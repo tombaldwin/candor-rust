@@ -15037,6 +15037,198 @@ pub fn go() {{ imp::doit(); }}
                  the call edge. Its twin `macro_spine_ref` differs by one `&` and must charge:\n{v:#}");
     }
 
+    /// R203, the RESIDUAL R199 did not reach and a REGRESSION against published 0.34.0 in its own right.
+    /// R199 taught the macro token walk to write `TryExit::interior`. But three constructions are not IN
+    /// those tokens at all, and each of them is a different reason the walk cannot see the leaf:
+    ///   (a) a crate-local `macro_rules!` TEMPLATE — `mk_h!("a")`'s tokens are `"a"`; the construction is
+    ///       in the DEFINITION, which only the collector's R48 index has. ASK THAT AUTHORITY.
+    ///   (b) tokens that are not an expression list — `stmts!(let x = H::new("a"); x)` fails
+    ///       `Punctuated::<Expr, Comma>::parse_terminated`, and the walk used to return. `syn` will read
+    ///       them as a STATEMENT sequence; ask it rather than treating the macro as empty.
+    ///   (c) a NESTED macro, where the ordinal numbering deliberately stops, and a macro in STATEMENT
+    ///       position, which is a `Stmt::Macro` and so never reached `Expr::Macro` handling at all.
+    ///   Plus the block boundary: `for_each_child_expr` stops at `{ .. }`, so `idm!({ out.push(H::new(
+    ///   "a")); gen(n) })?` was invisible for a fourth reason.
+    ///
+    /// EACH OF THOSE ON ITS OWN IS HARMLESS, and that is the part worth remembering: a leaf with NO
+    /// recorded position counts as live from the start and is charged. The CARDINAL SIN needs the PAIR —
+    /// build the leaf invisibly inside the `?`'s operand AND visibly again AFTER the `?`, and the visible
+    /// site's `first_ctor_seq` carries the leaf past R173's positional filter while nothing ever put it in
+    /// `interior`. That is why every `*_hole` below ends with `let h = H::try_new(m, "b")?;` and why
+    /// `tmpl_ctrl_direct`, identical but for the macro, is charged in every build: the discriminator is
+    /// exactly the invisibility.
+    ///
+    /// SAY WHICH DIRECTION IT FAILS IN: the fix writes ONLY `interior`, never `first_ctor_seq`,
+    /// `ctor_sites` or `macro_ctor_leaves` — the first can only REMOVE a leaf from the escaping set
+    /// (charge a drop), the other three can LICENSE an escape. So an over-reaching walk here over-charges;
+    /// it cannot introduce a silence. The exemptions are the enumerated value spine and nothing else.
+    ///
+    /// EXECUTED ground truth (a drop counter, error path, drops in THIS frame): every `*_hole` 1, the
+    /// loop one 2, `tmpl_ctrl_direct` 1; `spine_tmpl`/`spine_nest`/`spine_direct` 0 here and 1 inside
+    /// `use_h_val`, `multiarm_pure` 0.
+    #[test]
+    fn a_question_mark_charges_what_an_unreadable_macro_in_its_operand_built() {
+        let v = scan_src_to_json("r203opaque", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { let _h = h; gen(n) }
+            #[macro_export]
+            macro_rules! idm { ($e:expr) => { $e } }
+            #[macro_export]
+            macro_rules! mk_h { ($p:expr) => { $crate::H::new($p) } }
+            #[macro_export]
+            macro_rules! stmts { ($($t:tt)*) => {{ $($t)* }} }
+            #[macro_export]
+            macro_rules! push_h { ($o:expr, $p:expr) => {{ let x = $crate::H::new($p); $o.push(x); }} }
+            #[macro_export]
+            macro_rules! push_n { ($o:expr, $k:expr) => {{ for _ in 0..$k { $o.push($crate::H::new("a")); } }} }
+            #[macro_export]
+            macro_rules! ph { ($o:expr, $p:expr) => {{ $o.push($crate::H::new($p)); 1u32 }} }
+            #[macro_export]
+            macro_rules! two { (a $p:expr) => { $crate::H::new($p) }; (b $p:expr) => { $crate::gen(1) } }
+            pub fn use_u32(_x: u32, n: u32) -> Result<u32, ()> { gen(n) }
+
+            pub fn tmpl_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(mk_h!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn tmpl_block_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { push_h!(out, "a"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn tmpl_loop_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { push_n!(out, 2); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn unparsed_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(stmts!(let x = H::new("a"); x)); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn nested_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.extend(vec![vec![H::new("a")].pop().unwrap()]); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn nested2_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.extend(idm!(vec![idm!(H::new("a"))])); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn blocktok_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                idm!({ out.push(H::new("a")); gen(n) })?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn tmpl_spine_stmt_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                let _v = use_u32(ph!(out, "a"), n)?;
+                let b = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(b)
+            }
+            pub fn tmpl_ctrl_direct(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(H::new("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+
+            pub fn spine_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+            pub fn spine_tmpl(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(mk_h!("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+            pub fn spine_nested(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(idm!(idm!(H::new("a"))), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+            pub fn multiarm_pure(n: u32, m: u32) -> Result<H, ()> {
+                let _v = { let _ = two!(b "a"); gen(n) }?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+"#);
+        // THE REGRESSIONS: published 0.34.0 charged every one of these (it vetoed blanket); R173 through
+        // R199 all leave them ABSENT, and `deny Fs <fn>` goes 1 -> 0 on each.
+        for n in ["tmpl_hole", "tmpl_block_hole", "tmpl_loop_hole", "unparsed_hole", "nested_hole",
+                  "nested2_hole", "blocktok_hole", "tmpl_spine_stmt_hole"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}` builds an `H` inside its `?`'s operand through a macro this file's own walk \
+                     cannot read (a `macro_rules!` template, statement-only tokens, a nested macro, a \
+                     statement-position macro, or a block the child walk stops at), and builds the SAME \
+                     leaf again after the `?`. The later site's position carried the leaf past R173's \
+                     filter while nothing put it in `interior` — executed: the drop really runs on the \
+                     error exit:\n{v:#}");
+        }
+        // `tmpl_spine_stmt_hole` is the one that makes the TEMPLATE spine test two-step rather than
+        // whole-macro, the same way `macro_spine_ref` did for R199's token spine test: the macro node IS
+        // a by-value argument on the `?`'s spine, but what its template CONSTRUCTS sits in a statement
+        // and lands in a `Vec` this frame owns, so it dies on that `?`'s error exit (executed: 1 drop).
+        // MEASURED: a build that exempts a spine-resident template WHOLE leaves exactly this row ABSENT
+        // and every other row above charged.
+        assert!(effs(fn_entry(&v, "tmpl_ctrl_direct")).contains(&"Fs".to_string()),
+                "the discriminator: `tmpl_ctrl_direct` is `tmpl_hole` with the macro spelled out, so it \
+                 was already charged by R194 in every build. What the rows above test is exactly the \
+                 macro's INVISIBILITY, nothing else:\n{v:#}");
+        // THE OVER-CHARGE CONTROLS. A by-value argument is MOVED into the callee and dies in ITS frame
+        // (executed: 0 drops in this frame, 1 inside `use_h_val`), which the caller inherits through the
+        // call edge — so the exemption has to survive being written through a macro.
+        for n in ["spine_tmpl", "spine_nested"] {
+            assert!(!fn_entry(&v, n)["calls"].to_string().contains("H::drop"),
+                    "`{n}` puts the construction on the `?` operand's VALUE SPINE as a by-value argument. \
+                     A template's TAIL and a nested macro's VALUE are on that spine too, so the two-step \
+                     spine test has to reach inside the definition and inside the nested parse; charging \
+                     here is published's blanket fabrication back again (executed: 0 drops in this \
+                     frame):\n{v:#}");
+        }
+        // ITS SPELLED-OUT TWIN IS CHARGED, IN EVERY BUILD INCLUDING PUBLISHED 0.34.0, and saying so here
+        // is the point: `spine_direct` writes `H::new("a")` in the body, so R172's site gate sees a
+        // construction site that no escape root reaches and refuses the leaf. The macro spellings record
+        // NO site (a site `mark_escape` can never match would charge every macro construction), so they
+        // are quieter — a pre-existing asymmetry this row does not touch, and the executed answer, 0
+        // in-frame drops, is the one the macro rows give.
+        assert!(fn_entry(&v, "spine_direct")["calls"].to_string().contains("H::drop"),
+                "`spine_direct` is charged by the R172 SITE gate in published 0.34.0 and in every build \
+                 since. If this ever goes quiet, the two controls above stop being evidence that the \
+                 spine exemption survived the macro — they would just be agreeing with a body that \
+                 charges nothing:\n{v:#}");
+        assert!(row_absent(&v, "multiarm_pure"),
+                "R203 keeps R48's SINGLE-ARM rule, so `two!(b ..)` — whose matching arm constructs \
+                 nothing — contributes nothing (executed: 0 drops). Walking every arm would charge `H` \
+                 from the NON-matching arm `a`, which is the fabrication that rule exists to refuse; the \
+                 price is that a multi-arm template stays this row's stated residual:\n{v:#}");
+    }
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index

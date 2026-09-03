@@ -143,6 +143,52 @@ after upgrading; review policies and regenerate baselines with the new build.
   (`panel-fixes`, `panel-fixes-2/3/4`, the four wave fixture sets, rusqlite 0.40.2 and crossterm 0.29.0)
   moves only the six `m_macro_*` cells on a full-report wide diff; the R200/R201/R202 cells and all
   fourteen R194 spine controls are unmoved.
+- **⚠ SOUNDNESS R203 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R173 and reached
+  by none of R187/R194/R199 — found by R199's own fix agent) — CLOSED: a `?` is live for what a macro in
+  its operand built even when this scanner cannot READ that macro.** R199 taught the macro token walk to
+  record the open `?` exits. Three constructions are not in those tokens at all, each invisible for a
+  different reason: a crate-local `macro_rules!` TEMPLATE (`mk_h!("a")`'s tokens are `"a"` — the
+  construction is in the DEFINITION); a token stream that is not an expression list
+  (`stmts!(let x = H::new("a"); x)`); and a NESTED macro, or one in STATEMENT position, which the walk
+  stops at. A fourth was the block boundary: the child walk stops at `{ .. }`, so
+  `idm!({ out.push(H::new("a")); gen(n) })?` was invisible too.
+  EACH OF THOSE ALONE IS HARMLESS, and that is the part worth writing down: a leaf with no recorded
+  position counts as live from the start and is charged. The sin needs the PAIR — build the leaf
+  invisibly inside the `?`'s operand AND visibly again after the `?` — because then the visible site's
+  position carries the leaf past R173's filter while nothing ever vetoed it. Eight shapes read `['Fs']`
+  on published 0.34.0 and were ABSENT on `70fd624`, `7d9a970` and `75053f1`, with `deny Fs <fn>` going
+  1 → 0 on every one; executed ground truth is one `H::drop` in each frame on the error path (two for
+  the loop-shaped one). Their direct twin — the same body with the macro spelled out — is charged in
+  every build, so the discriminator is exactly the invisibility.
+  ASK THE AUTHORITY, DON'T GUESS. The template case is answered by the collector's own R48
+  `macro_rules!` index and its SINGLE-ARM rule, so the two paths cannot drift about what `NAME!(..)`
+  expands to; the unreadable-tokens case is answered by asking `syn` for a STATEMENT sequence instead of
+  treating the macro as empty. The spine exemption is again two steps: a template invoked ON the `?`'s
+  value spine has its TAIL exempt and nothing else, which `use_u32(ph!(out, "a"), n)?` — a spine-resident
+  template whose statement pushes into a `Vec` this frame owns — is the fixture for. Measured by
+  degrading the code: reverting leaves all eight ABSENT, and exempting a spine-resident template WHOLE
+  recovers seven and leaves exactly that one ABSENT. Everything here writes only the `?`-interior veto,
+  never a construction site and never a position, so it can only ever charge more; the exemptions are
+  the enumerated value spine and nothing else.
+  Over-charge controls that stay ABSENT (executed: 0 drops in-frame): a template macro and a nested
+  macro as by-value arguments on the spine, the `?`-free twin, and a macro that constructs nothing.
+  TWO THINGS THIS DOES NOT DO, both measured rather than assumed. A MULTI-ARM template stays silent,
+  because R48 refuses to say which arm an invocation expands and walking every arm charges a
+  non-matching arm's construction — the fixture holds both sides (`r_multiarm_hole`, silent; the
+  `multiarm_pure` control that walking every arm would fabricate), and the 1,504-crate A/B is
+  byte-identical either way, so the corpus cannot choose and the undivided authority wins. And
+  statement-only tokens on the spine are charged with 0 in-frame drops — an over-charge, at published
+  0.34.0's parity, invisible to `deny`.
+  1,504-crate A/B vs `75053f1`, wide key (16 fields): ADDED 0, REMOVED 0, CHANGED 0, effects lost 0,
+  call edges lost or gained 0 — byte-identical over 257,243 common rows. The new branch fires 34 times
+  across 16 of the 1,504 crates (jni 0.22.4, mysql_common 0.32.4/0.37.3, thirteen `syn` versions), so
+  the zero is measured over a corpus that reaches it, and all three leaves it reaches (`Ok`, `Err`, an
+  `Error` enum) have no `Drop` impl anywhere in their crate, which is why no row moves. R199's counter
+  is unchanged at 10 hits in 9 crates. Published → this build reproduces published → `7d9a970` LINE FOR
+  LINE across all six diff lists (ADDED 5,146, REMOVED 699, LOST 620, GAINED 1,752, lost call edges 503,
+  lost `unknownWhy` 2,118), identical member sets and identical per-row content. A 40-fixture regression
+  battery moves only the R203 cells on a full-report wide diff; the R200/R201/R202 cells and all fourteen
+  R194 spine controls are unmoved.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
