@@ -11,6 +11,50 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.35.0] — 2026-09-03
 
+- **⚠ SOUNDNESS R172 (cardinal sin, a REGRESSION against published 0.34.0) — CLOSED: a `Drop` value
+  that dies in a function is no longer silenced by a DIFFERENT value of the same type leaving through
+  the return.** `pub fn swap_free(p, q) -> H { let _g = H::new(p); from_handle(q) }` and the
+  `Self::mk(q)` spelling beside it read `['Net']` on published 0.34.0 (tag `736fa64`) and were ABSENT
+  on the 0.35.0 candidate, because R160 and R165 taught the escape gate to recognise two tail
+  spellings it used to ignore. The gate is now keyed on the construction SITE, not the type leaf —
+  the construction half of the fix R168 made for parameters. Executed ground truth: one `H::drop` runs
+  inside each frame while the returned value is still alive. `H::swap_type` (`H::mk(q)`), a victim of
+  the same key before either fix, is charged for the first time. 1,504-crate A/B vs the candidate:
+  ADDED 7, REMOVED 0, LOST 0 — and all 7 are the fix unmasking a pre-existing over-approximation
+  (x11rb `wrap_reply` and its callers; portable-atomic-util `Arc::get_mut`), not a recovered drop.
+- **⚠ SOUNDNESS R173 (fabrication, at corpus scale) — CLOSED: a `?` no longer vetoes the escape of a
+  value the function has not constructed yet.** `pub fn order(n) -> Result<Wr,()> { gen(n)?;
+  Ok(Self::for_region(n)) }` charged `Wr::drop` to a body that drops nothing on either path (executed:
+  0 drops on Ok and on Err). Each `?` now removes only what its own position can reach. The veto is
+  pre-existing — the explicit-type spelling is charged on published 0.34.0 too — but R160 made it fire
+  on the dominant `x?; Ok(Self::new())` spelling. 1,504-crate A/B: REMOVED 37 rows, 128 effect losses,
+  every removal read from source; 39 of the 136 new positive claims R160 introduced disappear,
+  including the whole 36-row x11rb wrapper family. Controls that stay charged: a construction BEFORE
+  the `?`, and one between two `?`s (executed: 1 drop each on the early-exit path).
+- **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
+  refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
+  (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
+  call on its bare LEAF and undid it, so a crate with a local `fn open(..) -> Conn` charged `Conn::drop`
+  to every `File::open(p)?` caller. event-listener's `full_fence` read `AtomicUsize::new(0)` as
+  `Event::new`; jobserver's `Client::release` read `io::Error::new` as `windows::Handle::new`, on a unix
+  fd. (b) R165's comment claimed the return index "already drops any leaf recorded with two different
+  return types" — false when the twin returns `()`, which `record_return` skipped: git2's free
+  `crate::init()` beside `Repository::init` gave 76 functions per version a phantom `Repository::drop`
+  edge, visible in `path`/`callers` while `inferred` stayed quiet. A unit return is now a conflicting
+  shape like any other. 1,504-crate A/B: REMOVED 18 rows, 7 effect losses, all audited; 8 of the 18
+  (syn, windows) are a precision COST — pure functions losing an `invisible` disclosure and two call
+  edges to the new ambiguity, recorded as a loss rather than a gain.
+- **⚠ SOUNDNESS R71 (cardinal sin, PUBLISHED in 0.34.0) — CLOSED: a callback stored in a field and
+  invoked through an unwrap BINDER is disclosed.** `if let Some(f) = &self.cb { f() }` — the idiomatic
+  optional-callback-field shape — reported the invoking function ABSENT from `functions[]`, with no
+  `Unknown` and no `unresolved`, while the direct spelling `(self.cb.as_ref().unwrap())()` was honest:
+  two spellings of one operation disagreeing, and a scoped `deny` over the invoking function PASSING
+  while the effect provably runs. The cause is a two-table split — an `Fn`-family binding lands in
+  `trait_vars`, which feeds only the `.method()` dispatch resolver, while the call-SYNTAX resolver
+  consults only `fn_typed_vars`, so the binding was live and never consulted at its own invocation
+  site. Fixed on `main` in `3cf055d` — which was pushed, never released — and shipping here for the
+  first time. (Residual, filed as R177: the same shape where the payload is a `Box<dyn Fn>` reached
+  through a `type` ALIAS is still ABSENT.)
 - **SOUNDNESS R171 (instrument) — the coverage-gate GENERATOR lost 24 rows in its own renderer** (a
   render-time `.dedup()` merged distinct entry points that share a crate-root alias and an effect set),
   diffed on a key it chooses by a different rule in each manifest, made a `pub fn` inside an inline `mod`
@@ -22,9 +66,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 - **⚠ SOUNDNESS R160 (cardinal sin, PUBLISHED in every release to date) — CLOSED: a sibling call
   qualified with `Self::` now resolves exactly as `<Type>::` does.** `Self` is bound in the ordinary
   import map for the length of each `impl` block, so the one path-expansion routine answers every
-  position; no second matching arm. `rusqlite::Connection::open` and `open_in_memory` were ABSENT from
-  `functions[]` and now read `['Db','Unknown']`; `pure <forwarder>` goes from binding nothing to a
-  violation. 1,489-crate A/B: 2,621 functions gained an entry, 2 lost one (both audited correct),
+  position; no second matching arm. `rusqlite::Connection::open`, `open_in_memory`,
+  `open_in_memory_with_flags` and `open_in_memory_with_flags_and_vfs` were ABSENT from `functions[]`
+  and now read `['Db','Unknown']`. (An earlier draft of this entry said `pure <forwarder>` "goes from
+  binding nothing to a violation". That is FALSE and is corrected here: a policy SCOPE is matched by
+  PREFIX, so `pure Connection::open` already binds `open_with_flags`/`open_with_flags_and_vfs` and
+  exits 1 on published 0.34.0. The true example, measured on rusqlite 0.39.0 with `candor-query gate`,
+  is a scope that binds nothing there: `deny Db Connection::open_in_memory` reports "policy rule
+  matched NO function" on the published build and a violation on this one.) 1,489-crate A/B: 2,621 functions gained an entry, 2 lost one (both audited correct),
   no `inferred` set shrank (`bb4851b`).
 - **⚠ SOUNDNESS R161 (cardinal sin, published) — CLOSED: a callback typed through a TYPE ALIAS, or a
   bare `fn` pointer unwrapped out of an `Option` by `if let`/`match`/`.map`, is now disclosed as
@@ -63,7 +112,8 @@ after upgrading; review policies and regenerate baselines with the new build.
   walk of the body could reach them: the counts came out equal, the shadow was promoted, and the
   `Cmd::new` the expansion injects resolved to the `<body-item>` sentinel. Ground truth EXECUTED (a
   generated script that touches a marker file; the marker exists, so a process really ran):
-  `f -> ["Exec"]` on published `3cf055d`, **ABSENT at HEAD `5af1a27`**, and `deny Exec`, `deny Exec f`,
+  `f -> ["Exec"]` on `3cf055d` — which was PUSHED, never RELEASED; the v0.34.0 tag is `736fa64`, six
+  commits earlier — **ABSENT at HEAD `5af1a27`**, and `deny Exec`, `deny Exec f`,
   `pure f` and `deny Exec Unknown` all fell exit 1 → exit 0 (`deny Unknown` correctly 0 either way).
   `count_ident` now expands through `collector::macro_template_blocks` — the same helper the collector
   injects with, so the two cannot disagree about what `NAME!` expands to — and falls back to counting a
