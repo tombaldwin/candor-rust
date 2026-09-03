@@ -1624,7 +1624,28 @@ pub(crate) fn record_return(
     rets: &mut HashMap<String, Option<String>>,
     self_ty: Option<&str>,
 ) {
-    let syn::ReturnType::Type(_, ty) = &sig.output else { return };
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
+        // used to `return` before recording anything, so the ambiguity rule below could not see the
+        // commonest collision there is: git2's free `pub fn init()` beside `Repository::init() ->
+        // Repository` left the leaf `init` unambiguously typed `Repository`, and every `crate::init()`
+        // call site read as constructing one. Recorded under its own sentinel so a leaf seen BOTH ways
+        // collapses to `None` like any other conflict; `recorded_return_type` filters the sentinel out,
+        // so a leaf that is only ever unit-returning still names no type.
+        let leaf = sig.ident.to_string();
+        match rets.get(&leaf) {
+            None => { rets.insert(leaf, Some(RET_UNIT.to_string())); }
+            Some(Some(prev)) if prev != RET_UNIT => {
+                // §E1 HIT COUNTER — the branch R174(b) adds: a typed leaf withdrawn by a unit twin.
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R174UNIT {leaf} (was {prev})");
+                }
+                rets.insert(leaf, None);
+            }
+            _ => {}
+        }
+        return;
+    };
     // A factory that returns a CALLABLE (`fn make_cb() -> Box<dyn Fn()>` / `-> fn()` / `-> impl Fn()`):
     // record the FN-TYPED sentinel under its leaf so `let g = make_cb(); g()` reads the honest opaque
     // call (Unknown), not a phantom free-fn `g`. A bare `fn()`/`impl Fn` has no path so `type_path` would
