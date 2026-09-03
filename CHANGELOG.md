@@ -172,18 +172,25 @@ after upgrading; review policies and regenerate baselines with the new build.
   the enumerated value spine and nothing else.
   Over-charge controls that stay ABSENT (executed: 0 drops in-frame): a template macro and a nested
   macro as by-value arguments on the spine, the `?`-free twin, and a macro that constructs nothing.
-  TWO THINGS THIS DOES NOT DO, both measured rather than assumed. A MULTI-ARM template stays silent,
-  because R48 refuses to say which arm an invocation expands and walking every arm charges a
-  non-matching arm's construction — the fixture holds both sides (`r_multiarm_hole`, silent; the
-  `multiarm_pure` control that walking every arm would fabricate), and the 1,504-crate A/B is
-  byte-identical either way, so the corpus cannot choose and the undivided authority wins. And
-  statement-only tokens on the spine are charged with 0 in-frame drops — an over-charge, at published
-  0.34.0's parity, invisible to `deny`.
+  THE MULTI-ARM TRADE, TAKEN DELIBERATELY AND PRICED. A MULTI-ARM `macro_rules!` has every parseable arm
+  walked for this veto — and only for this veto: R48's single-arm rule still governs CALL-EDGE
+  RESOLUTION, where a non-matching arm would ADD an effect, so there is still one authority on the
+  resolution side. Here the term only refuses to certify an escape, so "some arm builds it" is the
+  over-approximating answer and the one published 0.34.0 gave. It closes `r_multiarm_hole`
+  (`{ out.push(two!(a "a")); gen(n) }?`, executed 1 in-frame drop, charged by published and silent from
+  R173 onwards) and it over-charges `o_multiarm_pure`, whose invocation matches the arm that builds
+  nothing (executed 0 in-frame drops) — a fabrication against the previous commit, and exactly what
+  published already said. Both cells are in the fixture; the 1,504-crate A/B is byte-identical either
+  way, so the corpus cannot choose, and the ruling is that a SILENCE against published outranks an
+  over-charge AT published parity. One thing this still does not do: statement-only tokens on the spine
+  are charged with 0 in-frame drops — an over-charge, at published 0.34.0's parity, invisible to `deny`.
   1,504-crate A/B vs `75053f1`, wide key (16 fields): ADDED 0, REMOVED 0, CHANGED 0, effects lost 0,
   call edges lost or gained 0 — byte-identical over 257,243 common rows. The new branch fires 34 times
-  across 16 of the 1,504 crates (jni 0.22.4, mysql_common 0.32.4/0.37.3, thirteen `syn` versions), so
-  the zero is measured over a corpus that reaches it, and all three leaves it reaches (`Ok`, `Err`, an
-  `Error` enum) have no `Drop` impl anywhere in their crate, which is why no row moves. R199's counter
+  across 16 of the 1,504 crates (jni 0.22.4, mysql_common 0.32.4/0.37.3, thirteen `syn` versions) — 46
+  once every arm of a multi-arm template is walked, the extra twelve all being `syn`'s 100-arm `Token!`
+  macro used inside a `?` operand — so the zero is measured over a corpus that reaches it, and every
+  leaf it reaches (`Ok`, `Err`, jni's `Error`, `syn::token::Macro`) has no `Drop` impl anywhere in its
+  crate, which is why no row moves. R199's counter
   is unchanged at 10 hits in 9 crates. Published → this build reproduces published → `7d9a970` LINE FOR
   LINE across all six diff lists (ADDED 5,146, REMOVED 699, LOST 620, GAINED 1,752, lost call edges 503,
   lost `unknownWhy` 2,118), identical member sets and identical per-row content. A 40-fixture regression

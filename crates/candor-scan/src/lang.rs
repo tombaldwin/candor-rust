@@ -3209,43 +3209,49 @@ impl<'a> EscapeSites<'a> {
         self.note_opaque_block(&b, on_spine, &std::collections::HashSet::new());
     }
 
-    /// R203(a) — a crate-local `macro_rules!` whose TEMPLATE constructs. ASK THE AUTHORITY: this is the
-    /// same index and the same single-arm rule the collector's R48 inline expansion uses, so the two
-    /// cannot drift about what `NAME!(..)` expands to. A MULTI-ARM macro is skipped for R48's own
-    /// measured reason — an invocation matches exactly one arm and a syntactic scan cannot tell which,
-    /// so walking every arm would charge a non-matching arm's construction — which leaves multi-arm
-    /// templates as this row's honest residual.
+    /// R203(a) — a crate-local `macro_rules!` whose TEMPLATE constructs. ASK THE AUTHORITY: this reads
+    /// the SAME index the collector's R48 inline expansion reads (`local_macros`, via
+    /// `macro_template_blocks`), so the two cannot drift about what a template CONTAINS.
+    ///
+    /// IT DIVERGES FROM R48 ON MULTI-ARM, AND ONLY HERE — DELIBERATELY, BECAUSE THE TWO PATHS ASK
+    /// OPPOSITE QUESTIONS. R48 expands a template to RESOLVE CALL EDGES, i.e. to ADD an effect, so a
+    /// non-matching arm fabricates one and it stops at multi-arm; that rule is untouched, and the
+    /// resolution side still has exactly one authority. This path only ever adds to `TryExit::interior`,
+    /// which is a REFUSAL to certify that a leaf escaped — over a macro whose arms disagree about
+    /// whether they construct, "some arm builds it" is the over-approximating answer, and it is the
+    /// answer published 0.34.0 gave, because it vetoed blanket. So every parseable arm is walked.
+    ///
+    /// SAY WHAT IT COSTS, MEASURED ON BOTH SIDES. It closes `r_multiarm_hole` — `{ out.push(two!(a
+    /// "a")); gen(n) }?` with the leaf built again after the `?`, executed 1 in-frame drop, charged by
+    /// published 0.34.0 and silent from R173 to `5cefa62`. It over-charges `c_multiarm_pure`, whose
+    /// invocation matches an arm that constructs nothing (executed 0 in-frame drops) — an over-charge
+    /// the published build already had, and a fabrication against `5cefa62`. Both cells live in the
+    /// fixture. The 1,504-crate registry A/B is byte-identical either way, so the corpus cannot choose;
+    /// the ruling is that a SILENCE against published outranks an over-charge AT published parity.
     fn note_local_macro_template(&mut self, m: &syn::ExprMacro, on_spine: &[bool]) {
         let name = path_to_string(&m.mac.path);
         if name.contains("::") || self.macro_expanding.contains(&name) {
             return;
         }
         let Some(body) = self.local_macros.get(&name).cloned() else { return };
-        let (arm_count, blocks) = crate::collector::macro_template_blocks(&body);
-        // SINGLE-ARM ONLY, WHICH IS R48'S RULE AND NOT A NEW ONE. R48 refuses a multi-arm template
-        // because an invocation matches exactly ONE arm and a syntactic scan cannot tell which, so
-        // walking every arm charges a NON-matching arm's contents; keeping the same rule here keeps ONE
-        // authority for "what does `NAME!(..)` expand to" instead of two that can drift.
-        // MEASURED, not assumed, because the direction differs and the trade is real: walking every arm
-        // instead CLOSES `r_multiarm_hole` (executed 1 in-frame drop, silent) and FABRICATES
-        // `c_multiarm_pure` (executed 0, charged) — both of them at published-0.34.0 parity, and the
-        // 1,504-crate registry A/B is byte-identical EITHER WAY, so the corpus cannot choose. The tie
-        // goes to the undivided authority, and the multi-arm shape is R203's stated residual with
-        // `r_multiarm_hole` left in the fixture naming it.
-        if arm_count != 1 || blocks.len() != 1 {
-            return;
-        }
-        // The template's VALUE is its tail expression, so when the invocation sits on a `?`'s spine the
-        // tail is on it too and only the tail is exempt — R199's step 2, over the definition instead of
-        // the invocation. Every statement of the template stays interior.
-        let mut inner = std::collections::HashSet::new();
-        if on_spine.iter().any(|x| *x) {
-            if let Some(t) = tail_expr_of(&blocks[0]) {
-                value_spine_addrs(t, &mut inner);
-            }
-        }
+        // `macro_template_blocks` returns (total arms, the arms that PARSED). An arm that does not
+        // parse contributes nothing here, exactly as it contributes nothing to R48 — an unreadable
+        // template is a residual either way, never a fabrication.
+        let (_arms, blocks) = crate::collector::macro_template_blocks(&body);
         self.macro_expanding.insert(name.clone());
-        self.note_opaque_block(&blocks[0], on_spine, &inner);
+        for b in &blocks {
+            // Each arm's VALUE is its tail expression, so when the invocation sits on a `?`'s spine that
+            // arm's tail is on the spine too and ONLY the tail is exempt — R199's step 2, over the
+            // definition instead of the invocation. Every statement of every arm stays interior, which
+            // is what `tmpl_spine_stmt_hole` pins.
+            let mut inner = std::collections::HashSet::new();
+            if on_spine.iter().any(|x| *x) {
+                if let Some(t) = tail_expr_of(b) {
+                    value_spine_addrs(t, &mut inner);
+                }
+            }
+            self.note_opaque_block(b, on_spine, &inner);
+        }
         self.macro_expanding.remove(&name);
     }
 
