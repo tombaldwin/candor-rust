@@ -1044,7 +1044,9 @@ pub(crate) fn collect_reexports(
                         }
                         continue;
                     }
-                    out.push(Reexport { module: modpath.to_string(), from, name, alias });
+                    // R176 — a `#[cfg]`-gated `pub use` is one ARM of a platform split, not a shadow of
+                    // its siblings. Recorded here, applied in `reexport_aliases`.
+                    out.push(Reexport { module: modpath.to_string(), from, name, alias, cfg_gated: has_cfg(&u.attrs) });
                 }
             }
             // R99 (2): a NOMINAL type alias is exactly a `use <target> as <ident>` for path resolution,
@@ -1296,6 +1298,9 @@ pub(crate) fn seed_elem_of(
     sig: &syn::Signature,
     vars: &mut HashMap<String, String>,
     uses: &HashMap<String, String>,
+    // R177 — the CRATE-WIDE alias set here (Pass B), not the per-file one: a parameter is resolved
+    // against the merged index, exactly as `seed_fn_typed_vars` already is.
+    callable_aliases: &std::collections::HashSet<String>,
 ) -> (HashMap<String, String>, TupleElemIndex, HashMap<String, Vec<String>>, HashMap<String, Vec<Vec<String>>>) {
     let mut elem_of = HashMap::new();
     let mut tuple_of: TupleElemIndex = HashMap::new();
@@ -1313,7 +1318,7 @@ pub(crate) fn seed_elem_of(
                 if let Some(e) = elem_type(&pt.ty, uses) {
                     elem_of.insert(id.ident.to_string(), e);
                 }
-                let leaves = elem_trait_leaves(&pt.ty, &gbounds);
+                let leaves = elem_trait_leaves(&pt.ty, &gbounds, callable_aliases);
                 if !leaves.is_empty() {
                     elem_trait_of.insert(id.ident.to_string(), leaves);
                 }
@@ -1476,11 +1481,12 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses);
+    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
-        uses,
+        // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
+        uses: std::borrow::Cow::Borrowed(uses),
         vars,
         trait_vars,
         // The `dyn`-spelled (type-ERASED) subset of the same bounds — the imported-trait CHA (R4) fires
@@ -1618,11 +1624,83 @@ pub(crate) fn collect_type_idents(ty: &syn::Type, out: &mut Vec<String>) {
 /// Record `fn-leaf -> return type` into `rets`, tracking ambiguity: a leaf seen with two different
 /// return types is set to `None` (dropped later), so only UNAMBIGUOUS names survive. Result/Option are
 /// unwrapped to the success type.
+/// SOUNDNESS R177 — the `type NAME = <callable>` aliases declared ANYWHERE IN ONE FILE, collected
+/// before `collect_decls` walks it.
+///
+/// WHY A SEPARATE PASS. `collect_decls` both BUILDS `callable_aliases` and CONSUMES it — for a field's
+/// element leaves, a fn's return sentinel, a `static`'s payload — and it does both in source order, so an
+/// alias declared BELOW the struct that uses it was invisible to that struct. R161 recorded exactly that
+/// as a residual ("Pass A has no completed alias index; this walk is what builds it") and it is what made
+/// `pub type Cb = Box<dyn Fn()>; struct Holder { cb: Option<Cb> }` publish a purity claim over an
+/// installed callback on published 0.34.0 and on the 0.35.0 candidate alike.
+///
+/// THE BOUNDARY IS THE PER-FILE CACHE, NOT CONVENIENCE. `FileDecls` is keyed on ONE file's content, so a
+/// fact from a DIFFERENT file may not enter it — a cross-file alias (`type Cb` in `types.rs`, the struct
+/// in `holder.rs`) therefore stays a stated residual, answered only in the Pass-B positions that read the
+/// merged index (`seed_fn_typed_vars`, `seed_elem_of`, the `let` annotation). Widening it would mean
+/// invalidating every file's entry whenever any file's aliases change.
+///
+/// Runs to a FIXPOINT (bounded) so a same-file alias CHAIN resolves: `type A = fn(); type B = A;` needs
+/// `A` in the set before `B` can be judged, and source order does not guarantee it.
+pub(crate) fn seed_callable_aliases(
+    items: &[syn::Item],
+    include_tests: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for _ in 0..CALLABLE_ALIAS_CHAIN_MAX {
+        let before = out.len();
+        seed_callable_aliases_once(items, include_tests, out);
+        if out.len() == before {
+            return;
+        }
+    }
+}
+
+/// How many times `seed_callable_aliases` re-walks a file to resolve alias CHAINS. Four is a bound, not
+/// a measurement: a chain longer than this stops resolving, which is the pre-R177 behaviour and the safe
+/// direction (a missed alias is a silence this code already had, never a fabricated effect).
+const CALLABLE_ALIAS_CHAIN_MAX: usize = 4;
+
+fn seed_callable_aliases_once(
+    items: &[syn::Item],
+    include_tests: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Type(t) => {
+                if !include_tests && is_cfg_test(&t.attrs) {
+                    continue;
+                }
+                if crate::lang::is_callable_type(&t.ty, &HashMap::new(), out) {
+                    out.insert(t.ident.to_string());
+                }
+            }
+            // An INLINE module's aliases are part of the same file and reach the same `collect_decls`
+            // recursion, so they are collected here too — by LEAF name, which is the key space
+            // `callable_aliases` has always used.
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    seed_callable_aliases_once(inner, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn record_return(
     sig: &syn::Signature,
     uses: &HashMap<String, String>,
     rets: &mut HashMap<String, Option<String>>,
     self_ty: Option<&str>,
+    // SOUNDNESS R177 — this file's `type NAME = <callable>` aliases, collected by
+    // `seed_callable_aliases` BEFORE this walk starts. See the residual note below, which this closes
+    // for a same-file alias and leaves standing for a cross-file one.
+    callable_aliases: &std::collections::HashSet<String>,
 ) {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
@@ -1653,10 +1731,13 @@ pub(crate) fn record_return(
     // The sentinel rides the SAME ambiguity rule as a type (a leaf seen callable AND non-callable, or two
     // shapes, collapses to None → no claim) and is filtered out of var-typing in `ctor_type`. Over-
     // approximating toward fn-typed only ever marks the binding Unknown — the safe direction.
-    // R161: Pass A has no completed alias index (this walk is what builds it), so an alias-typed
-    // RETURN (`fn make() -> Alias`) still records no `RET_FN_TYPED` sentinel. Named as a residual; the
-    // PARAMETER positions, which is where R161 was measured, are answered from the merged index.
-    if is_callable_type(unwrap_result_option(ty), &generic_bounds_of(sig), &std::collections::HashSet::new()) {
+    // R161 said: "Pass A has no completed alias index (this walk is what builds it), so an alias-typed
+    // RETURN (`fn make() -> Alias`) records no `RET_FN_TYPED` sentinel." R177 closes half of that.
+    // `seed_callable_aliases` now runs over THIS FILE's items before the walk, so a same-file alias is
+    // known here; a CROSS-FILE one still is not, and that half stays a stated residual. The boundary is
+    // the per-file cache: `FileDecls` is keyed on one file's content, so a fact from another file cannot
+    // enter it without making the cache unsound.
+    if is_callable_type(unwrap_result_option(ty), &generic_bounds_of(sig), callable_aliases) {
         let leaf = sig.ident.to_string();
         match rets.get(&leaf) {
             None => { rets.insert(leaf, Some(RET_FN_TYPED.to_string())); }
@@ -1691,7 +1772,7 @@ pub(crate) fn record_return(
     // bound leaves under the distinct `<elemdyn>` sentinel (decoded by `resolve_elem_trait_leaves`); the
     // scalar-`<dyn>` check above already claimed a direct `-> Box<dyn>` return, so this only sees genuine
     // collections. Rides the same ambiguity rule (two shapes for a leaf → None).
-    let elem_dyn = elem_trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig));
+    let elem_dyn = elem_trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig), callable_aliases);
     if !elem_dyn.is_empty() {
         let sentinel = ret_elem_dyn_encode(&elem_dyn);
         let leaf = sig.ident.to_string();
@@ -1819,7 +1900,7 @@ pub(crate) fn collect_decls(
                 if let Some(v) = const_str_value(&c.expr) {
                     const_strings.insert(c.ident.to_string(), v);
                 }
-                if static_holds_callable(&c.ty) {
+                if static_holds_callable(&c.ty, callable_aliases) {
                     callable_statics.insert(c.ident.to_string());
                 }
             }
@@ -1827,7 +1908,7 @@ pub(crate) fn collect_decls(
                 if let Some(v) = const_str_value(&s.expr) {
                     const_strings.insert(s.ident.to_string(), v);
                 }
-                if static_holds_callable(&s.ty) {
+                if static_holds_callable(&s.ty, callable_aliases) {
                     callable_statics.insert(s.ident.to_string());
                 }
             }
@@ -1887,7 +1968,7 @@ pub(crate) fn collect_decls(
                                 // `Vec<T>` on `struct Registry<T: Handler>`) records its element DISPATCH
                                 // leaves so `self.handlers.iter().for_each(|h| h.handle())` dispatches (R37
                                 // field form). Uses the struct's own generic bounds for a bounded element.
-                                let leaves = elem_trait_leaves(&f.ty, &struct_bounds);
+                                let leaves = elem_trait_leaves(&f.ty, &struct_bounds, callable_aliases);
                                 if !leaves.is_empty() {
                                     field_elem_trait
                                         .entry(s.ident.to_string())
@@ -1915,7 +1996,7 @@ pub(crate) fn collect_decls(
                                     .or_default()
                                     .insert(i.to_string(), e);
                             }
-                            let leaves = elem_trait_leaves(&f.ty, &struct_bounds);
+                            let leaves = elem_trait_leaves(&f.ty, &struct_bounds, callable_aliases);
                             if !leaves.is_empty() {
                                 field_elem_trait
                                     .entry(s.ident.to_string())
@@ -1927,7 +2008,7 @@ pub(crate) fn collect_decls(
                     syn::Fields::Unit => {}
                 }
             }
-            syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None),
+            syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None, callable_aliases),
             // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
             // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
@@ -2057,7 +2138,12 @@ pub(crate) fn collect_decls(
                 // that BUILDS the set, and an alias whose RHS is itself another alias would need a
                 // completed index to resolve. Stated as the residual it is — a double alias
                 // (`type A = fn(); type B = A;`) still reads pure through `B`.
-                if crate::lang::is_callable_type(&it.ty, &HashMap::new(), &std::collections::HashSet::new()) {
+                // R177 — the set is PRE-SEEDED for this file by `seed_callable_aliases`, so the
+                // consult below sees a same-file chain (`type A = fn(); type B = A;`) and this insert is
+                // idempotent for everything the pre-pass already found. Kept rather than deleted: the
+                // pre-pass and this arm read the same `is_callable_type`, and leaving the walk's own
+                // recorder in place means a shape the pre-pass ever fails to reach still lands here.
+                if crate::lang::is_callable_type(&it.ty, &HashMap::new(), callable_aliases) {
                     callable_aliases.insert(it.ident.to_string());
                 }
             }
@@ -2156,7 +2242,7 @@ pub(crate) fn collect_decls(
                 }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        record_return(&m.sig, uses, rets, self_ty.as_deref());
+                        record_return(&m.sig, uses, rets, self_ty.as_deref(), callable_aliases);
                     }
                     // `impl X { const BASE: &str = "https://api.openai.com/v1"; }` — an associated const
                     // string. Indexed by its LEAF (`BASE`) exactly like a module const, so a body's

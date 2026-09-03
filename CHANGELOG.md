@@ -103,6 +103,47 @@ after upgrading; review policies and regenerate baselines with the new build.
   platform module's effects. Explicit import beats glob, as in Rust. The union exposed R170 (a module
   whose `pub use` is inside `cfg_if!` cannot contest a key it owns), guarded for the keys the union
   newly admits; the universal guard is open (`c3e1660`).
+- **⚠ SOUNDNESS R175 (fabrication introduced by R160, caught before release) — an `impl` NESTED IN A
+  METHOD BODY now rebinds `Self` to its own type.** R160 bound `Self` for the length of each FILE-LEVEL
+  `impl`; a `fn outer() { struct N; impl N { fn go() { Self::eff() } } }` is walked as part of `outer`'s
+  body, where `Self` still named the OUTER type — so `A::outer` was charged `A::eff`'s `Fs` over a
+  nested `N::eff` that is pure (published 0.34.0 has no row for it at all). The binding is restored on
+  exit, a nested `trait`'s default body gets the same treatment, and a non-nominal `impl Trait for
+  &[u8]` UNBINDS rather than inheriting. 1,504-crate A/B against the 0.35.0 candidate: 3 rows removed,
+  0 effects lost — all three are serde_with's `impl Visitor for Helper { .. Self::Value::parse(..) }`,
+  whose `invisible: ["time_0_3"]` came from expanding `Self` through the OUTER type's import; the
+  answer now matches the explicitly-written spelling exactly, which is the invariant. Also removes 8
+  fabricated call edges (hashlink's `Default for …Visitor { fn default() { Self::new() } }` was edging
+  to `LinkedHashMap::new`). MEASURED AND NOT FIXED: a crate-local `macro_rules!` expanding to a call is
+  silent in every position, unchanged in all three arms.
+- **⚠ SOUNDNESS R176 (cardinal-sin shape introduced by R169, caught before release) — explicit import
+  beats glob WITHIN one configuration, never ACROSS `#[cfg]` arms.** `#[cfg(unix)] pub use unix::*`
+  (whose `size` spawns a process) beside `#[cfg(windows)] pub use windows::size` (which reads a file)
+  made the caller publish `['Fs']` ALONE: the live platform's `Exec` silenced behind a positive claim
+  about the other one, on a function published 0.34.0 has no row for. The two arms never coexist in any
+  build, so neither shadows the other and the answer is their union — the same treatment this index
+  already gives the `#[cfg_attr(path)]` spelling of the split. `Reexport` records whether its `pub use`
+  is `#[cfg]`-gated (cache revision **18**; the rev17 the R161 entry above describes was never applied
+  to the schema string, so two builds of one version could share a key — fixed by skipping to 18). The
+  narrowing now fails toward the UNION, i.e. toward over-charging, never toward silence; the no-`cfg`
+  case is unchanged. The union falls back to the explicit set where it would exceed the re-export
+  fan-out cap, so widening an answer can never DROP one — measured, on a 14-definition fixture where it
+  did. 1,504-crate A/B: 10 unions across 1 crate (`cap-primitives`' `rustix` platform arms), 0 rows
+  removed, 0 effects lost.
+- **⚠ SOUNDNESS R177 (cardinal sin, PUBLISHED and still open on the 0.35.0 candidate) — CLOSED: a
+  callback stored as `Option<Alias>` where `Alias` is a `type NAME = <callable>` is now disclosed at
+  every unwrap binder.** `pub type Cb = Box<dyn Fn()>; cb: Option<Cb>` with `if let Some(c) = &self.cb
+  { c() }` was ABSENT from `functions[]` — an affirmative purity claim over a caller-installed
+  callback, executed ground truth — while the `.unwrap()()` spelling one token away disclosed
+  `Unknown`. R161 closed the bare-fn-pointer payload and listed this one as not established.
+  `elem_trait_leaves` now asks `is_callable_type`, the one authority for "is this value invokable",
+  instead of being a second implementation that had not been told about aliases; and a per-file
+  pre-pass collects a file's `type NAME = <callable>` names to a fixpoint BEFORE the walk that consumes
+  them, so declaration order and a same-file alias CHAIN no longer decide the answer (R181's double
+  alias and alias-typed return, for a same-file alias). `if let`/`match`/`.map`/`.as_ref()`/`while
+  let`/`for`, an `Option<Alias>` parameter and a `let` annotation all disclose; `deny Unknown <fn>`
+  goes 0 → 1. Stated residual: a CROSS-FILE alias is invisible to the per-file field index, because
+  `FileDecls` is keyed on one file's content. 1,504-crate A/B: 0 effects lost.
 - **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
   `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
   longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a

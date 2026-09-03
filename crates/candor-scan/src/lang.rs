@@ -526,11 +526,22 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
 /// bounded CHA instead of dropping to pure (`elem_type` returns None for a `dyn`/`impl` element — it has
 /// no nominal path, so the loop var was untyped). Empty for a concrete-element collection (`elem_type`
 /// owns those) and for a non-collection type.
-pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> Vec<String> {
+///
+/// SOUNDNESS R177 — `callable_aliases` is threaded in for the same reason `is_callable_type` takes it: a
+/// `type Cb = Box<dyn Fn()>` payload is a `Type::Path` like any other, so BOTH questions this function
+/// asks of an element (is it a trait object? is it a further container?) answered no, and so did the
+/// R161 bare-fn-pointer arm — `Option<Cb>` surfaced no element leaves at all while its one-alias-away
+/// twin `Option<Box<dyn Fn()>>` surfaced `["Fn"]`. `is_callable_type` already knew the answer; this
+/// function was a second implementation of the same question that had not been told (brief §F1-3).
+pub(crate) fn elem_trait_leaves(
+    ty: &syn::Type,
+    generic_bounds: &HashMap<String, Vec<String>>,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> Vec<String> {
     match ty {
-        syn::Type::Reference(r) => elem_trait_leaves(&r.elem, generic_bounds),
-        syn::Type::Paren(p) => elem_trait_leaves(&p.elem, generic_bounds),
-        syn::Type::Group(g) => elem_trait_leaves(&g.elem, generic_bounds),
+        syn::Type::Reference(r) => elem_trait_leaves(&r.elem, generic_bounds, callable_aliases),
+        syn::Type::Paren(p) => elem_trait_leaves(&p.elem, generic_bounds, callable_aliases),
+        syn::Type::Group(g) => elem_trait_leaves(&g.elem, generic_bounds, callable_aliases),
         syn::Type::Slice(s) => trait_leaves(&s.elem, generic_bounds),
         syn::Type::Array(a) => trait_leaves(&a.elem, generic_bounds),
         syn::Type::Path(p) => {
@@ -550,7 +561,7 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
                 if !d.is_empty() {
                     return d;
                 }
-                let e = elem_trait_leaves(t, generic_bounds);
+                let e = elem_trait_leaves(t, generic_bounds, callable_aliases);
                 if !e.is_empty() {
                     return e;
                 }
@@ -572,10 +583,27 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
                     if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                         eprintln!("R161ELEMFN {name}");
                     }
-                    vec!["Fn".to_string()]
-                } else {
-                    Vec::new()
+                    return vec!["Fn".to_string()];
                 }
+                // SOUNDNESS R177 — …and the NOMINAL-ALIAS payload, which is the same silence one
+                // spelling over. `pub type Cb = Box<dyn Fn()>; cb: Option<Cb>` with
+                // `if let Some(c) = &self.cb { c() }` was ABSENT from `functions[]` on published 0.34.0
+                // AND on the 0.35.0 candidate — an affirmative purity claim over a caller-installed
+                // callback, executed ground truth. R161 closed the parameter position for this alias and
+                // listed the container position as "not established"; it is established now.
+                //
+                // `is_callable_type` is the ONE authority for "is this value invokable" (it also peels
+                // `Box`/`Rc`/`Arc`/`Symbol` and `Option`/`Result`), so this arm asks IT rather than
+                // adding a third spelling of the question. The answer it contributes is the synthetic
+                // `"Fn"` leaf every other callable site already produces: it matches no local trait, so
+                // it can name no concrete effect — only turn a silent drop into `Unknown`.
+                if is_callable_type(t, generic_bounds, callable_aliases) {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R177ELEMALIAS {name}");
+                    }
+                    return vec!["Fn".to_string()];
+                }
+                Vec::new()
             };
             match name.as_str() {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
@@ -655,8 +683,11 @@ pub(crate) fn leaves_are_callable(leaves: &[String]) -> bool {
 /// `callback_installed_through_a_static_cell_reads_unknown_not_silent_pure` goes `["Env","Fs"]` ->
 /// `["Env"]`, losing `D::go` outright. Measured, not argued. Read the property as ADDITIVE GIVEN THAT
 /// GATE.
-pub(crate) fn static_holds_callable(ty: &syn::Type) -> bool {
-    leaves_are_callable(&elem_trait_leaves(ty, &HashMap::new()))
+pub(crate) fn static_holds_callable(
+    ty: &syn::Type,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> bool {
+    leaves_are_callable(&elem_trait_leaves(ty, &HashMap::new(), callable_aliases))
 }
 
 /// The per-position type paths of a TUPLE `syn::Type` (`(Sender, usize)` -> `[Some("Sender"),
