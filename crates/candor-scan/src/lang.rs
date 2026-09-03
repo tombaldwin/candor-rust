@@ -3164,8 +3164,24 @@ impl<'a> EscapeSites<'a> {
                     }
                 }
                 syn::Stmt::Expr(e, _) => self.note_opaque_expr(e, on_spine, inner),
-                // A macro in STATEMENT position: its value is discarded, so nothing in it is exempt.
-                syn::Stmt::Macro(m) => self.note_opaque_stmt_tokens(&m.mac.tokens, on_spine),
+                // SOUNDNESS R204 — a macro in STATEMENT position, walked THE SAME WAY `walk_block` walks
+                // one. R203's own summary said statement-position macros go to the interior walk; this
+                // arm did not, it went straight to `note_opaque_stmt_tokens`, so the TEMPLATE lookup and
+                // the expression-list parse were both skipped one level in — inside a template body,
+                // inside block tokens, inside statement tokens. Its value is discarded, so nothing in it
+                // is exempt (the all-`false` spine), which is exactly what the old call passed too:
+                // `note_opaque_stmt_tokens` hands `note_opaque_block` an EMPTY `inner`, so every leaf it
+                // found was already unexempt. The new call is therefore a superset of the old one — same
+                // statement-token walk on the `Err` arm, plus the two paths that were missing.
+                syn::Stmt::Macro(m) => {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R204STMTMACRO {}", path_to_string(&m.mac.path));
+                    }
+                    let none = vec![false; on_spine.len()];
+                    let host =
+                        syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
+                    self.note_opaque_macro(&host, &none);
+                }
                 syn::Stmt::Item(_) => {}
             }
         }

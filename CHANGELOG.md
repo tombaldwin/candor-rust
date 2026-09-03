@@ -196,6 +196,37 @@ after upgrading; review policies and regenerate baselines with the new build.
   lost `unknownWhy` 2,118), identical member sets and identical per-row content. A 40-fixture regression
   battery moves only the R203 cells on a full-report wide diff; the R200/R201/R202 cells and all fourteen
   R194 spine controls are unmoved.
+- **⚠ SOUNDNESS R204 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R203 above,
+  caught by a fifth fix-lens pass before release) — CLOSED: a statement-position macro INSIDE a
+  `macro_rules!` template, block tokens or statement tokens is now walked exactly like one written in
+  the function body.** R203 taught `walk_block` that a `Stmt::Macro` never reaches the `Expr::Macro`
+  machinery and routed it through the full interior walk — template lookup, then the expression-list
+  parse, then the statement parse. The statement half of the INTERIOR walk kept calling the statement
+  parse alone, so one level in, inside anything the veto had to re-parse, both of the other two paths
+  were skipped. Four shapes read `['Fs']` on published 0.34.0 (tag `736fa64`) and were ABSENT on
+  `5cefa62`/`c22a31d`, `deny Fs` 1 → 0 with no `Unknown`: a template whose body is `push_h!($o, $p);`
+  (only the template lookup can see that `H`), a template whose body is
+  `println!("{}", H::new($p).p);` (only the expression-list parse can), `idm!({ push_h!(out, "a");
+  gen(n) })?` and `stmts!(push_h!(out, "a"); 1u32)`. Executed ground truth: one `H::drop` runs in each
+  frame on the error exit, and each body builds the same leaf again after the `?` — that pair is the
+  sin, either half alone is harmless. The new call is a strict SUPERSET of the old one: the statement
+  parse it replaced passed an EMPTY exemption set, so nothing it reached was ever exempt, and the
+  replacement passes an all-`false` spine for the same reason (a statement macro's value is discarded)
+  and still ends at the identical statement parse when the tokens are not an expression list. It writes
+  `TryExit::interior` only, so over-reach over-charges and cannot silence. Over-charge control that
+  stays ABSENT (executed: 0 in-frame drops): a nested macro as a by-value argument ON the `?` operand's
+  value spine — the cell that a sloppier version of this fix, flattening the spine everywhere rather
+  than for statement macros only, would charge. 1,504-crate A/B vs `c22a31d`, wide key (16 fields):
+  ADDED 0, REMOVED 0, CHANGED 0, effects lost or gained 0, call edges lost 0 — byte-identical over
+  257,243 common rows, and published → this build reproduces published → `c22a31d` LINE FOR LINE across
+  all six diff lists (ADDED 5,146, REMOVED 699, LOST 620, GAINED 1,752, lost call edges 503, lost
+  `unknownWhy` 2,118), identical member sets and identical per-row content. The zero is measured over a
+  corpus that REACHES the branch: the new call fires 27 times across 7 of the 1,504 crates (four
+  `rustix` versions, `ring`, `tokio-util`, `termwiz`) on `assert!`, `prefixed_extern!`,
+  `tracing::trace!`, `eprintln!` and `core::assert!`, and no leaf it reaches has a `Drop` impl, which
+  is why no row moves. R194's, R199's and R203's own counters are unchanged at 2,821 / 10 / 46. A
+  42-fixture regression battery (the ledger's 40 plus round 5's `r5`/`r5b`) moves only those four cells
+  on a full-report wide diff; every other dir is identical.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
