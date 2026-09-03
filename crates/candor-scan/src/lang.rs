@@ -2825,6 +2825,14 @@ struct EscapeSites<'a> {
     /// all — so without this the leaf gets no `interior` entry from the operand and, if the same leaf
     /// is also built somewhere AFTER the `?`, it takes that site's `first_ctor_seq` and survives.
     local_macros: &'a HashMap<String, String>,
+    /// SOUNDNESS R206 — `macro_rules!` defined INSIDE the body being walked. `decls.rs` indexes
+    /// ITEM-level definitions only, so a body-local one is in no index at all; it is a `Stmt::Item`,
+    /// which `walk_block` discards. NAME -> arm tokens, filled as the walk passes the definition (a
+    /// `macro_rules!` is not usable before its definition, so the walk order is the scope order) and
+    /// read ALONGSIDE `local_macros`, never instead of it — see `note_local_macro_template`.
+    /// One `EscapeSites` per function body (`decls.rs` calls `escaping_ctor_leaves` per body), so this
+    /// cannot leak between functions. It can leak between BLOCKS of one body, which over-charges.
+    body_macros: HashMap<String, String>,
     /// R203 — local macros being expanded on this path, the same recursion guard R48 uses.
     macro_expanding: std::collections::HashSet<String>,
     /// R203 — the leaves put into some `?`'s `interior` by a path that could not address-key the
@@ -2871,6 +2879,7 @@ impl<'a> EscapeSites<'a> {
             fields,
             returns,
             local_macros,
+            body_macros: HashMap::new(),
             macro_expanding: std::collections::HashSet::new(),
             opaque_interior_leaves: std::collections::HashSet::new(),
             ctor_sites: HashMap::new(),
@@ -3262,7 +3271,7 @@ impl<'a> EscapeSites<'a> {
         // index is last-writer-wins across the crate, here and for R48's call-edge resolution alike.)
         let name = if full.contains("::") {
             let leaf = full.rsplit("::").next().unwrap_or_default().to_string();
-            if !self.local_macros.contains_key(&leaf) {
+            if !(self.local_macros.contains_key(&leaf) || self.body_macros.contains_key(&leaf)) {
                 return;
             }
             leaf
@@ -3280,11 +3289,40 @@ impl<'a> EscapeSites<'a> {
         if name != path_to_string(&m.mac.path) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             eprintln!("R205PATHTMPL {}", path_to_string(&m.mac.path));
         }
-        let Some(body) = self.local_macros.get(&name).cloned() else { return };
+        // SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules!` written inside a fn
+        // body is a `Stmt::Item`: `decls.rs` indexes item-level definitions only and `walk_block` threw
+        // `Stmt::Item` away, so its template was in no index and the veto could not see what it builds.
+        //
+        // BOTH BODIES ARE WALKED, NEVER ONE INSTEAD OF THE OTHER, and that is the whole of the care this
+        // needs. Rust's own rule is that a body-local `macro_rules!` SHADOWS a crate-level one of the
+        // same name for the rest of that body, so "consult the overlay first" reads like the correct
+        // model — but it is the one shape that could turn this into a new SILENCE: the overlay map is
+        // filled per BODY, not per block, so an entry from an earlier block would suppress the
+        // crate-level template that the later block really uses, and a template that constructs would be
+        // replaced by one that does not. Walking both is a strict superset of what shipped: every leaf
+        // `c22a31d` put in `interior` is still put there, and a shadowing pair adds the other template's
+        // leaves as an over-charge. This term can only refuse to certify an escape, so a superset is the
+        // direction it is allowed to be wrong in.
+        let mut bodies: Vec<String> = Vec::new();
+        if let Some(b) = self.body_macros.get(&name) {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R206BODYMACRO {name}");
+            }
+            bodies.push(b.clone());
+        }
+        if let Some(b) = self.local_macros.get(&name) {
+            if !bodies.contains(b) {
+                bodies.push(b.clone());
+            }
+        }
+        if bodies.is_empty() {
+            return;
+        }
         // `macro_template_blocks` returns (total arms, the arms that PARSED). An arm that does not
         // parse contributes nothing here, exactly as it contributes nothing to R48 — an unreadable
         // template is a residual either way, never a fabrication.
-        let (_arms, blocks) = crate::collector::macro_template_blocks(&body);
+        let blocks: Vec<syn::Block> =
+            bodies.iter().flat_map(|b| crate::collector::macro_template_blocks(b).1).collect();
         self.macro_expanding.insert(name.clone());
         for b in &blocks {
             // Each arm's VALUE is its tail expression, so when the invocation sits on a `?`'s spine that
@@ -3340,6 +3378,17 @@ impl<'a> EscapeSites<'a> {
                         let on_spine = vec![false; self.open_tries.len()];
                         let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                         self.note_opaque_macro(&host, &on_spine);
+                    }
+                }
+                // SOUNDNESS R206 — the only `Stmt::Item` this walk reads: a body-local `macro_rules!`
+                // DEFINITION, recorded for `note_local_macro_template`. An item-position macro
+                // INVOCATION (`foo!();`) carries no `ident` and is skipped, the same test `decls.rs`
+                // uses for the crate-level index. Nothing else about `Stmt::Item` changes.
+                syn::Stmt::Item(syn::Item::Macro(im))
+                    if im.ident.is_some() && im.mac.path.is_ident("macro_rules") =>
+                {
+                    if let Some(id) = &im.ident {
+                        self.body_macros.insert(id.to_string(), im.mac.tokens.to_string());
                     }
                 }
                 syn::Stmt::Item(_) => {}

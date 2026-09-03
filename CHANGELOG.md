@@ -253,6 +253,38 @@ after upgrading; review policies and regenerate baselines with the new build.
   A fourth crate, `tokio-util`, is the wrong-resolution case measured rather than argued: its own
   `macro_rules! trace` invokes the `tracing` CRATE's `tracing::trace!`, the leaf rule resolves that back
   to the local `trace`, and R48's recursion guard stops it — three reaches, zero walks, zero rows.
+- **⚠ SOUNDNESS R206 (cardinal sin, a REGRESSION against published 0.34.0 in the same family, caught by
+  the fifth fix-lens pass) — CLOSED: a `macro_rules!` defined INSIDE a function body is now visible to
+  the `?`-interior veto.** A body-local definition is a `Stmt::Item`; `decls.rs` builds R48's
+  crate-wide `macro_rules!` index from ITEM-level definitions only, and the veto's own walk discarded
+  every `Stmt::Item`, so a template written where it is used sat in no index either reader could
+  consult. `{ out.push(lm!("a")); gen(n) }?` with the same leaf built again after the `?` read `['Fs']`
+  on published 0.34.0 (tag `736fa64`) and was ABSENT on `5cefa62`/`c22a31d`, `deny Fs` 1 → 0 with no
+  `Unknown`; executed ground truth is one `H::drop` inside the frame on the error exit. `walk_block`
+  now records those definitions into a per-body overlay as the walk passes them (a `macro_rules!` is
+  not usable before its definition, so walk order is scope order), and the veto reads the overlay
+  ALONGSIDE the crate index.
+  BOTH TEMPLATES ARE WALKED, NEVER ONE INSTEAD OF THE OTHER, and the sibling fixture is why. Rust
+  shadows a crate-level macro with a body-local one of the same name, so "overlay first, index as
+  fallback" reads like the correct model — and it is a NEW cardinal sin, because the overlay is per
+  BODY and not per BLOCK: a `macro_rules! same` inside an `if` that has already closed then answers for
+  the crate-level `same!` a later block really uses, and a template that constructs is replaced by one
+  that does not. Measured, not argued: on the round-5 prototype that cell is published `['Fs']`,
+  `c22a31d` `['Fs']`, prototype ABSENT. Walking both is a strict superset of `c22a31d` — every leaf it
+  put in the `?`-interior set is still put there — and this term only ever REFUSES to certify an
+  escape, so the superset can over-charge and cannot silence. Over-charge control that stays ABSENT
+  (executed: 0 drops in the frame, 1 inside the callee): the same body-local construction as a
+  by-value argument ON the `?` operand's value spine.
+  1,504-crate A/B vs `c22a31d`, wide key (16 fields, cold, same dir list, same host): ADDED 0,
+  REMOVED 0, CHANGED 0 over 257,243 common rows — and published → this build reproduces published →
+  `c22a31d` line for line across all six diff lists (ADDED 5,146, REMOVED 699, LOST 620, GAINED 1,752,
+  lost call edges 503, lost `unknownWhy` 2,118), identical member sets and identical per-row content.
+  The zero is measured over a corpus that REACHES the branch: the overlay answers 59 times across 9 of
+  the 1,504 crates (`jni` 18, `mysql_async` 10+10, `time` 7, `chrono` 6, `h2` 3+3, `mysql_common`,
+  `color-print-proc-macro`), and R204's counter rises 27 → 33 because six more statement-position
+  macros are now reached inside those bodies. No leaf any of them constructs has a `Drop` impl, which
+  is why no row moves. A 43-fixture regression battery (the ledger's 40, round 5's `r5`/`r5b`, and the
+  new body-local fixture) moves only the R204/R205/R206 cells on a full-report wide diff.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
