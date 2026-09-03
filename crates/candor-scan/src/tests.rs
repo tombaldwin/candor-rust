@@ -15248,6 +15248,128 @@ pub fn go() {{ imp::doit(); }}
                  is a cardinal sin:\n{v:#}");
     }
 
+    /// SOUNDNESS R204 — the same question one level in, and a defect in R203's OWN code. R203 taught
+    /// `walk_block` that a macro in STATEMENT position is a `Stmt::Macro` the `Expr::Macro` machinery
+    /// never sees, and routed it through `note_opaque_macro` (template lookup, then the expression-list
+    /// parse, then the statement parse). `note_opaque_block` — the statement half of the INTERIOR walk,
+    /// i.e. the one that runs inside a `macro_rules!` template body, inside block tokens and inside
+    /// statement tokens — kept calling `note_opaque_stmt_tokens` directly. So the template lookup and the
+    /// expression-list parse were both skipped for every statement-position macro that is not written
+    /// directly in the function body, and R203's summary sentence ("statement-position macros go to the
+    /// same walk") was true one level down and false one level in.
+    ///
+    /// FOUR SHAPES, all published `['Fs']` and all ABSENT from `5cefa62`/`c22a31d` — a REGRESSION against
+    /// published 0.34.0 introduced by R203 itself:
+    ///   `tmpl_stmt_hole`     a template whose body is `push_h!($o, $p);` — a statement macro naming
+    ///                        ANOTHER local template, so only the template lookup can see the `H`.
+    ///   `tmpl_println_hole`  a template whose body is `println!("{}", H::new($p).p);` — the construction
+    ///                        is in the INVOCATION tokens, so only the expression-list parse can see it.
+    ///   `blocktok_stmt_hole` `idm!({ push_h!(out, "a"); gen(n) })?` — block tokens, statement macro in.
+    ///   `stmts_stmt_hole`    `stmts!(push_h!(out, "a"); 1u32)` — statement tokens, statement macro in.
+    ///
+    /// EXECUTED ground truth (a drop counter on the error path, drops in THIS frame): 1 for each hole,
+    /// 1 for `tmpl_ctrl_direct` and `println_direct`, 0 for `spine_nested`. Each hole builds the leaf a
+    /// SECOND time after the `?` (`H::try_new(m, "b")?`), which is what carries it past R173's positional
+    /// filter while nothing puts it in `interior` — the pair is the sin, either half alone is harmless.
+    ///
+    /// DIRECTION: the new call is a strict SUPERSET of the old one. `note_opaque_stmt_tokens` passes
+    /// `note_opaque_block` an EMPTY `inner`, so no leaf it reached was ever exempt; the replacement
+    /// passes an all-`false` spine for the same reason (a statement macro's value is discarded) and
+    /// still ends at the identical statement parse when the tokens are not an expression list. It writes
+    /// `TryExit::interior` only, so over-reach over-charges and cannot silence. `spine_nested` is the
+    /// control for the sloppier fix that flattens the spine everywhere instead of here.
+    #[test]
+    fn a_statement_macro_inside_a_template_or_tokens_is_walked_like_one_in_the_body() {
+        let v = scan_src_to_json("r204stmt", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { let _h = h; gen(n) }
+            #[macro_export]
+            macro_rules! idm { ($e:expr) => { $e } }
+            #[macro_export]
+            macro_rules! stmts { ($($t:tt)*) => {{ $($t)* }} }
+            #[macro_export]
+            macro_rules! push_h { ($o:expr, $p:expr) => {{ let x = $crate::H::new($p); $o.push(x); }} }
+            #[macro_export]
+            macro_rules! wrap_stmt { ($o:expr, $p:expr) => {{ push_h!($o, $p); }} }
+            #[macro_export]
+            macro_rules! logh { ($p:expr) => {{ println!("{}", $crate::H::new($p).p); }} }
+
+            pub fn tmpl_stmt_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { wrap_stmt!(out, "a"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn tmpl_println_hole(n: u32, m: u32) -> Result<H, ()> {
+                { logh!("a"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                Ok(h)
+            }
+            pub fn blocktok_stmt_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                idm!({ push_h!(out, "a"); gen(n) })?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn stmts_stmt_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { let _k = stmts!(push_h!(out, "a"); 1u32); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn tmpl_ctrl_direct(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(H::new("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn println_direct(n: u32, m: u32) -> Result<H, ()> {
+                { println!("{}", H::new("a").p); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                Ok(h)
+            }
+            pub fn spine_nested(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(idm!(idm!(H::new("a"))), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+"#);
+        for n in ["tmpl_stmt_hole", "tmpl_println_hole", "blocktok_stmt_hole", "stmts_stmt_hole"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}` builds an `H` inside its `?`'s operand through a STATEMENT-position macro that \
+                     is not written in the function body but inside a template, inside block tokens or \
+                     inside statement tokens — the one place R203 left calling `note_opaque_stmt_tokens` \
+                     instead of `note_opaque_macro`, so neither the template lookup nor the \
+                     expression-list parse ran. The same leaf is built again after the `?`, which carries \
+                     it past R173's positional filter. Published 0.34.0 charged all four; `5cefa62` and \
+                     `c22a31d` left them ABSENT and `deny Fs` went 1 -> 0 (executed: the drop really runs \
+                     on the error exit):\n{v:#}");
+        }
+        assert!(effs(fn_entry(&v, "tmpl_ctrl_direct")).contains(&"Fs".to_string()),
+                "the discriminator: the same body with the macro spelled out, charged in every build \
+                 since R194. What the four rows above test is exactly the macro's invisibility:\n{v:#}");
+        assert!(effs(fn_entry(&v, "println_direct")).contains(&"Fs".to_string()),
+                "`println_direct` is `tmpl_println_hole` with the `println!` written in the body instead \
+                 of inside a template, and it was charged in every build. Without it, `tmpl_println_hole` \
+                 could be passing because the walk reached the template rather than the tokens:\n{v:#}");
+        assert!(!fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
+                "THE OVER-CHARGE CONTROL for the sloppier version of this fix. A by-value argument on the \
+                 `?` operand's VALUE SPINE is moved into the callee and dies in ITS frame (executed: 0 \
+                 drops here, 1 inside `use_h_val`). R204 flattens the spine for a STATEMENT macro only, \
+                 whose value is genuinely discarded; flattening it for the expression walk as well would \
+                 charge here and re-fabricate published's blanket veto:\n{v:#}");
+    }
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index
