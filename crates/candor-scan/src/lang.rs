@@ -2345,36 +2345,96 @@ pub(crate) fn cross_ctor_leaf_from_struct_path(
 /// early return (`if unrelated { return Err(..); } let g = Guard::new(); Ok(g)`) is intersected against
 /// that unrelated exit too and reads as conditional, over-charging a value that in fact always escapes.
 /// Measured cost of that gap: see the corpus A/B in the commit this fixes.
-pub(crate) fn escaping_ctor_leaves(
-    block: &syn::Block,
-    uses: &HashMap<String, String>,
-    fields: &FieldIndex,
-    returns: &ReturnIndex,
+/// SOUNDNESS R172 — THE ANSWER IS PER CONSTRUCTION SITE, NOT PER TYPE LEAF, and the leaf set this
+/// returns is only the sites' summary.
+///
+///     pub fn swap_free(p: &str, q: &str) -> H { let _g = H::new(p); from_handle(q) }
+///
+/// Two DIFFERENT `H` values: one dies here (executed — `H::drop` really runs inside that frame), one
+/// is returned. Keyed by leaf, the returned one's escape suppressed the local one's drop and the
+/// function vanished from `functions[]` — a silent under-report, and a REGRESSION against published
+/// 0.34.0, because R160 (`Self::mk(q)`) and R165 (`from_handle(q)`) taught `ctor_leaf_of_expr` to
+/// answer `H` for two tail spellings that used to answer nothing. R168 fixed exactly this shape for
+/// the PARAMETER half by keying on `escapes.names`; this is the construction half of the same defect,
+/// and the pre-existing `swap_type` (`H::mk(q)`) victim goes with it — same mechanism, so a fix scoped
+/// to the two spellings the row was filed for would be an audit boundary drawn around its trigger.
+///
+/// So a leaf is suppressed only when EVERY construction of it in this body escapes. One non-escaping
+/// site is a live counterexample and the whole leaf is charged, which is the over-approximating
+/// direction: a site-set that is too small can only ever charge more.
+///
+/// SITES ARE IDENTIFIED BY THE ADDRESS of the borrowed `syn::Expr`, which is why the body walk and the
+/// escape walk have to see the SAME tree. The one place they cannot is a MACRO body — `mark_escape`
+/// parses `vec![Guard::new()]`'s tokens into owned temporaries whose addresses die with the call (and
+/// could be reused by a later allocation). Any leaf constructed inside a macro anywhere in the body is
+/// therefore recorded in `macro_ctor_leaves` and falls back to the old leaf-keyed rule — identical to
+/// the shipped behaviour for that leaf, neither better nor worse.
+pub(crate) fn escaping_ctor_leaves<'a>(
+    block: &'a syn::Block,
+    uses: &'a HashMap<String, String>,
+    fields: &'a FieldIndex,
+    returns: &'a ReturnIndex,
 ) -> Escapes {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
-    let mut sites = EscapeSites::default();
+    let mut sites = EscapeSites::new(uses, fields, returns);
     sites.walk_block(block, true);
     // A body with NO terminal exit (a `()`-returning fn with no trailing value — `store` below) still
     // has to run the fixpoint: the field/index/deref `assigns` route is UNCONDITIONAL (not gated on any
     // root, by design — see `escape_from_root`), so `*slot = Some(G::new());` must still be seen. A
     // single call seeded from `None` runs exactly that unconditional half and nothing root-dependent,
     // which is the correct answer when there is no root to be dependent ON.
-    if sites.roots.is_empty() {
-        return escape_from_root(None, &sites, uses, fields, returns);
-    }
-    let mut roots = sites.roots.iter();
-    let first = roots.next().expect("checked non-empty above");
-    let mut acc = escape_from_root(*first, &sites, uses, fields, returns);
-    for r in roots {
-        if acc.names.is_empty() && acc.leaves.is_empty() {
-            break; // the intersection can only shrink further; every remaining root would too.
+    let mut acc = if sites.roots.is_empty() {
+        escape_from_root(None, &sites)
+    } else {
+        let mut roots = sites.roots.iter();
+        let first = roots.next().expect("checked non-empty above");
+        let mut acc = escape_from_root(*first, &sites);
+        for r in roots {
+            if acc.names.is_empty() && acc.leaves.is_empty() {
+                break; // the intersection can only shrink further; every remaining root would too.
+            }
+            let next = escape_from_root(*r, &sites);
+            acc.names.retain(|n| next.names.contains(n));
+            acc.leaves.retain(|l| next.leaves.contains(l));
+            // SITES ARE UNIONED ACROSS EXITS WHILE LEAVES ARE INTERSECTED, and the two together are the
+            // rule. A site is a single construction expression, so an exit that cannot reach it has no
+            // opinion about it — intersecting made `fn render(..) -> Error { .. return Error::msg(s);
+            // .. Error::msg(msg) }` (anyhow) charge `Error::drop`, because each exit escapes a
+            // DIFFERENT one of the two sites and neither is in both. The conditional-escape regression
+            // this file exists to prevent is still caught, by the leaf INTERSECTION one line up: a name
+            // bound before a branch whose fate the branch decides drops its leaf from `acc.leaves` at
+            // the exit that does not carry it, and the site gate below only ever narrows that set
+            // further. So the suppression set can never exceed the shipped leaf-keyed one.
+            acc.sites.extend(next.sites);
         }
-        let next = escape_from_root(*r, &sites, uses, fields, returns);
-        acc.names.retain(|n| next.names.contains(n));
-        acc.leaves.retain(|l| next.leaves.contains(l));
-    }
-    acc
+        acc
+    };
+    // R172, the site gate. `acc.leaves` is the shipped leaf-keyed answer; a leaf survives it only if
+    // every construction of that leaf recorded by the body walk is one of the escaping sites. A leaf
+    // with NO recorded site (only reachable through a macro, or through a walk position the site pass
+    // does not reach) keeps the old answer — the site set is an added refusal, never a new licence.
+    let escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
+    acc.leaves.retain(|l| {
+        if sites.macro_ctor_leaves.contains(l) {
+            return true;
+        }
+        match sites.ctor_sites.get(l) {
+            Some(v) => {
+                let all = v.iter().all(|s| escaped_sites.contains(s));
+                // §E1 HIT COUNTER — the branch R172 adds is exactly "the leaf gate WOULD have
+                // suppressed a leaf that has a NON-escaping construction site too". Printed only when
+                // it really fires, so a zero count in an A/B means the corpus never reached the change.
+                if !all && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R172SITE {l} ({} sites, {} escaping)", v.len(),
+                              v.iter().filter(|s| escaped_sites.contains(s)).count());
+                }
+                all
+            }
+            None => true,
+        }
+    });
+    Escapes { leaves: acc.leaves, names: acc.names }
 }
 
 /// The escape fixpoint (root use, then the `lets`/`assigns`/`method_args` transitive closure — same
@@ -2382,57 +2442,88 @@ pub(crate) fn escaping_ctor_leaves(
 /// `None` for an exit proven to carry nothing (see `escaping_ctor_leaves`'s doc comment); such a call
 /// simply returns the empty sets, which is what makes it veto any name/leaf during the caller's
 /// intersection.
-fn escape_from_root(
-    root: Option<&syn::Expr>,
-    sites: &EscapeSites<'_>,
-    uses: &HashMap<String, String>,
-    fields: &FieldIndex,
-    returns: &ReturnIndex,
-) -> Escapes {
-    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut leaves: std::collections::HashSet<String> = std::collections::HashSet::new();
+fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks {
+    let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
+    let mut m = Marks::default();
     if let Some(e) = root {
-        mark_escape(e, uses, fields, returns, &mut names, &mut leaves);
+        mark_escape(e, uses, fields, returns, &mut m);
     }
     // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
     // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
     // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
     for e in &sites.escapes {
-        mark_escape(e, uses, fields, returns, &mut names, &mut leaves);
+        mark_escape(e, uses, fields, returns, &mut m);
     }
     for _ in 0..8 {
-        let before = (names.len(), leaves.len());
+        let before = (m.names.len(), m.leaves.len(), m.sites.len());
         for (name, init) in &sites.lets {
-            if names.contains(name) {
-                mark_escape(init, uses, fields, returns, &mut names, &mut leaves);
+            if m.names.contains(name) {
+                mark_escape(init, uses, fields, returns, &mut m);
             }
         }
         for (lhs, rhs) in &sites.assigns {
             match lhs {
                 // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
-                    if names.contains(n) {
-                        mark_escape(rhs, uses, fields, returns, &mut names, &mut leaves);
+                    if m.names.contains(n) {
+                        mark_escape(rhs, uses, fields, returns, &mut m);
                     }
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
                 // unconditionally (not gated on this root, same as before this fix: a store is a store
                 // regardless of which exit the function eventually takes).
-                None => mark_escape(rhs, uses, fields, returns, &mut names, &mut leaves),
+                None => mark_escape(rhs, uses, fields, returns, &mut m),
             }
         }
         for (recv, args) in &sites.method_args {
-            if names.contains(recv) {
+            if m.names.contains(recv) {
                 for a in args {
-                    mark_escape(a, uses, fields, returns, &mut names, &mut leaves);
+                    mark_escape(a, uses, fields, returns, &mut m);
                 }
             }
         }
-        if (names.len(), leaves.len()) == before {
+        if (m.names.len(), m.leaves.len(), m.sites.len()) == before {
             break;
         }
     }
-    Escapes { leaves, names }
+    m
+}
+
+/// One escape walk's findings. `leaves` is the shipped leaf-keyed answer, kept because it is what the
+/// macro fallback still needs; `sites` is the R172 refinement — the ADDRESS of each construction
+/// expression that escapes, so two constructions of one type in one body stop being one fact.
+#[derive(Default)]
+struct Marks {
+    names: std::collections::HashSet<String>,
+    leaves: std::collections::HashSet<String>,
+    sites: std::collections::HashSet<SiteId>,
+}
+
+/// R172 — a construction site's identity, comparable between the body walk and the escape walk.
+/// `(address of the `syn::Expr`, 0)` for a construction written in the tree itself; `(address of the
+/// enclosing `syn::ExprMacro`, 1-based pre-order ordinal)` for one inside a macro's token stream,
+/// where the two walks each parse their OWN copy and so cannot share addresses. The macro's node IS
+/// an `Expr`, but an `Expr::Macro` is never itself a construction, so the two forms cannot collide.
+type SiteId = (usize, usize);
+
+/// The canonical numbering both walks use for a macro's parsed token expressions: pre-order over
+/// EVERY child, stopping at a NESTED macro (whose own parse would need its own base). Deterministic
+/// from the token stream alone, which is what makes two separate parses agree.
+fn macro_site_ordinals<'e>(exprs: impl IntoIterator<Item = &'e syn::Expr>) -> HashMap<usize, usize> {
+    fn go(e: &syn::Expr, n: &mut usize, out: &mut HashMap<usize, usize>) {
+        if matches!(e, syn::Expr::Macro(_)) {
+            return;
+        }
+        *n += 1;
+        out.insert(e as *const syn::Expr as usize, *n);
+        for_each_child_expr(e, &mut |c| go(c, n, out));
+    }
+    let mut out = HashMap::new();
+    let mut n = 0usize;
+    for e in exprs {
+        go(e, &mut n, &mut out);
+    }
+    out
 }
 
 /// What `escaping_ctor_leaves` learned: the constructed type LEAVES that leave this scope, and the
@@ -2520,8 +2611,26 @@ pub(crate) fn owned_drop_params(
     out
 }
 
-#[derive(Default)]
 struct EscapeSites<'a> {
+    uses: &'a HashMap<String, String>,
+    fields: &'a FieldIndex,
+    returns: &'a ReturnIndex,
+    /// SOUNDNESS R172 — every construction site in the body, by type leaf, each identified by the
+    /// ADDRESS of its `syn::Expr`. Collected from the SAME walk that finds the escape sites, so the
+    /// two halves cannot disagree about what counts as a construction.
+    ctor_sites: HashMap<String, Vec<SiteId>>,
+    /// R172 — leaves constructed inside a MACRO body. `mark_escape` parses macro tokens into owned
+    /// temporaries, whose addresses cannot be matched against `ctor_sites`, so these leaves keep the
+    /// shipped leaf-keyed answer instead.
+    macro_ctor_leaves: std::collections::HashSet<String>,
+    /// R172 — CALLEE positions, which are NOT construction sites. `MemBio(bio)` is a construction; the
+    /// `MemBio` inside it is the callee PATH of that same call, and reading it as a second site of the
+    /// same leaf is fatal, because `mark_escape` descends only VALUE children (`for_each_value_child`
+    /// gives a `Call` its ARGS, never its `func`) and so can never mark it escaping. The leaf then has
+    /// a site that never escapes and is charged for a value it hands straight back to its caller —
+    /// measured as three fabrications on the first corpus A/B (openssl `MemBio::from_ptr`,
+    /// tokio-postgres `Socket::new_tcp`/`SqlState::from_code`), all of them ABSENT on published 0.34.0.
+    skip_sites: std::collections::HashSet<usize>,
     /// `return e` operands and the body's tail expression — each one an independent terminal exit of
     /// the function. `None` marks an exit that provably carries nothing out of this scope (a bare
     /// `return;`, or the implicit early-return a `?` can take): a real, present counterexample, not an
@@ -2543,6 +2652,93 @@ struct EscapeSites<'a> {
 }
 
 impl<'a> EscapeSites<'a> {
+    fn new(
+        uses: &'a HashMap<String, String>,
+        fields: &'a FieldIndex,
+        returns: &'a ReturnIndex,
+    ) -> Self {
+        EscapeSites {
+            uses,
+            fields,
+            returns,
+            ctor_sites: HashMap::new(),
+            macro_ctor_leaves: std::collections::HashSet::new(),
+            skip_sites: std::collections::HashSet::new(),
+            roots: Vec::new(),
+            escapes: Vec::new(),
+            lets: Vec::new(),
+            assigns: Vec::new(),
+            method_args: Vec::new(),
+        }
+    }
+
+    /// R172 — record this expression if it is a construction. Called on EVERY expression the walk
+    /// reaches, which is a superset of what `mark_escape` can reach from a root (that one descends
+    /// only value positions; this one descends every child), so a site the escape walk finds is
+    /// always in this table.
+    fn note_ctor_site(&mut self, e: &'a syn::Expr) {
+        if self.skip_sites.contains(&(e as *const syn::Expr as usize)) {
+            return; // a callee path — see `skip_sites`
+        }
+        if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
+            self.ctor_sites.entry(l).or_default().push((e as *const syn::Expr as usize, 0));
+        }
+    }
+
+    /// R172 — the leaves a MACRO body constructs, which `note_ctor_site` cannot address-key. Mirrors
+    /// `mark_escape`'s macro handling (parse the tokens as a comma-punctuated expression list) and then
+    /// walks the whole parsed subtree, deliberately wider than `mark_escape`'s value-position descent:
+    /// over-recording here only widens the set that keeps the SHIPPED answer.
+    fn note_macro_ctor_leaves(&mut self, m: &syn::ExprMacro) {
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) else { return };
+        let base = m as *const syn::ExprMacro as usize;
+        let mut n = 0usize;
+        for e in &exprs {
+            self.note_macro_site(e, base, &mut n);
+        }
+    }
+    /// The site-recording half of `macro_site_ordinals` — the SAME pre-order, the same stop at a
+    /// nested macro, so ordinal `k` here is ordinal `k` in `mark_escape`'s independent parse.
+    fn note_macro_site(&mut self, e: &syn::Expr, base: usize, n: &mut usize) {
+        if let syn::Expr::Macro(_) = e {
+            self.note_nested_macro_leaves(e);
+            return;
+        }
+        // NUMBERED regardless (the ordinal must stay identical to `macro_site_ordinals`, which numbers
+        // every node); only the SITE recording is skipped for a callee path.
+        *n += 1;
+        let ord = *n;
+        if let syn::Expr::Call(c) = e {
+            self.skip_sites.insert(&*c.func as *const syn::Expr as usize);
+        }
+        if self.skip_sites.contains(&(e as *const syn::Expr as usize)) {
+            for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, n));
+            return;
+        }
+        if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
+            self.ctor_sites.entry(l).or_default().push((base, ord));
+        }
+        for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, n));
+    }
+    /// A macro NESTED inside a macro is where the ordinal numbering stops (its parse would need its
+    /// own base), so its constructions keep the shipped leaf-keyed answer.
+    fn note_nested_macro_leaves(&mut self, e: &syn::Expr) {
+        if let syn::Expr::Macro(m) = e {
+            let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+            if let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
+                for sub in &exprs {
+                    if let Some(l) = ctor_leaf_of_expr(sub, self.uses, self.fields, self.returns) {
+                        self.macro_ctor_leaves.insert(l);
+                    }
+                    self.note_nested_macro_leaves(sub);
+                }
+            }
+            return;
+        }
+        for_each_child_expr(e, &mut |c| self.note_nested_macro_leaves(c));
+    }
+
     /// `tail` says whether this block's trailing expression is in RETURN position for the unit.
     fn walk_block(&mut self, b: &'a syn::Block, tail: bool) {
         for (i, st) in b.stmts.iter().enumerate() {
@@ -2570,6 +2766,10 @@ impl<'a> EscapeSites<'a> {
         }
     }
     fn walk_expr(&mut self, e: &'a syn::Expr) {
+        self.note_ctor_site(e); // R172
+        if let syn::Expr::Macro(m) = e {
+            self.note_macro_ctor_leaves(m); // R172 — address-keying cannot reach inside a macro
+        }
         match e {
             syn::Expr::Return(r) => match &r.expr {
                 Some(v) => self.roots.push(Some(v)),
@@ -2619,6 +2819,8 @@ impl<'a> EscapeSites<'a> {
             // (`forget` / `ManuallyDrop::new`) so `std::mem::forget`, `mem::forget` and a
             // `use std::mem::forget;` bare call all land.
             syn::Expr::Call(c) => {
+                // R172 — the callee is not a construction site of its own, whatever it names.
+                self.skip_sites.insert(&*c.func as *const syn::Expr as usize);
                 if let syn::Expr::Path(p) = &*c.func {
                     let full = path_to_string(&p.path);
                     let suppresses = full == "forget"
@@ -2665,16 +2867,18 @@ fn mark_escape(
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
     returns: &ReturnIndex,
-    names: &mut std::collections::HashSet<String>,
-    leaves: &mut std::collections::HashSet<String>,
+    m: &mut Marks,
 ) {
     if let Some(l) = ctor_leaf_of_expr(e, uses, fields, returns) {
-        leaves.insert(l);
+        m.leaves.insert(l);
+        // SOUNDNESS R172 — the ESCAPING construction site, address-keyed. `escaping_ctor_leaves`
+        // suppresses a leaf only when every site of it in the body is in this set.
+        m.sites.insert((e as *const syn::Expr as usize, 0));
     }
     if let syn::Expr::Path(p) = e {
         if p.qself.is_none() {
             if let Some(id) = p.path.get_ident() {
-                names.insert(id.to_string());
+                m.names.insert(id.to_string());
             }
         }
     }
@@ -2683,18 +2887,38 @@ fn mark_escape(
     if let syn::Expr::Field(f) = e {
         if let syn::Expr::Path(p) = &*f.base {
             if let Some(id) = p.path.get_ident() {
-                names.insert(id.to_string());
+                m.names.insert(id.to_string());
             }
         }
     }
     // `vec![Guard::new()]` / `Some(g)` written through a macro, in tail position. syn does not parse a
     // macro body, so without this the idiomatic collection literal reads as NOT escaping and every
     // `fn make() -> Vec<Guard> { vec![Guard::new()] }` fabricates the guard's Drop onto the factory.
-    if let syn::Expr::Macro(m) = e {
+    if let syn::Expr::Macro(mac) = e {
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
-            for sub in &exprs {
-                mark_escape(sub, uses, fields, returns, names, leaves);
+        if let Ok(exprs) = syn::parse::Parser::parse2(parser, mac.mac.tokens.clone()) {
+            // R172 — `exprs` are OWNED TEMPORARIES, so an address recorded under them dies with this
+            // call and a later allocation could reuse one. Marked into a scratch `Marks`, then each
+            // site RENUMBERED onto `macro_site_ordinals`, the one numbering the body walk also uses —
+            // `vec![from_handle(q)]` beside a local `H::new(p)` has to distinguish the two, or the
+            // published charge on that body stays lost (measured: `mixed_macro`).
+            let ords = macro_site_ordinals(exprs.iter());
+            let base = mac as *const syn::ExprMacro as usize;
+            let mut sub = Marks::default();
+            for one in &exprs {
+                mark_escape(one, uses, fields, returns, &mut sub);
+            }
+            m.names.extend(sub.names);
+            m.leaves.extend(sub.leaves);
+            for (addr, ord) in &sub.sites {
+                // Only sites written DIRECTLY in this parse (`ord == 0`) can be renumbered here. An
+                // entry from a NESTED macro carries that macro's own temporary base and is dropped —
+                // its leaf keeps the shipped leaf-keyed answer through `macro_ctor_leaves`.
+                if *ord == 0 {
+                    if let Some(o) = ords.get(addr) {
+                        m.sites.insert((base, *o));
+                    }
+                }
             }
         }
         return;
@@ -2721,50 +2945,50 @@ fn mark_escape(
     // children stays correct there too — `If`/`Match` are the only node kinds needing a NAME/leaf split.
     match e {
         syn::Expr::If(iff) => {
-            let mut then_names = std::collections::HashSet::new();
-            let mut then_leaves = std::collections::HashSet::new();
+            let mut then_m = Marks::default();
             if let Some(t) = tail_expr_of(&iff.then_branch) {
-                mark_escape(t, uses, fields, returns, &mut then_names, &mut then_leaves);
+                mark_escape(t, uses, fields, returns, &mut then_m);
             }
             // No `else` means the implicit value is `()`, which can carry no NAME — an empty set, which
             // (correctly) vetoes any name the `then` arm alone found. A `()`-typed branch cannot carry a
             // real leaf either (its tail would have to be unit-typed), so this never veto-by-omission a
             // leaf in practice; leaves are unioned regardless, per this fn's doc comment above.
-            let (else_names, else_leaves) = match &iff.else_branch {
+            let else_m = match &iff.else_branch {
                 Some((_, eb)) => {
-                    let mut n = std::collections::HashSet::new();
-                    let mut l = std::collections::HashSet::new();
-                    mark_escape(eb, uses, fields, returns, &mut n, &mut l);
-                    (n, l)
+                    let mut n = Marks::default();
+                    mark_escape(eb, uses, fields, returns, &mut n);
+                    n
                 }
-                None => (std::collections::HashSet::new(), std::collections::HashSet::new()),
+                None => Marks::default(),
             };
-            names.extend(then_names.intersection(&else_names).cloned());
-            leaves.extend(then_leaves.union(&else_leaves).cloned());
+            m.names.extend(then_m.names.intersection(&else_m.names).cloned());
+            // Leaves AND their sites ride the same union rule (see the comment above): a construction
+            // found directly inside one arm is a self-contained fact about that arm.
+            m.leaves.extend(then_m.leaves.union(&else_m.leaves).cloned());
+            m.sites.extend(then_m.sites.union(&else_m.sites).cloned());
             return;
         }
-        syn::Expr::Match(m) => {
-            let mut arms = m.arms.iter().map(|a| {
-                let mut n = std::collections::HashSet::new();
-                let mut l = std::collections::HashSet::new();
-                mark_escape(&a.body, uses, fields, returns, &mut n, &mut l);
-                (n, l)
+        syn::Expr::Match(mt) => {
+            let mut arms = mt.arms.iter().map(|a| {
+                let mut n = Marks::default();
+                mark_escape(&a.body, uses, fields, returns, &mut n);
+                n
             });
-            if let Some((first_n, first_l)) = arms.next() {
-                let (names_int, leaves_union) = arms.fold((first_n, first_l), |(an, al), (n, l)| {
-                    (
-                        an.intersection(&n).cloned().collect(),
-                        al.union(&l).cloned().collect(),
-                    )
+            if let Some(first) = arms.next() {
+                let folded = arms.fold(first, |a, n| Marks {
+                    names: a.names.intersection(&n.names).cloned().collect(),
+                    leaves: a.leaves.union(&n.leaves).cloned().collect(),
+                    sites: a.sites.union(&n.sites).cloned().collect(),
                 });
-                names.extend(names_int);
-                leaves.extend(leaves_union);
+                m.names.extend(folded.names);
+                m.leaves.extend(folded.leaves);
+                m.sites.extend(folded.sites);
             }
             return;
         }
         _ => {}
     }
-    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, returns, names, leaves));
+    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, returns, m));
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can
