@@ -861,3 +861,62 @@
         assert!(reason_class_matches(Some(&cs), &want(&["dispatch", "native"])));
         assert!(!reason_class_matches(Some(&cs), &want(&["unresolved"])));
     }
+
+    /// SOUNDNESS R150: `gate --report`'s own `same_artifact` (this crate, `gate.rs`) used to be a
+    /// second, independently-maintained copy of `candor-scan/src/scan.rs`'s guard that had drifted to
+    /// a bare `canonicalize()` — no device+inode check, no dangling-symlink pre-resolve. It now
+    /// delegates to the single shared authority (`candor_report::same_artifact`), but a test that pins
+    /// only the SCAN call site is exactly how the earlier drift went unnoticed for a whole release, so
+    /// this pins the GATE call site directly (`crate::gate::same_artifact`, not the scan crate's).
+    ///
+    /// Two arms, both cases the pre-fix bare-`canonicalize()` copy got wrong:
+    /// - a hardlink (shares a device+inode, `canonicalize()` alone does not compare those) — the
+    ///   `--policy P --gate-json <hardlink to P>` collision R150 names.
+    /// - a dangling symlink (its target does not exist yet, so `canonicalize()` fails outright rather
+    ///   than resolving to the name it points at).
+    /// Plus the negative control both arms need: an unrelated path must not collide with either.
+    #[cfg(unix)]
+    #[test]
+    fn gate_same_artifact_catches_a_hardlink_and_a_dangling_symlink_collision() {
+        let dir = std::env::temp_dir()
+            .join(format!("candor-query-gate-same-artifact-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Arm 1: device+inode. Two names for one file via a hardlink, no symlink involved.
+        let policy = dir.join("policy.P");
+        std::fs::write(&policy, b"deny Net\n").unwrap();
+        let hardlink = dir.join("gate.json");
+        std::fs::hard_link(&policy, &hardlink).unwrap();
+        assert!(
+            crate::gate::same_artifact(policy.to_str().unwrap(), hardlink.to_str().unwrap()),
+            "a hardlink to `policy.P` must be recognised as the SAME artifact — this is the case a \
+             bare canonicalize() (which resolves paths, not inodes) does not compare at all"
+        );
+
+        // Arm 2: a dangling symlink still names its (not-yet-existing) target.
+        let real = dir.join("policy.Q");
+        let link = dir.join("link-to-Q");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!real.exists(), "setup: the symlink's target must not exist yet");
+        assert!(
+            crate::gate::same_artifact(real.to_str().unwrap(), link.to_str().unwrap()),
+            "a dangling symlink naming `policy.Q` must be recognised as the SAME artifact as \
+             `policy.Q` itself — canonicalize() fails outright on a dangling link, so a naive copy \
+             reports these as different artifacts and lets the collision through"
+        );
+
+        // Control: an unrelated path must not collide with either arm.
+        let other = dir.join("policy.R");
+        std::fs::write(&other, b"deny Exec\n").unwrap();
+        assert!(
+            !crate::gate::same_artifact(other.to_str().unwrap(), hardlink.to_str().unwrap()),
+            "an unrelated file must not be swept into the hardlink match"
+        );
+        assert!(
+            !crate::gate::same_artifact(other.to_str().unwrap(), link.to_str().unwrap()),
+            "an unrelated path must not collide just because the dangling target is unresolvable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }

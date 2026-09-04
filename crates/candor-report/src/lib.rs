@@ -654,6 +654,63 @@ pub fn resolve_sink_artifact(path: &Path) -> std::path::PathBuf {
     cur
 }
 
+/// SPEC §3.3.1 — is this one artifact under two names?
+///
+/// **The single authority for this question.** Prior to SOUNDNESS R150 this existed as two independent
+/// copies — `candor-scan/src/scan.rs` and `candor-query/src/gate.rs` — that a review found had drifted:
+/// the scan copy had the device+inode check and the dangling-symlink pre-resolve added for ⟨0.28⟩; the
+/// gate copy was still the ⟨0.27⟩ bare-`canonicalize()` version. Two crates that both already depend on
+/// `candor-report` had no reason to keep two implementations, and the drift meant `gate --report` refused
+/// LESS than `candor-scan --policy` for the identical question: a hard-linked policy and `--gate-json`,
+/// or a dangling-symlink alias for one, was caught on the scan route and accepted on the gate route. Per
+/// this family's rule ("one owner, not two copies that can drift"), both call sites now delegate here.
+///
+/// NOT a path-component comparison. The guard that first shipped compared `Path::new(pp) ==
+/// Path::new(gp)`, which a review defeated with `--policy /w/P --gate-json ./P` run from `/w`: same
+/// file, different spelling, policy destroyed, exit 0 with `ok: true`. Canonicalisation resolves `.`,
+/// `..` and symlinks; where the sink does not exist yet (the normal case — we are about to create it)
+/// its parent is canonicalised and the file name appended. "Resolve the artifact, not just the string"
+/// is the rule that caught the release verifier; it applies here for the same reason.
+pub fn same_artifact(a: &str, b: &str) -> bool {
+    if a == "-" || b == "-" {
+        return false;
+    }
+    fn resolve(p: &str) -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(p);
+        if let Ok(c) = p.canonicalize() {
+            return Some(c);
+        }
+        let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        Some(parent.canonicalize().ok()?.join(p.file_name()?))
+    }
+    // ⟨0.28⟩ DEVICE+INODE FIRST, where the platform offers it. Path equality alone called two HARDLINKS
+    // to one inode two different sinks and refused a legal command — the mirror of the stale green, and
+    // measured 1-vs-3 across the engines. §3.3.1 asks for device+inode and that was read as advisory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
+                return true;
+            }
+        }
+    }
+    // …and a symlink whose target does not exist YET still names that target: `canonicalize` fails on a
+    // dangling link, so resolve it explicitly before falling back to the parent-directory form.
+    let (ra, rb) = (resolve_sink_artifact(std::path::Path::new(a)), resolve_sink_artifact(std::path::Path::new(b)));
+    if ra != std::path::Path::new(a) || rb != std::path::Path::new(b) {
+        if let (Some(x), Some(y)) = (resolve(&ra.to_string_lossy()), resolve(&rb.to_string_lossy())) {
+            if x == y {
+                return true;
+            }
+        }
+    }
+    match (resolve(a), resolve(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // The TEMP FILE is a sibling of the RESOLVED artifact, so the rename stays within one filesystem
     // (rename(2) is only atomic there) and lands on the file the operator actually reads.

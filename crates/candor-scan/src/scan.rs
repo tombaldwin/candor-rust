@@ -149,55 +149,16 @@ pub(crate) fn same_artifact_pub(a: &str, b: &str) -> bool {
     same_artifact(a, b)
 }
 
-/// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names?
+/// SPEC §3.3.1 — is this one artifact under two names?
 ///
-/// NOT a path-component comparison. The guard that shipped here compared `Path::new(pp) ==
-/// Path::new(gp)`, which a review defeated with `--policy /w/P --gate-json ./P` run from `/w`: same
-/// file, different spelling, policy destroyed, exit 0 with `ok: true`. Canonicalisation resolves `.`,
-/// `..` and symlinks; where the sink does not exist yet (the normal case — we are about to create it)
-/// its parent is canonicalised and the file name appended. "Resolve the artifact, not just the string"
-/// is the rule that caught the release verifier; it applies here for the same reason.
+/// SOUNDNESS R150: this used to be a second, independently-maintained copy of the same question that
+/// `candor-query/src/gate.rs` also implemented — and the two had drifted (the gate copy was a bare
+/// `canonicalize()` missing the device+inode check and the dangling-symlink pre-resolve below). Both
+/// crates already depend on `candor-report`, so the one implementation now lives there
+/// (`candor_report::same_artifact`) and this is a thin re-export kept so every call site in this crate
+/// stays unchanged. See the doc comment on `candor_report::same_artifact` for the full argument.
 fn same_artifact(a: &str, b: &str) -> bool {
-    if a == "-" || b == "-" {
-        return false;
-    }
-    fn resolve(p: &str) -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(p);
-        if let Ok(c) = p.canonicalize() {
-            return Some(c);
-        }
-        let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-        Some(parent.canonicalize().ok()?.join(p.file_name()?))
-    }
-    // ⟨0.28⟩ DEVICE+INODE FIRST, where the platform offers it. Path equality alone called two HARDLINKS
-    // to one inode two different sinks and refused a legal command — the mirror of the stale green, and
-    // measured 1-vs-3 across the engines. §3.3.1 asks for device+inode and that was read as advisory.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
-                return true;
-            }
-        }
-    }
-    // …and a symlink whose target does not exist YET still names that target: `canonicalize` fails on a
-    // dangling link, so resolve it explicitly before falling back to the parent-directory form.
-    let (ra, rb) = (
-        candor_report::resolve_sink_artifact(std::path::Path::new(a)),
-        candor_report::resolve_sink_artifact(std::path::Path::new(b)),
-    );
-    if ra != std::path::Path::new(a) || rb != std::path::Path::new(b) {
-        if let (Some(x), Some(y)) = (resolve(&ra.to_string_lossy()), resolve(&rb.to_string_lossy())) {
-            if x == y {
-                return true;
-            }
-        }
-    }
-    match (resolve(a), resolve(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
+    candor_report::same_artifact(a, b)
 }
 
 /// Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).

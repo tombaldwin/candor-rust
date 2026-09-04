@@ -977,21 +977,22 @@ fn refuse_disclosing(
 /// `--json` IS `--gate-json -`, deliberately: on a scan `--json <file>` writes the REPORT, and there is
 /// no report to write here, so the verb's machine output is the verdict. A second meaning for `--json`
 /// would be the one place a consumer could tell the two routes apart.
-/// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names? Not a string comparison: `--policy /w/P
+/// SPEC §3.3.1 — is this one artifact under two names? Not a string comparison: `--policy /w/P
 /// --gate-json ./P` run from `/w` names one file twice.
-fn same_artifact(a: &str, b: &str) -> bool {
-    if a == "-" || b == "-" {
-        return false;
-    }
-    fn resolve(p: &str) -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(p);
-        if let Ok(c) = p.canonicalize() {
-            return Some(c);
-        }
-        let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-        Some(parent.canonicalize().ok()?.join(p.file_name()?))
-    }
-    matches!((resolve(a), resolve(b)), (Some(x), Some(y)) if x == y)
+///
+/// SOUNDNESS R150: this was a bare-`canonicalize()` copy that had drifted from the guarded
+/// implementation in `candor-scan/src/scan.rs` — missing the ⟨0.28⟩ device+inode check (so two
+/// hardlinks to one inode, spelled differently, were seen as distinct artifacts) and the
+/// dangling-symlink pre-resolve (so a symlinked alias whose target does not exist yet was not
+/// recognised either). The gate route therefore refused LESS than the scan route for the identical
+/// question. Both crates already depend on `candor-report`, so this now delegates to the single
+/// authority there (`candor_report::same_artifact`) instead of keeping a second copy that can drift
+/// again.
+///
+/// `pub(crate)` (rather than private) so `tests.rs` can pin this call site directly — R150's own
+/// lesson was that a test pinning only ONE of two duplicated copies is how the drift went unnoticed.
+pub(crate) fn same_artifact(a: &str, b: &str) -> bool {
+    candor_report::same_artifact(a, b)
 }
 
 /// `.candor/config` is never a verdict sink, wherever it is.
