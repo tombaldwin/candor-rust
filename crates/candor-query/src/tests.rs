@@ -874,6 +874,7 @@
     ///   `--policy P --gate-json <hardlink to P>` collision R150 names.
     /// - a dangling symlink (its target does not exist yet, so `canonicalize()` fails outright rather
     ///   than resolving to the name it points at).
+    ///
     /// Plus the negative control both arms need: an unrelated path must not collide with either.
     #[cfg(unix)]
     #[test]

@@ -689,21 +689,21 @@ pub fn same_artifact(a: &str, b: &str) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
-                return true;
-            }
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b))
+            && ma.dev() == mb.dev()
+            && ma.ino() == mb.ino()
+        {
+            return true;
         }
     }
     // …and a symlink whose target does not exist YET still names that target: `canonicalize` fails on a
     // dangling link, so resolve it explicitly before falling back to the parent-directory form.
     let (ra, rb) = (resolve_sink_artifact(std::path::Path::new(a)), resolve_sink_artifact(std::path::Path::new(b)));
-    if ra != std::path::Path::new(a) || rb != std::path::Path::new(b) {
-        if let (Some(x), Some(y)) = (resolve(&ra.to_string_lossy()), resolve(&rb.to_string_lossy())) {
-            if x == y {
-                return true;
-            }
-        }
+    if (ra != std::path::Path::new(a) || rb != std::path::Path::new(b))
+        && let (Some(x), Some(y)) = (resolve(&ra.to_string_lossy()), resolve(&rb.to_string_lossy()))
+        && x == y
+    {
+        return true;
     }
     match (resolve(a), resolve(b)) {
         (Some(x), Some(y)) => x == y,
