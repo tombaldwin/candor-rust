@@ -9,6 +9,30 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **SOUNDNESS R214 — `coverage-gate-refresh.yml` no longer conflates two different alarms under
+  "regressed."** On its first-ever completed run the job called `e9cdd23` (R173) correctly withdrawing
+  a drop-glue over-charge from `async_nats::Context::publish`/`publish_message`/`publish_with_headers`
+  a "regression" — 3 of its 5 reported rows — because a checked-in `covered.tsv` row the fresh run no
+  longer sees covered can mean either of two things: **(a)** classify() genuinely lost a rule (the
+  entry still shows an effect — it reappears in the fresh `open.tsv`) — a real coverage loss, or **(b)**
+  the self-scan candidate oracle itself stopped nominating the entry (absent from BOTH fresh manifests
+  — its `inferred` effect set went empty or non-CORE, e.g. a precision fix) — not a classify()
+  regression at all. `eval/coverage-gate/generate.py --diff-manifests` (new; the workflow now calls it
+  instead of a ~50-line bash `comm`/`cut` reimplementation) makes that split explicit: (a) still fails
+  the job loudly, (b) is reported prominently (a `::warning::` annotation plus the drift issue body,
+  including a flag when a whole crate's entries vanish at once, which is more consistent with that
+  crate's self-scan failing outright than with a precision gain) but does not fail it — training the
+  weekly reader to distinguish a real regression from the gate's own oracle getting better, rather than
+  crying wolf on the next correct fix. Also states, in its own output whenever there is anything to
+  report, that the checked-in manifest (generated on whatever machine last committed it, historically
+  macOS) and the fresh run (Linux CI) have never been proven to produce the same self-scan output for
+  the same source (R212, still open — the same commit measured 3 regressed rows locally and 5 in CI,
+  and the host-platform cause could not be ruled in or out) — a diffed row is unconfirmed until it
+  reproduces from a same-platform regeneration. `generate.py --selftest` (still pure Python, no cargo,
+  no registry, no network) now proves the split discriminates: a constructed real classify() regression
+  exits 1, the real 3-row async_nats/R173 instance (read from this repo's own checked-in `covered.tsv`)
+  exits 0 while still reporting all 3, and a clean run exits 0 with nothing reported.
+
 - **Two PROPERTY gates for the stable scanner, calibrated by retro-rediscovery: `soundness/run_q.sh`
   (`?`-position) and `soundness/run_macro.sh` (macro equivalence).** Six cardinal-sin regressions were
   introduced and caught during the ⟨0.35⟩ round (SOUNDNESS R187, R194, R199, R203, R204, R210) and the

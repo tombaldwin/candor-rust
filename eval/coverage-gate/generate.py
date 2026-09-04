@@ -47,6 +47,12 @@ THE PIPELINE, per calibrated crate:
      classify() resolves; open: the shortest), so one candidate has two possible spellings and crossing
      between the lists rewrites the string with no change in what is covered — which the drift diff,
      keyed on that string, read as a regression and a growth at once.
+  6. `--diff-manifests` (SOUNDNESS R214) compares a fresh regeneration against the checked-in manifests
+     and is what `.github/workflows/coverage-gate-refresh.yml` now shells out to, rather than
+     reimplementing the comparison in bash. See `diff_manifests()`'s docstring for why a checked-in
+     `covered.tsv` row that a fresh run no longer sees covered splits into TWO different alarms, only
+     one of which is a real regression, and for the open, unresolved question of whether either alarm
+     is trustworthy across the macOS/Linux generation split (R212).
 
   Run `python3 eval/coverage-gate/generate.py --selftest` for this script's own tests (no cargo, no
   registry, no network); `cargo test --manifest-path eval/coverage-gate/classify_check/Cargo.toml` for
@@ -633,6 +639,90 @@ def selftest():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # --- diff_manifests: distinguish 'classify() lost a rule' from 'oracle stopped nominating' -------
+    # SOUNDNESS R214. Exactly the three cases the row demands: a real classify() regression (must
+    # FAIL), an entry the self-scan candidate oracle stopped nominating (must REPORT, must NOT fail),
+    # and a clean run (must PASS). Case 2 uses REAL data — this repo's own checked-in covered.tsv/
+    # open.tsv, and the actual instance from the job's first-ever run (33872987298): `e9cdd23` (R173)
+    # correctly withdrew a drop-glue over-charge from `async_nats::jetstream::context::Context::
+    # publish`/`publish_message`/`publish_with_headers`, so a real fresh run drops all three from BOTH
+    # manifests at once — self-scan's `inferred` set for each went from `['Log']` to `[]`.
+    tmp2 = tempfile.mkdtemp(prefix="cg-selftest-diff-")
+    try:
+        def write(name, lines):
+            p = os.path.join(tmp2, name)
+            with open(p, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            return p
+
+        cov_hdr = "# crate\tconsumer_path\tself_scan_effects\tclassified_as\tentry"
+        open_hdr = "# crate\tconsumer_path\teffects\tsource_file\tentry"
+        devnull = open(os.devnull, "w")
+
+        # Case 1: classify() lost a rule. `acme::mod1::Foo::bar` was covered; the fresh run no longer
+        # resolves any guess for it, but self-scan STILL nominates it — it reappears in the fresh
+        # open.tsv, same identity, with a CORE effect. A real regression: must fail.
+        c1_checked_cov = write("c1_checked_cov.tsv",
+                                [cov_hdr, "acme\tacme::Foo::bar\tNet\tNet\tacme::mod1::Foo::bar"])
+        c1_fresh_cov = write("c1_fresh_cov.tsv", [cov_hdr])
+        c1_checked_open = write("c1_checked_open.tsv", [open_hdr])
+        c1_fresh_open = write("c1_fresh_open.tsv",
+                               [open_hdr, "acme\tacme::Foo::bar\tNet,Unknown\tsrc/mod1.rs\t"
+                                          "acme::mod1::Foo::bar"])
+        r1 = diff_manifests(c1_checked_cov, c1_fresh_cov, c1_checked_open, c1_fresh_open)
+        check("case 1 (real regression): lands in `regressed`, not `oracle_dropped`",
+              len(r1["regressed"]) == 1 and len(r1["oracle_dropped"]) == 0
+              and r1["regressed"][0][0] == ("acme", "acme::mod1::Foo::bar"),
+              f"regressed={r1['regressed']} oracle_dropped={r1['oracle_dropped']}")
+        exit1 = diff_manifests_cli(c1_checked_cov, c1_fresh_cov, c1_checked_open, c1_fresh_open,
+                                    out=devnull)
+        check("case 1: diff_manifests_cli exits 1 — a real classify() regression must FAIL",
+              exit1 == 1, f"exit={exit1}")
+
+        # Case 2: the self-scan candidate oracle stopped nominating — REAL data, the async-nats
+        # instance. checked-in covered.tsv/open.tsv are this repo's real, currently-committed
+        # manifests; the simulated "fresh" covered.tsv is the real one with the three publish* rows
+        # removed, and the "fresh" open.tsv is the real checked-in open.tsv UNCHANGED (they do not
+        # reappear there either — that absence from BOTH lists is the whole defect).
+        real_covered = os.path.join(HERE, "covered.tsv")
+        real_open = os.path.join(HERE, "open.tsv")
+        dropped_entries = {
+            "async_nats::jetstream::context::Context::publish",
+            "async_nats::jetstream::context::Context::publish_message",
+            "async_nats::jetstream::context::Context::publish_with_headers",
+        }
+        with open(real_covered) as fh:
+            real_cov_lines = fh.read().splitlines()
+        fresh_cov_lines = [ln for ln in real_cov_lines if ln.split("\t")[-1] not in dropped_entries]
+        check("case 2 fixture: the real checked-in covered.tsv carries all 3 async_nats rows (else "
+              "this test is not exercising the real R214 instance)",
+              len(fresh_cov_lines) == len(real_cov_lines) - 3,
+              f"{len(real_cov_lines)} -> {len(fresh_cov_lines)}")
+        c2_fresh_cov = write("c2_fresh_cov.tsv", fresh_cov_lines)
+        r2 = diff_manifests(real_covered, c2_fresh_cov, real_open, real_open)
+        r2_dropped_keys = {k for k, *_ in r2["oracle_dropped"]}
+        r2_regressed_entries = {k[1] for k, *_ in r2["regressed"]}
+        check("case 2 (oracle stopped nominating): all 3 real async_nats rows land in "
+              "`oracle_dropped`, none in `regressed`",
+              {("async_nats", e) for e in dropped_entries} <= r2_dropped_keys
+              and not (dropped_entries & r2_regressed_entries),
+              f"oracle_dropped(async_nats)={sorted(k for k in r2_dropped_keys if k[0] == 'async_nats')}")
+        exit2 = diff_manifests_cli(real_covered, c2_fresh_cov, real_open, real_open, out=devnull)
+        check("case 2: diff_manifests_cli exits 0 — oracle-dropped ALONE must NOT fail the job",
+              exit2 == 0, f"exit={exit2}")
+
+        # Case 3: clean run — identical manifests. Nothing regressed, nothing dropped, nothing grown.
+        c3_cov = write("c3_cov.tsv", [cov_hdr, "acme\tacme::Foo::bar\tNet\tNet\tacme::mod1::Foo::bar"])
+        c3_open = write("c3_open.tsv",
+                         [open_hdr, "acme\tacme::Baz::qux\tFs\tsrc/baz.rs\tacme::mod2::Baz::qux"])
+        r3 = diff_manifests(c3_cov, c3_cov, c3_open, c3_open)
+        check("case 3 (clean run): nothing regressed, nothing oracle-dropped, nothing grown",
+              not r3["regressed"] and not r3["oracle_dropped"] and not r3["grown"], f"{r3}")
+        exit3 = diff_manifests_cli(c3_cov, c3_cov, c3_open, c3_open, out=devnull)
+        check("case 3: diff_manifests_cli exits 0 — a clean run must PASS", exit3 == 0, f"exit={exit3}")
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
     if fails:
         raise SystemExit(f"generate.py --selftest: {len(fails)} FAILED: {', '.join(fails)}")
     print("generate.py --selftest: all checks passed")
@@ -656,6 +746,222 @@ def print_fixture_toml():
             print(f'{c} = "{version}"')
 
 
+# --- SOUNDNESS R214 --------------------------------------------------------------------------------
+# `.github/workflows/coverage-gate-refresh.yml`'s weekly job re-runs this generator against a fresh
+# `cargo fetch` and diffs the result against the checked-in covered.tsv/open.tsv. Its first-ever
+# completed run (33872987298) called this "5 regressed" — but a covered.tsv row that drops out of a
+# fresh run means one of TWO very different things, and the workflow only ever asked one of them:
+#
+#   (a) classify() lost a rule.  The candidate is STILL effectful (self-scan still nominates it — it
+#       reappears in the fresh open.tsv with the same identity) but no classify() rule resolves it any
+#       more. This is a real coverage regression: `crates/candor-classify/tests/coverage_gate.rs`
+#       already asserts the rule on every push, so if this fires here, that push-time gate has ALSO
+#       gone red, or is about to the moment anyone edits the rule again. FAIL LOUDLY.
+#
+#   (b) the self-scan CANDIDATE ORACLE stopped nominating it.  The entry is absent from BOTH fresh
+#       manifests: not covered, not open. classify() was never even asked the question, because the
+#       candidate's self-scan `inferred` set no longer contains a CORE effect at all (it went empty,
+#       or narrowed to something classify_check's CORE filter excludes) — the oracle got MORE precise,
+#       not the checker less complete. Measured instance: `e9cdd23` (R173) correctly withdrew a
+#       drop-glue over-charge from `async_nats::Context::publish`/`publish_message`/`publish_with_headers`
+#       — self-scan's `inferred` set for each dropped from `['Log']` to `[]`, so all three vanished from
+#       covered.tsv AND open.tsv at once. classify()'s `Context::publish -> Net` rule never moved.
+#
+# The old diff conflated these because it only ever asked "is the key still in covered.fresh?" and
+# never checked whether it had moved to open.fresh instead of vanishing outright. `diff_manifests`
+# asks that second question. The decision (Tom, R214, and open to being overruled by whoever reads
+# this next): (b) is reported PROMINENTLY — a shrinking oracle is exactly the kind of change this gate
+# exists to surface, it is a real fact about the generator's own recall — but it does NOT fail the job,
+# because failing it would mean the coverage gate now polices classify()'s decisions about a candidate
+# list the OTHER instrument (the self-scan engine itself) chose to shrink, and a real fix to
+# candor-scan's precision (an over-charge withdrawal, exactly like R173) would then read as a coverage
+# regression forever, training whoever reads the weekly issue to stop trusting it — the same "cries
+# wolf" failure mode this row exists to close. (a) still fails: nothing about the oracle getting more
+# precise excuses classify() actually losing a rule.
+#
+# SECOND, UNRESOLVED HALF OF R214: the checked-in manifest is generated on whatever machine last ran
+# `python3 eval/coverage-gate/generate.py` and committed the result (macOS, historically) and diffed
+# here against a FRESH run on `ubuntu-latest`. The same commit `f991ff1` measured 3 regressed rows
+# locally (macOS) and 5 in CI (Linux) — R212 ruled out crate version, source bytes, gate code,
+# classify(), RAYON_NUM_THREADS, HashMap seeding and rustc sort tie-breaks as the cause, but COULD NOT
+# rule out the host platform itself (Docker was unavailable to test a Linux self-scan against the same
+# source on the machine that did the ruling-out). This function does not attempt to establish that
+# cause — doing so needs a same-platform-vs-cross-platform A/B of a candor-scan build, which is out of
+# this change's scope — so it says so, loudly, in its own output, every time it has something to
+# report: a diffed row here is only as trustworthy as the assumption that macOS and Linux self-scan the
+# same source identically, and that assumption is UNPROVEN, not confirmed. A reader chasing a reported
+# row should regenerate the checked-in manifest on the SAME platform the job just ran on before trusting
+# that the row is real, not an artifact of the split.
+PLATFORM_CAVEAT = (
+    "NOTE (SOUNDNESS R212, unresolved): the checked-in manifest and this fresh run are not proven to "
+    "be generated on the same platform (checked-in: whatever machine last committed it, historically "
+    "macOS; this run: the CI runner). A same-commit run has measured a DIFFERENT row count on macOS "
+    "vs Linux before, and the host-platform cause was never ruled out — Docker was unavailable to test "
+    "it. Treat every row below as unconfirmed until it reproduces from a same-platform regeneration."
+)
+
+
+def read_tsv_rows(path):
+    """The data rows (as column lists) of a covered.tsv/open.tsv-shaped file: strip the leading
+    `#`-comment header block `classify_check` writes and blank lines. Both manifests carry the
+    candidate's IDENTITY as their LAST column (`entry`) and its owning crate as their FIRST (`crate`)
+    — see classify_check's own header comments — despite differing middle columns between the two
+    files, so column 0 and column -1 are the stable join key regardless of which file this reads."""
+    rows = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            rows.append(line.split("\t"))
+    return rows
+
+
+def _manifest_key_map(rows):
+    """(crate, entry) -> full row, for rows that actually carry both columns."""
+    return {(r[0], r[-1]): r for r in rows if len(r) >= 2}
+
+
+def _require_entry_column(path, rows):
+    if rows and len(rows[0]) < 5:
+        raise SystemExit(
+            f"::error::{path} has no `entry` column — the checked-in manifest predates the identity "
+            f"column and cannot be diffed. Regenerate it (python3 eval/coverage-gate/generate.py) "
+            f"and commit, then re-run this job."
+        )
+
+
+def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path):
+    """Compare a fresh regeneration against the checked-in manifests and return a dict with three
+    DISTINCT findings, per the R214 comment block above:
+
+      regressed        -- classify() lost a rule. Real regression. The job must FAIL.
+      oracle_dropped    -- the self-scan candidate oracle stopped nominating the entry (its `inferred`
+                        set no longer clears classify_check's CORE bar). NOT a classify() regression;
+                        reported, does not fail.
+      grown          -- a genuinely new open.tsv entry (crates.io drift introduced an uncovered public
+                        entry point) — unchanged from the pre-R214 behaviour.
+      crate_covered_totals -- {crate: count of checked-in covered.tsv rows}, so a caller can tell
+                        whether ALL of a crate's covered entries just landed in oracle_dropped at once
+                        (more consistent with that crate's self-scan failing outright than with a
+                        precision gain on one entry) from a partial, plausible drop.
+
+    Each finding value is a list of ((crate, entry), checked_in_row, fresh_row_or_None) tuples, sorted
+    by key, so a caller can print whatever detail it wants without re-reading the files.
+    """
+    checked_cov_rows = read_tsv_rows(checked_covered_path)
+    fresh_cov_rows = read_tsv_rows(fresh_covered_path)
+    checked_open_rows = read_tsv_rows(checked_open_path)
+    fresh_open_rows = read_tsv_rows(fresh_open_path)
+    for p, rows in ((checked_covered_path, checked_cov_rows), (fresh_covered_path, fresh_cov_rows),
+                    (checked_open_path, checked_open_rows), (fresh_open_path, fresh_open_rows)):
+        _require_entry_column(p, rows)
+
+    checked_cov = _manifest_key_map(checked_cov_rows)
+    fresh_cov = _manifest_key_map(fresh_cov_rows)
+    checked_open = _manifest_key_map(checked_open_rows)
+    fresh_open = _manifest_key_map(fresh_open_rows)
+
+    crate_covered_totals = {}
+    for (crate, _entry) in checked_cov:
+        crate_covered_totals[crate] = crate_covered_totals.get(crate, 0) + 1
+
+    # A checked-in covered.tsv row the fresh run no longer sees covered at all.
+    lost = sorted(set(checked_cov) - set(fresh_cov))
+    # Split on whether the fresh run STILL nominates it (in open.fresh, meaning self-scan's `inferred`
+    # set still clears CORE) — that split is exactly (a) vs (b) above.
+    regressed = [(k, checked_cov[k], fresh_open[k]) for k in lost if k in fresh_open]
+    oracle_dropped = [(k, checked_cov[k], None) for k in lost if k not in fresh_open]
+
+    # GROWTH is unchanged from the pre-R214 diff: a fresh open.tsv entry absent from BOTH checked-in
+    # lists (genuinely new — not a row that simply got fixed elsewhere and moved out of open.tsv).
+    grown_raw = set(fresh_open) - set(checked_open)
+    grown = sorted((k, None, fresh_open[k]) for k in grown_raw if k not in checked_cov)
+
+    return {
+        "regressed": regressed, "oracle_dropped": oracle_dropped, "grown": grown,
+        "crate_covered_totals": crate_covered_totals,
+    }
+
+
+def _fmt_key(k):
+    crate, entry = k
+    return f"{crate}\t{entry}"
+
+
+def format_diff_report(result):
+    """Render `diff_manifests`'s result as the job-log text a human reads. Returns the text; the
+    caller decides what to do with exit codes and CI outputs."""
+    lines = []
+    regressed, oracle_dropped, grown = result["regressed"], result["oracle_dropped"], result["grown"]
+    crate_covered_totals = result["crate_covered_totals"]
+
+    lines.append(f"--- REGRESSED: classify() lost a rule ({len(regressed)}) ---")
+    lines.append("A candidate self-scan STILL finds effectful (it reappears in the fresh open.tsv) "
+                  "that no classify() rule resolves any more. This is a real coverage loss.")
+    for k, old, new in regressed:
+        lines.append(f"  {_fmt_key(k)}  was classified_as={old[3]!r}  now self-scan effects={new[2]!r} "
+                      f"(open.tsv:{new[3]})")
+
+    lines.append("")
+    lines.append(f"--- ORACLE-DROPPED: self-scan stopped nominating this entry ({len(oracle_dropped)}) ---")
+    lines.append("Absent from BOTH fresh manifests: the entry's self-scan `inferred` set no longer "
+                  "clears the CORE bar (went empty, or narrowed to a non-CORE effect). classify() was "
+                  "never asked. NOT a regression by itself; reported for visibility, does not fail this "
+                  "job.")
+    dropped_per_crate = {}
+    for k, old, _ in oracle_dropped:
+        dropped_per_crate[k[0]] = dropped_per_crate.get(k[0], 0) + 1
+        lines.append(f"  {_fmt_key(k)}  was classified_as={old[3]!r} self_scan_effects={old[2]!r}")
+    whole_crate_vanished = sorted(
+        crate for crate, n in dropped_per_crate.items() if n == crate_covered_totals.get(crate, -1)
+    )
+    if whole_crate_vanished:
+        lines.append("  WARNING: every checked-in covered.tsv row for "
+                      f"{', '.join(whole_crate_vanished)} landed here at once — that is more consistent "
+                      "with that crate's self-scan FAILING outright this run (check the earlier "
+                      "'self-scan FAILED' log lines from the regenerate step) than with a precision "
+                      "gain on one entry. Investigate before assuming benign.")
+
+    lines.append("")
+    lines.append(f"--- GROWN: newly-uncovered (crates.io drift) ({len(grown)}) ---")
+    for k, _, new in grown:
+        lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
+
+    lines.append("")
+    if regressed or oracle_dropped:
+        lines.append(PLATFORM_CAVEAT)
+    return "\n".join(lines)
+
+
+def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
+                        github_output_path=None, out=sys.stdout):
+    """Run `diff_manifests`, print the report to `out`, write GitHub Actions step outputs if
+    `github_output_path` is given, and return the process exit code the caller should use: 1 if
+    `regressed` or `grown` is non-empty (the two FAILING findings), 0 otherwise. `oracle_dropped` is
+    never, by itself, part of the exit-code decision — see the R214 comment block for why."""
+    result = diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path)
+    print(format_diff_report(result), file=out)
+
+    if github_output_path:
+        with open(github_output_path, "a") as fh:
+            fh.write(f"regressed={len(result['regressed'])}\n")
+            fh.write(f"oracle_dropped={len(result['oracle_dropped'])}\n")
+            fh.write(f"grown={len(result['grown'])}\n")
+
+    if result["regressed"] or result["grown"]:
+        print(f"::error::coverage-gate drift: {len(result['regressed'])} regressed "
+              f"(classify() lost a rule), {len(result['oracle_dropped'])} oracle-dropped (self-scan "
+              f"stopped nominating, reported not failed), {len(result['grown'])} newly-uncovered "
+              f"— see job log above", file=out)
+        return 1
+    if result["oracle_dropped"]:
+        print(f"::warning::coverage-gate: {len(result['oracle_dropped'])} entries dropped out of both "
+              f"manifests (self-scan's candidate oracle got more precise, or a crate's self-scan "
+              f"failed) — reported, not failing. See job log above.", file=out)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--registry", default=None,
@@ -665,6 +971,13 @@ def main():
                     help="run the generator's own extraction tests (no cargo, no registry) and exit")
     ap.add_argument("--print-fixture-toml", action="store_true",
                     help="print a fresh fixture Cargo.toml to stdout (for `cargo fetch`) and exit")
+    ap.add_argument("--diff-manifests", nargs=4, default=None,
+                    metavar=("CHECKED_COVERED", "FRESH_COVERED", "CHECKED_OPEN", "FRESH_OPEN"),
+                    help="diff a fresh regeneration against the checked-in manifests (SOUNDNESS R214) "
+                         "and exit with the job's verdict; see diff_manifests()'s docstring")
+    ap.add_argument("--github-output", default=None,
+                    help="with --diff-manifests, append regressed/oracle_dropped/grown counts to this "
+                         "GITHUB_OUTPUT file")
     args = ap.parse_args()
 
     if args.selftest:
@@ -674,6 +987,10 @@ def main():
     if args.print_fixture_toml:
         print_fixture_toml()
         return
+
+    if args.diff_manifests:
+        code = diff_manifests_cli(*args.diff_manifests, github_output_path=args.github_output)
+        sys.exit(code)
 
     registry_src = args.registry
     if registry_src is None:

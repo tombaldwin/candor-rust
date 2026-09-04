@@ -7,10 +7,20 @@
 # nightly-bump.yml / disclosure-recall.yml / re-baseline.yml for the same weekly-not-continuous shape).
 #
 # This job re-runs the SAME generator against FRESH sources and diffs the result against the checked-in
-# manifest: a shrinking or unchanged open.tsv and an intact covered.tsv are fine (nothing to do); either
-# manifest changing for the worse — a new uncovered entry crates.io drift introduced, or a covered entry
-# that no longer resolves — fails the job and opens a tracking issue with the concrete diff, the same
-# "report a NEW finding" contract realworld-oracle.yml already uses.
+# manifest: a shrinking or unchanged open.tsv and an intact covered.tsv are fine (nothing to do); a new
+# uncovered entry crates.io drift introduced, or a covered entry classify() genuinely no longer
+# resolves, fails the job and opens a tracking issue with the concrete diff, the same "report a NEW
+# finding" contract realworld-oracle.yml already uses.
+#
+# SOUNDNESS R214: a checked-in covered.tsv row the fresh run no longer sees covered is TWO different
+# events, not one — classify() losing a rule (real regression, must fail) vs. the self-scan candidate
+# oracle itself no longer nominating the entry because its effect set went empty or non-CORE (e.g. a
+# drop-glue over-charge correctly withdrawn — measured instance: `e9cdd23`/R173 on async_nats). The
+# comparison itself, and the reasoning for treating those two differently, lives in
+# `eval/coverage-gate/generate.py`'s `diff_manifests` (see its module-level R214 comment block) rather
+# than here, so this workflow only ever calls it — see that file, not this one, to change the policy.
+# The same function also states, in its own output, that the diff has never been proven safe across the
+# macOS(checked-in)/Linux(this runner) split (R212) — unresolved, not silently assumed away.
 name: coverage-gate-refresh
 
 on:
@@ -89,60 +99,23 @@ jobs:
           # restore the checked-in files so `git diff` below is the ONLY source of truth for what changed
           git checkout -- eval/coverage-gate/covered.tsv eval/coverage-gate/open.tsv
 
-      - name: Diff fresh vs checked-in — fail on regression or growth
+      - name: Diff fresh vs checked-in — fail on regression or growth, report oracle drops separately
         id: diff
+        # SOUNDNESS R214. This used to be ~50 lines of `comm`/`cut` reimplementing the comparison in
+        # bash — see git history if you need the old spelling. It is now one call into
+        # `eval/coverage-gate/generate.py --diff-manifests`, the SAME script that generated both
+        # manifests, so there is exactly one place that knows what `entry`, `covered`, and `open` mean
+        # (Ask the authority, never reimplement it). It prints a labelled report to this step's own log
+        # (regressed / oracle-dropped / newly-uncovered, plus the R212 platform caveat whenever there is
+        # anything to report — see that function's docstring for why the split matters and why the
+        # platform question stays open) and exits 1 only for `regressed` or `grown`; `oracle_dropped`
+        # reaches this step's log as a `::warning::` annotation (visible in the Actions run summary even
+        # on an otherwise-green run) and is written to $GITHUB_OUTPUT, but never fails the job by itself.
         run: |
-          # Data rows only (strip the generated `#` header comments) so a header wording tweak never
-          # counts as drift.
-          grep -v '^#' eval/coverage-gate/covered.tsv | sort > /tmp/covered.checked-in.tsv
-          grep -v '^#' /tmp/fresh/covered.tsv | sort > /tmp/covered.fresh.tsv
-          grep -v '^#' eval/coverage-gate/open.tsv | sort > /tmp/open.checked-in.tsv
-          grep -v '^#' /tmp/fresh/open.tsv | sort > /tmp/open.fresh.tsv
-
-          # THE DIFF KEY IS COLUMN 5 (`entry`), NOT COLUMN 2 (`consumer_path`). SOUNDNESS, 2026-09-02:
-          # consumer_path is a GUESSED consumer-facing spelling, and it is chosen by DIFFERENT rules in
-          # the two files — covered.tsv prints the first guess classify() resolves (it has to be a
-          # resolving spelling, coverage_gate.rs asserts classify() on it), open.tsv prints the shortest.
-          # So one candidate has two possible spellings and moving between the lists rewrites the string,
-          # while the checks below compare a covered key to a covered key AND a fresh OPEN key to a
-          # checked-in COVERED key. Keyed on column 2, a rule REMOVED (covered -> open, path rewritten)
-          # therefore reads as a regression AND as growth, double-counting one event, and a rule added
-          # can rewrite a covered path with no coverage change at all. `entry` is the candidate's
-          # identity — the module-qualified key candor-scan itself reports — is the SAME string in both
-          # files, and does not move unless the entry point itself does.
-          for f in /tmp/covered.checked-in.tsv /tmp/open.checked-in.tsv; do
-            if [ -s "$f" ] && [ "$(head -1 "$f" | awk -F'\t' '{print NF}')" -lt 5 ]; then
-              echo "::error::$f has no \`entry\` column — the checked-in manifest predates the identity" \
-                   "column and cannot be diffed. Regenerate it (python3 eval/coverage-gate/generate.py)" \
-                   "and commit, then re-run this job."
-              exit 1
-            fi
-          done
-
-          # REGRESSION: an entry classify() covered before, that the fresh run no longer sees covered at
-          # all (dropped from covered.tsv without reappearing — as a MATCHING entry — in open.tsv, which
-          # would mean self-scan itself stopped finding the effect, e.g. the crate rewrote that function).
-          cut -f1,5 /tmp/covered.checked-in.tsv | sort -u > /tmp/covered.checked-in.keys
-          cut -f1,5 /tmp/covered.fresh.tsv       | sort -u > /tmp/covered.fresh.keys
-          comm -23 /tmp/covered.checked-in.keys /tmp/covered.fresh.keys > /tmp/regressed.keys || true
-
-          # GROWTH: a fresh-run open.tsv entry absent from the checked-in open.tsv AND absent from the
-          # checked-in covered.tsv — i.e. genuinely new, not just a row that got fixed elsewhere.
-          cut -f1,5 /tmp/open.checked-in.tsv | sort -u > /tmp/open.checked-in.keys
-          cut -f1,5 /tmp/open.fresh.tsv      | sort -u > /tmp/open.fresh.keys
-          comm -23 /tmp/open.fresh.keys /tmp/open.checked-in.keys > /tmp/new-open.raw.keys || true
-          comm -23 /tmp/new-open.raw.keys /tmp/covered.checked-in.keys > /tmp/new-open.keys || true
-
-          regressed=$(wc -l < /tmp/regressed.keys | tr -d ' ')
-          grown=$(wc -l < /tmp/new-open.keys | tr -d ' ')
-          echo "regressed=$regressed" >> "$GITHUB_OUTPUT"
-          echo "grown=$grown" >> "$GITHUB_OUTPUT"
-          echo "--- regressed (was covered, no longer classified) ---"; cat /tmp/regressed.keys
-          echo "--- newly open (crates.io drift introduced an uncovered entry) ---"; cat /tmp/new-open.keys
-          if [ "$regressed" -ne 0 ] || [ "$grown" -ne 0 ]; then
-            echo "::error::coverage-gate drift: $regressed regressed, $grown newly-uncovered — see job log"
-            exit 1
-          fi
+          python3 eval/coverage-gate/generate.py --diff-manifests \
+            eval/coverage-gate/covered.tsv /tmp/fresh/covered.tsv \
+            eval/coverage-gate/open.tsv /tmp/fresh/open.tsv \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Upload fresh manifests
         if: always()
@@ -160,8 +133,18 @@ jobs:
           {
             echo "A fresh \`cargo fetch\` against live crates.io shifted the coverage-gate differential:"
             echo ""
-            echo "- regressed (checked-in covered.tsv row no longer classified): ${{ steps.diff.outputs.regressed }}"
-            echo "- newly uncovered (crates.io drift, not yet in open.tsv or covered.tsv): ${{ steps.diff.outputs.grown }}"
+            echo "- **regressed** (classify() no longer resolves this entry, and self-scan STILL nominates it — a real coverage loss): ${{ steps.diff.outputs.regressed }}"
+            echo "- **newly uncovered** (crates.io drift introduced a public entry point no rule recognizes): ${{ steps.diff.outputs.grown }}"
+            echo ""
+            echo "Not counted above and NOT why this issue was filed (SOUNDNESS R214) — reported here only"
+            echo "for visibility, since it was also a \`::warning::\` in the job log: ${{ steps.diff.outputs.oracle_dropped }} entries where the self-scan candidate oracle itself stopped nominating the row (its inferred effect set went empty or narrowed to a non-CORE effect — e.g. a drop-glue over-charge correctly withdrawn from the scanner, the async_nats/e9cdd23 instance this distinction was written for). If that count is large, or concentrated entirely in one crate, check the earlier 'self-scan FAILED' log lines before assuming it is benign — it can also mean that crate's self-scan errored out this run."
+            echo ""
+            echo "**CAVEAT (SOUNDNESS R212, unresolved):** the checked-in manifest and this run's fresh"
+            echo "manifest are not proven to be generated on the same platform (checked-in: whatever"
+            echo "machine last committed it; this run: the CI runner). The same commit has previously"
+            echo "measured a different row count on macOS vs Linux, and the host-platform cause was never"
+            echo "ruled out. Reproduce any row below from a same-platform regeneration before treating it"
+            echo "as confirmed."
             echo ""
             echo "See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) log for the exact rows, and the uploaded \`coverage-gate-fresh-manifests\` artifact for the full fresh output."
             echo ""
