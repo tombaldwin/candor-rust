@@ -9,6 +9,22 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R150 — CLOSED: `gate --report`'s same-artifact guard converged on the one
+  implementation, closing a FAIL-OPEN gap against the scan route.** `same_artifact` (SPEC §3.3.1 — is a
+  `--policy`/`--gate-json`/`--report` collision one artifact under two names?) existed as two
+  independently-maintained copies: `candor-scan/src/scan.rs`'s had the ⟨0.28⟩ device+inode check and a
+  dangling-symlink pre-resolve; `candor-query/src/gate.rs`'s was still a bare `canonicalize()` with
+  neither. A policy hard-linked to its own `--gate-json` was refused on the scan route and ACCEPTED on
+  the gate route, which then armed its fail-closed placeholder over the hardlink and silently destroyed
+  the policy before evaluating it — reproduced against the pre-fix binary: `--policy policy.P
+  --gate-json <hardlink to policy.P>` exited 0 pre-fix (via a mangled re-parse of its own placeholder,
+  the policy already overwritten) vs. a clean `refusing (exit 2)` with `policy.P` byte-identical
+  afterwards post-fix. Both crates already depended on `candor-report`, so the guarded implementation
+  now lives there once (`candor_report::same_artifact`) and both call sites delegate to it — one
+  authority, not two copies that can drift. `candor-query`'s own test suite now pins the gate call site
+  directly (a hardlink case and a dangling-symlink case, `gate.rs`'s own `same_artifact`, not the scan
+  crate's), since a test that pinned only one copy is how the drift went unnoticed for a release.
+
 ## [0.35.0] — 2026-09-03
 
 - **⚠ SOUNDNESS R172 (cardinal sin, a REGRESSION against published 0.34.0) — CLOSED: a `Drop` value
