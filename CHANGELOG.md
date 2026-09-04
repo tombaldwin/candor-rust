@@ -24,6 +24,29 @@ after upgrading; review policies and regenerate baselines with the new build.
   authority, not two copies that can drift. `candor-query`'s own test suite now pins the gate call site
   directly (a hardlink case and a dangling-symlink case, `gate.rs`'s own `same_artifact`, not the scan
   crate's), since a test that pinned only one copy is how the drift went unnoticed for a release.
+- **SOUNDNESS R112 — CLOSED: `soundness/realworld/run.sh`'s real-crate syscall oracle now honours
+  `CARGO_TARGET_DIR` for the scanner it runs, and fails loud rather than silently using the wrong
+  binary.** The script already honoured `CARGO_TARGET_DIR` for the *build* (cargo reads the env var
+  itself) but hardcoded `$ROOT/target/debug/candor-scan` as the path it went on to *read* — the same
+  BUILD-vs-READ split R108 found for this script's own predecessor bug. Measured on this machine (not
+  in CI, where the trigger — a container-local `CARGO_TARGET_DIR` cache dir — actually occurs): with
+  `CARGO_TARGET_DIR` redirected and a stale binary left sitting at the hardcoded path (a plausible state
+  after any build that predates a `CARGO_TARGET_DIR` override), pre-fix code silently ran the stale
+  binary with zero warning and exit 0; post-fix code correctly resolves to, and verifies, the freshly
+  built binary at the redirected path. A second arm — a build that reports success without producing a
+  binary at the resolved path — now fails loud (`exit 1`, naming the missing path and the
+  `CARGO_TARGET_DIR` value) instead of silently continuing. Mirrors `pf/run_pf.sh`'s already-correct
+  form exactly, so the family's two real-crate oracles answer this one question the same way. The
+  fix is confined to the build/path-resolution prologue (`git diff` — 2 lines changed, rest new
+  comments); the loop, verdict and exit-code composition below it (including R104's existing "a driver
+  that never reached the verdict is `broke`, and `broke > 0` fails the whole run" rule, which already
+  makes a genuinely-missing report red rather than a silent pass) are untouched. **Not independently
+  re-run end-to-end on Linux+strace for this change** — the local Docker environment used for that in
+  past rounds had unrelated storage corruption this session; the CARGO_TARGET_DIR-honouring/fail-loud
+  logic itself was verified directly (its literal statements, extracted and run standalone, both before
+  and after the fix, under a real `cargo` build), but the full oracle run (including "a real finding
+  still fails non-zero") should be watched on the `realworld-oracle.yml` CI gate this file already runs
+  under.
 
 ## [0.35.0] — 2026-09-03
 

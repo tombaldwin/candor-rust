@@ -34,8 +34,21 @@ export RUSTFLAGS="-C linker=cc"
 retry() { local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 3 ] && return 1; echo "  (retry $n after transient failure: $*)"; sleep 5; done; }
 
 echo "realworld oracle: building candor-scan (stable)…"
-retry cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
-SCAN="$ROOT/target/debug/candor-scan"
+# SOUNDNESS R112: this used to build with CARGO_TARGET_DIR honoured (cargo reads the env var itself) and
+# then hardcode "$ROOT/target/debug/candor-scan" as the SCAN path regardless — so a build redirected by
+# CARGO_TARGET_DIR (a container-local cache dir is the real-world trigger; R108 found it first for the
+# BUILD half of this same script) landed nowhere near the path this script went on to read. Mirrors
+# pf/run_pf.sh's already-correct form exactly, so the two harnesses answer this one question the same way.
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" retry cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
+SCAN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/candor-scan"
+# FAIL, never read as clean: a build that reports success but leaves no binary where this script is about
+# to look (the exact CARGO_TARGET_DIR mismatch above, or any other cause) must not be allowed to degrade
+# into "every driver's report is silently absent" — which without this line reads as 20 separate `broke`
+# rows rather than the one loud, immediately actionable diagnostic this is. Not exit 3 (self-skip): the
+# prerequisites (Linux/strace/python3) checked above are environment realities this oracle accepts it
+# cannot run under; a missing SCAN binary after a build that just reported success is this SCRIPT'S OWN
+# bug, the same distinction oracle.sh's header draws between "cannot run here" and "broken".
+[ -x "$SCAN" ] || { echo "FAIL: candor-scan build reported success but no binary at $SCAN (CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<unset>})"; exit 1; }
 
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
 # NEW findings). The list and its mechanism now live in ONE place shared with pf/run_pf.sh, which had no
