@@ -14,6 +14,11 @@ soundness/realworld/**/r.*.json
 # soundness/run.sh's per-run dylint stream (see its own comment) — a debugging aid, not a checked-in
 # artifact.
 soundness/.last-run.dylint.log
+# run_q.sh / run_macro.sh keep their per-seed detail log and — for a FAILING seed only — a copy
+# of the generated crate, so a finding arrives with a reproduction. Both are regeneratable from
+# the seed; neither is a checked-in artifact.
+soundness/.last-run.gen_*.log
+soundness/.last-run.gen_*.seed*/
 # coverage-gate: entries.json is a regeneratable ~9MB intermediate (per-crate self-scan output feeding
 # classify_check); only covered.tsv/open.tsv, its checked-in DERIVED artifacts, are meant to be committed.
 /eval/coverage-gate/entries.json

@@ -303,6 +303,30 @@ jobs:
       - name: Soundness fuzzer (drop)
         run: bash soundness/run_drop.sh 40
 
+      # PROPERTY gates for the STABLE scanner (candor-scan), not the dylint engine. Each generated
+      # pair is two spellings of ONE program — `let t = EXPR; t?;` vs `EXPR?;`, a `?` before vs after
+      # a construction in a loop body, a construction written directly vs through a single-arm
+      # `macro_rules!` — so a spelling that loses an effect its equivalent was charged is a silent
+      # under-report with no oracle needed. They exist because SIX cardinal-sin regressions in the
+      # ⟨0.35⟩ `?`-veto family (R187/R194/R199/R203/R204/R210) each measured ZERO incidence over the
+      # 1,504-crate corpus A/B and were caught only by hand-written fixtures. Calibrated by
+      # retro-rediscovery, attributed by the ADJACENT-COMMIT difference (a pre-fix binary carries every
+      # defect fixed later, so redness there attributes nothing): 6 of 6, all within 18 random seeds when
+      # both run — and neither alone gets past 3 of 6. soundness/README.md carries the table.
+      - name: Soundness property gate (?-position)
+        run: bash soundness/run_q.sh 60
+      - name: Soundness property gate (macro equivalence)
+        run: bash soundness/run_macro.sh 60
+      # The known-open register those two subtract is MEASURED, and a register that has silently gone
+      # stale hides the next regression on any shape it lists. `--check` re-measures it exhaustively
+      # and fails on any difference — including an improvement, which means the register must be
+      # re-run and shrunk rather than left claiming a debt that is paid.
+      # NOTE: the checked-in register was measured on macOS (candor-scan is syntactic, so it should
+      # be platform-independent — but that is an expectation, not a measurement; this Linux leg is
+      # the first thing that will say otherwise, and it prints the diff rather than a bare failure).
+      - name: Soundness property gate (known-open register is current)
+        run: bash soundness/baseline.sh --check
+
       # Dynamic oracle (phase 2): RUN each generated program under strace and assert candor's static
       # prediction over-approximates the effects the kernel actually observed — ground truth that
       # trusts nothing about how the crate was generated. Catches a program that demonstrably performs

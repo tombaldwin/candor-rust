@@ -156,3 +156,157 @@ top of its branch) makes the probe fail with 4 fabrications (`Mmap::len`/`is_emp
 (The formerly-planned extensions are all built and documented above: per-function oracle attribution =
 `oracle_pf.sh`; cross-crate boundaries = `run_cross.sh`; macro-generated bodies = the `macro_call` form +
 the macro-defined `sink`; arbitrary self types = `arc_dyn`/`ufcs_dyn`.)
+
+## Property gates for the stable scanner (`run_q.sh`, `run_macro.sh`)
+
+Everything above tests the *deep* (dylint/HIR) engine. These two test **candor-scan**, the stable
+syntactic scanner, and they check a *property* rather than an expected answer.
+
+**Why they exist.** Six cardinal-sin regressions were introduced and later caught during the ⟨0.35⟩
+round — SOUNDNESS **R187, R194, R199, R203, R204, R210**, all in the `?`-veto / drop-glue family.
+The 1,504-crate wide-key corpus A/B caught **zero** of them: every one measured 0 corpus incidence.
+The corpus is this family's *fabrication* gate. Every one of the six silences was caught by somebody
+hand-writing the right panel fixture — i.e. by guessing the shape first. These gates check a property
+over **generated** shapes, so nobody has to guess.
+
+Each generated pair is **two spellings of one program**, emitted from a single description so the
+two cannot drift apart the way a fixture and its hand-written "control" do:
+
+| gate | reference spelling | variant spelling | claim |
+|---|---|---|---|
+| `run_q.sh` *hoist* | `let t = EXPR; t?;` | `EXPR?;` | identical evaluation ⇒ identical charge |
+| `run_q.sh` *looprot* | `loop { CTOR …?; }` | `loop { …?; CTOR }` | a `?` in a loop body is live for everything that body builds ⇒ variant ⊇ reference |
+| `run_macro.sh` | the construction written directly | the same construction through a single-arm `macro_rules!` | one program ⇒ identical charge |
+
+Both spellings of every pair are **compiled and executed** (`examples/gt.rs`) and their in-frame drop
+counts printed, so no verdict rests on comparing two absences: a pair whose spellings never drop is
+reported `NO-GROUND-TRUTH` and not judged (§E3).
+
+### The property that does NOT work, and why it is worth recording
+
+The first formulation tried was the obvious one — *"insert a `?` that can never error; the set of
+in-frame drops can only grow"*, compared against a `?`-free twin. Measured over 40 seeds it
+rediscovered **0 of 6**. It is **vacuous on exactly the shapes the bugs live in**: with the
+constructed value escaping by return, nothing drops in frame until a `?` creates an early exit, so
+the `?`-free twin is charged *nothing* and no under-report can violate `⊇ ∅`. The R187 fixture's own
+`collect_loop_noq` is that twin, and its documented expected answer is ABSENT. Two spellings that
+both really drop is what makes the comparison bite.
+
+### Calibration — retro-rediscovery (§I)
+
+**A gate is trusted only after it is shown able to fail**, so this comes before any clean result.
+A binary was built at each row's fix commit and at its PARENT, and the gates run against both. The
+attribution is the **adjacent-commit** difference, not "red on a pre-fix binary": every pre-fix
+binary in this chain also carries every defect fixed *later*, so a gate going red at `cd2d436` says
+nothing about which row it found. What follows is the set of violating shapes that the named commit —
+and only that commit — closes, measured in `--all` mode over the whole shape space.
+
+| row | fix commit | shapes closed, `run_q.sh` | shapes closed, `run_macro.sh` | first random seed to re-find it |
+|---|---|---|---|---|
+| R187 | `a155a69` | **12** | 0 | `run_q` seed **14** |
+| R194 | `7d9a970` | **18** | 0 | `run_q` seed **1** |
+| R199 | `75053f1` | **6** | **6** | `run_macro` seed **6** (`run_q` 21) |
+| R203 | `5cefa62`+`c22a31d` | 0 | **24** | `run_macro` seed **1** |
+| R204 | `535022b` | 0 | **9** | `run_macro` seed **18** |
+| R210 | `f991ff1` | 0 | **8** | `run_macro` seed **12** |
+
+**6 of 6 rediscovered, and all six within 18 random seeds when both gates are run.** CI runs 60.
+
+Neither gate alone gets past 3 of 6, and the split is structural, not luck: `run_q.sh` owns the
+`?`-position rows (R187 is its `looprot` mode alone — 12 shapes that appear at `cd2d436` and at no
+later build; R194 and R199 are its `hoist` mode), and `run_macro.sh` owns the macro-visibility rows
+(R203/R204/R210), which `run_q.sh` cannot reach because they need the ending where a same-leaf value
+escapes by return, and there its `?`-hoisted *reference* spelling is itself silent at HEAD, so the
+comparison has nothing to lose. Only R199 is found by both. **They are complements; running one
+without the other buys about half.**
+
+The concrete programs, one per row (reference spelling charged, variant ABSENT under the pre-fix
+build and charged after it):
+
+```rust
+// R187 — run_q, looprot: a `?` before vs after the construction in a loop body
+for _i in 0..9u32 { out.push(H::new("a")); let _v = tick(&mut c)?; }   // charged
+for _i in 0..9u32 { let _v = tick(&mut c)?; out.push(H::new("a")); }   // ABSENT under cd2d436
+
+// R194 — run_q, hoist: the `?` on its own operand
+let t = { out.push(H::new("a")); gen(n) }; t?;   // charged
+{ out.push(H::new("a")); gen(n) }?;              // ABSENT under 70fd624
+
+// R199 — the same, with the construction macro-borne
+let t = { out.extend(vec![H::new("a")]); gen(n) }; t?;   // charged
+{ out.extend(vec![H::new("a")]); gen(n) }?;              // ABSENT under 7d9a970
+
+// R203 — run_macro: a template in the `?` operand, same leaf built after it
+(if m > 0 { out.push(H::new("a")); gen(n) } else { Ok(0u32) })?;   // charged
+(if m > 0 { out.push(mE!("a"));    gen(n) } else { Ok(0u32) })?;   // ABSENT under 75053f1
+
+// R204 — a statement-position macro inside re-parsed block tokens
+idm!({ { let x = H::new("a"); out.push(x); } gen(n) })?;   // charged
+idm!({ mS!(out, "a");                       gen(n) })?;    // ABSENT under c22a31d
+
+// R210 — a `macro_rules!` defined inside re-parsed block tokens and used there
+(if m > 0 { { out.push(H::new("a")); } gen(n) } else { Ok(0u32) })?;   // charged
+(if m > 0 { idm!({ macro_rules! mB { ($p:expr) => { H::new($p) } }
+                   out.push(mB!("a")); }); gen(n) } else { Ok(0u32) })?;  // ABSENT under 7e0c90b
+```
+
+Each of those functions ends `let h = H::try_new(m, "b")?; let _ = out; Ok(h)` or `Ok(out)`, and
+`examples/gt.rs` records the in-frame drops both spellings actually perform.
+
+### The known-open register (`known_open.tsv`)
+
+**candor-scan does not satisfy either property today.** `soundness/known_open.tsv` records the shapes
+where it fails, measured **exhaustively** (every point of both shape spaces, not a sample — a sampled
+baseline would mark a shape "new" the first time a later seed happened to reach it). The gates
+subtract it, so a NEW instance fails while the standing ones are printed every run.
+
+**Every line in that file is a silent under-report that is still open.** It is a debt register, not a
+list of acceptable behaviours, and re-running `baseline.sh` to turn a red gate green is how a cardinal
+sin gets accepted as a low residual. At `c5dae3d` it holds 216 entries:
+
+- **163 macro-equivalence violations.** 89 are R203's declared residuals (tokens readable neither as
+  an expression list nor as statements: `unparsed`, `match_arms`, `repetition`). 50 are `body_local` /
+  `blocktok_local` — a `macro_rules!` defined in a function body or inside re-parsed macro tokens and
+  used there. R206/R207/R210 closed those for the `?`-interior **veto**; the collector's own
+  resolution is still open, which is the same split the R142/R143/R144 rows describe. The remaining
+  24 are plain crate-level templates losing in three contexts only: the **hoisted** `?`
+  (`let t = …; t?`) and both loop bodies.
+- **53 `?`-position drifts**, every one with the ending where a same-leaf value escapes by return.
+  There, `let t = <operand>; t?;` is reported PURE while the byte-equivalent `<operand>?;` is charged,
+  whenever either the construction or the operand is macro-borne. One mechanism: the collector never
+  sees the macro-borne construction, and the `?`-interior machinery patches over that only when the
+  `?` sits syntactically on the operand.
+- Separately, `run_q.sh` reports **102 `BOTH-PURE` pairs** at HEAD — neither spelling charged though
+  the run dropped. Those are silent under-reports too, but they are not this gate's differential, so
+  they are counted and printed rather than gated.
+
+### Running them
+
+```sh
+bash soundness/run_q.sh 60                    # ?-position property, 60 seeds  (~30s)
+bash soundness/run_macro.sh 60                # macro equivalence, 60 seeds    (~30s)
+CANDOR_SCAN_BIN=/path/to/candor-scan bash soundness/run_q.sh 40   # measure a chosen arm
+bash soundness/baseline.sh                    # re-measure known_open.tsv (exhaustive)
+bash soundness/baseline.sh --check            # fail if the register is out of date
+```
+
+Exit 0 clean · 1 a real finding · 2 harness/build error · 3 SELFSKIP with a stated reason; each ends
+with a `RESULT:` line. A failing seed's crate is copied to `soundness/.last-run.<gen>.seed<N>/`, so a
+finding arrives with a reproduction.
+
+### What these gates CANNOT catch
+
+- **Anything already in `known_open.tsv`.** A regression that lands on an already-broken shape is
+  invisible. The register is 216 of the ~756 shapes; the gates are blind on that 29%.
+- **A defect both spellings share.** Both are self-differential. If the drop model loses an effect for
+  the reference spelling too, the pair agrees and passes — that is what the `BOTH-PURE` counter is for,
+  and it is reported, not gated.
+- **Fabrication.** They only look for a spelling charging *less*. Over-charging in both spellings is
+  invisible; that is the corpus A/B's job, and the two are complements.
+- **One effectful `Drop` on one guard type.** No trait objects, generics, cross-crate edges, `async`,
+  threads, or non-`Drop` effect routes. The other fuzzers in this directory cover those, and none of
+  them covers these two properties.
+- **The deep (dylint) engine.** These drive `candor-scan` only.
+- **Shapes outside the composed space** — the ~13 construction forms, ~11 macro forms, ~11 contexts and
+  3 endings enumerated in the two generators. It is a bigger space than any fixture set, and it is
+  still a list somebody wrote down.
