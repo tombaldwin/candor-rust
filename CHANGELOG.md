@@ -9,6 +9,27 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Two PROPERTY gates for the stable scanner, calibrated by retro-rediscovery: `soundness/run_q.sh`
+  (`?`-position) and `soundness/run_macro.sh` (macro equivalence).** Six cardinal-sin regressions were
+  introduced and caught during the ⟨0.35⟩ round (SOUNDNESS R187, R194, R199, R203, R204, R210) and the
+  1,504-crate wide-key corpus A/B caught **zero** of them — every one measured 0 corpus incidence.
+  Each was caught instead by somebody hand-writing the right fixture. These gates check a property over
+  GENERATED programs: each pair is two spellings of ONE program emitted from one description —
+  `let t = EXPR; t?;` vs `EXPR?;`, a `?` before vs after a construction in a loop body, and a
+  construction written directly vs through a single-arm `macro_rules!` — so a spelling that loses an
+  effect its equivalent was charged is a silent under-report with no oracle needed. Both spellings of
+  every pair are COMPILED and EXECUTED (`examples/gt.rs`) and their in-frame drop counts checked, so no
+  verdict rests on comparing two absences. Calibrated against the six pre-fix binaries built from each
+  fix commit's parent: **6 of 6 rediscovered, all within 12 random seeds** (R187 seed 1, R194 1, R199 1,
+  R203 1, R204 8, R210 12); exhaustively, 54/54/60/54/37/8 distinct violating shapes. The obvious
+  formulation — insert a never-erroring `?` and compare against a `?`-free twin — was tried first and
+  rediscovered **0 of 6**: it is vacuous on exactly these shapes, because with the value escaping by
+  return the `?`-free twin is charged nothing (it is R187's own `collect_loop_noq` control, whose
+  expected answer is ABSENT). `soundness/known_open.tsv` records, exhaustively, the 216 shapes at which
+  HEAD already fails these properties — a debt register, subtracted so a NEW instance fails and printed
+  every run so it is not forgotten. Both gates run in CI. `soundness/README.md` carries the calibration
+  table and an explicit statement of what they cannot catch.
+
 - **⚠ SOUNDNESS R150 — CLOSED: `gate --report`'s same-artifact guard converged on the one
   implementation, closing a FAIL-OPEN gap against the scan route.** `same_artifact` (SPEC §3.3.1 — is a
   `--policy`/`--gate-json`/`--report` collision one artifact under two names?) existed as two
