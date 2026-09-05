@@ -15545,8 +15545,8 @@ pub fn go() {{ imp::doit(); }}
     /// exactly the invisibility.
     ///
     /// SAY WHICH DIRECTION IT FAILS IN: the fix writes ONLY `interior`, never `first_ctor_seq`,
-    /// `ctor_sites` or `macro_ctor_leaves` — the first can only REMOVE a leaf from the escaping set
-    /// (charge a drop), the other three can LICENSE an escape. So an over-reaching walk here over-charges;
+    /// `ctor_sites` — `interior` can only REMOVE a leaf from the escaping set
+    /// (charge a drop), the other two can LICENSE an escape. So an over-reaching walk here over-charges;
     /// it cannot introduce a silence. The exemptions are the enumerated value spine and nothing else.
     ///
     /// EXECUTED ground truth (a drop counter, error path, drops in THIS frame): every `*_hole` 1, the
@@ -15716,17 +15716,12 @@ pub fn go() {{ imp::doit(); }}
              argument, and `spine_direct` writes the identical construction without a macro. They must \
              agree. If they do not, the shared macro reading has stopped seeing what the direct walk \
              sees — which is the silent under-report this whole family is about:\n{v:#}");
-        // `spine_nested` is the ONE that still disagrees, and it is named here rather than left to
-        // read as an exemption: a macro NESTED inside a macro's tokens is where the shared reading
-        // stops (its parse needs its own base), so its constructions are still invisible to the site
-        // half. The property gates count the same gap — `macro=nested` and `ctor=mac_nested` are still
-        // registered in soundness/known_open.tsv. When it closes, this assertion flips to the parity
-        // form above.
-        assert!(!fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
-                "`spine_nested` reaches its construction through a macro inside a macro, which the \
-                 shared macro reading deliberately stops at. If this starts charging, nested readings \
-                 have landed and this row should be asserted as parity with `spine_direct` instead — \
-                 and soundness/known_open.tsv should have shrunk by the `nested` shapes:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "spine_direct")["calls"].to_string().contains("H::drop"),
+            "`spine_nested` reaches its construction through a macro inside a macro — the shape the
+             leaf-keyed `macro_ctor_leaves` LICENCE used to certify outright — and `spine_direct` \
+             writes the same construction with no macro. They must agree:\n{v:#}");
         // AND THE TWIN ITSELF IS STILL CHARGED, so the parity above cannot be satisfied by both rows
         // going quiet.
         assert!(fn_entry(&v, "spine_direct")["calls"].to_string().contains("H::drop"),
@@ -15848,6 +15843,11 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn spine_nested_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
 "#);
         for n in ["tmpl_stmt_hole", "tmpl_println_hole", "blocktok_stmt_hole", "stmts_stmt_hole"] {
             assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
@@ -15867,12 +15867,17 @@ pub fn go() {{ imp::doit(); }}
                 "`println_direct` is `tmpl_println_hole` with the `println!` written in the body instead \
                  of inside a template, and it was charged in every build. Without it, `tmpl_println_hole` \
                  could be passing because the walk reached the template rather than the tokens:\n{v:#}");
-        assert!(!fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
-                "THE OVER-CHARGE CONTROL for the sloppier version of this fix. A by-value argument on the \
-                 `?` operand's VALUE SPINE is moved into the callee and dies in ITS frame (executed: 0 \
-                 drops here, 1 inside `use_h_val`). R204 flattens the spine for a STATEMENT macro only, \
-                 whose value is genuinely discarded; flattening it for the expression walk as well would \
-                 charge here and re-fabricate published's blanket veto:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "spine_nested_direct")["calls"].to_string().contains("H::drop"),
+            "A by-value argument on the `?` operand's VALUE SPINE is moved into the callee and dies in \
+             ITS frame (executed: 0 drops here, 1 inside `use_h_val`), and `spine_nested_direct` \
+             writes it with no macro. THE TWO MUST AGREE — the SIXTH control in this file to assert \
+             that a macro-borne construction on a by-value spine 'stays exempt', and the sixth whose \
+             direct twin the R172 site gate has charged since published 0.34.0. R172 keys on \
+             construction SITES and has no by-value-argument exemption at all; every one of these six \
+             passed on the macro's INVISIBILITY, which is the same invisibility that lost a real drop \
+             one spelling over:\n{v:#}");
     }
 
     /// SOUNDNESS R205 — A PATH IS STILL A NAME, and the path spelling is the CANONICAL one. R203 looks a
@@ -15955,6 +15960,11 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn dollar_chain_spine_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
 "#);
         for n in ["dollar_chain_stmt", "dollar_chain_expr", "crate_path_direct"] {
             assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
@@ -15970,13 +15980,18 @@ pub fn go() {{ imp::doit(); }}
                 "the discriminator: the SAME two-template chain with the inner macro named bare, charged \
                  in every build since `5cefa62`. If this ever goes quiet the three rows above stop being \
                  evidence about the `::` spelling and become evidence about chaining:\n{v:#}");
-        assert!(!fn_entry(&v, "dollar_chain_spine")["calls"].to_string().contains("H::drop"),
-                "THE OVER-CHARGE CONTROL. The same `$crate::`-chained construction as a by-value ARGUMENT \
-                 on the `?` operand's value spine is moved into the callee and dropped in ITS frame \
-                 (executed: 0 drops here, 1 inside `use_h_val`), which the caller inherits through the \
-                 call edge. R199's two-step spine exemption has to survive being reached through a \
-                 PATH-spelled template exactly as it does through a bare one; charging here is published \
-                 0.34.0's blanket veto back again:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "dollar_chain_spine")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "dollar_chain_spine_direct")["calls"].to_string().contains("H::drop"),
+            "The same `$crate::`-chained construction as a by-value ARGUMENT on the `?` operand's \
+             value spine is moved into the callee and dropped in ITS frame (executed: 0 drops here, 1 \
+             inside `use_h_val`), and `dollar_chain_spine_direct` writes it with no macro at all. THE \
+             TWO MUST AGREE. This was the FIFTH control in this file asserting that a macro-borne \
+             construction on a by-value spine 'stays exempt'; all five passed because the construction \
+             was INVISIBLE, and all five have a direct twin the R172 site gate has charged since \
+             published 0.34.0 — R172 keys on construction SITES and has no by-value-argument exemption \
+             at all. The shared over-report is that missing exemption, a separate defect whose fix \
+             WITHDRAWS a charge and needs its own A/B:\n{v:#}");
     }
 
     /// SOUNDNESS R226 — THE SITE WALK AND THE ESCAPE WALK NOW READ A MACRO THE SAME WAY.

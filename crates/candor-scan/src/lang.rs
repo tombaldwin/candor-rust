@@ -2443,9 +2443,15 @@ pub(crate) fn cross_ctor_leaf_from_struct_path(
 /// SITES ARE IDENTIFIED BY THE ADDRESS of the borrowed `syn::Expr`, which is why the body walk and the
 /// escape walk have to see the SAME tree. The one place they cannot is a MACRO body — `mark_escape`
 /// parses `vec![Guard::new()]`'s tokens into owned temporaries whose addresses die with the call (and
-/// could be reused by a later allocation). Any leaf constructed inside a macro anywhere in the body is
-/// therefore recorded in `macro_ctor_leaves` and falls back to the old leaf-keyed rule — identical to
-/// the shipped behaviour for that leaf, neither better nor worse.
+/// could be reused by a later allocation).
+///
+/// SOUNDNESS R226 — SO THE TWO WALKS SHARE A READING AND A NUMBERING INSTEAD. `macro_reading` is the
+/// one reading (invocation tokens as an expression list, as statements, and the resolved
+/// `macro_rules!` arms) and `macro_reading_ordinals` the one numbering, so a construction inside a
+/// macro is a SITE with an identity both walks can compute; `ord_nested` composes a nested reading's
+/// ordinals into the enclosing one's space. What this replaced was `macro_ctor_leaves`, a leaf-keyed
+/// set that made this gate CERTIFY the escape for any leaf a macro anywhere in the body constructed —
+/// an unevidenced licence, and the direction this file is not allowed to be wrong in.
 pub(crate) fn escaping_ctor_leaves<'a>(
     block: &'a syn::Block,
     uses: &'a HashMap<String, String>,
@@ -2572,9 +2578,13 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // does not reach) keeps the old answer — the site set is an added refusal, never a new licence.
     let escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
     acc.leaves.retain(|l| {
-        if sites.macro_ctor_leaves.contains(l) {
-            return true;
-        }
+        // SOUNDNESS R226 — THE LEAF-KEYED MACRO LICENCE IS GONE. `macro_ctor_leaves` said "this leaf
+        // was built inside a macro somewhere, and no site table can hold that construction, so keep
+        // the shipped leaf-keyed answer" — i.e. CERTIFY the escape without evidence, which is the one
+        // direction this file is not allowed to be wrong in. It existed because a nested macro's parse
+        // produces owned temporaries whose addresses die with the call; `ord_nested` now composes a
+        // nested reading's ordinals into the enclosing reading's space, so the site walk and
+        // `mark_escape` agree about those constructions and the licence has nothing left to cover.
         match sites.ctor_sites.get(l) {
             Some(v) => {
                 let all = v.iter().all(|s| escaped_sites.contains(s));
@@ -2733,6 +2743,103 @@ const ORD_DEEP0: usize = 1 << 20;
 const ORD_STMTS: usize = 1 << 21;
 const ORD_TMPL: usize = 1 << 22;
 const ORD_ARM_STRIDE: usize = 1 << 14;
+
+/// The shallow pre-order `macro_site_ordinals` numbers — every child, stopping at a nested macro and
+/// at a callee path. Factored out so the nested site walk visits exactly the nodes that numbering
+/// gave an ordinal to.
+fn macro_shallow_exprs<'e>(e: &'e syn::Expr, f: &mut dyn FnMut(&'e syn::Expr)) {
+    if matches!(e, syn::Expr::Macro(_)) {
+        return;
+    }
+    f(e);
+    match e {
+        syn::Expr::Call(c) => c.args.iter().for_each(|a| macro_shallow_exprs(a, f)),
+        _ => for_each_child_expr(e, &mut |c| macro_shallow_exprs(c, f)),
+    }
+}
+
+/// A macro invoked INSIDE a reading. `Expr` is one `mark_escape` can reach through a value position;
+/// `Stmt` is one whose value is DISCARDED, which no escape walk ever reaches — so its constructions
+/// are always non-escaping sites, i.e. they charge.
+enum NestedMacro<'a> {
+    Expr(&'a syn::ExprMacro),
+    Stmt(&'a syn::StmtMacro),
+}
+
+/// SOUNDNESS R226 — THE ORDINAL FOR A SITE REACHED THROUGH A NESTED READING. A positional scheme
+/// would need an unbounded stride (a nested reading's own ordinals already run into the millions once
+/// template arms are numbered), so compose by FNV-1a over `(j, inner)` instead and set the top bit,
+/// which no direct ordinal ever carries. Deterministic from the two indices alone, so the site walk
+/// and the escape walk — which parse their own copies — agree.
+fn ord_nested(j: usize, inner: usize) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in (j as u64).to_le_bytes().iter().chain((inner as u64).to_le_bytes().iter()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h | (1u64 << 63)) as usize
+}
+
+/// Every macro invocation inside a reading, in ONE canonical order — region 0's own pre-order, then
+/// the block interiors that pre-order stops at, then region 1, then each template arm. Index `j`
+/// therefore means the same invocation to both walks, which is the whole of what `ord_nested` needs.
+fn nested_macro_nodes(r: &MacroReading) -> Vec<NestedMacro<'_>> {
+    let mut out: Vec<NestedMacro<'_>> = Vec::new();
+    fn shallow<'e>(e: &'e syn::Expr, out: &mut Vec<NestedMacro<'e>>) {
+        if let syn::Expr::Macro(m) = e {
+            out.push(NestedMacro::Expr(m));
+            return;
+        }
+        for_each_child_expr(e, &mut |c| shallow(c, out));
+    }
+    fn deep_block<'e>(b: &'e syn::Block, out: &mut Vec<NestedMacro<'e>>) {
+        for st in &b.stmts {
+            match st {
+                syn::Stmt::Local(l) => {
+                    if let Some(init) = &l.init {
+                        deep_expr(&init.expr, out);
+                        if let Some((_, d)) = &init.diverge {
+                            deep_expr(d, out);
+                        }
+                    }
+                }
+                syn::Stmt::Expr(e, _) => deep_expr(e, out),
+                syn::Stmt::Macro(m) => out.push(NestedMacro::Stmt(m)),
+                syn::Stmt::Item(_) => {}
+            }
+        }
+    }
+    fn deep_expr<'e>(e: &'e syn::Expr, out: &mut Vec<NestedMacro<'e>>) {
+        if let syn::Expr::Macro(m) = e {
+            out.push(NestedMacro::Expr(m));
+            return;
+        }
+        for_each_child_expr(e, &mut |c| deep_expr(c, out));
+        for_each_child_block(e, &mut |bl| deep_block(bl, out));
+    }
+    for e in &r.token_exprs {
+        shallow(e, &mut out);
+    }
+    // The interiors region 0's shallow pre-order stops at, walked in the same order `deep0_exprs`
+    // numbers them so the two enumerations cannot disagree about which invocation is which.
+    fn deep0<'e>(e: &'e syn::Expr, out: &mut Vec<NestedMacro<'e>>) {
+        if matches!(e, syn::Expr::Macro(_)) {
+            return;
+        }
+        for_each_child_expr(e, &mut |c| deep0(c, out));
+        for_each_child_block(e, &mut |bl| deep_block(bl, out));
+    }
+    for e in &r.token_exprs {
+        deep0(e, &mut out);
+    }
+    if let Some(b) = &r.token_stmts {
+        deep_block(b, &mut out);
+    }
+    for arm in &r.template_arms {
+        deep_block(arm, &mut out);
+    }
+    out
+}
 
 /// Pre-order over a block's statements and expressions, descending into nested blocks — what
 /// `for_each_child_expr` deliberately does not do. Stops at a nested macro, exactly as
@@ -2983,10 +3090,6 @@ struct EscapeSites<'a> {
     /// ADDRESS of its `syn::Expr`. Collected from the SAME walk that finds the escape sites, so the
     /// two halves cannot disagree about what counts as a construction.
     ctor_sites: HashMap<String, Vec<SiteId>>,
-    /// R172 — leaves constructed inside a MACRO body. `mark_escape` parses macro tokens into owned
-    /// temporaries, whose addresses cannot be matched against `ctor_sites`, so these leaves keep the
-    /// shipped leaf-keyed answer instead.
-    macro_ctor_leaves: std::collections::HashSet<String>,
     /// R172 — CALLEE positions, which are NOT construction sites. `MemBio(bio)` is a construction; the
     /// `MemBio` inside it is the callee PATH of that same call, and reading it as a second site of the
     /// same leaf is fatal, because `mark_escape` descends only VALUE children (`for_each_value_child`
@@ -3078,7 +3181,6 @@ impl<'a> EscapeSites<'a> {
             macro_expanding: std::collections::HashSet::new(),
             opaque_interior_leaves: std::collections::HashSet::new(),
             ctor_sites: HashMap::new(),
-            macro_ctor_leaves: std::collections::HashSet::new(),
             skip_sites: std::collections::HashSet::new(),
             seq: 0,
             try_exits: Vec::new(),
@@ -3136,7 +3238,7 @@ impl<'a> EscapeSites<'a> {
     ///
     /// SAY WHICH DIRECTION IT FAILS IN. It writes `ctor_sites` and NOTHING else. Not `first_ctor_seq`
     /// — a leaf with no recorded position counts as live from the start, so CREATING one can suppress
-    /// a charge. Not `macro_ctor_leaves`, which licenses an escape outright. Adding sites can only make
+    /// a charge. Adding sites can only make
     /// the gate's "every site escapes" test harder to satisfy: a site `mark_escape` also finds through
     /// `macro_reading_ordinals` is neutral, and one it does not find CHARGES.
     fn note_reading_sites(&mut self, reading: &MacroReading, base: usize) {
@@ -3166,6 +3268,62 @@ impl<'a> EscapeSites<'a> {
         }
         for (l, o) in found {
             self.ctor_sites.entry(l).or_default().push((base, o));
+        }
+        // NESTED READINGS. A macro invoked inside a macro is where R203 stopped, and its
+        // constructions were the last shape neither walk could address-key. `ord_nested(j, inner)`
+        // composes the child's own ordinal into this reading's space, and `mark_escape` composes it
+        // the same way, so a nested construction that ESCAPES is still matched and stays uncharged.
+        // ONE LEVEL of nesting: R203's own "nested macro" shape, and the template that reaches
+        // its construction through a second template. A macro three deep keeps the pre-change answer,
+        // which is stated in `soundness/known_open.tsv` rather than assumed away.
+        {
+            for (j, node) in nested_macro_nodes(reading).into_iter().enumerate() {
+                let inner_m = match node {
+                    NestedMacro::Expr(m) => syn::Expr::Macro(m.clone()),
+                    // A statement macro's value is discarded, so no escape walk reaches it; its
+                    // constructions are recorded as sites that can only charge.
+                    NestedMacro::Stmt(m) => syn::Expr::Macro(syn::ExprMacro {
+                        attrs: Vec::new(),
+                        mac: m.mac.clone(),
+                    }),
+                };
+                let syn::Expr::Macro(em) = &inner_m else { unreachable!() };
+                let inner = {
+                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+                    macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
+                };
+                let iords = macro_reading_ordinals(&inner);
+                let mut sub: Vec<(String, usize)> = Vec::new();
+                {
+                    let (uses, fields, returns) = (self.uses, self.fields, self.returns);
+                    let mut rec = |e: &syn::Expr| {
+                        if let Some(l) = ctor_leaf_of_expr(e, uses, fields, returns) {
+                            if let Some(o) = iords.get(&(e as *const syn::Expr as usize)) {
+                                sub.push((l, ord_nested(j, *o)));
+                            }
+                        }
+                    };
+                    // Region 0's own expressions too: unlike the OUTER reading, whose shallow
+                    // region 0 is already site-recorded by `note_macro_site`, nothing has walked
+                    // this one.
+                    for e in &inner.token_exprs {
+                        macro_shallow_exprs(e, &mut rec);
+                    }
+                    deep0_exprs(&inner.token_exprs, &mut rec);
+                    if let Some(b) = &inner.token_stmts {
+                        deep_exprs(b, &mut rec);
+                    }
+                    for arm in &inner.template_arms {
+                        deep_exprs(arm, &mut rec);
+                    }
+                }
+                for (l, o) in sub {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R226NESTED {l}"); // §E1 HIT COUNTER
+                    }
+                    self.ctor_sites.entry(l).or_default().push((base, o));
+                }
+            }
         }
     }
 
@@ -3258,12 +3416,15 @@ impl<'a> EscapeSites<'a> {
         n: &mut usize,
     ) {
         if let syn::Expr::Macro(_) = e {
-            self.note_nested_macro_leaves(e);
-            // SOUNDNESS R203 — the line above records the nested macro's leaves for the SITE gate only.
-            // It records no `first_ctor_seq` and no `interior`, so `{ out.extend(vec![vec![H::new("a")]
-            // .pop().unwrap()]); gen(n) }?` lost the `H::drop` that really runs on the error exit as
-            // soon as a later `H::try_new(..)` supplied a `first_ctor_seq` past the `?`. The exemption
-            // test for the nested NODE is R199's two-step, one level in.
+            // SOUNDNESS R226 — a nested macro's constructions are recorded as SITES by
+            // `note_reading_sites`, under `ord_nested`, which `mark_escape` composes identically.
+            // Before that they were recorded as a leaf-keyed LICENCE (`macro_ctor_leaves`) that made
+            // the site gate certify the escape outright.
+            // SOUNDNESS R203 — the interior walk below. It records no `first_ctor_seq` and no site, so
+            // `{ out.extend(vec![vec![H::new("a")].pop().unwrap()]); gen(n) }?` lost the `H::drop` that
+            // really runs on the error exit as soon as a later `H::try_new(..)` supplied a
+            // `first_ctor_seq` past the `?`. The exemption test for the nested NODE is R199's two-step,
+            // one level in.
             if !self.open_tries.is_empty() {
                 let node_exempt = inner_spine.contains(&(e as *const syn::Expr as usize));
                 let nested: Vec<bool> = on_spine.iter().map(|b| *b && node_exempt).collect();
@@ -3307,23 +3468,6 @@ impl<'a> EscapeSites<'a> {
         }
         for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, on_spine, inner_spine, n));
     }
-    /// A macro NESTED inside a macro is where the ordinal numbering stops (its parse would need its
-    /// own base), so its constructions keep the shipped leaf-keyed answer.
-    fn note_nested_macro_leaves(&mut self, e: &syn::Expr) {
-        if let syn::Expr::Macro(m) = e {
-            let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-            if let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
-                for sub in &exprs {
-                    if let Some(l) = ctor_leaf_of_expr(sub, self.uses, self.fields, self.returns) {
-                        self.macro_ctor_leaves.insert(l);
-                    }
-                    self.note_nested_macro_leaves(sub);
-                }
-            }
-            return;
-        }
-        for_each_child_expr(e, &mut |c| self.note_nested_macro_leaves(c));
-    }
 
     // ─── SOUNDNESS R203 ──────────────────────────────────────────────────────────────────────────
     // A construction `lang.rs` cannot ADDRESS-KEY still has to reach the open `?`s' `interior`.
@@ -3341,8 +3485,8 @@ impl<'a> EscapeSites<'a> {
     //
     // SAY WHICH DIRECTION THIS FAILS IN. Everything below writes ONLY `TryExit::interior`, and
     // `interior` appears in exactly one place — a `retain` that can only REMOVE a leaf from the escaping
-    // set, i.e. charge a drop that was not charged. It never writes `first_ctor_seq`, `ctor_sites` or
-    // `macro_ctor_leaves`, each of which can LICENSE an escape. So the failure mode of an over-reaching
+    // set, i.e. charge a drop that was not charged. It never writes `first_ctor_seq` or `ctor_sites`,
+    // either of which can LICENSE an escape. So the failure mode of an over-reaching
     // walk here is an over-charge, never a new silence; the over-charge is what the corpus A/B and the
     // six ABSENT controls measure. The exemptions are enumerated (the value spine, as everywhere else in
     // R194) and every shape not enumerated stays charged — denylist, not allowlist.
@@ -3938,14 +4082,28 @@ fn mark_escape(
             }
         }
         m.leaves.extend(sub.leaves);
+        // A site reached through a NESTED macro carries that macro's own temporary base, which dies
+        // with this call. Compose it into THIS reading's space with `ord_nested`, exactly as the site
+        // walk does — before this, such an entry was DROPPED, so a construction inside a nested macro
+        // could never be marked escaping and the site walk had to leave it unrecorded to avoid
+        // charging every one of them.
+        let nested_base: HashMap<usize, usize> = nested_macro_nodes(&reading)
+            .iter()
+            .enumerate()
+            .filter_map(|(j, n)| match n {
+                NestedMacro::Expr(m) => Some((*m as *const syn::ExprMacro as usize, j)),
+                NestedMacro::Stmt(_) => None,
+            })
+            .collect();
         for (addr, ord) in &sub.sites {
-            // Only sites written DIRECTLY in this parse (`ord == 0`) can be renumbered here. An
-            // entry from a NESTED macro carries that macro's own temporary base and is dropped —
-            // its leaf keeps the shipped leaf-keyed answer through `macro_ctor_leaves`.
+            // A site written DIRECTLY in this parse carries `ord == 0` and is renumbered onto this
+            // reading's ordinals.
             if *ord == 0 {
                 if let Some(o) = ords.get(addr) {
                     m.sites.insert((base, *o));
                 }
+            } else if let Some(j) = nested_base.get(addr) {
+                m.sites.insert((base, ord_nested(*j, *ord)));
             }
         }
         return;
