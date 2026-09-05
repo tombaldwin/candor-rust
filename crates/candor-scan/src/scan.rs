@@ -1677,7 +1677,42 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // a per-qual map is a UNION over units that need not agree, is untouched and still open.
             // The two REAL definitions a key can hold (two modules each with a `Bar::go`) stay two, and
             // R190(c)'s refusal over them is unchanged: those are distinct quals sharing a tail.
-            by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
+            //
+            // `by_leaf` DEDUPLICATES FOR THE SAME REASON, AND THE SPEC RULING IS WHY IT LANDS SEPARATELY.
+            // The bare-leaf spelling does not go silent — it discloses `ambiguous:same-name local defs`
+            // (the `v.len() >= 2` site below) — so this half is precision, not the cardinal sin, and it
+            // WITHDRAWS an existing answer, which is the move measured and refused for R208. SPEC §4
+            // (2026-09-05) settles it: "several bodies under ONE qualified name are one definition, and
+            // resolve to the UNION of their effects"; `ambiguous:` is reserved for two DISTINCT
+            // definitions competing for one bare name. A deduplicated bucket of size one resolves to
+            // that one qual, and a report entry is keyed on the qual and merges its units (R129), so
+            // what the caller inherits IS the union of the arms — a COMPLETE answer replacing a hedge,
+            // not a withdrawal into silence. Conformance PART 10's `armsunion`/`armsswap` pin it with
+            // arms carrying DIFFERENT effects (Fs vs Exec) in both source orders, because same-effect
+            // arms cannot separate a union from a PICK, and a pick would be fabrication.
+            //
+            // WHAT IT COSTS, MEASURED RATHER THAN ASSERTED SAFE (SOUNDNESS R227). The hedge it
+            // withdraws was, in a minority of cases, ACCIDENTALLY COVERING a silence that belongs to
+            // something else. Over 1,509 registry crates, 1,167 rows lose the reason; 961 of them now
+            // point at a target that carries an effect, and the rest at one this engine already
+            // reported PURE. All 122 such targets were read from source: nearly all are
+            // arithmetic/conversion/platform-shim twins with no effect in either arm, and 32 rows sit
+            // over an arm whose effect reaches the machine by a route this engine does not model at all
+            // — inline `asm!` and `core::arch` RNG intrinsics (`getrandom`'s `rndr`/`rdrand`), an
+            // `extern "Rust"` logger hook (`defmt`'s `export::timestamp`), a `link`ed Win32 call
+            // (`cmake`'s `fix_build_dir`), `ffi::sqlite3_threadsafe`, libc `poll`. In EVERY one of
+            // those the target is absent from the report on BOTH sides of this change: the silence is
+            // at the callee and pre-exists, and what moves is the cover. That is not a reason to keep
+            // the hedge — a hedge that happens to sit over an unrelated hole is not a disclosure of it,
+            // and it was equally absent from the thousands of QUALIFIED call sites reaching the same
+            // callees — but it is why this comment does not claim the change is free. R128/R139 (a
+            // macro-declared callee, zero units) and R123/R140 (a `#[cfg]`'d `use` resolved by source
+            // order) are the shapes R227 predicted here, and NEITHER appears in that population; the
+            // one that does is unmodelled FFI, which is a different open question.
+            let vl = by_leaf.entry(f.leaf.clone()).or_default();
+            if !vl.contains(&f.qual) {
+                vl.push(f.qual.clone());
+            }
         }
         if let Some(t2) = tail2(&f.qual) {
             if let Some(ty) = t2.split("::").next() {
@@ -2687,6 +2722,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // scans a purpose-built fixture so the kind is VISIBLE there instead of silently absent.
             // That measurement is also what §4 ⟨0.24⟩ cites for admitting the kind rather than deleting
             // it, so the number and the vocabulary now stand or fall together.
+            //
+            // ── WHAT THE ⟨0.35⟩ `by_leaf` DEDUP CHANGED HERE (SOUNDNESS R222, SPEC §4 2026-09-05) ────
+            // `v.len() >= 2` now counts DISTINCT QUALS, so this fires on a genuine ambiguity — two
+            // separately-written definitions competing for one bare name (two modules each exporting a
+            // `helper`; a free fn beside a same-named method) — and no longer on a `#[cfg]` arm set,
+            // which SPEC §4 rules is ONE definition resolving to the UNION of its arms. Those calls now
+            // resolve through `resolve_target` above and never reach this branch. THE NUMBERS ABOVE ARE
+            // PRE-DEDUP AND ARE LEFT AS THE HISTORICAL MEASUREMENT THEY WERE: the 8,710-of-19,607
+            // census and the 58/200 counterfactual were both taken while the cfg shape was hedged here,
+            // and the population this branch sees is now smaller by that shape. They are not re-derived
+            // — an unmeasured number here would be worse than a dated one. What is measured: over 1,509
+            // registry crates the dedup withdraws this reason from 1,167 rows and adds a concrete effect
+            // to 128 functions, losing none. AND IT DOES NOT MAKE THE KIND RARE — counted, not assumed:
+            // over the same corpus this reason goes 24,226 → 22,826 entries and 682 → 632 crates, so
+            // the 58/200 counterfactual's subject is still overwhelmingly present and the rename is
+            // still a SPEC rung rather than an edit here.
             if !c.is_macro && !c.method && classified.is_none() && !resolved_local && suppress_bare_leaf
                 && !c.path.contains("::")
                 && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
