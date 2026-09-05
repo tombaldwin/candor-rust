@@ -9,6 +9,60 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R222 (second half) — several bodies under ONE qualified name are ONE definition and
+  resolve to the UNION of their effects, per SPEC §4.** `by_leaf` counted `FnInfo` entries rather than
+  distinct definitions, exactly as `by_tail2` did, so a bare call to a `#[cfg]`-twinned function saw
+  "two definitions" and answered `Unknown ambiguous:same-name local defs` over arms the engine had
+  already analysed. It now deduplicates, resolves to the single definition, and inherits the union of
+  its units. **This implements SPEC.md §4's clause of 2026-09-05** — *"'Two same-named local
+  definitions' means two DISTINCT definitions. Several bodies under ONE qualified name are one
+  definition, and resolve to the UNION of their effects"* — and conformance PART 10's `armsunion` /
+  `armsswap` rows go from RED to GREEN with it; they were written red on purpose, before the port.
+  `ambiguous:` stays exactly where the clause reserves it: two separately-written definitions competing
+  for one bare name.
+  **The deciding measurement, and it inverts the R208 analogy this half was withheld under.** A twin
+  whose arms carry DIFFERENT effects does not go quiet — it goes to the union, order-independently
+  (`Fs` + `Exec`, and the same answer with the arms swapped). So a hedge is replaced by a COMPLETE
+  answer rather than withdrawn; R208's refused remedy went the other way, concrete → hedge. Same-effect
+  arms cannot tell a union from a PICK, which is why no fixture here or in the conformance suite had
+  ever caught the distinction; `two_cfg_arms_of_one_fn_resolve_to_the_union_in_either_source_order` is
+  the discriminator, in both source orders, and it is what the revert takes red.
+  **A/B over 1,509 crates.io crates against the shipped `cc05b8c`, keyed on EVERY report field, one
+  variable: 0 rows ADDED, 300 REMOVED, 2,129 CHANGED on the wide key (1,080 on `inferred` alone),
+  173 crates touched; 128 functions gain a concrete effect (Clock 89, Rand 80, Env 27, Fs 10, Ipc 6,
+  Log 6, Net 4) and 0 functions lose one.** Reach (§E1), counted in the changed branch itself: the
+  dedup collapses 2,059 leaf buckets in 569 of the 1,509 crates. **All 300 removals audited from
+  source — 228 distinct functions, NONE of which carried a concrete effect**; 134 held nothing but the
+  withdrawn hedge and 94 inherited it, and every newly-resolved target they reach was read in the
+  crate's own source rather than in candor's report. Executed ground truth (§E3): the union fixture was
+  built and run and wrote 8 real bytes; `deny Fs go` over it goes exit 0 → 1.
+  **WHAT IT COSTS, measured rather than asserted safe (SOUNDNESS R227).** 1,167 rows lose the
+  `ambiguous:` reason. 961 now point at a target that carries an effect; the rest point at one this
+  engine already reported PURE. All 122 such targets were read from source: nearly all are
+  arithmetic/conversion/platform-shim twins with no effect in either arm, and **32 rows sit over an arm
+  whose effect reaches the machine by a route this engine does not model at all** — inline `asm!` and
+  `core::arch` RNG intrinsics (`getrandom`'s `rndr`/`rdrand`), an `extern "Rust"` logger hook
+  (`defmt`'s `export::timestamp`), a `link`ed Win32 call (`cmake`'s `fix_build_dir`),
+  `ffi::sqlite3_threadsafe`, libc `poll`. In every one of them the target is absent from the report on
+  BOTH sides of this change: the silence is at the callee, it pre-exists, and what moved is an
+  accidental cover over it — the same cover that was already missing from every QUALIFIED call site
+  reaching those callees. R227 predicted this population would be R128/R139 (a macro-declared callee)
+  or R123/R140 (a `#[cfg]`'d `use` resolved by source order); **neither appears in it**, and the shape
+  that does — unmodelled FFI and inline assembly — is a different open question.
+  Live gate this closes: `fastrand`'s `random_seed` is a three-arm `#[cfg]` twin whose `getrandom` arm
+  is the crate's real entropy source, so `deny Rand global_rng::Rng` exits **0 before and 1 after** over
+  `Rng::new`. Scope matters and the earlier framing overstated it: `deny Rand global_rng` was already
+  red on the shipped engine and `deny Unknown` caught the constructor in both arms — what was green is
+  the effect-named gate.
+  Re-pointed, not deleted: `the_ambiguous_reason_kind_and_its_class_are_pinned` now holds two
+  separately-written `helper` definitions in two modules (the shape conformance PART 10 also moved to),
+  and `save_bare` asserts `Fs` — the answer its qualified twin `save_twin` already had.
+  The kind is not thereby made rare, counted rather than assumed: over the same 1,509 crates
+  `ambiguous:` goes **24,226 → 22,826 reason entries in 682 → 632 crates**, so the 58/200
+  `deny E Unknown[dispatch]` counterfactual that §4 ⟨0.24⟩ cites still has its subject.
+  `soundness/run_q.sh` and `soundness/run_macro.sh` are CLEAN before and after with 40 / 133 known-open
+  hits unchanged, so no registered shape closed and `known_open.tsv` is untouched.
+
 - ⚠ **SOUNDNESS R222/R129 — `by_tail2` counted ONE definition twice, so a call that was never
   ambiguous resolved to NOTHING.** The index pushed `f.qual` once per analysed UNIT, and several units
   routinely share one qual: two `#[cfg]` arms of a fn or of its module, ≥2 impls of one trait for one
@@ -35,18 +89,22 @@ after upgrading; review policies and regenerate baselines with the new build.
   All 5 removals audited from source: each lost an `invisible` disclosure it had INHERITED through an
   edge that existed only because the primary route was fake-ambiguous (curl's `FormError::fmt` edging
   to `Error::fmt`, digest's `D::digest` edging to `DynDigest::finalize`).
-  **THE `by_leaf` TWIN IS DELIBERATELY NOT TAKEN, and it is a ruling rather than a bug fix.** The same
-  duplicate reaches `by_leaf`, where the bare-call path already DISCLOSES
-  (`Unknown ambiguous:same-name local defs`) instead of going silent — so it is not the cardinal sin.
-  Deduplicating it too was built and measured: +125 concrete effects, but **1,400 corpus rows lose
-  that disclosure and 228 rows vanish from the report entirely**, and it turns off rust's single
-  largest `Unknown` reason (8,710 of 19,607 `unknownWhy` entries over a 1,062-report census) for
-  exactly the shape §4 ⟨0.24⟩ admitted the kind FOR — cfg-gated alternative definitions, which
-  `the_ambiguous_reason_kind_and_its_class_are_pinned` pins with a fixture whose two arms genuinely
-  differ. Withdrawing an existing answer is the same move measured and refused for R208 in this
-  release, so the direction of the batch stays uniform: **the qualified spelling gains an edge it
-  never had, the bare spelling keeps disclosing, and the trade is on the record instead of inside a
-  diff.** Every withdrawal that half would make was checked mechanically first: of the 3,603 ambiguity
+  **THE `by_leaf` TWIN WAS HELD BACK HERE AND IS TAKEN IN THE BULLET ABOVE — READ THAT ONE FOR WHAT
+  SHIPS.** This paragraph is kept as the record of why it was held, because the reasoning was wrong in
+  a specific and instructive way. The same duplicate reaches `by_leaf`, where the bare-call path
+  already DISCLOSES (`Unknown ambiguous:same-name local defs`) instead of going silent — so it is not
+  the cardinal sin, which is true and is why it needed a ruling rather than a fix. Deduplicating it too
+  was built and measured: +125 concrete effects, but **1,400 corpus rows lose that disclosure and 228
+  rows vanish from the report entirely**, and it turns off rust's single largest `Unknown` reason
+  (8,710 of 19,607 `unknownWhy` entries over a 1,062-report census) for exactly the shape §4 ⟨0.24⟩ was
+  read as admitting the kind FOR — cfg-gated alternative definitions. **That last clause is where the
+  reasoning failed: §4 admitted the KIND, never that shape, and `same-name local defs` appears nowhere
+  in SPEC.md. The binding of `ambiguous:` to `#[cfg]` lived only in this engine's fixture and in
+  conformance PART 10's, and SPEC §4 (2026-09-05) settles it the other way.** Calling it "withdrawing
+  an existing answer, the move refused for R208" was also wrong on the facts: R208's remedy went
+  concrete → hedge, this one goes hedge → the UNION of the arms, which no fixture in the family could
+  distinguish from a pick until `armsunion`/`armsswap`.
+  Every withdrawal that half would make was checked mechanically first: of the 3,603 ambiguity
   sites in the 59 crates it touches, all 134 rows it withdraws had `distinct = 1` — one definition
   counted twice — while the 2,237 `distinct = 2` and 824 `distinct = 3` sites are genuine and stay.
   **NOT TOUCHED, and neither claim moves:** `all`/`functions[]` is not deduplicated (see the four

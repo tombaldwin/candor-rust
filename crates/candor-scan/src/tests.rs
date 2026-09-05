@@ -1764,10 +1764,15 @@ pub fn hits_pure() { purelib::io::go(); }
     /// to exist at all. candor-ts's `5ba301c` is a precedent that the SHAPE of reclassification can be
     /// safe, not evidence that this one is — there, every reclassified reason named NOTHING.
     ///
-    /// The kind's real-world weight, so nobody re-opens this thinking it is a corner: `ambiguous:` is
+    /// The kind's real-world weight, so nobody re-opens this thinking it is a corner: `ambiguous:` was
     /// **8710 of 19607** `unknownWhy` entries over a 1062-report census (more than `callback:`'s 9421 is
-    /// away from it), across 220 packages — the cfg-gated-alternative-definitions shape, which a syntactic
-    /// scan cannot resolve because it does not evaluate `cfg`.
+    /// away from it), across 220 packages. THAT CENSUS IS PRE-⟨0.35⟩ AND ITS POPULATION HAS MOVED, so do
+    /// not read it as current: most of it was the `#[cfg]`-alternative-definitions shape, which SPEC §4
+    /// (2026-09-05) rules is ONE definition resolving to the UNION of its arms — SOUNDNESS R222's
+    /// `by_leaf` dedup resolves those, withdrawing this reason from 1,167 rows across 1,509 registry
+    /// crates. The old figure is left DATED rather than re-derived, because what it is cited for is a
+    /// fact about that measurement at that time. What the kind means now is the fixture below: two
+    /// SEPARATELY WRITTEN definitions competing for one bare name, where no owner can be formed at all.
     ///
     /// TO CHANGE IT: a SPEC rung, not an engine edit. That is exactly how it changed — §4 ⟨0.24⟩ cites
     /// the 58/200 → 0/200 counterfactual above as its reason for admitting the kind rather than deleting
@@ -1786,14 +1791,22 @@ pub fn hits_pure() { purelib::io::go(); }
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ambkind\"\n").unwrap();
-        // The shape that actually produces it on real code: cfg-gated alternative definitions of one free
-        // function. Rust picks by `cfg`; a syntactic scan cannot, and picking would fabricate one arm's
-        // effects onto the other — so it discloses.
+        // RE-POINTED ⟨0.35⟩ (SOUNDNESS R222): this fixture used to be a `#[cfg]` TWIN — one `helper`
+        // written as two arms — and that binding of the kind to conditional compilation existed nowhere
+        // in SPEC.md. It lived in this fixture, in its comment, and in conformance PART 10's, which is
+        // exactly how the engine came to hedge 8,710 answers it already had. SPEC §4 now states the
+        // rule: several bodies under ONE qualified name are one definition and resolve to the union of
+        // their effects, so a twin is NOT this kind and `two_cfg_arms_of_one_fn_resolve_to_the_union`
+        // pins where it goes instead. The shape below is what the kind is defined by — an owner that
+        // could not be formed AT ALL: `a::helper` and `b::helper` are two SEPARATELY WRITTEN
+        // definitions, both glob-imported, and the bare `helper()` call names both. It is the same
+        // fixture conformance PART 10 now asserts on, deliberately, so the two cannot drift apart.
+        // The arms carry DIFFERENT effects (Fs vs Exec) so a PICK would be visible as one of them
+        // rather than hiding behind an identical answer.
         std::fs::write(d.join("src/lib.rs"), "\
-#[cfg(unix)]
-pub fn helper() { std::fs::read(\"/etc/a\").ok(); }
-#[cfg(windows)]
-pub fn helper() { println!(\"pure\"); }
+pub mod a { pub fn helper() { std::fs::read(\"/etc/a\").ok(); } }
+pub mod b { pub fn helper() { std::process::Command::new(\"x\").status().ok(); } }
+use a::*; use b::*;
 pub fn go() { helper(); }
 ").unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
@@ -1804,9 +1817,21 @@ pub fn go() { helper(); }
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
+        // THE FIXTURE MUST BE A REAL AMBIGUITY BEFORE ITS ANSWER MEANS ANYTHING (§E3): both definitions
+        // exist, are analysed, and disagree. If either of these fails, the assertion below is about
+        // nothing.
+        assert_eq!(effs(fn_entry(&v, "a::helper")), vec!["Fs".to_string()],
+                   "arm A must be analysed and charged Fs, or the ambiguity is not real:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "b::helper")), vec!["Exec".to_string()],
+                   "arm B must be analysed and charged Exec, or a PICK would be indistinguishable \
+                    from the union:\n{v:#}");
         let go = fn_entry(&v, "go");
         assert!(effs(go).contains(&"Unknown".to_string()),
                 "an ambiguous bare call must DISCLOSE, not drop the edge silently:\n{v:#}");
+        assert!(!effs(go).iter().any(|e| e == "Fs" || e == "Exec"),
+                "two DISTINCT definitions are not a `#[cfg]` arm set: unioning them would charge `go` \
+                 with effects of a definition that may never run, and picking one is worse. SPEC §4 \
+                 reserves `ambiguous:` for exactly this:\n{v:#}");
         assert_eq!(go["unknownWhy"], serde_json::json!(["ambiguous:same-name local defs"]),
                    "the KIND is load-bearing — see the doc comment before renaming it:\n{v:#}");
         // …and the class it projects to, which is what `deny E Unknown[dispatch]` resolves.
@@ -12093,12 +12118,15 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// identical, and was charged `Fs` all along — so the assertion is a one-variable comparison, not
     /// an absence.
     ///
-    /// `save_bare` IS THE HALF THIS COMMIT DELIBERATELY LEAVES OPEN, and it is asserted here so the
-    /// boundary is a pinned fact rather than an omission. The same duplicate reaches `by_leaf`, where
-    /// the bare-call path DISCLOSES (`Unknown ambiguous:same-name local defs`) instead of going
-    /// silent, so it is not the cardinal sin — and deduplicating `by_leaf` too would WITHDRAW that
-    /// disclosure on 1,400 corpus rows for +125 concrete effects, which is a ruling, not a bug fix.
-    /// See the CHANGELOG entry.
+    /// `save_bare` IS THE BARE-LEAF SPELLING OF THE SAME DUPLICATE, and it was left disclosing
+    /// (`Unknown ambiguous:same-name local defs`) when the `by_tail2` half shipped, because withdrawing
+    /// an existing answer is a ruling rather than a bug fix. THE RULING CAME: SPEC §4 (2026-09-05) —
+    /// several bodies under ONE qualified name are one definition and resolve to the UNION of their
+    /// effects — so `save_bare` now reads `Fs`, the same answer `save_twin` gets, and the deciding
+    /// measurement is that a genuinely-differing twin goes to the union rather than quiet (see
+    /// `two_cfg_arms_of_one_fn_resolve_to_the_union_in_either_source_order`). What it is NOT is a
+    /// licence to resolve a real ambiguity: `the_ambiguous_reason_kind_and_its_class_are_pinned` holds
+    /// two DISTINCT definitions and still gets the hedge.
     #[test]
     fn two_cfg_arms_of_one_fn_are_one_definition_not_an_ambiguity() {
         let v = scan_src_to_json("r222twin", "\
@@ -12121,9 +12149,75 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         assert!(effs(fn_entry(&v, "save_twin")).contains(&"Fs".to_string()),
                 "a QUALIFIED call to a `#[cfg]`-twinned fn was refused as AMBIGUOUS and certified its \
                  caller PURE over a real `fs::write` — SOUNDNESS R222:\n{v:#}");
-        assert!(effs(fn_entry(&v, "save_bare")).contains(&"Unknown".to_string()),
-                "the BARE-leaf spelling of the same duplicate is left disclosing on purpose — if this \
-                 changed, the `by_leaf` half shipped without the ruling it needs:\n{v:#}");
+        assert!(effs(fn_entry(&v, "save_bare")).contains(&"Fs".to_string()),
+                "the BARE-leaf spelling of the same duplicate must reach the SAME answer as the \
+                 qualified one — SPEC §4: one qualified name, one definition, the union of its arms. \
+                 A hedge here is the pre-⟨0.35⟩ behaviour:\n{v:#}");
+        assert!(!effs(fn_entry(&v, "save_bare")).contains(&"Unknown".to_string()),
+                "…and the hedge must be GONE, not sitting alongside the answer. The two spellings of \
+                 one duplicate now agree, which is the whole point of the `by_leaf` half:\n{v:#}");
+    }
+
+    /// SOUNDNESS R222 / SPEC §4 (2026-09-05) — THE UNION, IN BOTH SOURCE ORDERS. This is the
+    /// discriminator the suite did not have, and its absence is why the `by_leaf` half looked like a
+    /// pure withdrawal for as long as it did.
+    ///
+    /// EVERY EARLIER `#[cfg]`-TWIN FIXTURE IN THIS FILE CARRIES THE SAME EFFECT ON BOTH ARMS
+    /// (`r222twin`'s `put`, the old `ambkind`), so it cannot tell three different outcomes apart:
+    ///
+    ///   UNION  `['Exec','Fs']` — both arms' effects, which is what SPEC §4 requires
+    ///   PICK   one concrete effect — one configuration's effects charged to another. FABRICATION,
+    ///          and WORSE than the hedge it replaced, because it makes a positive false claim
+    ///   HEDGE  `['Unknown']`  — the pre-⟨0.35⟩ answer
+    ///
+    /// So the arms here carry DIFFERENT effects — `Fs` on one, `Exec` on the other — and the assertion
+    /// is on the CALLER. It is not on `helper`: both `helper` rows already report the union, because a
+    /// report entry is keyed on the qual and merges its units (R129), so asserting there would pass
+    /// under every one of the three outcomes above.
+    ///
+    /// AND IT RUNS THE SAME CRATE WITH THE ARMS SWAPPED. A union is order-independent by construction;
+    /// a pick is not, and R208 is this engine's live example of an answer that depends on which
+    /// definition the scanner reached first. One order alone cannot see that.
+    ///
+    /// Mirrors conformance PART 10's `armsunion`/`armsswap` deliberately — the spec suite is the
+    /// four-way pin, this is the one that fails in seconds.
+    #[test]
+    fn two_cfg_arms_of_one_fn_resolve_to_the_union_in_either_source_order() {
+        let unix_first = "\
+            #[cfg(unix)]\n\
+            pub fn helper() { std::fs::read(\"/etc/a\").ok(); }\n\
+            #[cfg(windows)]\n\
+            pub fn helper() { std::process::Command::new(\"x\").status().ok(); }\n\
+            pub fn go() { helper(); }\n\
+            pub fn solo() { std::fs::read(\"/etc/b\").ok(); }\n\
+            pub fn go_ctl() { solo(); }\n";
+        let windows_first = "\
+            #[cfg(windows)]\n\
+            pub fn helper() { std::process::Command::new(\"x\").status().ok(); }\n\
+            #[cfg(unix)]\n\
+            pub fn helper() { std::fs::read(\"/etc/a\").ok(); }\n\
+            pub fn go() { helper(); }\n\
+            pub fn solo() { std::fs::read(\"/etc/b\").ok(); }\n\
+            pub fn go_ctl() { solo(); }\n";
+        let mut answers: Vec<Vec<String>> = Vec::new();
+        for (name, src) in [("r222armsunion", unix_first), ("r222armsswap", windows_first)] {
+            let v = scan_src_to_json(name, src);
+            // THE CONTROL: a singly-defined callee in the same crate, charged all along. If this is
+            // absent the fixture is not reaching the resolver at all and nothing below means anything.
+            assert!(effs(fn_entry(&v, "go_ctl")).contains(&"Fs".to_string()),
+                    "[{name}] the CONTROL must be charged, or this fixture proves nothing:\n{v:#}");
+            let got = effs(fn_entry(&v, "go"));
+            assert!(got.contains(&"Fs".to_string()) && got.contains(&"Exec".to_string()),
+                    "[{name}] `go` = {got:?}. One definition written as two `#[cfg]` arms resolves to \
+                     the UNION of their effects (SPEC §4). A single concrete effect here is a PICK — \
+                     one configuration's effects charged to another, which is fabrication; \
+                     `['Unknown']` is the pre-⟨0.35⟩ hedge:\n{v:#}");
+            answers.push(got);
+        }
+        assert_eq!(answers[0], answers[1],
+                   "the SAME arm set answered differently in the two source orders: {answers:?} — a \
+                    union is order-independent by construction, so this is R208's shape, an answer that \
+                    depends on which definition the scanner reached first");
     }
 
     /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO. Two GENUINELY DIFFERENT definitions sharing
