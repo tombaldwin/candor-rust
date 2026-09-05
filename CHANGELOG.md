@@ -9,6 +9,27 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R190(e) — a re-export key the alias index REFUSED to admit now discloses.**
+  `reexport_aliases` declines a `<module>::<name>` key three ways: the fan-out cap (more definitions
+  under one key than `REEXPORT_FANOUT_MAX`), a key two modules claim, and R169's macro-hidden-contest
+  guard. Each decline is right — the index will not guess which definition a name means — and each left
+  the calling function resolving to NOTHING, reported pure. Measured on a fixture that COMPILES AND
+  RUNS: thirteen mutually-exclusive `#[cfg(target_os = …)]` glob arms make `imp::pick()` ABSENT while
+  the identical THREE-arm control reads `['Exec']` over a real spawn — the silence appears at 13 and
+  nowhere below it, which is why no hand fixture had found it. Corpus A/B over 1,509 crates.io crates:
+  **94 functions across 3 crates — 0.015% of 647,698 analysed functions, zero concrete effects lost.**
+- **SOUNDNESS R190(c) is NOT closed, and is now priced rather than assumed.** The QUALIFIED-tail
+  spelling of the same refusal (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod sys`, caller
+  `sys::sz()`) still leaves the caller ABSENT. Hedging every ambiguous 2-segment tail measures **45,472
+  functions across 674 of 1,509 crates (7.02% of analysed functions)**, against 0.85% for the whole
+  rest of this family; counting distinct quals only brings it to 5.29%, and additionally requiring that
+  the written path fail to select one candidate brings it to 4.88% — all inside the 8-25%
+  false-uncertainty band that got the hedge-every-untyped-receiver design rejected. The flood is
+  dominated by two things that are not this row's subject: primitive-conversion collisions
+  (`u32::from` with several `impl From<_> for u32`) and a type name two modules share, where the CALL
+  names its module and `tail2` throws that qualifier away. Recorded in `scan.rs` with those numbers so
+  the next attempt starts from the mechanism split.
+
 - ⚠ **SOUNDNESS R184 — an alias/nominal LEAF COLLISION no longer deletes every effect edge through the
   colliding type in silence.** `prim_aliases` is a crate-wide set of bare LEAVES, so a non-nominal
   `pub type H = fn(&str)` in one module makes EVERY `H::method` call in the crate skip local

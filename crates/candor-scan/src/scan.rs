@@ -1683,7 +1683,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // re-exported it (`pub use self::platform::*` makes `imp::platform::doit` nameable as `imp::doit`).
     // A FALLBACK, never a competitor: `reexport_target` consults it only where `by_tail2` holds nothing at
     // all for the call's tail, so no resolution that worked before can be displaced or made ambiguous.
-    let by_reexport = reexport_aliases(&merged.reexports, &fns, &merged.macro_modules);
+    // SOUNDNESS R190(e) — `by_reexport_refused` is the keys `reexport_aliases` declined to admit. It is
+    // an out-param rather than a second return so the index's own control flow (three `continue`s, each
+    // its own reason) stays where it is and is not duplicated by a second pass over the same edges.
+    let mut by_reexport_refused: HashMap<String, &'static str> = HashMap::new();
+    let by_reexport =
+        reexport_aliases(&merged.reexports, &fns, &merged.macro_modules, &mut by_reexport_refused);
 
     // Inverse of trait_impls (impl-TYPE leaf → the trait leaves it impls), for the trait-DEFAULT-method
     // caller fallback below: a call `t.m()` on a concrete type T that does NOT declare `m` but impls a
@@ -2655,6 +2660,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:type alias and nominal type share a leaf".to_string());
+            }
+            // §4 HONESTY — SOUNDNESS R190(e): A RE-EXPORT KEY THE ALIAS INDEX REFUSED TO ADMIT.
+            // `reexport_aliases` declines a key three ways — the fan-out cap, a key two modules claim,
+            // and R169's macro-hidden-contest guard — and each decline is correct (it will not guess
+            // which definition a name means). Each also left the call resolving to NOTHING, with the
+            // caller reported PURE. Measured: thirteen `#[cfg(unix)] pub use crate::gN::*` arms in one
+            // module make `imp::pick()` ABSENT, while the identical THREE-arm control reads ['Exec'] —
+            // the silence appears at 13 and nowhere below it, which is why no fixture found it before.
+            //
+            // Gated to exactly the calls `reexport_target` could have answered — non-method, qualified,
+            // and no `by_tail2` definition — so a name that resolves some other way is untouched. The
+            // reason travels from the index, so an A/B can attribute the three causes separately.
+            // Direction: over-disclosure; the admitted key set is unchanged.
+            if !c.is_macro && !c.method && classified.is_none() && !resolved_local && !aliased
+                && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
+            {
+                if let Some(why) = tail2(&c.path).and_then(|t2| by_reexport_refused.get(&t2)) {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R190EDISCLOSE {} {}", c.path, why); // §E1 HIT COUNTER
+                    }
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why.entry(f.qual.clone()).or_default().insert((*why).to_string());
+                }
             }
             // §4 HONESTY — SOUNDNESS R128, A MACRO-HIDDEN TARGET: a crate-local FREE call
             // (`crate::<module>::<name>`) that resolved to nothing, whose owning MODULE is one whose item
