@@ -1325,7 +1325,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
-    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, callable_aliases: &merged.callable_aliases };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -1403,6 +1402,34 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .cloned()
         .chain(owned_drops.keys().cloned())
         .collect();
+
+    // SOUNDNESS R182 — fn LEAF -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew.
+    // `record_return`/`merge_decls` file every withdrawn candidate under `amb_ret_key`; this reduces them
+    // to the ones a charge could actually have landed on, which is the whole of the flood control. A leaf
+    // whose collision is `parse -> Config` vs `parse -> usize` yields NOTHING here — neither type has a
+    // local `Drop`, so the refusal cost nothing and there is nothing to disclose. Built AFTER
+    // `drop_relevant` for that intersection, which is why `elems` is assembled here rather than beside
+    // the other indexes.
+    let ambiguous_return_leaves: HashMap<String, Vec<String>> = {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for k in merged.rets.keys() {
+            let Some((fn_leaf, ty_leaf)) = crate::model::split_amb_ret_key(k) else { continue };
+            // Only a leaf the index really DID withdraw: a candidate recorded during an intra-file
+            // conflict that a later contributor resolved would otherwise read as ambiguous forever.
+            if !matches!(merged.rets.get(fn_leaf), Some(None)) {
+                continue;
+            }
+            if drop_relevant.contains(ty_leaf) {
+                m.entry(fn_leaf.to_string()).or_default().push(ty_leaf.to_string());
+            }
+        }
+        for v in m.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        m
+    };
+    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves };
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
@@ -1737,6 +1764,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if f.unresolved {
             direct.entry(f.qual.clone()).or_default().insert("Unknown");
             unknown_why.entry(f.qual.clone()).or_default().insert("callback:unresolved call".to_string());
+        }
+        // SOUNDNESS R182/R196 — A REFUSAL MUST DISCLOSE, NOT CERTIFY. Each entry is a place where name
+        // resolution found more than one answer, correctly refused to guess, and then had nothing to
+        // say — so the enclosing function was reported PURE over a destructor that really runs. The
+        // reason kind is `ambiguous:`, SPEC §4's fifth kind, for exactly the argument the
+        // `ambiguous:same-name local defs` site below sets out: one function runs and Rust resolves it
+        // statically, so what failed is this analyser's name resolution, not the program's.
+        for why in &f.refusals {
+            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+            unknown_why.entry(f.qual.clone()).or_default().insert(why.clone());
         }
         // DROP-GLUE (#3): local types this fn CONSTRUCTS that have a local `impl Drop`. The `Drop::drop`
         // body runs at scope exit — an implicit edge the call graph misses, so a guard that flushes/closes
@@ -2564,6 +2601,37 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs".to_string());
             }
+            // SOUNDNESS R190(c) — THE QUALIFIED-TAIL SPELLING OF THE SAME REFUSAL IS *NOT* CLOSED HERE,
+            // AND THE REASON IS A MEASUREMENT. The block above hedges a BARE leaf naming two-or-more local
+            // defs; a QUALIFIED call whose 2-segment tail names two-or-more does not, so
+            //
+            //     #[cfg(unix)]    mod sys { pub fn sz() -> u32 { Command::new("stty")… } }
+            //     #[cfg(windows)] mod sys { pub fn sz() -> u32 { fs::read("x")… } }
+            //     pub fn go_def() -> u32 { sys::sz() }
+            //
+            // still leaves `go_def` ABSENT from `functions[]` while both `sys::sz` rows carry ['Exec','Fs']
+            // (`panel-fixes-2/cfgmod`). It is a real silence and it stays open, PRICED rather than assumed:
+            //
+            //   hedging every ambiguous tail2      45,472 fns / 674 of 1,509 crates  =  7.02% of analyzed
+            //   …counting DISTINCT quals only      34,242 fns / 445 crates           =  5.29%
+            //   …and only where the WRITTEN path
+            //     fails to select one candidate    31,634 fns / 428 crates           =  4.88%
+            //
+            // against 0.85% for the whole rest of this family. `collector.rs`'s own note records that
+            // hedging every untyped receiver was rejected at an 8-25% false-uncertainty flood; this is
+            // that band, and no narrowing above brings it out.
+            //
+            // WHAT THE FLOOD IS MADE OF, read off the hit log rather than guessed — and it is two things
+            // that are not this row's subject:
+            //   * `u32::from` / `u16::from` / `u8::from` — 2,658 of x11rb-protocol's 3,419 hits. A crate
+            //     with several `impl From<_> for u32` blocks keys them all under one tail, and every
+            //     primitive conversion in the crate then reads ambiguous.
+            //   * a type name two modules share (`xproto::QueryVersionRequest::serialize` beside
+            //     `present::…`). The CALL is written with its module and names one definition; `tail2`
+            //     throws that qualifier away. That is a resolution gap in the KEY WIDTH, not a contest
+            //     between definitions — and closing it by RESOLVING (a wider key) would add edges rather
+            //     than `Unknown`s, which is a different change with a different failure direction.
+            // Filed with those numbers so the next attempt starts from the mechanism split, not from here.
             // §4 HONESTY — SOUNDNESS R128, A MACRO-HIDDEN TARGET: a crate-local FREE call
             // (`crate::<module>::<name>`) that resolved to nothing, whose owning MODULE is one whose item
             // list candor could not read in full because an unexpanded item-position macro sits in it.

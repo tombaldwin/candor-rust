@@ -1513,6 +1513,7 @@ pub(crate) fn fninfo(
         ambiguous_enum_leaves: elems.ambiguous_enum_leaves,
         callable_statics: elems.callable_statics,
         callable_aliases: elems.callable_aliases,
+        ambiguous_return_leaves: elems.ambiguous_return_leaves,
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -1526,6 +1527,7 @@ pub(crate) fn fninfo(
         lazy_statics,
         forced_lazies: std::collections::HashSet::new(),
         unresolved: false,
+        refusals: std::collections::BTreeSet::new(),
         err_ret_leaf: result_err_leaf(&sig.output, uses),
         const_strings,
         str_locals: std::collections::HashMap::new(),
@@ -1590,6 +1592,7 @@ pub(crate) fn fninfo(
         unresolved: c.unresolved,
         ret_idents,
         ret_bound_type,
+        refusals: c.refusals.into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
     }
 }
@@ -1823,9 +1826,34 @@ pub(crate) fn record_return(
             rets.insert(leaf, Some(tp));
         }
         Some(Some(prev)) if *prev != tp => {
+            // SOUNDNESS R182 — record BOTH candidates before the withdrawal, so the drop route can
+            // DISCLOSE instead of certifying. Written only here, at a detected conflict, so an
+            // unambiguous leaf costs nothing. See `amb_ret_key` for why the key carries the type.
+            let prev = prev.clone();
+            note_amb_ret(rets, &leaf, &prev);
+            note_amb_ret(rets, &leaf, &tp);
             rets.insert(leaf, None); // conflicting return types — ambiguous, drop
         }
+        Some(None) => {
+            // Already ambiguous from an earlier definition — keep collecting, or the THIRD and later
+            // definitions of a colliding leaf would be invisible to the disclosure.
+            note_amb_ret(rets, &leaf, &tp);
+        }
         _ => {}
+    }
+}
+
+/// SOUNDNESS R182 — file one WITHDRAWN candidate return type under `amb_ret_key`. Only a LOCAL nominal
+/// type is recorded: `local_type_leaf` is the same refusal the drop route applies (a `std`/`core`/
+/// `alloc`-rooted path names no local type, so a collision with one could never have been charged
+/// anything), and recording what could not be charged is exactly the false uncertainty the 8-25% flood
+/// measurement rejected.
+pub(crate) fn note_amb_ret(rets: &mut HashMap<String, Option<String>>, fn_leaf: &str, tp: &str) {
+    if let Some(ty_leaf) = crate::lang::local_type_leaf(tp) {
+        rets.insert(
+            crate::model::amb_ret_key(fn_leaf, &ty_leaf),
+            Some(crate::model::RET_AMB.to_string()),
+        );
     }
 }
 
