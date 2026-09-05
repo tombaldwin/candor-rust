@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev22: FileDecls gained `macro_twins` (R208 — the `macro_rules!` names one file defines twice with
+    // different templates). A rev21 entry has none, so it deserializes EMPTY: "this file twins no macro",
+    // for a file that does — and the consequence is the order-dependent silence the field exists to
+    // disclose, served warm and invisible. Same shape as rev17.
     // rev21: `rets` gained the `<amb>` CANDIDATE entries (R182/R196 — which types the ambiguity rule
     // withdrew from a colliding fn leaf, so the drop route can disclose instead of certifying the
     // caller pure). A rev20 entry has none, so a warm re-scan would find the withdrawal but not the
@@ -112,7 +116,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev21/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev22/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -184,6 +188,15 @@ pub(crate) struct FileDecls {
     /// the template so an effectful macro body isn't silent-pure (R48). String-valued (re-parsed at use).
     #[serde(default)]
     pub(crate) local_macros: HashMap<String, String>,
+    /// SOUNDNESS R208 — the `macro_rules!` NAMES this file defines MORE THAN ONCE with DIFFERENT arm
+    /// tokens. `local_macros` is keyed by BARE NAME and merges last-writer-wins, so which module's
+    /// template R48 expands depends on FILE ORDER: measured, `r5` and `r5b` (the same two files, swapped)
+    /// disagree on whether the caller is charged. The order-dependence is NOT fixed here — an index that
+    /// records duplicates and refuses is a separate mechanism, and refusing would WITHDRAW the charge the
+    /// winning template supplies, which this family does not do without its own A/B. What changes is that
+    /// an invocation of a twinned name now DISCLOSES instead of certifying whichever template won the race.
+    #[serde(default)]
+    pub(crate) macro_twins: Vec<String>,
     /// BLANKET-impl method leaf -> the blanket self-param name (`ext` -> `T` for `impl<T> Ext for T`); "" if
     /// ambiguous. Lets an unresolved `x.ext()` edge to the blanket body `T::ext` (R45).
     #[serde(default)]
@@ -244,6 +257,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut lazy_statics = std::collections::HashSet::new();
     let mut const_strings = HashMap::new();
     let mut local_macros = HashMap::new();
+    let mut macro_twins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut blanket_methods = HashMap::new();
     let mut callable_statics = std::collections::HashSet::new();
     let mut callable_aliases = std::collections::HashSet::new();
@@ -252,7 +266,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::decls::seed_callable_aliases(items, include_tests, &mut callable_aliases);
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
     // an external `pub use`. `uses` is this file's top-level `use` map, as `collect_decls` left it, so a
@@ -282,6 +296,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         callable_aliases: callable_aliases.into_iter().collect(),
         const_strings,
         local_macros,
+        // R208 — drop the `cfg\u{1f}NAME` bookkeeping entries `collect_decls` used to remember which
+        // names it had seen `#[cfg]`-gated; only the twinned NAMES cross this boundary.
+        macro_twins: macro_twins.into_iter().filter(|s| !s.contains('\u{1f}')).collect(),
         blanket_methods,
         // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
         root_reexports: if modpath.is_empty() { collect_root_reexports(items, include_tests) } else { HashMap::new() },
@@ -326,6 +343,10 @@ pub(crate) struct MergedDecls {
     pub(crate) callable_aliases: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
     pub(crate) local_macros: HashMap<String, String>,
+    /// SOUNDNESS R208 — see `FileDecls::macro_twins`. Crate-wide: a name twinned WITHIN one file, plus
+    /// one two files spell differently (the `r5`/`r5b` shape, and the commoner one: `#[cfg]` arms in
+    /// separate platform modules).
+    pub(crate) macro_twins: std::collections::HashSet<String>,
     pub(crate) blanket_methods: HashMap<String, String>,
     /// The crate-ROOT re-exports (`name -> path`, plus the `GLOB_KEY` sentinel), contributed by the root
     /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
@@ -609,8 +630,16 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
     }
     for (k, v) in &fd.local_macros {
+        // SOUNDNESS R208 — the collision is no longer "rare" by assertion: 324 of 1,504 corpus crates
+        // define a `macro_rules!` name more than once (`#[cfg]` twins — anyhow, aho-corasick,
+        // async-compression …). Last-writer-wins STAYS, so nothing this file already charges is
+        // withdrawn; the name is recorded so an invocation of it can disclose.
+        if acc.local_macros.get(k).is_some_and(|prev| prev != v) {
+            acc.macro_twins.insert(k.clone());
+        }
         acc.local_macros.insert(k.clone(), v.clone()); // macro NAME → arm tokens; last-writer-wins on a rare collision
     }
+    acc.macro_twins.extend(fd.macro_twins.iter().cloned());
     for (k, v) in &fd.blanket_methods {
         // blanket method leaf → self-param; a cross-file collision on DIFFERENT params is ambiguous ("").
         match acc.blanket_methods.get(k) {
@@ -859,6 +888,13 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     s.push('\n');
     // local_macros — sorted NAME=arm-tokens pairs. A bare `NAME!(..)` inline-expands the template, so a
     // change to a macro body changes the effects of its invokers → must invalidate their cached FnInfos.
+    s.push_str("macro_twins");
+    let mut mtw: Vec<&String> = m.macro_twins.iter().collect();
+    mtw.sort();
+    for k in mtw {
+        s.push('\u{1f}');
+        s.push_str(k);
+    }
     s.push_str("local_macros");
     let mut lmk: Vec<&String> = m.local_macros.keys().collect();
     lmk.sort();

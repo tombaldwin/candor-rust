@@ -140,6 +140,8 @@ pub(crate) struct CallCollector<'a> {
     /// SOUNDNESS R182 — fn leaf -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew;
     /// see `ElemIndexes::ambiguous_return_leaves` for why it is pre-intersected with `drop_relevant`.
     pub(crate) ambiguous_return_leaves: &'a std::collections::HashMap<String, Vec<String>>,
+    /// SOUNDNESS R208 — the twinned `macro_rules!` names; see `ElemIndexes::macro_twins`.
+    pub(crate) macro_twins: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
@@ -3658,6 +3660,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // code review: `emit!(log x)` on `macro_rules! emit { (log $m)=>{..}; (save $m)=>{fs::write(..)} }`
         // wrongly read Fs). A multi-arm macro is left an honest under-report; anti-fabrication wins over
         // recall. (Single-arm covers the dominant effectful-macro shape — logging wrappers like `trace!`.)
+        // SOUNDNESS R208 — WHICH TEMPLATE THIS EXPANDS DEPENDS ON FILE ORDER, SO SAY SO. `local_macros`
+        // is keyed by bare NAME and merges last-writer-wins, so a crate with `#[cfg(unix)] macro_rules!
+        // same` in one module and `#[cfg(windows)] macro_rules! same` in another expands whichever file
+        // the walk reached last. Measured on `panel-fixes-5/r5` and `r5b` — the same two files, swapped:
+        // one order leaves `a3_collision_hole` SILENT over an executed drop, the other charges it.
+        //
+        // THE PICK IS LEFT ALONE ON PURPOSE, and this is the one row in the refusal family where the
+        // obvious fix is not the safe one. "Record duplicates and REFUSE" is what R208's row asks for,
+        // and refusing here WITHDRAWS the charge the winning template supplies: measured on `r5b`,
+        // `mb::a3_collision_hole` goes ['Fs'] → ['Unknown'], a concrete effect lost. So this adds the
+        // disclosure and nothing else; the order-dependence stays open, now visibly rather than silently.
+        if !mpath.contains("::") && self.macro_twins.contains(&mleaf) {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R208DISCLOSE {mleaf}"); // §E1 HIT COUNTER
+            }
+            self.refusals.insert("ambiguous:same-name macro_rules! definitions".to_string());
+        }
         if !mpath.contains("::")
             && !self.macro_expanding.contains(&mleaf)
             && self.local_macros.contains_key(&mleaf)

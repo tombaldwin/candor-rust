@@ -1514,6 +1514,7 @@ pub(crate) fn fninfo(
         callable_statics: elems.callable_statics,
         callable_aliases: elems.callable_aliases,
         ambiguous_return_leaves: elems.ambiguous_return_leaves,
+        macro_twins: elems.macro_twins,
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -1882,6 +1883,9 @@ pub(crate) fn collect_decls(
     lazy_statics: &mut std::collections::HashSet<String>,
     const_strings: &mut HashMap<String, String>,
     local_macros: &mut HashMap<String, String>,
+    // SOUNDNESS R208 — the names this file defines MORE THAN ONCE with different templates. See
+    // `FileDecls::macro_twins`; the cross-file half is in `merge_decls`.
+    macro_twins: &mut std::collections::BTreeSet<String>,
     blanket_methods: &mut HashMap<String, String>,
     callable_statics: &mut std::collections::HashSet<String>,
     // R161 — `type NAME = <callable>` alias leaves. Collected in the SAME walk and the SAME arm as
@@ -1950,7 +1954,31 @@ pub(crate) fn collect_decls(
                     && m.mac.path.is_ident("macro_rules") =>
             {
                 if let Some(name) = &m.ident {
-                    local_macros.insert(name.to_string(), m.mac.tokens.to_string());
+                    let name = name.to_string();
+                    let tokens = m.mac.tokens.to_string();
+                    // SOUNDNESS R208 — two `#[cfg]`-gated definitions of one name are the commonest
+                    // spelling of this, and within ONE file they are the ONLY spelling of it. A plain
+                    // sequential redefinition (`macro_rules! go { .. }` twice, no attribute) is NOT
+                    // ambiguous: Rust's textual shadowing makes the later definition the one an
+                    // invocation below it expands, which is exactly what last-writer-wins already does.
+                    // MEASURED — `r139_a_local_macro_template_counts_toward_the_body_shadow`'s
+                    // "redefined-macro" case went ['Exec'] -> ['Exec','Unknown'] on the ungated rule,
+                    // an `Unknown` over a program with one correct answer. `#[cfg]` twins have no
+                    // textual order that means anything: only one arm compiles and this scan walks both.
+                    //
+                    // The `cfg\u{1f}` entries are this file's own bookkeeping (which names it has seen
+                    // gated); `file_decls` strips them, so `FileDecls::macro_twins` carries names only.
+                    let gate_key = format!("cfg\u{1f}{name}");
+                    let gated = crate::lang::has_cfg(&m.attrs);
+                    if gated {
+                        macro_twins.insert(gate_key.clone());
+                    }
+                    if local_macros.get(name.as_str()).is_some_and(|prev| *prev != tokens)
+                        && (gated || macro_twins.contains(&gate_key))
+                    {
+                        macro_twins.insert(name.clone());
+                    }
+                    local_macros.insert(name, tokens);
                 }
             }
             _ => {}
@@ -2295,7 +2323,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods, callable_statics, callable_aliases);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases);
                 }
             }
             _ => {}

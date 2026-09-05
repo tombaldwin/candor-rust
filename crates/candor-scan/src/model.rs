@@ -443,6 +443,10 @@ pub(crate) struct ElemIndexes<'a> {
     /// is ambiguous in almost every crate, and hedging on ambiguity ALONE would charge `Unknown` at
     /// every free call of such a name. Entries only exist where the refusal really did withdraw a drop.
     pub(crate) ambiguous_return_leaves: &'a HashMap<String, Vec<String>>,
+    /// SOUNDNESS R208 — the `macro_rules!` names this crate defines more than once with DIFFERENT arm
+    /// tokens; see `cache::FileDecls::macro_twins`. Carries names only: it can name no concrete effect,
+    /// only turn an order-dependent silence into `Unknown`.
+    pub(crate) macro_twins: &'a HashSet<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely
