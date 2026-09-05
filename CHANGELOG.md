@@ -9,6 +9,23 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R208 — an invocation of a `macro_rules!` name the crate defines TWICE now discloses its
+  order-dependence.** `local_macros` is keyed by bare NAME and merges last-writer-wins, so which
+  module's template R48 expands depends on FILE ORDER: measured on the same two files swapped
+  (`panel-fixes-5/r5` and `r5b`), one order leaves the caller SILENT over an executed drop and the
+  other charges it. 324 of 1,504 corpus crates define a `macro_rules!` name more than once (`#[cfg]`
+  twins — anyhow, aho-corasick, async-compression …). **The row's own remedy — "record duplicates and
+  REFUSE" — is deliberately NOT taken, because it WITHDRAWS: measured on `r5b`,
+  `mb::a3_collision_hole` goes `['Fs']` → `['Unknown']`, a concrete effect lost.** So the pick is left
+  exactly as it was and only the disclosure is added: an invocation of a twinned name carries
+  `Unknown` beside `ambiguous:same-name macro_rules! definitions`, and whatever the winning template
+  charged is still charged. The order-dependence stays open — visibly rather than silently. A plain
+  sequential redefinition in one file is NOT twinned: Rust's textual shadowing makes the later
+  definition the one an invocation below it expands, which is what last-writer-wins already does, so
+  the intra-file rule fires only when a `#[cfg]` is involved. Corpus A/B over 1,509 crates.io crates:
+  **1,477 functions across 56 crates — 0.23% of 647,698 analysed functions, zero concrete effects
+  lost.** Cache schema rev22.
+
 - ⚠ **SOUNDNESS R190(e) — a re-export key the alias index REFUSED to admit now discloses.**
   `reexport_aliases` declines a `<module>::<name>` key three ways: the fan-out cap (more definitions
   under one key than `REEXPORT_FANOUT_MAX`), a key two modules claim, and R169's macro-hidden-contest
