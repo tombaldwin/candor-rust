@@ -3890,6 +3890,13 @@ pub(crate) fn reexport_aliases(
     // alone and `file::tempfile_in`'s `imp::create(dir)` resolved into the DIRECTORY module — a wrong
     // attribution that also lost `file::imp::unix::create`'s `Env`.
     macro_modules: &std::collections::HashSet<String>,
+    // SOUNDNESS R190(e) — out-param: the keys this index REFUSED to admit, and why. Every `continue`
+    // below is a refusal between competing definitions, and every one of them left a caller of that
+    // name resolving to NOTHING — reported PURE, with no `Unknown` and no reason. The index cannot
+    // disclose by itself (it is built long before any call site is read), so it records what it refused
+    // and `scan.rs` hedges the calls that land on one. Add-only: nothing here changes which keys are
+    // ADMITTED, so no edge this index used to supply is withdrawn.
+    refused: &mut HashMap<String, &'static str>,
 ) -> HashMap<String, Vec<String>> {
     use std::collections::BTreeMap;
     // module key -> name -> (which edges put it there, which definitions it stands for). The module key
@@ -4060,11 +4067,23 @@ pub(crate) fn reexport_aliases(
             {
                 effective = explicit_quals;
             }
+            let key = format!("{mlast}::{name}");
             if effective.is_empty() || effective.len() > REEXPORT_FANOUT_MAX {
+                // R190(e). The cap is a never-guess rule and it stays one — but ABOVE it the caller went
+                // ABSENT. Measured: thirteen `#[cfg(unix)] pub use crate::gN::*` arms in one module and
+                // `imp::pick()` reads pure, while the identical three-arm control reads ['Exec'].
+                if !effective.is_empty() {
+                    refused.insert(key, "ambiguous:re-export fan-out above the cap");
+                }
                 continue;
             }
-            let key = format!("{mlast}::{name}");
             if claimants.get(&key).is_none_or(|c| c.len() != 1) {
+                // The same shape one test over: the 2-segment key is claimed by two modules (or by none
+                // this index can see), so it names no single definition and the call resolves to nothing.
+                // Recorded under its own reason so the two can be told apart in an A/B.
+                if claimants.contains_key(&key) {
+                    refused.insert(key, "ambiguous:re-export key claimed by two modules");
+                }
                 continue;
             }
             // …and the claimant this index CANNOT SEE — applied ONLY to the keys the multi-edge union
@@ -4083,6 +4102,9 @@ pub(crate) fn reexport_aliases(
                 if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                     eprintln!("R169MACROCONTEST {key} (module {module})");
                 }
+                // R190(e), third spelling: R169's guard refuses this key because a macro-hidden module
+                // could also own it. Refusing is right; going silent about it is not.
+                refused.insert(key, "ambiguous:re-export key a macro-hidden module could also own");
                 continue;
             }
             if from_edges.len() > 1 && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {

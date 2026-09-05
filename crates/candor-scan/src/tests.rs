@@ -4144,6 +4144,39 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert_eq!(why(&v, "b::go_h"),
                    vec!["ambiguous:type alias and nominal type share a leaf".to_string()]);
 
+        // R190(e) — the re-export fan-out CAP. Thirteen mutually-exclusive `#[cfg(target_os = …)]` glob
+        // arms put 13 quals under one alias key; `reexport_aliases` drops the key (right — it will not
+        // guess) and `go` then resolved to nothing. The three-arm control is the same shape under the cap.
+        // COMPILES AND RUNS (§E3): the arms are mutually exclusive, so exactly one is live, and the live
+        // one really spawns a process. A same-cfg 13-glob spelling is E0659 and would be no evidence.
+        let oses = ["macos", "linux", "windows", "freebsd", "netbsd", "openbsd", "dragonfly",
+                    "android", "ios", "solaris", "illumos", "haiku", "redox"];
+        let mut r190e = String::new();
+        for (i, _) in oses.iter().enumerate() {
+            r190e.push_str(&format!(
+                "pub mod g{i} {{ pub fn pick() -> u32 {{ std::process::Command::new(\"echo\").status().ok(); {i} }} }}\n"));
+        }
+        r190e.push_str("pub mod imp {\n");
+        for (i, o) in oses.iter().enumerate() {
+            r190e.push_str(&format!("    #[cfg(target_os = \"{o}\")] pub use crate::g{i}::*;\n"));
+        }
+        r190e.push_str("}\npub fn go() -> u32 { imp::pick() }\n");
+        for (i, _) in oses.iter().take(3).enumerate() {
+            r190e.push_str(&format!(
+                "pub mod k{i} {{ pub fn kick() -> u32 {{ std::process::Command::new(\"echo\").status().ok(); {i} }} }}\n"));
+        }
+        r190e.push_str("pub mod kmp {\n");
+        for (i, o) in oses.iter().take(3).enumerate() {
+            r190e.push_str(&format!("    #[cfg(target_os = \"{o}\")] pub use crate::k{i}::*;\n"));
+        }
+        r190e.push_str("}\npub fn go_ctl() -> u32 { kmp::kick() }\n");
+        let v = scan_fixture("rf190e", &r190e);
+        assert_eq!(fixture_effects(&v, "go_ctl"), vec!["Exec".to_string()],
+                   "CONTROL: three arms fit under REEXPORT_FANOUT_MAX — same shape, keeps its Exec");
+        assert_eq!(fixture_effects(&v, "go"), vec!["Unknown".to_string()],
+                   "R190(e): above the cap the key is dropped and `go` went ABSENT over a real spawn");
+        assert_eq!(why(&v, "go"), vec!["ambiguous:re-export fan-out above the cap".to_string()]);
+
     }
 
     /// SOUNDNESS R182/R196 — THE FABRICATION CONTROLS, which are the reason the two refusals exist at all.
