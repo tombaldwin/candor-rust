@@ -9,6 +9,19 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R184 — an alias/nominal LEAF COLLISION no longer deletes every effect edge through the
+  colliding type in silence.** `prim_aliases` is a crate-wide set of bare LEAVES, so a non-nominal
+  `pub type H = fn(&str)` in one module makes EVERY `H::method` call in the crate skip local
+  resolution — including the calls that mean an unrelated `struct H` a module over. The skip itself is
+  right and stays: it is what stops sled's `type Inner = [u8; CUTOFF]` inheriting a same-named
+  `struct Inner`'s effectful `Default`. What was wrong is that the skipped call left no edge and no
+  disclosure: measured, `b::S::go_vec`/`go_idx`/`go_direct` were all ABSENT from `functions[]` while
+  the one-variable control `b::T::go_vec` (leaf `K`, colliding with nothing) read `['Fs']` over the
+  identical `fs::write`. The skip now discloses `Unknown` with reason
+  `ambiguous:type alias and nominal type share a leaf`, and only where it actually cost an edge (the
+  tail names a definition this scan read). Corpus A/B over 1,509 crates.io crates: **272 functions
+  across 19 crates — 0.04% of 647,698 analysed functions, and zero functions lost a concrete effect.**
+
 - ⚠ **SOUNDNESS R182/R196 — the drop route's two REFUSALS now DISCLOSE instead of certifying the caller
   pure.** `ctor_leaf_from_call_returns` declines when a fn leaf resolves to more than one definition —
   because two definitions disagree about the return type (R182), or because a UNIT-returning twin means

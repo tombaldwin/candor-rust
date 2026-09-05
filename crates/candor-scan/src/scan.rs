@@ -2632,6 +2632,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             //     between definitions — and closing it by RESOLVING (a wider key) would add edges rather
             //     than `Unknown`s, which is a different change with a different failure direction.
             // Filed with those numbers so the next attempt starts from the mechanism split, not from here.
+            // §4 HONESTY — SOUNDNESS R184: THE ALIAS/NOMINAL LEAF COLLISION. `prim_aliases` is a
+            // crate-wide set of BARE LEAVES (`cache.rs`'s merge says so: "set union — order-independent"),
+            // so a `type H = fn(&str)` in one module makes EVERY `H::method` call in the crate skip local
+            // resolution — including the calls that mean an unrelated `struct H` one module over. The
+            // skip is right: it is what stops sled's `type Inner = [u8; CUTOFF]` inheriting a same-named
+            // `struct Inner`'s effectful `Default`. The SILENCE is not: measured, `b::S::go_vec`/
+            // `go_idx`/`go_direct` all ABSENT while the one-variable control `b::T::go_vec` (leaf `K`,
+            // colliding with nothing) reads ['Fs'] over the identical `fs::write`.
+            //
+            // Fires only where the alias skip actually COST something — the tail names a definition this
+            // scan read and would otherwise have edged to. Where the leaf is an alias and nothing else
+            // (the sled case's own `Inner::default()` has no local `impl Default` unit to find) the
+            // condition is false and nothing is emitted. Direction: over-disclosure, and the sled control
+            // keeps working because `Unknown` is not `Clock`/`Env` — the fabrication it exists to stop is
+            // a CONCRETE effect, which this cannot produce.
+            if !c.is_macro && classified.is_none() && !resolved_local && aliased && resolvable
+                && tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
+            {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R184DISCLOSE {}", c.path); // §E1 HIT COUNTER
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:type alias and nominal type share a leaf".to_string());
+            }
             // §4 HONESTY — SOUNDNESS R128, A MACRO-HIDDEN TARGET: a crate-local FREE call
             // (`crate::<module>::<name>`) that resolved to nothing, whose owning MODULE is one whose item
             // list candor could not read in full because an unexpanded item-position macro sits in it.

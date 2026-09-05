@@ -4122,6 +4122,28 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert_eq!(why(&v, "drop_limit"),
                    vec!["ambiguous:unit-returning twin of a constructing fn".to_string()]);
 
+        // R184 — `prim_aliases` is a crate-wide set of bare LEAVES, so a NON-NOMINAL `type H = fn(&str)`
+        // in one module makes every `H::method` call in the crate skip local resolution, including the
+        // ones that mean an unrelated `struct H`. The skip is right (it is what stops sled's
+        // `type Inner = [u8; N]` inheriting a same-named struct's effectful `Default`); the silence is not.
+        let r184 = "pub mod a { pub type H = fn(&str); pub fn use_it(f: H) { f(\"x\") } }\n\
+                    pub mod b {\n\
+                      pub struct H;\n\
+                      impl H { pub fn run(&self, p: &str) { let _ = std::fs::write(p, \"x\"); } }\n\
+                      pub struct K;\n\
+                      impl K { pub fn run(&self, p: &str) { let _ = std::fs::write(p, \"x\"); } }\n\
+                      pub fn go_h(p: &str) { H.run(p) }\n\
+                      pub fn go_k(p: &str) { K.run(p) }\n\
+                    }\n";
+        let v = scan_fixture("rf184", r184);
+        assert_eq!(fixture_effects(&v, "b::go_k"), vec!["Fs".to_string()],
+                   "CONTROL: leaf `K` collides with no alias — identical body, keeps its Fs");
+        assert_eq!(fixture_effects(&v, "b::go_h"), vec!["Unknown".to_string()],
+                   "R184: leaf `H` names both a non-nominal alias and a local struct; the skip must \
+                    DISCLOSE rather than delete the edge in silence");
+        assert_eq!(why(&v, "b::go_h"),
+                   vec!["ambiguous:type alias and nominal type share a leaf".to_string()]);
+
     }
 
     /// SOUNDNESS R182/R196 — THE FABRICATION CONTROLS, which are the reason the two refusals exist at all.
@@ -4129,6 +4151,17 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// these guards were traded for.
     #[test]
     fn the_refusal_disclosures_do_not_reopen_the_fabrications_the_refusals_closed() {
+        // The sled `IVec` case `prim_aliases` exists for: `type Inner = [u8; N]` names a type with NO
+        // local impl, so `Inner::default()` is the ARRAY's, not the same-named struct's effectful one.
+        let sled = "pub struct Inner { pub n: u32 }\n\
+                    impl Default for Inner { fn default() -> Self { let _ = std::fs::read(\"/x\"); Inner { n: 0 } } }\n\
+                    pub type IVecInner = [u8; 4];\n\
+                    pub mod v { pub type Inner = [u8; 4]; pub fn inline() -> usize { let a = Inner::default(); a.len() } }\n";
+        let v = scan_fixture("rfsled", sled);
+        assert!(!fixture_effects(&v, "v::inline").contains(&"Fs".to_string()),
+                "the alias skip must still refuse the same-named STRUCT's effectful Default — a \
+                 fabrication on a provably-pure path is what `prim_aliases` was added for");
+
         // R174(b)'s git2 shape: a free `pub fn init()` (unit) beside `Repository::init() -> Repository`
         // (Drop). The unit twin must keep the phantom `Repository::drop` edge OFF `git2_shape`.
         let git2 = "pub mod repo {\n\
