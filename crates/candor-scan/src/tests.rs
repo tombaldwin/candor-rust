@@ -12079,6 +12079,79 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 "a local `mine::Command::spawn` captured a std `Command::spawn` and silenced it:\n{v:#}");
     }
 
+    /// SOUNDNESS R222/R129 — TWO `#[cfg]` ARMS OF ONE FUNCTION ARE ONE DEFINITION, NOT AN AMBIGUITY.
+    /// `by_tail2` pushed `f.qual` once per analysed UNIT, so a qual carried by two units held TWO
+    /// entries, `resolve_target`'s `len() == 1` uniqueness filter read "ambiguous", and the call
+    /// resolved to NOTHING — a lost edge on a call that was never ambiguous, with NO disclosure beside
+    /// it. 11,230 functions were in that state across 1,509 crates.io crates.
+    ///
+    /// GROUND TRUTH IS EXECUTED (§E3): this crate was built and `cargo run` wrote 5, 4 and 5 bytes to
+    /// three real files. Pre-fix `save_twin` was ABSENT from the report and `deny Fs save_twin` exited
+    /// 0 over a real `fs::write`; post-fix it exits 1.
+    ///
+    /// THE CONTROL IS IN THE SAME FIXTURE: `save_ctl` calls a singly-defined `put_once`, is otherwise
+    /// identical, and was charged `Fs` all along — so the assertion is a one-variable comparison, not
+    /// an absence.
+    ///
+    /// `save_bare` IS THE HALF THIS COMMIT DELIBERATELY LEAVES OPEN, and it is asserted here so the
+    /// boundary is a pinned fact rather than an omission. The same duplicate reaches `by_leaf`, where
+    /// the bare-call path DISCLOSES (`Unknown ambiguous:same-name local defs`) instead of going
+    /// silent, so it is not the cardinal sin — and deduplicating `by_leaf` too would WITHDRAW that
+    /// disclosure on 1,400 corpus rows for +125 concrete effects, which is a ruling, not a bug fix.
+    /// See the CHANGELOG entry.
+    #[test]
+    fn two_cfg_arms_of_one_fn_are_one_definition_not_an_ambiguity() {
+        let v = scan_src_to_json("r222twin", "\
+            pub mod sink {\n\
+                #[cfg(unix)]\n\
+                pub fn put(p: &str, b: &str) -> std::io::Result<()> { std::fs::write(p, b) }\n\
+                #[cfg(not(unix))]\n\
+                pub fn put(p: &str, b: &str) -> std::io::Result<()> { std::fs::write(p, b) }\n\
+                pub fn put_once(p: &str, b: &str) -> std::io::Result<()> { std::fs::write(p, b) }\n\
+            }\n\
+            pub fn save_twin(p: &str) -> std::io::Result<()> { sink::put(p, \"twin\\n\") }\n\
+            pub fn save_ctl(p: &str) -> std::io::Result<()> { sink::put_once(p, \"ctl\\n\") }\n\
+            #[cfg(unix)]\n\
+            pub fn emit(p: &str) -> std::io::Result<()> { std::fs::write(p, \"emit\\n\") }\n\
+            #[cfg(not(unix))]\n\
+            pub fn emit(p: &str) -> std::io::Result<()> { std::fs::write(p, \"emit\\n\") }\n\
+            pub fn save_bare(p: &str) -> std::io::Result<()> { emit(p) }\n");
+        assert!(effs(fn_entry(&v, "save_ctl")).contains(&"Fs".to_string()),
+                "the CONTROL must be charged, or this fixture proves nothing:\n{v:#}");
+        assert!(effs(fn_entry(&v, "save_twin")).contains(&"Fs".to_string()),
+                "a QUALIFIED call to a `#[cfg]`-twinned fn was refused as AMBIGUOUS and certified its \
+                 caller PURE over a real `fs::write` — SOUNDNESS R222:\n{v:#}");
+        assert!(effs(fn_entry(&v, "save_bare")).contains(&"Unknown".to_string()),
+                "the BARE-leaf spelling of the same duplicate is left disclosing on purpose — if this \
+                 changed, the `by_leaf` half shipped without the ruling it needs:\n{v:#}");
+    }
+
+    /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO. Two GENUINELY DIFFERENT definitions sharing
+    /// one key are a real ambiguity and must still be refused — deduplication collapses EQUAL quals
+    /// only, never distinct ones. `mod a`'s `Bar::go` beside `mod b`'s `Bar::go` are two quals sharing
+    /// a `tail2`, which is R190(c)'s subject and is untouched here.
+    ///
+    /// Measured over the corpus rather than argued: `by_tail2` dedup ADDS 1,941 rows and removes 5,
+    /// none of which loses a concrete effect, and the `ambiguous:same-name local defs` disclosure count
+    /// moves by 15 rows — the refusals that were about a real collision all survive. EXECUTED: the
+    /// fixture writes 5 real bytes through `a::Bar::go`.
+    #[test]
+    fn two_different_definitions_sharing_a_tail_are_still_an_ambiguity() {
+        let v = scan_src_to_json("r222realamb", "\
+            pub mod a {\n\
+                pub struct Bar;\n\
+                impl Bar { pub fn go(p: &str) -> std::io::Result<()> { std::fs::write(p, \"real\\n\") } }\n\
+            }\n\
+            pub mod b {\n\
+                pub struct Bar;\n\
+                impl Bar { pub fn go(_p: &str) -> std::io::Result<()> { Ok(()) } }\n\
+            }\n\
+            pub fn caller(p: &str) -> std::io::Result<()> { a::Bar::go(p) }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "caller"),
+                "`Bar::go` names TWO distinct definitions; resolving it would guess, and this engine \
+                 under-reports rather than guessing (SOUNDNESS R190(c), still open):\n{v:#}");
+    }
+
     /// SOUNDNESS R223 — THE PUBLISHED CARDINAL SIN. `tail2` throws the crate qualifier away, so a call
     /// written into a DEPENDENCY (`walkdir::DirEntry::metadata`) matches a same-named LOCAL definition,
     /// `t == f.qual` drops the edge as a self-reference, and `resolved_local` then suppresses the `Fs`
