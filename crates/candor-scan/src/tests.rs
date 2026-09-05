@@ -15693,23 +15693,42 @@ pub fn go() {{ imp::doit(); }}
                 "the discriminator: `tmpl_ctrl_direct` is `tmpl_hole` with the macro spelled out, so it \
                  was already charged by R194 in every build. What the rows above test is exactly the \
                  macro's INVISIBILITY, nothing else:\n{v:#}");
-        // THE OVER-CHARGE CONTROLS. A by-value argument is MOVED into the callee and dies in ITS frame
-        // (executed: 0 drops in this frame, 1 inside `use_h_val`), which the caller inherits through the
-        // call edge — so the exemption has to survive being written through a macro.
-        for n in ["spine_tmpl", "spine_nested"] {
-            assert!(!fn_entry(&v, n)["calls"].to_string().contains("H::drop"),
-                    "`{n}` puts the construction on the `?` operand's VALUE SPINE as a by-value argument. \
-                     A template's TAIL and a nested macro's VALUE are on that spine too, so the two-step \
-                     spine test has to reach inside the definition and inside the nested parse; charging \
-                     here is published's blanket fabrication back again (executed: 0 drops in this \
-                     frame):\n{v:#}");
-        }
-        // ITS SPELLED-OUT TWIN IS CHARGED, IN EVERY BUILD INCLUDING PUBLISHED 0.34.0, and saying so here
-        // is the point: `spine_direct` writes `H::new("a")` in the body, so R172's site gate sees a
-        // construction site that no escape root reaches and refuses the leaf. The macro spellings record
-        // NO site (a site `mark_escape` can never match would charge every macro construction), so they
-        // are quieter — a pre-existing asymmetry this row does not touch, and the executed answer, 0
-        // in-frame drops, is the one the macro rows give.
+        // THE BY-VALUE-ARGUMENT ROWS, NOW ASSERTED AS PARITY WITH THEIR DIRECT TWIN RATHER THAN AS AN
+        // EXEMPTION — because the exemption was never there. A by-value argument is MOVED into the
+        // callee and dies in ITS frame (executed: 0 drops in this frame, 1 inside `use_h_val`), so
+        // charging a `H::drop` EDGE here is an over-report. `spine_direct`, the spelled-out twin, has
+        // been charged by the R172 site gate in published 0.34.0 and in every build since: R172 keys on
+        // construction SITES and has no by-value-argument exemption at all, so the site no escape root
+        // reaches refuses the leaf. Until the shared macro reading landed, the macro spellings recorded
+        // NO SITE, and these three assertions read as "the spine exemption survived the macro" when what
+        // they actually measured was the macro's INVISIBILITY — the same invisibility that made
+        // `out.push(mk_h!("a"))` beside an escaping `H` a silent under-report. Four controls in this file
+        // asserted it; all four had a direct twin that failed the same assertion at HEAD (measured).
+        //
+        // So the property asserted here is the one the macro gate exists for: THE MACRO SPELLING ANSWERS
+        // AS THE DIRECT SPELLING DOES. The residual over-report they now share is the site gate's
+        // missing by-value-argument exemption, which is a separate defect with a SILENCING direction
+        // (marking a moved-in argument as escaping withdraws a charge) and needs its own A/B.
+        assert_eq!(
+            fn_entry(&v, "spine_tmpl")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "spine_direct")["calls"].to_string().contains("H::drop"),
+            "`spine_tmpl` puts the construction on the `?` operand's VALUE SPINE as a by-value \
+             argument, and `spine_direct` writes the identical construction without a macro. They must \
+             agree. If they do not, the shared macro reading has stopped seeing what the direct walk \
+             sees — which is the silent under-report this whole family is about:\n{v:#}");
+        // `spine_nested` is the ONE that still disagrees, and it is named here rather than left to
+        // read as an exemption: a macro NESTED inside a macro's tokens is where the shared reading
+        // stops (its parse needs its own base), so its constructions are still invisible to the site
+        // half. The property gates count the same gap — `macro=nested` and `ctor=mac_nested` are still
+        // registered in soundness/known_open.tsv. When it closes, this assertion flips to the parity
+        // form above.
+        assert!(!fn_entry(&v, "spine_nested")["calls"].to_string().contains("H::drop"),
+                "`spine_nested` reaches its construction through a macro inside a macro, which the \
+                 shared macro reading deliberately stops at. If this starts charging, nested readings \
+                 have landed and this row should be asserted as parity with `spine_direct` instead — \
+                 and soundness/known_open.tsv should have shrunk by the `nested` shapes:\n{v:#}");
+        // AND THE TWIN ITSELF IS STILL CHARGED, so the parity above cannot be satisfied by both rows
+        // going quiet.
         assert!(fn_entry(&v, "spine_direct")["calls"].to_string().contains("H::drop"),
                 "`spine_direct` is charged by the R172 SITE gate in published 0.34.0 and in every build \
                  since. If this ever goes quiet, the two controls above stop being evidence that the \
@@ -15960,6 +15979,120 @@ pub fn go() {{ imp::doit(); }}
                  0.34.0's blanket veto back again:\n{v:#}");
     }
 
+    /// SOUNDNESS R226 — THE SITE WALK AND THE ESCAPE WALK NOW READ A MACRO THE SAME WAY.
+    ///
+    /// R172's site gate suppresses a leaf only when EVERY construction of it in the body is one of the
+    /// escaping sites, so a construction one walk can see and the other cannot decides the answer
+    /// twice over, in opposite directions:
+    ///
+    ///   * the SITE walk could not see a `macro_rules!` template, statement-only tokens, or a block
+    ///     inside macro tokens, so `out.push(mk_h!("a")); let h = H::try_new(m, "b")?; let _ = out;
+    ///     Ok(h)` had exactly ONE site — the escaping one — and the gate certified the function pure
+    ///     while an `H::drop` really ran in that frame. A CARDINAL SIN, and its direct twin
+    ///     `out.push(H::new("a"))` was charged all along.
+    ///   * the ESCAPE walk could not see them either, so `pub fn esc_tmpl() -> H { mk_h!("a") }` —
+    ///     which drops NOTHING in this frame — was charged, because the leaf never reached the
+    ///     escaping set at all. A FABRICATION, and its direct twin `H::new("a")` was correctly absent.
+    ///
+    /// R199, R203, R204 and R210 each closed one spelling of the first half INSIDE a `?` operand,
+    /// because every walk they added is gated on an open `?` and writes only `TryExit::interior`. None
+    /// of them could reach either half outside one. `macro_reading` is the single reading both walks
+    /// take, and `macro_reading_ordinals` the single numbering that carries site identity between two
+    /// independent parses of one token stream.
+    ///
+    /// EXECUTED GROUND TRUTH, `mem::forget` on every return so only in-frame drops count: the four
+    /// `dies_*` rows drop 1 each, the eight `esc_*` rows drop 0. Measured against the pre-change build
+    /// (`7dfe710`): `dies_tmpl`/`dies_blocktok`/`dies_stmt_tmpl` ABSENT -> charged, and
+    /// `esc_tmpl`/`esc_vec_tmpl`/`esc_push_tmpl` charged -> ABSENT. Every direct twin is unchanged in
+    /// both builds, which is what makes the macro spelling the variable under test.
+    ///
+    /// `esc_stmt_tmpl` is the RESIDUAL, recorded rather than hidden: a STATEMENT template that stores
+    /// its construction into a macro-parameter binding (`$o.push(x)`) which the CALLER returns. The
+    /// value's fate is decided by a name that exists only after substitution, so no reading of the
+    /// definition can tell whether it escapes, and it is charged. That over-charge is at parity with
+    /// the pre-change build, which charged it too.
+    #[test]
+    fn one_macro_reading_serves_the_site_walk_and_the_escape_walk() {
+        let v = scan_src_to_json("r226read", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            #[macro_export] macro_rules! idm { ($e:expr) => { $e } }
+            #[macro_export] macro_rules! mk_h { ($p:expr) => { $crate::H::new($p) } }
+            #[macro_export] macro_rules! push_h { ($o:expr, $p:expr) => {{ let x = $crate::H::new($p); $o.push(x); }} }
+
+            pub fn dies_direct(m: u32) -> Result<H, ()> {
+                let mut out = Vec::new(); out.push(H::new("a"));
+                let h = H::try_new(m, "b")?; let _ = out; Ok(h)
+            }
+            pub fn dies_tmpl(m: u32) -> Result<H, ()> {
+                let mut out = Vec::new(); out.push(mk_h!("a"));
+                let h = H::try_new(m, "b")?; let _ = out; Ok(h)
+            }
+            pub fn dies_blocktok(m: u32) -> Result<H, ()> {
+                let mut out = Vec::new(); idm!({ out.push(H::new("a")); });
+                let h = H::try_new(m, "b")?; let _ = out; Ok(h)
+            }
+            pub fn dies_stmt_tmpl(m: u32) -> Result<H, ()> {
+                let mut out = Vec::new(); push_h!(out, "a");
+                let h = H::try_new(m, "b")?; let _ = out; Ok(h)
+            }
+
+            pub fn esc_direct() -> H { H::new("a") }
+            pub fn esc_tmpl() -> H { mk_h!("a") }
+            pub fn esc_vec_direct() -> Vec<H> { vec![H::new("a")] }
+            pub fn esc_vec_tmpl() -> Vec<H> { vec![mk_h!("a")] }
+            pub fn esc_push_direct() -> Vec<H> { let mut v = Vec::new(); v.push(H::new("a")); v }
+            pub fn esc_push_tmpl() -> Vec<H> { let mut v = Vec::new(); v.push(mk_h!("a")); v }
+            pub fn esc_stmt_direct() -> Vec<H> { let mut v = Vec::new(); { let x = H::new("a"); v.push(x); } v }
+            pub fn esc_stmt_tmpl() -> Vec<H> { let mut v = Vec::new(); push_h!(v, "a"); v }
+"#);
+        // A PURE function is omitted from `functions[]` entirely, so "absent" and "present with no
+        // `H::drop` edge" are the same answer and both mean NOT CHARGED. Reading `fn_entry` directly
+        // would panic on exactly the rows this change is supposed to make pure.
+        let charged = |n: &str| {
+            v["functions"].as_array().unwrap().iter().any(|f| {
+                f["fn"] == n && f["calls"].to_string().contains("H::drop")
+            })
+        };
+        // THE SILENCES. Each row's construction dies in its own frame (executed: 1 in-frame drop) while
+        // a DIFFERENT value of the same leaf escapes by return, which is the only shape where R172's
+        // site gate is the deciding mechanism. Before the shared reading the macro spellings were
+        // ABSENT while `dies_direct` was charged.
+        for n in ["dies_direct", "dies_tmpl", "dies_blocktok", "dies_stmt_tmpl"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()) && charged(n),
+                    "`{n}` builds an `H` that dies in its own frame beside a same-leaf value that \
+                     escapes. The macro spellings were ABSENT before the site walk could read a \
+                     template, statement-only tokens or a block inside macro tokens — a silent \
+                     under-report against an executed drop, with `dies_direct` charged beside \
+                     them:\n{v:#}");
+        }
+        // THE FABRICATIONS, the same asymmetry read from the other side. Nothing drops in these frames
+        // (executed: 0), and the macro spellings were charged because the ESCAPE walk could not see
+        // what the collector's own R48 expansion had already charged.
+        for n in ["esc_direct", "esc_tmpl", "esc_vec_direct", "esc_vec_tmpl",
+                  "esc_push_direct", "esc_push_tmpl"] {
+            assert!(!charged(n),
+                    "`{n}` hands its construction to the caller and drops nothing in this frame \
+                     (executed: 0 in-frame drops). The macro spellings were charged before the escape \
+                     walk read the same template the site walk does; their direct twins were absent in \
+                     both builds, which is what identifies the macro as the variable:\n{v:#}");
+        }
+        // THE RESIDUAL, at pre-change parity. A statement template stores through a macro PARAMETER
+        // (`$o`), a name that exists only after substitution, so no reading of the definition can say
+        // whether the value escapes. It is charged; `esc_stmt_direct`, where the same statements are
+        // written out and the escape is visible, is not.
+        assert!(charged("esc_stmt_tmpl") && !charged("esc_stmt_direct"),
+                "`esc_stmt_tmpl` stores its construction into a macro-parameter binding the caller \
+                 returns, so the definition alone cannot tell that it escapes and it is over-charged \
+                 (executed: 0 in-frame drops) — the pre-change build charged it too. If this ever goes \
+                 quiet, say by what mechanism, because the mechanism that could do it is the one that \
+                 loses `dies_stmt_tmpl`:\n{v:#}");
+    }
+
     /// SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules! lm { .. }` written
     /// inside a function body is a `Stmt::Item`. `decls.rs` builds R48's `macro_rules!` index from
     /// ITEM-level definitions only, and `walk_block` threw every `Stmt::Item` away, so a body-local
@@ -16037,6 +16170,11 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn body_local_spine_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
 "#);
         assert!(effs(fn_entry(&v, "body_local_hole")).contains(&"Fs".to_string()),
                 "`body_local_hole` builds an `H` inside its `?`'s operand through a `macro_rules!` \
@@ -16058,12 +16196,20 @@ pub fn go() {{ imp::doit(); }}
                  the body-local `same2!` constructs an `H` and the crate-level `same2!` of that name \
                  does not, so only a walk that reads the overlay can put the leaf in `interior` \
                  (executed: 1 in-frame drop on the error exit):\n{v:#}");
-        assert!(!fn_entry(&v, "body_local_spine")["calls"].to_string().contains("H::drop"),
-                "THE OVER-CHARGE CONTROL. The same body-local construction as a by-value ARGUMENT on \
-                 the `?` operand's value spine is moved into the callee and dies in ITS frame \
-                 (executed: 0 drops here, 1 inside `use_h_val`). R199's two-step spine exemption has to \
-                 survive being reached through the body overlay exactly as it does through the crate \
-                 index; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "body_local_spine")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "body_local_spine_direct")["calls"].to_string().contains("H::drop"),
+            "The same body-local construction as a by-value ARGUMENT on the `?` operand's value spine \
+             is moved into the callee and dies in ITS frame (executed: 0 drops here, 1 inside \
+             `use_h_val`), and `body_local_spine_direct` writes it with no macro. THE TWO MUST AGREE \
+             —              the by-value-argument case is asserted as PARITY WITH ITS DIRECT TWIN, not as an \
+             exemption. R172's site gate keys on construction SITES and has no by-value-argument \
+             exemption at all, so the spelled-out twin has been charged since published 0.34.0; \
+             while a macro-borne construction recorded no site, this row read as \"the spine \
+             exemption survived the macro\" and actually measured the macro's INVISIBILITY — the \
+             same invisibility that lost a real drop one spelling over. The shared over-report is \
+             the site gate's missing by-value exemption, a separate defect whose fix WITHDRAWS a \
+             charge and needs its own A/B:\n{v:#}");
     }
 
     /// SOUNDNESS R206, SECOND INSTANCE — THE AUDIT BOUNDARY DRAWN PAST ITS OWN TRIGGER. R206 closed
@@ -16120,6 +16266,11 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn spine_ctrl_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
 "#);
         assert!(effs(fn_entry(&v, "defined_in_block_tokens")).contains(&"Fs".to_string()),
                 "`defined_in_block_tokens` declares its `macro_rules!` INSIDE the tokens the veto \
@@ -16131,11 +16282,19 @@ pub fn go() {{ imp::doit(); }}
                 "the discriminator — the same USE site with the definition at BODY level, which R206 \
                  already closed. If this ever goes quiet, the row above stops being evidence about the \
                  second walk and becomes evidence about the use site:\n{v:#}");
-        assert!(!fn_entry(&v, "spine_ctrl")["calls"].to_string().contains("H::drop"),
-                "THE OVER-CHARGE CONTROL: a body-local construction as a by-value argument ON the `?` \
-                 operand's value spine is moved into the callee and dies in ITS frame (executed 0 \
-                 drops here). Recording definitions from a second walk must not cost R199's spine \
-                 exemption:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "spine_ctrl")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "spine_ctrl_direct")["calls"].to_string().contains("H::drop"),
+            "a body-local construction as a by-value argument ON the `?` operand's value spine is \
+             moved into the callee and dies in ITS frame (executed 0 drops here), and \
+             `spine_ctrl_direct` writes it with no macro. THE TWO MUST AGREE —              the by-value-argument case is asserted as PARITY WITH ITS DIRECT TWIN, not as an \
+             exemption. R172's site gate keys on construction SITES and has no by-value-argument \
+             exemption at all, so the spelled-out twin has been charged since published 0.34.0; \
+             while a macro-borne construction recorded no site, this row read as \"the spine \
+             exemption survived the macro\" and actually measured the macro's INVISIBILITY — the \
+             same invisibility that lost a real drop one spelling over. The shared over-report is \
+             the site gate's missing by-value exemption, a separate defect whose fix WITHDRAWS a \
+             charge and needs its own A/B:\n{v:#}");
     }
 
 
@@ -16216,6 +16375,11 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn repetition_spine_direct(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(H::new("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
             pub fn kv_tokens_open(n: u32, m: u32) -> Result<H, ()> {
                 let mut out = Vec::new();
                 { out.push(kv!("a" => H::new("a"))); gen(n) }?;
@@ -16233,11 +16397,20 @@ pub fn go() {{ imp::doit(); }}
                      charged all three; `5cefa62`/`c22a31d` left them ABSENT (executed: 2, 2 and 1 \
                      in-frame drops on the error exit):\n{v:#}");
         }
-        assert!(!fn_entry(&v, "repetition_spine")["calls"].to_string().contains("H::drop"),
-                "THE OVER-CHARGE CONTROL. A repetition template's value as a by-value ARGUMENT on the \
-                 `?` operand's value spine is moved into the callee and dies in ITS frame (executed: 0 \
-                 drops here, 1 inside `use_h_val`). Flattening must not cost R199's two-step spine \
-                 exemption; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
+        assert_eq!(
+            fn_entry(&v, "repetition_spine")["calls"].to_string().contains("H::drop"),
+            fn_entry(&v, "repetition_spine_direct")["calls"].to_string().contains("H::drop"),
+            "A repetition template's value as a by-value ARGUMENT on the `?` operand's value spine is \
+             moved into the callee and dies in ITS frame (executed: 0 drops here, 1 inside \
+             `use_h_val`), and `repetition_spine_direct` writes the identical construction with no \
+             macro. THE TWO MUST AGREE —              the by-value-argument case is asserted as PARITY WITH ITS DIRECT TWIN, not as an \
+             exemption. R172's site gate keys on construction SITES and has no by-value-argument \
+             exemption at all, so the spelled-out twin has been charged since published 0.34.0; \
+             while a macro-borne construction recorded no site, this row read as \"the spine \
+             exemption survived the macro\" and actually measured the macro's INVISIBILITY — the \
+             same invisibility that lost a real drop one spelling over. The shared over-report is \
+             the site gate's missing by-value exemption, a separate defect whose fix WITHDRAWS a \
+             charge and needs its own A/B:\n{v:#}");
         assert!(!v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "kv_tokens_open"),
                 "THE PIN ON R207's STATED RESIDUAL, not a control. `kv!(\"a\" => H::new(\"a\"))` has \
                  invocation tokens that parse neither as an expression list nor as statements, and a \

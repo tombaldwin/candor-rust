@@ -9,6 +9,45 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R226 — the SITE walk and the ESCAPE walk now read a macro the same way, so a
+  macro-borne construction is neither certified pure nor fabricated.** R172's site gate suppresses a
+  drop only when EVERY construction of that leaf in the body is one of the escaping sites, and until
+  now `lang.rs` had two walks that disagreed about what a macro contains. The site walk could not see
+  a `macro_rules!` TEMPLATE, statement-only tokens, or a block inside macro tokens, so
+  `out.push(mk_h!("a")); let h = H::try_new(m, "b")?; let _ = out; Ok(h)` had exactly one site — the
+  escaping one — and the function was certified PURE while an `H::drop` really ran in that frame
+  (**a cardinal sin**; its direct twin `out.push(H::new("a"))` was charged all along). The escape walk
+  could not see them either, so `pub fn esc_tmpl() -> H { mk_h!("a") }`, which drops nothing here, was
+  **fabricated** a `Drop` edge. R199/R203/R204/R210 each closed one spelling of the first half INSIDE a
+  `?` operand — every walk they added is gated on an open `?` and writes only `TryExit::interior` — and
+  none could reach either half outside one. `macro_reading` is now the single reading both walks take
+  and `macro_reading_ordinals` the single numbering that carries site identity between two independent
+  parses of one token stream; region 0's ordinals are unchanged, so every site identity the two walks
+  already agreed on is untouched.
+  **Executed ground truth** (`mem::forget` on every return, so only in-frame drops count): the four
+  `dies_*` cells drop 1 each and were ABSENT for the template / block-token / statement-template
+  spellings; the six `esc_*` cells drop 0 and three of them were charged. Every direct twin is
+  unchanged in both builds, which is what makes the macro the variable under test. Revert red (5 tests).
+  **Property gates:** the R216 debt register drops from **216 shapes to 169** — 47 closed, 0 new — and
+  BOTH-PURE pairs from 102 to 90; `soundness/known_open.tsv` is regenerated in this commit.
+  **1,509-crate registry A/B, WIDE key** (`fn` + `inferred` + `unknownWhy` + `declared` + `unresolved`
+  + `incomplete` + `netClass` + `invisible` + drop-glue call edges), vs `7dfe710`, both arms cold:
+  **ADDED 0 / REMOVED 0 / CHANGED 0 over 270,874 rows**, 0 functions lost a concrete effect — and the
+  same for each half in isolation (a site-recording-only arm is byte-identical to both), so nothing is
+  cancelling. §E1 reach: the DECISION counter `R226DECIDE` (the gate would have suppressed on the sites
+  the old walk could see, and does not) fires **695 times in 115 crates**; none of those leaves has a
+  local `impl Drop`, which is why the corpus is quiet. `R226MACROSITE` (727,315 / 433 crates) and
+  `R226ESCAPE` (707,074 / 60 crates) are WALK counters, not decisions — recorded as such.
+  **Four shipped tests were asserting a safety property the code does not have.** Each said a
+  macro-borne construction on a `?` operand's by-value spine "stays exempt"; all four passed because
+  the construction was INVISIBLE, and all four have a direct twin (`use_h_val(H::new("a"), n)?`) that
+  has been charged by the site gate since published 0.34.0. They now assert PARITY WITH THAT TWIN,
+  which is the property the macro gate exists for. The residual they share — R172 has no by-value
+  argument exemption at all — is a separate defect whose fix WITHDRAWS a charge and needs its own A/B.
+  Still open and named in the test: a macro NESTED inside macro tokens (`spine_nested`), and a
+  statement template that stores through a macro parameter the caller returns (`esc_stmt_tmpl`,
+  over-charged at pre-change parity).
+
 - ⚠ **SOUNDNESS R222 (second half) — several bodies under ONE qualified name are ONE definition and
   resolve to the UNION of their effects, per SPEC §4.** `by_leaf` counted `FnInfo` entries rather than
   distinct definitions, exactly as `by_tail2` did, so a bare call to a `#[cfg]`-twinned function saw
