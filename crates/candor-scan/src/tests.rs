@@ -15994,7 +15994,7 @@ pub fn go() {{ imp::doit(); }}
              WITHDRAWS a charge and needs its own A/B:\n{v:#}");
     }
 
-    /// SOUNDNESS R226 — the claim `ord_nested`'s comment makes, PINNED BY A TEST rather than asserted
+    /// SOUNDNESS R229 — the claim `ord_nested`'s comment makes, PINNED BY A TEST rather than asserted
     /// (§E2). A composed nested ordinal must never collide with a DIRECT one, or a nested construction
     /// would be matched against an unrelated site and the gate would certify an escape that never
     /// happened. The separation is a single bit — the top bit of a `usize`, which is 31 on a 32-bit
@@ -16024,7 +16024,7 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
-    /// SOUNDNESS R226 — THE SITE WALK AND THE ESCAPE WALK NOW READ A MACRO THE SAME WAY.
+    /// SOUNDNESS R229 — THE SITE WALK AND THE ESCAPE WALK NOW READ A MACRO THE SAME WAY.
     ///
     /// R172's site gate suppresses a leaf only when EVERY construction of it in the body is one of the
     /// escaping sites, so a construction one walk can see and the other cannot decides the answer

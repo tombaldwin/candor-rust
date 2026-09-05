@@ -9,7 +9,7 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
-- ⚠ **SOUNDNESS R226 (second half) — a macro invoked INSIDE a macro is read too, and the leaf-keyed
+- ⚠ **SOUNDNESS R229 (second half) — a macro invoked INSIDE a macro is read too, and the leaf-keyed
   macro LICENCE is gone.** `macro_ctor_leaves` said "this leaf was built inside a macro somewhere, and
   no site table can hold that construction, so keep the shipped leaf-keyed answer" — i.e. the R172 site
   gate CERTIFIED the escape with no evidence, for every leaf any macro in the body constructed. It
@@ -27,7 +27,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   resolves the construction at all and no change to the escape model can reach them. That is R142/R143/
   R144's subject, in `collector.rs`.
   **1,509-crate registry A/B, WIDE key, vs `7dfe710`:** ADDED 0 / REMOVED 0 / CHANGED 0 over 270,874
-  rows. §E1 reach: `R226DECIDE` 1,741 hits / 143 crates, `R226NESTED` 5,794 hits / 43 crates.
+  rows. §E1 reach: `R229DECIDE` 1,741 hits / 143 crates, `R229NESTED` 5,794 hits / 43 crates.
   Revert red (3 tests). The SIXTH and last shipped "by-value spine stays exempt" control is converted
   to parity with its direct twin, for the reason the other five were.
   `ord_nested`'s separation claim is PINNED BY A TEST rather than asserted in a comment (§E2): the top
@@ -35,7 +35,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   separation would have vanished there while every test passed on the 64-bit machine anyone would check
   it on (§L).
 
-- ⚠ **SOUNDNESS R226 — the SITE walk and the ESCAPE walk now read a macro the same way, so a
+- ⚠ **SOUNDNESS R229 — the SITE walk and the ESCAPE walk now read a macro the same way, so a
   macro-borne construction is neither certified pure nor fabricated.** R172's site gate suppresses a
   drop only when EVERY construction of that leaf in the body is one of the escaping sites, and until
   now `lang.rs` had two walks that disagreed about what a macro contains. The site walk could not see
@@ -60,10 +60,10 @@ after upgrading; review policies and regenerate baselines with the new build.
   + `incomplete` + `netClass` + `invisible` + drop-glue call edges), vs `7dfe710`, both arms cold:
   **ADDED 0 / REMOVED 0 / CHANGED 0 over 270,874 rows**, 0 functions lost a concrete effect — and the
   same for each half in isolation (a site-recording-only arm is byte-identical to both), so nothing is
-  cancelling. §E1 reach: the DECISION counter `R226DECIDE` (the gate would have suppressed on the sites
+  cancelling. §E1 reach: the DECISION counter `R229DECIDE` (the gate would have suppressed on the sites
   the old walk could see, and does not) fires **695 times in 115 crates**; none of those leaves has a
-  local `impl Drop`, which is why the corpus is quiet. `R226MACROSITE` (727,315 / 433 crates) and
-  `R226ESCAPE` (707,074 / 60 crates) are WALK counters, not decisions — recorded as such.
+  local `impl Drop`, which is why the corpus is quiet. `R229MACROSITE` (727,315 / 433 crates) and
+  `R229ESCAPE` (707,074 / 60 crates) are WALK counters, not decisions — recorded as such.
   **Four shipped tests were asserting a safety property the code does not have.** Each said a
   macro-borne construction on a `?` operand's by-value spine "stays exempt"; all four passed because
   the construction was INVISIBLE, and all four have a direct twin (`use_h_val(H::new("a"), n)?`) that
