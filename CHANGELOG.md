@@ -30,6 +30,10 @@ after upgrading; review policies and regenerate baselines with the new build.
   rows. §E1 reach: `R226DECIDE` 1,741 hits / 143 crates, `R226NESTED` 5,794 hits / 43 crates.
   Revert red (3 tests). The SIXTH and last shipped "by-value spine stays exempt" control is converted
   to parity with its direct twin, for the reason the other five were.
+  `ord_nested`'s separation claim is PINNED BY A TEST rather than asserted in a comment (§E2): the top
+  bit it sets is `usize`'s, not a `u64`'s — `1u64 << 63` truncates to ZERO on a 32-bit target, and the
+  separation would have vanished there while every test passed on the 64-bit machine anyone would check
+  it on (§L).
 
 - ⚠ **SOUNDNESS R226 — the SITE walk and the ESCAPE walk now read a macro the same way, so a
   macro-borne construction is neither certified pure nor fabricated.** R172's site gate suppresses a
