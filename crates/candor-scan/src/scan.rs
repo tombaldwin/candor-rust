@@ -98,8 +98,36 @@ fn prescan_argv(args: &[String]) -> PreScan {
                     ps.outs.push(it.next().expect("peeked").clone());
                 }
             }
+            // ⟨0.32⟩ THE TARGET THIS WALK RESOLVES MUST BE THE ONE THE MAIN LOOP WOULD ACCEPT, because
+            // the refusal marker is written to ITS default prefix. Two rules, both read off the main
+            // loop rather than guessed:
+            //
+            //   1. THE FIRST POSITIONAL WINS, not the last. This arm used to be `ps.target = Some(..)`
+            //      on every bare token, with a comment saying it took the last "specifically to mirror
+            //      this loop". That mirror went stale: the main loop now REFUSES a second positional
+            //      (`unexpected extra argument`) instead of letting the last one win, so the target it
+            //      holds when it refuses is the FIRST.
+            //
+            //   2. STOP AT A TOKEN THE MAIN LOOP WOULD REFUSE. An unrecognised flag exits 2 there, so
+            //      nothing after it is ever accepted — and its operand is not a target. Measured:
+            //      `candor-scan . --scope src` resolved `src` here (last-wins picked up the rejected
+            //      flag's operand), so the refusal marker was written to `src/.candor/`, CREATING that
+            //      directory in the operator's tree and overwriting any marker already there. The
+            //      target the operator actually gave, `.`, was discarded. candor-ts and candor-swift
+            //      both wrote to `.` on this argv; rust was alone.
+            //
+            // A flag whose arity we know is skipped above; a KNOWN VALUELESS flag is not a stopping
+            // point, since a target may legitimately follow it (`candor-scan --include-tests .`).
             _ => {
-                if !a.starts_with('-') {
+                if a.starts_with('-') {
+                    if !matches!(
+                        a.as_str(),
+                        "--json" | "--include-tests" | "--incremental" | "--deps"
+                            | "--agents" | "--version" | "--help" | "-h"
+                    ) {
+                        break;
+                    }
+                } else if ps.target.is_none() {
                     ps.target = Some(a.clone());
                 }
             }
