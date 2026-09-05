@@ -9,6 +9,54 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R222/R129 — `by_tail2` counted ONE definition twice, so a call that was never
+  ambiguous resolved to NOTHING.** The index pushed `f.qual` once per analysed UNIT, and several units
+  routinely share one qual: two `#[cfg]` arms of a fn or of its module, ≥2 impls of one trait for one
+  type differing only in type params (`jiff`'s `ZonedArithmetic::from` ×3), an `impl Trait for
+  `[T]`/`(T,)`/`&T` whose type segment `impl_type_name` cannot form and drops (`half`'s
+  `convert_from_f32_slice`, `x11rb`'s `serialize_into`, `diesel`'s `to_sql`), an inherent assoc fn
+  beside a trait method of one name, erased generic args (`typenum`'s `private_pow`), and ≥2 different
+  traits with a same-named method (`rustix`'s `Uid::fmt` ×6). `resolve_target`'s `len() == 1`
+  uniqueness filter then read "ambiguous" over a bucket holding one distinct qual and the edge was
+  dropped **with no `Unknown` beside it — absent, nothing to fail closed on.** 11,230 functions were
+  in that state; 20,495 of 647,698 analysed units (3.16%) in 884 of 1,509 corpus crates are duplicate
+  quals. The buckets are now keyed on DISTINCT definitions.
+  **THIS LANDED SECOND, AND THAT ORDER IS MEASURED, NOT STYLISTIC.** The duplicate had been
+  accidentally BLOCKING R223's mis-resolution, so deduplicating alone on the shipped `c8aa83c`
+  **LOSES an effect**: `rand_core-0.6.4`'s `error::Error::fmt` goes `['Rand']` → ABSENT, because
+  `tail2` discards the crate qualifier and `getrandom::Error::from` lands on the local `Error::from`.
+  Three fixtures isolate it with ONE variable — the number of local `Error` definitions: with none,
+  charged in every arm; with ONE, already lost on shipped `main` (that is R223); with TWO, the
+  duplicate was what saved it. Built and run as a corpus A/B: c8aa83c + dedup alone loses `Rand` ×1
+  and removes 234 rows; with R223 first, the same dedup loses nothing.
+  **A/B over 1,509 crates.io crates against `c8aa83c`, keyed on EVERY field, both commits together:
+  1,994 rows ADDED, 5 REMOVED, 7,432 CHANGED, 424 crates touched; 596 functions gain a concrete effect
+  (Log 157, Rand 156, Fs 124, Clock 111, Db 104, Env 71, Net 58, Exec 32) and 0 functions lose one.**
+  All 5 removals audited from source: each lost an `invisible` disclosure it had INHERITED through an
+  edge that existed only because the primary route was fake-ambiguous (curl's `FormError::fmt` edging
+  to `Error::fmt`, digest's `D::digest` edging to `DynDigest::finalize`).
+  **THE `by_leaf` TWIN IS DELIBERATELY NOT TAKEN, and it is a ruling rather than a bug fix.** The same
+  duplicate reaches `by_leaf`, where the bare-call path already DISCLOSES
+  (`Unknown ambiguous:same-name local defs`) instead of going silent — so it is not the cardinal sin.
+  Deduplicating it too was built and measured: +125 concrete effects, but **1,400 corpus rows lose
+  that disclosure and 228 rows vanish from the report entirely**, and it turns off rust's single
+  largest `Unknown` reason (8,710 of 19,607 `unknownWhy` entries over a 1,062-report census) for
+  exactly the shape §4 ⟨0.24⟩ admitted the kind FOR — cfg-gated alternative definitions, which
+  `the_ambiguous_reason_kind_and_its_class_are_pinned` pins with a fixture whose two arms genuinely
+  differ. Withdrawing an existing answer is the same move measured and refused for R208 in this
+  release, so the direction of the batch stays uniform: **the qualified spelling gains an edge it
+  never had, the bare spelling keeps disclosing, and the trade is on the record instead of inside a
+  diff.** Every withdrawal that half would make was checked mechanically first: of the 3,603 ambiguity
+  sites in the 59 crates it touches, all 134 rows it withdraws had `distinct = 1` — one definition
+  counted twice — while the 2,237 `distinct = 2` and 824 `distinct = 3` sites are genuine and stay.
+  **NOT TOUCHED, and neither claim moves:** `all`/`functions[]` is not deduplicated (see the four
+  numbered reasons at the `blind_direct` insertion), so
+  `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two` still pins both units
+  in the report and one violation at the gate. R129's own subject — that a per-qual map is a UNION
+  over units that need not agree, printed once per unit — is untouched and still open; its duplicate
+  ROW count in fact RISES, 6,981 → 7,371, because more functions are now effectful enough to be
+  reported at all. R190(c)'s refusal over two genuinely distinct quals sharing a tail is unchanged.
+
 - ⚠ **SOUNDNESS R223 — a call written into a DEPENDENCY no longer has its effect silenced by a
   same-named LOCAL definition.** `tail2` keys the local index on the last TWO segments, so
   `tokio_postgres::Client::execute` and deadpool-postgres' own `generic_client::Client::execute`

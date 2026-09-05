@@ -1656,6 +1656,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
         let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);
         if !is_lazy_unit {
+            // SOUNDNESS R222/R129 — these buckets are the input to a UNIQUENESS test, so they must hold
+            // DISTINCT DEFINITIONS, not `FnInfo` entries. `fns` carries one entry per analysed UNIT and
+            // several units routinely share one qual: two `#[cfg]` arms of a fn or of its module, ≥2
+            // impls of one trait for one type differing only in type params (`jiff`'s
+            // `ZonedArithmetic::from` ×3), an `impl Trait for [T]`/`(T,)`/`&T` whose type segment
+            // `lang.rs`'s `impl_type_name` cannot form and drops (`half`'s `convert_from_f32_slice`),
+            // an inherent assoc fn beside a trait method of one name, erased generic args (`typenum`'s
+            // `private_pow`), and ≥2 DIFFERENT traits with a same-named method (`rustix`'s `Uid::fmt`
+            // ×6). Pushing the qual per unit made ONE definition look like two, `resolve_target`'s
+            // `len() == 1` filter read "ambiguous", and the call resolved to NOTHING — a lost edge on a
+            // call that was never ambiguous. 11,230 functions were in that state; 20,495 of 647,698
+            // analysed units (3.16%) in 884 of 1,509 corpus crates are duplicate quals.
+            //
+            // WHAT THIS IS NOT. It does not deduplicate `all`/`functions[]` — that was tried and
+            // reverted (see the four numbered reasons at the `blind_direct` insertion below), and
+            // `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`
+            // (tests/cli.rs) still pins both units in the report and one violation at the gate; neither
+            // claim is touched here. It also does not distinguish the units — R129's own subject, that
+            // a per-qual map is a UNION over units that need not agree, is untouched and still open.
+            // The two REAL definitions a key can hold (two modules each with a `Bar::go`) stay two, and
+            // R190(c)'s refusal over them is unchanged: those are distinct quals sharing a tail.
             by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
         }
         if let Some(t2) = tail2(&f.qual) {
@@ -1664,7 +1685,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     local_types.insert(ty.to_string());
                 }
             }
-            by_tail2.entry(t2).or_default().push(f.qual.clone());
+            let v = by_tail2.entry(t2).or_default();
+            if !v.contains(&f.qual) {
+                v.push(f.qual.clone());
+            }
         }
     }
     // ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf) -> the in-scope fns that DIRECTLY dispatch
