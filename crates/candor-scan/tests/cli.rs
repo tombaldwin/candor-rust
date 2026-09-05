@@ -353,6 +353,65 @@ fn unknown_flags_exit_2() {
     }
 }
 
+#[test]
+fn an_unknown_flags_operand_is_never_taken_as_the_scan_target() {
+    // ⟨0.32⟩ The refusal MARKER is written to the prefix the refusing run WOULD have used, so the
+    // target `prescan_argv` resolves is load-bearing on a run that never scans anything. It used to
+    // take the LAST bare token, which on `candor-scan . --scope src` is the REJECTED flag's operand:
+    // the marker went to `src/.candor/`, CREATING that directory in the operator's tree and
+    // overwriting whatever marker was already there, while the target they actually gave was thrown
+    // away. Both halves are asserted here — where it lands, and what it must not touch.
+    let d = make_crate("uftarget", "pub fn go() {}");
+    let root = d.to_string_lossy().into_owned();
+
+    // A decoy at the path the operand names, holding bytes no candor run may replace.
+    let decoy_dir = d.join("src").join(".candor");
+    std::fs::create_dir_all(&decoy_dir).unwrap();
+    let decoy = decoy_dir.join("report.refused.json");
+    std::fs::write(&decoy, b"PRECIOUS").unwrap();
+
+    let out = Command::new(bin())
+        .current_dir(&d)
+        .args([root.as_str(), "--scope", "src"])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "an unknown flag still refuses");
+
+    assert_eq!(
+        std::fs::read(&decoy).unwrap(),
+        b"PRECIOUS",
+        "the rejected flag's operand must not become a sink: {} was overwritten",
+        decoy.display()
+    );
+    assert!(
+        d.join(".candor").join("report.refused.json").exists(),
+        "the marker belongs at the target the operator gave, not at the operand"
+    );
+}
+
+#[test]
+fn two_positionals_mark_the_first_which_is_the_one_the_refusal_names() {
+    // The main loop refuses a second positional and its message names the FIRST as the target it
+    // holds. The prescan used to take the last "to mirror this loop" — a mirror that went stale when
+    // the loop stopped letting the last one win, so the marker landed under a directory the run had
+    // already refused to scan.
+    let a = make_crate("twoposa", "pub fn go() {}");
+    let b = make_crate("twoposb", "pub fn go() {}");
+    let out = Command::new(bin())
+        .args([a.to_string_lossy().as_ref(), b.to_string_lossy().as_ref()])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "two targets is a usage error");
+    assert!(
+        a.join(".candor").join("report.refused.json").exists(),
+        "the marker goes to the FIRST positional, the one the refusal message names"
+    );
+    assert!(
+        !b.join(".candor").join("report.refused.json").exists(),
+        "the second positional was refused, so nothing may be written under it"
+    );
+}
+
 // ── adversarial inputs: no panic, clean handling ──────────────────────────────────────────────────
 
 #[test]
