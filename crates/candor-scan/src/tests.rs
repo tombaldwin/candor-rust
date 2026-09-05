@@ -7778,6 +7778,29 @@ trait G {
         serde_json::from_str(&body.unwrap()).unwrap()
     }
 
+    /// `scan_src_to_json` with a `[dependencies]` table. SOUNDNESS R223 keys on the manifest's own
+    /// dependency list, so a fixture whose Cargo.toml declares nothing cannot reach that branch at all.
+    #[cfg(test)]
+    fn scan_src_with_deps_to_json(tag: &str, deps: &str, src: &str) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-scan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("Cargo.toml"),
+            format!("[package]\nname = \"{tag}\"\n[dependencies]\n{deps}\n"),
+        )
+        .unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        serde_json::from_str(&body.unwrap()).unwrap()
+    }
+
     #[cfg(test)]
     fn fn_entry<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
         v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name)
@@ -12054,6 +12077,90 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             pub fn run(c: &mut std::process::Command) { let _ = c.spawn(); }\n");
         assert!(effs(fn_entry(&v, "run")).contains(&"Exec".to_string()),
                 "a local `mine::Command::spawn` captured a std `Command::spawn` and silenced it:\n{v:#}");
+    }
+
+    /// SOUNDNESS R223 — THE PUBLISHED CARDINAL SIN. `tail2` throws the crate qualifier away, so a call
+    /// written into a DEPENDENCY (`walkdir::DirEntry::metadata`) matches a same-named LOCAL definition,
+    /// `t == f.qual` drops the edge as a self-reference, and `resolved_local` then suppresses the `Fs`
+    /// the classifier had. The newtype/wrapper forwarding idiom — the shape a consumer actually calls —
+    /// therefore reported PURE: deadpool-postgres' whole `GenericClient` surface, fs-err's tokio
+    /// wrappers, cap-std's `Pool`. Census over 1,509 registry crates: 123 sites, 99 caller functions,
+    /// 26 crates, 59 of them leaving the caller ABSENT.
+    ///
+    /// GROUND TRUTH IS EXECUTED, not assumed (§E3). This crate was built against `walkdir = "2"` and
+    /// `cargo run` printed a real byte count from a real `stat`; before the fix `wrap::DirEntry::metadata`
+    /// and `wrap::size_of` were both ABSENT and `deny Fs wrap` exited 0 over them, after it 1.
+    ///
+    /// THE CONTROL IS IN THE SAME FIXTURE and differs in ONE character sequence — the local type's NAME.
+    /// `Entry::metadata` does not collide on `tail2` and was charged `Fs` all along, so the assertion
+    /// below is not an absence dressed up as a finding: the two arms differ only in the collision.
+    #[test]
+    fn a_dependency_qualified_call_is_not_silenced_by_a_same_named_local_definition() {
+        let v = scan_src_with_deps_to_json("r223wrap", "walkdir = \"2\"", "\
+            pub struct DirEntry(pub walkdir::DirEntry);\n\
+            impl DirEntry {\n\
+                pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> {\n\
+                    walkdir::DirEntry::metadata(&self.0).map_err(std::io::Error::other)\n\
+                }\n\
+            }\n\
+            pub struct Entry(pub walkdir::DirEntry);\n\
+            impl Entry {\n\
+                pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> {\n\
+                    walkdir::DirEntry::metadata(&self.0).map_err(std::io::Error::other)\n\
+                }\n\
+            }\n");
+        assert!(effs(fn_entry(&v, "Entry::metadata")).contains(&"Fs".to_string()),
+                "the CONTROL must be charged, or this fixture proves nothing:\n{v:#}");
+        assert!(effs(fn_entry(&v, "DirEntry::metadata")).contains(&"Fs".to_string()),
+                "a wrapper forwarding to the SAME-NAMED method of a dependency's type certified \
+                 PURE — SOUNDNESS R223, the cardinal sin:\n{v:#}");
+    }
+
+    /// SOUNDNESS R223, THE DIRECTION THE FIX MUST NOT GO. A crate may declare a MODULE named like one
+    /// of its own dependencies, and `expand` strips a written `crate::` prefix, so `crate::rand::fill()`
+    /// arrives at the resolver byte-identical to a call into the `rand` CRATE. The local definition is
+    /// the one that runs and it does no randomness at all, so charging the crate's `Rand` here would be
+    /// a fabrication — this is the over-charge control for the change above.
+    ///
+    /// EXECUTED: built against `rand = "0.8"`, `cargo run` printed `[7, 7, 7, 7]`. Deterministic, and
+    /// the report is empty in both arms.
+    #[test]
+    fn a_local_module_named_like_a_dependency_still_owns_its_own_calls() {
+        let v = scan_src_with_deps_to_json("r223shadow", "rand = \"0.8\"", "\
+            pub mod rand {\n\
+                pub fn fill(buf: &mut [u8]) { for b in buf.iter_mut() { *b = 7; } }\n\
+            }\n\
+            pub fn seed() -> [u8; 4] {\n\
+                let mut b = [0u8; 4];\n\
+                crate::rand::fill(&mut b);\n\
+                b\n\
+            }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "seed"),
+                "`seed` calls a LOCAL `rand::fill` that only writes 7s — charging the `rand` crate's \
+                 `Rand` to it is a fabrication:\n{v:#}");
+    }
+
+    /// SOUNDNESS R223 — WHY THE SUFFIX TEST NEEDS A THIRD SEGMENT. A local definition at the crate ROOT
+    /// has a two-segment qual (`DirEntry::metadata`), which is a suffix of every path ending in those
+    /// two segments — so a suffix test alone degenerates into the `tail2` match it exists to
+    /// corroborate. Found by measurement, not by reading: with the plain suffix test,
+    /// tokio-native-tls' `native_tls::TlsConnector::connect` walked through it and stayed silent.
+    ///
+    /// EXECUTED: the crate-root form of the fixture above was built and run against a real `walkdir`.
+    #[test]
+    fn a_crate_root_definition_gets_no_free_pass_from_the_suffix_test() {
+        let v = scan_src_with_deps_to_json("r223root", "walkdir = \"2\"", "\
+            pub struct DirEntry(pub walkdir::DirEntry);\n\
+            impl DirEntry {\n\
+                pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> {\n\
+                    walkdir::DirEntry::metadata(&self.0).map_err(std::io::Error::other)\n\
+                }\n\
+            }\n\
+            pub fn size_of(e: DirEntry) -> u64 { e.metadata().map(|m| m.len()).unwrap_or(0) }\n");
+        assert!(effs(fn_entry(&v, "DirEntry::metadata")).contains(&"Fs".to_string()),
+                "a crate-ROOT wrapper is the same collision one module shallower:\n{v:#}");
+        assert!(effs(fn_entry(&v, "size_of")).contains(&"Fs".to_string()),
+                "the consumer-facing caller inherits it over the local edge:\n{v:#}");
     }
 
     /// The same hole through every OTHER receiver spelling the scanner can type. The gate that hid it
