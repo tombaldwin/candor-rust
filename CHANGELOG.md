@@ -9,6 +9,24 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R182/R196 — the drop route's two REFUSALS now DISCLOSE instead of certifying the caller
+  pure.** `ctor_leaf_from_call_returns` declines when a fn leaf resolves to more than one definition —
+  because two definitions disagree about the return type (R182), or because a UNIT-returning twin means
+  a leaf-keyed lookup cannot say which callee answered (R196). Declining is right; what followed was
+  not: the construction was never noted, the destructor's effects never charged, and the enclosing
+  function was omitted from `functions[]` entirely — indistinguishable from a function that really is
+  pure. Measured, executed: `let h = two::mk(p)` beside an unrelated `other::mk -> usize` left
+  `holds_two` ABSENT while its one-variable control read `['Net']`; `let g = net::open(a)` beside an
+  unrelated unit `Ui::open` left `drop_limit` ABSENT while `drop_ctrl` read `['Fs']`. Both now carry
+  `Unknown` with an `ambiguous:` reason (SPEC §4).
+  **The disclosure is priced, not blanket.** A leaf like `new`/`parse` is ambiguous in almost every
+  crate, so the refusal is only disclosed where it actually WITHDREW something a charge could have
+  landed on: `rets` now records the withdrawn candidate types (under an `<amb>` sentinel key, outside
+  the identifier key space), and `scan.rs` intersects them with `drop_relevant`. Corpus A/B over 1,509
+  crates.io crates: **R182 2,190 functions, R196 236 — 0.37% of 647,698 analysed functions between
+  them, and ZERO functions lost a concrete effect.** `deny Unknown` users: these add `Unknown`, so a
+  gate that was green may now be red — that is the point. Cache schema rev21.
+
 - **SOUNDNESS R214 — `coverage-gate-refresh.yml` no longer conflates two different alarms under
   "regressed."** On its first-ever completed run the job called `e9cdd23` (R173) correctly withdrawing
   a drop-glue over-charge from `async_nats::Context::publish`/`publish_message`/`publish_with_headers`

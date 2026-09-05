@@ -2228,7 +2228,7 @@ pub(crate) fn ctor_leaf_from_call_path(full: &str, uses: &HashMap<String, String
 /// `is_idle`, `available_permits` in `batch_semaphore`/`mpsc` picked up the FUTURE's `Log` + `Unknown`
 /// off an atomic ordering constant. Expanding the path before classifying is what makes
 /// `type_from_value_path`'s existing `Enum::Variant` rule fire and answer `Ordering` instead.
-fn local_type_leaf(ty: &str) -> Option<String> {
+pub(crate) fn local_type_leaf(ty: &str) -> Option<String> {
     if matches!(ty.split("::").next(), Some("std") | Some("core") | Some("alloc")) {
         return None;
     }

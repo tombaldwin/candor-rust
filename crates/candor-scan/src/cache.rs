@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev21: `rets` gained the `<amb>` CANDIDATE entries (R182/R196 — which types the ambiguity rule
+    // withdrew from a colliding fn leaf, so the drop route can disclose instead of certifying the
+    // caller pure). A rev20 entry has none, so a warm re-scan would find the withdrawal but not the
+    // candidates and emit NO disclosure — i.e. exactly the silence the entries exist to close, served
+    // warm and invisible. Same shape as rev17.
     // rev20: a change to what an EXISTING field RECORDS (R188) — `rets` no longer files a unit
     // return under the fn's own LEAF but under `<unit><leaf>`, so a rev19 entry deserializes into a
     // map whose typed leaf was withdrawn by its unit twin, and the warm cache replays `let c =
@@ -107,7 +112,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev20/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev21/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -481,10 +486,30 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
             e.insert(k.clone(), v.clone());
         }
     }
-    let merge_amb = |dst: &mut HashMap<String, Option<String>>, src: &HashMap<String, Option<String>>| {
+    // `record_amb` — SOUNDNESS R182. The CROSS-FILE half of `record_return`'s conflict recording: two
+    // files each declaring one `mk` see no collision of their own, and the withdrawal happens HERE. The
+    // candidate has to be filed at both places or a two-file collision (the commonest shape there is)
+    // would leave the drop route unable to tell a withdrawal from an absence. Only `rets` records —
+    // `enum_tmp` has its own R90 disclosure and no drop route.
+    let merge_amb = |dst: &mut HashMap<String, Option<String>>,
+                     src: &HashMap<String, Option<String>>,
+                     record_amb: bool| {
         for (leaf, val) in src {
+            // A sentinel entry (`<unit>x`, `<amb>x\x1fT`) is a fact about a key space no candidate
+            // recording applies to; it merges like any other value but must never itself be recorded as
+            // a candidate, or the key would nest.
+            let plain = record_amb && crate::model::split_amb_ret_key(leaf).is_none();
             match val {
                 None => {
+                    // The contributor is already ambiguous, so its OWN candidates ride in as ordinary
+                    // `<amb>` entries — but whatever `dst` had recorded under this leaf is about to be
+                    // withdrawn here and would otherwise vanish unrecorded.
+                    if plain {
+                        if let Some(Some(prev)) = dst.get(leaf) {
+                            let prev = prev.clone();
+                            crate::decls::note_amb_ret(dst, leaf, &prev);
+                        }
+                    }
                     dst.insert(leaf.clone(), None); // contributor already ambiguous → ambiguous
                 }
                 Some(tp) => match dst.get(leaf) {
@@ -492,16 +517,27 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
                         dst.insert(leaf.clone(), Some(tp.clone()));
                     }
                     Some(Some(prev)) if prev != tp => {
+                        if plain {
+                            let prev = prev.clone();
+                            crate::decls::note_amb_ret(dst, leaf, &prev);
+                            crate::decls::note_amb_ret(dst, leaf, tp);
+                        }
                         dst.insert(leaf.clone(), None); // conflicting types — drop
                     }
                     Some(Some(_)) => {} // same type — keep
-                    Some(None) => {}    // already ambiguous — stays
+                    Some(None) => {
+                        // Already ambiguous — still record, or a THIRD contributing file's candidate
+                        // would be invisible to the disclosure.
+                        if plain {
+                            crate::decls::note_amb_ret(dst, leaf, tp);
+                        }
+                    }
                 },
             }
         }
     };
-    merge_amb(&mut acc.rets, &fd.rets);
-    merge_amb(&mut acc.enum_tmp, &fd.enum_tmp);
+    merge_amb(&mut acc.rets, &fd.rets, true);
+    merge_amb(&mut acc.enum_tmp, &fd.enum_tmp, false);
     // R77: the Vec-valued twin of `merge_amb` — same ambiguity rule (a leaf seen with two DIFFERENT leaf
     // sets, or already `None` in any contributor, collapses to `None`), for `enum_variant_traits`.
     let merge_amb_vec = |dst: &mut HashMap<String, Option<Vec<String>>>, src: &HashMap<String, Option<Vec<String>>>| {

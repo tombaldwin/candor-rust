@@ -87,6 +87,18 @@ pub(crate) struct FnInfo {
     /// MODULE-QUALIFIED fn qual beside it, which a leaf-keyed index does not have.
     #[serde(rename = "b", default, skip_serializing_if = "Option::is_none")]
     pub(crate) ret_bound_type: Option<String>,
+    /// SOUNDNESS R182/R196 — the REFUSAL reasons this body hit: a place where name resolution found
+    /// MORE THAN ONE answer, refused to guess (correctly), and then had nothing to say. Each entry is a
+    /// SPEC §4 `kind:detail` reason string, which `scan.rs` turns into a DIRECT `Unknown` beside the
+    /// reason. Distinct from `unresolved` (one bool, one reason — "a callable I could not see through"):
+    /// these are refusals with a NAMED cause, and one body can hit several.
+    ///
+    /// THE RULE THEY INSTANCE: **a refusal must disclose, not certify.** Before this the refusal simply
+    /// returned `None` and the enclosing function was reported PURE — the cardinal sin's signature,
+    /// because an omitted pure function and an omitted effectful one are the same bytes. Every write
+    /// here can only ADD `Unknown`; none of them withdraws an answer.
+    #[serde(rename = "rf", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refusals: Vec<String>,
     /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn dispatches on through a local
     /// bounded-CHA-eligible receiver — see `CallCollector::dispatch_sites` for the full rationale. NOT
     /// part of `candor_report::ReportEntry` (the public wire schema): an ordinary scan's published report
@@ -266,6 +278,38 @@ pub(crate) fn unit_twin_key(leaf: &str) -> String {
     format!("{RET_UNIT}{leaf}")
 }
 
+/// SOUNDNESS R182 — sentinel prefix for a CANDIDATE return type of a fn leaf the ambiguity rule
+/// WITHDREW. `rets` drops a leaf recorded with two conflicting return types (right: never guess), and
+/// the drop route then read that absence as "this call constructs nothing" and certified the caller
+/// pure. To disclose instead, the site has to tell "this leaf named no type" apart from "this leaf's
+/// type was thrown away because it collided" — and, so the disclosure does not flood, WHICH types
+/// collided, because the refusal costs nothing unless one of them was drop-relevant.
+///
+/// Recorded in the same key-space trick `unit_twin_key` uses and for the same reason: a reader keyed on
+/// a plain identifier can never see these, so no existing consumer changes meaning. The candidate TYPE
+/// LEAF rides in the KEY and the value is the constant prefix, which is what makes the entry
+/// conflict-free under `merge_amb`'s "two values for one key ⇒ ambiguous" rule — one key can only ever
+/// carry one value. Leaves, not paths, for the reason `alias_expand_decls` states about `prim_aliases`
+/// and `drop_types`: a bare leaf is not something a module-alias rewrite can say anything about, so the
+/// entry cannot go stale when that rewrite runs.
+///
+/// Written ONLY at a detected conflict (in `record_return` for an intra-file collision, in `merge_decls`
+/// for a cross-file one), so an unambiguous crate adds no entries at all.
+pub(crate) const RET_AMB: &str = "<amb>";
+
+/// The `rets` key under which a WITHDRAWN candidate return type is filed. One place, so the two writers
+/// (`record_return`, `merge_decls`) and the one reader (`ambiguous_return_leaves`) cannot spell it
+/// differently — §F1.7's shape, the same argument as `unit_twin_key`.
+pub(crate) fn amb_ret_key(fn_leaf: &str, type_leaf: &str) -> String {
+    format!("{RET_AMB}{fn_leaf}\u{1f}{type_leaf}")
+}
+
+/// The inverse of `amb_ret_key`: `(fn leaf, candidate type leaf)` for a `rets` key that is one, `None`
+/// for every ordinary entry.
+pub(crate) fn split_amb_ret_key(key: &str) -> Option<(&str, &str)> {
+    key.strip_prefix(RET_AMB)?.split_once('\u{1f}')
+}
+
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl
 /// Trait` / `-> &dyn Trait`). The trait bound leaves are joined after it (`"<dyn>Task"` /
 /// `"<dyn>Read+Seek"`), so `get().run()` on such a factory resolves the receiver's TRAIT bounds and
@@ -388,6 +432,13 @@ pub(crate) struct ElemIndexes<'a> {
     /// parameter vanished from `functions[]`. Carries names only; like `callable_statics` it can name no
     /// concrete effect, only turn a silent drop into `Unknown`.
     pub(crate) callable_aliases: &'a HashSet<String>,
+    /// SOUNDNESS R182 — fn LEAF -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew
+    /// from `ReturnIndex`. Built in `scan.rs` from the `amb_ret_key` entries, intersected with
+    /// `drop_relevant`, so the map is EMPTY for a crate whose collisions could never have been charged
+    /// anything. That intersection is what keeps the disclosure off the flood: a leaf like `new`/`parse`
+    /// is ambiguous in almost every crate, and hedging on ambiguity ALONE would charge `Unknown` at
+    /// every free call of such a name. Entries only exist where the refusal really did withdraw a drop.
+    pub(crate) ambiguous_return_leaves: &'a HashMap<String, Vec<String>>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

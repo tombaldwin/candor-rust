@@ -137,11 +137,17 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) callable_statics: &'a std::collections::HashSet<String>,
     /// R161 — the crate-wide `type NAME = <callable>` alias leaves; see `ElemIndexes::callable_aliases`.
     pub(crate) callable_aliases: &'a std::collections::HashSet<String>,
+    /// SOUNDNESS R182 — fn leaf -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew;
+    /// see `ElemIndexes::ambiguous_return_leaves` for why it is pre-intersected with `drop_relevant`.
+    pub(crate) ambiguous_return_leaves: &'a std::collections::HashMap<String, Vec<String>>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
     pub(crate) unresolved: bool,
+    /// SOUNDNESS R182/R196 — the NAMED refusals this body hit; see `FnInfo::refusals`. A set, so a shape
+    /// repeated in one body discloses once, and `BTreeSet` so the emitted order is deterministic.
+    pub(crate) refusals: std::collections::BTreeSet<String>,
     /// The ERROR type leaf of the enclosing fn's `Result<_, E>` return, if any — the `?` operator's
     /// `From::from` TARGET. A `may_fail()?` where `may_fail` returns `Result<_, E1>` and this fn returns
     /// `Result<_, E2>` desugars to `E2::from(e1)` via a local `impl From<E1> for E2`; we edge to
@@ -307,6 +313,68 @@ fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
 }
 
 impl<'a> CallCollector<'a> {
+    /// SOUNDNESS R182/R196 — the drop route's REFUSALS, disclosed instead of certified.
+    ///
+    /// `ctor_leaf_from_call_returns` declines for four distinct reasons and only two of them are
+    /// refusals between competing definitions. This names those two and stays silent on the others,
+    /// because the point is a hedge that is worth reading, not a hedge everywhere:
+    ///
+    ///   * R196 — a UNIT-returning twin of this leaf. The index still HOLDS the typed answer (R188 filed
+    ///     the twin under its own key precisely so `let`-typing keeps it); this route cannot tell which
+    ///     of the two same-named callees a leaf-keyed lookup answered for, so it declines. Measured:
+    ///     `let g = net::open(a)` beside an unrelated unit `Ui::open` — one executed drop, the caller
+    ///     ABSENT in all three arms.
+    ///   * R182 — the leaf's return type was WITHDRAWN because two definitions disagree. Measured:
+    ///     `two::mk -> H` beside `other::mk -> usize`, `holds_two` ABSENT while the one-variable control
+    ///     `holds` reads `['Net']`.
+    ///
+    /// NOT disclosed here, deliberately, and each is a stated under-report rather than an oversight:
+    ///   * a `std`/`core`/`alloc`-rooted callee (R174(a)'s refusal). That is not a contest between local
+    ///     definitions — it is a refusal to let a local `Drop` type collide with `File::open`/
+    ///     `HashMap::new`, which every crate calls constantly. Hedging it is the 8-25% flood.
+    ///   * `drop` itself, and a leaf the index simply never recorded. Neither withdrew anything.
+    ///
+    /// AND THE GATE THAT KEEPS IT OFF THE FLOOD: a refusal costs nothing unless the answer it withdrew
+    /// would have been CHARGED. `note_release`'s two conditions are `drop_relevant` and "not escaping",
+    /// so the same two are asked here — for R196 of the answer the index still holds, for R182 of the
+    /// candidates `ambiguous_return_leaves` recorded (already intersected with `drop_relevant` in
+    /// `scan.rs`). Without it every free call of an ambiguous leaf — `new`, `parse`, `build`, ambiguous
+    /// in almost every crate — would charge `Unknown`.
+    ///
+    /// Direction: ADD-ONLY. It writes into `refusals`, which `scan.rs` turns into an `Unknown` beside a
+    /// reason; no branch here can withdraw an effect any arm previously reported.
+    fn note_ctor_refusal(&mut self, path: &str) {
+        if matches!(path.split("::").next(), Some("std") | Some("core") | Some("alloc")) {
+            return;
+        }
+        let last = path.rsplit("::").next().unwrap_or(path);
+        if last == "drop" {
+            return;
+        }
+        // Would a charge for `leaf` have landed in this frame? Exactly `note_release`'s own two gates.
+        let would_charge =
+            |s: &Self, leaf: &str| s.drop_relevant.contains(leaf) && !s.escaping_ctors.contains(leaf);
+        if self.returns.contains_key(&crate::model::unit_twin_key(last)) {
+            let withdrawn = crate::lang::recorded_return_type(last, self.returns)
+                .as_deref()
+                .and_then(crate::lang::local_type_leaf);
+            if withdrawn.is_some_and(|l| would_charge(self, &l)) {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R196DISCLOSE {path}"); // §E1 HIT COUNTER
+                }
+                self.refusals.insert("ambiguous:unit-returning twin of a constructing fn".to_string());
+            }
+            return;
+        }
+        if self.ambiguous_return_leaves.get(last).is_some_and(|c| c.iter().any(|l| would_charge(self, l)))
+        {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R182DISCLOSE {path}"); // §E1 HIT COUNTER
+            }
+            self.refusals.insert("ambiguous:same-name fns with different return types".to_string());
+        }
+    }
+
     /// DROP-GLUE, the single emission point. `leaf` is whatever `lang::ctor_leaf_from_*` returned for
     /// the construction expression in hand; a type with no local `Drop` (and owning none) is not
     /// `drop_relevant` and costs nothing, and a construction whose value ESCAPES this scope is refused
@@ -2060,6 +2128,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                                 leaf
                             });
+                        // SOUNDNESS R182/R196 — A REFUSAL MUST DISCLOSE, NOT CERTIFY. Both routes above
+                        // can decline because the name resolved to MORE THAN ONE definition, and the
+                        // enclosing function was then reported PURE over a destructor that really runs.
+                        if ctor.is_none() {
+                            self.note_ctor_refusal(&path);
+                        }
                         self.note_construction(ctor);
                         // CROSS-CRATE sibling — R68(1). `path` is already the resolved (use-expanded)
                         // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
