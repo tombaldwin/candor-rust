@@ -9,6 +9,28 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R226 (second half) — a macro invoked INSIDE a macro is read too, and the leaf-keyed
+  macro LICENCE is gone.** `macro_ctor_leaves` said "this leaf was built inside a macro somewhere, and
+  no site table can hold that construction, so keep the shipped leaf-keyed answer" — i.e. the R172 site
+  gate CERTIFIED the escape with no evidence, for every leaf any macro in the body constructed. It
+  existed because a nested macro's parse produces owned temporaries whose addresses die with the call.
+  `ord_nested` now composes a nested reading's ordinals into the enclosing reading's space (FNV-1a over
+  `(index, inner ordinal)` with the top bit set, so it can never alias a direct ordinal), and
+  `nested_macro_nodes` enumerates the nested invocations in ONE canonical order for both walks — so the
+  site half and `mark_escape` agree about a construction one macro deep, and the licence has nothing
+  left to cover. It is deleted, and with it a guard the drop family has carried since R172.
+  **Property gates:** the R216 debt register goes from **169 shapes to 141** — 28 more closed, 0 new;
+  `macro=nested`, `macro=tmpl_stmt` and `macro=std_stmt_tokens` are gone entirely, and with them the
+  LAST escape-side class in the register. **Everything still registered on the macro side (131 of the
+  141) is RESOLUTION-side**: `body_local`, `blocktok_local`, `repetition`, `unparsed` and `match_arms`
+  are ABSENT even with nothing escaping and no `?` in the body (measured), so the collector never
+  resolves the construction at all and no change to the escape model can reach them. That is R142/R143/
+  R144's subject, in `collector.rs`.
+  **1,509-crate registry A/B, WIDE key, vs `7dfe710`:** ADDED 0 / REMOVED 0 / CHANGED 0 over 270,874
+  rows. §E1 reach: `R226DECIDE` 1,741 hits / 143 crates, `R226NESTED` 5,794 hits / 43 crates.
+  Revert red (3 tests). The SIXTH and last shipped "by-value spine stays exempt" control is converted
+  to parity with its direct twin, for the reason the other five were.
+
 - ⚠ **SOUNDNESS R226 — the SITE walk and the ESCAPE walk now read a macro the same way, so a
   macro-borne construction is neither certified pure nor fabricated.** R172's site gate suppresses a
   drop only when EVERY construction of that leaf in the body is one of the escaping sites, and until
