@@ -4210,6 +4210,28 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                  version carried that phantom edge, and disclosing the refusal must not restore it");
     }
 
+    /// SOUNDNESS R182 — the `<amb>` candidate entries ride inside `rets`/`ReturnIndex`, so they are
+    /// visible to anything that reads that index without a key. Every keyed reader is safe by
+    /// construction (`<amb>` is not a Rust identifier), but `has_dyn_return` scans the VALUES, and a
+    /// sentinel that decoded as a dispatch return there would silently switch on bounded CHA for a whole
+    /// crate. Pinned rather than asserted (§E2 — the assertion was written by the commit that needs it).
+    #[test]
+    fn the_amb_sentinel_is_not_readable_as_any_other_return_shape() {
+        use crate::model::*;
+        for v in [RET_AMB, &amb_ret_key("mk", "H")] {
+            assert!(ret_dyn_leaves(v).is_none(), "{v} decoded as a `<dyn>` return");
+            assert!(ret_elem_dyn_leaves(v).is_none(), "{v} decoded as an `<elemdyn>` return");
+            assert!(ret_tuple_dyn_leaves(v).is_none(), "{v} decoded as a `<tupledyn>` return");
+            assert_ne!(v, RET_FN_TYPED);
+            assert_ne!(v, RET_UNIT);
+            assert!(!v.starts_with(RET_UNIT), "an `<amb>` key must not be readable as a unit twin");
+        }
+        // …and the inverse: the two writers and the one reader agree on the spelling.
+        assert_eq!(split_amb_ret_key(&amb_ret_key("mk", "H")), Some(("mk", "H")));
+        assert_eq!(split_amb_ret_key("mk"), None);
+        assert_eq!(split_amb_ret_key(&unit_twin_key("mk")), None);
+    }
+
     fn scan_fixture(name: &str, src: &str) -> serde_json::Value {
         scan_fixture_files(name, src, &[])
     }
