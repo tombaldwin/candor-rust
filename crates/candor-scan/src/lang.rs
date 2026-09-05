@@ -2578,6 +2578,16 @@ pub(crate) fn escaping_ctor_leaves<'a>(
         match sites.ctor_sites.get(l) {
             Some(v) => {
                 let all = v.iter().all(|s| escaped_sites.contains(s));
+                // §E1 HIT COUNTER, R226's CHARGING half — and it counts the DECISION, not the walk.
+                // `R226MACROSITE` counts every construction the shared macro reading finds, which is
+                // six figures on this corpus and says nothing about whether the answer moved. This
+                // fires only when the gate would have SUPPRESSED the leaf on the sites the pre-change
+                // walk could see, and does not because of a site only the shared reading records.
+                if !all && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+                    && v.iter().filter(|s| s.1 < ORD_DEEP0).all(|s| escaped_sites.contains(s))
+                {
+                    eprintln!("R226DECIDE {l}");
+                }
                 // §E1 HIT COUNTER — the branch R172 adds is exactly "the leaf gate WOULD have
                 // suppressed a leaf that has a NON-escaping construction site too". Printed only when
                 // it really fires, so a zero count in an A/B means the corpus never reached the change.
@@ -2600,21 +2610,25 @@ pub(crate) fn escaping_ctor_leaves<'a>(
 /// intersection.
 fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks {
     let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
+    // The SAME macro indexes the site walk used. `body_macros` is complete by now — `walk_block` has
+    // finished — so both walks resolve every invocation to the same template.
+    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros };
+    let guard = &mut Vec::new();
     let mut m = Marks::default();
     if let Some(e) = root {
-        mark_escape(e, uses, fields, returns, &mut m);
+        mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
     }
     // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
     // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
     // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
     for e in &sites.escapes {
-        mark_escape(e, uses, fields, returns, &mut m);
+        mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
     }
     for _ in 0..8 {
         let before = (m.names.len(), m.leaves.len(), m.sites.len());
         for (name, init) in &sites.lets {
             if m.names.contains(name) {
-                mark_escape(init, uses, fields, returns, &mut m);
+                mark_escape(init, &lens, guard, uses, fields, returns, &mut m);
             }
         }
         for (lhs, rhs) in &sites.assigns {
@@ -2622,19 +2636,19 @@ fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks 
                 // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
                     if m.names.contains(n) {
-                        mark_escape(rhs, uses, fields, returns, &mut m);
+                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m);
                     }
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
                 // unconditionally (not gated on this root, same as before this fix: a store is a store
                 // regardless of which exit the function eventually takes).
-                None => mark_escape(rhs, uses, fields, returns, &mut m),
+                None => mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m),
             }
         }
         for (recv, args) in &sites.method_args {
             if m.names.contains(recv) {
                 for a in args {
-                    mark_escape(a, uses, fields, returns, &mut m);
+                    mark_escape(a, &lens, guard, uses, fields, returns, &mut m);
                 }
             }
         }
@@ -2680,6 +2694,187 @@ fn macro_site_ordinals<'e>(exprs: impl IntoIterator<Item = &'e syn::Expr>) -> Ha
         go(e, &mut n, &mut out);
     }
     out
+}
+
+/// The two `macro_rules!` indexes an expansion may resolve against: the crate-wide one R48 builds
+/// (`local_macros`) and the body-local overlay `walk_block` fills as it passes a `Stmt::Item`
+/// definition. Carried as one value so the SITE walk and the ESCAPE walk are handed the identical
+/// pair — §F1 #3, two implementations of one question drift, and this family has been the proof of
+/// it four times (R199, R203, R204, R210 are each one walk seeing what the other could not).
+#[derive(Clone, Copy)]
+struct MacroLens<'a> {
+    local: &'a HashMap<String, String>,
+    body: &'a HashMap<String, String>,
+}
+
+/// ONE READING OF ONE MACRO INVOCATION, produced by `macro_reading` and consumed by BOTH walks.
+///
+/// A macro can be read three ways and the readings are not alternatives — a template invocation has
+/// tokens AND a definition, and both can construct. Each reading is a REGION, and a construction in
+/// region *r* is site-keyed `(address of the enclosing `syn::ExprMacro`, ordinal(r, k))`; the two
+/// walks parse their own copies of the same tokens, so the ordinal is the only thing that can carry
+/// identity across them (`macro_site_ordinals`' original reason, generalised to every region).
+struct MacroReading {
+    /// Region 0 — the invocation tokens as a comma-punctuated expression list. `vec![H::new()]`.
+    token_exprs: Vec<syn::Expr>,
+    /// Region 1 — the same tokens read as a STATEMENT sequence, when region 0 could not parse them.
+    /// `stmts!(let x = H::new("a"); x)`.
+    token_stmts: Option<syn::Block>,
+    /// Region 2+ — the arms of a resolved crate-local or body-local `macro_rules!`, flattened by
+    /// `macro_template_blocks_flat`. The construction of `mk_h!("a")` lives HERE and in no other
+    /// region: the invocation's tokens are `"a"`.
+    template_arms: Vec<syn::Block>,
+}
+
+/// Region bases for `macro_reading_ordinals`. Region 0's numbering is deliberately left at 1..n,
+/// byte-identical to what `macro_site_ordinals` produced before the other regions existed, so every
+/// site identity the two walks already agreed on is unchanged and this can only ADD keys.
+const ORD_DEEP0: usize = 1 << 20;
+const ORD_STMTS: usize = 1 << 21;
+const ORD_TMPL: usize = 1 << 22;
+const ORD_ARM_STRIDE: usize = 1 << 14;
+
+/// Pre-order over a block's statements and expressions, descending into nested blocks — what
+/// `for_each_child_expr` deliberately does not do. Stops at a nested macro, exactly as
+/// `macro_site_ordinals` does, because a nested macro's own parse needs its own base.
+fn deep_exprs<'e>(b: &'e syn::Block, f: &mut dyn FnMut(&'e syn::Expr)) {
+    fn ex<'e>(e: &'e syn::Expr, f: &mut dyn FnMut(&'e syn::Expr)) {
+        if matches!(e, syn::Expr::Macro(_)) {
+            return;
+        }
+        f(e);
+        match e {
+            // The callee PATH of a call is the constructor's own NAME, not a second construction —
+            // `skip_sites`' reason, applied here by not numbering it. `mark_escape` never descends a
+            // callee either (`for_each_value_child` gives a `Call` its ARGS), so a site recorded there
+            // could never be marked escaping and would charge a value handed straight to the caller.
+            syn::Expr::Call(c) => c.args.iter().for_each(|a| ex(a, f)),
+            _ => for_each_child_expr(e, &mut |c| ex(c, f)),
+        }
+        for_each_child_block(e, &mut |bl| deep_exprs(bl, f));
+    }
+    for st in &b.stmts {
+        match st {
+            syn::Stmt::Local(l) => {
+                if let Some(init) = &l.init {
+                    ex(&init.expr, f);
+                    if let Some((_, d)) = &init.diverge {
+                        ex(d, f);
+                    }
+                }
+            }
+            syn::Stmt::Expr(e, _) => ex(e, f),
+            _ => {}
+        }
+    }
+}
+
+/// The nodes region 0 reaches only by descending a BLOCK — `idm!({ out.push(H::new("a")); })`, whose
+/// single token expression is an `Expr::Block` that `for_each_child_expr` stops at. Numbered in their
+/// own range so region 0's shallow ordinals never move.
+fn deep0_exprs<'e>(exprs: &'e [syn::Expr], f: &mut dyn FnMut(&'e syn::Expr)) {
+    fn ex<'e>(e: &'e syn::Expr, f: &mut dyn FnMut(&'e syn::Expr)) {
+        if matches!(e, syn::Expr::Macro(_)) {
+            return;
+        }
+        match e {
+            syn::Expr::Call(c) => c.args.iter().for_each(|a| ex(a, f)),
+            _ => for_each_child_expr(e, &mut |c| ex(c, f)),
+        }
+        for_each_child_block(e, &mut |bl| deep_exprs(bl, f));
+    }
+    for e in exprs {
+        ex(e, f);
+    }
+}
+
+/// The canonical numbering over a whole `MacroReading`. Deterministic from the reading's structure
+/// alone, which is what lets two independent parses of one token stream agree on site identity.
+fn macro_reading_ordinals(r: &MacroReading) -> HashMap<usize, usize> {
+    let mut out = macro_site_ordinals(r.token_exprs.iter());
+    let mut n = 0usize;
+    deep0_exprs(&r.token_exprs, &mut |e| {
+        n += 1;
+        out.entry(e as *const syn::Expr as usize).or_insert(ORD_DEEP0 + n);
+    });
+    if let Some(b) = &r.token_stmts {
+        let mut n = 0usize;
+        deep_exprs(b, &mut |e| {
+            n += 1;
+            out.entry(e as *const syn::Expr as usize).or_insert(ORD_STMTS + n);
+        });
+    }
+    for (j, arm) in r.template_arms.iter().enumerate() {
+        let mut n = 0usize;
+        let base = ORD_TMPL + j * ORD_ARM_STRIDE;
+        deep_exprs(arm, &mut |e| {
+            n += 1;
+            out.entry(e as *const syn::Expr as usize).or_insert(base + n);
+        });
+    }
+    out
+}
+
+/// SOUNDNESS R205/R206 — which `macro_rules!` NAME an invocation path resolves to, if any. Extracted
+/// so the site walk and the escape walk cannot resolve differently; see `note_local_macro_template`'s
+/// comment for why the LEAF of a path is used and which direction that fails in.
+fn resolve_local_macro(m: &syn::ExprMacro, lens: &MacroLens<'_>) -> Option<String> {
+    let full = path_to_string(&m.mac.path);
+    if full.contains("::") {
+        let leaf = full.rsplit("::").next().unwrap_or_default().to_string();
+        if lens.local.contains_key(&leaf) || lens.body.contains_key(&leaf) {
+            return Some(leaf);
+        }
+        return None;
+    }
+    if lens.local.contains_key(&full) || lens.body.contains_key(&full) {
+        return Some(full);
+    }
+    None
+}
+
+/// THE ONE READING both walks use. `guard` is the recursion guard R48 uses, threaded so a template
+/// that invokes itself terminates identically on both sides.
+fn macro_reading(
+    m: &syn::ExprMacro,
+    lens: &MacroLens<'_>,
+    expanding: &dyn Fn(&str) -> bool,
+) -> MacroReading {
+    // `respan_call_site` is REQUIRED, not hygiene: these tokens were parsed on a rayon worker and this
+    // walk runs on a different thread, so syn's one span-JOIN (`parse_negative_lit`, reached by any
+    // `-1` in the tokens) aborts the parser. `every_moved_token_reparse_site_survives_the_thread_
+    // boundary` is the test; `model::respan_call_site` carries the full explanation.
+    let tokens = crate::model::respan_call_site(m.mac.tokens.clone());
+    let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    let (token_exprs, token_stmts) = match syn::parse::Parser::parse2(parser, tokens.clone()) {
+        Ok(exprs) => (exprs.into_iter().collect::<Vec<_>>(), None),
+        Err(_) => (
+            Vec::new(),
+            syn::parse::Parser::parse2(syn::Block::parse_within, tokens)
+                .ok()
+                .map(|stmts| syn::Block { brace_token: Default::default(), stmts }),
+        ),
+    };
+    let mut template_arms = Vec::new();
+    if let Some(name) = resolve_local_macro(m, lens) {
+        if !expanding(&name) {
+            // BOTH bodies, never one instead of the other — `note_local_macro_template`'s comment
+            // states why (the overlay is per-body, not per-block, so consulting it first can silence).
+            let mut bodies: Vec<&String> = Vec::new();
+            if let Some(b) = lens.body.get(&name) {
+                bodies.push(b);
+            }
+            if let Some(b) = lens.local.get(&name) {
+                if !bodies.contains(&b) {
+                    bodies.push(b);
+                }
+            }
+            for b in bodies {
+                template_arms.extend(crate::collector::macro_template_blocks_flat(b).1);
+            }
+        }
+    }
+    MacroReading { token_exprs, token_stmts, template_arms }
 }
 
 /// What `escaping_ctor_leaves` learned: the constructed type LEAVES that leave this scope, and the
@@ -2925,11 +3120,71 @@ impl<'a> EscapeSites<'a> {
         }
     }
 
+    /// THE SITE HALF OF THE SHARED MACRO READING — the regions `note_macro_site`'s shallow token walk
+    /// cannot address-key: the interiors of BLOCKS inside the tokens, tokens that only read as
+    /// STATEMENTS, and a resolved `macro_rules!` TEMPLATE, whose construction is in the DEFINITION and
+    /// appears nowhere in the invocation at all.
+    ///
+    /// WHY IT HAS TO EXIST. R172's site gate suppresses a leaf only when EVERY construction of it in
+    /// the body is one of the escaping sites, and a construction it cannot see is not a site — so
+    /// `out.push(mk_h!("a")); let h = H::try_new(m, "b")?; let _ = out; Ok(h)` had one site, the
+    /// escaping one, and the gate certified the function pure while an `H::drop` really ran in that
+    /// frame (executed: 1 in-frame drop; the direct twin `out.push(H::new("a"))` is charged). R199,
+    /// R203, R204 and R210 each closed one spelling of this INSIDE a `?` operand and left it open
+    /// outside one, because every walk they added is gated on `open_tries` and writes only
+    /// `TryExit::interior`. This is not gated on anything.
+    ///
+    /// SAY WHICH DIRECTION IT FAILS IN. It writes `ctor_sites` and NOTHING else. Not `first_ctor_seq`
+    /// — a leaf with no recorded position counts as live from the start, so CREATING one can suppress
+    /// a charge. Not `macro_ctor_leaves`, which licenses an escape outright. Adding sites can only make
+    /// the gate's "every site escapes" test harder to satisfy: a site `mark_escape` also finds through
+    /// `macro_reading_ordinals` is neutral, and one it does not find CHARGES.
+    fn note_reading_sites(&mut self, reading: &MacroReading, base: usize) {
+        let ords = macro_reading_ordinals(reading);
+        let (uses, fields, returns) = (self.uses, self.fields, self.returns);
+        let mut found: Vec<(String, usize)> = Vec::new();
+        {
+            let mut rec = |e: &syn::Expr| {
+                if let Some(l) = ctor_leaf_of_expr(e, uses, fields, returns) {
+                    if let Some(o) = ords.get(&(e as *const syn::Expr as usize)) {
+                        found.push((l, *o));
+                    }
+                }
+            };
+            deep0_exprs(&reading.token_exprs, &mut rec);
+            if let Some(b) = &reading.token_stmts {
+                deep_exprs(b, &mut rec);
+            }
+            for arm in &reading.template_arms {
+                deep_exprs(arm, &mut rec);
+            }
+        }
+        if !found.is_empty() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            for (l, _) in &found {
+                eprintln!("R226MACROSITE {l}"); // §E1 HIT COUNTER
+            }
+        }
+        for (l, o) in found {
+            self.ctor_sites.entry(l).or_default().push((base, o));
+        }
+    }
+
+    /// One macro invocation, read ONCE for both halves of this walk.
+    fn note_macro_reading(&mut self, m: &syn::ExprMacro) {
+        let reading = {
+            let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+            macro_reading(m, &lens, &|n| self.macro_expanding.contains(n))
+        };
+        self.note_reading_sites(&reading, m as *const syn::ExprMacro as usize);
+    }
+
     /// R172 — the leaves a MACRO body constructs, which `note_ctor_site` cannot address-key. Mirrors
     /// `mark_escape`'s macro handling (parse the tokens as a comma-punctuated expression list) and then
     /// walks the whole parsed subtree, deliberately wider than `mark_escape`'s value-position descent:
     /// over-recording here only widens the set that keeps the SHIPPED answer.
     fn note_macro_ctor_leaves(&mut self, m: &syn::ExprMacro, host: &syn::Expr) {
+        // The SITE half — not gated on an open `?`, unlike everything below it.
+        self.note_macro_reading(m);
         // SOUNDNESS R199 — SPINE MEMBERSHIP IS DECIDED IN TWO STEPS, because a macro's contents are
         // parsed out of TOKENS into a FRESH tree whose addresses exist in no spine set and never can:
         // `value_spine_addrs` walks the real body only.
@@ -3407,9 +3662,21 @@ impl<'a> EscapeSites<'a> {
                 // it is on any spine and everything it builds is interior. Interior only — never a site,
                 // never a `first_ctor_seq`, so this can only charge more.
                 syn::Stmt::Macro(m) => {
+                    // The SITE half, not gated on an open `?`. A statement macro's VALUE is discarded,
+                    // so `mark_escape` never reaches it from any root and every site recorded here is
+                    // a non-escaping one — which is the point: `push_h!(out, "a")` builds an `H` that
+                    // dies with `out`, and without a site the R172 gate certified the body pure
+                    // whenever some OTHER `H` escaped. Keyed on the `StmtMacro`'s own address, which no
+                    // `ExprMacro` shares.
+                    let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
+                    let syn::Expr::Macro(em) = &host else { unreachable!() };
+                    let reading = {
+                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+                        macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
+                    };
+                    self.note_reading_sites(&reading, m as *const syn::StmtMacro as usize);
                     if !self.open_tries.is_empty() {
                         let on_spine = vec![false; self.open_tries.len()];
-                        let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                         self.note_opaque_macro(&host, &on_spine);
                     }
                 }
@@ -3580,6 +3847,8 @@ impl<'a> EscapeSites<'a> {
 /// out, and recurse through the value positions that carry a value outward.
 fn mark_escape(
     e: &syn::Expr,
+    lens: &MacroLens<'_>,
+    guard: &mut Vec<String>,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
     returns: &ReturnIndex,
@@ -3611,29 +3880,71 @@ fn mark_escape(
     // macro body, so without this the idiomatic collection literal reads as NOT escaping and every
     // `fn make() -> Vec<Guard> { vec![Guard::new()] }` fabricates the guard's Drop onto the factory.
     if let syn::Expr::Macro(mac) = e {
-        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(exprs) = syn::parse::Parser::parse2(parser, mac.mac.tokens.clone()) {
-            // R172 — `exprs` are OWNED TEMPORARIES, so an address recorded under them dies with this
-            // call and a later allocation could reuse one. Marked into a scratch `Marks`, then each
-            // site RENUMBERED onto `macro_site_ordinals`, the one numbering the body walk also uses —
-            // `vec![from_handle(q)]` beside a local `H::new(p)` has to distinguish the two, or the
-            // published charge on that body stays lost (measured: `mixed_macro`).
-            let ords = macro_site_ordinals(exprs.iter());
-            let base = mac as *const syn::ExprMacro as usize;
-            let mut sub = Marks::default();
-            for one in &exprs {
-                mark_escape(one, uses, fields, returns, &mut sub);
+        // ONE READING, SHARED WITH THE SITE WALK. Before this, the two walks read a macro differently:
+        // the site walk consulted the `macro_rules!` TEMPLATE index and re-read unparsable tokens as
+        // statements (R203/R206/R207), and this one did neither — it parsed the invocation tokens as an
+        // expression list and stopped. A construction the site walk can SEE and this walk cannot is a
+        // site that can never be marked escaping, i.e. a FABRICATION; one this walk can see and the
+        // site walk cannot is a leaf certified pure, i.e. a SILENT UNDER-REPORT. Both were live at
+        // 7dfe710 and both are measured in the commit that adds this.
+        let reading = macro_reading(mac, lens, &|n| guard.iter().any(|x| x == n));
+        let ords = macro_reading_ordinals(&reading);
+        let base = mac as *const syn::ExprMacro as usize;
+        let mut sub = Marks::default();
+        // R172 — the parsed forms are OWNED TEMPORARIES, so an address recorded under them dies with
+        // this call and a later allocation could reuse one. Marked into a scratch `Marks`, then each
+        // site RENUMBERED onto `macro_reading_ordinals`, the numbering the body walk also uses —
+        // `vec![from_handle(q)]` beside a local `H::new(p)` has to distinguish the two, or the
+        // published charge on that body stays lost (measured: `mixed_macro`).
+        for one in &reading.token_exprs {
+            mark_escape(one, lens, guard, uses, fields, returns, &mut sub);
+        }
+        // Region 0's NAMES are the caller's own tokens (`vec![g]` really does carry the local `g`
+        // out) and are extended exactly as before this change.
+        m.names.extend(std::mem::take(&mut sub.names));
+        let region0_leaves = sub.leaves.clone();
+        // Region 1 and 2 carry the macro's VALUE in exactly one position each — a block's TAIL. A
+        // statement inside them runs and discards its value, so its constructions do NOT escape
+        // through the invocation, which is the whole reason a template that pushes into a collection
+        // (`{ let x = H::new($p); $o.push(x); }`) must stay charged while `mk_h!` (`{ H::new($p) }`)
+        // must not. Marking only the tail is also the CHARGING direction: an escape mark suppresses.
+        //
+        // THEIR NAMES ARE DISCARDED, deliberately. `strip_dollars` renders `$o` as `o`, a name that
+        // means nothing in the caller's body; extending `m.names` with it would let an unrelated local
+        // of that name read as escaping — a silence, from a walk whose whole job here is to stop one.
+        if let Some(b) = &reading.token_stmts {
+            if let Some(t) = tail_expr_of(b) {
+                mark_escape(t, lens, guard, uses, fields, returns, &mut sub);
             }
-            m.names.extend(sub.names);
-            m.leaves.extend(sub.leaves);
-            for (addr, ord) in &sub.sites {
-                // Only sites written DIRECTLY in this parse (`ord == 0`) can be renumbered here. An
-                // entry from a NESTED macro carries that macro's own temporary base and is dropped —
-                // its leaf keeps the shipped leaf-keyed answer through `macro_ctor_leaves`.
-                if *ord == 0 {
-                    if let Some(o) = ords.get(addr) {
-                        m.sites.insert((base, *o));
+        }
+        if !reading.template_arms.is_empty() {
+            if let Some(name) = resolve_local_macro(mac, lens) {
+                guard.push(name);
+                for arm in &reading.template_arms {
+                    if let Some(t) = tail_expr_of(arm) {
+                        mark_escape(t, lens, guard, uses, fields, returns, &mut sub);
                     }
+                }
+                guard.pop();
+            }
+        }
+        // §E1 HIT COUNTER, R226's SUPPRESSING half: a leaf that escapes through the macro's VALUE and
+        // that only the template / statement-token reading can see. Before the shared reading these
+        // never reached `Marks::leaves`, so the leaf was never in the escaping set and the collector's
+        // own R48 expansion charged a construction that is handed to the caller.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            for l in sub.leaves.difference(&region0_leaves) {
+                eprintln!("R226ESCAPE {l}");
+            }
+        }
+        m.leaves.extend(sub.leaves);
+        for (addr, ord) in &sub.sites {
+            // Only sites written DIRECTLY in this parse (`ord == 0`) can be renumbered here. An
+            // entry from a NESTED macro carries that macro's own temporary base and is dropped —
+            // its leaf keeps the shipped leaf-keyed answer through `macro_ctor_leaves`.
+            if *ord == 0 {
+                if let Some(o) = ords.get(addr) {
+                    m.sites.insert((base, *o));
                 }
             }
         }
@@ -3663,7 +3974,7 @@ fn mark_escape(
         syn::Expr::If(iff) => {
             let mut then_m = Marks::default();
             if let Some(t) = tail_expr_of(&iff.then_branch) {
-                mark_escape(t, uses, fields, returns, &mut then_m);
+                mark_escape(t, lens, guard, uses, fields, returns, &mut then_m);
             }
             // No `else` means the implicit value is `()`, which can carry no NAME — an empty set, which
             // (correctly) vetoes any name the `then` arm alone found. A `()`-typed branch cannot carry a
@@ -3672,7 +3983,7 @@ fn mark_escape(
             let else_m = match &iff.else_branch {
                 Some((_, eb)) => {
                     let mut n = Marks::default();
-                    mark_escape(eb, uses, fields, returns, &mut n);
+                    mark_escape(eb, lens, guard, uses, fields, returns, &mut n);
                     n
                 }
                 None => Marks::default(),
@@ -3687,7 +3998,7 @@ fn mark_escape(
         syn::Expr::Match(mt) => {
             let mut arms = mt.arms.iter().map(|a| {
                 let mut n = Marks::default();
-                mark_escape(&a.body, uses, fields, returns, &mut n);
+                mark_escape(&a.body, lens, guard, uses, fields, returns, &mut n);
                 n
             });
             if let Some(first) = arms.next() {
@@ -3704,7 +4015,7 @@ fn mark_escape(
         }
         _ => {}
     }
-    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, returns, m));
+    for_each_value_child(e, &mut |c| mark_escape(c, lens, guard, uses, fields, returns, m));
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can

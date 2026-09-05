@@ -7,10 +7,7 @@
 #
 # Columns: <generator kind>  <verdict>  <shape key>
 # MEASURED exhaustively (every point of both shape spaces) by soundness/baseline.sh
-# at candor-rust c5dae3d. Regenerate with: bash soundness/baseline.sh
-q	DRIFT	ctor=ctor_fn,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=direct,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=let_bind,ending=drop_h,mode=hoist,operand=macroid
+# at candor-rust 7dfe710. Regenerate with: bash soundness/baseline.sh
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=block
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=closure
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=ifelse
@@ -18,20 +15,8 @@ q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=macroid
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=matcharm
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=nested
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=tryforeach
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=block
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=closure
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=ifelse
 q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=matcharm
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=nested
-q	DRIFT	ctor=mac_expr,ending=drop_h,mode=hoist,operand=tryforeach
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=block
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=closure
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=ifelse
 q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=matcharm
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=nested
-q	DRIFT	ctor=mac_local,ending=drop_h,mode=hoist,operand=tryforeach
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=block
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=closure
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=ifelse
@@ -39,20 +24,8 @@ q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=macroid
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=matcharm
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=nested
 q	DRIFT	ctor=mac_nested,ending=drop_h,mode=hoist,operand=tryforeach
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=block
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=closure
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=ifelse
 q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=matcharm
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=nested
-q	DRIFT	ctor=mac_repeat,ending=drop_h,mode=hoist,operand=tryforeach
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=block
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=closure
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=ifelse
 q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=macroid
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=matcharm
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=nested
-q	DRIFT	ctor=mac_stmt,ending=drop_h,mode=hoist,operand=tryforeach
 q	DRIFT	ctor=mac_tmpl_stmt,ending=drop_h,mode=hoist,operand=block
 q	DRIFT	ctor=mac_tmpl_stmt,ending=drop_h,mode=hoist,operand=closure
 q	DRIFT	ctor=mac_tmpl_stmt,ending=drop_h,mode=hoist,operand=ifelse
@@ -62,14 +35,9 @@ q	DRIFT	ctor=mac_tmpl_stmt,ending=drop_h,mode=hoist,operand=nested
 q	DRIFT	ctor=mac_tmpl_stmt,ending=drop_h,mode=hoist,operand=tryforeach
 q	DRIFT	ctor=mac_vec,ending=drop_h,mode=hoist,operand=macroid
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=blocktok_local
-macro	VIOLATION	context=loop_for,ending=drop_h,macro=body_local
-macro	VIOLATION	context=loop_for,ending=drop_h,macro=crate_path
-macro	VIOLATION	context=loop_for,ending=drop_h,macro=expr
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=match_arms
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=nested
-macro	VIOLATION	context=loop_for,ending=drop_h,macro=repetition
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=std_stmt_tokens
-macro	VIOLATION	context=loop_for,ending=drop_h,macro=stmt
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=tmpl_stmt
 macro	VIOLATION	context=loop_for,ending=drop_h,macro=unparsed
 macro	VIOLATION	context=loop_for,ending=drop_len,macro=blocktok_local
@@ -83,14 +51,9 @@ macro	VIOLATION	context=loop_for,ending=ret_out,macro=match_arms
 macro	VIOLATION	context=loop_for,ending=ret_out,macro=repetition
 macro	VIOLATION	context=loop_for,ending=ret_out,macro=unparsed
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=blocktok_local
-macro	VIOLATION	context=loop_while,ending=drop_h,macro=body_local
-macro	VIOLATION	context=loop_while,ending=drop_h,macro=crate_path
-macro	VIOLATION	context=loop_while,ending=drop_h,macro=expr
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=match_arms
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=nested
-macro	VIOLATION	context=loop_while,ending=drop_h,macro=repetition
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=std_stmt_tokens
-macro	VIOLATION	context=loop_while,ending=drop_h,macro=stmt
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=tmpl_stmt
 macro	VIOLATION	context=loop_while,ending=drop_h,macro=unparsed
 macro	VIOLATION	context=loop_while,ending=drop_len,macro=blocktok_local
@@ -128,14 +91,9 @@ macro	VIOLATION	context=q_closure,ending=ret_out,macro=match_arms
 macro	VIOLATION	context=q_closure,ending=ret_out,macro=repetition
 macro	VIOLATION	context=q_closure,ending=ret_out,macro=unparsed
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=blocktok_local
-macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=body_local
-macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=crate_path
-macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=expr
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=match_arms
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=nested
-macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=repetition
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=std_stmt_tokens
-macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=stmt
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=tmpl_stmt
 macro	VIOLATION	context=q_hoisted,ending=drop_h,macro=unparsed
 macro	VIOLATION	context=q_hoisted,ending=drop_len,macro=blocktok_local
@@ -209,14 +167,9 @@ macro	VIOLATION	context=q_tryforeach,ending=ret_out,macro=match_arms
 macro	VIOLATION	context=q_tryforeach,ending=ret_out,macro=repetition
 macro	VIOLATION	context=q_tryforeach,ending=ret_out,macro=unparsed
 macro	VIOLATION	context=straight,ending=drop_h,macro=blocktok_local
-macro	VIOLATION	context=straight,ending=drop_h,macro=body_local
-macro	VIOLATION	context=straight,ending=drop_h,macro=crate_path
-macro	VIOLATION	context=straight,ending=drop_h,macro=expr
 macro	VIOLATION	context=straight,ending=drop_h,macro=match_arms
 macro	VIOLATION	context=straight,ending=drop_h,macro=nested
-macro	VIOLATION	context=straight,ending=drop_h,macro=repetition
 macro	VIOLATION	context=straight,ending=drop_h,macro=std_stmt_tokens
-macro	VIOLATION	context=straight,ending=drop_h,macro=stmt
 macro	VIOLATION	context=straight,ending=drop_h,macro=tmpl_stmt
 macro	VIOLATION	context=straight,ending=drop_h,macro=unparsed
 macro	VIOLATION	context=straight,ending=drop_len,macro=blocktok_local
