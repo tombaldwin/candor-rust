@@ -2445,7 +2445,7 @@ pub(crate) fn cross_ctor_leaf_from_struct_path(
 /// parses `vec![Guard::new()]`'s tokens into owned temporaries whose addresses die with the call (and
 /// could be reused by a later allocation).
 ///
-/// SOUNDNESS R226 — SO THE TWO WALKS SHARE A READING AND A NUMBERING INSTEAD. `macro_reading` is the
+/// SOUNDNESS R229 — SO THE TWO WALKS SHARE A READING AND A NUMBERING INSTEAD. `macro_reading` is the
 /// one reading (invocation tokens as an expression list, as statements, and the resolved
 /// `macro_rules!` arms) and `macro_reading_ordinals` the one numbering, so a construction inside a
 /// macro is a SITE with an identity both walks can compute; `ord_nested` composes a nested reading's
@@ -2578,7 +2578,7 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // does not reach) keeps the old answer — the site set is an added refusal, never a new licence.
     let escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
     acc.leaves.retain(|l| {
-        // SOUNDNESS R226 — THE LEAF-KEYED MACRO LICENCE IS GONE. `macro_ctor_leaves` said "this leaf
+        // SOUNDNESS R229 — THE LEAF-KEYED MACRO LICENCE IS GONE. `macro_ctor_leaves` said "this leaf
         // was built inside a macro somewhere, and no site table can hold that construction, so keep
         // the shipped leaf-keyed answer" — i.e. CERTIFY the escape without evidence, which is the one
         // direction this file is not allowed to be wrong in. It existed because a nested macro's parse
@@ -2588,15 +2588,15 @@ pub(crate) fn escaping_ctor_leaves<'a>(
         match sites.ctor_sites.get(l) {
             Some(v) => {
                 let all = v.iter().all(|s| escaped_sites.contains(s));
-                // §E1 HIT COUNTER, R226's CHARGING half — and it counts the DECISION, not the walk.
-                // `R226MACROSITE` counts every construction the shared macro reading finds, which is
+                // §E1 HIT COUNTER, R229's CHARGING half — and it counts the DECISION, not the walk.
+                // `R229MACROSITE` counts every construction the shared macro reading finds, which is
                 // six figures on this corpus and says nothing about whether the answer moved. This
                 // fires only when the gate would have SUPPRESSED the leaf on the sites the pre-change
                 // walk could see, and does not because of a site only the shared reading records.
                 if !all && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
                     && v.iter().filter(|s| s.1 < ORD_DEEP0).all(|s| escaped_sites.contains(s))
                 {
-                    eprintln!("R226DECIDE {l}");
+                    eprintln!("R229DECIDE {l}");
                 }
                 // §E1 HIT COUNTER — the branch R172 adds is exactly "the leaf gate WOULD have
                 // suppressed a leaf that has a NON-escaping construction site too". Printed only when
@@ -2766,7 +2766,7 @@ enum NestedMacro<'a> {
     Stmt(&'a syn::StmtMacro),
 }
 
-/// SOUNDNESS R226 — THE ORDINAL FOR A SITE REACHED THROUGH A NESTED READING. A positional scheme
+/// SOUNDNESS R229 — THE ORDINAL FOR A SITE REACHED THROUGH A NESTED READING. A positional scheme
 /// would need an unbounded stride (a nested reading's own ordinals already run into the millions once
 /// template arms are numbered), so compose by FNV-1a over `(j, inner)` instead and set the top bit,
 /// which no direct ordinal ever carries. Deterministic from the two indices alone, so the site walk
@@ -3272,7 +3272,7 @@ impl<'a> EscapeSites<'a> {
         }
         if !found.is_empty() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             for (l, _) in &found {
-                eprintln!("R226MACROSITE {l}"); // §E1 HIT COUNTER
+                eprintln!("R229MACROSITE {l}"); // §E1 HIT COUNTER
             }
         }
         for (l, o) in found {
@@ -3328,7 +3328,7 @@ impl<'a> EscapeSites<'a> {
                 }
                 for (l, o) in sub {
                     if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-                        eprintln!("R226NESTED {l}"); // §E1 HIT COUNTER
+                        eprintln!("R229NESTED {l}"); // §E1 HIT COUNTER
                     }
                     self.ctor_sites.entry(l).or_default().push((base, o));
                 }
@@ -3425,7 +3425,7 @@ impl<'a> EscapeSites<'a> {
         n: &mut usize,
     ) {
         if let syn::Expr::Macro(_) = e {
-            // SOUNDNESS R226 — a nested macro's constructions are recorded as SITES by
+            // SOUNDNESS R229 — a nested macro's constructions are recorded as SITES by
             // `note_reading_sites`, under `ord_nested`, which `mark_escape` composes identically.
             // Before that they were recorded as a leaf-keyed LICENCE (`macro_ctor_leaves`) that made
             // the site gate certify the escape outright.
@@ -4081,13 +4081,13 @@ fn mark_escape(
                 guard.pop();
             }
         }
-        // §E1 HIT COUNTER, R226's SUPPRESSING half: a leaf that escapes through the macro's VALUE and
+        // §E1 HIT COUNTER, R229's SUPPRESSING half: a leaf that escapes through the macro's VALUE and
         // that only the template / statement-token reading can see. Before the shared reading these
         // never reached `Marks::leaves`, so the leaf was never in the escaping set and the collector's
         // own R48 expansion charged a construction that is handed to the caller.
         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             for l in sub.leaves.difference(&region0_leaves) {
-                eprintln!("R226ESCAPE {l}");
+                eprintln!("R229ESCAPE {l}");
             }
         }
         m.leaves.extend(sub.leaves);
