@@ -9,6 +9,43 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R223 — a call written into a DEPENDENCY no longer has its effect silenced by a
+  same-named LOCAL definition.** `tail2` keys the local index on the last TWO segments, so
+  `tokio_postgres::Client::execute` and deadpool-postgres' own `generic_client::Client::execute`
+  present the identical key `Client::execute`: the local definition won the lookup, `t == f.qual`
+  dropped the edge as a self-reference, and `resolved_local` then suppressed the `Db` the classifier
+  had. **The whole `GenericClient` forwarding surface — `execute`, `query`, `query_one`,
+  `prepare_typed`, `batch_execute` and their `Transaction` twins — was ABSENT from the report, while
+  the same crate correctly charged `Db` on `Manager::create`**, so the silence was aimed precisely at
+  the methods a consumer calls. Census over 1,509 crates.io crates, instrumented at the site: **123
+  suppression sites, 99 caller functions, 26 crates; Net 72, Fs 24, Db 19, Rand 6, Env 2; 59 of the
+  sites left the caller ABSENT.** The dominant shape is the newtype/wrapper idiom forwarding to the
+  same-named method of an external type, which is why `fs-err` (a `std::fs` wrapper) and `cap-std`
+  are on the list.
+  **The guard is right and the KEY was too narrow, so what is withdrawn is the local definition's
+  AUTHORITY to speak for the dependency, never the edge.** `resolved_local` is unchanged and the
+  local `calls` edge is kept, so the result is a UNION and the change can only ADD a charge. That
+  direction was not a preference: the first cut made a dependency-qualified path un-`resolvable` and
+  **dropped 161 concrete effects** — rdkafka's `Log` ×30 through a `use rdkafka_sys::types::*` glob
+  that rewrites a call on rdkafka's OWN `client::Client`, sqlx-postgres ×12, tungstenite's `Rand`
+  through an extension-trait `impl IntoClientRequest for http::Uri`; a second cut still dropped 43.
+  Cargo.toml is the authority on what is external (the role `std | core | alloc` already plays), and
+  a local definition whose own qual is a **≥3-segment suffix** of the written path is corroborated by
+  a segment `tail2` had thrown away, so it keeps its authority — a two-segment crate-root qual does
+  not, which is measured: with a plain suffix test, tokio-native-tls'
+  `native_tls::TlsConnector::connect` walked straight through and stayed silent.
+  **A/B over 1,509 crates.io crates against `c8aa83c`, keyed on EVERY field: 53 rows ADDED, 0
+  REMOVED, 45 CHANGED, 15 crates touched; 91 functions gain a concrete effect (Net 39, Db 27, Fs 22,
+  Rand 3) and 0 functions lose one.** Gains audited in full from source, not sampled:
+  deadpool-postgres 26, tokio 23 (mio-backed socket constructors), ignore 8 (walkdir `metadata`),
+  fs-err 14, cap-std 6, tonic 4, postgres 2, p12-keystore 2, ureq, axum, hickory-net, rand_core.
+  §E1 reach counters: the branch is reached at **437,268 sites in 1,069 of 1,509 crates**, of which
+  4,084 in 286 crates also resolved locally and **76 in 15 crates actually flipped**; the 47 census
+  sites that stay suppressed were each read from source and are correct local resolutions (own trait
+  impls on `String`/`SocketAddr`, a crate's own `mod rand`, a glob-rewritten local `PgStream`, a bin
+  calling its own lib). STATED RESIDUAL: the `CANDOR_DEPS` cross-crate join at the same site is still
+  gated on `resolved_local` and is left alone here, because this A/B does not run `--deps`.
+
 - ⚠ **SOUNDNESS R208 — an invocation of a `macro_rules!` name the crate defines TWICE now discloses its
   order-dependence.** `local_macros` is keyed by bare NAME and merges last-writer-wins, so which
   module's template R48 expands depends on FILE ORDER: measured on the same two files swapped

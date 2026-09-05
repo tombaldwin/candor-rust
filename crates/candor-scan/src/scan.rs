@@ -2202,6 +2202,52 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let aliased = tail2(&c.path)
                 .and_then(|t2| t2.split("::").next().map(str::to_string))
                 .is_some_and(|ty| merged.prim_aliases.contains(&ty));
+            // SOUNDNESS R223 — WHOSE crate does this qualified path name? `tail2` keeps the last TWO
+            // segments only, so a call WRITTEN into a dependency (`tokio_postgres::Client::execute`) and a
+            // local definition (`generic_client::Client::execute`) present the IDENTICAL key
+            // `Client::execute`. The local one wins the lookup, `t == f.qual` then drops the edge as a
+            // self-reference, and `resolved_local` SUPPRESSES the `Db` the classifier had — so the
+            // newtype/wrapper forwarding idiom (deadpool-postgres, fs-err, cap-std) reports the very
+            // methods a consumer calls as PURE. Census over 1,509 registry crates: 123 suppression sites,
+            // 99 caller functions, 26 crates, and 59 of the sites leave the caller ABSENT — silent.
+            //
+            // Cargo.toml is the AUTHORITY on what is external — the same role `std | core | alloc` plays
+            // in `resolvable` below for the toolchain's own crates. `cr` is the written head segment and
+            // `deps` is keyed the same way (post `-`→`_`, pre `package = "…"` rename), which is why the κ
+            // ledger above tests `deps.contains(cr)` with this same expression.
+            //
+            // A DEP-LOOKING HEAD IS NOT PROOF OF A DEP CALL, and this half was MEASURED, not reasoned.
+            // `c.path` is not the written source text: `expand` resolves it through the file's `use` map,
+            // and a GLOB import claims every name it could plausibly supply — rdkafka's
+            // `use rdkafka_sys::types::*` turns `self.client.native_ptr()`, a call on rdkafka's OWN
+            // `client::Client`, into `rdkafka_sys::types::client::Client::native_ptr`. `expand` also
+            // STRIPS a written `crate::`/`self::`/`super::` prefix (`lang.rs`, the crate-rooted branch),
+            // so an intra-crate call into a module named like a dependency (fs-err's own `mod tokio`,
+            // aws-lc-rs's `mod rand`) arrives byte-identical too. What separates the two is whether the
+            // local definition's OWN qual is a SUFFIX of the written path:
+            // `rdkafka_sys::types::client::Client::native_ptr` ends with `client::Client::native_ptr`, so
+            // the head segments are a prefix an import put there and the path names that very definition.
+            // `tokio_postgres::Client::execute` does NOT end with `generic_client::Client::execute`, and
+            // the only thing linking that call to the local definition is the two segments `tail2` kept.
+            //
+            // THE SUFFIX TEST NEEDS A THIRD SEGMENT TO MEAN ANYTHING — measured, not tidied. A local
+            // definition at the crate ROOT has a two-segment qual (`TlsConnector::connect`), which is a
+            // suffix of EVERY path ending in those two segments, so the test degenerates into the tail2
+            // match it is supposed to corroborate: tokio-native-tls' `native_tls::TlsConnector::connect`
+            // walked straight through it and kept its `Net` suppressed. A suffix therefore only counts as
+            // evidence when the definition contributes a segment `tail2` had thrown away — an exact match
+            // aside, which needs no corroboration because it IS the path.
+            let extern_dep_qualified = c.path.contains("::")
+                && deps.contains(cr)
+                && !tail2(&c.path)
+                    .and_then(|t2| by_tail2.get(&t2))
+                    .is_some_and(|v| {
+                        v.iter().any(|q| {
+                            q == &c.path
+                                || (q.matches("::").count() >= 2
+                                    && c.path.ends_with(&format!("::{q}")))
+                        })
+                    });
             // Did this call resolve to a LOCAL definition (free fn, method, or a unique trait-default)?
             // If so the local def is AUTHORITATIVE and its effects flow through the `calls` edge — the
             // crate/FFI classifier MUST NOT also fire, or a pure local fn whose NAME collides with an FFI
@@ -2386,7 +2432,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // reviewed claim, and it holds whether or not any single join happened to fire.)
                 }
             }
-            if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
+            // SOUNDNESS R223 — WHICH resolution is allowed to silence the classifier. `resolved_local`
+            // stays exactly as computed: the edge is KEPT, so this change can only ADD a charge and can
+            // never withdraw one — the direction matters, because the first two cuts of this fix made the
+            // path un-`resolvable` instead and dropped 161 (then 43) concrete effects across the corpus,
+            // among them tungstenite's `Rand` through an extension-trait `impl IntoClientRequest for
+            // http::Uri` and tokio-websockets' `Rand` through a `pub use` re-export. Both are local
+            // definitions a consumer really reaches, and a fix for a silent under-report that creates
+            // silent under-reports elsewhere is not a fix.
+            //
+            // What is withdrawn is only the AUTHORITY to speak for the dependency. `resolved_local`
+            // suppresses the classifier because the local definition is authoritative — true when the
+            // call names that definition, false when the only thing tying them together is the two
+            // segments `tail2` kept (`extern_dep_qualified` above). The result is a UNION: the local
+            // edge's effects flow through propagation AND the dependency's classified effect is charged,
+            // which is the sound over-approximation. The precision cost is a call whose head merely LOOKS
+            // like a dependency inheriting that crate's rule — over-report, on the record in `inferred`,
+            // never the cardinal sin.
+            let local_is_authoritative = resolved_local && !extern_dep_qualified;
+            if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !local_is_authoritative) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb
                 // the table does not recognise contributes nothing, so the field stays absent rather than
@@ -2408,7 +2472,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // fallback, so `eff == "Net"` and the `Llm` would be DROPPED (a gate evasion — the
                 // model surface silently vanishes behind the plain Net) unless we add it here. Matches
                 // the deep engine (src/lib.rs) and candor-java, which both add Llm+Net unconditionally.
-                if model_sdk && !suppress_bare_leaf && !resolved_local {
+                if model_sdk && !suppress_bare_leaf && !local_is_authoritative {
                     let d = direct.entry(f.qual.clone()).or_default();
                     d.insert("Llm");
                     d.insert("Net");
