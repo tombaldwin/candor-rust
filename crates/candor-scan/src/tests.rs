@@ -4051,12 +4051,6 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         }
     }
 
-    /// Build a throwaway crate from `src`, scan it, and return the JSON report. Shared by the
-    /// implicit-stringification tests below, which each need their OWN crate (the CHA fan-out is
-    /// crate-wide, so an effectful `impl Display` anywhere in the fixture would contaminate the
-    /// all-pure control).
-    #[cfg(test)]
-
     /// SOUNDNESS R182/R184/R190(e)/R196/R208 — THE REFUSAL FAMILY: *a refusal must disclose, not certify.*
     ///
     /// Each case below is a place where name resolution found MORE THAN ONE answer, correctly declined to
@@ -4260,6 +4254,11 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert_eq!(split_amb_ret_key(&unit_twin_key("mk")), None);
     }
 
+    /// Build a throwaway crate from `src`, scan it, and return the JSON report. Shared by the
+    /// implicit-stringification tests below, which each need their OWN crate (the CHA fan-out is
+    /// crate-wide, so an effectful `impl Display` anywhere in the fixture would contaminate the
+    /// all-pure control).
+    #[cfg(test)]
     fn scan_fixture(name: &str, src: &str) -> serde_json::Value {
         scan_fixture_files(name, src, &[])
     }
