@@ -285,8 +285,12 @@ pub(crate) fn unit_twin_key(leaf: &str) -> String {
 /// type was thrown away because it collided" — and, so the disclosure does not flood, WHICH types
 /// collided, because the refusal costs nothing unless one of them was drop-relevant.
 ///
-/// Recorded in the same key-space trick `unit_twin_key` uses and for the same reason: a reader keyed on
-/// a plain identifier can never see these, so no existing consumer changes meaning. The candidate TYPE
+/// Recorded in the same key-space trick `unit_twin_key` uses: every reader of `ReturnIndex` keys on a
+/// plain identifier (or on `unit_twin_key`), so none of them can address one of these. THE ONE READER
+/// THAT DOES NOT KEY is `decls::fninfo`'s `has_dyn_return`, which scans the index's VALUES — and the
+/// value here is the constant `RET_AMB`, distinct from all three dyn prefixes; pinned by
+/// `the_amb_sentinel_is_not_readable_as_any_other_return_shape`, because an assertion written by the
+/// commit that needs it to be true is the one nobody checks. The candidate TYPE
 /// LEAF rides in the KEY and the value is the constant prefix, which is what makes the entry
 /// conflict-free under `merge_amb`'s "two values for one key ⇒ ambiguous" rule — one key can only ever
 /// carry one value. Leaves, not paths, for the reason `alias_expand_decls` states about `prim_aliases`
