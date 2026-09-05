@@ -15994,6 +15994,36 @@ pub fn go() {{ imp::doit(); }}
              WITHDRAWS a charge and needs its own A/B:\n{v:#}");
     }
 
+    /// SOUNDNESS R226 — the claim `ord_nested`'s comment makes, PINNED BY A TEST rather than asserted
+    /// (§E2). A composed nested ordinal must never collide with a DIRECT one, or a nested construction
+    /// would be matched against an unrelated site and the gate would certify an escape that never
+    /// happened. The separation is a single bit — the top bit of a `usize`, which is 31 on a 32-bit
+    /// target and 63 on a 64-bit one, so the arithmetic below is what has to hold on BOTH.
+    #[test]
+    fn nested_ordinals_never_alias_a_direct_one() {
+        use crate::lang::{ord_nested, ORD_ARM_STRIDE, ORD_DEEP0, ORD_NESTED_FLOOR, ORD_STMTS, ORD_TMPL};
+        // The largest direct ordinal any reading can produce: a template with an implausible number of
+        // arms, each with an implausible number of numbered nodes.
+        let worst_direct = ORD_TMPL + 100_000 * ORD_ARM_STRIDE + 1_000_000;
+        assert!(worst_direct < ORD_NESTED_FLOOR,
+                "a direct ordinal reached {worst_direct}, at or above the nested floor                  {ORD_NESTED_FLOOR} — nested and direct site identities would alias, and a nested                  construction could be matched against an unrelated escaping site");
+        for j in 0..64usize {
+            for inner in [1usize, 2, ORD_DEEP0 + 3, ORD_STMTS + 4, ORD_TMPL + 5] {
+                assert!(ord_nested(j, inner) >= ORD_NESTED_FLOOR,
+                        "ord_nested({j}, {inner}) landed below the floor — on a 32-bit target the top
+                         bit would have been shifted out of a `u64` and lost");
+            }
+        }
+        // …and it is injective enough to be an identity: no two of these composed ordinals collide.
+        let mut seen = std::collections::HashSet::new();
+        for j in 0..256usize {
+            for inner in 1..256usize {
+                assert!(seen.insert(ord_nested(j, inner)),
+                        "ord_nested collided at ({j}, {inner}) — two different nested constructions                          would share one site identity");
+            }
+        }
+    }
+
     /// SOUNDNESS R226 — THE SITE WALK AND THE ESCAPE WALK NOW READ A MACRO THE SAME WAY.
     ///
     /// R172's site gate suppresses a leaf only when EVERY construction of it in the body is one of the

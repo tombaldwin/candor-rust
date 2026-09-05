@@ -2739,10 +2739,10 @@ struct MacroReading {
 /// Region bases for `macro_reading_ordinals`. Region 0's numbering is deliberately left at 1..n,
 /// byte-identical to what `macro_site_ordinals` produced before the other regions existed, so every
 /// site identity the two walks already agreed on is unchanged and this can only ADD keys.
-const ORD_DEEP0: usize = 1 << 20;
-const ORD_STMTS: usize = 1 << 21;
-const ORD_TMPL: usize = 1 << 22;
-const ORD_ARM_STRIDE: usize = 1 << 14;
+pub(crate) const ORD_DEEP0: usize = 1 << 20;
+pub(crate) const ORD_STMTS: usize = 1 << 21;
+pub(crate) const ORD_TMPL: usize = 1 << 22;
+pub(crate) const ORD_ARM_STRIDE: usize = 1 << 14;
 
 /// The shallow pre-order `macro_site_ordinals` numbers — every child, stopping at a nested macro and
 /// at a callee path. Factored out so the nested site walk visits exactly the nodes that numbering
@@ -2771,14 +2771,23 @@ enum NestedMacro<'a> {
 /// template arms are numbered), so compose by FNV-1a over `(j, inner)` instead and set the top bit,
 /// which no direct ordinal ever carries. Deterministic from the two indices alone, so the site walk
 /// and the escape walk — which parse their own copies — agree.
-fn ord_nested(j: usize, inner: usize) -> usize {
+pub(crate) fn ord_nested(j: usize, inner: usize) -> usize {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in (j as u64).to_le_bytes().iter().chain((inner as u64).to_le_bytes().iter()) {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    (h | (1u64 << 63)) as usize
+    // The top bit of a `usize`, NOT of a `u64`: `1u64 << 63` truncates to ZERO when cast to a 32-bit
+    // `usize`, and the separation this relies on would silently disappear on that target while every
+    // test passed on the 64-bit machine anyone would check it on. `ORD_NESTED_FLOOR` is the pinned
+    // claim; `nested_ordinals_never_alias_a_direct_one` is the test.
+    (h as usize) | ORD_NESTED_FLOOR
 }
+
+/// The bit `ord_nested` sets, and the floor no DIRECT ordinal may reach. Direct ordinals are region 0's
+/// 1..n, `ORD_DEEP0 + k`, `ORD_STMTS + k` and `ORD_TMPL + arm * ORD_ARM_STRIDE + k` — so the claim is
+/// that a template's arm count cannot push the last of those over the floor.
+pub(crate) const ORD_NESTED_FLOOR: usize = 1usize << (usize::BITS - 1);
 
 /// Every macro invocation inside a reading, in ONE canonical order — region 0's own pre-order, then
 /// the block interiors that pre-order stops at, then region 1, then each template arm. Index `j`
