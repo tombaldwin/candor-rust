@@ -75,6 +75,8 @@ struct PreScan {
 fn prescan_argv(args: &[String]) -> PreScan {
     let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, outs: Vec::new(), target: None };
     let mut it = args.iter().peekable();
+    // Set at the first token the main loop would refuse; gates the TARGET only (see the `_` arm).
+    let mut stopped = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             // Consumed and recorded only when the loop would accept it (`-` or non-flag); a
@@ -120,14 +122,20 @@ fn prescan_argv(args: &[String]) -> PreScan {
             // point, since a target may legitimately follow it (`candor-scan --include-tests .`).
             _ => {
                 if a.starts_with('-') {
+                    // STOP THE TARGET, NEVER THE WALK. The first version of this `break` exited the
+                    // whole loop, which also stopped collecting `--gate-json` — and that collection is
+                    // DELIBERATELY order-independent: ⟨0.27⟩ (1) requires the verdict sink to be armed
+                    // with the refusal whatever the argv order, so `--zzz --gate-json G` must still arm
+                    // G. Breaking left yesterday's green at G, a STALE GREEN, which is the direction
+                    // that matters. Caught by conformance PART 34 (b), not by this crate's own tests.
                     if !matches!(
                         a.as_str(),
                         "--json" | "--include-tests" | "--incremental" | "--deps"
                             | "--agents" | "--version" | "--help" | "-h"
                     ) {
-                        break;
+                        stopped = true;
                     }
-                } else if ps.target.is_none() {
+                } else if ps.target.is_none() && !stopped {
                     ps.target = Some(a.clone());
                 }
             }

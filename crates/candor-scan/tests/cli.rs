@@ -390,6 +390,41 @@ fn an_unknown_flags_operand_is_never_taken_as_the_scan_target() {
 }
 
 #[test]
+fn an_unknown_flag_arms_the_gate_sink_in_either_argv_order() {
+    // ⟨0.27⟩ (1) — the verdict sink is armed with the refusal WHATEVER the argv order, so a reader of
+    // the sink can never be handed yesterday's `{"ok": true}` by a run that refused. `prescan_argv`
+    // therefore collects `--gate-json` PAST a token the parse loop would refuse; that over-collection
+    // is deliberate and load-bearing.
+    //
+    // The first version of the R232 fix stopped the target walk with a `break`, which also stopped that
+    // collection: `--zzz --gate-json G` left the stale green at G, and only the ORDER
+    // `--gate-json G --zzz` still armed. Conformance PART 34 (b) caught it — "the contract depends on
+    // ARGV ORDER" — and nothing in this crate did. It does now.
+    for (label, args) in [
+        ("bad flag FIRST", vec!["--zzz-not-a-flag", "--gate-json"]),
+        ("bad flag LAST", vec!["--gate-json"]),
+    ] {
+        let d = make_crate("armorder", "pub fn go() {}");
+        let sink = d.join("verdict.json");
+        std::fs::write(&sink, br#"{"ok":true,"note":"YESTERDAYS GREEN"}"#).unwrap();
+
+        let mut cmd = Command::new(bin());
+        cmd.arg(d.to_string_lossy().as_ref());
+        for a in &args { cmd.arg(a); }
+        cmd.arg(sink.to_string_lossy().as_ref());
+        if label == "bad flag LAST" { cmd.arg("--zzz-not-a-flag"); }
+        let out = cmd.output().expect("run candor-scan");
+
+        assert_eq!(out.status.code(), Some(2), "{label}: an unknown flag refuses");
+        let got = std::fs::read_to_string(&sink).expect("sink readable");
+        assert!(
+            !got.contains("YESTERDAYS GREEN"),
+            "{label}: the refusing run left the previous green at the sink:\n{got}"
+        );
+    }
+}
+
+#[test]
 fn two_positionals_mark_the_first_which_is_the_one_the_refusal_names() {
     // The main loop refuses a second positional and its message names the FIRST as the target it
     // holds. The prescan used to take the last "to mirror this loop" — a mirror that went stale when
