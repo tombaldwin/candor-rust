@@ -16393,6 +16393,61 @@ pub fn go() {{ imp::doit(); }}
                  report):\n{v:#}");
     }
 
+    /// SOUNDNESS R144 — R143's SIBLING: THE TEMPLATE DOES NOT PARSE, AND THAT WAS ALSO SILENT.
+    /// `macro_template_blocks` `$`-strips a template and parses it as a block. `strip_dollars`
+    /// leaves a `$( X ) sep? *` repetition as `( X ) *`, which is no statement; a
+    /// `$($k:expr => $v:expr),*` matcher (the maplit shape) and a match-arm list are not blocks
+    /// either. The arm yields no `syn::Block`, so there is nothing to walk — and nothing was said.
+    /// EXECUTED ground truth (`scratchpad/r142/fix`): `c3_top_rep` (repetition) and `c4_top_kv`
+    /// (maplit) each perform a real `std::fs::write` and are ENTIRELY ABSENT from `functions[]` on
+    /// a binary built at `d54108b`, while a non-repetition control doing the identical write is
+    /// `['Fs']`.
+    ///
+    /// FILED AND FIXED SEPARATELY FROM R143 BECAUSE A FIX FOR ONE DOES NOT COVER THE OTHER. They
+    /// reach the same site through different gates — `arm_count` vs `blocks.len()` — and R207's
+    /// flattened reader, which already exists and is deliberately veto-side only, would close the
+    /// repetition half of THIS one and none of R143's. `match_arm_list` and `kv_pairs` are the two
+    /// spellings the flatten does NOT reach, so they pin the part that stays open either way.
+    ///
+    /// THE REASONS MUST DIFFER. A single reason for both would make the report unable to say which
+    /// of the two limitations it hit, and they have different remedies.
+    #[test]
+    fn r144_a_an_unreadable_macro_template_discloses_instead_of_certifying() {
+        let v = scan_src_to_json("r144unread", r#"
+            macro_rules! rep { ($($p:expr),*) => { $( std::fs::write($p, "x").unwrap(); )* } }
+            macro_rules! kv { ($($k:expr => $v:expr),*) => {{ let mut m = ::std::collections::HashMap::new(); $( m.insert($k, $v); std::fs::write($k, "x").unwrap(); )* m }} }
+            macro_rules! arms { ($n:expr, $($pat:pat => $e:expr),*) => { match $n { $($pat => $e),* } } }
+            macro_rules! plain { ($p:expr) => { std::fs::write($p, "x").unwrap() } }
+            macro_rules! two { (a $p:expr) => { let _ = $p; }; (b $p:expr) => { std::fs::write($p, "x").unwrap() }; }
+            pub fn repetition(p: &str) { rep!(p); }
+            pub fn kv_pairs(p: &str) { let m = kv!(p => 1u32); let _ = m.len(); }
+            pub fn match_arm_list(p: &str, n: u32) { let _ = arms!(n, 0 => p.len(), _ => 0); }
+            pub fn readable(p: &str) { plain!(p); }
+            pub fn multi_arm(p: &str) { two!(b p); }
+"#);
+        for name in ["repetition", "kv_pairs", "match_arm_list"] {
+            let e = effs_opt(&v, name);
+            assert!(e.contains(&"Unknown".to_string()),
+                    "SOUNDNESS R144 — `{name}` invokes a local `macro_rules!` whose template this \
+                     scan cannot parse. Skipping it is defensible; saying NOTHING about it is not, \
+                     and `repetition` and `kv_pairs` really write a file through one. Was \
+                     `{e:?}`\n{v:#}");
+            let why = fn_entry(&v, name)["unknownWhy"].to_string();
+            assert!(why.contains("ambiguous:unreadable macro_rules! template"),
+                    "the reason must name the UNREADABLE-TEMPLATE cause, not R143's multi-arm one: \
+                     the two limitations have different remedies and a report that conflates them \
+                     cannot say which it hit. Was {why}\n{v:#}");
+        }
+        assert_eq!(effs_opt(&v, "readable"), vec!["Fs".to_string()],
+                   "THE NO-REGRESSION CONTROL — a template that DOES parse is expanded and charged \
+                    precisely, and must not pick up a hedge. A clean `['Fs']`:\n{v:#}");
+        let why_multi = fn_entry(&v, "multi_arm")["unknownWhy"].to_string();
+        assert!(why_multi.contains("multi-arm") && !why_multi.contains("unreadable"),
+                "THE SEPARATION CONTROL — R143's multi-arm case must keep R143's reason. Both \
+                 verdicts live at one site, one `else if` apart, so a cut that widened either \
+                 condition would silently swallow the other: was {why_multi}\n{v:#}");
+    }
+
     /// SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules! lm { .. }` written
     /// inside a function body is a `Stmt::Item`. `decls.rs` builds R48's `macro_rules!` index from
     /// ITEM-level definitions only, and `walk_block` threw every `Stmt::Item` away, so a body-local

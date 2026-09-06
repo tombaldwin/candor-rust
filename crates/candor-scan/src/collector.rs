@@ -3818,6 +3818,30 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     self.refusals
                         .insert(format!("ambiguous:unexpanded multi-arm macro_rules! `{mname}`"));
+                } else {
+                    // SOUNDNESS R144 — R143's SIBLING, DIFFERENT CAUSE, SAME SILENCE. Here the arm
+                    // count is fine and the TEMPLATE does not parse: `strip_dollars` leaves a
+                    // `$( X ) sep? *` repetition as `( X ) *`, which is no statement, and a
+                    // `$($k:expr => $v:expr),*` or a match-arm list is not a block either. The arm
+                    // yielded no `syn::Block`, so there is nothing to walk — and, before this, nothing
+                    // was said. Executed ground truth: `c3_top_rep` (a repetition template) and
+                    // `c4_top_kv` (the maplit shape) each perform a real `std::fs::write` and are
+                    // ENTIRELY ABSENT from `functions[]` on `d54108b`.
+                    //
+                    // FILED AND FIXED SEPARATELY FROM R143 ON PURPOSE. The two reach this site through
+                    // different gates (`arm_count` vs `blocks.len()`), they name different causes in
+                    // the report, and R207's flattened reader — which exists, is measured, and is
+                    // deliberately veto-side only — would close the repetition half of THIS one and
+                    // nothing of R143's. A fix for one does not cover the other.
+                    //
+                    // NOT the same thing as expanding it: this only refuses to certify. `ambiguous:`
+                    // follows `ambiguous:module items hidden by an unexpanded macro`, which is already
+                    // this engine's kind for a macro-opacity refusal that is not a name collision.
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R144DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
+                    }
+                    self.refusals
+                        .insert(format!("ambiguous:unreadable macro_rules! template `{mname}`"));
                 }
             }
         }

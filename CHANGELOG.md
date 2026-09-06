@@ -9,6 +9,33 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R144 — a `macro_rules!` template this scan cannot PARSE was skipped, and that was
+  also silent.** R143's sibling with a different cause. `macro_template_blocks` `$`-strips a
+  template and parses it as a block; `strip_dollars` leaves a `$( X ) sep? *` repetition as
+  `( X ) *`, which is no statement, and a `$($k:expr => $v:expr),*` matcher or a match-arm list is
+  not a block either. The arm yields no `syn::Block` and there was nothing to walk — **and nothing
+  was said.** Executed ground truth: a repetition template and a maplit-shaped template each
+  perform a real `std::fs::write` and are ENTIRELY ABSENT from `functions[]` on `d54108b`, while a
+  parseable control doing the identical write is `['Fs']`. **A cardinal sin.** Such an invocation
+  now discloses `Unknown` with `ambiguous:unreadable macro_rules! template \`NAME\``, a DIFFERENT
+  reason from R143's, because the two limitations have different remedies and a report that
+  conflated them could not say which it hit.
+  **1,509-crate registry A/B, wide key**, vs `2c7eeb6`: **ADDED 923 / REMOVED 0 / CHANGED 3,281**
+  over 267,360 rows, **0 functions lost a concrete effect**; 3,495 rows carry the new reason across
+  **143 of 1,509 crates**. §E1 reach: `R144DISCLOSE` 5,249 hits / 143 crates.
+- **The debt register can now tell a SILENT under-report from a DISCLOSED one, and the shipped one
+  was conflating them.** `check_pair.py` scored `Fs -> Unknown` as a `VIOLATION`, i.e. as the
+  cardinal sin, which SPEC §4 says it is not — so a register whose whole purpose is to track sins
+  could not have shown R143's or R144's remedy at all. It now emits `DISCLOSED` for that case
+  (still debt, still never a pass, still in the register) and excludes `Unknown` from the `DRIFT`
+  delta, since a twin that hedges says nothing about the base. **Calibrated against the pre-fix
+  binary**: at `d54108b` the new verdict reports **119 VIOLATION + 12 DISCLOSED**, not 131
+  VIOLATION — twelve of the shipped register's "silent under-reports" were never silent, and all
+  twelve are the `q_closure` context, whose own `run_cb(|| ..)` puts `Unknown` on both spellings.
+  **Across the three cuts the register goes 141 shapes → 99, and the SILENT macro count 119 → 4.**
+  The four that remain are `blocktok_local` + `drop_h`, a drop-glue SITE-recording gap in the R229
+  vein rather than a macro-resolution one.
+
 - ⚠ **SOUNDNESS R143 — a MULTI-ARM `macro_rules!` was skipped, and the report said nothing at all.**
   `visit_macro` expands only a genuinely single-arm template, because an invocation matches EXACTLY
   ONE arm and a pre-expansion scan cannot tell which; walking every arm would charge a non-matching
