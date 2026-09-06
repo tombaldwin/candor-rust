@@ -3982,9 +3982,26 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             assert!(eff(f).contains(&"Fs".to_string()), "local single-arm macro template's Fs must reach `{f}`:\n{body}");
         }
         assert!(eff("e").contains(&"Log".to_string()), "a local logging-wrapper macro's Log must reach `e`:\n{body}");
-        for f in ["p", "m_pure", "m_call"] {
+        // SOUNDNESS R143 — THE PROPERTY IS "NO FABRICATED EFFECT", AND THIS ASSERTED ABSENCE INSTEAD.
+        // `m_pure` invokes the EMPTY arm of a two-arm macro whose other arm writes, and the control
+        // it exists to be is that the writing arm's `Fs` must not land here. It was written as
+        // `inferred == []`, which was the same bytes only because the skip was SILENT. Since R143
+        // that skip DISCLOSES: `m_pure` is `['Unknown']` with `ambiguous:unexpanded multi-arm`, and
+        // the fabrication control is intact — the effect the wrong arm performs is still absent. So
+        // the assertion now says what it means. `p` and `m_call` are untouched by that cut (a pure
+        // single-arm template, and a single-arm template whose metavar sits in CALLEE position) and
+        // stay exactly empty, which is what keeps this from being a blanket weakening.
+        for f in ["p", "m_call"] {
             assert!(eff(f).is_empty(), "macro fabrication control `{f}` must stay pure:\n{body}");
         }
+        assert!(!eff("m_pure").contains(&"Fs".to_string()),
+                "THE FABRICATION CONTROL: `m_pure` matches `multi!`'s EMPTY arm, and the `Fs` its \
+                 OTHER arm performs must not be charged here. (It carries `Unknown` since R143 — a \
+                 disclosure that the arm is unknown, not a claim about which one ran.):\n{body}");
+        assert!(eff("m_pure").contains(&"Unknown".to_string()),
+                "…and the skip must DISCLOSE rather than certify — R143. This assertion is the half \
+                 the original control could not express, because it read `[]` and `[]` meant both \
+                 \"no fabrication\" and \"nothing said at all\":\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -16766,15 +16783,30 @@ pub fn go() {{ imp::doit(); }}
              same invisibility that lost a real drop one spelling over. The shared over-report is \
              the site gate's missing by-value exemption, a separate defect whose fix WITHDRAWS a \
              charge and needs its own A/B:\n{v:#}");
-        assert!(!v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "kv_tokens_open"),
-                "THE PIN ON R207's STATED RESIDUAL, not a control. `kv!(\"a\" => H::new(\"a\"))` has \
-                 invocation tokens that parse neither as an expression list nor as statements, and a \
-                 template that is a repetition over those same unreadable tokens — so no reader, this \
-                 flattening included, can see the construction, and the row is silent against \
-                 published 0.34.0. It ships open in 0.35.0 by the owner's ruling (measured corpus \
-                 incidence 0 of 1,504 crates; exposure 387 fns in 51 crates; the blanket alternative \
-                 fabricates 7 jni rows, 6 beyond published parity). If this ever charges the residual \
-                 has CLOSED — update SOUNDNESS R207 and the 0.35.0 advisory:\n{v:#}");
+        // SOUNDNESS R144 — THE PIN WAS ON THE ROW'S ABSENCE, AND THE ROW IS THE WRONG WITNESS.
+        // What R207 left open is that NO READER CAN SEE THE CONSTRUCTION in `kv!("a" => H::new("a"))`
+        // — invocation tokens that parse neither as an expression list nor as statements, over a
+        // template that is a repetition of those same tokens. That residual is untouched. What
+        // changed is that the function no longer says NOTHING about it: R144 makes an unreadable
+        // template disclose. So the pin moves onto the residual itself — the construction stays
+        // invisible, i.e. no `Fs` and no `H::drop` edge — and gains the half it could not state,
+        // that the invisibility is now DISCLOSED. `!any(fn == ..)` could not tell a closed residual
+        // from a disclosed one, which is the same conflation R143 and R144 are about.
+        let kv = fn_entry(&v, "kv_tokens_open");
+        assert!(!effs(kv).contains(&"Fs".to_string())
+                    && !kv["calls"].to_string().contains("H::drop"),
+                "THE PIN ON R207's STATED RESIDUAL, not a control. No reader — this flattening \
+                 included — can see the `H::new` inside `kv!(\"a\" => H::new(\"a\"))`, and the row is \
+                 silent about that construction against published 0.34.0. It ships open in 0.35.0 by \
+                 the owner's ruling (measured corpus incidence 0 of 1,504 crates; exposure 387 fns \
+                 in 51 crates; the blanket alternative fabricates 7 jni rows, 6 beyond published \
+                 parity). If this ever charges the residual has CLOSED — update SOUNDNESS R207 and \
+                 the 0.35.0 advisory:\n{v:#}");
+        assert!(effs(kv).contains(&"Unknown".to_string()),
+                "…and since R144 the invisibility is DISCLOSED rather than silent: the template is \
+                 unreadable, the function says so, and `deny Unknown` can see it. The residual above \
+                 is unchanged — this is the OTHER half, which the previous `!any(fn == ..)` form \
+                 could not express because a disclosed row and a closed one both make it fail:\n{v:#}");
     }
 
     /// SOUNDNESS R207 — THE BOUNDARY, ASSERTED RATHER THAN ARGUED. The repetition flattening exists on

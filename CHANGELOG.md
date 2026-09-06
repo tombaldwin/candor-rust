@@ -9,6 +9,19 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **TWO SHIPPED TESTS ASSERTED A ROW'S ABSENCE AS A PROXY FOR A PROPERTY, and the proxy broke the
+  moment the engine started disclosing.** Both went red on R143/R144 and neither was wrong about
+  its subject — they were wrong about their witness. `local_macro_template_is_expanded_so_its
+  _effects_are_seen` asserted `m_pure` (which matches the EMPTY arm of a two-arm macro whose other
+  arm writes) has `inferred == []`; the property it exists to protect is that the OTHER arm's `Fs`
+  is not fabricated here, and `[]` meant that only while the skip was silent. It now asserts no
+  `Fs` AND a disclosed `Unknown` — the half the original form could not express, because `[]` read
+  as both "no fabrication" and "nothing said at all". `a_macro_rules_repetition_template_is_read_
+  by_the_try_interior_veto` asserted `kv_tokens_open` is not in `functions[]` at all as the pin on
+  R207's stated residual; the residual is that no reader can see the construction, so it now
+  asserts that directly (no `Fs`, no `H::drop` edge) plus the disclosure. `!any(fn == ..)` could
+  not tell a CLOSED residual from a DISCLOSED one.
+
 - ⚠ **SOUNDNESS R144 — a `macro_rules!` template this scan cannot PARSE was skipped, and that was
   also silent.** R143's sibling with a different cause. `macro_template_blocks` `$`-strips a
   template and parses it as a block; `strip_dollars` leaves a `$( X ) sep? *` repetition as
