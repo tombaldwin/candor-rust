@@ -72,6 +72,27 @@ struct PreScan {
 /// never accepted. ONE walk feeds every pre-pass consumer, and the loop now agrees token-for-token
 /// with it: under the ⟨0.28⟩ ruling `--policy --out X` is a usage error at `--policy`, and `--out X`
 /// — parsed, not swallowed — arms X fail-closed before the refusal.
+/// THE VALUELESS FLAGS, IN ONE PLACE — SOUNDNESS R264.
+///
+/// `prescan_argv` and the main parse loop each need to know which flags take no operand, and they used
+/// to hold two hand-written copies of that fact. The copies differed by exactly one token: the prescan
+/// had `--version` and not `-V`. That is §G — two paths computing one fact — and the cost was DATA LOSS,
+/// not a wrong report: with `-V` treated as refusable, `stopped` suppressed the target, `pre_target`
+/// fell back to `"."`, and `gate_json_input_collision` was then asked "is this sink under `.`?" instead
+/// of "is it under the target the operator gave?". A sink outside the CWD subtree is invisible to that
+/// question, so arming proceeded and the fail-closed verdict document was written OVER a source file of
+/// the scan, at parse time, before the walk. Measured from an unrelated cwd:
+///
+///     candor-scan --version <dir> --gate-json <dir>/src/lib.rs   exit 2, nothing written
+///     candor-scan -V        <dir> --gate-json <dir>/src/lib.rs   exit 0, lib.rs DESTROYED
+///
+/// Anything added here must be a flag the main loop accepts with no operand. Adding one that DOES take
+/// an operand re-opens the target-suppression bug from the other side.
+const VALUELESS_FLAGS: &[&str] = &[
+    "--json", "--include-tests", "--incremental", "--deps", "--agents",
+    "--version", "-V", "--help", "-h",
+];
+
 fn prescan_argv(args: &[String]) -> PreScan {
     let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, outs: Vec::new(), target: None };
     let mut it = args.iter().peekable();
@@ -128,11 +149,7 @@ fn prescan_argv(args: &[String]) -> PreScan {
                     // with the refusal whatever the argv order, so `--zzz --gate-json G` must still arm
                     // G. Breaking left yesterday's green at G, a STALE GREEN, which is the direction
                     // that matters. Caught by conformance PART 34 (b), not by this crate's own tests.
-                    if !matches!(
-                        a.as_str(),
-                        "--json" | "--include-tests" | "--incremental" | "--deps"
-                            | "--agents" | "--version" | "--help" | "-h"
-                    ) {
+                    if !VALUELESS_FLAGS.contains(&a.as_str()) {
                         stopped = true;
                     }
                 } else if ps.target.is_none() && !stopped {
@@ -544,9 +561,44 @@ pub(crate) fn scan_main() {
             }
             refuse_repeated_gate_json(&distinct);
         }
-        // Exactly one sink: the ordinary single-sink guard. It exits 2 having written nothing, which is
-        // the whole of rule (2) when there is no other sink with a reader waiting.
-        refuse_gate_json_over_any_input(gp, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+        // SOUNDNESS R264 — AN UNKNOWN TARGET MUST NOT BE READ AS `.`, BECAUSE THE GUARD BELOW ASKS A
+        // QUESTION ABOUT THE TARGET AND `.` ANSWERS A DIFFERENT ONE.
+        //
+        // When a token the parse loop will refuse arrives BEFORE the target (`-V`, a typo, an
+        // unrecognised flag), `stopped` suppresses the target and `pre_target` is None. Falling back to
+        // `"."` then asks `gate_json_input_collision` *"is this sink under the CWD?"* instead of *"is it
+        // under the target the operator named?"* — and a sink outside the CWD subtree is invisible to
+        // that question. Arming proceeded and the fail-closed verdict document was written OVER a source
+        // file of the scan, at parse time, before the walk. Measured from an unrelated cwd:
+        // `candor-scan -V <dir> --gate-json <dir>/src/lib.rs` exited 0 having replaced `lib.rs`.
+        //
+        // We cannot answer the containment question without a target. But we can still answer the half
+        // that makes it DESTRUCTIVE — does the sink bear an extension this engine parses — and that half
+        // needs no target at all. So when the target is unknown, refuse any sink that looks like source
+        // and arm nothing. A legitimate sink (`.candor/verdict.json`) is unaffected: it is not `.rs`.
+        //
+        // Refusing to arm here costs at most a stale green on a run that is exiting 2 anyway and says
+        // so; arming costs the operator's file. That is not a close trade.
+        match pre_target.as_deref() {
+            Some(t) => refuse_gate_json_over_any_input(gp, t, pre_policy.as_deref()),
+            None => {
+                if gp != "-"
+                    && std::path::Path::new(gp).extension().and_then(|e| e.to_str()) == Some("rs")
+                {
+                    eprintln!(
+                        "candor-scan: --gate-json {gp} bears an extension this engine parses (.rs) and this \
+                         run has no resolved target to check it against — refusing (exit 2), and nothing \
+                         was written there."
+                    );
+                    eprintln!(
+                        "        A flag the parse loop refuses (`-V`, a typo) BEFORE the target leaves the \
+                         target unresolved, so the input guard cannot tell whether this sink is a file the \
+                         scan reads. Name the target first, or use a non-source sink."
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
         // ARM HERE — earlier than any exit this process can take. It used to be armed after the arg
         // loop, so the loop's own `unknown flag` exit(2) left the PREVIOUS run's green document on
         // disk; §3.3 names an unknown flag as a broken-gate-config exit-2 cause, which MUST leave a
