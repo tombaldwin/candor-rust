@@ -9,11 +9,29 @@ charged identically; `equal: false` means only `inferred(TWIN) ⊇ inferred(BASE
 
 Verdicts:
 
-  VIOLATION   the TWIN lost an effect the BASE was charged — `inferred(TWIN) ⊉ inferred(BASE)`.
-              A silent under-report: two spellings of one program, and this one certifies pure or
-              narrower what the other was charged for, over drops `examples/gt.rs` executed.
-  DRIFT       (equal-pairs only) the TWIN gained an effect the BASE lacks. Same program, so this
-              is the same defect seen from the other side: the BASE is the one under-reporting.
+  VIOLATION   the TWIN lost an effect the BASE was charged — `inferred(TWIN) ⊉ inferred(BASE)` —
+              AND SAID NOTHING. Two spellings of one program, and this one certifies pure or
+              narrower what the other was charged for, over drops `examples/gt.rs` executed. The
+              cardinal sin.
+  DISCLOSED   the TWIN lost an effect the BASE was charged AND carries `Unknown`. SPEC §4 makes
+              that SOUND — an unresolvable reach reported as `Unknown` is the contract working —
+              so it is NOT the cardinal sin. It is still debt: two spellings of one program
+              answering differently, one of them imprecisely. Kept in the register, counted and
+              printed separately, and never counted as a pass. R143/R144 are the reason this
+              verdict exists: their remedy is a hedge, and a register that scored a hedge as a
+              silent under-report would have said the fix changed nothing.
+              IT IS A COARSE TEST, DELIBERATELY, AND HERE IS THE COST OF THAT. It asks only
+              whether the TWIN carries `Unknown` — not whether that `Unknown` came from the
+              construct under test. Measured on the pre-R142 binary (`d54108b`): 12 of the 131
+              shapes score DISCLOSED there, and all twelve are the `q_closure` context, whose
+              `run_cb(|| ..)` puts `Unknown` on BOTH spellings for a reason that has nothing to do
+              with the macro. Reading `unknownWhy` instead would over-fit the register to one
+              engine's reason strings; the harness's own standard is `Unknown` is a PASS for
+              soundness (see soundness/README.md), and this matches it.
+  DRIFT       (equal-pairs only) the TWIN gained a CONCRETE effect the BASE lacks. Same program,
+              so this is the same defect seen from the other side: the BASE is the one
+              under-reporting. `Unknown` is excluded from this delta — a twin that hedges says
+              nothing about the base, and reading it as drift would report every disclosure twice.
   BOTH-PURE   neither spelling is charged, although the ground-truth run performed at least one
               in-frame drop. Also a silent under-report, but NOT the differential these gates are
               calibrated on, so it is counted and printed separately and never counted as a pass.
@@ -102,13 +120,19 @@ def main():
         if not ib and not it:
             both_pure.append("%s/%s drops=%s [%s]" % (b, t, g, sh))
             continue
-        for kindname, delta in (("VIOLATION", ib - it),
-                                ("DRIFT", (it - ib) if pr.get("equal") else set())):
+        lost = ib - it
+        # SOUND-BUT-IMPRECISE vs SILENT. `Unknown` in the twin is SPEC §4's honest answer, so the
+        # pair is debt rather than a sin; with no `Unknown` anywhere the twin is certifying, which
+        # is the sin. The two are kept apart because a fix that converts one into the other is
+        # exactly what R143/R144 ask for and the register has to be able to show it.
+        lost_kind = "DISCLOSED" if ("Unknown" in it and lost) else "VIOLATION"
+        for kindname, delta in ((lost_kind, lost),
+                                ("DRIFT", (it - ib - {"Unknown"}) if pr.get("equal") else set())):
             if not delta:
                 continue
             seen.add((kindname, sh))
             line = ("%s %s->%s %s=%s base=%s twin=%s drops=%s [%s]"
-                    % (kindname, b, t, "lost" if kindname == "VIOLATION" else "gained",
+                    % (kindname, b, t, "gained" if kindname == "DRIFT" else "lost",
                        sorted(delta), sorted(ib) or "ABSENT", sorted(it) or "ABSENT", g, sh))
             (old if (kindname, sh) in known else new).append(line)
 
