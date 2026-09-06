@@ -9,6 +9,30 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R143 — a MULTI-ARM `macro_rules!` was skipped, and the report said nothing at all.**
+  `visit_macro` expands only a genuinely single-arm template, because an invocation matches EXACTLY
+  ONE arm and a pre-expansion scan cannot tell which; walking every arm would charge a non-matching
+  arm's effect. **That skip is right. The silence was not.** The code called it "an honest
+  under-report" and it was not one — the report carried no `Unknown`, no `unknownWhy`, no
+  `incomplete` and no `invisible` over a template that really writes. A named limitation that
+  answers `Unknown` is a limitation; one that answers NOTHING is a silent under-report with a
+  footnote. **A cardinal sin.** Executed ground truth: a function invoking the `write` arm of a
+  two-arm macro performs the write and is ENTIRELY ABSENT from `functions[]` on `d54108b`, while a
+  single-arm control doing the identical write is charged `['Fs']`.
+  An unexpandable multi-arm invocation now discloses `Unknown` with
+  `ambiguous:unexpanded multi-arm macro_rules! \`NAME\`` — SPEC §4's `ambiguous:` kind with the
+  reserved dot-free detail (no function value is involved and no owner type can be formed), the same
+  kind and the same ADD-ONLY direction as the R208 site beside it.
+  **The over-charge is real and is measured, not argued.** A macro whose arms are ALL pure still
+  discloses, because "the arms I can read are pure" is not a fact about the one that expanded — a
+  cut that exempted it would be reading the arms it refused to choose between. **1,509-crate
+  registry A/B, wide key**, vs `79d0101`: **ADDED 2,832 / REMOVED 0 / CHANGED 2,288** over 266,437
+  rows, **0 functions lost a concrete effect**; 4,238 rows carry the new reason, across **131 of
+  1,509 crates**. R143's row predicted this "costs no precision"; it costs about 1.6% of rows, all
+  of it disclosed `Unknown` rather than a concrete effect. §E1 reach: `R143DISCLOSE` fires 12,770
+  times in 131 crates. The debt register does not move — it contains no multi-arm shape, and its
+  equivalence verdict would count `Fs -> Unknown` as a VIOLATION regardless.
+
 - ⚠ **SOUNDNESS R142 — a `macro_rules!` declared INSIDE a function body was invisible to call-edge
   resolution.** `local_macros`, the crate-local `macro_rules!` index `collector.rs::visit_macro`
   expands from, is built by `decls::collect_decls`, which visits FILE/MODULE items only. A template

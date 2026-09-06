@@ -3797,6 +3797,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         c.is_macro = true;
                     }
                     self.macro_expanding.remove(&mname);
+                } else if arm_count > 1 {
+                    // SOUNDNESS R143 — THE SKIP IS RIGHT; THE SILENCE IS THE DEFECT. A multi-arm
+                    // invocation matches EXACTLY ONE arm and a pre-expansion scan cannot tell which,
+                    // so walking every arm would charge a non-matching arm's effect — the fabrication
+                    // the comment above records. What that comment then called "an honest
+                    // under-report" was not one: the report carried NO disclosure of any kind, and a
+                    // named limitation that answers NOTHING is a silent under-report with a footnote
+                    // (R85's ruling). Measured on a crate that compiles and really writes:
+                    // `c2_top_multi` invokes the `write` arm of a two-arm macro, performs the write,
+                    // and was ENTIRELY ABSENT from `functions[]`.
+                    //
+                    // `ambiguous:` is the kind, not `dispatch:`/`callback:`: no function value is
+                    // involved and no owner type can be formed — SPEC §4's reserved dot-free detail
+                    // for "no owner could be formed at all". Same kind, same field and same
+                    // ADD-ONLY direction as the R208 site above; it costs the caller an `Unknown`
+                    // and makes `deny Unknown` able to see the gap, which is the whole point.
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R143DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
+                    }
+                    self.refusals
+                        .insert(format!("ambiguous:unexpanded multi-arm macro_rules! `{mname}`"));
                 }
             }
         }

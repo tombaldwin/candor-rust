@@ -16334,6 +16334,65 @@ pub fn go() {{ imp::doit(); }}
                  over a program that writes no file:\n{v:#}");
     }
 
+    /// SOUNDNESS R143 — A MULTI-ARM `macro_rules!` IS SKIPPED, AND THE REPORT SAID NOTHING AT ALL.
+    /// `visit_macro` expands only a genuinely single-arm template, because an invocation matches
+    /// EXACTLY ONE arm and a pre-expansion scan cannot tell which — walking every arm would charge a
+    /// non-matching arm's effect. That skip is right. The code called it "an honest under-report"; it
+    /// was not one. EXECUTED ground truth (`scratchpad/r142/fix`): `c2_top_multi` invokes the `write`
+    /// arm of a two-arm macro, performs a real `std::fs::write`, and on a binary built at `d54108b`
+    /// is ENTIRELY ABSENT from `functions[]` — no `Unknown`, no `unknownWhy`, no `incomplete`, no
+    /// `invisible` — while a single-arm control doing the identical write is charged `['Fs']`. A
+    /// named limitation that answers `Unknown` is a limitation; one that answers NOTHING is a silent
+    /// under-report with a footnote (R85's ruling).
+    ///
+    /// THE THREE CONTROLS ARE THE POINT, because a disclosure that fires everywhere is a flood and a
+    /// disclosure that fires nowhere is this row. `single_arm` must stay a clean `['Fs']` (the skip
+    /// only ever applied to multi-arm, so a disclosure reaching it would be a regression);
+    /// `no_local_macro` must stay off the report entirely; and `multi_arm_pure` — every arm pure —
+    /// must ALSO disclose, because the scan cannot read which arm ran and "all the arms I can see are
+    /// pure" is not a fact about the one that expanded. That last one is the over-charge this cut
+    /// deliberately accepts, and it is measured on the registry rather than argued.
+    #[test]
+    fn r143_a_a_multi_arm_macro_skip_discloses_instead_of_certifying() {
+        let v = scan_src_to_json("r143multi", r#"
+            macro_rules! two { (a $p:expr) => { let _ = $p; }; (b $p:expr) => { std::fs::write($p, "x").unwrap() }; }
+            macro_rules! one { ($p:expr) => { std::fs::write($p, "x").unwrap() } }
+            macro_rules! two_pure { (a $p:expr) => { let _ = $p; }; (b $p:expr) => { let _ = $p; }; }
+            pub fn multi_arm(p: &str) { two!(b p); }
+            pub fn single_arm(p: &str) { one!(p); }
+            pub fn multi_arm_pure(p: &str) { two_pure!(a p); }
+            pub fn no_local_macro(p: &str) { let _ = p.len(); }
+            pub fn body_multi_arm(p: &str) {
+                macro_rules! bm { (a $q:expr) => { let _ = $q; }; (b $q:expr) => { std::fs::write($q, "x").unwrap() }; }
+                bm!(b p);
+            }
+"#);
+        for name in ["multi_arm", "body_multi_arm"] {
+            let e = effs_opt(&v, name);
+            assert!(e.contains(&"Unknown".to_string()),
+                    "SOUNDNESS R143 — `{name}` really writes a file through the second arm of a \
+                     two-arm `macro_rules!`. The skip is correct; the SILENCE is the defect. It must \
+                     DISCLOSE, not vanish: was `{e:?}`\n{v:#}");
+            let why = fn_entry(&v, name)["unknownWhy"].to_string();
+            assert!(why.contains("ambiguous:unexpanded multi-arm"),
+                    "the disclosure must NAME the unexpanded macro, or `deny Unknown` sees a reason \
+                     it cannot act on — SPEC §4's `ambiguous:` with the reserved dot-free detail \
+                     (no function value, no owner type): was {why}\n{v:#}");
+        }
+        assert!(effs_opt(&v, "multi_arm_pure").contains(&"Unknown".to_string()),
+                "THE ARM-BLINDNESS CONTROL. Every arm of `two_pure!` is pure, and this still has to \
+                 disclose: the scan does not know which arm expanded, so \"the arms I can read are \
+                 pure\" is not a fact about the one that ran. A cut that exempted this would be \
+                 reading the arms it refused to choose between:\n{v:#}");
+        assert_eq!(effs_opt(&v, "single_arm"), vec!["Fs".to_string()],
+                   "THE NO-REGRESSION CONTROL — a SINGLE-arm macro was never skipped and must not \
+                    pick up the disclosure. A clean `['Fs']`, not `['Fs','Unknown']`:\n{v:#}");
+        assert!(effs_opt(&v, "no_local_macro").is_empty(),
+                "THE NO-FLOOD CONTROL — a function that invokes no local macro at all must be \
+                 untouched by this cut (candor omits effect-free fns, so it stays off the \
+                 report):\n{v:#}");
+    }
+
     /// SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules! lm { .. }` written
     /// inside a function body is a `Stmt::Item`. `decls.rs` builds R48's `macro_rules!` index from
     /// ITEM-level definitions only, and `walk_block` threw every `Stmt::Item` away, so a body-local
