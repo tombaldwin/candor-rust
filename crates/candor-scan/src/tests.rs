@@ -639,7 +639,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         c.elem_trait_of.insert(n.into(), vec!["Doer".into()]);
         c.tuple_of.insert(n.into(), vec![Some("A".into())]);
         c.tuple_trait_of.insert(n.into(), vec![vec!["Doer".into()]]);
-        c.fn_alias.insert(n.into(), "effectful".into());
+        c.fn_alias.insert(n.into(), vec!["effectful".into()]);
         c.str_locals.insert(n.into(), "https://outer.example".into());
         c.closure_vars.insert(n.into());
         c.fn_typed_vars.insert(n.into());
@@ -675,7 +675,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         assert_eq!(c.elem_trait_of.get(n).cloned(), Some(vec!["Doer".to_string()]));
         assert_eq!(c.tuple_of.get(n).cloned(), Some(vec![Some("A".to_string())]));
         assert_eq!(c.tuple_trait_of.get(n).cloned(), Some(vec![vec!["Doer".to_string()]]));
-        assert_eq!(c.fn_alias.get(n).map(String::as_str), Some("effectful"));
+        assert_eq!(c.fn_alias.get(n).map(Vec::as_slice), Some(&["effectful".to_string()][..]));
         assert_eq!(c.str_locals.get(n).map(String::as_str), Some("https://outer.example"));
     }
 
@@ -10665,6 +10665,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev23 -> rev24 an ANALYSIS change that feeds `fninfos`, not a field (R271). The expression
+    ///                 WRAPPED around a callable is peeled by one shared authority now, so a rev23
+    ///                 entry replays, warm, the silent under-report that row is: `getrandom`
+    ///                 `fill_inner` invoking a `transmute`d syscall pointer behind `unsafe {}`, and
+    ///                 `trybuild` `run::Test::check` reaching `cargo` through `let check = match ..`,
+    ///                 both read as performing nothing.
     ///   rev22 -> rev23 a change to what an EXISTING field RECORDS (R238): `trait_fields` now also
     ///                 carries the synthetic `"Fn"` leaf for a struct/tuple field whose declared type
     ///                 is an INVOKABLE callback carrying no trait in its syntax (`cb: fn(&i32)->bool`,
@@ -10691,11 +10697,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R238 bumped the token to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R271 bumped the token to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10706,7 +10712,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev23/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev24/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -13911,6 +13917,171 @@ pub fn go() {{ imp::doit(); }}
         );
     }
 
+    /// SOUNDNESS R271 — THE EXPRESSION WRAPPED AROUND A CALLABLE. Two consumers asked "what can this
+    /// expression evaluate to" and answered it separately: `expr_is_fn_typed` peeled `&`/paren/group/
+    /// `?`/`.await` and an `if`'s THEN branch, the named-fn-by-value edge for an invoking adapter peeled
+    /// NOTHING. So a `match`, a block, `unsafe {}`, a deref, a cast, an indexed array literal, an `if`'s
+    /// ELSE branch and every nesting of those dropped the callee — in the INVOKING-ADAPTER and
+    /// BOUND-THEN-CALLED forms alike, through all seven access paths (parameter, field, `self` field,
+    /// nested field, tuple position, alias, `Option<fn>`).
+    ///
+    /// Ground truth is a GENERATED, COMPILED, EXECUTED 270-cell matrix (wrapper x access path x call
+    /// form), not this fixture: every cell really invokes its callback (450 invocations, 400 files
+    /// actually written), 136 of 210 opaque cells were ABSENT at `v0.35.0` and 112 at `1ab28cb`, and the
+    /// completeness manifest said `analyzed: {count: 211}` with no `unanalyzed` over all of them.
+    ///
+    /// The E arm below is the sharp one and is why the fix is not `expr_is_fn_typed` alone: `eff` is a
+    /// fn THIS SCAN CAN READ and knows writes a file, so a silent cell is a lost KNOWN effect, not a
+    /// lost hedge — blanket `deny Fs` exited 0 over three real file writes.
+    ///
+    /// NOT COVERED, deliberately, and it is a finding about how this class must be tested: the DIRECT
+    /// call form `(match .. { _ => cb })(x)` was never affected — it does not reach either consumer, and
+    /// all 70 of the matrix's direct cells reported `Unknown` on both arms. A fixture built on that form
+    /// CANNOT GO RED, so it would have certified this fix while every cell above stayed silent.
+    #[test]
+    fn r271_a_wrapper_around_the_callable_does_not_lose_it() {
+        let v = scan_src_to_json("r271wrap", concat!(
+            "pub fn eff(x: &i32) -> bool { let _ = std::fs::write(\"/tmp/r271\", \"y\"); *x > 0 }\n",
+            "pub fn pure_a(x: &i32) -> bool { *x > 0 }\n",
+            "pub fn e_plain_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(eff); }\n",
+            "pub fn e_plain_bound(flag: bool) -> bool { let g = eff; g(&1) }\n",
+            "pub fn e_block_adapter(v: &mut Vec<i32>, flag: bool) { v.retain({ eff }); }\n",
+            "pub fn e_block_bound(flag: bool) -> bool { let g = { eff }; g(&1) }\n",
+            "pub fn e_matcharm_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(match 0 { _ => eff }); }\n",
+            "pub fn e_matcharm_bound(flag: bool) -> bool { let g = match 0 { _ => eff }; g(&1) }\n",
+            "pub fn e_unsafeb_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(unsafe { eff }); }\n",
+            "pub fn e_unsafeb_bound(flag: bool) -> bool { let g = unsafe { eff }; g(&1) }\n",
+            "pub fn e_deref_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(*(&eff)); }\n",
+            "pub fn e_deref_bound(flag: bool) -> bool { let g = *(&eff); g(&1) }\n",
+            "pub fn e_cast_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(eff as fn(&i32) -> bool); }\n",
+            "pub fn e_cast_bound(flag: bool) -> bool { let g = eff as fn(&i32) -> bool; g(&1) }\n",
+            "pub fn e_index_adapter(v: &mut Vec<i32>, flag: bool) { v.retain([eff][0]); }\n",
+            "pub fn e_index_bound(flag: bool) -> bool { let g = [eff][0]; g(&1) }\n",
+            "pub fn e_ifthen_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(if flag { eff } else { eff }); }\n",
+            "pub fn e_ifthen_bound(flag: bool) -> bool { let g = if flag { eff } else { eff }; g(&1) }\n",
+            "pub fn e_nested_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(unsafe { match 0 { _ => { eff } } }); }\n",
+            "pub fn e_nested_bound(flag: bool) -> bool { let g = unsafe { match 0 { _ => { eff } } }; g(&1) }\n",
+            "pub fn p_plain_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(pure_a); }\n",
+            "pub fn p_plain_bound(flag: bool) -> bool { let g = pure_a; g(&1) }\n",
+            "pub fn p_block_adapter(v: &mut Vec<i32>, flag: bool) { v.retain({ pure_a }); }\n",
+            "pub fn p_block_bound(flag: bool) -> bool { let g = { pure_a }; g(&1) }\n",
+            "pub fn p_matcharm_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(match 0 { _ => pure_a }); }\n",
+            "pub fn p_matcharm_bound(flag: bool) -> bool { let g = match 0 { _ => pure_a }; g(&1) }\n",
+            "pub fn p_unsafeb_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(unsafe { pure_a }); }\n",
+            "pub fn p_unsafeb_bound(flag: bool) -> bool { let g = unsafe { pure_a }; g(&1) }\n",
+            "pub fn p_deref_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(*(&pure_a)); }\n",
+            "pub fn p_deref_bound(flag: bool) -> bool { let g = *(&pure_a); g(&1) }\n",
+            "pub fn p_cast_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(pure_a as fn(&i32) -> bool); }\n",
+            "pub fn p_cast_bound(flag: bool) -> bool { let g = pure_a as fn(&i32) -> bool; g(&1) }\n",
+            "pub fn p_index_adapter(v: &mut Vec<i32>, flag: bool) { v.retain([pure_a][0]); }\n",
+            "pub fn p_index_bound(flag: bool) -> bool { let g = [pure_a][0]; g(&1) }\n",
+            "pub fn p_ifthen_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(if flag { pure_a } else { pure_a }); }\n",
+            "pub fn p_ifthen_bound(flag: bool) -> bool { let g = if flag { pure_a } else { pure_a }; g(&1) }\n",
+            "pub fn p_nested_adapter(v: &mut Vec<i32>, flag: bool) { v.retain(unsafe { match 0 { _ => { pure_a } } }); }\n",
+            "pub fn p_nested_bound(flag: bool) -> bool { let g = unsafe { match 0 { _ => { pure_a } } }; g(&1) }\n",
+            "pub fn o_plain_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(cb); }\n",
+            "pub fn o_plain_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = cb; g(&1) }\n",
+            "pub fn o_block_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain({ cb }); }\n",
+            "pub fn o_block_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = { cb }; g(&1) }\n",
+            "pub fn o_matcharm_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(match 0 { _ => cb }); }\n",
+            "pub fn o_matcharm_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = match 0 { _ => cb }; g(&1) }\n",
+            "pub fn o_unsafeb_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(unsafe { cb }); }\n",
+            "pub fn o_unsafeb_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = unsafe { cb }; g(&1) }\n",
+            "pub fn o_deref_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(*(&cb)); }\n",
+            "pub fn o_deref_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = *(&cb); g(&1) }\n",
+            "pub fn o_cast_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(cb as fn(&i32) -> bool); }\n",
+            "pub fn o_cast_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = cb as fn(&i32) -> bool; g(&1) }\n",
+            "pub fn o_index_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain([cb][0]); }\n",
+            "pub fn o_index_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = [cb][0]; g(&1) }\n",
+            "pub fn o_ifthen_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(if flag { cb } else { cb }); }\n",
+            "pub fn o_ifthen_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = if flag { cb } else { cb }; g(&1) }\n",
+            "pub fn o_nested_adapter(v: &mut Vec<i32>, cb: fn(&i32) -> bool, flag: bool) { v.retain(unsafe { match 0 { _ => { cb } } }); }\n",
+            "pub fn o_nested_bound(cb: fn(&i32) -> bool, flag: bool) -> bool { let g = unsafe { match 0 { _ => { cb } } }; g(&1) }\n",
+        ));
+        let present = |n: &str| v["functions"].as_array().into_iter().flatten().any(|f| f["fn"] == n);
+        for w in ["plain", "block", "matcharm", "unsafeb", "deref", "cast", "index", "ifthen", "nested"] {
+            for form in ["adapter", "bound"] {
+                let n = format!("e_{w}_{form}");
+                assert!(
+                    present(&n),
+                    "R271: `{n}` invokes `eff`, which WRITES A FILE — an absent row certifies it pure:\n{v:#}"
+                );
+                assert_eq!(
+                    effs_opt(&v, &n), vec!["Fs".to_string()],
+                    "R271: `{n}` must charge the KNOWN effect of the fn it invokes:\n{v:#}"
+                );
+                let n = format!("o_{w}_{form}");
+                assert_eq!(
+                    effs_opt(&v, &n), vec!["Unknown".to_string()],
+                    "R271: `{n}` invokes a caller-supplied callback and must disclose Unknown:\n{v:#}"
+                );
+                // OVER-CHARGE CONTROL, same shape, callee provably pure and locally visible. Written
+                // before the fix and part of it: a widening shows up here as a flipped control, not as
+                // nothing. Measured on real code too — `xxhash-rust` `xxh64::finalize` binds
+                // `if is_aligned { get_aligned_chunk } else { get_unaligned_chunk }` and gains both call
+                // edges and NO effect.
+                let n = format!("p_{w}_{form}");
+                assert!(
+                    effs_opt(&v, &n).is_empty(),
+                    "R271 OVER-CHARGE CONTROL: `{n}` invokes only a pure local fn and must gain nothing:\n{v:#}"
+                );
+            }
+        }
+    }
+
+    /// SOUNDNESS R271 — THE FAN-OUT, and the reason `fn_alias` holds a LIST. `let g = if c { a } else
+    /// { b };` binds one name to TWO callables and `g()` reaches one of them, so the row must carry the
+    /// UNION. The first fix hedged this to `Unknown` (`fn_typed_vars` + `vars.remove`) and that was
+    /// wrong in BOTH directions at once, measured over 1,509 crates: it fired on 8,921 enum-variant
+    /// `match` bindings and cost `git2` `transport::subtransport_action` its `invisible: ["libgit2_sys"]`
+    /// disclosure row entirely, while turning a two-pure-branch binding into `Unknown`. Real instances
+    /// of the union: `openssl` `symm::Crypter::new` (`match mode { Encrypt => CipherCtxRef::encrypt_init,
+    /// Decrypt => CipherCtxRef::decrypt_init }`), `trybuild` `run::Test::check`, `xattr` `sys::bsd::set_path`.
+    #[test]
+    fn r271_a_fan_out_alias_carries_the_union_and_leaves_a_non_callable_alone() {
+        let v = scan_src_to_json("r271fan", concat!(
+            "pub enum Service { Up, Down }\n",
+            "pub struct Conn;\n",
+            "impl Conn { pub fn go(&self) -> u8 { 1 } }\n",
+            "pub fn eff(x: &i32) -> bool { let _ = std::fs::write(\"/tmp/r271\", \"y\"); *x > 0 }\n",
+            "pub fn pure_a(x: &i32) -> bool { *x > 0 }\n",
+            "pub fn pure_b(x: &i32) -> bool { *x < 0 }\n",
+            // UNION: one branch effectful, one pure — the effect must survive.
+            "pub fn fan_union(c: bool) -> bool { let g = if c { pure_a } else { eff }; g(&1) }\n",
+            "pub fn fan_union_match(k: u8) -> bool { let g = match k { 0 => eff, _ => pure_a }; g(&1) }\n",
+            // OVER-CHARGE CONTROL: both branches pure.
+            "pub fn fan_pure(c: bool) -> bool { let g = if c { pure_a } else { pure_b }; g(&1) }\n",
+            // git2 REGRESSION CONTROL: a fan-out of ENUM VARIANTS is not a callable binding, and must
+            // not cost the binding its concrete type — `v.go()` still has to resolve through `vars`.
+            "pub fn variant_fan(k: u8) -> Service { match k { 0 => Service::Up, _ => Service::Down } }\n",
+            "pub fn variant_binding_keeps_its_type(k: u8) -> u8 { let _s = match k { 0 => Service::Up, _ => Service::Down }; let v = Conn; v.go() }\n",
+            // PARTIAL-ALIAS CONTROL: an operand this cannot name makes the whole alias partial, and a
+            // partial alias would silently drop the other branch. Record nothing instead.
+            "pub fn fan_partial(c: bool, cb: fn(&i32) -> bool) -> bool { let g = if c { eff } else { cb }; g(&1) }\n",
+        ));
+        for n in ["fan_union", "fan_union_match"] {
+            assert_eq!(
+                effs_opt(&v, n), vec!["Fs".to_string()],
+                "R271: `{n}` may reach `eff`, which writes a file — the union must carry Fs:\n{v:#}"
+            );
+        }
+        assert!(
+            effs_opt(&v, "fan_pure").is_empty(),
+            "R271 OVER-CHARGE CONTROL: a fan-out of two PURE local fns must gain nothing:\n{v:#}"
+        );
+        assert!(
+            effs_opt(&v, "variant_binding_keeps_its_type").is_empty()
+                && effs_opt(&v, "variant_fan").is_empty(),
+            "R271 git2 REGRESSION CONTROL: an enum-variant fan-out is inert — hedging it to fn-typed \
+             cost `git2::transport::subtransport_action` its whole disclosure row:\n{v:#}"
+        );
+        assert!(
+            !effs_opt(&v, "fan_partial").is_empty(),
+            "R271: a fan-out with one UNNAMEABLE branch must not resolve to the other half only — it \
+             either discloses or stays as silent as before, never half-resolves:\n{v:#}"
+        );
+    }
+
     /// R99 CONTROL — a plain external call must keep its own crate identity. The module-qualified alias
     /// lookup runs AFTER the single-segment `use` route in the bare-qualifier branch precisely so a file
     /// that binds the head itself (`use somecrate::facade;`) still means ITS `facade`; and a path with
@@ -14393,7 +14564,7 @@ pub fn go() {{ imp::doit(); }}
         c.elem_trait_of.insert(n.into(), vec!["Doer".into()]);
         c.tuple_of.insert(n.into(), vec![Some("A".into())]);
         c.tuple_trait_of.insert(n.into(), vec![vec!["Doer".into()]]);
-        c.fn_alias.insert(n.into(), "effectful".into());
+        c.fn_alias.insert(n.into(), vec!["effectful".into()]);
         c.str_locals.insert(n.into(), "https://outer.example".into());
         c.closure_vars.insert(n.into());
         c.fn_typed_vars.insert(n.into());
@@ -14409,7 +14580,7 @@ pub fn go() {{ imp::doit(); }}
         c.elem_trait_of.insert(n.into(), vec!["Other".into()]);
         c.tuple_of.insert(n.into(), vec![Some("B".into())]);
         c.tuple_trait_of.insert(n.into(), vec![vec!["Other".into()]]);
-        c.fn_alias.insert(n.into(), "other".into());
+        c.fn_alias.insert(n.into(), vec!["other".into()]);
         c.str_locals.insert(n.into(), "https://inner.example".into());
         c.closure_vars.remove(n);
         c.fn_typed_vars.remove(n);
@@ -14425,7 +14596,7 @@ pub fn go() {{ imp::doit(); }}
         if c.elem_trait_of.get(n).cloned() != Some(vec!["Doer".to_string()]) { wrong.push("elem_trait_of"); }
         if c.tuple_of.get(n).cloned() != Some(vec![Some("A".to_string())]) { wrong.push("tuple_of"); }
         if c.tuple_trait_of.get(n).cloned() != Some(vec![vec!["Doer".to_string()]]) { wrong.push("tuple_trait_of"); }
-        if c.fn_alias.get(n).map(String::as_str) != Some("effectful") { wrong.push("fn_alias"); }
+        if c.fn_alias.get(n).map(Vec::as_slice) != Some(&["effectful".to_string()][..]) { wrong.push("fn_alias"); }
         if c.str_locals.get(n).map(String::as_str) != Some("https://outer.example") { wrong.push("str_locals"); }
         // The HEDGING sets are restored too — unlike `scoped_binding`, which keeps them. The questions
         // differ: there the shadow's BODY is being walked and clearing a hedge would let `x()` resolve to
@@ -14443,7 +14614,7 @@ pub fn go() {{ imp::doit(); }}
         c.restore_bindings(&post);
         assert_eq!(c.vars.get(n).map(String::as_str), Some("Inner"));
         assert_eq!(c.elem_of.get(n).map(String::as_str), Some("OtherElem"));
-        assert_eq!(c.fn_alias.get(n).map(String::as_str), Some("other"));
+        assert_eq!(c.fn_alias.get(n).map(Vec::as_slice), Some(&["other".to_string()][..]));
         assert!(!c.closure_vars.contains(n) && !c.fn_typed_vars.contains(n));
 
         // An entry ABSENT from the snapshot must be REMOVED, never left standing.

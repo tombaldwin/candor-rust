@@ -394,6 +394,82 @@ pub(crate) fn block_tail_expr(b: &syn::Block) -> Option<&syn::Expr> {
     }
 }
 
+/// SOUNDNESS R271 — the ONE authority for "which sub-expressions can this expression evaluate TO,
+/// as a value". Peels the expression wrappers that pass a value through UNCHANGED and returns the
+/// operand expressions at the leaves: a `match`/`if` yields one per arm/branch (both of them —
+/// a value read from only the THEN branch is a dataflow merge judged by adjacency, §F1 question 1),
+/// a block or `unsafe {}` yields its tail, `*`/`as`/`&`/`?`/`.await`/parens yield their operand,
+/// and an INDEXED ARRAY LITERAL (`[cb][0]`) yields its elements.
+///
+/// Two consumers ask this question and they used to answer it separately, which is how it drifted:
+/// `expr_is_fn_typed` peeled `&`/paren/group/`?`/`.await` and an `if`'s THEN branch, while the
+/// named-fn-by-value edge for an invoking adapter peeled NOTHING and matched a bare `syn::Expr::Path`.
+/// So `v.retain(match 0 { _ => local_eff })`, over a fn the scanner can read and KNOWS writes a file,
+/// was ABSENT from `functions[]` — not a lost hedge, a lost KNOWN effect. Measured over a generated
+/// 270-cell matrix: 8 of 10 wrappers x 7 access paths x {invoking adapter, bound-then-called} silent,
+/// on `v0.35.0` and on HEAD alike.
+///
+/// DIRECTION IT FAILS IN. Toward SILENCE, unchanged, for every wrapper NOT listed: a `loop`/`while`
+/// whose value arrives via `break`, a subscript of a real collection (`xs[i]` — the sound answer needs
+/// element typing, and peeling to the BASE path would let an unrelated same-named leaf be resolved as
+/// a callee, which is the leaf-collision fabrication class), and any wrapper reached through a call
+/// this fn does not model. It never invents an operand: every expression returned is a real
+/// sub-expression of the input, so a consumer that resolves nothing for it is exactly as silent as
+/// before. Each sub-expression is visited at most once, so the output is linear in the AST.
+pub(crate) fn callable_operands<'a>(expr: &'a syn::Expr, out: &mut Vec<&'a syn::Expr>) {
+    match expr {
+        syn::Expr::Paren(e) => callable_operands(&e.expr, out),
+        syn::Expr::Group(e) => callable_operands(&e.expr, out),
+        syn::Expr::Reference(e) => callable_operands(&e.expr, out),
+        syn::Expr::Try(e) => callable_operands(&e.expr, out),
+        syn::Expr::Await(e) => callable_operands(&e.base, out),
+        syn::Expr::Cast(e) => callable_operands(&e.expr, out),
+        // The CAST'S OWN TARGET TYPE is deliberately NOT consulted. `is_callable_type(&e.ty)` would
+        // make `local_pure as Cb` opaque, degrading a provably pure, locally visible callee to
+        // `Unknown` — the over-charge control this change must not worsen. `transmute::<_, F>` reads
+        // its turbofish because there the OPERAND is a raw pointer and no other information exists.
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => callable_operands(&u.expr, out),
+        syn::Expr::Block(b) => match block_tail_expr(&b.block) {
+            Some(t) => callable_operands(t, out),
+            None => out.push(expr),
+        },
+        syn::Expr::Unsafe(u) => match block_tail_expr(&u.block) {
+            Some(t) => callable_operands(t, out),
+            None => out.push(expr),
+        },
+        syn::Expr::If(e) => {
+            if let Some(t) = block_tail_expr(&e.then_branch) {
+                callable_operands(t, out);
+            }
+            if let Some((_, els)) = &e.else_branch {
+                callable_operands(els, out);
+            }
+        }
+        syn::Expr::Match(m) => {
+            for arm in &m.arms {
+                callable_operands(&arm.body, out);
+            }
+        }
+        // `[cb][0]` — an ARRAY LITERAL subscripted. Only the literal: see the direction note above.
+        syn::Expr::Index(i) => match &*i.expr {
+            syn::Expr::Array(a) => {
+                for e in &a.elems {
+                    callable_operands(e, out);
+                }
+            }
+            _ => out.push(expr),
+        },
+        _ => out.push(expr),
+    }
+}
+
+/// [`callable_operands`] as an owned vector — the form both consumers use.
+pub(crate) fn callable_operand_list(expr: &syn::Expr) -> Vec<&syn::Expr> {
+    let mut v = Vec::new();
+    callable_operands(expr, &mut v);
+    v
+}
+
 /// The params of a signature that are invokable callbacks (`is_callable_type`) — so `cb()` on one reads
 /// the honest `Unknown` instead of being silently dropped as a phantom call to a free fn `cb`.
 pub(crate) fn seed_fn_typed_vars(
