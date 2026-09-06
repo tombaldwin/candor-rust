@@ -390,6 +390,65 @@ fn an_unknown_flags_operand_is_never_taken_as_the_scan_target() {
 }
 
 #[test]
+fn a_refused_flag_before_the_target_cannot_turn_gate_json_into_a_source_file_delete() {
+    // SOUNDNESS R264 — DATA LOSS, and the worst thing in this file. `-V` was in the main loop's
+    // valueless set and NOT in `prescan_argv`'s copy, so it set `stopped`, the target was suppressed,
+    // `pre_target` fell back to `"."`, and `gate_json_input_collision` was asked "is this sink under the
+    // CWD?" instead of "is it under the target?". From an unrelated cwd the answer is no, arming
+    // proceeded, and the fail-closed verdict document was written OVER the source file at parse time.
+    //
+    //     candor-scan --version <dir> --gate-json <dir>/src/lib.rs   exit 2, intact
+    //     candor-scan -V        <dir> --gate-json <dir>/src/lib.rs   exit 0, DESTROYED
+    //
+    // Two fixes, and the test asserts both: one VALUELESS_FLAGS list instead of two hand-written copies
+    // (that closes `-V`), and a target-independent refusal for a source-shaped sink when the target is
+    // unknown (that closes every OTHER refusable leading token, which the single list cannot reach —
+    // an unrecognised flag legitimately suppresses the target).
+    //
+    // The cwd matters and is why this bit me once: on macOS `/tmp` is a symlink to `/private/tmp`, so
+    // running from `/tmp` puts a scratch sink UNDER the cwd and the old guard sees it. This test uses a
+    // cwd unrelated to both.
+    let d = make_crate("dataloss", "pub fn go() { let _ = std::fs::read(\"x\"); }");
+    let src = d.join("src").join("lib.rs");
+    let original = std::fs::read(&src).expect("fixture source readable");
+    // The cwd must NOT be an ancestor of the sink, or the OLD guard sees it and the test proves
+    // nothing. `make_crate` builds under the system temp dir, so `temp_dir()` is exactly the wrong
+    // choice here — I wrote that first and the test passed against the unfixed binary. The crate root
+    // is on a different branch of the filesystem from the fixture.
+    let elsewhere = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+
+    for leading in ["--version", "-V", "--zzz-not-a-flag", "--scope"] {
+        std::fs::write(&src, &original).unwrap();
+        let out = Command::new(bin())
+            .current_dir(&elsewhere)
+            .args([leading, d.to_string_lossy().as_ref(), "--gate-json", src.to_string_lossy().as_ref()])
+            .output()
+            .expect("run candor-scan");
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            original,
+            "{leading}: --gate-json overwrote a SOURCE FILE of the scan (exit {:?})",
+            out.status.code()
+        );
+    }
+
+    // CONTROL, and it is the reason the fix is not simply "never arm without a target": a legitimate
+    // non-source sink must STILL be armed behind a refusable flag, or the ⟨0.27⟩ stale green comes back.
+    let sink = d.join("verdict.json");
+    std::fs::write(&sink, br#"{"ok":true,"note":"YESTERDAYS GREEN"}"#).unwrap();
+    let out = Command::new(bin())
+        .current_dir(&elsewhere)
+        .args(["--zzz-not-a-flag", d.to_string_lossy().as_ref(),
+               "--gate-json", sink.to_string_lossy().as_ref()])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "an unknown flag still refuses");
+    let got = std::fs::read_to_string(&sink).unwrap();
+    assert!(!got.contains("YESTERDAYS GREEN"),
+            "a non-source sink must still be armed behind a refused flag:\n{got}");
+}
+
+#[test]
 fn an_unknown_flag_arms_the_gate_sink_in_either_argv_order() {
     // ⟨0.27⟩ (1) — the verdict sink is armed with the refusal WHATEVER the argv order, so a reader of
     // the sink can never be handed yesterday's `{"ok": true}` by a run that refused. `prescan_argv`
