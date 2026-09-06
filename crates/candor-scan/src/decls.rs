@@ -2003,6 +2003,7 @@ pub(crate) fn collect_decls(
                                 // Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
                                 // `Box` to `type_path`, which would shadow the CHA route.
                                 let leaves = trait_leaves(&f.ty, &struct_bounds);
+                                let had_trait_leaves = !leaves.is_empty();
                                 if !leaves.is_empty() {
                                     trait_fields
                                         .entry(s.ident.to_string())
@@ -2010,6 +2011,47 @@ pub(crate) fn collect_decls(
                                         .insert(name.to_string(), leaves);
                                 } else if let Some(ty) = type_path(&f.ty, uses) {
                                     entry.insert(name.to_string(), ty);
+                                }
+                                // SOUNDNESS R238 — A FIELD-HELD CALLBACK IS A CALLBACK. `trait_leaves`
+                                // above already records `handler: Box<dyn Fn()>` (a `Fn*` BOUND is a trait
+                                // leaf), but the shapes that carry NO trait in their syntax — a bare
+                                // `cb: fn(&i32) -> bool` pointer, a callable type ALIAS (`cb: Pred`), an
+                                // `Option<fn(..)>` — recorded nothing here, so `v.retain(h.cb)` handed a
+                                // caller-supplied body to an invoking adapter and the enclosing fn was
+                                // ABSENT from `functions[]` entirely. `is_callable_type` is the ONE
+                                // authority for that question (`seed_fn_typed_vars` asks it for
+                                // PARAMETERS, which is why the parameter spelling of the same program
+                                // already disclosed) — asked here so the field spelling gets the same
+                                // answer instead of a second copy of the rule drifting from it.
+                                //
+                                // ADDITIVE, and that is load-bearing, not defensive: it runs only where
+                                // `trait_leaves` found NOTHING, and it writes the synthetic `"Fn"` leaf
+                                // into `trait_fields` while the `fields` entry above stays exactly as it
+                                // was. R177 is the measured reason — the hedge DISPLACING a concrete
+                                // element type took `h.run(p)` from `["Fs"]` to ABSENT — so this never
+                                // replaces a leaf, it only supplies one where there was none.
+                                //
+                                // `"Fn"` matches no local trait, so `dispatch_calls_for_trait_method`
+                                // returns false for it and no CHA fan-out, no `Type::method` edge and no
+                                // concrete effect can come out of this entry. The only thing it can do is
+                                // make `expr_is_fn_typed` answer true for `h.cb`, i.e. turn an omission
+                                // into an `Unknown`.
+                                if !had_trait_leaves
+                                    && crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases)
+                                {
+                                    // §E1 HIT COUNTER — an unchanged row is not evidence the new code
+                                    // ran, and the two halves of R238 are reached by DIFFERENT routes:
+                                    // this index entry feeds the pre-existing dispatch/`let` binders,
+                                    // while the collector's own `Expr::Field` arm feeds the HOF-argument
+                                    // position. They must be counted separately or a zero on one is read
+                                    // as a zero on both.
+                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        eprintln!("R238DECL {}.{}", s.ident, name);
+                                    }
+                                    trait_fields
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(name.to_string(), vec!["Fn".to_string()]);
                                 }
                                 // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
                                 // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
@@ -2044,6 +2086,23 @@ pub(crate) fn collect_decls(
                             }
                             if let Some(ty) = type_path(&f.ty, uses) {
                                 entry.insert(i.to_string(), ty);
+                            }
+                            // SOUNDNESS R238 — the TUPLE-struct position of the named-field rule above;
+                            // `struct Tup(fn(&i32) -> bool)` and `t.0` handed to an invoking adapter is
+                            // the same program as `h.cb`. Keyed by POSITION, exactly as `fields` and
+                            // `field_elem` are here. This position records ONLY the callable answer:
+                            // the general `trait_leaves` question was never asked for a tuple field
+                            // (`trait_fields` has no Unnamed arm at all — a separate, pre-existing gap
+                            // for `struct T(Box<dyn Handler>)`, left alone deliberately because widening
+                            // it changes DISPATCH, which is a different measurement).
+                            if crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases) {
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R238DECL {}.{}", s.ident, i); // §E1 HIT COUNTER
+                                }
+                                trait_fields
+                                    .entry(s.ident.to_string())
+                                    .or_default()
+                                    .insert(i.to_string(), vec!["Fn".to_string()]);
                             }
                             if let Some(e) = elem_type(&f.ty, uses) {
                                 field_elem

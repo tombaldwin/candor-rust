@@ -1581,6 +1581,40 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Try(t) => self.expr_is_fn_typed(&t.expr),
             syn::Expr::Await(a) => self.expr_is_fn_typed(&a.base),
             syn::Expr::If(e) => block_tail_expr(&e.then_branch).is_some_and(|t| self.expr_is_fn_typed(t)),
+            // SOUNDNESS R238 — A CALLBACK HELD IN A FIELD. `h.cb` / `self.cb` / `n.inner.cb` / `t.0`,
+            // handed to an invoking adapter (`v.retain(h.cb)`, `xs.iter().map(h.cb)`) or bound and then
+            // called (`let g = h.cb; g()`). Every arm above answers for a NAME; a field ACCESS is not a
+            // name, so it matched nothing and the enclosing fn was ABSENT from `functions[]` — while the
+            // IDENTICAL program written with the callback as a PARAMETER disclosed
+            // `['Unknown'] callback:unresolved call`. Executed ground truth: both callbacks run, and the
+            // supplied one performs `Fs`; over a library that defines nothing effectful, `deny Unknown`
+            // went exit 1 with the parameter spelling and exit 0 with the field spelling.
+            //
+            // Routed through `resolve_recv_traits`, the ONE authority for "what dispatch leaves does this
+            // receiver expression carry" — it already resolves the base type (`self`, a param, a NESTED
+            // `n.inner`, a tuple position) and reads `trait_fields`, which R238's decls.rs half now also
+            // populates for the callable shapes that carry no trait in their syntax. Asking it rather
+            // than re-deriving the field lookup here is the point: two implementations of one question
+            // is how this family's bugs recur (a `Box<dyn Fn()>` field was ALREADY in that index and
+            // this arm is what makes it reachable).
+            //
+            // DIRECTION IT FAILS IN. Toward SILENCE — unchanged — whenever the base type cannot be
+            // resolved, the field is declared in another crate, or the type/field pair is not indexed.
+            // Toward OVER-CHARGE only where a leaf-keyed collision puts a callable field's name on a
+            // type whose same-named field is a plain value AND that value reaches a non-callback
+            // argument slot of one of the closed list of invoking adapters (`fold`'s seed, `map_or`'s
+            // default). Never toward a fabricated EFFECT: `"Fn"` names no local trait, so nothing here
+            // can produce a `Type::method` edge — the only reachable outcome is `Unknown`.
+            syn::Expr::Field(_) => {
+                let callable = crate::lang::leaves_are_callable(&self.resolve_recv_traits(expr));
+                // §E1 HIT COUNTER — an unchanged row is not evidence the new code ran. Same switch and
+                // shape as R160's `SELFALIAS` and R161's `R161ALIAS`/`R161OPT` lines; gated on the
+                // positive answer so the env lookup is off the hot path.
+                if callable && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R238FIELD");
+                }
+                callable
+            }
             // `let g = make_callback();` — a call to a LOCAL factory the pre-pass recorded as returning a
             // callable (the fn-typed sentinel). Without this, `g()` resolves as a phantom free-fn `g` and
             // is silently dropped (or fabricates a same-named local fn). Over-approximating to fn-typed
