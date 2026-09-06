@@ -120,8 +120,16 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) dep_bound_vars: HashMap<String, String>,
     /// locals aliased to a free-FUNCTION path (`let g = eff;` where `eff` is a visible fn): a later `g()`
     /// resolves to the aliased path, so its effect (and whole transitive chain) is not silently dropped
-    /// (sweep [6]). Keyed by the local name → the expanded callee path.
-    pub(crate) fn_alias: std::collections::HashMap<String, String>,
+    /// (sweep [6]). Keyed by the local name → the expanded callee paths.
+    ///
+    /// SOUNDNESS R271 — a LIST, because a wrapper can fan out: `let g = if c { a } else { b };` binds ONE
+    /// name to TWO callables and `g()` reaches one of them, so the report must carry the UNION. It was a
+    /// single `String`, which is why the peeling fix first hedged a fan-out to `Unknown` instead — and
+    /// that hedge, measured over 1,509 crates, ALSO fired on `let x = match k { A => Service::Up, .. };`
+    /// (enum-variant paths, 8,921 sites) and cost git2 `transport::subtransport_action` its
+    /// `invisible: ["libgit2_sys"]` disclosure row entirely. A list is inert for a non-callable: an alias
+    /// that is never invoked is never resolved, exactly as for the single-target form.
+    pub(crate) fn_alias: std::collections::HashMap<String, Vec<String>>,
     /// Crate-wide LAZY/deferred static names (`once_cell`/`std` `Lazy`/`LazyLock`/`LazyCell`,
     /// `lazy_static!`, `thread_local!`). A body that NAMES one of these FORCES its deferred init on
     /// first use — so naming the static edges to its synthetic init unit (`<lazy>::NAME`), carrying the
@@ -314,7 +322,7 @@ pub(crate) struct BoundNameState {
     elem_trait_of: Option<Vec<String>>,
     tuple_of: Option<Vec<Option<String>>>,
     tuple_trait_of: Option<Vec<Vec<String>>>,
-    fn_alias: Option<String>,
+    fn_alias: Option<Vec<String>>,
     str_locals: Option<String>,
     closure_vars: bool,
     fn_typed_vars: bool,
@@ -1580,20 +1588,28 @@ impl<'a> CallCollector<'a> {
     fn tuple_literal_leaves(&self, it: &syn::ExprTuple) -> Vec<Vec<String>> {
         it.elems.iter().map(|e| self.tuple_elem_leaves(e)).collect()
     }
-    /// Whether an expression evaluates to a fn-typed (callback) value — a fn-typed binding, through
-    /// `&`/paren/group wrappers, or an `if` whose then-branch tail yields one. Lets `let g = cb`
-    /// propagate fn-typed-ness so a later `g()` reads the honest `Unknown` instead of a phantom free-fn
-    /// call. Over-approximating toward fn-typed only ever marks `g()` Unknown (the safe direction) — it
+    /// Whether an expression evaluates to a fn-typed (callback) value. Lets `let g = cb` propagate
+    /// fn-typed-ness so a later `g()` reads the honest `Unknown` instead of a phantom free-fn call.
+    /// Over-approximating toward fn-typed only ever marks `g()` Unknown (the safe direction) — it
     /// never fabricates a specific effect.
+    ///
+    /// SOUNDNESS R271 — the WRAPPER peeling is `lang::callable_operands`, shared with the
+    /// named-fn-by-value edge for an invoking adapter. It used to be spelled out here as a handful of
+    /// arms (`&`/paren/group/`?`/`.await` and an `if`'s THEN branch only), which meant a `match`, a
+    /// block, `unsafe {}`, a deref, a cast, an indexed array literal, an `if`'s ELSE branch and every
+    /// nesting of those fell through to `_ => false`; and the OTHER consumer of the same question
+    /// peeled nothing at all. Two implementations of one question is how this family's bugs recur.
     fn expr_is_fn_typed(&self, expr: &syn::Expr) -> bool {
+        crate::lang::callable_operand_list(expr)
+            .into_iter()
+            .any(|o| self.expr_is_fn_typed_leaf(o))
+    }
+
+    /// The LEAF half of [`Self::expr_is_fn_typed`]: asked of an expression that `callable_operands`
+    /// has already peeled to, so it never needs a pass-through arm of its own.
+    fn expr_is_fn_typed_leaf(&self, expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Path(p) => p.path.get_ident().is_some_and(|i| self.fn_typed_vars.contains(&i.to_string())),
-            syn::Expr::Paren(p) => self.expr_is_fn_typed(&p.expr),
-            syn::Expr::Group(g) => self.expr_is_fn_typed(&g.expr),
-            syn::Expr::Reference(r) => self.expr_is_fn_typed(&r.expr),
-            syn::Expr::Try(t) => self.expr_is_fn_typed(&t.expr),
-            syn::Expr::Await(a) => self.expr_is_fn_typed(&a.base),
-            syn::Expr::If(e) => block_tail_expr(&e.then_branch).is_some_and(|t| self.expr_is_fn_typed(t)),
             // SOUNDNESS R238 — A CALLBACK HELD IN A FIELD. `h.cb` / `self.cb` / `n.inner.cb` / `t.0`,
             // handed to an invoking adapter (`v.retain(h.cb)`, `xs.iter().map(h.cb)`) or bound and then
             // called (`let g = h.cb; g()`). Every arm above answers for a NAME; a field ACCESS is not a
@@ -1714,6 +1730,48 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// The free-fn `fn_alias` TARGET a path-shaped `let` init names, or `None` when the path names a
+    /// LOCAL binding (which is not a free fn) or carries a qualified self type. `let g = eff;` — `g`
+    /// aliases a free fn, so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path
+    /// is callable, so aliasing any bare path is sound (an unused alias is never resolved).
+    ///
+    /// SOUNDNESS R271 — one implementation, asked once per PEELED operand. It was inline in the
+    /// `let`-binder and matched only a bare `syn::Expr::Path` on the init, so every wrapper around the
+    /// same path (`match`, a block, `unsafe {}`, `*`, `as`, `[f][0]`, an `if`) fell out of it.
+    ///
+    /// R107 — BOTH reads here are of the statement's own RHS, and BOTH run after writes to the very
+    /// tables they consult, so both are inside the pre-binding window:
+    ///   * `single_local` asks whether the init names a LOCAL binding, reading
+    ///     `vars`/`closure_vars`/`fn_typed_vars` — all three of which the arms above have already
+    ///     rewritten for this name. MEASURED FABRICATION on the closure shape: `let eff = || {}; let
+    ///     eff = eff; eff();` beside a free `fn eff()` that writes a file reported `Fs` on a body that
+    ///     calls only the closure, because `closure_vars.remove` had already run and the rebind aliased
+    ///     the free fn. (PRE-EXISTING — identical at `9c4d5be`.)
+    ///   * the `fn_alias` chain lookup, which R99 answered with an explicit `shadowed_alias` local — a
+    ///     second mechanism for the ordering question the window owns.
+    ///
+    /// R99 — an alias OF an alias (`let w = std::fs::write; let v = w; v(..)`). `expand("w")` names
+    /// nothing (`w` is a local, not an import), so `v` was bound to the dead string `w` and its call
+    /// resolved to no fn at all. Follow the existing entry, reading the SAME map the call site reads,
+    /// so the two spellings cannot answer differently.
+    fn alias_targets_of_path(&mut self, p: &syn::ExprPath, pre_bindings: &[BoundNameState]) -> Option<Vec<String>> {
+        self.with_pre_bindings(pre_bindings, |s| {
+            let single_local = p.path.get_ident().is_some_and(|i| {
+                let n = i.to_string();
+                s.vars.contains_key(&n) || s.closure_vars.contains(&n) || s.fn_typed_vars.contains(&n)
+            });
+            if p.qself.is_some() || single_local {
+                return None;
+            }
+            Some(
+                p.path
+                    .get_ident()
+                    .and_then(|i| s.fn_alias.get(&i.to_string()).cloned())
+                    .unwrap_or_else(|| vec![expand(&path_to_string(&p.path), &s.uses)]),
+            )
+        })
+    }
+
     /// Bind `name -> ty` in `vars` for the duration of `body`. Thin wrapper over `scoped_binding`.
     fn scoped_var<R>(&mut self, name: &str, ty: Option<String>, body: impl FnOnce(&mut Self) -> R) -> R {
         self.scoped_binding(name, ty.map(Bound::Concrete).unwrap_or(Bound::Unknown), body)
@@ -1787,15 +1845,19 @@ impl<'a> CallCollector<'a> {
         }
         let r = body(self);
 
-        let restore = |m: &mut HashMap<String, String>, p: Option<String>| match p {
-            Some(v) => { m.insert(name.to_string(), v); }
-            None => { m.remove(name); }
-        };
-        restore(&mut self.vars, p_vars);
-        restore(&mut self.dep_bound_vars, p_prov);
-        restore(&mut self.fn_alias, p_alias);
-        restore(&mut self.str_locals, p_str);
-        restore(&mut self.elem_of, p_elem);
+        // Generic over the value type: `fn_alias` holds a LIST of targets (R271) while the others hold
+        // one `String`, and one restore is better than two that can drift.
+        fn restore<V>(m: &mut HashMap<String, V>, name: &str, p: Option<V>) {
+            match p {
+                Some(v) => { m.insert(name.to_string(), v); }
+                None => { m.remove(name); }
+            }
+        }
+        restore(&mut self.vars, name, p_vars);
+        restore(&mut self.dep_bound_vars, name, p_prov);
+        restore(&mut self.fn_alias, name, p_alias);
+        restore(&mut self.str_locals, name, p_str);
+        restore(&mut self.elem_of, name, p_elem);
         match p_traits {
             Some(v) => { self.trait_vars.insert(name.to_string(), v); }
             None => { self.trait_vars.remove(name); }
@@ -2132,9 +2194,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !is_closure_call {
                         // resolve a fn-alias local (`let g = eff; g()`) to its aliased path (sweep [6]);
                         // otherwise the bare path as written.
-                        let mut path = ident
-                            .as_ref()
-                            .and_then(|n| self.fn_alias.get(n).cloned())
+                        // SOUNDNESS R271 — a fan-out alias names SEVERAL callables and the call reaches
+                        // ONE OF THEM, so every target beyond the first is pushed as its own edge and the
+                        // row carries the union. `alias_targets_of_path` never records a qself path, so
+                        // the extras need none of the qself repair below.
+                        let aliased = ident.as_ref().and_then(|n| self.fn_alias.get(n).cloned());
+                        if let Some(ts) = &aliased {
+                            for extra in ts.iter().skip(1) {
+                                let leaf2 = extra.rsplit("::").next().unwrap_or(extra).to_string();
+                                self.calls.push(Call { path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            }
+                        }
+                        let mut path = aliased
+                            .and_then(|ts| ts.into_iter().next())
                             .unwrap_or_else(|| expand(&path_to_string(&p.path), &self.uses));
                         // A QSELF call (`<Type>::assoc()` / `<Type as Trait>::m()`) is an ASSOCIATED-fn call
                         // on the qself receiver TYPE, not a free fn — but `path_to_string(&p.path)` DROPS the
@@ -2585,7 +2657,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the Rust/TS engines' fn-as-value posture). Gated on `elem_adapter` (an invoking HOF) so a STORE
         // sink never fabricates; a bare LOCAL (a value/closure, not a free-fn path) is skipped.
         if elem_adapter {
-            for a in &node.args {
+            for arg in &node.args {
+                // SOUNDNESS R271 — PEEL THE EXPRESSION WRAPPED AROUND THE CALLABLE, through the ONE
+                // authority both consumers of that question now use. This loop used to match a bare
+                // `syn::Expr::Path` on the argument itself, so `v.retain(match 0 { _ => local_eff })`
+                // — over a fn this scan can READ and knows writes a file — pushed no call, took no
+                // `Unknown`, and left the enclosing fn ABSENT from `functions[]`. Not a lost hedge: a
+                // lost KNOWN effect, with blanket `deny Fs` exiting 0 over three real file writes.
+                // `match`, a block, `unsafe {}`, `*`, `as`, `[cb][0]`, an `if`'s ELSE branch and every
+                // nesting of those were silent for BOTH the opaque-callback arm below and the
+                // named-fn edge, in the invoking-adapter and bound-then-called forms alike (the
+                // DIRECT-call form `(match .. )(x)` was never affected — it does not come through
+                // here, so a fixture built on it cannot go red).
+                let ops = crate::lang::callable_operand_list(arg);
+                // §E1 REACH COUNTER, on the CHANGED branch — not on the loop enclosing it. True only
+                // when peeling actually moved: `ops` is not just the argument itself.
+                let peeled = ops.len() != 1 || !std::ptr::eq(ops[0], arg);
+                for a in ops {
                 // An OPAQUE callable passed BY VALUE to a synchronous callback-invoker (`xs.iter()
                 // .for_each(cb)`, `opt.map(cb)`) — where `cb` is a generic/`impl`/`dyn` `Fn` param or an
                 // otherwise-unresolvable fn-typed local — is invoked by the adapter on a body the scan
@@ -2595,8 +2683,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // fix; candor-java c755acd). `expr_is_fn_typed` peels `&`/paren/group so `for_each(&cb)`
                 // and `let g = cb; for_each(g)` are covered too. Checked BEFORE the named-fn edge below so an
                 // opaque local never falls through to a phantom free-fn resolution.
-                if self.expr_is_fn_typed(a) {
+                if self.expr_is_fn_typed_leaf(a) {
                     self.unresolved = true;
+                    if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R271ADAPT");
+                    }
                     continue;
                 }
                 if let syn::Expr::Path(p) = a {
@@ -2627,11 +2718,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         };
                         if !two_seg_trait_method {
                             let name = path_to_string(&p.path);
-                            let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, &self.uses));
-                            let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                            self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            // R271 — every target of a fan-out alias, for the same reason the direct-call
+                            // site edges to each: the adapter invokes ONE of them and the row is a union.
+                            let paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
+                            for path in paths {
+                                let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
+                                self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            }
+                            if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                eprintln!("R271ADAPT");
+                            }
                         }
                     }
+                }
                 }
             }
         }
@@ -3592,48 +3691,50 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is
                         // callable, so aliasing any bare path is sound (an unused alias is never resolved).
-                        if let syn::Expr::Path(p) = &*init.expr {
-                            // R107 — BOTH reads here are of this statement's own RHS, and BOTH ran after
-                            // writes to the very tables they consult:
-                            //   * `single_local` asks whether the init names a LOCAL binding, reading
-                            //     `vars`/`closure_vars`/`fn_typed_vars` — all three of which the arms above
-                            //     have already rewritten for this name. MEASURED FABRICATION on the closure
-                            //     shape: `let eff = || {}; let eff = eff; eff();` beside a free `fn eff()`
-                            //     that writes a file reported `Fs` on a body that calls only the closure,
-                            //     because `closure_vars.remove` had already run and the rebind aliased the
-                            //     free fn. (PRE-EXISTING — identical at `9c4d5be`, not this round's.)
-                            //   * the `fn_alias` chain lookup, which R99 answered with an explicit
-                            //     `shadowed_alias` local — a second mechanism for the ordering question the
-                            //     window owns. Reading pre-state gives the same answer, so the local goes.
-                            // Only the READS are inside the window; the `fn_alias.insert` below is this
-                            // statement's DECISION and must survive it.
-                            let target = self.with_pre_bindings(&pre_bindings, |s| {
-                                let single_local = p.path.get_ident().is_some_and(|i| {
-                                    let n = i.to_string();
-                                    s.vars.contains_key(&n) || s.closure_vars.contains(&n)
-                                        || s.fn_typed_vars.contains(&n)
-                                });
-                                if p.qself.is_some() || single_local {
-                                    return None;
+                        // SOUNDNESS R271 — the BOUND-THEN-CALLED half. Peeled through the same one
+                        // authority the invoking-adapter edge uses, so `let g = match 0 { _ => local_eff };
+                        // g(&1)` resolves the alias instead of dropping `g()` as a phantom free fn.
+                        // A FAN-OUT (`if c { a } else { b }`) binds one name to SEVERAL callables: record
+                        // them ALL and let the call site edge to each, so `g()` carries the UNION. The
+                        // first attempt hedged a fan-out to `Unknown` instead (`fn_typed_vars` +
+                        // `vars.remove`) and that was measurably wrong in TWO directions at once — it
+                        // fired on 8,921 enum-variant `match` bindings across 1,509 crates, costing git2
+                        // `transport::subtransport_action` its `invisible` disclosure row, and it turned
+                        // `let g = if c { pure_a } else { pure_b }` — provably pure both ways — into
+                        // `Unknown`. The union is both sound and exact, and it is inert for a
+                        // non-callable, because an alias that is never invoked is never resolved.
+                        let r271_ops = crate::lang::callable_operand_list(&init.expr);
+                        let r271_peeled = r271_ops.len() != 1 || !std::ptr::eq(r271_ops[0], &*init.expr);
+                        let r271_targets: Option<Vec<Vec<String>>> = r271_ops
+                            .iter()
+                            .map(|o| match o {
+                                syn::Expr::Path(p) => self.alias_targets_of_path(p, &pre_bindings),
+                                // ANY operand this cannot name means the alias would be PARTIAL, and a
+                                // partial alias is the under-report: `g()` would carry one branch's
+                                // effects and silently drop the other's. Record nothing — unchanged.
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(groups) = r271_targets {
+                            let mut targets: Vec<String> = Vec::new();
+                            for g in groups {
+                                for t in g {
+                                    if !targets.contains(&t) {
+                                        targets.push(t);
+                                    }
                                 }
-                                // R99 — an alias OF an alias (`let w = std::fs::write; let v = w; v(..)`).
-                                // `expand("w")` names nothing (`w` is a local, not an import), so `v` was
-                                // bound to the dead string `w` and its call resolved to no fn at all —
-                                // ABSENT from `functions[]` in both the shadowing and non-shadowing
-                                // spellings, while the ONE-hop form has resolved since sweep [6]. Follow
-                                // the existing entry, reading the SAME map the call site reads, so the two
-                                // spellings cannot answer differently.
-                                Some(
-                                    p.path
-                                        .get_ident()
-                                        .and_then(|i| s.fn_alias.get(&i.to_string()).cloned())
-                                        .unwrap_or_else(|| {
-                                            expand(&path_to_string(&p.path), &s.uses)
-                                        }),
-                                )
-                            });
-                            if let Some(target) = target {
-                                self.fn_alias.insert(id.ident.to_string(), target);
+                            }
+                            if !targets.is_empty() {
+                                // §E1 REACH COUNTERS, on the CHANGED branches themselves.
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if r271_peeled {
+                                        eprintln!("R271LET");
+                                    }
+                                    if targets.len() > 1 {
+                                        eprintln!("R271LETFAN");
+                                    }
+                                }
+                                self.fn_alias.insert(id.ident.to_string(), targets);
                             }
                         }
                     }
