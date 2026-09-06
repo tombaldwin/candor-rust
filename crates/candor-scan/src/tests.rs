@@ -3986,7 +3986,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // `m_pure` invokes the EMPTY arm of a two-arm macro whose other arm writes, and the control
         // it exists to be is that the writing arm's `Fs` must not land here. It was written as
         // `inferred == []`, which was the same bytes only because the skip was SILENT. Since R143
-        // that skip DISCLOSES: `m_pure` is `['Unknown']` with `ambiguous:unexpanded multi-arm`, and
+        // that skip DISCLOSES: `m_pure` is `['Unknown']` with `macro:unexpanded multi-arm`, and
         // the fabrication control is intact — the effect the wrong arm performs is still absent. So
         // the assertion now says what it means. `p` and `m_call` are untouched by that cut (a pure
         // single-arm template, and a single-arm template whose metavar sits in CALLEE position) and
@@ -16391,7 +16391,7 @@ pub fn go() {{ imp::doit(); }}
                      two-arm `macro_rules!`. The skip is correct; the SILENCE is the defect. It must \
                      DISCLOSE, not vanish: was `{e:?}`\n{v:#}");
             let why = fn_entry(&v, name)["unknownWhy"].to_string();
-            assert!(why.contains("ambiguous:unexpanded multi-arm"),
+            assert!(why.contains("macro:unexpanded multi-arm"),
                     "the disclosure must NAME the unexpanded macro, or `deny Unknown` sees a reason \
                      it cannot act on — SPEC §4's `ambiguous:` with the reserved dot-free detail \
                      (no function value, no owner type): was {why}\n{v:#}");
@@ -16450,7 +16450,7 @@ pub fn go() {{ imp::doit(); }}
                      and `repetition` and `kv_pairs` really write a file through one. Was \
                      `{e:?}`\n{v:#}");
             let why = fn_entry(&v, name)["unknownWhy"].to_string();
-            assert!(why.contains("ambiguous:unreadable macro_rules! template"),
+            assert!(why.contains("macro:unreadable macro_rules! template"),
                     "the reason must name the UNREADABLE-TEMPLATE cause, not R143's multi-arm one: \
                      the two limitations have different remedies and a report that conflates them \
                      cannot say which it hit. Was {why}\n{v:#}");

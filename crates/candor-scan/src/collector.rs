@@ -3817,7 +3817,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         eprintln!("R143DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
                     }
                     self.refusals
-                        .insert(format!("ambiguous:unexpanded multi-arm macro_rules! `{mname}`"));
+                        // SOUNDNESS R257 — `macro:`, NOT `ambiguous:`. SPEC §4's table reserves
+                        // `ambiguous:` for "two or more separately-written definitions competing for
+                        // one bare name", and its 2026-09-05 clarification says in terms that an engine
+                        // which cannot compute the arm union discloses "a limit of its own resolution
+                        // rather than an ambiguity in the program". A macro arm is picked by the
+                        // invocation's own tokens; nothing is competing. The prefix matters beyond
+                        // wording: §6.2 projects `ambiguous:*` to class `dispatch`, so the first
+                        // spelling put every one of these rows in front of `deny Unknown[dispatch]` —
+                        // measured, 6 of 74 previously-passing crates flipped, serde among them.
+                        // `macro:` is unlisted in §6.2 and therefore reaches the `unresolved`
+                        // catch-all, which is what this actually is.
+                        .insert(format!("macro:unexpanded multi-arm macro_rules! `{mname}`"));
                 } else {
                     // SOUNDNESS R144 — R143's SIBLING, DIFFERENT CAUSE, SAME SILENCE. Here the arm
                     // count is fine and the TEMPLATE does not parse: `strip_dollars` leaves a
@@ -3841,7 +3852,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         eprintln!("R144DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
                     }
                     self.refusals
-                        .insert(format!("ambiguous:unreadable macro_rules! template `{mname}`"));
+                        .insert(format!("macro:unreadable macro_rules! template `{mname}`"));
                 }
             }
         }
