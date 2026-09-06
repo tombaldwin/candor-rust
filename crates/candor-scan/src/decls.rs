@@ -1533,6 +1533,8 @@ pub(crate) fn fninfo(
         const_strings,
         str_locals: std::collections::HashMap::new(),
         local_macros,
+        // SOUNDNESS R142 — empty at entry and grown as the walk meets each body-local `macro_rules!`.
+        body_macros: HashMap::new(),
         macro_expanding: std::collections::HashSet::new(),
         // Empty at entry: filled as body-level `use` items are visited (`visit_item_use`).
         local_uses: std::collections::HashMap::new(),

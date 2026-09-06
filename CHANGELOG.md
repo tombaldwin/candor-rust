@@ -9,6 +9,43 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R142 — a `macro_rules!` declared INSIDE a function body was invisible to call-edge
+  resolution.** `local_macros`, the crate-local `macro_rules!` index `collector.rs::visit_macro`
+  expands from, is built by `decls::collect_decls`, which visits FILE/MODULE items only. A template
+  declared in a function body was therefore in no index that path could consult, and a bare
+  `NAME!(..)` expanding it read silent-pure — **the whole function went ABSENT from `functions[]`**
+  with no `Unknown`, no `unknownWhy`, no `incomplete` and no `invisible`. **A cardinal sin**, and a
+  DIFFERENT AUTHORITY from R206, which gave the `?`-operand drop-safety veto a body-local reader in
+  `lang.rs`; R142's shape has no `?` in it at all.
+  **Executed ground truth** on a crate that compiles and really writes: four functions reaching a
+  real `std::fs::write` through a body-local template (at body level, as a call argument, in a nested
+  block, and one whose name collides with another body's) are ABSENT on a binary built at `d54108b`
+  and charged `['Fs']` now, while the crate-level twin and the plain direct call are charged in both.
+  **The index is OWNED AND BLOCK-SCOPED, which is the whole fix.** `local_macros` is crate-wide and
+  NAME-keyed, so hoisting body-local definitions into it lets one body's template expand in another
+  body that declares its own macro of that name. Recording happens as the walk MEETS the definition
+  (`visit_item_macro`, which is also what reaches a definition inside re-parsed macro tokens) and
+  `visit_block` restores the map on the way out. Both controls were degraded: one shared name-keyed
+  map fabricates `['Fs']` on a body that writes nothing AND loses the effect on the body that does;
+  deleting the `visit_block` restore fabricates `['Fs']` on a body whose only invocation resolves to
+  a crate-level pure macro. Revert-red on three independent neutralisations.
+  **Property gates:** `soundness/known_open.tsv` 141 shapes → 99 (42 closed, 0 new), and the
+  `?`-position gate's BOTH-PURE pairs 84 → 48. **1,509-crate registry A/B, wide key** (`fn` +
+  inferred + unknownWhy + declared + unresolved + incomplete + netClass + invisible + drop-glue
+  edges), vs `d54108b`: **ADDED 6 / REMOVED 0 / CHANGED 4** over 270,904 rows, **0 functions lost a
+  concrete effect**. Every one audited against original source: rayon's `par_sort_by_cached_key`
+  (×3 versions) and combine's `str_uncons_while` invoke a caller-supplied callback inside a
+  body-local template and now say `Unknown callback:unresolved call` instead of being absent; h2's
+  `Peer::convert_poll_message` (×2) and tower-http's `DefaultMakeSpan::make_span` reach a real
+  `tracing::debug!`/`tracing::span!` inside one and now report `Log`; axum's
+  `MethodRouter::call_with_state` and rustix's `io_uring_layouts` gain an `invisible` disclosure.
+  The two withdrawals are the same function twice: `time-0.3.55`'s `SignedDuration::fmt` loses
+  `invisible: ["serde_core"]`, and it was a FALSE disclosure — the crate-wide name-keyed index made
+  that body's `item!` expand the UNRELATED `macro_rules! item` in `src/serde/mod.rs`, whose template
+  names `serde_core::de::Error`. The body-local definition now shadows it, which is Rust's own rule.
+  **§E1 reach:** `R142BODY`, the counter on the DECISION (a template the body itself declares, about
+  to be walked), fires **2,192 times across 133 crates**.
+
 - ⚠ **SOUNDNESS R238 — a callback held in a STRUCT FIELD is a callback.** `fn via_field(v: &mut
   Vec<i32>, h: &Holder) { v.retain(h.cb) }` was **ABSENT from `functions[]` entirely** while the
   identical program written with the callback as a PARAMETER reported `['Unknown'] callback:unresolved
