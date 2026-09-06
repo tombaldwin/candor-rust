@@ -166,6 +166,19 @@ pub(crate) struct CallCollector<'a> {
     /// silent-pure (R48). Metavars are `$`-stripped and the template parse-or-skipped as a block — only ever
     /// ADDS visibility (an unparseable/`$(..)*`-repetition template is skipped), never fabricates.
     pub(crate) local_macros: &'a std::collections::HashMap<String, String>,
+    /// SOUNDNESS R142 — `macro_rules!` declared INSIDE this body: NAME → its arm TOKENS, the same
+    /// (name, tokens) pair `decls::scan_items` records for a FILE-level one. `local_macros` is built by
+    /// `collect_decls`, which visits file/module items only, so a template declared in a function body
+    /// was never recorded and a bare `NAME!(..)` expanding it read silent-pure — the whole function went
+    /// ABSENT from `functions[]` over an executed `fs::write`.
+    ///
+    /// IT IS OWNED AND BODY-SCOPED, AND THAT IS THE POINT — the reason R142's row calls this "not a
+    /// one-line fix". `local_macros` is a crate-wide NAME-keyed map; hoisting body-local definitions
+    /// into it would let one function's `macro_rules! twin` expand inside a DIFFERENT function that
+    /// declares its own `twin`, which is a fabrication. Recording happens as the walk MEETS the
+    /// definition (`visit_item_macro`) and `visit_block` restores the map on the way out, so what is
+    /// visible at an invocation is what Rust's own textual scoping makes visible there.
+    pub(crate) body_macros: std::collections::HashMap<String, String>,
     /// Local macros currently being inline-expanded on this path — a recursion guard so a macro whose
     /// template invokes itself (or a mutually-recursive macro) can't loop forever.
     pub(crate) macro_expanding: std::collections::HashSet<String>,
@@ -2041,8 +2054,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// changing that is a much larger question and not one this fix should smuggle in.
     fn visit_block(&mut self, node: &'ast syn::Block) {
         let saved = self.trait_quals_by_param.clone();
+        // SOUNDNESS R142 — a `macro_rules!` declared in a block is in scope for the REST OF THAT BLOCK
+        // and nothing else, so the body-local index is restored on the way out. Without this, a template
+        // declared in one block would still expand at a later sibling invocation that Rust resolves to a
+        // crate-level macro of the same name — an effect on a function that performs none. The control
+        // is `r142_e_a_nested_block_macro_does_not_leak_to_a_later_sibling`, which goes red (FABRICATED
+        // `Fs` on a pure fn) with these two lines removed.
+        let saved_macros = self.body_macros.clone();
         syn::visit::visit_block(self, node);
+        self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;
+    }
+    /// SOUNDNESS R142 — RECORD A BODY-LOCAL `macro_rules!` AS THE WALK MEETS ITS DEFINITION.
+    ///
+    /// `visit_macro` cannot do this: for `macro_rules! foo { .. }` syn puts `foo` in `ItemMacro::ident`
+    /// and only the ARMS in `Macro::tokens`, so the node `visit_macro` receives does not carry the name.
+    /// This override is also what reaches a definition inside RE-PARSED macro tokens (`idm!({
+    /// macro_rules! m {..} m!(..) })`): those tokens come back through `visit_expr` as an `Expr::Block`
+    /// whose statements include this item, so one recording site covers both spellings.
+    ///
+    /// Same (name, tokens) shape as `decls::scan_items`' file-level arm, last-writer-wins for the same
+    /// reason: Rust's textual shadowing makes the later definition the one an invocation below it
+    /// expands. A `#[cfg]`-inactive statement never reaches here — `visit_stmt` drops it first.
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        if let Some(name) = &node.ident {
+            if node.mac.path.is_ident("macro_rules") {
+                self.body_macros.insert(name.to_string(), node.mac.tokens.to_string());
+            }
+        }
+        syn::visit::visit_item_macro(self, node);
     }
     /// A `use` written INSIDE a body (`fn f() { use deplib::CFG; .. }`). Pass A's `uses` map is built from
     /// FILE-level items, so this spelling contributed nothing and every name it imported looked
@@ -3711,16 +3751,38 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
             self.refusals.insert("ambiguous:same-name macro_rules! definitions".to_string());
         }
-        if !mpath.contains("::")
-            && !self.macro_expanding.contains(&mleaf)
-            && self.local_macros.contains_key(&mleaf)
+        // SOUNDNESS R142 — THE BODY-LOCAL INDEX IS CONSULTED FIRST, AND UNDER THE UNSHADOWED NAME.
+        // Two things stand between a body-local template and this expansion. (a) `local_macros` never
+        // held it. (b) A `macro_rules!` in a body IS a body-declared item, so R106's shadow rebinds its
+        // name and `expand` yields `<body-item>NAME` — a path that matches nothing. Strip that sentinel
+        // for the body-local lookup ONLY: it is the sentinel's own meaning ("this body declares this
+        // name") that says where to look. `local_macros` stays keyed on the expanded leaf exactly as it
+        // was, so a name this body declares still does NOT reach a crate-level template of that name —
+        // that reading is unchanged by this cut and is not measured by it.
+        let mname = mleaf.strip_prefix(crate::decls::ITEM_SENTINEL).unwrap_or(&mleaf).to_string();
+        let mbody = if mpath.contains("::") {
+            None
+        } else if !self.macro_expanding.contains(&mname) && self.body_macros.contains_key(&mname) {
+            self.body_macros.get(&mname).cloned()
+        } else if !self.macro_expanding.contains(&mleaf) {
+            self.local_macros.get(&mleaf).cloned()
+        } else {
+            None
+        };
         {
-            if let Some(body) = self.local_macros.get(&mleaf).cloned() {
+            if let Some(body) = mbody {
                 let (arm_count, blocks) = macro_template_blocks(&body);
                 // Only a genuinely SINGLE-arm macro (one arm total, and it parsed) — multi-arm is skipped to
                 // avoid charging a non-matching arm's effect (the review-caught fabrication).
                 if arm_count == 1 && blocks.len() == 1 {
-                    self.macro_expanding.insert(mleaf.clone());
+                    // §E1 HIT COUNTER, on the DECISION and not on the branch enclosing it: it fires
+                    // only where a template the body itself declares is about to be walked, which is
+                    // the only case this cut adds. A crate-level expansion (the pre-existing path)
+                    // does not count it.
+                    if self.body_macros.contains_key(&mname) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R142BODY {mname}");
+                    }
+                    self.macro_expanding.insert(mname.clone());
                     let before = self.calls.len();
                     self.visit_block(&blocks[0]);
                     // Mark every call the template contributed as macro-origin (`is_macro`): a `$`-stripped
@@ -3734,7 +3796,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     for c in self.calls[before..].iter_mut() {
                         c.is_macro = true;
                     }
-                    self.macro_expanding.remove(&mleaf);
+                    self.macro_expanding.remove(&mname);
                 }
             }
         }

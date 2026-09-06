@@ -255,7 +255,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -305,7 +305,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -624,7 +624,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
             dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
-            const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
+            const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
             ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
@@ -5342,7 +5342,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -5382,7 +5382,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -5406,7 +5406,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -5453,7 +5453,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -5489,7 +5489,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -14362,7 +14362,7 @@ pub fn go() {{ imp::doit(); }}
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
             dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
-            const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
+            const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
             ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
@@ -16251,6 +16251,87 @@ pub fn go() {{ imp::doit(); }}
                  (executed: 0 in-frame drops) — the pre-change build charged it too. If this ever goes \
                  quiet, say by what mechanism, because the mechanism that could do it is the one that \
                  loses `dies_stmt_tmpl`:\n{v:#}");
+    }
+
+    /// SOUNDNESS R142 — A BODY-LOCAL `macro_rules!` IS INVISIBLE TO CALL-EDGE RESOLUTION, and R206
+    /// is a DIFFERENT AUTHORITY. R206 gave the `?`-operand drop-safety VETO a body-local reader
+    /// (`lang.rs`), and every fixture it has is `?`-wrapped. The crate-wide `local_macros` index that
+    /// `collector.rs::visit_macro` expands from is built by `decls::collect_decls`, which visits
+    /// file/module items only — so a template declared in a function body and invoked with NO `?`
+    /// anywhere reached no reader at all. EXECUTED ground truth, `scratchpad/r142/fix`, a crate that
+    /// compiles and really writes: `a1_body_single`, `a2_body_single_nested_expr`, `a3_nested_block`
+    /// and `a5_same_name_effectful` each perform a real `fs::write`, and on a binary built at
+    /// `d54108b` all four are ENTIRELY ABSENT from `functions[]` — no `Unknown`, no `unknownWhy`, no
+    /// `incomplete`, no `invisible` — while `c0_direct` and `c1_top_single` are charged `['Fs']`.
+    ///
+    /// WHY THE INDEX IS OWNED AND BLOCK-SCOPED, MEASURED IN BOTH DIRECTIONS. R142's row calls the
+    /// obvious fix a fabrication trade, and it is: `local_macros` is crate-wide and NAME-keyed, so
+    /// hoisting body-local definitions into it lets one body's template expand in another body that
+    /// declares its own macro of that name. Degrading exactly this fix to one shared name-keyed map
+    /// (the naive hoist) on that same crate moves TWO cells at once — `a8_second_pure` fabricates
+    /// `['Fs']` over a program that writes nothing, and `a5_same_name_effectful` goes ABSENT over a
+    /// program that writes. Degrading only the `visit_block` restore moves `a6_scope_leak` from pure
+    /// to `['Fs']`. Both controls were run; neither survives its own degradation.
+    ///
+    /// `nested_block_pure` is R206's `stale_overlay_hole` question asked of THIS index: a pure
+    /// body-local `same!` inside an `if` that has closed must not answer for the crate-level `same!`
+    /// used after it. `collides_pure` is the cross-body control — a second body declaring the same
+    /// name with a pure template, which must stay off the report.
+    #[test]
+    fn r142_a_body_local_macro_rules_is_expanded_by_call_edge_resolution() {
+        let v = scan_src_to_json("r142body", r#"
+            macro_rules! same { ($p:expr) => { std::fs::write($p, "x").unwrap() } }
+            macro_rules! quiet { ($p:expr) => { let _ = $p; } }
+            pub fn crate_level(p: &str) { same!(p); }
+            pub fn body_level(p: &str) {
+                macro_rules! bl { ($q:expr) => { std::fs::write($q, "x").unwrap() } }
+                bl!(p);
+            }
+            pub fn body_level_in_arg(p: &str) {
+                macro_rules! bl2 { ($q:expr) => { std::fs::write($q, "x").unwrap() } }
+                let v = vec![bl2!(p)];
+                let _ = v;
+            }
+            pub fn nested_block_level(p: &str) {
+                { macro_rules! bl3 { ($q:expr) => { std::fs::write($q, "x").unwrap() } } bl3!(p); }
+            }
+            pub fn collides_pure(p: &str) {
+                macro_rules! twin { ($q:expr) => { let _ = $q; } }
+                twin!(p);
+            }
+            pub fn collides_effectful(p: &str) {
+                macro_rules! twin { ($q:expr) => { std::fs::write($q, "x").unwrap() } }
+                twin!(p);
+            }
+            pub fn nested_block_pure(p: &str) {
+                { macro_rules! quiet { ($q:expr) => { std::fs::write($q, "x").unwrap() } } let _ = 1; }
+                quiet!(p);
+            }
+"#);
+        for name in ["crate_level", "body_level", "body_level_in_arg", "nested_block_level",
+                     "collides_effectful"] {
+            assert!(effs_opt(&v, name).contains(&"Fs".to_string()),
+                    "SOUNDNESS R142 — `{name}` performs a real `std::fs::write` reached through a \
+                     `macro_rules!` template. `crate_level` is the control that has always worked; the \
+                     other four are declared INSIDE a body, which `decls::collect_decls` never \
+                     indexed, so the whole function went ABSENT from `functions[]` with no disclosure \
+                     of any kind. Executed ground truth in `scratchpad/r142/fix`:\n{v:#}");
+        }
+        assert!(!effs_opt(&v, "collides_pure").contains(&"Fs".to_string()),
+                "THE FABRICATION CONTROL, and the reason R142's row calls this not-a-one-line-fix. \
+                 `collides_pure` declares its OWN `twin!` with a pure template and writes nothing. \
+                 One crate-wide NAME-keyed index — the obvious hoist — expands the other body's \
+                 effectful `twin!` here. Measured: degrading this fix to a single shared map charges \
+                 the equivalent cell `['Fs']` over a program that performs no write:\n{v:#}");
+        assert!(!effs_opt(&v, "nested_block_pure").contains(&"Fs".to_string()),
+                "THE BLOCK-SCOPE CONTROL — R206's `stale_overlay_hole` question asked of the \
+                 RESOLUTION index, and THE INVOCATION AFTER THE BLOCK IS THE WHOLE FIXTURE. A nested \
+                 block declares an effectful `quiet!` and never invokes it; the invocation that \
+                 follows resolves to the crate-level PURE `quiet!`, and nothing here writes. The \
+                 first cut of this control put the invocation INSIDE the block, where the leak \
+                 cannot show — it passed with the `visit_block` restore deleted, i.e. it was testing \
+                 nothing. With the invocation moved out, deleting those two lines charges `['Fs']` \
+                 over a program that writes no file:\n{v:#}");
     }
 
     /// SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules! lm { .. }` written
