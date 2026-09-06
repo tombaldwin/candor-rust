@@ -44,6 +44,15 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev23: a change to what an EXISTING field RECORDS (R238) — `trait_fields` now also carries the
+    // synthetic `"Fn"` leaf for a struct/tuple field whose declared type is an INVOKABLE callback but
+    // carries no trait in its syntax (`cb: fn(&i32) -> bool`, a callable type ALIAS, `Option<fn(..)>`).
+    // A rev22 entry was written by a binary that recorded NONE of those, so serde reads it without
+    // complaint and yields "this type has no callable field" for a type that does — and the consequence
+    // is exactly the silent under-report the entry closes, served warm and invisible: `v.retain(h.cb)`
+    // hands a caller-supplied body to an invoking adapter and the enclosing fn is ABSENT from
+    // `functions[]`. Same shape as rev20, rev16 and rev13 — a field ADDITION is not the only thing that
+    // needs a bump, a change in what an existing field records does too.
     // rev22: FileDecls gained `macro_twins` (R208 — the `macro_rules!` names one file defines twice with
     // different templates). A rev21 entry has none, so it deserializes EMPTY: "this file twins no macro",
     // for a file that does — and the consequence is the order-dependent silence the field exists to
@@ -116,7 +125,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev22/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev23/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -9,6 +9,66 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R238 — a callback held in a STRUCT FIELD is a callback.** `fn via_field(v: &mut
+  Vec<i32>, h: &Holder) { v.retain(h.cb) }` was **ABSENT from `functions[]` entirely** while the
+  identical program written with the callback as a PARAMETER reported `['Unknown'] callback:unresolved
+  call`. Same HOF, same callback type, one difference — the access path. Executed ground truth on a
+  compiled fixture: every arm really invokes the caller-supplied body (42 invocations), and the body
+  supplied performed `Fs`. **Gate impact isolated:** over a library that defines nothing effectful and
+  only invokes a caller-supplied callback, `deny Unknown` exited **1** with the parameter spelling and
+  **0** with the field spelling — a green gate over a library that calls arbitrary caller-supplied
+  behaviour. **A cardinal sin.**
+  **Mechanism, and why it was TWO holes.** Nothing typed a field ACCESS as callable. (1) Pass A's
+  struct-field arm recorded `trait_leaves`, which sees a `Fn*` BOUND (`Box<dyn Fn()>`) but not the
+  shapes carrying no trait in their syntax — a bare `fn(&i32) -> bool`, a callable type ALIAS,
+  `Option<fn(..)>`, a tuple-struct position. Those reached no index at all. (2) `expr_is_fn_typed`
+  answered only for a NAME, so even an already-indexed `Box<dyn Fn>` field handed to an invoking
+  adapter matched nothing. Both now ask `is_callable_type` / `resolve_recv_traits` — the authorities
+  the PARAMETER path already used, which is exactly why the parameter spelling worked.
+  **ADDITIVE, deliberately.** The new index entry is written only where `trait_leaves` found NOTHING,
+  and it writes the synthetic `"Fn"` hedge without touching the concrete `fields` entry — R177 is the
+  measured reason (that hedge DISPLACING a concrete element type took a row from `["Fs"]` to ABSENT).
+  `"Fn"` matches no local trait, so `dispatch_calls_for_trait_method` declines it and no CHA fan-out,
+  no `Type::method` edge and no concrete effect can come out of it. The only reachable outcome is
+  `Unknown`.
+  **THE WIDENING THIS IS NOT.** The naive form — "any call whose callee came from a field" — was built,
+  measured and REJECTED in candor-java during R217: **+1,697 rows over 395 jars**. This one is gated on
+  the field's DECLARED TYPE being callable, so it fails toward SILENCE (unchanged) whenever the base
+  type cannot be resolved, the field is declared in another crate, or the pair is not indexed; and
+  toward over-charge only where a leaf-keyed collision puts a callable field's name on a type whose
+  same-named field is a plain value AND that value reaches a non-callback argument slot of an invoking
+  adapter (`fold`'s seed). That collision is a REAL shape, reproduced in a compiling fixture, and it
+  produced **zero rows on the corpus**.
+  **1,509-crate registry A/B, WIDE key (every field), vs `ade1dc5`: ADDED 24 / REMOVED 0 / CHANGED 2**
+  over 263,575 common rows, 0 errors. **All 26 audited in full against SOURCE, not against candor's own
+  report.** The 24 additions are real cardinal-sin instances in published crates: 22 in `rustls-ffi`
+  0.15.0/0.15.3 (`let cb = self.callback; cb(..)` over an `unsafe extern "C"` callback the C caller
+  supplies — `CallbackReader::read`, `CallbackWriter::write`, `VectoredCallbackWriter::write_vectored`,
+  `SessionStoreBroker::retrieve`/`store`, `Verifier::verify_server_cert`, `ClientHelloResolver::resolve`
+  and their callers) and 2 in `crossbeam-epoch` 0.9.18/0.9.20 (`Deferred::call`). Zero removals — nothing
+  the previous build charged is now certified pure. The 2 changes are reason-channel only, both correct:
+  `arrow-array` 58.4.0 `get_stream_last_error` moves `unknownWhy` from `ambiguous:same-name local defs`
+  (an artefact of resolving the callback as a free-fn NAME — the crate really has two `get_last_error`
+  definitions) to `callback:unresolved call`, and `sea-orm` 2.0.2 `RusqliteConnector::connect` GAINS
+  `callback:unresolved call` alongside its existing reason. No `inferred` set lost a member anywhere.
+  **§E1 reach counters, and one of them is ZERO — recorded here rather than discovered later.**
+  `R238DECL` (the new index entries): **75,376 hits in 199 of 1,509 crates**. `R238FIELD`
+  (`expr_is_fn_typed`'s new `Expr::Field` arm): **0 hits in 0 of 1,509 crates** — that half is
+  **SAFETY-ONLY over this corpus**, and the A/B says nothing about it. A recall hunt found why:
+  real code overwhelmingly writes `struct ForEachConsumer<'f, F> { op: &'f F }` with the `F: Fn(T)`
+  bound on the **impl block**, not on the struct (rayon `src/iter/for_each.rs:55`,
+  `iter.into_iter().for_each(self.op)`), and Pass A reads only the struct's own generics. **Measured on
+  a compiling fixture: the struct-bound form is now charged, the impl-bound form is still silent.**
+  Left open deliberately — charging an UNBOUNDED generic field would be the +1,697 shape exactly.
+  **Over-charge control, written before the fix and part of the test:** a field holding a callback that
+  is never invoked (returned, not called), a non-callable sibling field, a non-callable field in an
+  invoking adapter's seed slot, and a pure inline closure through the same HOF — all five gain nothing,
+  measured. Revert-red verified by stashing the source change with the test in place (10 arms red).
+  Cache schema **rev22 → rev23**: `trait_fields` now records something a rev22 entry does not, so a warm
+  entry would serve "this type has no callable field" for a type that has one — the same under-report,
+  invisible. `soundness/incremental_equiv.sh`: 120 edits (20 of them struct-field edits), every
+  incremental scan byte-identical to a full scan.
+
 - ⚠ **SOUNDNESS R229 (second half) — a macro invoked INSIDE a macro is read too, and the leaf-keyed
   macro LICENCE is gone.** `macro_ctor_leaves` said "this leaf was built inside a macro somewhere, and
   no site table can hold that construction, so keep the shipped leaf-keyed answer" — i.e. the R172 site

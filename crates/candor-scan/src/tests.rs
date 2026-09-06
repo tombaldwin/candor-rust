@@ -3051,6 +3051,114 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
     }
 
     #[test]
+    fn callback_held_in_a_struct_field_and_handed_to_an_invoker_is_unknown() {
+        // SOUNDNESS R238 — a callback held in a STRUCT FIELD and handed to a HOF that INVOKES it was
+        // reported PURE (ABSENT from `functions[]`), while the IDENTICAL callback passed as a PARAMETER
+        // disclosed `['Unknown'] callback:unresolved call`. Same HOF, same callback type, one difference:
+        // the access path. Executed ground truth on a compiled+run fixture: every arm below really does
+        // invoke the caller-supplied body, and the body supplied performed `Fs` (42 invocations across
+        // the arms). Over a library that defines nothing effectful, `deny Unknown` exited 1 with the
+        // parameter spelling and 0 with the field spelling — a green gate over a library that calls
+        // arbitrary caller-supplied behaviour.
+        //
+        // THE SWEEP IS THE MECHANISM, NOT THE INSTANCE. The row was filed on the bare `fn`-pointer field.
+        // Nine further spellings were silent by the SAME mechanism (`expr_is_fn_typed` answering only for
+        // a NAME, never for a field ACCESS) and are pinned here: `Box<dyn Fn>`, a bounded generic field,
+        // a callable type ALIAS field, a NESTED field, a TUPLE-struct position, `self.cb` inside a
+        // method, a `let` rebind of a field, and adapters other than `retain` (`map`, `and_then`).
+        let run = |src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r238-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r238\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // Keyed on the EXACT qual, not `ends_with`: an ABSENT row and a present-but-pure one are
+        // different answers here and a suffix match would conflate two rows that share a tail.
+        let row = |v: &serde_json::Value, q: &str| -> Option<Vec<String>> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(q))
+                .map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect())
+        };
+        let v = run(SRC_R238);
+        for f in ["via_field_fnptr", "via_field_boxdyn", "via_field_generic", "via_field_alias",
+                  "via_field_nested", "via_field_tuple", "via_field_map", "via_field_and_then",
+                  "via_field_let_rebind", "Holder::via_self_field"] {
+            assert_eq!(row(&v, f), Some(vec!["Unknown".to_string()]),
+                "R238: a callback held in a FIELD and handed to an invoking HOF must disclose Unknown \
+                 exactly as the PARAMETER spelling does — {f} = {:?}\n{v}", row(&v, f));
+        }
+        // The baseline arm, unchanged: without it the ten above prove nothing about an ASYMMETRY.
+        assert_eq!(row(&v, "via_param"), Some(vec!["Unknown".to_string()]),
+            "the PARAMETER spelling is the arm that already worked; it must not have moved:\n{v}");
+        // OVER-CHARGE CONTROLS. `None` = absent from `functions[]` (this engine's spelling of pure);
+        // `Some([])` = present and pure. Either is "gained nothing"; `Unknown` is not.
+        for f in ["ctl_store_only", "ctl_read_sibling", "ctl_fold_seed_field",
+                  "ctl_pure_closure", "ctl_pure_closure_field"] {
+            let got = row(&v, f);
+            assert!(got.as_ref().is_none_or(|e| e.is_empty()),
+                "R238 OVER-CHARGE: {f} performs no call this scan cannot see and must gain nothing \
+                 — got {got:?}\n{v}");
+        }
+    }
+
+    /// The R238 fixture. Held out of the test body only because it is long; every item in it is
+    /// exercised by `callback_held_in_a_struct_field_and_handed_to_an_invoker_is_unknown` above, and
+    /// the whole of it COMPILES AND RUNS as written (an absence-shaped control over an uncompilable
+    /// program is no evidence at all — this family has shipped three of those).
+    const SRC_R238: &str = r##"
+pub type Pred = fn(&i32) -> bool;
+pub struct Holder { pub cb: fn(&i32) -> bool }
+pub struct BoxHolder { pub cb: Box<dyn Fn(&i32) -> bool> }
+pub struct GenHolder<F: Fn(&i32) -> bool> { pub cb: F }
+pub struct AliasHolder { pub cb: Pred }
+pub struct Nested { pub inner: Holder }
+pub struct Tup(pub fn(&i32) -> bool);
+pub struct OptOwn { pub cb: fn(i32) -> Option<i32> }
+pub struct Acc { pub init: i32, pub cb: fn(&i32) -> bool }
+
+// The DISCLOSING baseline: the same callback as a PARAMETER. Unchanged by this fix; it is the arm
+// that makes the others a defect rather than a design.
+pub fn via_param(v: &mut Vec<i32>, p: fn(&i32) -> bool) { v.retain(p) }
+
+// The ten silent arms.
+pub fn via_field_fnptr(v: &mut Vec<i32>, h: &Holder) { v.retain(h.cb) }
+pub fn via_field_boxdyn(v: &mut Vec<i32>, h: &BoxHolder) { v.retain(&h.cb) }
+pub fn via_field_generic<F: Fn(&i32) -> bool>(v: &mut Vec<i32>, h: &GenHolder<F>) { v.retain(&h.cb) }
+pub fn via_field_alias(v: &mut Vec<i32>, h: &AliasHolder) { v.retain(h.cb) }
+pub fn via_field_nested(v: &mut Vec<i32>, n: &Nested) { v.retain(n.inner.cb) }
+pub fn via_field_tuple(v: &mut Vec<i32>, t: &Tup) { v.retain(t.0) }
+pub fn via_field_map(v: &[i32], h: &Holder) -> Vec<bool> { v.iter().map(h.cb).collect() }
+pub fn via_field_and_then(o: Option<i32>, h: &OptOwn) -> Option<i32> { o.and_then(h.cb) }
+pub fn via_field_let_rebind(v: &mut Vec<i32>, h: &Holder) { let g = h.cb; v.retain(g) }
+impl Holder {
+    pub fn via_self_field(&self, v: &mut Vec<i32>) { v.retain(self.cb) }
+}
+
+// OVER-CHARGE CONTROLS — every one must GAIN NOTHING.
+// A field that HOLDS a callback but is never invoked here (returned, not called).
+pub fn ctl_store_only(h: &Holder) -> fn(&i32) -> bool { h.cb }
+// A sibling NON-callable field on a type that also has a callable one.
+pub fn ctl_read_sibling(a: &Acc) -> i32 { a.init + 1 }
+// A NON-callable field in an invoking adapter's non-callback (seed) slot.
+pub fn ctl_fold_seed_field(v: &[i32], a: &Acc) -> i32 { v.iter().fold(a.init, |x, y| x + y) }
+// A PURE INLINE CLOSURE through the same HOF must stay pure — never blanket-hedged to Unknown.
+pub fn ctl_pure_closure(v: &mut Vec<i32>) { v.retain(|x| *x > 0) }
+// ...including one that READS a non-callable field of a type that has a callable one.
+pub fn ctl_pure_closure_field(v: &mut Vec<i32>, a: &Acc) { v.retain(|x| *x > a.init) }
+"##;
+
+    #[test]
     fn method_returning_collection_of_trait_objects_dispatches() {
         // `for d in r.all()` / `self.all().iter().for_each(..)` where `all() -> Vec<Box<dyn Doer>>`, and
         // `if let Some(d) = self.opt()` where `opt() -> Option<Box<dyn Doer>>` — a method/factory returning
@@ -10540,6 +10648,13 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev22 -> rev23 a change to what an EXISTING field RECORDS (R238): `trait_fields` now also
+    ///                 carries the synthetic `"Fn"` leaf for a struct/tuple field whose declared type
+    ///                 is an INVOKABLE callback carrying no trait in its syntax (`cb: fn(&i32)->bool`,
+    ///                 a callable ALIAS, `Option<fn(..)>`). A rev22 entry was written by a binary that
+    ///                 recorded none of them, so a warm re-scan reads "this type has no callable
+    ///                 field" for a type that has one and replays the silent under-report the entry
+    ///                 closes: `let cb = self.callback; cb(..)` over a caller-supplied C callback.
     ///   rev19 -> rev20 a change to what an EXISTING field RECORDS (R188): the unit-return sentinel
     ///                 moved out of the `rets` LEAF key into `<unit><leaf>`. A rev19 entry
     ///                 deserializes into a map whose typed leaf was withdrawn by an unrelated unit
@@ -10559,11 +10674,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R182 bumped the token to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R238 bumped the token to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10574,7 +10689,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev22/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev23/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
