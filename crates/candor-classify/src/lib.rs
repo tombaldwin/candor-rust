@@ -142,31 +142,69 @@ pub const CALIBRATED_BUT_PARTIAL_CRATES: [&str; 3] = ["libc", "nix", "rustix"];
 /// A crate ABSENT from this table keeps its unconditional exemption: the ceiling is a denylist of
 /// versions known to be beyond the review, not an allowlist of versions blessed by it. Adding a crate
 /// here is what makes its claim honest, so the table is expected to grow toward `CALIBRATED_CRATES`.
-pub const CALIBRATED_CEILINGS: [(&str, &str); 24] = [
+pub const CALIBRATED_CEILINGS: [(&str, &str); 62] = [
     ("arboard", "3.6.1"),
+    ("argon2", "0.6.0"),
     ("async_nats", "0.35.1"),
+    ("async_process", "2.5.0"),
+    ("aws_config", "1.12.0"),
+    ("backoff", "0.4.0"),
+    ("bcrypt", "0.19.3"),
+    ("chrono", "0.4.45"),
+    ("clap", "4.6.6"),
+    ("clircle", "0.6.1"),
     ("console", "0.15.11"),
     ("crossterm", "0.28.1"),
-    ("dialoguer", "0.12.0"),
-    ("dotenv", "0.15.0"),
-    ("dotenvy", "0.15.7"),
-    ("grep_cli", "0.1.12"),
+    ("ctrlc", "3.5.2"),
+    ("curl", "0.4.50"),
+    ("deadpool_postgres", "0.14.2"),
+    ("diesel", "2.3.13"),
+    ("duct", "1.1.2"),
+    ("elasticsearch", "8.19.0-alpha.1"),
+    ("env_logger", "0.11.11"),
+    ("etcetera", "0.11.0"),
+    ("execute", "0.3.0"),
+    ("fastrand", "2.5.0"),
+    ("filetime", "0.2.29"),
+    ("fs_err", "3.3.1"),
+    ("git2", "0.21.0"),
+    ("glob", "0.3.4"),
     ("ignore", "0.4.33"),
-    ("isahc", "2.0.1"),
-    ("lettre", "0.11.23"),
+    ("jiff", "0.2.35"),
+    ("lapin", "4.10.0"),
+    ("log", "0.4.34"),
+    ("lscolors", "0.21.0"),
+    ("memmap2", "0.9.11"),
     ("mongodb", "3.8.1"),
     ("mysql", "28.0.0"),
-    ("portable_pty", "0.9.0"),
-    ("postgres", "0.7.10"),
+    ("mysql_async", "0.37.1"),
+    ("native_tls_crate", "0.2.18"),
+    ("notify", "8.2.0"),
+    ("password_hash", "0.6.1"),
+    ("pbkdf2", "0.13.0"),
+    ("pnet", "0.35.0"),
+    ("rand", "0.10.2"),
     ("ratatui", "0.29.0"),
+    ("rdkafka", "0.39.0"),
     ("redis", "1.6.0"),
+    ("reqwest", "0.13.4"),
     ("rusqlite", "0.40.2"),
     ("rustls", "0.23.43"),
+    ("scrypt", "0.12.0"),
     ("sea_orm", "1.1.20"),
+    ("sqlx", "0.9.0"),
     ("sqlx_core", "0.8.6"),
-    ("tempfile", "3.27.0"),
+    ("terminal_colorsaurus", "1.0.3"),
+    ("time", "0.3.55"),
+    ("tokio_native_tls", "0.3.1"),
+    ("tokio_postgres", "0.7.18"),
     ("tonic", "0.12.3"),
+    ("tracing", "0.1.44"),
+    ("tracing_subscriber", "0.3.23"),
+    ("tungstenite", "0.30.0"),
     ("ureq", "2.12.1"),
+    ("walkdir", "2.5.0"),
+    ("wild", "2.2.1"),
 ];
 
 /// `true` when `resolved` is a version this crate's rules were NOT written against — i.e. strictly
@@ -852,7 +890,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::send_string")
             || path == "ureq::agent"
             || path == "ureq::request"
-            || path == "ureq::request_url")
+            || path == "ureq::request_url"
+            || path == "ureq::unversioned::transport::RustlsConnector::connect"
+            || path == "ureq::tls::rustls::RustlsConnector::connect"
+            || path == "ureq::RustlsConnector::connect")
     {
         return Some("Net");
     }
@@ -953,8 +994,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // `rustls::KeyLogFile::new` (key_log_file.rs:88) reads `$SSLKEYLOGFILE` and, if set, opens (creating
     // if needed) that file in append mode — a real, if opt-in, disk write path independent of the sync
     // TLS record-layer I/O the `rustls` arm above already covers.
-    if crate_name == "native_tls_crate"
-        && (path.ends_with("TlsConnector::new") || path.ends_with("Identity::from_pkcs8"))
+    if matches!(crate_name, "native_tls" | "native_tls_crate")
+        && (path.ends_with("TlsConnector::new")
+            || path.ends_with("Identity::from_pkcs8")
+            || path.ends_with("Identity::from_pkcs12"))
     {
         return Some("Fs");
     }
@@ -1275,6 +1318,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "ignore::WalkBuilder::build_matchers"
             || path == "ignore::IncrementalIgnore::matched"
             || path == "ignore::IncrementalIgnore::matched_with_errors"
+            || path == "ignore::DirEntry::metadata"
+            || path == "ignore::walk::DirEntry::metadata"
+            || path == "ignore::WalkParallel::visit"
+            || path == "ignore::walk::WalkParallel::visit"
         {
             return Some("Fs");
         }
@@ -1361,7 +1408,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // only BUILDS — it keeps the narrow set below. (Found by running on a real
         // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
         if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
-            const PG: [&str; 20] = [
+            const PG: [&str; 21] = [
                 "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
                 "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
                 "::copy_in", "::copy_out", "::transaction", "::connect",
@@ -1377,6 +1424,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 // tokio_postgres 0.7.10+.
                 "::query_row", "::query_map", "::query_and_then", "::execute_batch",
                 "::prepare_cached", "::query_typed",
+                "::prepare_typed_cached",
             ];
             if PG.iter().any(|v| path.ends_with(v)) {
                 return Some("Db");
@@ -1385,7 +1433,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // cancel_token.rs:34) opens a BRAND NEW connection to the server to send a raw CancelRequest
             // packet — real socket I/O, but not a query round-trip on an existing connection like the PG
             // verb list above, so bucketed `Net` rather than `Db`.
-            if crate_name == "tokio_postgres" && path.ends_with("CancelToken::cancel_query") {
+            if matches!(crate_name, "tokio_postgres" | "postgres")
+                && path.ends_with("CancelToken::cancel_query")
+            {
                 return Some("Net");
             }
             // rusqlite only: opening the database IS the connection establishment (`Connection::
@@ -1487,7 +1537,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                     || path == "rusqlite::Connection::from_handle_owned"
                     || path == "rusqlite::Connection::extension_init2"
                     || path == "rusqlite::init_auto_extension"
-                    || path == "rusqlite::auto_extension::init_auto_extension")
+                    || path == "rusqlite::auto_extension::init_auto_extension"
+                    || path == "rusqlite::Statement::insert"
+                    || path == "rusqlite::statement::Statement::insert"
+                    || path == "rusqlite::Statement::raw_execute"
+                    || path == "rusqlite::statement::Statement::raw_execute")
             {
                 return Some("Db");
             }
@@ -1945,13 +1999,43 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // Verification and explicit-salt hashing are deterministic recomputation — pure. `rand_core`
     // carries the OsRng source itself (otherwise the most common salt mint is invisible).
     if matches!(crate_name, "argon2" | "scrypt" | "pbkdf2" | "password_hash") {
-        if path.contains("SaltString::generate") {
+        // SOUNDNESS R318 — `SaltString::generate` was this block's ONLY match target and the type was
+        // DELETED upstream in password-hash 0.6.0 (0.5.0: 21 occurrences; 0.6.1: zero). Everything below
+        // it fell through to `return None`, so all four crates asserted purity — including on
+        // `argon2.hash_password(password)`, the one-argument DEFAULT TRAIT METHOD at
+        // `password-hash-0.6.1/src/lib.rs:107` whose body is `let salt = try_generate_salt()?;`. That is
+        // the most documented call shape in the family, minting OS entropy, reading pure, on crates whose
+        // entire purpose is a security review.
+        //
+        // `ends_with`, NOT `contains`: `hash_password_with_salt` takes an explicit salt and is
+        // deterministic recomputation — correctly PURE — and a `contains` match would fabricate `Rand`
+        // on it. `hash_password_with_rng` DOES draw, from the caller's RNG, so it is charged.
+        // The old `SaltString::generate` clause is kept: it is still the right answer for 0.5.x.
+        if path.contains("SaltString::generate")
+            || path.ends_with("::generate_salt")
+            || path.ends_with("::try_generate_salt")
+            || path.ends_with("::hash_password")
+            || path.ends_with("::hash_password_with_rng")
+        {
             return Some("Rand");
         }
         return None;
     }
     if crate_name == "bcrypt" {
-        if path.ends_with("::hash") || path.ends_with("::hash_with_result") {
+        // SOUNDNESS R319 — this list was EXACTLY bcrypt's internal-salt surface at 0.15.1 and fell
+        // behind by ADDITION, not by rename: 0.19.3 adds four more verbs that each document "the salt
+        // is generated randomly using the OS randomness" and reach `getrandom::fill`. A stale-PATH
+        // check could never have found this, because every old path still exists and still works —
+        // a version ceiling catches additions, a path check only catches removals.
+        // The explicit-salt family (`hash_with_salt`, `hash_with_salt_bytes`,
+        // `non_truncating_hash_with_salt*`) stays PURE: the caller supplies the salt.
+        if path.ends_with("::hash")
+            || path.ends_with("::hash_with_result")
+            || path.ends_with("::non_truncating_hash")
+            || path.ends_with("::hash_bytes")
+            || path.ends_with("::non_truncating_hash_bytes")
+            || path.ends_with("::non_truncating_hash_with_result")
+        {
             return Some("Rand");
         }
         return None;
@@ -2327,6 +2411,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "sqlx_core::fs::read_dir"
             || path.ends_with("::migrate::resolve_blocking")
             || path.ends_with("::migrate::resolve_blocking_with_config")
+            || path == "sqlx_core::config::Config::try_from_path"
+            || path == "sqlx_core::Config::try_from_path"
+            || path == "sqlx_core::config::Config::try_from_path_or_default"
+            || path == "sqlx_core::Config::try_from_path_or_default"
+            || path == "sqlx_core::config::Config::try_from_crate_or_default"
+            || path == "sqlx_core::Config::try_from_crate_or_default"
         {
             return Some("Fs");
         }
@@ -2617,7 +2707,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // reply (bidirectional tty dialogue — Ipc, consistent with dialoguer/console). Nothing else is I/O.
     if crate_name == "terminal_colorsaurus" {
         if path.ends_with("::background_color") || path.ends_with("::foreground_color")
-            || path.ends_with("::color_palette") || path.ends_with("::theme_mode")
+            || path.ends_with("::color_palette")
+            // SOUNDNESS R321 — FQN-exact, not a suffix. `1.0.3` added
+            // `ColorPalette::theme_mode(&self)` (src/lib.rs:112), a PURE derived accessor
+            // comparing `perceived_lightness()` on two already-fetched colours, alongside the
+            // effectful free `theme_mode(options)` (src/lib.rs:157). A `::theme_mode` suffix
+            // charges `Ipc` to both. Counterpart to R319: the same upstream mechanism — a
+            // release ADDING a name — under-reports in one crate and fabricates in another,
+            // depending only on whether the new name is effectful.
+            || path == "terminal_colorsaurus::theme_mode"
         {
             return Some("Ipc");
         }
