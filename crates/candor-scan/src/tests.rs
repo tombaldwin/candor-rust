@@ -4631,6 +4631,81 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                  Unknown WITH a §4 reason, never read pure (SOUNDNESS R128) — wrong: {wrong:#?}");
     }
 
+    /// SOUNDNESS R272 — THE SYNTHETIC `"Fn"` HEDGE LEAF **CAN** NAME A LOCAL TRAIT, AND THE OBVIOUS
+    /// FIX TRADES THIS DEFECT FOR A WORSE ONE. Both fixtures are here for that reason; the second one
+    /// is the whole point of the entry.
+    ///
+    /// R238's field-callback index writes a synthetic `"Fn"` leaf for a field whose declared type is
+    /// invokable but carries no trait in its syntax (`cb: fn()`). Four sites assert, in comments, that
+    /// this leaf "matches no local trait, so it can name no concrete effect — the only reachable
+    /// outcome is `Unknown`". A crate defining `pub trait Fn { fn go(&self); }` falsifies that: the
+    /// hedge hands the bounded CHA what it reads as that trait's name, it fans out over every local
+    /// `impl Fn for _`, and the caller is charged an effect from an implementor its receiver can never
+    /// be. EXECUTED, on a compiled crate: `call_it(h) { h.cb.go() }` over `cb: fn()` provably creates
+    /// no file (`cargo run` prints `EVIL file exists after call_it = false`) and candor reports
+    /// `['Fs']`, with blanket `deny Fs`, `deny Fs Unknown` and caller-scoped `deny Fs call_it` all
+    /// exit 1. A safety sentence written by the change that needed it to be true (§E2, attack K).
+    ///
+    /// **THE FIX THAT WAS BUILT, MEASURED AND REJECTED.** Spelling the hedge `<callable>` — the
+    /// family's own `<dyn>`/`<elemdyn>`/`<fn>`/`<lazy>` sentinel convention, which no trait can be
+    /// named — makes the assertion true by construction and does remove the over-charge: `call_it`
+    /// goes to ABSENT, correctly, and `deny Fs call_it` goes exit 1 -> 0. It was byte-identical over
+    /// all 1,509 registry crates (ADDED 0 / REMOVED 0 / CHANGED 0) — which is the most flattering
+    /// number available and means only that neither shape occurs there, not that the change is safe.
+    /// The SECOND fixture below is what it is not safe against: with the same program and an
+    /// EFFECTFUL `impl Fn for fn()`, the ground-truth run really does write the file, and the
+    /// sentinel build reports `call_it` **ABSENT** — a silent under-report, this family's cardinal
+    /// sin, traded for an over-charge that is not. The residual over-charge is disclosed as an
+    /// effect the caller may not perform; the silence would be a purity claim over one it does.
+    ///
+    /// So the correction is the deliverable and the exploit is not: the four comments are worded as
+    /// the ASSUMPTION they are, and these two fixtures pin the trade so the next person to reach for
+    /// the same narrowing meets the second one first. A real fix has to keep the effect — the honest
+    /// shape is a method call on a hedge-typed receiver disclosing `Unknown` rather than resolving to
+    /// nothing — and that is a widening whose over-charge surface this corpus cannot measure at all,
+    /// so it is filed rather than guessed at here.
+    ///
+    /// LATENT: `grep -rlE 'trait\s+Fn\b'` over all 1,509 registry crates returns 0 files.
+    #[test]
+    fn r272_a_crate_that_defines_its_own_trait_fn() {
+        // (a) THE OVER-CHARGE. `impl Fn for fn()` is pure; `Evil` is not; `call_it`'s receiver can
+        // only ever be a `fn()`. Asserted as the RECORDED CURRENT ANSWER, not as a desired one: if
+        // this line starts failing, read the doc above before deleting it — the fix that makes it
+        // pass must also keep fixture (b) non-silent.
+        let v = scan_src_to_json("r272over", concat!(
+            "pub trait Fn { fn go(&self); }\n",
+            "impl Fn for fn() { fn go(&self) { } }\n",
+            "pub struct Evil;\n",
+            "impl Fn for Evil { fn go(&self) { let _ = std::fs::write(\"/tmp/r272\", \"x\"); } }\n",
+            "pub struct Holder { pub cb: fn() }\n",
+            "pub fn call_it(h: &Holder) { h.cb.go() }\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "call_it"), vec!["Fs".to_string()],
+            "R272 RECORDED OVER-CHARGE: `call_it` provably performs nothing (executed) and is charged \
+             Fs through a CHA fan-out over a trait its receiver only shares a NAME with:\n{v:#}"
+        );
+        // (b) THE SECOND FIXTURE, and the reason the obvious fix was rejected. One character of the
+        // program differs — the impl FOR THE RECEIVER'S OWN TYPE now writes a file — and the executed
+        // run confirms `call_it` really does it. Whatever answers (a), this must never be ABSENT.
+        let v = scan_src_to_json("r272real", concat!(
+            "pub trait Fn { fn go(&self); }\n",
+            "impl Fn for fn() { fn go(&self) { let _ = std::fs::write(\"/tmp/r272c\", \"x\"); } }\n",
+            "pub struct Evil;\n",
+            "impl Fn for Evil { fn go(&self) { let _ = std::fs::write(\"/tmp/r272\", \"x\"); } }\n",
+            "pub struct Holder { pub cb: fn() }\n",
+            "pub fn call_it(h: &Holder) { h.cb.go() }\n",
+        ));
+        let present = v["functions"].as_array().into_iter().flatten().any(|f| f["fn"] == "call_it");
+        assert!(
+            present && !effs_opt(&v, "call_it").is_empty(),
+            "R272 CARDINAL-SIN GUARD: `call_it` reaches an `impl Fn for fn()` that WRITES A FILE — \
+             executed, the file is really created. An absent row certifies it pure. Spelling the \
+             hedge leaf `<callable>` makes fixture (a) correct and makes THIS one silent; that trade \
+             is why R272 is a re-wording and a pair of fixtures rather than a narrowing:\n{v:#}"
+        );
+    }
+
     /// SOUNDNESS R270 — THE KIND IS DECIDED BY THE CONDITION, AND THE CLASS IS WHAT GATES.
     /// R128's hedge above and R169's re-export twin are the ZERO-READABLE-DEFS case: a macro this
     /// engine declined to expand, so there are not two definitions competing for a name, there are none

@@ -653,8 +653,9 @@ pub(crate) fn elem_trait_leaves(
                 // the fixture's callback really writes a file in that frame.
                 //
                 // The synthetic `"Fn"` leaf is the SAME one `static_holds_callable` and
-                // `ret_dispatch_leaves` already produce, and it matches no local trait, so it can name
-                // no concrete effect — it can only turn silence into `Unknown`.
+                // `ret_dispatch_leaves` already produce. It can only turn silence into `Unknown` GIVEN
+                // that no crate in scope defines its own `trait Fn` — see `leaves_are_callable`'s R272
+                // note, which states that condition once and records what happens when it fails.
                 if is_bare_fn(t) {
                     if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                         eprintln!("R161ELEMFN {name}");
@@ -671,8 +672,9 @@ pub(crate) fn elem_trait_leaves(
                 // `is_callable_type` is the ONE authority for "is this value invokable" (it also peels
                 // `Box`/`Rc`/`Arc`/`Symbol` and `Option`/`Result`), so this arm asks IT rather than
                 // adding a third spelling of the question. The answer it contributes is the synthetic
-                // `"Fn"` leaf every other callable site already produces: it matches no local trait, so
-                // it can name no concrete effect — only turn a silent drop into `Unknown`.
+                // `"Fn"` leaf every other callable site already produces: it turns a silent drop into
+                // `Unknown` GIVEN no crate in scope defines its own `trait Fn` (R272 — the condition is
+                // stated at `leaves_are_callable`, not re-asserted here).
                 if is_callable_type(t, generic_bounds, callable_aliases) {
                     if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                         eprintln!("R177ELEMALIAS {name}");
@@ -727,6 +729,35 @@ fn is_bare_fn(ty: &syn::Type) -> bool {
     }
 }
 
+/// SOUNDNESS R272 — THE CONDITION THE SYNTHETIC `"Fn"` HEDGE RESTS ON, STATED ONCE AND AS AN
+/// ASSUMPTION, BECAUSE THE UNCONDITIONAL READING IS FALSE.
+///
+/// Several sites write a synthetic `"Fn"` leaf for a value whose declared type is invokable but
+/// carries no trait in its syntax (`cb: fn()`, a callable type ALIAS, `Option<fn(..)>`, a
+/// `RET_FN_TYPED` return, a callable `static`). Each used to assert, in its own words, that this
+/// "matches no local trait, so no CHA fan-out, no `Type::method` edge and no concrete effect can come
+/// out of it — the only reachable outcome is `Unknown`".
+///
+/// **THAT HOLDS ONLY WHILE NO CRATE IN SCOPE DEFINES ITS OWN `trait Fn` / `FnMut` / `FnOnce`.** Where
+/// one does, the hedge hands the bounded CHA what it reads as that trait's name and the caller is
+/// charged an effect from an implementor its receiver can never be. EXECUTED: `call_it(h) { h.cb.go() }`
+/// over `cb: fn()` provably creates no file and is reported `['Fs']`, with caller-scoped `deny Fs
+/// call_it` exit 1. `Fn` is not a name real crates give a trait — 0 of 1,509 registry crates define
+/// one — but that is an assumption about the ecosystem, not a property of this code, and it is written
+/// here as one.
+///
+/// **WHY THE HEDGE IS NOT SIMPLY RE-SPELLED.** Bracketing it (`<callable>`, the family's own
+/// `<dyn>`/`<elemdyn>`/`<fn>`/`<lazy>` convention) makes the claim true by construction, was built,
+/// and was REJECTED on measurement: it removes the over-charge and introduces a SILENT UNDER-REPORT
+/// one character away, where the `impl Fn for fn()` is itself effectful — the caller then resolves to
+/// nothing and is certified pure over a file it really writes. An over-charge is disclosed as an
+/// effect the caller may not perform; the silence is a purity claim over one it does, and this family
+/// ranks those. Both fixtures are pinned in `r272_a_crate_that_defines_its_own_trait_fn`; read them
+/// before narrowing this. A real fix has to keep the effect — a method call on a hedge-typed receiver
+/// disclosing `Unknown` rather than resolving to nothing — and its over-charge surface is not
+/// measurable on a corpus where neither shape occurs (that A/B is byte-identical, which says only
+/// that, §E1).
+///
 /// Whether a set of dispatch leaves names an INVOKABLE callback rather than a user trait — the ONE
 /// definition of that question, shared by `CallCollector::leaves_are_callable` (every binder site) and
 /// by the Pass-A `callable_statics` index. Rust exposes no stable method on `Fn`/`FnMut`/`FnOnce`, so
@@ -750,8 +781,8 @@ pub(crate) fn leaves_are_callable(leaves: &[String]) -> bool {
 ///
 /// SOUNDNESS DIRECTION, AND THE CONDITION IT RESTS ON — worded as the assumption it is, because the
 /// unconditional reading is FALSE. The index only ever produces the synthetic `"Fn"` leaf, the same one
-/// `ret_dispatch_leaves` decodes `RET_FN_TYPED` into, and that leaf matches no local trait — so it cannot
-/// contribute a CONCRETE effect. It CAN WITHDRAW one: the consuming arm in `resolve_elem_trait_leaves`
+/// `ret_dispatch_leaves` decodes `RET_FN_TYPED` into, which cannot contribute a CONCRETE effect GIVEN no
+/// crate in scope defines its own `trait Fn` (R272, stated at `leaves_are_callable`). It CAN WITHDRAW one: the consuming arm in `resolve_elem_trait_leaves`
 /// runs BEFORE the local `elem_trait_of`/`trait_vars` lookup, so a name that is a callable static
 /// crate-wide AND a dispatch-typed local HERE would have its real leaves replaced by `["Fn"]` and lose
 /// its dispatch. The `locally_bound` gate on that arm is the only thing preventing that, and it is

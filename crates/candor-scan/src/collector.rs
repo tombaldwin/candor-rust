@@ -757,7 +757,8 @@ impl<'a> CallCollector<'a> {
             // — the same shadow rule the lazy-static forcing edge uses, from the same authority. The leaf
             // is the synthetic `"Fn"` that `ret_dispatch_leaves` already produces for `RET_FN_TYPED`, so
             // every downstream consumer (`leaves_are_callable` → `fn_typed_vars`) is the existing one and
-            // the outcome can only ever be `Unknown`, never a concrete effect.
+            // the outcome is `Unknown` rather than a concrete effect GIVEN R272's condition (stated at
+            // `lang::leaves_are_callable`).
             syn::Expr::Path(p) if p.qself.is_none()
                 && p.path.segments.last().is_some_and(|s| {
                     let n = s.ident.to_string();
@@ -1440,8 +1441,10 @@ impl<'a> CallCollector<'a> {
     }
     /// SOUNDNESS R177 — is this leaf set ONLY the synthetic callable marker?
     ///
-    /// `"Fn"` is a HEDGE, not a type. It matches no local trait, so the dispatch route can resolve
-    /// nothing through it, while a CONCRETE element type can — and R177 made the two collide for the
+    /// `"Fn"` is a HEDGE, not a type. It names no local trait in any crate that does not define one
+    /// itself (R272 — the condition, and its executed counter-example, live at
+    /// `lang::leaves_are_callable`), so the dispatch route resolves nothing through it, while a
+    /// CONCRETE element type can — and R177 made the two collide for the
     /// first time: `callable_aliases` is keyed by LEAF, so a `mod a { type H = Box<dyn Fn(&str)> }`
     /// beside a `mod b { struct H; struct S { hs: Vec<H> } }` gave `S`'s field the `["Fn"]` leaves and
     /// the dispatch route then DISPLACED the concrete `b::H` element typing: `for h in &self.hs {
