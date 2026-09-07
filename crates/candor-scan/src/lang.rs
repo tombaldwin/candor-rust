@@ -2590,7 +2590,13 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     for (name, body) in std::mem::take(&mut sites.pending_closure_escapes) {
         let uses_n = sites.path_uses.get(&name).copied().unwrap_or(0);
         let disc_n = sites.discarded_calls.get(&name).copied().unwrap_or(0);
-        if !(uses_n > 0 && uses_n == disc_n) {
+        // R304 — the counters are keyed on a BARE IDENT with no scope, so they only describe one
+        // entity when the body binds that name exactly once and never spells it inside macro tokens
+        // the walk cannot read. Either condition failing means the counts may be about something
+        // else entirely, and the only safe answer is the old unconditional escape.
+        let one_entity = sites.name_bindings.get(&name).copied().unwrap_or(0) == 1
+            && !sites.macro_idents.contains(&name);
+        if !(one_entity && uses_n > 0 && uses_n == disc_n) {
             sites.escapes.push(body);
         } else if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             // INSTRUMENTED, because an unchanged corpus row is not evidence the new code ran — the
@@ -3255,6 +3261,15 @@ struct EscapeSites<'a> {
     pending_closure_escapes: Vec<(String, &'a syn::Expr)>,
     /// Every single-ident `Expr::Path` occurrence, counted.
     path_uses: HashMap<String, usize>,
+    /// How many times each name is BOUND in this body — every `let NAME = …` and every body-local
+    /// `fn NAME`. SOUNDNESS R304: `path_uses` is keyed on a bare identifier with no scope, so a
+    /// DIFFERENT entity's discarded call satisfied the test for a closure that never runs
+    /// (`let cb: fn() -> u32 = tick; cb(); let cb = || H::new();` — executed 0 in-frame drops,
+    /// charged). A name bound more than once is not one name, so it is disqualified outright.
+    name_bindings: HashMap<String, usize>,
+    /// Identifiers appearing anywhere in a macro's token stream. `path_uses` cannot see them, and an
+    /// UNSEEN use makes `uses == disc` more likely, which withdraws suppression that should stand.
+    macro_idents: std::collections::HashSet<String>,
     /// Occurrences that are the callee of a call whose VALUE IS DISCARDED (`f();`, `let _ = f();`).
     discarded_calls: HashMap<String, usize>,
     /// SOUNDNESS R173 — a pre-order counter over the body, standing in for evaluation order. Only the
@@ -3344,6 +3359,8 @@ impl<'a> EscapeSites<'a> {
             let_bound_closures: HashMap::new(),
             pending_closure_escapes: Vec::new(),
             path_uses: HashMap::new(),
+            name_bindings: HashMap::new(),
+            macro_idents: std::collections::HashSet::new(),
             discarded_calls: HashMap::new(),
             seq: 0,
             try_exits: Vec::new(),
@@ -3950,8 +3967,9 @@ impl<'a> EscapeSites<'a> {
                                     .insert(&*init.expr as *const syn::Expr as usize, n);
                             }
                         }
-                        // `let _ = f();` discards the value exactly as `f();` does.
-                        if matches!(l.pat, syn::Pat::Wild(_)) {
+                        // `let _ = f();` discards the value exactly as `f();` does — but ONLY in THIS
+                        // frame. See the `closure_depth` note on the statement-call counter below.
+                        if self.closure_depth == 0 && matches!(l.pat, syn::Pat::Wild(_)) {
                             if let syn::Expr::Call(c) = &*init.expr {
                                 if let syn::Expr::Path(p) = &*c.func {
                                     if let Some(id) = p.path.get_ident() {
@@ -3973,6 +3991,7 @@ impl<'a> EscapeSites<'a> {
                         if let Some(n) = single_pat_ident(&l.pat) {
                             let seq = self.seq;
                             self.first_bind_seq.entry(n.clone()).or_insert(seq);
+                            *self.name_bindings.entry(n.clone()).or_insert(0) += 1;
                             self.lets.push((n, &init.expr));
                         }
                     }
@@ -3982,7 +4001,17 @@ impl<'a> EscapeSites<'a> {
                         self.roots.push(Some(e));
                     }
                     // `f();` — the value is discarded, so anything the callee built dies here.
-                    if semi.is_some() {
+                    //
+                    // SOUNDNESS R303: `self.closure_depth == 0` is load-bearing, and leaving it out was a
+                    // FABRICATION. A closure captured by ANOTHER closure that invokes it and discards the
+                    // result — `let f = || H::new(); Box::new(move || { f(); })` — satisfied
+                    // `uses == disc` at depth 1, so the suppression was withdrawn and the `Drop` charged
+                    // to a frame that never runs it (executed: 0 in-frame drops). `mark_escape` cannot
+                    // rescue it either: `for_each_value_child`'s `Block` arm descends only the TAIL, so an
+                    // `f` in a non-tail statement never reaches `m.names` and the `lets` fixpoint never
+                    // re-marks the closure. A discarded call inside a nested closure says nothing about
+                    // whether THIS frame consumes the value, so it must not count as one.
+                    if self.closure_depth == 0 && semi.is_some() {
                         if let syn::Expr::Call(c) = e {
                             if let syn::Expr::Path(p) = &*c.func {
                                 if let Some(id) = p.path.get_ident() {
@@ -3999,7 +4028,16 @@ impl<'a> EscapeSites<'a> {
                 // `macro_rules!` template is, one spelling over. Its value is DISCARDED, so nothing in
                 // it is on any spine and everything it builds is interior. Interior only — never a site,
                 // never a `first_ctor_seq`, so this can only charge more.
+                // R304 — a body-local `fn NAME` binds that name too, and shadowing a let-bound
+                // closure with one (or vice versa) is the same collision.
+                syn::Stmt::Item(syn::Item::Fn(itf)) => {
+                    *self
+                        .name_bindings
+                        .entry(itf.sig.ident.to_string())
+                        .or_insert(0) += 1;
+                }
                 syn::Stmt::Macro(m) => {
+                    self.note_macro_idents(m.mac.tokens.clone());
                     // The SITE half, not gated on an open `?`. A statement macro's VALUE is discarded,
                     // so `mark_escape` never reaches it from any root and every site recorded here is
                     // a non-escaping one — which is the point: `push_h!(out, "a")` builds an `H` that
@@ -4033,6 +4071,20 @@ impl<'a> EscapeSites<'a> {
             }
         }
     }
+    /// Every identifier in a macro's tokens, flattened through nested groups. R304: the escape walk
+    /// does not read macro tokens as expressions, so a use spelled there is invisible to `path_uses`.
+    fn note_macro_idents(&mut self, ts: proc_macro2::TokenStream) {
+        for t in ts {
+            match t {
+                proc_macro2::TokenTree::Ident(i) => {
+                    self.macro_idents.insert(i.to_string());
+                }
+                proc_macro2::TokenTree::Group(g) => self.note_macro_idents(g.stream()),
+                _ => {}
+            }
+        }
+    }
+
     fn walk_expr(&mut self, e: &'a syn::Expr) {
         // R198/R209(b) — every single-ident path occurrence, counted, so the deferred decision below
         // can ask whether a let-bound closure's name is used for anything BUT a value-discarded call.
@@ -4046,6 +4098,7 @@ impl<'a> EscapeSites<'a> {
         self.seq += 1; // R173 — pre-order position, read only for its ORDER
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
+            self.note_macro_idents(m.mac.tokens.clone());
             self.note_macro_ctor_leaves(m, e); // R172 — address-keying cannot reach inside a macro
         }
         match e {

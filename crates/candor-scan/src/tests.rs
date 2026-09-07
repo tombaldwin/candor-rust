@@ -6659,6 +6659,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             pub struct T(pub u32);
             impl Drop for T { fn drop(&mut self) { let _ = std::fs::write("/tmp/t", "x"); } }
             pub fn with_slot<R>(f: impl FnOnce() -> R) -> R { f() }
+            macro_rules! idm { ($e:expr) => { $e } }
 
             // CHARGED — built here, run here, dropped here.
             pub fn let_disc() { let f = || T(0); let _ = f(); }
@@ -6669,13 +6670,28 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             pub fn never_invoked() { let _f = || T(0); }
             pub fn result_returned() -> T { let f = || T(0); f() }
             pub fn inline_handed_away() -> Option<T> { with_slot(|| Some(T(0))) }
+
+            // SOUNDNESS R303 — the discarded call is inside ANOTHER closure, so it says nothing
+            // about whether THIS frame consumes the value. Executed: 0 in-frame drops. Charging
+            // these was a fabrication a review agent found, in a shape that occurs in real crates.
+            pub fn nested_disc() -> Box<dyn Fn()> { let f = || T(0); Box::new(move || { f(); }) }
+            pub fn nested_let_disc() -> Box<dyn Fn()> { let f = || T(0); Box::new(move || { let _ = f(); }) }
+
+            // SOUNDNESS R304 — the counters are keyed on a BARE IDENT with no scope, so a
+            // DIFFERENT entity's discarded call satisfied the test. `tick` is called and discarded;
+            // the later `cb` closure is never invoked at all. Executed: 0 in-frame drops.
+            pub fn tick() -> u32 { 1 }
+            pub fn shadowed_name(n: u32) -> u32 { let cb: fn() -> u32 = tick; cb(); let cb = || T(0); n }
+            // …and the same use spelled inside MACRO TOKENS, which the escape walk cannot read.
+            pub fn macro_spelled() -> Box<dyn Fn() -> T> { let f = || T(0); Box::new(idm!(f)) }
         "#);
         for f in ["let_disc", "bare_call_stmt", "invoked_twice"] {
             assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
                     "`{f}` builds, runs and drops the value in THIS scope — it must be charged, and \
                      absence here is a purity claim over a real effect:\n{v:#}");
         }
-        for f in ["never_invoked", "result_returned", "inline_handed_away"] {
+        for f in ["never_invoked", "result_returned", "inline_handed_away",
+                  "nested_disc", "nested_let_disc", "shadowed_name", "macro_spelled"] {
             assert!(!fixture_effects(&v, f).contains(&"Fs".to_string()),
                     "`{f}` releases nothing in this scope (0 executed drops) — charging it \
                      FABRICATES:\n{v:#}");
