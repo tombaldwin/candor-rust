@@ -935,6 +935,49 @@ pub(crate) fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashM
 /// in it at all — a DENYLIST narrowing, not an allowlist: the exemption behaves exactly as before unless
 /// this returns POSITIVE evidence of non-registry sourcing, so an unreadable/absent lockfile costs
 /// nothing (never a new false positive) and only a confirmed impostor loses the exemption.
+/// REGISTRY package name -> resolved version, from `Cargo.lock`. SOUNDNESS R311: the sibling above
+/// walks these very `[[package]]` blocks and reads only the name, discarding the `version` line one
+/// row down — and that discarded field is the whole difference between "this crate was reviewed" and
+/// "a crate with the reviewed NAME is present". `CALIBRATED_CRATES` grants a purity exemption keyed on
+/// the name alone, so a major upstream release silently extends a reviewed-purity claim onto types
+/// nobody has read (measured: sea-orm 1.1.20 -> 2.0.2 added `DatabaseExecutor`, `RestrictedConnection`
+/// and `RbacContext`, none of which any rule can name).
+///
+/// REGISTRY ONLY, deliberately. A path/git dependency is already an impostor for exemption purposes
+/// (`non_registry_lock_names`), and its `version` is whatever its own manifest says — not evidence
+/// about which published source is present. Names are normalised `-` -> `_` exactly as above, because
+/// that is the form `CALIBRATED_CRATES` is keyed in.
+pub(crate) fn registry_lock_versions(dir: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(lock) = std::fs::read_to_string(format!("{dir}/Cargo.lock")) else { return out };
+    let (mut name, mut version, mut registry) = (String::new(), String::new(), false);
+    let flush = |name: &mut String,
+                 version: &mut String,
+                 registry: &mut bool,
+                 out: &mut std::collections::HashMap<String, String>| {
+        if !name.is_empty() && !version.is_empty() && *registry {
+            out.insert(std::mem::take(name).replace('-', "_"), std::mem::take(version));
+        }
+        name.clear();
+        version.clear();
+        *registry = false;
+    };
+    for line in lock.lines() {
+        let l = line.trim();
+        if l == "[[package]]" {
+            flush(&mut name, &mut version, &mut registry, &mut out);
+        } else if let Some(v) = l.strip_prefix("name = ") {
+            name = v.trim_matches('"').to_string();
+        } else if let Some(v) = l.strip_prefix("version = ") {
+            version = v.trim_matches('"').to_string();
+        } else if l.starts_with("source = ") && l.contains("registry+") {
+            registry = true;
+        }
+    }
+    flush(&mut name, &mut version, &mut registry, &mut out);
+    out
+}
+
 pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let Ok(lock) = std::fs::read_to_string(format!("{dir}/Cargo.lock")) else { return out };

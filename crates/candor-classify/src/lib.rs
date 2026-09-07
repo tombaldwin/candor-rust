@@ -118,6 +118,66 @@ pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 /// RAND tables all fire for these three), and stays the honest `.calibrated.json` sidecar contract.
 pub const CALIBRATED_BUT_PARTIAL_CRATES: [&str; 3] = ["libc", "nix", "rustix"];
 
+/// SOUNDNESS R311 — the version each calibrated crate's rules were actually WRITTEN AGAINST.
+///
+/// `CALIBRATED_CRATES` converts "no rule matched" into "reviewed, and pure", with no disclosure. That
+/// claim is evidence about SOURCE SOMEONE READ, and it was being granted on the crate NAME alone — so
+/// an upstream release extended it, silently, to code that did not exist when the review happened.
+/// Measured 2026-09-07: the sea_orm rule block says in terms that it was "verified against sea-orm
+/// 1.1.20 source"; the calibrated fixture resolved 2.0.2, whose `DatabaseExecutor`,
+/// `RestrictedConnection`, `RestrictedTransaction`, `RbacContext` and `RusqliteSharedConnection` carry
+/// 43 public entry points that no rule can name and every one of which read PURE.
+///
+/// A crate resolving ABOVE its ceiling is downgraded to `CALIBRATED_BUT_PARTIAL_CRATES` behaviour:
+/// matched calls keep their rules (they are still right), unmatched calls rejoin the ledger and
+/// disclose `invisible` instead of reading as reviewed-pure. Fail-closed AT THE POINT THE CLAIM IS
+/// MADE — the coverage gate can only ever notify us afterwards.
+///
+/// EXACT, not major-only, and the direction is deliberate: an exact ceiling fails NOISY (a minor bump
+/// discloses until someone re-reviews and moves the line) while major-only fails SILENT — and the
+/// minor direction is not hypothetical, since redis 1.6.0 -> 1.7.0 and mongodb 3.8.1 -> 3.9.0 both
+/// produced real uncovered entry points in the same measurement. Per the family's denylist rule, start
+/// strict and relax against measured disclosure volume, never the reverse.
+///
+/// A crate ABSENT from this table keeps its unconditional exemption: the ceiling is a denylist of
+/// versions known to be beyond the review, not an allowlist of versions blessed by it. Adding a crate
+/// here is what makes its claim honest, so the table is expected to grow toward `CALIBRATED_CRATES`.
+pub const CALIBRATED_CEILINGS: [(&str, &str); 3] = [
+    ("sea_orm", "1.1.20"),
+    ("redis", "1.6.0"),
+    ("mongodb", "3.8.1"),
+];
+
+/// `true` when `resolved` is a version this crate's rules were NOT written against — i.e. strictly
+/// newer than its ceiling. Unknown crate, unparseable version, or an exact match: `false`, keep the
+/// exemption. Comparison is numeric per dotted component so `1.10.0 > 1.9.0`; a pre-release or build
+/// suffix on the resolved version is treated as ABOVE the release it decorates, which is the
+/// charging direction.
+pub fn calibration_exceeded(crate_name: &str, resolved: &str) -> bool {
+    let Some((_, ceiling)) = CALIBRATED_CEILINGS.iter().find(|(c, _)| *c == crate_name) else {
+        return false;
+    };
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['+', '-']).next().unwrap_or("")
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (r, c) = (parts(resolved), parts(ceiling));
+    if r.is_empty() {
+        return false;
+    }
+    for i in 0..r.len().max(c.len()) {
+        let (a, b) = (r.get(i).copied().unwrap_or(0), c.get(i).copied().unwrap_or(0));
+        if a != b {
+            return a > b;
+        }
+    }
+    // Equal numerically: a pre-release/build suffix means it is not the reviewed artifact.
+    resolved != *ceiling
+}
+
+
 /// Crates REVIEWED AND FOUND TO PERFORM NO EFFECT OF THEIR OWN — the κ ledger treats them as covered, so
 /// their calls stop being disclosed blind spots.
 ///

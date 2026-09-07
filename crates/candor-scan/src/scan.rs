@@ -3166,6 +3166,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // replacement) it does not.
     let non_registry_names: std::collections::HashSet<String> =
         non_registry_lock_names(dir).into_iter().chain(non_registry_manifest_names(dir)).collect();
+    // SOUNDNESS R311 — which VERSION of each registry dependency is actually present. The calibration
+    // exemption below converts "no rule matched" into "reviewed, and pure"; that is evidence about
+    // source someone READ, so it must not be granted to a release published after the reading. No
+    // Cargo.lock (a library tree) leaves this empty, and an absent version keeps today's exemption —
+    // stated rather than hidden, because the alternative is disclosing on every lockless scan.
+    let lock_versions = deps::registry_lock_versions(dir);
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
@@ -3190,8 +3196,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // (an ambiguous fd could be Fs/Net/Ipc — see candor-classify's table), so "no rule matched"
             // there is an honest gap, not a reviewed verdict — it must still reach the ledger and
             // disclose `invisible`, exactly like a call into an uncalibrated dependency.
+            // R311 — a resolved version ABOVE the reviewed ceiling is downgraded to the same
+            // treatment as `CALIBRATED_BUT_PARTIAL_CRATES`: matched calls keep their rules, unmatched
+            // calls rejoin the ledger and disclose rather than reading as reviewed-pure.
+            let beyond_review = lock_versions
+                .get(real)
+                .is_some_and(|v| candor_classify::calibration_exceeded(real, v));
+            if beyond_review && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                // INSTRUMENTED: an unchanged corpus row is not evidence the branch ran.
+                eprintln!(
+                    "R311CEILING {} resolved {} exceeds its reviewed ceiling",
+                    real,
+                    lock_versions.get(real).map(String::as_str).unwrap_or("?")
+                );
+            }
             let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str())
+                && !beyond_review
                 && !impostor;
             !covered
                 && !fully_calibrated
