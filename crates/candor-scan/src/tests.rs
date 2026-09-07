@@ -6642,6 +6642,46 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// A/B against flate2 1.1.9 itself: all thirteen of its constructor rows (`ZlibEncoder::new`,
     /// `gz_encoder`, `DeflateDecoder::new`, …) are refused, and its sixteen genuinely-releasing
     /// `finish`/`into_inner` rows are gained.
+    /// ⟨drop-glue CLOSURE — LOCALLY CONSUMED⟩ SOUNDNESS R209(b)/R198. A closure's body was pushed onto
+    /// `escapes` UNCONDITIONALLY, so `let f = || T(0); let _ = f();` — which builds the value here, runs
+    /// here and drops it here — read as escaping and the enclosing fn was ABSENT from `functions[]`
+    /// entirely. Measured on the shipped 0.35.0 and on HEAD alike: 1 executed drop, `pure` exit 0.
+    ///
+    /// The suppression is withdrawn ONLY when the name is used and EVERY use is the callee of a call
+    /// whose value is discarded. The four controls below are the reason it is that narrow, and each is
+    /// an executed 0-drop cell that an earlier, looser version of this fix FABRICATED a charge onto:
+    /// a closure that is never invoked never runs its body, and one whose result is returned hands the
+    /// value to the caller. An inline closure (`with_slot(|| …)`, the sharded-slab case the escape was
+    /// written for) is untouched and is asserted by `closure_returns` in the test above.
+    #[test]
+    fn drop_glue_charges_a_closure_invoked_and_discarded_in_this_scope() {
+        let v = scan_fixture("dropclosure", r#"
+            pub struct T(pub u32);
+            impl Drop for T { fn drop(&mut self) { let _ = std::fs::write("/tmp/t", "x"); } }
+            pub fn with_slot<R>(f: impl FnOnce() -> R) -> R { f() }
+
+            // CHARGED — built here, run here, dropped here.
+            pub fn let_disc() { let f = || T(0); let _ = f(); }
+            pub fn bare_call_stmt() { let f = || T(0); f(); }
+            pub fn invoked_twice() { let f = || T(0); f(); f(); }
+
+            // SUPPRESSED — each of these executes ZERO drops in this frame.
+            pub fn never_invoked() { let _f = || T(0); }
+            pub fn result_returned() -> T { let f = || T(0); f() }
+            pub fn inline_handed_away() -> Option<T> { with_slot(|| Some(T(0))) }
+        "#);
+        for f in ["let_disc", "bare_call_stmt", "invoked_twice"] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` builds, runs and drops the value in THIS scope — it must be charged, and \
+                     absence here is a purity claim over a real effect:\n{v:#}");
+        }
+        for f in ["never_invoked", "result_returned", "inline_handed_away"] {
+            assert!(!fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` releases nothing in this scope (0 executed drops) — charging it \
+                     FABRICATES:\n{v:#}");
+        }
+    }
+
     #[test]
     fn drop_glue_refuses_a_construction_that_escapes_the_scope() {
         let v = scan_fixture("dropescape", r#"

@@ -2573,6 +2573,32 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // this table (running its own copy of the fixpoint), never re-walks the tree.
     let mut sites = EscapeSites::new(uses, fields, returns, local_macros);
     sites.walk_block(block, true);
+    // SOUNDNESS R198/R209(b) — decide the LET-BOUND closures now that the whole body is walked.
+    //
+    // A closure's body is only built when the closure RUNS, and only dies here if the value it
+    // produces also dies here. So the suppression is withdrawn in exactly one provable case: the name
+    // is used, and EVERY use of it is the callee of a call whose value is discarded (`f();`,
+    // `let _ = f();`). Then the body ran in this frame and nothing carried its result out.
+    //
+    // Everything else keeps the old unconditional escape, and each exclusion is a measured cell:
+    //   · never invoked (`let f = || H::new(); ` and no call) — the body NEVER RUNS, so charging it
+    //     fabricates. Executed ground truth: 0 drops.
+    //   · the result leaves (`return f()`) — it is the caller's to drop. Executed: 0 drops here.
+    //   · any other use of the name (stored, passed on, invoked with its value bound and kept) — not
+    //     provably local, so it stays suppressed. This is a DENYLIST of the exemption: an unrecognised
+    //     spelling keeps today's behaviour and stays silent rather than fabricating.
+    for (name, body) in std::mem::take(&mut sites.pending_closure_escapes) {
+        let uses_n = sites.path_uses.get(&name).copied().unwrap_or(0);
+        let disc_n = sites.discarded_calls.get(&name).copied().unwrap_or(0);
+        if !(uses_n > 0 && uses_n == disc_n) {
+            sites.escapes.push(body);
+        } else if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            // INSTRUMENTED, because an unchanged corpus row is not evidence the new code ran — the
+            // same switch decls.rs's alias counter and scan.rs's R105 counter use. This fires exactly
+            // when the suppression is WITHDRAWN, i.e. on the charging path this change adds.
+            eprintln!("R209BCLOSURE {} ({} use(s), all discarded calls)", name, uses_n);
+        }
+    }
     // A body with NO terminal exit (a `()`-returning fn with no trailing value — `store` below) still
     // has to run the fixpoint: the field/index/deref `assigns` route is UNCONDITIONAL (not gated on any
     // root, by design — see `escape_from_root`), so `*slot = Some(G::new());` must still be seen. A
@@ -3214,6 +3240,23 @@ struct EscapeSites<'a> {
     /// measured as three fabrications on the first corpus A/B (openssl `MemBio::from_ptr`,
     /// tokio-postgres `Socket::new_tcp`/`SqlState::from_code`), all of them ABSENT on published 0.34.0.
     skip_sites: std::collections::HashSet<usize>,
+    /// SOUNDNESS R198/R209(b) — addresses of closure expressions that are the initialiser of a
+    /// `let NAME = |…| …`. The `Expr::Closure` arm below pushes a closure's body onto `escapes`
+    /// unconditionally, which is right for an INLINE closure (an argument, a tail) whose value this
+    /// scope hands away and cannot follow — but wrong for one bound to a name here, where whether the
+    /// body's constructions outlive the frame is decided by what happens to that NAME. Recorded before
+    /// the initialiser is walked so the arm can tell the two apart, and only for a SINGLE-IDENT binder:
+    /// a destructuring binder never enters `lets`, so the fixpoint below could never reach it and the
+    /// unconditional push stays its only correct treatment.
+    let_bound_closures: HashMap<usize, String>,
+    /// `(name, closure body)` for each `let NAME = |…| …` whose body was NOT pushed onto `escapes`
+    /// during the walk. The decision needs counts that only exist once the whole body has been walked,
+    /// so it is deferred to `escape_sites` and applied there.
+    pending_closure_escapes: Vec<(String, &'a syn::Expr)>,
+    /// Every single-ident `Expr::Path` occurrence, counted.
+    path_uses: HashMap<String, usize>,
+    /// Occurrences that are the callee of a call whose VALUE IS DISCARDED (`f();`, `let _ = f();`).
+    discarded_calls: HashMap<String, usize>,
     /// SOUNDNESS R173 — a pre-order counter over the body, standing in for evaluation order. Only the
     /// ORDER of these numbers is ever read, never their values.
     seq: usize,
@@ -3298,6 +3341,10 @@ impl<'a> EscapeSites<'a> {
             opaque_interior_leaves: std::collections::HashSet::new(),
             ctor_sites: HashMap::new(),
             skip_sites: std::collections::HashSet::new(),
+            let_bound_closures: HashMap::new(),
+            pending_closure_escapes: Vec::new(),
+            path_uses: HashMap::new(),
+            discarded_calls: HashMap::new(),
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -3895,6 +3942,27 @@ impl<'a> EscapeSites<'a> {
             match st {
                 syn::Stmt::Local(l) => {
                     if let Some(init) = &l.init {
+                        // R198/R209(b) — see `let_bound_closures`. Must be recorded BEFORE the walk,
+                        // because the walk is what reaches the `Expr::Closure` arm that reads it.
+                        if matches!(&*init.expr, syn::Expr::Closure(_)) {
+                            if let Some(n) = single_pat_ident(&l.pat) {
+                                self.let_bound_closures
+                                    .insert(&*init.expr as *const syn::Expr as usize, n);
+                            }
+                        }
+                        // `let _ = f();` discards the value exactly as `f();` does.
+                        if matches!(l.pat, syn::Pat::Wild(_)) {
+                            if let syn::Expr::Call(c) = &*init.expr {
+                                if let syn::Expr::Path(p) = &*c.func {
+                                    if let Some(id) = p.path.get_ident() {
+                                        *self
+                                            .discarded_calls
+                                            .entry(id.to_string())
+                                            .or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                        }
                         self.walk_expr(&init.expr);
                         if let Some((_, d)) = &init.diverge {
                             self.walk_expr(d);
@@ -3912,6 +3980,16 @@ impl<'a> EscapeSites<'a> {
                 syn::Stmt::Expr(e, semi) => {
                     if tail && last && semi.is_none() {
                         self.roots.push(Some(e));
+                    }
+                    // `f();` — the value is discarded, so anything the callee built dies here.
+                    if semi.is_some() {
+                        if let syn::Expr::Call(c) = e {
+                            if let syn::Expr::Path(p) = &*c.func {
+                                if let Some(id) = p.path.get_ident() {
+                                    *self.discarded_calls.entry(id.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
                     }
                     self.walk_expr(e);
                 }
@@ -3956,6 +4034,15 @@ impl<'a> EscapeSites<'a> {
         }
     }
     fn walk_expr(&mut self, e: &'a syn::Expr) {
+        // R198/R209(b) — every single-ident path occurrence, counted, so the deferred decision below
+        // can ask whether a let-bound closure's name is used for anything BUT a value-discarded call.
+        if let syn::Expr::Path(p) = e {
+            if p.qself.is_none() {
+                if let Some(id) = p.path.get_ident() {
+                    *self.path_uses.entry(id.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
         self.seq += 1; // R173 — pre-order position, read only for its ORDER
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
@@ -4051,7 +4138,25 @@ impl<'a> EscapeSites<'a> {
             // to agree about them. An unconditional ESCAPE ROUTE (see `escapes`'s doc comment), not an
             // exit of THIS function — the closure's return flows out through its own eventual
             // invocation, so it must not be intersected against this function's unrelated exits.
-            syn::Expr::Closure(c) => self.escapes.push(&c.body),
+            syn::Expr::Closure(c) => {
+                // A closure bound to a name is NOT an unconditional escape: `let f = || H::new("a");
+                // let _ = f();` invokes it here and the value dies here, so charging is correct and the
+                // old unconditional push certified the body pure. Whether it really escapes is decided
+                // by the NAME, and `escape_from_root`'s `lets` fixpoint already answers that — it calls
+                // `mark_escape` on this very closure expression when the name escapes, and
+                // `for_each_value_child` now descends a closure's body so that reaches the
+                // construction. An INLINE closure keeps the unconditional push: its value is handed to
+                // something this scope cannot follow (sharded-slab's `shard.with_slot(key, |slot| …
+                // Some(Entry { .. }))`, the case this arm was written for), so it must stay suppressed.
+                match self
+                    .let_bound_closures
+                    .get(&(e as *const syn::Expr as usize))
+                    .cloned()
+                {
+                    Some(name) => self.pending_closure_escapes.push((name, &c.body)),
+                    None => self.escapes.push(&c.body),
+                }
+            }
             _ => {}
         }
         // SOUNDNESS R187 — A `?` INSIDE A LOOP IS LIVE FOR EVERYTHING THAT LOOP BODY BUILDS. R173 gave
@@ -4305,6 +4410,13 @@ fn mark_escape(
 /// disagreement was silent); keeping only one route is the fix, not an incidental cleanup.
 fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) {
     match e {
+        // SOUNDNESS R198/R209(b) — a closure's body is a value position OF THE CLOSURE: when the
+        // closure value itself escapes this frame, everything its body constructs is built in some
+        // later frame and is not this scope's to drop. Reached only from `mark_escape`, which is this
+        // function's sole caller, and in practice only through `escape_from_root`'s `lets` fixpoint —
+        // i.e. exactly when the name holding the closure was found to escape. Without this the narrowed
+        // `Expr::Closure` arm in the collector would under-suppress a closure that IS handed away.
+        syn::Expr::Closure(c) => f(&c.body),
         syn::Expr::Paren(p) => f(&p.expr),
         syn::Expr::Group(g) => f(&g.expr),
         syn::Expr::Try(t) => f(&t.expr),
