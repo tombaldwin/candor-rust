@@ -77,7 +77,7 @@ KNOWN="${CANDOR_KNOWN_OPEN:-$ROOT/soundness/known_open.tsv}"
 LOG="$ROOT/soundness/.last-run.$BASE.log"
 : > "$LOG"
 
-pass=0; fail=0; err=0; failed_seeds=""; v_total=0; d_total=0; bp_total=0
+pass=0; fail=0; err=0; failed_seeds=""; v_total=0; d_total=0; bp_total=0; bpk_total=0
 for s in $SEEDS; do
   d="$WORK/s$s"
   python3 "$GEN" "$s" "$d" >/dev/null 2>&1 || { echo "  seed $s: GEN ERROR"; err=$((err+1)); continue; }
@@ -111,7 +111,10 @@ for s in $SEEDS; do
   { echo "=== seed $s ==="; echo "$result"; } >> "$LOG"
   v_total=$((v_total + $(printf '%s\n' "$result" | grep -cE '^  (VIOLATION|DRIFT) ')))
   d_total=$((d_total + $(printf '%s\n' "$result" | grep -c '^  KNOWN-OPEN ')))
+  # R273 — NEW both-pure (unprefixed) and KNOWN-OPEN both-pure are counted apart, because a new
+  # one is a finding and a known one is debt. Anchored so `KNOWN-OPEN BOTH-PURE` cannot match both.
   bp_total=$((bp_total + $(printf '%s\n' "$result" | grep -c '^  BOTH-PURE ')))
+  bpk_total=$((bpk_total + $(printf '%s\n' "$result" | grep -c '^  KNOWN-OPEN BOTH-PURE ')))
   if [ "${result%% *}" = "OK" ]; then
     pass=$((pass+1))
   else
@@ -126,18 +129,19 @@ done
 echo
 echo "$LABEL: $pass seeds clean, $fail seeds with property violations, $err harness/generator errors"
 echo "$LABEL: $v_total NEW property violation(s); $d_total hit(s) on the known-open register"
-echo "$LABEL: $bp_total pair(s) BOTH-PURE — neither spelling charged, though the run dropped. Not this"
-echo "$LABEL:   gate's differential; it is a separate silent under-report. See $LOG."
+echo "$LABEL: $bp_total NEW pair(s) BOTH-PURE, $bpk_total on the register — neither spelling charged,"
+echo "$LABEL:   though the run dropped. A SYMMETRIC silence, which a differential gate cannot see by"
+echo "$LABEL:   construction, so it is registered and gated in its own right (R273). See $LOG."
 [ -n "$failed_seeds" ] && echo "$LABEL: failing seeds:$failed_seeds"
 echo "$LABEL: per-seed detail kept at $LOG"
 
 if [ "$fail" -gt 0 ]; then
-  echo "RESULT: FINDING — $v_total NEW property violation(s) over $fail seed(s)"
+  echo "RESULT: FINDING — $v_total NEW property violation(s) and $bp_total NEW BOTH-PURE silence(s) over $fail seed(s)"
   exit 1
 fi
 if [ "$err" -gt 0 ]; then
   echo "RESULT: ERROR — $err seed(s) could not be measured"
   exit 2
 fi
-echo "RESULT: CLEAN — $pass seeds, 0 NEW property violations ($d_total known-open hits)"
+echo "RESULT: CLEAN — $pass seeds, 0 NEW property violations and 0 NEW BOTH-PURE ($d_total known-open hits)"
 exit 0

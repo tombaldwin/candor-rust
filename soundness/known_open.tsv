@@ -1,13 +1,17 @@
 # soundness/known_open.tsv — the KNOWN-OPEN register for the two property gates.
 #
 # Each line is a shape at which candor-scan reports two spellings of ONE program
-# differently, i.e. A SILENT UNDER-REPORT THAT IS STILL OPEN. The gates subtract these so a
+# differently, or (BOTH-PURE, SOUNDNESS R273) reports NEITHER spelling although the executed
+# run dropped — i.e. A SILENT UNDER-REPORT THAT IS STILL OPEN. The gates subtract these so a
 # NEW instance fails, and print them every run so they are not forgotten. This is a debt
 # register, not a list of acceptable behaviours.
 #
 # Columns: <generator kind>  <verdict>  <shape key>
 # MEASURED exhaustively (every point of both shape spaces) by soundness/baseline.sh
-# at candor-rust 2c7eeb6. Regenerate with: bash soundness/baseline.sh
+# at candor-rust 0dda3b5. Regenerate with: bash soundness/baseline.sh
+q	BOTH-PURE	ctor=mac_blocktok,ending=drop_h,loop=forloop,mode=looprot
+q	BOTH-PURE	ctor=mac_blocktok,ending=drop_h,loop=loopbrk,mode=looprot
+q	BOTH-PURE	ctor=mac_blocktok,ending=drop_h,loop=whileloop,mode=looprot
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=block
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=closure
 q	DRIFT	ctor=mac_blocktok,ending=drop_h,mode=hoist,operand=ifelse

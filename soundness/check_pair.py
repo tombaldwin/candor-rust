@@ -33,8 +33,18 @@ Verdicts:
               under-reporting. `Unknown` is excluded from this delta — a twin that hedges says
               nothing about the base, and reading it as drift would report every disclosure twice.
   BOTH-PURE   neither spelling is charged, although the ground-truth run performed at least one
-              in-frame drop. Also a silent under-report, but NOT the differential these gates are
-              calibrated on, so it is counted and printed separately and never counted as a pass.
+              in-frame drop. Also a silent under-report, and it is NOT the differential these gates
+              are calibrated on — a differential instrument is structurally blind to a SYMMETRIC
+              silence, and nothing else in this harness carries it.
+              SOUNDNESS R273 — IT IS REGISTERED AND GATED LIKE EVERY OTHER VERDICT. It used to be
+              counted, printed with the words "it is a separate silent under-report", and then
+              dropped: `head` ignored it, `baseline.sh` wrote nothing for it, and `both_pure` never
+              reached an exit code in any of the three scripts. A NEW symmetric silence therefore
+              printed IDENTICALLY to the six known ones and passed every gate — the detector
+              worked and the aggregator discarded the detection (attack H). Registering it and
+              failing on a new one are not alternatives: "new" is undefined without the register,
+              and a register nothing fails on changes nothing. Both, exactly as for
+              VIOLATION/DISCLOSED/DRIFT.
   NO-GROUND-TRUTH  a spelling performed no in-frame drop at all. A control asserting an absence
               over a program that never runs the construction is asserting something about nothing
               (§E3), so the pair is not judged.
@@ -107,7 +117,7 @@ def main():
     entries = load_report(rep)
     gt = load_gt(d)
 
-    new, old, both_pure, no_gt = [], [], [], []
+    new, old, both_pure, both_pure_known, no_gt = [], [], [], [], []
     seen = set()
     for pr in truth["pairs"]:
         b, t, shape = pr["base"], pr["twin"], pr["shape"]
@@ -118,7 +128,11 @@ def main():
             continue
         ib, it = entries.get(b, set()), entries.get(t, set())
         if not ib and not it:
-            both_pure.append("%s/%s drops=%s [%s]" % (b, t, g, sh))
+            # R273 — subject to the SAME known-open subtraction as every other verdict, and
+            # recorded in `seen` so a shape that stops being both-pure prints as STALE-BASELINE.
+            seen.add(("BOTH-PURE", sh))
+            line = "%s/%s drops=%s [%s]" % (b, t, g, sh)
+            (both_pure_known if ("BOTH-PURE", sh) in known else both_pure).append(line)
             continue
         lost = ib - it
         # SOUND-BUT-IMPRECISE vs SILENT. `Unknown` in the twin is SPEC §4's honest answer, so the
@@ -141,15 +155,21 @@ def main():
     stale = sorted(k for k in known if k not in seen) if (known_path and "--stale" in sys.argv) else []
 
     n = len(truth["pairs"])
-    head = "OK" if not new else "FAIL"
-    print("%s pairs=%d new=%d known-open=%d both-pure=%d no-ground-truth=%d stale-baseline=%d"
-          % (head, n, len(new), len(old), len(both_pure), len(no_gt), len(stale)))
+    # R273 — a NEW both-pure is a finding, so it reaches `head` and therefore the caller's exit
+    # code. The known ones stay visible and stay out of the verdict, like every other known-open.
+    head = "OK" if not new and not both_pure else "FAIL"
+    print("%s pairs=%d new=%d known-open=%d both-pure=%d both-pure-known=%d "
+          "no-ground-truth=%d stale-baseline=%d"
+          % (head, n, len(new) + len(both_pure), len(old) + len(both_pure_known),
+             len(both_pure), len(both_pure_known), len(no_gt), len(stale)))
     for v in new:
         print("  " + v)
     for v in old:
         print("  KNOWN-OPEN " + v)
     for v in both_pure:
         print("  BOTH-PURE " + v)
+    for v in both_pure_known:
+        print("  KNOWN-OPEN BOTH-PURE " + v)
     for v in no_gt:
         print("  NO-GROUND-TRUTH " + v)
     for k, sh in stale:
