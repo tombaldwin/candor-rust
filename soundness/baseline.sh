@@ -3,14 +3,18 @@
 # gates (run_q.sh, run_macro.sh) subtract before failing.
 #
 # It builds the EXHAUSTIVE crate for each generator — every point of the shape space, not a sample —
-# compiles it, runs its ground truth, scans it, and writes every VIOLATION/DISCLOSED/DRIFT shape
-# it finds.
+# compiles it, runs its ground truth, scans it, and writes every VIOLATION/DISCLOSED/DRIFT/BOTH-PURE
+# shape it finds.
 # Exhaustive on purpose: a baseline built from random seeds would mark a shape "new" the first time
 # a later seed happened to reach it, and the gate would go red on nothing.
 #
-# EVERY LINE IT WRITES IS A SPELLING PAIR THAT STILL ANSWERS DIFFERENTLY. `VIOLATION` is the silent
-# under-report — the cardinal sin. `DISCLOSED` is the same equivalence failure with an `Unknown` in
-# the macro spelling: SOUND under SPEC §4, still debt, never a pass. This file is a debt register.
+# EVERY LINE IT WRITES IS A SPELLING PAIR THAT STILL ANSWERS DIFFERENTLY, OR ONE WHERE BOTH
+# SPELLINGS GO SILENT OVER AN EXECUTED DROP. `VIOLATION` is the silent under-report — the cardinal
+# sin. `DISCLOSED` is the same equivalence failure with an `Unknown` in the macro spelling: SOUND
+# under SPEC §4, still debt, never a pass. `BOTH-PURE` (SOUNDNESS R273) is the SYMMETRIC silence a
+# differential gate is structurally blind to: neither spelling charged, though the ground-truth run
+# dropped. It was detected, printed and then discarded by all three scripts, so a NEW one read
+# exactly like the known ones and passed every gate. This file is a debt register.
 # Re-running it after a fix is how the debt is shown to have shrunk; re-running it to make a red
 # gate green is how a cardinal sin gets accepted as a low residual, which this family does not do.
 #
@@ -53,7 +57,8 @@ TMP="$WORK/known.tsv"
   echo "# soundness/known_open.tsv — the KNOWN-OPEN register for the two property gates."
   echo "#"
   echo "# Each line is a shape at which candor-scan reports two spellings of ONE program"
-  echo "# differently, i.e. A SILENT UNDER-REPORT THAT IS STILL OPEN. The gates subtract these so a"
+  echo "# differently, or (BOTH-PURE, SOUNDNESS R273) reports NEITHER spelling although the executed"
+  echo "# run dropped — i.e. A SILENT UNDER-REPORT THAT IS STILL OPEN. The gates subtract these so a"
   echo "# NEW instance fails, and print them every run so they are not forgotten. This is a debt"
   echo "# register, not a list of acceptable behaviours."
   echo "#"
@@ -75,10 +80,10 @@ for pair in "q:gen_q.py" "macro:gen_macro.py"; do
   "$SCAN" "$d" --json > "$d/report.json" 2>/dev/null
   [ "$?" -eq 2 ] && { echo "baseline: $kind scan INCOMPLETE (exit 2)"; rc=2; continue; }
   python3 "$ROOT/soundness/check_pair.py" "$d" "$d/report.json" > "$d/chk.txt"
-  n=$(grep -cE '^  (VIOLATION|DISCLOSED|DRIFT) ' "$d/chk.txt")
+  n=$(grep -cE '^  (VIOLATION|DISCLOSED|DRIFT|BOTH-PURE) ' "$d/chk.txt")
   echo "baseline: $kind — $(head -1 "$d/chk.txt")"
-  grep -E '^  (VIOLATION|DISCLOSED|DRIFT) ' "$d/chk.txt" \
-    | sed -E "s/^  (VIOLATION|DISCLOSED|DRIFT) .*\[(.*)\]\$/$kind"$'\t'"\\1"$'\t'"\\2/" \
+  grep -E '^  (VIOLATION|DISCLOSED|DRIFT|BOTH-PURE) ' "$d/chk.txt" \
+    | sed -E "s/^  (VIOLATION|DISCLOSED|DRIFT|BOTH-PURE) .*\[(.*)\]\$/$kind"$'\t'"\\1"$'\t'"\\2/" \
     | sort -u >> "$TMP"
   echo "baseline: $kind — $n shape instances, $(grep -c "^$kind"$'\t' "$TMP") distinct keys so far"
 done
