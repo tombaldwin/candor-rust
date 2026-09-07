@@ -4376,7 +4376,16 @@ pub(crate) fn reexport_aliases(
                 }
                 // R190(e), third spelling: R169's guard refuses this key because a macro-hidden module
                 // could also own it. Refusing is right; going silent about it is not.
-                refused.insert(key, "ambiguous:re-export key a macro-hidden module could also own");
+                //
+                // KIND: `macro:` — SOUNDNESS R270, the sibling of `scan.rs`'s macro-opacity hedge and the
+                // second site R257's boundary walked past. The key is not claimed by two definitions this
+                // engine can read; it is claimed by one, and a module whose items are INSIDE AN UNEXPANDED
+                // MACRO might also claim it. Zero readable defs on the contesting side, so §4's
+                // `ambiguous:` (two same-named definitions competing for one bare name) does not describe
+                // it and §6.2's `dispatch` class is the wrong home. Measured over 1,509 crates: 2 rows in
+                // 1 crate; `deny Unknown[dispatch]` loses nothing, `deny Unknown[unresolved]` GAINS
+                // tempfile-3.10.0, which passes it today while holding the hole.
+                refused.insert(key, "macro:re-export key a macro-hidden module could also own");
                 continue;
             }
             if from_edges.len() > 1 && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
