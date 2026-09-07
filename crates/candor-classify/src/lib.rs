@@ -142,7 +142,21 @@ pub const CALIBRATED_BUT_PARTIAL_CRATES: [&str; 3] = ["libc", "nix", "rustix"];
 /// A crate ABSENT from this table keeps its unconditional exemption: the ceiling is a denylist of
 /// versions known to be beyond the review, not an allowlist of versions blessed by it. Adding a crate
 /// here is what makes its claim honest, so the table is expected to grow toward `CALIBRATED_CRATES`.
-pub const CALIBRATED_CEILINGS: [(&str, &str); 62] = [
+// SOUNDNESS R328 — this table is MERGED, never rewritten. `bbd7615` replaced it wholesale with a
+// freshly-computed dict and silently dropped NINE entries (dialoguer, dotenv, dotenvy, grep_cli, isahc,
+// lettre, portable_pty, tempfile, postgres) while its own commit message claimed "four crates are
+// deliberately absent, each with a stated reason in the code". Eight had no stated reason and every one
+// of them cites a version in its own rules — they are exactly the crates the ceiling exists to protect,
+// and the protection would have been gone the moment any of them published. Effect classes at stake:
+// Net (isahc), SMTP (lettre), Exec (portable_pty), Fs (tempfile), Env (dotenv/dotenvy), Ipc (dialoguer).
+//
+// DELIBERATELY ABSENT, and this is the complete list:
+//   postgres  — R313. Its recorded 0.7.10 was TOKIO-postgres's version, lifted by a regex from a comment
+//               about a different crate; postgres ships 0.19.x. No verified baseline exists and inventing
+//               one is the claim-without-review this table exists to stop.
+//   async_fs, getrandom — their rules match on CRATE NAME alone, so no path can go stale.
+//   rand_core — R320/R333 unresolved.
+pub const CALIBRATED_CEILINGS: [(&str, &str); 70] = [
     ("arboard", "3.6.1"),
     ("argon2", "0.6.0"),
     ("async_nats", "0.35.1"),
@@ -158,7 +172,10 @@ pub const CALIBRATED_CEILINGS: [(&str, &str); 62] = [
     ("ctrlc", "3.5.2"),
     ("curl", "0.4.50"),
     ("deadpool_postgres", "0.14.2"),
+    ("dialoguer", "0.12.0"),
     ("diesel", "2.3.13"),
+    ("dotenv", "0.15.0"),
+    ("dotenvy", "0.15.7"),
     ("duct", "1.1.2"),
     ("elasticsearch", "8.19.0-alpha.1"),
     ("env_logger", "0.11.11"),
@@ -167,33 +184,38 @@ pub const CALIBRATED_CEILINGS: [(&str, &str); 62] = [
     ("fastrand", "2.5.0"),
     ("filetime", "0.2.29"),
     ("fs_err", "3.3.1"),
-    ("git2", "0.21.0"),
+    ("git2", "0.20.4"),
     ("glob", "0.3.4"),
+    ("grep_cli", "0.1.12"),
     ("ignore", "0.4.33"),
+    ("isahc", "2.0.1"),
     ("jiff", "0.2.35"),
     ("lapin", "4.10.0"),
+    ("lettre", "0.11.23"),
     ("log", "0.4.34"),
     ("lscolors", "0.21.0"),
     ("memmap2", "0.9.11"),
     ("mongodb", "3.8.1"),
     ("mysql", "28.0.0"),
-    ("mysql_async", "0.37.1"),
+    ("mysql_async", "0.37.0"),
     ("native_tls_crate", "0.2.18"),
     ("notify", "8.2.0"),
     ("password_hash", "0.6.1"),
     ("pbkdf2", "0.13.0"),
     ("pnet", "0.35.0"),
+    ("portable_pty", "0.9.0"),
     ("rand", "0.10.2"),
     ("ratatui", "0.29.0"),
     ("rdkafka", "0.39.0"),
     ("redis", "1.6.0"),
     ("reqwest", "0.13.4"),
-    ("rusqlite", "0.40.2"),
+    ("rusqlite", "0.39"),
     ("rustls", "0.23.43"),
     ("scrypt", "0.12.0"),
     ("sea_orm", "1.1.20"),
     ("sqlx", "0.9.0"),
-    ("sqlx_core", "0.8.6"),
+    ("sqlx_core", "0.9.0"),
+    ("tempfile", "3.27.0"),
     ("terminal_colorsaurus", "1.0.3"),
     ("time", "0.3.55"),
     ("tokio_native_tls", "0.3.1"),
@@ -212,6 +234,26 @@ pub const CALIBRATED_CEILINGS: [(&str, &str); 62] = [
 /// exemption. Comparison is numeric per dotted component so `1.10.0 > 1.9.0`; a pre-release or build
 /// suffix on the resolved version is treated as ABOVE the release it decorates, which is the
 /// charging direction.
+/// Version-only comparison: is `a` strictly newer than `b`? Shared with `candor-scan`'s lockfile
+/// parser so "which of two versions of one crate do we keep" is answered by the SAME comparator that
+/// decides whether a version is beyond review — one authority, not two spellings that drift.
+pub fn calibration_exceeded_raw(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['+', '-']).next().unwrap_or("")
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (x, y) = (parts(a), parts(b));
+    for i in 0..x.len().max(y.len()) {
+        let (p, q) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        if p != q {
+            return p > q;
+        }
+    }
+    a != b
+}
+
 pub fn calibration_exceeded(crate_name: &str, resolved: &str) -> bool {
     let Some((_, ceiling)) = CALIBRATED_CEILINGS.iter().find(|(c, _)| *c == crate_name) else {
         return false;
@@ -3546,6 +3588,102 @@ mod tests {
                          one of the two is wrong, and the list is the claim");
             }
         }
+    }
+
+    /// ⟨CALIBRATION CEILING — the table must agree with the REVIEW RECORD⟩ SOUNDNESS R328.
+    ///
+    /// `CALIBRATED_CEILINGS` is the version each crate's rules were actually written against. Nothing
+    /// derived it from, or checked it against, the review record — and three separate failures followed
+    /// in one day: a wholesale table rewrite silently DROPPED nine entries while the commit message
+    /// claimed four were absent "each with a stated reason"; `git2` was ceilinged ABOVE the only version
+    /// its rules record reading (the SILENT direction, and 0.21 added `author_from_env` /
+    /// `committer_from_env` / `Oid::hash_file_ext`, none of them ruled); and `sqlx_core` sat BELOW the
+    /// version its own comment says was verified, which is also an impossible sibling of `sqlx 0.9.0`'s
+    /// `=0.9.0` pin. All three were invisible to 410 tests and 29 gates.
+    ///
+    /// This asserts the one invariant that catches all of them: **a crate whose rules cite a reviewed
+    /// version must carry a ceiling, and it must be THAT version.** Citations are read with wrapped
+    /// comment lines joined and both name spellings tried — R315, where a line-by-line dashed-only
+    /// sweep silently under-counted the citations by three.
+    #[test]
+    fn calibration_ceilings_match_the_recorded_review() {
+        let src = include_str!("lib.rs");
+        // join wrapped comment continuations, then collapse whitespace: a citation is prose and prose wraps.
+        let flat = src
+            .replace("\n    //", " ")
+            .replace("\n        //", " ")
+            .replace("\n            //", " ");
+        let flat: String = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ceilings: std::collections::HashMap<&str, &str> =
+            CALIBRATED_CEILINGS.iter().copied().collect();
+        // Absences are deliberate and enumerated in the table's own comment; keep the list HERE too so
+        // dropping one silently is impossible — that is exactly what happened.
+        let deliberate = ["postgres", "async_fs", "getrandom", "rand_core"];
+        let mut problems: Vec<String> = Vec::new();
+        for c in CALIBRATED_CRATES {
+            if deliberate.contains(&c) {
+                continue;
+            }
+            // EVERY citation, both verbs, both name spellings, and slash-separated lists —
+            // "verified against sqlx-core 0.8.6/0.9.0" records TWO reviewed versions, and a crate may
+            // be cited in more than one comment ("validated against rusqlite 0.39" elsewhere). An
+            // extractor that stops at the first hit under-collects, and under-collecting here makes a
+            // correct ceiling look like it is above the record — R315's lesson, one level up.
+            let mut cited: Vec<String> = Vec::new();
+            for form in [c.to_string(), c.replace('_', "-")] {
+                for verb in ["verified against ", "validated against "] {
+                    let pat = format!("{verb}{form} ");
+                    let mut from = 0usize;
+                    while let Some(i) = flat[from..].find(&pat) {
+                        let at = from + i + pat.len();
+                        let tail: String = flat[at..]
+                            .chars()
+                            .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '/')
+                            .collect();
+                        for v in tail.split('/') {
+                            let v = v.trim_end_matches('.').to_string();
+                            if v.split('.').count() >= 2 && !cited.contains(&v) {
+                                cited.push(v);
+                            }
+                        }
+                        from = at;
+                    }
+                }
+            }
+            if cited.is_empty() {
+                continue;
+            }
+            match ceilings.get(c) {
+                None => problems.push(format!(
+                    "{c}: rules cite {} but there is NO ceiling — the exemption is unconditional",
+                    cited.join("/")
+                )),
+                // A comment may legitimately record MORE THAN ONE reviewed version
+                // ("verified against sqlx-core 0.8.6/0.9.0"), so matching any of them is fine, and a
+                // ceiling BELOW the newest review is merely noisy. The failure that matters is a
+                // ceiling ABOVE EVERY recorded review: that grants reviewed-purity over source nobody
+                // read, which is the SILENT direction and the whole reason this table exists.
+                Some(have) => {
+                    let ok = cited.iter().any(|v| have.starts_with(v) || v.starts_with(*have))
+                        || cited.iter().any(|v| calibration_exceeded_raw(v, have));
+                    if !ok {
+                        problems.push(format!(
+                            "{c}: ceiling {have} is ABOVE every recorded review ({}) — it grants \
+                             reviewed-purity over source no comment records anyone reading",
+                            cited.join("/")
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "CALIBRATED_CEILINGS disagrees with the review record:\n  {}\n\n\
+             A ceiling ABOVE the recorded review grants reviewed-purity over source nobody read (SILENT); \
+             a ceiling BELOW it is noisy but safe. Either way the table and the record must agree, or \
+             neither is evidence.",
+            problems.join("\n  ")
+        );
     }
 
     #[test]

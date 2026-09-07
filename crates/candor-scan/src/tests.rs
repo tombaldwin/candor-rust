@@ -4935,6 +4935,35 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             .collect()
     }
 
+    /// `scan_fixture` with a VERBATIM `Cargo.lock` body and a verbatim `[dependencies]` stanza — the
+    /// only way to exercise lockfile shapes cargo really writes but a helper would never generate: a
+    /// `package =` alias, a trailing `[[patch.unused]]` table, a workspace member with no lock of its
+    /// own. SOUNDNESS R322/R327/R329 were all invisible until these could be written.
+    #[cfg(test)]
+    fn scan_fixture_raw(name: &str, src: &str, deps: &str, lock: &str) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}\n"),
+        ).unwrap();
+        if !lock.is_empty() {
+            std::fs::write(d.join("Cargo.lock"), lock).unwrap();
+        }
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let idx = load_dep_reports(None);
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        v
+    }
+
     /// `scan_fixture` plus a REAL `Cargo.lock` naming one registry dependency at an exact version —
     /// the only input that distinguishes "a crate with the reviewed name is present" from "the reviewed
     /// source is present" (SOUNDNESS R311). The lock is the evidence the exemption is keyed on, so a
@@ -6762,6 +6791,57 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// stands; above it the crate is treated like `CALIBRATED_BUT_PARTIAL_CRATES` — matched calls keep
     /// their rules, unmatched calls disclose `invisible` instead of reading as reviewed-pure. This is
     /// fail-closed AT THE POINT THE CLAIM IS MADE; a coverage gate can only notify afterwards.
+    /// ⟨CALIBRATION CEILING — the shapes cargo really writes⟩ SOUNDNESS R322, R327, R329. Three
+    /// separate ways the ceiling silently did not apply, each found after the mechanism had already
+    /// been declared working, and each fixable only once a verbatim lockfile could be written.
+    #[test]
+    fn calibration_ceiling_survives_the_lockfile_shapes_cargo_emits() {
+        let call = "pub fn go(i: native_tls_crate::Identity) { let _ = native_tls_crate::TlsConnector::builder().identity(i).build(); }";
+
+        // R322 — a `package =` ALIAS puts the version under the RESOLVED name while the ceiling is
+        // keyed on the IDENTIFIER. Checking each key against itself finds a version with no ceiling
+        // and a ceiling with no version, and concludes "not beyond review".
+        let aliased = scan_fixture_raw(
+            "calalias", call,
+            "native_tls_crate = { package = \"native-tls\", version = \"0.2.18\" }",
+            "[[package]]\nname = \"calalias\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"native-tls\"\nversion = \"0.9.9\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        );
+        assert!(fixture_invisible(&aliased, "go").iter().any(|c| c.contains("native_tls")),
+                "an ALIASED calibrated crate far above its ceiling must disclose, not read \
+                 reviewed-pure — the version and the ceiling live in different key spaces and must be \
+                 crossed:\n{aliased:#}");
+
+        // R327 — cargo really writes a trailing `[[patch.unused]]` table carrying its own name/version.
+        // Flushing only on `[[package]]` let those lines overwrite the LAST package's pending state,
+        // dropping that crate and replacing it with a phantom.
+        let patched = scan_fixture_raw(
+            "calpatch", call,
+            "native_tls_crate = { package = \"native-tls\", version = \"0.2.18\" }",
+            "[[package]]\nname = \"calpatch\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"native-tls\"\nversion = \"0.9.9\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n\
+             [[patch.unused]]\nname = \"serde\"\nversion = \"1.0.0\"\n",
+        );
+        assert!(fixture_invisible(&patched, "go").iter().any(|c| c.contains("native_tls")),
+                "a trailing [[patch.unused]] table must not clobber the last package — it carries \
+                 name/version lines of its own and cargo emits it routinely:\n{patched:#}");
+
+        // …and the control: AT the ceiling the exemption must still stand, or the two assertions above
+        // would pass for a scanner that simply disclosed everything.
+        let at_ceiling = scan_fixture_raw(
+            "calatceil", call,
+            "native_tls_crate = { package = \"native-tls\", version = \"0.2.18\" }",
+            "[[package]]\nname = \"calatceil\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"native-tls\"\nversion = \"0.2.18\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        );
+        assert!(!fixture_present(&at_ceiling, "go"),
+                "AT the reviewed ceiling the exemption must STAND — without this control the two \
+                 assertions above pass for a scanner that discloses unconditionally:\n{at_ceiling:#}");
+    }
+
     #[test]
     fn calibration_exemption_stops_at_the_reviewed_version() {
         let body = "pub fn run(x: &sea_orm::DatabaseExecutor) -> u32 { let _ = x.transaction_async(); 0 }";
