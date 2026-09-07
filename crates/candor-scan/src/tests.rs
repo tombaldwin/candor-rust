@@ -4621,7 +4621,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     .filter_map(|w| w.as_str().map(String::from)).collect::<Vec<_>>())
                 .collect();
             if eff != vec!["Unknown".to_string()]
-                || whys != vec!["ambiguous:module items hidden by an unexpanded macro".to_string()]
+                || whys != vec!["macro:module items hidden by an unexpanded macro".to_string()]
             {
                 wrong.push(format!("{name}: go = {eff:?} / unknownWhy = {whys:?}"));
             }
@@ -4629,6 +4629,97 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(wrong.is_empty(),
                 "a caller handing work to a target hidden behind an unexpanded item macro must DISCLOSE \
                  Unknown WITH a §4 reason, never read pure (SOUNDNESS R128) — wrong: {wrong:#?}");
+    }
+
+    /// SOUNDNESS R270 — THE KIND IS DECIDED BY THE CONDITION, AND THE CLASS IS WHAT GATES.
+    /// R128's hedge above and R169's re-export twin are the ZERO-READABLE-DEFS case: a macro this
+    /// engine declined to expand, so there are not two definitions competing for a name, there are none
+    /// it can read. §4 ⟨0.25⟩: where an engine cannot resolve, "what it discloses there is a LIMIT OF
+    /// ITS OWN RESOLUTION rather than an ambiguity in the program". Both carried `ambiguous:`, which
+    /// §6.2 projects to `dispatch`, so `deny Unknown[unresolved]` did not see them.
+    ///
+    /// MEASURED over 1,509 registry crates, BOTH directions — measuring one is how R257 got the cost
+    /// backwards. `deny Unknown[dispatch]` loses these two spellings on exactly ONE crate
+    /// (tiff-0.11.3); `deny Unknown[unresolved]` GAINS 30 that pass today while holding the hole:
+    /// reqwest x3, nix x4, wasm-bindgen x4, openssl, flate2 x2, isahc x2, find-msvc-tools x3, diesel,
+    /// encoding_rs, parking_lot_core, windows-core, lapin, tempfile, dispatch2, moxcms,
+    /// portable-atomic-util, winx, tiff.
+    ///
+    /// THE OTHER SIX `ambiguous:` SPELLINGS STAY, and the enumeration is the point of the row — R257's
+    /// boundary was drawn around its own trigger. Each remaining one is genuinely two separately-written
+    /// definitions competing for one bare name: `same-name local defs` (16,755 rows / 584 crates),
+    /// `same-name fns with different return types` (3,560 / 136), `same-name macro_rules! definitions`
+    /// (1,533 / 75), `type alias and nominal type share a leaf` (345 / 19), `unit-returning twin of a
+    /// constructing fn` (238 / 7), `re-export key claimed by two modules` (92 / 2).
+    /// `same-name macro_rules! definitions` is the trap and is asserted below: a sweep keyed on the WORD
+    /// "macro" would have re-kinded it and cost 15 crates their `deny Unknown[dispatch]` gate, while it
+    /// is the textbook `ambiguous:` — TWO templates written for one name, both readable.
+    #[test]
+    fn r270_macro_opacity_classifies_as_unresolved_and_real_ambiguity_still_as_dispatch() {
+        use candor_classify::policy::ReasonClass;
+        for why in [
+            "macro:module items hidden by an unexpanded macro",
+            "macro:re-export key a macro-hidden module could also own",
+            "macro:unexpanded multi-arm macro_rules! `m`",
+            "macro:unreadable macro_rules! template `m`",
+        ] {
+            assert_eq!(
+                ReasonClass::classify(why), ReasonClass::Unresolved,
+                "R270: `{why}` is the engine's own resolution limit, so `deny Unknown[unresolved]` must \
+                 see it — it reached `dispatch` while 30 real crates passed that gate holding the hole"
+            );
+        }
+        for why in [
+            "ambiguous:same-name local defs",
+            "ambiguous:same-name fns with different return types",
+            "ambiguous:same-name macro_rules! definitions",
+            "ambiguous:type alias and nominal type share a leaf",
+            "ambiguous:unit-returning twin of a constructing fn",
+            "ambiguous:re-export key claimed by two modules",
+            "ambiguous:re-export fan-out above the cap",
+            "ambiguous:cfg-duplicated alias",
+        ] {
+            assert_eq!(
+                ReasonClass::classify(why), ReasonClass::Dispatch,
+                "R270: `{why}` is TWO separately-written definitions competing for one bare name — §4's \
+                 own case. Re-kinding it because the WORD `macro` appears in it costs a real gate"
+            );
+        }
+        // §2 forward-compatibility, the control §4 says is MUST-level: a fabricated off-vocabulary kind
+        // must still reach the conservative catch-all, or "added a kind" and "stopped checking the kind
+        // set" are the same diff.
+        assert_eq!(ReasonClass::classify("banana:whatever"), ReasonClass::Unresolved);
+
+        // END TO END, on the EMITTED string rather than on a literal — a class table that is right about
+        // a token nothing emits proves nothing. Scan R128's own shape and put the reason this scan
+        // actually produced to the classifier. With the emission site reverted this reads `ambiguous:`
+        // and classifies `Dispatch`, which is precisely the 30 crates that pass `deny Unknown[unresolved]`
+        // today while holding the hole.
+        let src = "mod hidden { macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; } m!(); }\n\
+                   use crate::hidden::spawn;\n\
+                   pub fn go(p: &str) -> bool { spawn(p) }\n";
+        let v = scan_fixture_files("r270e2e", src, &[]);
+        let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some("go"))
+            .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect();
+        assert!(!whys.is_empty(),
+                "the fixture must REACH the emission site — a reason-class assertion over a fixture that \
+                 produced no reason could not have failed (§E3):\n{v:#}");
+        for w in &whys {
+            assert_eq!(
+                ReasonClass::classify(w), ReasonClass::Unresolved,
+                "R270: `go` reaches a target hidden in an unexpanded macro; the reason it emits ({w}) \
+                 must reach the `unresolved` class, not `dispatch`:\n{v:#}"
+            );
+        }
+        // The COLLECTOR twin (`macro:re-export key a macro-hidden module could also own`) has no unit
+        // fixture and that is stated rather than left to be discovered: its branch needs a key with two
+        // source edges contested by a macro-hidden module, which occurs in 1 of 1,509 registry crates.
+        // Its evidence is that measured crate — tempfile-3.10.0 goes `deny Unknown[unresolved]` exit
+        // 0 -> 1 — plus the `R169MACROCONTEST` reach counter (4 hits in 2 crates), not a fixture.
     }
 
     /// THE CONTROLS FOR R128, EACH VARYING EXACTLY ONE THING — the module keeps its `pub(crate) use`

@@ -80,6 +80,31 @@ impl ReasonClass {
     /// `dispatch` and rust is its only PRODUCER; `indy`/`task-handoff` are candor-java's migration kinds
     /// and `dep:`/`dep-stale:` are swift's registered per-dependency-ENTRY kinds, reaching `Unresolved`
     /// through the catch-all, which is the class §6.2 prescribes for them.
+    ///
+    /// ⟨0.35⟩ **AND THIS ENGINE PRODUCES A SIXTH SPELLING OF ITS OWN, `macro:`, WHICH THE PARAGRAPH
+    /// ABOVE DID NOT NAME UNTIL SOUNDNESS R270.** It is off-vocabulary as a §4 kind — legal under §2
+    /// forward-compatibility, round-tripped verbatim, and reaching `Unresolved` through the catch-all
+    /// below, deliberately: it marks the ZERO-READABLE-DEFS case (a macro this engine declined to
+    /// expand), which is "a limit of its own resolution rather than an ambiguity in the program" in
+    /// §4 ⟨0.25⟩'s words, and `dispatch` is the wrong class for that. Four sites emit it, and they are
+    /// listed here rather than left to a grep because the whole hazard this doc comment exists for is a
+    /// vocabulary held in one place going stale while the code moves:
+    ///
+    ///   * `collector.rs` `macro:unexpanded multi-arm macro_rules! <name>`   (R257)
+    ///   * `collector.rs` `macro:unreadable macro_rules! template <name>`    (R257)
+    ///   * `collector.rs` `macro:re-export key a macro-hidden module could also own`  (R270)
+    ///   * `scan.rs`      `macro:module items hidden by an unexpanded macro`  (R270, R128's site)
+    ///
+    /// R257 minted the spelling at exactly the two lines it was reported for and this comment kept
+    /// asserting the file held the vocabulary once; R270 is the sweep, and the census that justified it
+    /// enumerates every `ambiguous:`-emitting site rather than the ones in hand. The six that REMAIN
+    /// `ambiguous:` are each genuinely two-separately-written-definitions — including
+    /// `ambiguous:same-name macro_rules! definitions`, which a sweep keyed on the WORD "macro" would
+    /// have re-kinded wrongly and cost 15 crates their `deny Unknown[dispatch]` gate. The kind is
+    /// decided by the CONDITION (two readable defs vs none), never by the name.
+    ///
+    /// A dedicated §4 kind for this state is a SPEC clause plus a conformance PART before any engine
+    /// emits it, and candor-rust does not own that file — filed, not invented here.
     pub fn classify(why: &str) -> ReasonClass {
         let w = why.trim().to_ascii_lowercase();
         if w.starts_with("reflect") || w == "dynamicmemberlookup" {

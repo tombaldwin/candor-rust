@@ -2999,17 +2999,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && macro_hidden_owner(&c.path, 1, &merged.macro_modules)
             {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                // KIND: `ambiguous:` — §4's fifth kind, "the analyser's own NAME RESOLUTION" failed, with
-                // a best-effort (non-conformance-compared) detail. It is the only member of §4's CLOSED
-                // vocabulary this state fits: there is no owner type so it is not `dispatch:`, no function
-                // VALUE so it is not `callback:`, and a macro body is Rust the engine declined to expand,
-                // not a foreign boundary, so it is not `native:`/`reflect:`. §4's own text describes
-                // `ambiguous:` around the two-same-named-defs case rather than the zero-readable-defs one,
-                // so this REUSES a kind rather than fitting it exactly. A dedicated kind is a SPEC clause
-                // plus a conformance PART before any engine emits it (this family's write-the-row-before-
-                // the-port rule) and candor-rust does not own that file — filed, not invented here.
+                // KIND: `macro:` — SOUNDNESS R270, and the comment this replaces conceded the point
+                // itself: "§4's own text describes `ambiguous:` around the two-same-named-defs case
+                // rather than the zero-readable-defs one, so this REUSES a kind rather than fitting it
+                // exactly." This IS the zero-readable-defs case — the module's items are hidden inside a
+                // macro this engine declined to expand, so there are not two definitions competing, there
+                // are none the engine can read. §4 ⟨0.25⟩'s clarification names the test: where an engine
+                // cannot resolve, "what it discloses there is a LIMIT OF ITS OWN RESOLUTION rather than
+                // an ambiguity in the program". `macro:` is off-vocabulary, tolerated under §2
+                // forward-compatibility, round-trips verbatim and reaches `unresolved` through §6.2's
+                // conservative catch-all — which is the class this state belongs in and `dispatch` is not.
+                //
+                // R257 re-kinded this condition at the two lines it was reported for and stopped there;
+                // this is the sweep. MEASURED over 1,509 registry crates, BOTH directions, because
+                // measuring one is how R257 got the cost backwards: `deny Unknown[dispatch]` loses this
+                // spelling on exactly ONE crate (tiff-0.11.3), while `deny Unknown[unresolved]` GAINS
+                // 29 crates that pass today while holding a real macro-opacity hole — reqwest x3, nix x4,
+                // wasm-bindgen x4, openssl, flate2 x2, isahc x2, diesel, encoding_rs, parking_lot_core,
+                // windows-core, lapin and more.
                 unknown_why.entry(f.qual.clone()).or_default()
-                    .insert("ambiguous:module items hidden by an unexpanded macro".to_string());
+                    .insert("macro:module items hidden by an unexpanded macro".to_string());
                 if std::env::var_os("CANDOR_R128_INSTR").is_some() {
                     eprintln!("R128HIT\t{}\t{}\tt2present={}\tleafty={}\tleaffn={}", f.qual, c.path,
                         tail2(&c.path).is_some_and(|t| by_tail2.contains_key(&t)),
