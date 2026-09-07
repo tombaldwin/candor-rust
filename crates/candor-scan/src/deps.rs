@@ -956,7 +956,18 @@ pub(crate) fn registry_lock_versions(dir: &str) -> std::collections::HashMap<Str
                  registry: &mut bool,
                  out: &mut std::collections::HashMap<String, String>| {
         if !name.is_empty() && !version.is_empty() && *registry {
-            out.insert(std::mem::take(name).replace('-', "_"), std::mem::take(version));
+            // R327 — MAX, not last. Two versions of one crate in a lock is ordinary; last-wins equalled
+            // max only because cargo happens to serialise ascending, which nothing asserts. Executed: a
+            // descending lock silently picked the LOWER version and kept the exemption.
+            let k = std::mem::take(name).replace('-', "_");
+            let v = std::mem::take(version);
+            let keep = match out.get(&k) {
+                Some(prev) => candor_classify::calibration_exceeded_raw(&v, prev),
+                None => true,
+            };
+            if keep {
+                out.insert(k, v);
+            }
         }
         name.clear();
         version.clear();
@@ -964,7 +975,13 @@ pub(crate) fn registry_lock_versions(dir: &str) -> std::collections::HashMap<Str
     };
     for line in lock.lines() {
         let l = line.trim();
-        if l == "[[package]]" {
+        // SOUNDNESS R327 — flush on ANY table header, not only `[[package]]`. Cargo really writes a
+        // trailing `[[patch.unused]]` table carrying its own `name`/`version`/`source`, and flushing
+        // only on `[[package]]` let those lines OVERWRITE the last package's pending state — dropping
+        // that crate and replacing it with a phantom. Demonstrated: the last package loses its ceiling,
+        // and in the sibling parser a git-sourced `log` loses its IMPOSTOR flag and regains the
+        // CALIBRATED_CRATES purity exemption, reopening the sin ⟨caca530⟩ closed.
+        if l.starts_with("[[") || l.starts_with("[") {
             flush(&mut name, &mut version, &mut registry, &mut out);
         } else if let Some(v) = l.strip_prefix("name = ") {
             name = v.trim_matches('"').to_string();
@@ -991,7 +1008,10 @@ pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<St
     };
     for line in lock.lines() {
         let l = line.trim();
-        if l == "[[package]]" {
+        // SOUNDNESS R327 — see `registry_lock_versions`. Flushing only on `[[package]]` let a trailing
+        // `[[patch.unused]]` clobber the last package, and here that loses an IMPOSTOR flag: a
+        // git-sourced crate wearing a calibrated name silently regains the purity exemption.
+        if l.starts_with("[[") || l.starts_with("[") {
             flush(&mut name, &mut registry, &mut out);
         } else if let Some(v) = l.strip_prefix("name = ") {
             name = v.trim_matches('"').to_string();

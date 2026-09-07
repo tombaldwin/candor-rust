@@ -3178,14 +3178,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // documented-limitation-is-not-measured shape: it read as considered, and that is what stopped it
     // being fixed. Failing to find a version keeps today's exemption, so this can only ADD containment.
     let lock_versions = {
-        let own = deps::registry_lock_versions(dir);
-        if own.is_empty() {
-            deps::find_workspace_root(std::path::Path::new(dir))
-                .map(|r| deps::registry_lock_versions(&r.to_string_lossy()))
-                .unwrap_or(own)
-        } else {
-            own
+        // SOUNDNESS R329 — MAX over {member lock, workspace root lock}, not an else-branch. My first
+        // version preferred the member's own lock whenever it was non-empty, so a stale or partial
+        // member lock SHADOWED the root's and silently restored the exemption — and cargo ignores
+        // member lockfiles entirely, so the root's is the only real one. Note the sibling three lines
+        // above: `non_registry_names` deliberately UNIONS its lock and manifest evidence. Two adjacent
+        // lookups of one question, and mine had drifted to the weaker rule.
+        let mut v = deps::registry_lock_versions(dir);
+        if let Some(root) = deps::find_workspace_root(std::path::Path::new(dir)) {
+            for (k, rv) in deps::registry_lock_versions(&root.to_string_lossy()) {
+                let take = match v.get(&k) {
+                    Some(prev) => candor_classify::calibration_exceeded_raw(&rv, prev),
+                    None => true,
+                };
+                if take {
+                    v.insert(k, rv);
+                }
+            }
         }
+        v
     };
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()

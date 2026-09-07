@@ -3958,6 +3958,12 @@ impl<'a> EscapeSites<'a> {
             let last = i + 1 == b.stmts.len();
             match st {
                 syn::Stmt::Local(l) => {
+                    // SOUNDNESS R325 — EVERY name this statement binds, whatever the pattern shape and
+                    // whether or not there is an initialiser. Counting only `single_pat_ident` inside
+                    // the `if let Some(init)` saw 2 of at least 8 binder forms, and an UNDER-count makes
+                    // `one_entity` wrongly TRUE — the FABRICATION direction. `let (a, b) = ..`,
+                    // `let Some(x) = .. else`, and a bare `let x;` all bind names the guard must see.
+                    self.note_pat_bindings(&l.pat);
                     if let Some(init) = &l.init {
                         // R198/R209(b) — see `let_bound_closures`. Must be recorded BEFORE the walk,
                         // because the walk is what reaches the `Expr::Closure` arm that reads it.
@@ -3991,7 +3997,6 @@ impl<'a> EscapeSites<'a> {
                         if let Some(n) = single_pat_ident(&l.pat) {
                             let seq = self.seq;
                             self.first_bind_seq.entry(n.clone()).or_insert(seq);
-                            *self.name_bindings.entry(n.clone()).or_insert(0) += 1;
                             self.lets.push((n, &init.expr));
                         }
                     }
@@ -4082,6 +4087,29 @@ impl<'a> EscapeSites<'a> {
                 proc_macro2::TokenTree::Group(g) => self.note_macro_idents(g.stream()),
                 _ => {}
             }
+        }
+    }
+
+    /// Every identifier a PATTERN binds, recursively. SOUNDNESS R325: the guard's key is a bare name,
+    /// so it must know every binder form or its count is wrong in the FABRICATION direction — tuple and
+    /// struct destructuring, `ref`/`mut`, slices, `|` alternatives, and the `@` sub-binding.
+    fn note_pat_bindings(&mut self, p: &syn::Pat) {
+        match p {
+            syn::Pat::Ident(i) => {
+                *self.name_bindings.entry(i.ident.to_string()).or_insert(0) += 1;
+                if let Some((_, sub)) = &i.subpat {
+                    self.note_pat_bindings(sub);
+                }
+            }
+            syn::Pat::Tuple(t) => t.elems.iter().for_each(|q| self.note_pat_bindings(q)),
+            syn::Pat::TupleStruct(t) => t.elems.iter().for_each(|q| self.note_pat_bindings(q)),
+            syn::Pat::Struct(t) => t.fields.iter().for_each(|f| self.note_pat_bindings(&f.pat)),
+            syn::Pat::Slice(t) => t.elems.iter().for_each(|q| self.note_pat_bindings(q)),
+            syn::Pat::Or(t) => t.cases.iter().for_each(|q| self.note_pat_bindings(q)),
+            syn::Pat::Reference(r) => self.note_pat_bindings(&r.pat),
+            syn::Pat::Type(t) => self.note_pat_bindings(&t.pat),
+            syn::Pat::Paren(t) => self.note_pat_bindings(&t.pat),
+            _ => {}
         }
     }
 
@@ -4228,7 +4256,13 @@ impl<'a> EscapeSites<'a> {
         // `closure_depth`. Nested loops rewrite twice, outermost last, which is correct and monotone.
         let loop_mark = matches!(e, syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_))
             .then(|| self.try_exits.len());
-        let in_closure = matches!(e, syn::Expr::Closure(_));
+        // SOUNDNESS R324 — an ASYNC BLOCK defers execution exactly as a closure does, and
+        // `for_each_child_block` descends `Async(x) => f(&x.block)`, so its statements were walked at
+        // depth 0. R303 guarded the closure spelling of its own shape and left the async one open:
+        // `let f = || H::new(); async move { f(); }` counted a discarded call as "in this frame",
+        // withdrew the suppression, and charged a drop that happens in the POLLER's frame — executed,
+        // 0 in-frame drops. `closure_depth` names DEFERRAL, not the `Closure` node.
+        let in_closure = matches!(e, syn::Expr::Closure(_) | syn::Expr::Async(_));
         if in_closure {
             self.closure_depth += 1;
         }
