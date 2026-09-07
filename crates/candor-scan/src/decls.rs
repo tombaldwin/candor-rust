@@ -2033,11 +2033,13 @@ pub(crate) fn collect_decls(
                                 // element type took `h.run(p)` from `["Fs"]` to ABSENT — so this never
                                 // replaces a leaf, it only supplies one where there was none.
                                 //
-                                // `"Fn"` matches no local trait, so `dispatch_calls_for_trait_method`
-                                // returns false for it and no CHA fan-out, no `Type::method` edge and no
-                                // concrete effect can come out of this entry. The only thing it can do is
-                                // make `expr_is_fn_typed` answer true for `h.cb`, i.e. turn an omission
-                                // into an `Unknown`.
+                                // `"Fn"` matches no local trait — GIVEN no crate in scope defines one
+                                // itself — so `dispatch_calls_for_trait_method` returns false for it and
+                                // the only thing this entry can do is make `expr_is_fn_typed` answer true
+                                // for `h.cb`, i.e. turn an omission into an `Unknown`. SOUNDNESS R272:
+                                // that sentence was written here as a GUARANTEE and it is an ASSUMPTION;
+                                // the condition, the executed counter-example and the reason the hedge is
+                                // not simply re-spelled are stated once at `lang::leaves_are_callable`.
                                 if !had_trait_leaves
                                     && crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases)
                                 {

@@ -425,7 +425,8 @@ pub(crate) struct ElemIndexes<'a> {
     /// The module-level counterpart of `field_elem_trait`: a static has no binding site to type it at, so
     /// before this index `resolve_elem_trait_leaves` returned NOTHING for a static receiver and every
     /// unwrap binder over one silently dropped the call as pure (SOUNDNESS R101, kernel-witnessed).
-    /// Carries only the synthetic `"Fn"` leaf, so it cannot CONTRIBUTE a concrete effect. It can WITHDRAW
+    /// Carries only the synthetic `"Fn"` leaf, so it cannot CONTRIBUTE a concrete effect GIVEN no crate
+    /// in scope defines its own `trait Fn` (R272 — stated at `lang::leaves_are_callable`). It can WITHDRAW
     /// one if its consuming arm is reached for a name that is a dispatch-typed LOCAL here — see
     /// `lang::static_holds_callable`, which states that condition and the guard-deletion measurement.
     pub(crate) callable_statics: &'a HashSet<String>,
