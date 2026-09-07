@@ -142,10 +142,31 @@ pub const CALIBRATED_BUT_PARTIAL_CRATES: [&str; 3] = ["libc", "nix", "rustix"];
 /// A crate ABSENT from this table keeps its unconditional exemption: the ceiling is a denylist of
 /// versions known to be beyond the review, not an allowlist of versions blessed by it. Adding a crate
 /// here is what makes its claim honest, so the table is expected to grow toward `CALIBRATED_CRATES`.
-pub const CALIBRATED_CEILINGS: [(&str, &str); 3] = [
-    ("sea_orm", "1.1.20"),
-    ("redis", "1.6.0"),
+pub const CALIBRATED_CEILINGS: [(&str, &str); 24] = [
+    ("arboard", "3.6.1"),
+    ("async_nats", "0.35.1"),
+    ("console", "0.15.11"),
+    ("crossterm", "0.28.1"),
+    ("dialoguer", "0.12.0"),
+    ("dotenv", "0.15.0"),
+    ("dotenvy", "0.15.7"),
+    ("grep_cli", "0.1.12"),
+    ("ignore", "0.4.33"),
+    ("isahc", "2.0.1"),
+    ("lettre", "0.11.23"),
     ("mongodb", "3.8.1"),
+    ("mysql", "28.0.0"),
+    ("portable_pty", "0.9.0"),
+    ("postgres", "0.7.10"),
+    ("ratatui", "0.29.0"),
+    ("redis", "1.6.0"),
+    ("rusqlite", "0.40.2"),
+    ("rustls", "0.23.43"),
+    ("sea_orm", "1.1.20"),
+    ("sqlx_core", "0.8.6"),
+    ("tempfile", "3.27.0"),
+    ("tonic", "0.12.3"),
+    ("ureq", "2.12.1"),
 ];
 
 /// `true` when `resolved` is a version this crate's rules were NOT written against — i.e. strictly
