@@ -9,6 +9,54 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **DATA LOSS, and it was introduced and closed the same day — SOUNDNESS R264.** A refused flag
+  standing before the scan target let `--gate-json` DELETE a source file. `-V` lived in the main
+  loop's valueless-flag set and NOT in `prescan_argv`'s hand-written copy of that same fact, so it
+  set `stopped`, the target was suppressed, `pre_target` fell back to `"."`, and the sink-collision
+  guard was asked "is this under the CWD?" instead of "is this under the TARGET?". A sink outside the
+  CWD subtree is invisible to that question, so arming proceeded and the fail-closed verdict document
+  was written over the source file at parse time, before the walk ever ran. Verified from a cwd
+  unrelated to both target and sink: `--version <dir> --gate-json <dir>/src/lib.rs` exits 2 with the
+  file intact; `-V` in the same position exited 0 with the file DESTROYED. The two spellings of one
+  fact are now one shared `VALUELESS_FLAGS` constant.
+
+- **The macro-opacity hedge is spelled `macro:`, not `ambiguous:` — SOUNDNESS R257.** The disclosure
+  was right and the KIND was wrong. SPEC §4 reserves `ambiguous:` for two or more separately-written
+  definitions competing for one bare name; a macro arm is selected by the invocation's own tokens, so
+  nothing competes, and the engine is disclosing a limit of its own resolution. The prefix is not
+  cosmetic: §6.2 projects `ambiguous:*` to class `dispatch`, so the first spelling put ~7,700 rows in
+  front of every scoped `deny Unknown[dispatch]` gate that never meant to ask for them.
+
+- **Two MORE macro-opacity hedges were still `ambiguous:` — SOUNDNESS R270.** R257 re-kinded the two
+  lines it was reported for, which drew the audit's boundary around its own trigger. A census of all
+  ten `ambiguous:`-emitting spellings over 1,509 registry crates (22,826 rows) found two more with
+  ZERO readable definitions — module items hidden by an unexpanded macro (291 rows / 45 crates) and a
+  re-export key claimed by a macro-hidden module (2 rows / 1 crate) — and confirmed the other seven
+  genuinely have two readable definitions and correctly KEEP the kind. One spelling, a cfg-duplicated
+  alias, is filed unsettled rather than guessed at.
+
+- **The expression WRAPPED around a callable dropped it — SOUNDNESS R271.** `expr_is_fn_typed`
+  answered for the callable's access path while the named-fn-by-value edge answered for a bare
+  `syn::Expr::Path`: two consumers of one question — "what can this expression evaluate to" —
+  implemented separately, so a `match`, a block, `unsafe {}`, a deref, a cast, an indexed array
+  literal, an `if`'s else branch and every nesting of those fell out of BOTH. Now one authority,
+  `lang::callable_operands`. **The second consumer is the point:** a fix confined to
+  `expr_is_fn_typed` would have looked complete and left the sharper half red —
+  `v.retain(match 0 { _ => local_eff })`, over a function this scan can read and knows writes a file,
+  was ABSENT from `functions[]`. Not a lost hedge, a lost KNOWN EFFECT, with blanket `deny Fs`
+  exiting 0 over three real file writes. Ground truth was a generated, compiled, executed 270-cell
+  matrix (10 wrappers × 7 access paths × 3 call forms plus pure/effect twins), 450 real invocations,
+  400 files actually written, and zero cells with no invocations.
+
+- **R238's `"Fn"` hedge CAN name a local trait — SOUNDNESS R272, and the fix was built, measured and
+  REJECTED.** Four sites asserted in comments that a synthetic `"Fn"` leaf "matches no local trait, so
+  no CHA fan-out and no concrete effect can come out of it". A crate defining `pub trait Fn` falsifies
+  that, and it was a safety sentence written by the change that needed it to be true. Executed on a
+  compiled crate, candor reported `['Fs']` for a function that provably performs nothing, with blanket
+  and caller-scoped denies all exiting 1 — a RED gate over a pure function. The obvious repair,
+  respelling the hedge as `<callable>`, is recorded in the row along with the measurement that rejected
+  it; the comments now state the assumption they actually rest on instead of asserting a guarantee.
+
 - **TWO SHIPPED TESTS ASSERTED A ROW'S ABSENCE AS A PROXY FOR A PROPERTY, and the proxy broke the
   moment the engine started disclosing.** Both went red on R143/R144 and neither was wrong about
   its subject — they were wrong about their witness. `local_macro_template_is_expanded_so_its
