@@ -9,6 +9,21 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **A closure INVOKED AND DISCARDED in this scope no longer reads as escaping — SOUNDNESS
+  R209(b)/R198.** `let f = || H::new("a"); let _ = f();` builds the value here, runs here and drops it
+  here, but the closure's body was pushed onto the escape set UNCONDITIONALLY, so the enclosing
+  function was ABSENT from `functions[]` entirely — a purity claim over a real effect, with `pure`
+  exiting 0. Silent on the shipped 0.35.0 and on HEAD alike. **The loose fix was built first and
+  rejected:** withdrawing the suppression for every let-bound closure moved 18 cells and four were
+  FABRICATIONS against executed ground truth — a closure that is never invoked never runs its body,
+  and one whose result is returned hands the value to the caller. The shipped rule withdraws the
+  suppression only when the name is used and EVERY use is the callee of a value-discarded call:
+  9 cells move, all correct, zero fabrications. **This does not close the class** — five shapes stay
+  silent (result bound and kept, invocation inside a block, a closure passed by reference). Corpus
+  A/B over 1,514 crates and 276,938 rows: no row changes, with the branch instrumented and reached
+  189 times across 90 crates. The sharded-slab case the escape was written for is untouched by
+  construction: an inline closure still pushes unconditionally.
+
 - ⚠ **DATA LOSS, and it was introduced and closed the same day — SOUNDNESS R264.** A refused flag
   standing before the scan target let `--gate-json` DELETE a source file. `-V` lived in the main
   loop's valueless-flag set and NOT in `prescan_argv`'s hand-written copy of that same fact, so it
