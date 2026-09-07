@@ -4915,6 +4915,60 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[cfg(test)]
+    /// Is `name` present in `functions[]` at all? SOUNDNESS R311 needs this distinct from
+    /// `fixture_effects(..).is_empty()`: ABSENT is a positive purity CLAIM (SPEC §2 rule 3), while
+    /// present-with-no-effects plus an `invisible` list is a DISCLOSURE. The two read identically
+    /// through an effects-only accessor, and telling them apart is the whole point of the ceiling.
+    #[cfg(test)]
+    fn fixture_present(v: &serde_json::Value, name: &str) -> bool {
+        v["functions"].as_array().into_iter().flatten()
+            .any(|f| f["fn"].as_str() == Some(name))
+    }
+
+    /// The `invisible` crate list a function carries — the crates whose effects this scan could not see.
+    #[cfg(test)]
+    fn fixture_invisible(v: &serde_json::Value, name: &str) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some(name))
+            .flat_map(|f| f["invisible"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// `scan_fixture` plus a REAL `Cargo.lock` naming one registry dependency at an exact version —
+    /// the only input that distinguishes "a crate with the reviewed name is present" from "the reviewed
+    /// source is present" (SOUNDNESS R311). The lock is the evidence the exemption is keyed on, so a
+    /// fixture without one cannot exercise the ceiling at all.
+    #[cfg(test)]
+    fn scan_fixture_lock(name: &str, src: &str, dep: &str, version: &str) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{dep} = \"{version}\"\n"),
+        ).unwrap();
+        std::fs::write(
+            d.join("Cargo.lock"),
+            format!(
+                "[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [[package]]\nname = \"{dep}\"\nversion = \"{version}\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+            ),
+        ).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let idx = load_dep_reports(None);
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        v
+    }
+
     fn fixture_effects(v: &serde_json::Value, name: &str) -> Vec<String> {
         v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some(name))
@@ -6696,6 +6750,37 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     "`{f}` releases nothing in this scope (0 executed drops) — charging it \
                      FABRICATES:\n{v:#}");
         }
+    }
+
+    /// ⟨CALIBRATION CEILING⟩ SOUNDNESS R311. `CALIBRATED_CRATES` converts "no rule matched" into
+    /// "reviewed, and pure" with no disclosure — a claim about SOURCE SOMEONE READ, granted on the crate
+    /// NAME alone. So an upstream release silently extended it to code that did not exist when the review
+    /// happened: sea-orm's rules say they were verified against 1.1.20, the fixture resolved 2.0.2, and
+    /// 43 public entry points on types no rule can name read PURE.
+    ///
+    /// The two arms differ ONLY in the version string in `Cargo.lock`. At the ceiling the exemption
+    /// stands; above it the crate is treated like `CALIBRATED_BUT_PARTIAL_CRATES` — matched calls keep
+    /// their rules, unmatched calls disclose `invisible` instead of reading as reviewed-pure. This is
+    /// fail-closed AT THE POINT THE CLAIM IS MADE; a coverage gate can only notify afterwards.
+    #[test]
+    fn calibration_exemption_stops_at_the_reviewed_version() {
+        let body = "pub fn run(x: &sea_orm::DatabaseExecutor) -> u32 { let _ = x.transaction_async(); 0 }";
+        let at = scan_fixture_lock("calceil_at", body, "sea-orm", "1.1.20");
+        let above = scan_fixture_lock("calceil_above", body, "sea-orm", "2.0.2");
+        assert!(!fixture_present(&at, "run"),
+                "at the reviewed ceiling the calibration exemption must STAND — disclosing here would \
+                 flood every consumer on a reviewed version:\n{at:#}");
+        assert!(fixture_invisible(&above, "run").iter().any(|c| c == "sea_orm"),
+                "ABOVE the reviewed ceiling an unmatched call must DISCLOSE `invisible`, not read as \
+                 reviewed-pure — the rules were never written against this source:\n{above:#}");
+        assert!(candor_classify::calibration_exceeded("sea_orm", "2.0.2"));
+        assert!(!candor_classify::calibration_exceeded("sea_orm", "1.1.20"));
+        // A crate with NO ceiling keeps its unconditional exemption: this is a denylist of versions
+        // beyond the review, not an allowlist of versions blessed by it.
+        assert!(!candor_classify::calibration_exceeded("tokio", "99.0.0"));
+        // Numeric per component, not lexical: 1.10 is newer than 1.9.
+        assert!(candor_classify::calibration_exceeded("redis", "1.10.0"));
+        assert!(!candor_classify::calibration_exceeded("redis", "1.5.9"));
     }
 
     #[test]
