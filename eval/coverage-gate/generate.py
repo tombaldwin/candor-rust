@@ -801,6 +801,50 @@ PLATFORM_CAVEAT = (
 )
 
 
+VERSION_HEADER = "# resolved-versions:"
+
+
+def stamp_versions(path, resolved):
+    """Insert `# resolved-versions: name=dir …` into a manifest's comment header, replacing any
+    previous stamp. A COMMENT, so `read_tsv_rows` skips it and no join key changes."""
+    stamp = VERSION_HEADER + " " + " ".join(
+        "%s=%s" % (k, resolved[k]) for k in sorted(resolved)) + "\n"
+    with open(path) as fh:
+        lines = [l for l in fh if not l.startswith(VERSION_HEADER)]
+    out, placed = [], False
+    for l in lines:
+        out.append(l)
+        if not placed and l.startswith("#"):
+            out.append(stamp)
+            placed = True
+    if not placed:
+        out.insert(0, stamp)
+    with open(path, "w") as fh:
+        fh.writelines(out)
+
+
+def manifest_versions(path):
+    """crate -> resolved registry directory, from a manifest's R311 stamp. Empty for a manifest
+    written before the stamp existed, which is NOT the same as 'no crates' — callers must treat an
+    empty map as UNKNOWN and say so rather than reporting every crate as changed."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith(VERSION_HEADER):
+                    body = line[len(VERSION_HEADER):].strip()
+                    out = {}
+                    for tok in body.split():
+                        if "=" in tok:
+                            k, v = tok.split("=", 1)
+                            out[k] = v
+                    return out
+                if not line.startswith("#") and line.strip():
+                    break
+    except OSError:
+        pass
+    return {}
+
+
 def read_tsv_rows(path):
     """The data rows (as column lists) of a covered.tsv/open.tsv-shaped file: strip the leading
     `#`-comment header block `classify_check` writes and blank lines. Both manifests carry the
@@ -943,6 +987,33 @@ def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_pa
     result = diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path)
     print(format_diff_report(result), file=out)
 
+    # SOUNDNESS R311 — report a CRATE VERSION CHANGE before the row counts, because it EXPLAINS them.
+    # The calibrated fixture pins `"*"`, so an upstream release moves the ledger's reviewed-purity claim
+    # onto source nobody reviewed; the only previous symptom was a pile of anonymous newly-uncovered
+    # rows, and it cost two wrong diagnoses (R302) before the versions were compared by hand.
+    v_old = manifest_versions(checked_covered_path)
+    v_new = manifest_versions(fresh_covered_path)
+    if not v_old or not v_new:
+        print("\n  VERSION STAMP: absent from %s — cannot say which upstream versions produced these "
+              "rows.\n  A manifest written before SOUNDNESS R311 carries no stamp; regenerate to get one. "
+              "This is UNKNOWN, not 'unchanged'."
+              % ("the checked-in manifest" if not v_old else "the fresh manifest"), file=out)
+    else:
+        moved = sorted(k for k in set(v_old) & set(v_new) if v_old[k] != v_new[k])
+        gone = sorted(set(v_old) - set(v_new))
+        added = sorted(set(v_new) - set(v_old))
+        if moved or gone or added:
+            print("\n--- CRATE VERSIONS CHANGED (R311) — these explain rows below, and a MAJOR bump means "
+                  "the reviewed-purity claim now covers source no rule was written against ---", file=out)
+            for k in moved:
+                print("  %-24s %s  ->  %s" % (k, v_old[k], v_new[k]), file=out)
+            for k in gone:
+                print("  %-24s %s  ->  (no source found)" % (k, v_old[k]), file=out)
+            for k in added:
+                print("  %-24s (absent)  ->  %s" % (k, v_new[k]), file=out)
+        else:
+            print("\n  crate versions: identical in both manifests (%d stamped)" % len(v_new), file=out)
+
     if github_output_path:
         with open(github_output_path, "a") as fh:
             fh.write(f"regressed={len(result['regressed'])}\n")
@@ -1005,10 +1076,17 @@ def main():
 
     calibrated = calibrated_crates_from_source()
     all_entries, scan_errors = {}, {}
+    # SOUNDNESS R311 — record WHICH VERSION of each crate was actually read. The fixture pins `"*"`, so
+    # a major upstream release silently moves the ledger onto a version nobody reviewed, and until this
+    # existed the only symptom was a pile of anonymous "newly-uncovered" rows. `find_crate_dir` already
+    # knows the answer; nothing was writing it down.
+    resolved_versions = {}
     for c in calibrated:
         if c in EXCLUDE:
             continue
         d, entries = process_crate(registry_src, c)
+        if d is not None:
+            resolved_versions[c] = os.path.basename(d)
         if d is None:
             print(f"WARN no source for {c} under {registry_src}", file=sys.stderr)
             continue
@@ -1050,6 +1128,12 @@ def main():
          "--", entries_path, covered_path, open_path],
         check=True,
     )
+    # R311 — stamp the resolved versions into both manifests, as a comment so no data row moves and the
+    # join key is untouched. `diff_manifests` reads it back and reports a version change as its own
+    # labelled alarm, because "sea-orm went 1.x -> 2.x" and "43 entries appeared" are the same event and
+    # only the first one is diagnosable.
+    stamp_versions(covered_path, resolved_versions)
+    stamp_versions(open_path, resolved_versions)
 
 
 if __name__ == "__main__":
