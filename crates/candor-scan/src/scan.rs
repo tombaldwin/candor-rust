@@ -3171,7 +3171,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // source someone READ, so it must not be granted to a release published after the reading. No
     // Cargo.lock (a library tree) leaves this empty, and an absent version keeps today's exemption —
     // stated rather than hidden, because the alternative is disclosing on every lockless scan.
-    let lock_versions = deps::registry_lock_versions(dir);
+    // …and a WORKSPACE MEMBER has no `Cargo.lock` of its own — the root holds it. Falling back to the
+    // root is the difference between a ceiling that applies to a member crate and one that silently does
+    // not; `find_workspace_root` already exists for exactly this and was simply not consulted here. The
+    // previous comment stated the lockless case as an accepted residual, which is the
+    // documented-limitation-is-not-measured shape: it read as considered, and that is what stopped it
+    // being fixed. Failing to find a version keeps today's exemption, so this can only ADD containment.
+    let lock_versions = {
+        let own = deps::registry_lock_versions(dir);
+        if own.is_empty() {
+            deps::find_workspace_root(std::path::Path::new(dir))
+                .map(|r| deps::registry_lock_versions(&r.to_string_lossy()))
+                .unwrap_or(own)
+        } else {
+            own
+        }
+    };
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
@@ -3199,9 +3214,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // R311 — a resolved version ABOVE the reviewed ceiling is downgraded to the same
             // treatment as `CALIBRATED_BUT_PARTIAL_CRATES`: matched calls keep their rules, unmatched
             // calls rejoin the ledger and disclose rather than reading as reviewed-pure.
-            let beyond_review = lock_versions
+            // SOUNDNESS R322 — TWO KEY SPACES, ONE FACT, and I reintroduced R312's exact shape inside
+            // R311's own fix on the same day. The exemption below is keyed on `cr` (the syntactic first
+            // segment a consumer writes); this lookup was keyed only on `real` (the resolved package
+            // name after `dep_renames`). `CALIBRATED_CEILINGS` is populated from CALIBRATED_CRATES
+            // IDENTIFIERS, so `("native_tls_crate", "0.2.18")` sat under a key `real` can never hold and
+            // that ceiling could never fire — while `cr` = `native_tls_crate` still took the exemption.
+            // Both keys are consulted, and EITHER saying "beyond review" is enough: the disagreement
+            // between the two spaces is precisely what must not be allowed to grant silence.
+            // The VERSION and the CEILING live in different key spaces and must be CROSSED, not
+            // matched pairwise: under a `package =` alias the lock records the resolved name
+            // (`native_tls`) while `CALIBRATED_CEILINGS` is keyed on the identifier
+            // (`native_tls_crate`). Checking each key against itself finds a version with no ceiling
+            // and a ceiling with no version, and concludes "not beyond review" — silently.
+            let ver = lock_versions
                 .get(real)
-                .is_some_and(|v| candor_classify::calibration_exceeded(real, v));
+                .or_else(|| lock_versions.get(cr.as_str()));
+            let beyond_review = ver.is_some_and(|v| {
+                candor_classify::calibration_exceeded(real, v)
+                    || candor_classify::calibration_exceeded(cr.as_str(), v)
+            });
             if beyond_review && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 // INSTRUMENTED: an unchanged corpus row is not evidence the branch ran.
                 eprintln!(
