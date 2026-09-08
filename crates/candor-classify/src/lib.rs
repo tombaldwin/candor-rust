@@ -2170,7 +2170,24 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // review: OsRng is a unit struct, cloning consumes nothing).
         let m = path.rsplit("::").next().unwrap_or(path);
         let os_rng = path.contains("OsRng") && !matches!(m, "clone" | "fork" | "default");
-        if rng_verb || os_rng {
+        // SOUNDNESS R320 — …and the SAME clause for the type's CURRENT NAME. rand 0.10 renamed the OS
+        // entropy source to `SysRng` and moved it to `getrandom`, re-exporting it as
+        // `rand::rngs::SysRng` (`rand-0.10.2/src/rngs/mod.rs:119`). Measured, not assumed: candor
+        // resolves the crate from the path the CONSUMER writes, so `rand::rngs::SysRng` arrives with
+        // crate_name `rand` and lands here — NOT in getrandom's whole-crate exemption, which is what
+        // R320 left open. The asymmetry that leaves was executed on a fixture: with `OsRng` as the
+        // receiver an unrecognised verb charges `Rand` (the `contains` clause is the safety margin over
+        // the verb list); with `SysRng` it read PURE. So the margin protected the DELETED spelling and
+        // not its replacement, which is the wrong way round for a type whose only purpose is to draw
+        // from the OS. Same construction exemption for the same reason — `SysRng` is a unit struct
+        // (`getrandom-0.4.3/src/sys_rng.rs:34`), so copying the handle consumes nothing.
+        let sys_rng = path.contains("SysRng") && !matches!(m, "clone" | "fork" | "default");
+        // §E1 HIT COUNTER (`CANDOR_ALIAS_DEBUG`), for `bin/corpus-ab.py --mark`: a widened charge that
+        // moves no rows is either inert or unreached, and those two print identically.
+        if sys_rng && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R320SYSRNG {path}");
+        }
+        if rng_verb || os_rng || sys_rng {
             return Some("Rand");
         }
         return None;

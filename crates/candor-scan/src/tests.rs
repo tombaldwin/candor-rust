@@ -6843,6 +6843,41 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_os_entropy_source_keeps_its_safety_margin_under_its_new_name() {
+        // SOUNDNESS R320 — rand 0.10 renamed the OS entropy source `OsRng` -> `SysRng` and moved it
+        // into `getrandom`, re-exported as `rand::rngs::SysRng`. candor resolves the crate from the
+        // path the CONSUMER writes, so that spelling lands in the `rand` rule block and NOT in
+        // getrandom's whole-crate exemption — which is the question R320 refused to answer from the
+        // classifier alone, and the answer changes the repair.
+        //
+        // The clause being restored is a SAFETY MARGIN over the verb list, not a duplicate of it: an
+        // unrecognised verb on a type that exists only to draw from the OS must still charge. Before
+        // this, that margin covered the DELETED spelling and not its replacement, which is the wrong
+        // way round. The two spellings are asserted TOGETHER so the pair cannot drift again.
+        let src = "\
+use rand::rngs::{OsRng, SysRng};\n\
+pub fn sys_unknown_verb() { let r = SysRng; let _ = r.some_new_draw(); }\n\
+pub fn os_unknown_verb() { let r = OsRng; let _ = r.some_new_draw(); }\n\
+pub fn sys_ctor() { let _r = SysRng::default(); }\n\
+pub fn os_ctor() { let _r = OsRng::default(); }\n\
+pub fn known_verb() { let mut r = SysRng; let _ = r.try_next_u32(); }\n";
+        let v = scan_fixture("r320sysrng", src);
+
+        for f in ["sys_unknown_verb", "os_unknown_verb", "known_verb"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Rand".to_string()],
+                       "{f} uses the OS entropy source and must charge Rand:\n{v:#}");
+        }
+        // …and the construction exemption survives for BOTH, or the margin becomes a fabrication:
+        // each is a unit struct (`getrandom-0.4.3/src/sys_rng.rs:34`), so copying the handle draws
+        // nothing. Without these two rows the assertions above pass for a rule that charges the
+        // mere MENTION of the type.
+        for f in ["sys_ctor", "os_ctor"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} only constructs the zero-sized handle — no entropy is consumed:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn hash_password_is_told_apart_by_arity_not_by_name() {
         // SOUNDNESS R330 — `PasswordHasher::hash_password` is ONE name with TWO signatures, and the
         // fix I shipped for R318 the previous day charged both. password-hash 0.5.0 `traits.rs:33` and
