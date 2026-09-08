@@ -6843,6 +6843,38 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_fallible_draw_verbs_charge_under_both_rule_blocks() {
+        // SOUNDNESS R333, and this test exists because `bin/assert-audit.sh` flagged its fix commit
+        // (`e414faf`) as asserting a safety property with no test in the range — correctly. The fix
+        // shipped verified by a throwaway fixture only.
+        //
+        // `rand_core` 0.10.1 has TWO traits: `RngCore` (`next_u32`/`next_u64`/`fill_bytes`) and
+        // `TryRngCore` (`try_next_u32`/`try_next_u64`/`try_fill_bytes`), and `ends_with("::next_u32")`
+        // does NOT match `::try_next_u32`. Since rand 0.10's OS source is FALLIBLE, the `try_*` forms
+        // are its natural API.
+        //
+        // BOTH SPELLINGS, because that is the whole lesson of the row: TWO verb lists answer the one
+        // question "is this a draw?" — one in the `rand_core` block, one in `rand`'s — and the first
+        // attempt widened only `rand_core`'s and moved nothing. Correct code on a path the call does
+        // not take is byte-identical from the outside to a fix that does not work.
+        let src = "\
+pub fn rc_try32(r: &mut rand_core::SysRng) { let _ = r.try_next_u32(); }\n\
+pub fn rc_try64(r: &mut rand_core::SysRng) { let _ = r.try_next_u64(); }\n\
+pub fn rc_tryfill(r: &mut rand_core::SysRng, b: &mut [u8]) { let _ = r.try_fill_bytes(b); }\n\
+pub fn rd_try32(r: &mut rand::rngs::mock::StepRng) { let _ = r.try_next_u32(); }\n\
+pub fn rd_try64(r: &mut rand::rngs::mock::StepRng) { let _ = r.try_next_u64(); }\n\
+pub fn rc_next32(r: &mut rand_core::SysRng) { let _ = r.next_u32(); }\n\
+pub fn rd_fill(r: &mut rand::rngs::mock::StepRng, b: &mut [u8]) { r.fill_bytes(b); }\n";
+        let v = scan_fixture("r333tryverbs", src);
+        for f in ["rc_try32", "rc_try64", "rc_tryfill", "rd_try32", "rd_try64",
+                  "rc_next32", "rd_fill"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Rand".to_string()],
+                       "{f} draws from an RNG and must charge Rand — the fallible verbs under BOTH \
+                        rule blocks, and the infallible controls beside them:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_redis_sentinel_lookup_surface_is_charged_and_its_config_surface_is_not() {
         // SOUNDNESS R335 — redis's `sentinel` module is how a client finds the current master in a
         // failover deployment, and every lookup talks to the sentinel servers over TCP.
