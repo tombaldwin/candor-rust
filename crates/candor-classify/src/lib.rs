@@ -2087,6 +2087,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::next_u32")
             || path.ends_with("::next_u64")
             || path.ends_with("::fill_bytes")
+            // SOUNDNESS R333 — the FALLIBLE trait. rand_core 0.10 splits `RngCore` from `TryRngCore`,
+            // and `SysRng` (the renamed `OsRng`) is fallible, so `try_next_u32` is the natural API on
+            // it. `ends_with("::next_u32")` does NOT match `::try_next_u32`, so the modern spelling of
+            // a real entropy draw read PURE. Third instance in one day, after R319 and R321, of the
+            // same shape: an upstream rename is rarely just a rename — it arrives with an API SHAPE
+            // change, and a suffix list written against the old shape stops covering the new one.
+            || path.ends_with("::try_next_u32")
+            || path.ends_with("::try_next_u64")
+            || path.ends_with("::try_fill_bytes")
         {
             return Some("Rand");
         }
@@ -2140,6 +2149,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::sample_iter")
             || path.ends_with("::next_u32")
             || path.ends_with("::next_u64")
+            // SOUNDNESS R333 — the FALLIBLE trait, in the `rand` block as well as `rand_core`'s. Two
+            // verb lists answer one question ("is this a draw?") and only one had been widened, which
+            // is why the first half of this fix moved nothing: correct code on a path the call does not
+            // take. `TryRngCore`'s verbs are the natural API on the fallible `SysRng`.
+            || path.ends_with("::try_next_u32")
+            || path.ends_with("::try_next_u64")
             || path.ends_with("::thread_rng")
             || path.ends_with("::rng")
             || path.ends_with("::from_entropy")
