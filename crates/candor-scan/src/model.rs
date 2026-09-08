@@ -72,6 +72,17 @@ pub(crate) struct Call {
     /// adjudicates is reachable with a zero-length argument list under either spelling.
     #[serde(rename = "n", default, skip_serializing_if = "crate::model::is_zero_u8")]
     pub(crate) argc: u8,
+    /// SOUNDNESS R334 — an ARGUMENT of this call names the OS entropy source as a VALUE
+    /// (`StdRng::try_from_rng(&mut SysRng)`, `ReseedingRng::new(1024, OsRng)`). Recorded here rather
+    /// than decided in the collector because the collector does not know the callee's crate identity —
+    /// that is resolved in `scan.rs` — and because a boolean travelling with the call is the same shape
+    /// as `path_lits_partial` beside it: a fact read off the argument list at the only place it is
+    /// visible, adjudicated later.
+    ///
+    /// The callee is opaque by construction, which is the whole point: `from_rng(&mut pcg)` is
+    /// deterministic and `from_rng(&mut SysRng)` is an OS draw, and only the argument tells them apart.
+    #[serde(rename = "er", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) entropy_arg: bool,
 }
 
 pub(crate) fn is_zero_u8(n: &u8) -> bool {

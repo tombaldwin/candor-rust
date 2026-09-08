@@ -459,7 +459,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
             eprintln!("CTOR-MARK {} in {}", leaf, self.modpath);
         }
-        self.calls.push(Call { argc: 0,
+        self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{leaf}::{CONSTRUCT_MARKER}"),
             leaf: CONSTRUCT_MARKER.to_string(),
             str_arg: None,
@@ -507,7 +507,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
             eprintln!("CTOR-MARK-CROSS {cr}::{leaf} in {}", self.modpath);
         }
-        self.calls.push(Call { argc: 0,
+        self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{cr}::{DROP_MARKER}::{leaf}"),
             leaf: "drop".to_string(),
             str_arg: None,
@@ -919,7 +919,7 @@ impl<'a> CallCollector<'a> {
     fn charge_iter_next(&mut self, expr: &syn::Expr) {
         if let Some(ty_leaf) = self.iter_next_target(expr) {
             let path = format!("{ty_leaf}::next");
-            self.calls.push(Call { argc: 0,
+            self.calls.push(Call { argc: 0, entropy_arg: false,
                 path,
                 leaf: "next".to_string(),
                 str_arg: None,
@@ -939,7 +939,7 @@ impl<'a> CallCollector<'a> {
     /// like the iterator/lazy edges. The CALLER owns the resolve-or-skip gate (the type must be a concrete
     /// local `impl <trait>`), so this never fabricates.
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
-        self.calls.push(Call { argc: 0,
+        self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
             leaf: method.to_string(),
             str_arg: None,
@@ -999,7 +999,7 @@ impl<'a> CallCollector<'a> {
         // nothing, as today.
         let segs: Vec<&str> = ty.split("::").collect();
         if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
-            self.calls.push(Call { argc: 0,
+            self.calls.push(Call { argc: 0, entropy_arg: false,
                 path: format!("{}::{}::{}", segs[0], ty_leaf, method),
                 leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
@@ -1369,7 +1369,7 @@ impl<'a> CallCollector<'a> {
         match self.trait_impls.get(tr) {
             Some(impls) if impls.len() <= 12 => {
                 for ty in impls {
-                    self.calls.push(Call { argc: 0,
+                    self.calls.push(Call { argc: 0, entropy_arg: false,
                         path: format!("{ty}::{leaf}"),
                         leaf: leaf.to_string(),
                         str_arg: str_arg.clone(),
@@ -2205,7 +2205,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if let Some(ts) = &aliased {
                             for extra in ts.iter().skip(1) {
                                 let leaf2 = extra.rsplit("::").next().unwrap_or(extra).to_string();
-                                self.calls.push(Call { argc: 0, path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                                self.calls.push(Call { argc: 0, entropy_arg: false, path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                             }
                         }
                         let mut path = aliased
@@ -2297,6 +2297,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // consumer normalize. Saturating: 255 arguments is not a signature anyone is
                         // adjudicating, and a wrap would read as the sentinel.
                         self.calls.push(Call { argc: node.args.len().min(255) as u8,
+                                               entropy_arg: args_name_entropy_source(&node.args),
                                                path, leaf, str_arg, typed: false, method,
                                                is_macro: false, path_lits_partial, path_lit2 });
                     }
@@ -2360,7 +2361,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.charge_coercion(&node.receiver, "Read", "read");
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { argc: 0, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
+        self.calls.push(Call { argc: 0, entropy_arg: false, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
         // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver is a local bound from
         // a cross-crate call whose return type we never learned — `let c = deplib::build(); c.fetch()`.
         // No key is formed, so no question is asked of the chained report, so its silence licenses
@@ -2412,7 +2413,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // a callee path is not, so splitting from the FRONT (as the reverted attempt did)
                 // truncates every non-root factory to its first module segment.
                 let (root, rest) = callee_path.split_once("::").unwrap_or((callee_path.as_str(), ""));
-                self.calls.push(Call { argc: 0,
+                self.calls.push(Call { argc: 0, entropy_arg: false,
                     path: format!("{root}::<untyped>::{rest}::{leaf}"),
                     leaf: leaf.clone(),
                     str_arg: None,
@@ -2492,6 +2493,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // count is already the non-receiver arity; `method: true` records which convention it
                 // was written in so the consumer does not have to guess.
                 self.calls.push(Call { argc: node.args.len().min(255) as u8,
+                                       entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
                                        is_macro: false, path_lits_partial: false, path_lit2: None });
             }
@@ -2552,7 +2554,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     let full = crate::lang::expand(written, &self.uses);
                     let root = full.split("::").next().unwrap_or("");
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
-                        self.calls.push(Call { argc: 0,
+                        self.calls.push(Call { argc: 0, entropy_arg: false,
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: str_arg.clone(),
@@ -2612,7 +2614,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }) {
                             if impls.len() <= 12 {
                                 for ty in impls {
-                                    self.calls.push(Call { argc: 0,
+                                    self.calls.push(Call { argc: 0, entropy_arg: false,
                                         path: format!("{ty}::{leaf}"),
                                         leaf: leaf.clone(),
                                         str_arg: str_arg.clone(),
@@ -2737,7 +2739,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             let paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
                             for path in paths {
                                 let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                                self.calls.push(Call { argc: 0, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                                self.calls.push(Call { argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                             }
                             if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                 eprintln!("R271ADAPT");
@@ -3099,7 +3101,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !locally_bound && !self.lazy_statics.contains(&name)
                         && self.forced_lazies.insert(format!("{cr}\u{0}{key}"))
                     {
-                        self.calls.push(Call { argc: 0,
+                        self.calls.push(Call { argc: 0, entropy_arg: false,
                             path: format!("{cr}::{LAZY_UNIT_PREFIX}::{key}"),
                             leaf: name.clone(), str_arg: None,
                             typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
@@ -3142,7 +3144,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let qual = lazy_qual(&mp, &name);
                         // Not a macro/typed/method.
                         if self.forced_lazies.insert(qual.clone()) {
-                            self.calls.push(Call { argc: 0, path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            self.calls.push(Call { argc: 0, entropy_arg: false, path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                         }
                     }
                 }
@@ -3972,7 +3974,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         if mpath.contains("::") {
-            self.calls.push(Call { argc: 0, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
+            self.calls.push(Call { argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
                             path_lits_partial: false, path_lit2: None,
                         });
         }

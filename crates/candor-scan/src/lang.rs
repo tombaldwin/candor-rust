@@ -1418,6 +1418,49 @@ fn root_glob(uses: &HashMap<String, String>) -> Option<&str> {
     Some(first)
 }
 
+/// SOUNDNESS R334 — does any ARGUMENT of this call name the OS entropy source as a VALUE?
+///
+/// The counterpart to `positional_str_lit` above, and deliberately its opposite in one respect: that
+/// helper reads a KNOWN position because a literal anywhere in the list was the wrong answer for a
+/// security gate. Here the whole list is read, because the entropy source has no fixed position —
+/// `StdRng::try_from_rng(&mut SysRng)` puts it at 0 and `ReseedingRng::new(1024, OsRng)` at 1 — and
+/// unlike a path literal, its presence ANYWHERE in the arguments is the fact worth recording. The
+/// hazard `positional_str_lit` exists to stop does not apply: no argument here can be mistaken for a
+/// different argument's meaning, since the only thing being asked is "is the OS RNG in this list".
+///
+/// Recursive on purpose: the source arrives wrapped. `&mut SysRng` is a `Reference`, `&mut *r` adds a
+/// `Unary`, a fully-qualified `rand::rngs::OsRng` is a longer `Path`, and `SysRng::default()` is a
+/// `Call` whose own callee path names it. A match on the bare `Expr::Path` arm alone would see the
+/// first of those and miss the rest — which is the shape of defect this register keeps recording as
+/// "correct code on a path the failing case never takes".
+pub(crate) fn args_name_entropy_source(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> bool {
+    struct Seek(bool);
+    impl<'ast> syn::visit::Visit<'ast> for Seek {
+        fn visit_path(&mut self, p: &'ast syn::Path) {
+            if p.segments.iter().any(|seg| {
+                candor_classify::is_entropy_source_ident(&seg.ident.to_string())
+            }) {
+                self.0 = true;
+            }
+            syn::visit::visit_path(self, p);
+        }
+    }
+    let mut seek = Seek(false);
+    for a in args {
+        syn::visit::Visit::visit_expr(&mut seek, a);
+        if seek.0 {
+            // §E1 HIT COUNTER (`CANDOR_ALIAS_DEBUG`) for `bin/corpus-ab.py --mark`.
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R334ENTROPYARG");
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// ⟨0.29⟩ The string literal at ARGUMENT POSITION `idx`, or None when that argument is anything else.
 ///
 /// It REPLACES `first_str_lit`, which scanned the whole list and returned the first literal it found —

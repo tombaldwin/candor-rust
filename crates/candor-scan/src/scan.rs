@@ -1949,6 +1949,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .iter()
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
+            // SOUNDNESS R334 — THE OS ENTROPY SOURCE PASSED AS AN ARGUMENT, decided at the TOP of this
+            // loop and deliberately BEFORE every `continue` below.
+            //
+            // Every other entropy rule keys on the CALLEE, so `StdRng::try_from_rng(&mut SysRng)` — the
+            // idiomatic way to seed a userspace CSPRNG from the OS (quinn-proto `endpoint.rs:81`) —
+            // matched nothing and read pure, in the OLD `OsRng` spelling as well as the new one. The
+            // callee cannot be charged instead: `from_rng(&mut pcg)` is deterministic and the
+            // deterministic population is the larger one (802 `from_seed`/`seed_from_u64` sites in the
+            // local registry), so charging the verb would be R330's mistake one crate over. Only the
+            // argument separates them.
+            //
+            // POSITION IS THE FIX, not the rule. Placed beside the other second effects further down,
+            // this was measured as INERT: the flag reached the loop with the right path
+            // (`rand::rngs::StdRng::try_from_rng`) and the body never ran, because a dependency call
+            // that resolves through `deps_idx` `continue`s long before it. Correct code on a path the
+            // failing case never takes — the third time in two days — and only a probe at this loop's
+            // entry showed it. The fact is a property of the ARGUMENT LIST alone, so it belongs where
+            // nothing can skip it.
+            //
+            // Unguarded by `suppress_bare_leaf`/`local_is_authoritative` (which are not yet computed
+            // here) and that is correct rather than convenient: if the callee is a LOCAL function its
+            // own effects propagate anyway, and handing the OS entropy source to it is worth charging
+            // at the hand-off — the only point where candor can see the value at all.
+            if c.entropy_arg {
+                direct.entry(f.qual.clone()).or_default().insert("Rand");
+            }
             // ── R105 — A `#[cfg]`-DUPLICATED ALIAS, ADJUDICATED WHERE THE LEAF IS KNOWN ────────────────
             // `decls::record_alias` keeps EVERY arm of an alias whose declaration is duplicated across
             // `#[cfg]` branches (the ordinary platform/feature shim) instead of letting the last one in
