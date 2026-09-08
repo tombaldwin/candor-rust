@@ -6843,6 +6843,41 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_native_tls_identity_wrappers_are_charged_and_their_siblings_are_not() {
+        // SOUNDNESS R337 — candor charges `native_tls::Identity::from_pkcs8`/`from_pkcs12` `Fs`
+        // because on the security-framework backend they create a real `tempfile::TempDir` and write a
+        // keychain into it (`native-tls-0.2.18/src/imp/security_framework.rs:93` and `:167`). But
+        // candor classifies the call a CONSUMER writes, not the dependency body behind it — so the
+        // idiomatic wrappers matched nothing, and in a CALIBRATED crate an unmatched path is a claim of
+        // reviewed purity with NO disclosure. A call taking only bytes writes a file on macOS, silently.
+        //
+        // The SIBLINGS are in the same fixture on purpose: they are why the suffixes are narrow, and a
+        // test without them passes for a rule that charges every `from_pem` in either crate.
+        // `reqwest::tls::Identity::from_pem` is rustls-only, a `Cursor` over a buffer (tls.rs:373);
+        // lettre's `Certificate::from_der`/`from_pem` reach `native_tls::Certificate::*`, which imports
+        // items with no keychain and no temp dir (security_framework.rs:206,212).
+        let src = "\
+pub fn rq_pkcs12(d: &[u8]) { let _ = reqwest::tls::Identity::from_pkcs12_der(d, \"p\"); }\n\
+pub fn rq_pkcs8(p: &[u8], k: &[u8]) { let _ = reqwest::tls::Identity::from_pkcs8_pem(p, k); }\n\
+pub fn le_identity(p: &[u8], k: &[u8]) { let _ = lettre::transport::smtp::client::tls::Identity::from_pem(p, k); }\n\
+pub fn rq_pem(b: &[u8]) { let _ = reqwest::tls::Identity::from_pem(b); }\n\
+pub fn rq_cert(d: &[u8]) { let _ = reqwest::tls::Certificate::from_der(d); }\n\
+pub fn le_cert_pem(p: &[u8]) { let _ = lettre::transport::smtp::client::tls::Certificate::from_pem(p); }\n";
+        let v = scan_fixture("r337tlswrap", src);
+
+        for f in ["rq_pkcs12", "rq_pkcs8", "le_identity"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} reaches native_tls's Identity import, which writes a temporary keychain \
+                        on macOS, and must charge Fs:\n{v:#}");
+        }
+        for f in ["rq_pem", "rq_cert", "le_cert_pem"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} parses bytes in memory and must stay pure — it is the control that keeps the \
+                     suffixes narrow:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_fallible_draw_verbs_charge_under_both_rule_blocks() {
         // SOUNDNESS R333, and this test exists because `bin/assert-audit.sh` flagged its fix commit
         // (`e414faf`) as asserting a safety property with no test in the range — correctly. The fix

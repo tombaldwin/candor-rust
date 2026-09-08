@@ -896,6 +896,33 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // selectively re-exported), so `PoolClient` is unreachable from outside the crate; the real
         // HTTP/3 dispatch a consumer can actually reach is the already-covered `::send`/`::execute`.
         // Removed from open.tsv rather than guessed.
+        // SOUNDNESS R337 — THE WRAPPER, not the wrapped. candor already charges
+        // `native_tls_crate::Identity::from_pkcs8`/`from_pkcs12` `Fs` (the clause below), and the reason
+        // it does is concrete rather than defensive: on the security-framework backend those create a
+        // real `tempfile::TempDir` and write a keychain into it —
+        // `native-tls-0.2.18/src/imp/security_framework.rs:93` (`identity.keychain`, `from_pkcs8`) and
+        // `:167` (`tmp.keychain`, `from_pkcs12`). But candor classifies the call a CONSUMER writes, not
+        // the dependency body behind it, so a consumer who reaches that code through its idiomatic
+        // wrapper matched no rule at all — and in a CALIBRATED crate an unmatched path is a claim of
+        // reviewed purity with no disclosure. A call taking only BYTES writes a file on macOS, and it
+        // read pure.
+        //
+        // Swept for the CLASS rather than the two rows the coverage gate handed me: every caller of
+        // `native_tls{,_crate}::Identity::from_pkcs8|from_pkcs12` in the local registry is reqwest
+        // (0.11/0.12/0.13, all three spelling these the same way), lettre, and `tcp_stream` — which is
+        // NOT calibrated, so its calls disclose rather than claim purity and it needs no rule.
+        //
+        // Suffix-matched, not exact-path, because all three reqwest majors carry the same names; and
+        // narrow on purpose. The SIBLINGS are the fabrication control and they must stay pure:
+        // `reqwest::tls::Identity::from_pem` is rustls-only, a `Cursor` over a buffer (tls.rs:373), and
+        // lettre's `Certificate::from_der`/`from_pem` reach `native_tls::Certificate::*`, which imports
+        // items with no keychain and no temp dir (security_framework.rs:206,212).
+        if crate_name == "reqwest"
+            && (path.ends_with("::Identity::from_pkcs12_der")
+                || path.ends_with("::Identity::from_pkcs8_pem"))
+        {
+            return Some("Fs");
+        }
         if crate_name == "reqwest" && path.ends_with("::Part::file") {
             return Some("Fs");
         }
@@ -1117,6 +1144,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "lettre" {
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
+        }
+        // SOUNDNESS R337 — lettre's half of the same wrapper gap. `Identity::from_pem(pem, key)`
+        // (transport/smtp/client/tls.rs:749) is `native_tls::Identity::from_pkcs8(pem, key)`, which on
+        // macOS writes a temporary keychain. The `::Identity::` in the suffix is load-bearing: the
+        // `Certificate::from_pem` twenty lines above it (`:676`) is in-memory and must stay pure, and a
+        // bare `::from_pem` would charge both.
+        if path.ends_with("::Identity::from_pem") {
+            return Some("Fs");
         }
         if path == "lettre::TlsParametersBuilder::build"
             || path == "lettre::transport::smtp::client::TlsParametersBuilder::build"
