@@ -2633,6 +2633,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     d.insert("Llm");
                     d.insert("Net");
                 }
+                // SOUNDNESS R338 — the same SECOND-EFFECT shape, for the trust-store read a calibrated
+                // crate performs inside its own public entry point. `classify` returns ONE effect, so
+                // `tungstenite::client_tls` resolving to `Net` would DROP the `Fs` it also does — the
+                // identical drop the Llm block above exists to prevent, which is why this sits beside
+                // it and carries the same guards rather than becoming a second mechanism.
+                if !suppress_bare_leaf
+                    && !local_is_authoritative
+                    && candor_classify::reads_trust_store(cr_real, &path_real)
+                {
+                    direct.entry(f.qual.clone()).or_default().insert("Fs");
+                }
                 // A host-ESTABLISHING Net / program-NAMING Exec call with NO captured literal → the endpoint
                 // is invisible to the gate (a runtime value). Mark the surface incomplete so a benign captured
                 // literal can't certify it (the masking evasion). Establishing-allowlist via the SHARED

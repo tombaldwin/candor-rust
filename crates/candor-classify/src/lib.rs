@@ -3332,6 +3332,43 @@ pub fn is_fs_path_arg(leaf: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R338 — DOES THIS CALL ALSO READ THE SYSTEM TRUST STORE? A SECOND effect, not a
+/// replacement for the one `classify` returns.
+///
+/// **THE DEFECT.** candor charges `native_tls::TlsConnector::new` `Fs` because on the openssl backend
+/// it loads the probed cert file/dir from disk. Several calibrated crates construct that connector
+/// INSIDE a public entry point, so the consumer's call discloses the transport effect and drops the
+/// `Fs` — `tungstenite::client_tls` reports `['Net']`, and `deny Fs` passes over a real trust-store
+/// read. `wrap_stream` does `tls_connector.map_or_else(TlsConnector::new, Ok)`
+/// (`tungstenite-0.30.0/src/tls.rs:54`), so a caller supplying no connector gets `TlsConnector::new()`.
+/// (The row the coverage gate nominated — `tungstenite::tls::encryption::native_tls::wrap_stream` — is
+/// unreachable from outside: `mod tls;` is private at `lib.rs:32`. The reachable form is one level up.)
+///
+/// **WHY THIS IS SO SHORT: the sweep found four more crates and every one was PRICED AND REJECTED,
+/// which is the deliverable rather than a gap.** Callers of `native_tls::TlsConnector::new` in the
+/// local registry are redis, tungstenite, ureq, minreq and tokio-websockets.
+///   - `minreq`, `tokio_websockets` — NOT calibrated, so their calls already disclose rather than
+///     claim purity. No rule can improve them.
+///   - `redis` — `ActualConnection::new` (`redis-1.6.0/src/connection.rs:932`) constructs it only for a
+///     `rediss://` address, and the consumer-visible verb is `Client::get_connection`. Charging that
+///     `Fs` would fabricate on every PLAIN redis user, which is the majority. Rejected on the trade.
+///   - `ureq` — `agent.rs:265` takes `crate::default_tls_config()`, and ureq's default features are
+///     `["tls", "gzip"]`: `native-certs` is OFF, so the default build resolves to
+///     `rtls::root_certs()`'s `#[cfg(not(feature = "native-certs"))]` arm, which is
+///     `webpki_roots::TLS_SERVER_ROOTS` — COMPILED IN, no disk read (`ureq-2.12.1/src/rtls.rs:82`).
+///     Charging it would fabricate on the default build. Rejected on the evidence.
+///
+/// What is left is tungstenite's two explicitly-TLS-named entry points, where no caller is
+/// over-charged: `client_tls` passes `None` for the connector unconditionally, and
+/// `client_tls_with_config`'s callers are by definition doing TLS. **`tungstenite::connect` is a stated
+/// residual, not an oversight** — it serves `ws://` and `wss://` alike, so charging it would hit real
+/// plain-WebSocket users; the scheme is often a string literal candor already captures in `str_arg`,
+/// which is the shape a future fix should use rather than a blanket charge.
+pub fn reads_trust_store(crate_name: &str, path: &str) -> bool {
+    crate_name == "tungstenite"
+        && (path.ends_with("::client_tls") || path.ends_with("::client_tls_with_config"))
+}
+
 /// SOUNDNESS R330 — IS THIS `hash_password` CALL PROVABLY THE EXPLICIT-SALT ONE (password-hash 0.5.x)?
 ///
 /// **THE DEFECT THIS EXISTS FOR, and it was mine, introduced by R318's fix the previous day.** R318

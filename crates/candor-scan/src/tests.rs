@@ -6843,6 +6843,43 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn a_tls_entry_point_keeps_its_transport_effect_and_gains_the_trust_store_read() {
+        // SOUNDNESS R338 — `classify` returns ONE effect, so `tungstenite::client_tls` resolving to
+        // `Net` DROPPED the `Fs` it also performs: `wrap_stream` does
+        // `tls_connector.map_or_else(TlsConnector::new, Ok)` (tungstenite-0.30.0/src/tls.rs:54), and
+        // `native_tls::TlsConnector::new` loads the probed cert file/dir from disk. A `deny Fs` gate
+        // passed over a real trust-store read.
+        //
+        // BOTH effects are asserted, not just the new one. A second-effect mechanism that REPLACES
+        // rather than adds is the exact gate evasion the Llm block beside it exists to prevent, and it
+        // would look like a pass here if only `Fs` were checked.
+        //
+        // The plain entry points are the fabrication control and they matter more than usual, because
+        // the reason `connect` is NOT charged is a deliberate pricing decision recorded in
+        // `reads_trust_store`: it serves ws:// and wss:// alike, so charging it would hit real
+        // plain-WebSocket users.
+        let src = "\
+pub fn tls_client(u: tungstenite::handshake::client::Request, s: std::net::TcpStream) { let _ = tungstenite::client_tls(u, s); }\n\
+pub fn tls_client_cfg(u: tungstenite::handshake::client::Request, s: std::net::TcpStream) { let _ = tungstenite::client_tls_with_config(u, s, None, None); }\n\
+pub fn ws_connect(u: &str) { let _ = tungstenite::connect(u); }\n\
+pub fn ws_client(u: tungstenite::handshake::client::Request, s: std::net::TcpStream) { let _ = tungstenite::client(u, s); }\n";
+        let v = scan_fixture("r338trust", src);
+
+        for f in ["tls_client", "tls_client_cfg"] {
+            let mut got = fixture_effects(&v, f);
+            got.sort();
+            assert_eq!(got, vec!["Fs".to_string(), "Net".to_string()],
+                       "{f} dials a socket AND reads the system trust store — the second effect must \
+                        be ADDED to the transport one, never replace it:\n{v:#}");
+        }
+        for f in ["ws_connect", "ws_client"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Net".to_string()],
+                       "{f} serves plain WebSocket too and is deliberately NOT charged Fs — see the \
+                        pricing recorded in reads_trust_store:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_native_tls_identity_wrappers_are_charged_and_their_siblings_are_not() {
         // SOUNDNESS R337 — candor charges `native_tls::Identity::from_pkcs8`/`from_pkcs12` `Fs`
         // because on the security-framework backend they create a real `tempfile::TempDir` and write a
