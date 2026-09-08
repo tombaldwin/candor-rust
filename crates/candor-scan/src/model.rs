@@ -52,6 +52,30 @@ pub(crate) struct Call {
     /// `allow Fs /tmp/lit` exited 0 while writing `/tmp/dst`. candor-java and candor-swift publish both.
     #[serde(rename = "p2", default, skip_serializing_if = "Option::is_none")]
     pub(crate) path_lit2: Option<String>,
+    /// SOUNDNESS R330 — HOW MANY ARGUMENTS THE CALL WAS WRITTEN WITH, receiver excluded for a method
+    /// call and INCLUDED for the UFCS spelling (that is simply what `syn` hands each visitor; the
+    /// `method` flag beside this field is what tells the two apart, and the consumer normalizes).
+    ///
+    /// **THE DEFECT THIS EXISTS FOR.** `PasswordHasher::hash_password` is ONE name with two
+    /// signatures: at password-hash 0.5.0 (`traits.rs:33`) it is `(&self, password, salt)` — the caller
+    /// supplies the salt, so it is deterministic recomputation and correctly PURE — and at 0.6.1
+    /// (`lib.rs:107`) it is `(&self, password)`, whose body is `try_generate_salt()?`, an OS entropy
+    /// draw. A rule keyed on the PATH cannot tell them apart, because the path is identical; keying on
+    /// the resolved version could, but only where a lockfile is present. The arity is written at the
+    /// call site and needs nothing else.
+    ///
+    /// **0 means NOT RECORDED**, not "no arguments" — most of the edges this scanner synthesizes
+    /// (macro edges, builder edges, construction markers) have no argument list of their own, and a
+    /// cache written before this field existed deserializes to 0. That sentinel is only sound because
+    /// no consumer may read it as a real count: `password_hash_mints_salt` treats 0 as unknown and
+    /// charges anyway, which is the under-report-safe direction, and neither of the two signatures it
+    /// adjudicates is reachable with a zero-length argument list under either spelling.
+    #[serde(rename = "n", default, skip_serializing_if = "crate::model::is_zero_u8")]
+    pub(crate) argc: u8,
+}
+
+pub(crate) fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.

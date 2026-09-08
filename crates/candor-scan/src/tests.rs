@@ -6843,6 +6843,71 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn hash_password_is_told_apart_by_arity_not_by_name() {
+        // SOUNDNESS R330 — `PasswordHasher::hash_password` is ONE name with TWO signatures, and the
+        // fix I shipped for R318 the previous day charged both. password-hash 0.5.0 `traits.rs:33` and
+        // argon2 0.5.3 `lib.rs:572`: `(&self, password, salt)` — the caller supplies the salt, so the
+        // call is deterministic recomputation and PURE. password-hash 0.6.1 `lib.rs:107`:
+        // `(&self, password)`, body `let salt = try_generate_salt()?;` — an OS entropy draw.
+        //
+        // BOTH DIRECTIONS ARE ASSERTED IN ONE FIXTURE ON PURPOSE. The charging half is what R318
+        // bought and is the cardinal-sin direction; the pure half is what R330 gives back. A test for
+        // either alone passes for a scanner that has simply stopped adjudicating this family — which is
+        // exactly the failure that let R318's own fix ship with a fabrication in it.
+        let src = "\
+use argon2::Argon2;\n\
+use password_hash::{PasswordHasher, SaltString};\n\
+pub fn v05_method(a: &Argon2, pw: &[u8], salt: &SaltString) { let _ = a.hash_password(pw, salt); }\n\
+pub fn v05_ufcs(a: &Argon2, pw: &[u8], salt: &SaltString) { let _ = PasswordHasher::hash_password(a, pw, salt); }\n\
+pub fn v06_method(a: &Argon2, pw: &[u8]) { let _ = a.hash_password(pw); }\n\
+pub fn v06_ufcs(a: &Argon2, pw: &[u8]) { let _ = PasswordHasher::hash_password(a, pw); }\n\
+pub fn with_rng(a: &Argon2, r: &mut u8, pw: &[u8]) { let _ = a.hash_password_with_rng(r, pw); }\n\
+pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_with_salt(pw, salt); }\n";
+        let v = scan_fixture("r330arity", src);
+
+        // 0.6.x — one non-receiver argument. MUST charge; this is the R318 finding and it must survive.
+        for f in ["v06_method", "v06_ufcs"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Rand".to_string()],
+                       "{f} mints its own salt (`try_generate_salt`) and must charge Rand:\n{v:#}");
+        }
+        // …and the caller's-RNG verb, which is unambiguous in both versions.
+        assert_eq!(fixture_effects(&v, "with_rng"), vec!["Rand".to_string()],
+                   "hash_password_with_rng draws from the caller's RNG:\n{v:#}");
+
+        // 0.5.x — two non-receiver arguments. MUST be pure, in BOTH spellings: `syn` gives a method
+        // call its args without the receiver and a UFCS call with it, so a refinement that normalized
+        // only one convention would leave the other fabricating.
+        for f in ["v05_method", "v05_ufcs", "with_salt"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} hashes with a caller-supplied salt — deterministic recomputation, no draw:\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn hash_password_charges_when_the_arity_was_never_recorded() {
+        // SOUNDNESS R330 — the direction of the `argc == 0` sentinel, asserted rather than assumed.
+        // Most edges this scanner synthesizes carry no argument list, and every cache entry written
+        // before `Call::argc` existed deserializes to 0. Unknown must charge: the refinement may only
+        // remove a fabrication, never create a silence. Without this the sentinel is a silent
+        // under-report waiting for the first synthesized edge into this family.
+        assert!(!candor_classify::password_hash_explicit_salt(
+                    "argon2", "argon2::Argon2::hash_password", 0, true),
+                "an UNRECORDED arity must leave the charge standing");
+        assert!(candor_classify::password_hash_explicit_salt(
+                    "argon2", "argon2::Argon2::hash_password", 2, true),
+                "a 2-argument method call is the 0.5.x explicit-salt signature");
+        assert!(!candor_classify::password_hash_explicit_salt(
+                    "argon2", "argon2::Argon2::hash_password", 1, true),
+                "a 1-argument method call is the 0.6.x salt-minting signature");
+        assert!(candor_classify::password_hash_explicit_salt(
+                    "password_hash", "password_hash::PasswordHasher::hash_password", 3, false),
+                "UFCS carries the receiver, so 3 args is the same 0.5.x signature");
+        assert!(!candor_classify::password_hash_explicit_salt(
+                    "bcrypt", "bcrypt::hash_password", 2, true),
+                "the refinement is scoped to the password-hash family and must not reach bcrypt");
+    }
+
+    #[test]
     fn calibration_exemption_stops_at_the_reviewed_version() {
         let body = "pub fn run(x: &sea_orm::DatabaseExecutor) -> u32 { let _ = x.transaction_async(); 0 }";
         let at = scan_fixture_lock("calceil_at", body, "sea-orm", "1.1.20");
@@ -11052,6 +11117,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev24 -> rev25 `Call` gained `argc`, the call-site arity (R330). A rev24 entry has no such
+    ///                 field, so it deserializes to 0 — the NOT-RECORDED sentinel — and every cached
+    ///                 `hash_password` in the password-hash family keeps the fabricated `Rand` the rev
+    ///                 exists to remove. This one degrades in the SAFE direction, which is exactly why
+    ///                 it needs the bump: a warm cache would replay the old answer while the source,
+    ///                 the tests and the fresh scan all say the fix landed.
     ///   rev23 -> rev24 an ANALYSIS change that feeds `fninfos`, not a field (R271). The expression
     ///                 WRAPPED around a callable is peeled by one shared authority now, so a rev23
     ///                 entry replays, warm, the silent under-report that row is: `getrandom`
@@ -11084,11 +11155,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R271 bumped the token to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R330 bumped the token to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -11099,7 +11170,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev24/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev25/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

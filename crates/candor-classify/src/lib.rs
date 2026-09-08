@@ -2056,6 +2056,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if path.contains("SaltString::generate")
             || path.ends_with("::generate_salt")
             || path.ends_with("::try_generate_salt")
+            // SOUNDNESS R330 — this suffix is a DEFAULT, refined by arity at the call site. `hash_password`
+            // is one name with two signatures (see `password_hash_explicit_salt` below), and the path
+            // cannot tell them apart. Charging here and NARROWING there is deliberate: a consumer that
+            // never consults the refinement keeps the over-report, never the silence.
             || path.ends_with("::hash_password")
             || path.ends_with("::hash_password_with_rng")
         {
@@ -3242,6 +3246,49 @@ pub fn is_fs_path_arg(leaf: &str) -> bool {
             | "create"
             | "create_new"
     )
+}
+
+/// SOUNDNESS R330 — IS THIS `hash_password` CALL PROVABLY THE EXPLICIT-SALT ONE (password-hash 0.5.x)?
+///
+/// **THE DEFECT THIS EXISTS FOR, and it was mine, introduced by R318's fix the previous day.** R318
+/// correctly found that `hash_password` mints OS entropy — at password-hash **0.6.x**, where
+/// `fn hash_password(&self, password)` (`lib.rs:107`) has the body `let salt = try_generate_salt()?;`.
+/// At **0.5.0** (`traits.rs:33`) and argon2 **0.5.3** (`lib.rs:572`) the identical name is
+/// `fn hash_password(&self, password, salt)`: the caller supplies the salt and the call is deterministic
+/// recomputation — PURE. So the `ends_with`-not-`contains` guard R318 relied on was keyed on the 0.6.x
+/// name, and at 0.5.x the explicit-salt call IS named `hash_password`. Measured: two calls with the same
+/// stored salt produce byte-identical hashes, and all four 0.5.x spellings were charged `Rand`.
+///
+/// **Why arity and not the resolved version.** R330's remedy offered both. The version is only knowable
+/// where a lockfile resolves, and `calibration_exceeded` is ONE-SIDED — it fires when resolved > ceiling,
+/// so it can never see a rule that mis-describes an OLDER release, which is exactly this direction. The
+/// arity is written at the call site, needs no lockfile, and distinguishes the two signatures exactly.
+///
+/// **The direction is stated so it cannot drift:** this returns true only for the shape it can PROVE is
+/// explicit-salt. An unrecorded arity (`argc == 0`, every synthesized edge and every pre-R330 cache
+/// entry) returns false and the call stays charged. Narrowing a sound over-approximation by DENYLIST,
+/// never by allowlist — the family rule.
+pub fn password_hash_explicit_salt(crate_name: &str, path: &str, argc: u8, method: bool) -> bool {
+    if !matches!(crate_name, "argon2" | "scrypt" | "pbkdf2" | "password_hash")
+        || !path.ends_with("::hash_password")
+    {
+        return false;
+    }
+    if argc == 0 {
+        return false; // NOT RECORDED — see `Call::argc`. Unknown charges.
+    }
+    // `syn` hands a method call its args WITHOUT the receiver and a UFCS `Trait::method(&recv, ..)`
+    // WITH it, so normalize to the non-receiver count before comparing: 0.5.x is `(password, salt)` = 2,
+    // 0.6.x is `(password)` = 1.
+    let non_receiver = if method { argc } else { argc - 1 };
+    let hit = non_receiver == 2;
+    // §E1 HIT COUNTER, the `CANDOR_ALIAS_DEBUG` pattern. A refinement that narrows a charge must be
+    // able to prove it REACHED real code, because "nothing moved" and "the branch never ran" print the
+    // same corpus A/B. This is what `bin/corpus-ab.py --mark` counts.
+    if hit && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        eprintln!("R330EXPLICITSALT {path} argc={argc} method={method}");
+    }
+    hit
 }
 
 /// ⟨0.29⟩ HOW MANY LEADING ARGUMENTS OF AN `Fs` PATH-TAKING CALL ARE PATHS.
