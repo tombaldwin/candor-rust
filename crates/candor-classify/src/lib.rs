@@ -3332,6 +3332,40 @@ pub fn is_fs_path_arg(leaf: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R334 — IS THIS PATH SEGMENT THE OS ENTROPY SOURCE ITSELF (as a VALUE, not a verb)?
+///
+/// **THE DEFECT THIS EXISTS FOR.** Every entropy rule in the `rand` block keys on the CALLEE — a verb
+/// (`from_os_rng`, `next_u32`, `fill_bytes`) or the source type in RECEIVER position
+/// (`contains("OsRng")`/`contains("SysRng")`, R320). The idiomatic way to seed a userspace CSPRNG from
+/// the OS puts the source in ARGUMENT position, where neither key can see it. Executed, one fixture,
+/// four rows:
+///
+/// ```text
+/// StdRng::try_from_rng(&mut SysRng)   ABSENT   quinn-proto-0.11.17 endpoint.rs:81
+/// StdRng::from_rng(&mut OsRng)        ABSENT   the same hole in the OLD spelling
+/// StdRng::from_seed([0u8; 32])        ABSENT   correct — deterministic, and the control
+/// StdRng::from_os_rng()               ['Rand'] the verb form
+/// ```
+///
+/// Both spellings, so this is NOT a rename residual and predates R320 — whose "stale `OsRng` clause"
+/// framing would have sent the audit straight past it.
+///
+/// **WHY THE ARGUMENT AND NOT THE VERB.** `from_rng`/`try_from_rng` cannot simply be charged: their
+/// effect is decided by what is passed to them, `from_rng(&mut pcg)` is deterministic, and there are
+/// 802 `from_seed`/`seed_from_u64` call sites in this machine's registry cache — the deterministic
+/// population is the larger one. Charging the verb is R330's mistake one crate over. The discriminator
+/// is the ARGUMENT, so that is what is read.
+///
+/// **THE OVER-APPROXIMATION IS DELIBERATE AND STATED.** Naming one of these types as a VALUE is charged
+/// wherever it appears in an argument list, including moves that do not themselves draw (`Some(OsRng)`,
+/// `Box::new(SysRng)`). That is sound and it is also the ONLY place candor can see it: a source handed
+/// off into a struct field is drawn from in some later function whose own call list never mentions it.
+/// A user type coincidentally named `OsRng` would be charged too — an over-report, the safe direction,
+/// and cheaper than the silence it replaces.
+pub fn is_entropy_source_ident(seg: &str) -> bool {
+    matches!(seg, "OsRng" | "SysRng")
+}
+
 /// SOUNDNESS R338 — DOES THIS CALL ALSO READ THE SYSTEM TRUST STORE? A SECOND effect, not a
 /// replacement for the one `classify` returns.
 ///

@@ -6843,6 +6843,49 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_os_entropy_source_is_charged_when_it_is_handed_over_as_an_argument() {
+        // SOUNDNESS R334 — every other entropy rule keys on the CALLEE: a verb (`from_os_rng`,
+        // `next_u32`) or the source type as the RECEIVER (R320). The idiomatic way to seed a userspace
+        // CSPRNG from the OS puts the source in ARGUMENT position, where neither key can see it, and it
+        // read pure — `quinn-proto-0.11.17/src/endpoint.rs:81` is the real instance.
+        //
+        // The DETERMINISTIC controls are the whole reason this keys on the argument and not the verb:
+        // `from_rng(&mut pcg)` is reproducible, `from_seed` is reproducible, and there are 802
+        // `from_seed`/`seed_from_u64` call sites in this machine's registry cache — charging
+        // `from_rng` itself would be R330's mistake one crate over, on the larger population.
+        //
+        // Every WRAPPING the source arrives in is covered here on purpose, because the walk is
+        // recursive and a match on the bare path arm alone would pass the first row and fail the rest:
+        // a reference, a fully-qualified path, a non-zero argument position, and a constructor call.
+        let src = "\
+use rand::rngs::{OsRng, StdRng, SysRng};\n\
+use rand::SeedableRng;\n\
+pub fn seed_from_sys() { let _r = StdRng::try_from_rng(&mut SysRng); }\n\
+pub fn seed_from_os() { let _r = StdRng::from_rng(&mut OsRng); }\n\
+pub fn seed_qualified() { let _r = StdRng::from_rng(&mut rand::rngs::OsRng); }\n\
+pub fn reseeding() { let _r = rand::rngs::ReseedingRng::new(1024, SysRng); }\n\
+pub fn ctor_arg() { let _r = StdRng::from_rng(&mut SysRng::default()); }\n\
+pub fn seed_from_seed() { let _r = StdRng::from_seed([0u8; 32]); }\n\
+pub fn seed_from_pcg(p: &mut u8) { let _r = StdRng::from_rng(p); }\n\
+pub fn seed_os_verb() { let _r = StdRng::from_os_rng(); }\n";
+        let v = scan_fixture("r334entropyarg", src);
+
+        for f in ["seed_from_sys", "seed_from_os", "seed_qualified", "reseeding", "ctor_arg"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Rand".to_string()],
+                       "{f} hands the OS entropy source to an opaque callee and must charge Rand — \
+                        the argument is the only thing that distinguishes it from a seeded PRNG:\n{v:#}");
+        }
+        for f in ["seed_from_seed", "seed_from_pcg"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} seeds deterministically and must stay pure — this is the control that keeps \
+                     the rule off the verb and on the argument:\n{v:#}");
+        }
+        // …and the verb form must not have been traded away for the argument form.
+        assert_eq!(fixture_effects(&v, "seed_os_verb"), vec!["Rand".to_string()],
+                   "from_os_rng() is charged by the VERB and must still be:\n{v:#}");
+    }
+
+    #[test]
     fn a_tls_entry_point_keeps_its_transport_effect_and_gains_the_trust_store_read() {
         // SOUNDNESS R338 — `classify` returns ONE effect, so `tungstenite::client_tls` resolving to
         // `Net` DROPPED the `Fs` it also performs: `wrap_stream` does
@@ -11293,6 +11336,9 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev25 -> rev26 `Call` gained `entropy_arg` — an argument names the OS entropy source (R334).
+    ///                 A rev25 entry deserializes it as `false`: "no argument hands over the OS RNG",
+    ///                 which is exactly the silent purity claim the rev exists to remove, replayed warm.
     ///   rev24 -> rev25 `Call` gained `argc`, the call-site arity (R330). A rev24 entry has no such
     ///                 field, so it deserializes to 0 — the NOT-RECORDED sentinel — and every cached
     ///                 `hash_password` in the password-hash family keeps the fabricated `Rand` the rev
@@ -11331,11 +11377,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R330 bumped the token to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -11346,7 +11392,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev25/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev26/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
