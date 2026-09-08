@@ -6843,6 +6843,43 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_redis_sentinel_lookup_surface_is_charged_and_its_config_surface_is_not() {
+        // SOUNDNESS R335 — redis's `sentinel` module is how a client finds the current master in a
+        // failover deployment, and every lookup talks to the sentinel servers over TCP.
+        // `Sentinel::master_for` runs a `SENTINEL masters` round-trip and its own doc says it "will
+        // connect to the master node"; `get_sentinel_client` opens a client per address and issues
+        // `ROLE`. All twelve read as positive purity claims at redis 1.6.0 — the REVIEWED CEILING, so
+        // the calibration exemption applied and nothing disclosed.
+        //
+        // The rule is a DENYLIST and both halves are asserted here, because a denylist is only sound
+        // if its exempt set is right: charging the module and exempting nothing would fabricate on
+        // every builder, and that fabrication is what would get the rule narrowed back into the
+        // enumeration shape it was written to replace.
+        let src = "\
+use redis::sentinel::{Sentinel, SentinelClient};\n\
+pub fn recv_master(s: &mut Sentinel) { let _ = s.master_for(\"m\", None); }\n\
+pub fn recv_replica(s: &mut Sentinel) { let _ = s.replica_rotate_for(\"m\", None); }\n\
+pub fn recv_client(c: &mut SentinelClient) { let _ = c.get_sentinel_client(); }\n\
+pub fn qual_master(s: &mut Sentinel) { let _ = redis::sentinel::Sentinel::master_for(s, \"m\", None); }\n\
+pub fn cfg_build(p: Vec<String>) { let _ = Sentinel::build(p); }\n\
+pub fn cfg_set(i: redis::sentinel::SentinelNodeConnectionInfo) { let _ = i.set_tcp_settings(); }\n";
+        let v = scan_fixture_lock("r335sentinel", src, "redis", "1.6.0");
+
+        // The lookup surface, in BOTH spellings — a real consumer writes the receiver-typed one, and
+        // a rule verified only through the fully-qualified path would miss every real call site.
+        for f in ["recv_master", "recv_replica", "recv_client", "qual_master"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Db".to_string()],
+                       "{f} performs a sentinel round-trip and must charge Db:\n{v:#}");
+        }
+        // The config surface. `Sentinel::build` only parses URLs through `into_connection_info`, and
+        // the `set_*` family assembles a struct — no socket in either.
+        for f in ["cfg_build", "cfg_set"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} is in-memory configuration and must stay pure:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_os_entropy_source_keeps_its_safety_margin_under_its_new_name() {
         // SOUNDNESS R320 — rand 0.10 renamed the OS entropy source `OsRng` -> `SysRng` and moved it
         // into `getrandom`, re-exported as `rand::rngs::SysRng`. candor resolves the crate from the

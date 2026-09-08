@@ -1594,6 +1594,38 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // connection establishment. The shared VERBS below only catch the low-level
         // `cmd("GET").query(con)`, so without this a normal redis user's calls classify as
         // PURE. (Found hardening on redis-rs: a fn doing `con.get`/`set` reported no effects.)
+        // SOUNDNESS R335 — the SENTINEL module, which the rules above reach only by accident. redis's
+        // `sentinel` surface is how a client finds the current master in a failover deployment, and
+        // every lookup TALKS TO THE SENTINEL SERVERS: `Sentinel::master_for` runs
+        // `find_master_address` (a `SENTINEL masters` round-trip) and its own doc says "this will
+        // connect to the master node to verify that it considers itself master"; `get_sentinel_client`
+        // opens a client per address and issues `ROLE` until one answers. Measured on redis 1.6.0 —
+        // which is this crate's REVIEWED CEILING, so the calibration exemption applied and every one of
+        // them read as a positive purity claim, in both the receiver-typed and UFCS spellings.
+        //
+        // A DENYLIST, not the enumeration the surrounding rules use, and that is the point. The
+        // enumerate-the-connecting-verbs shape is what goes stale: a release that ADDS a lookup verb
+        // adds a SILENCE, the cardinal direction. Inverted, the whole module is `Db` except its
+        // config surface, so a new verb is charged by default and only a new PURE verb costs a
+        // fabrication. The exempt set is not guessed: every `pub fn` leaf in redis-1.6.0/src/sentinel.rs
+        // is one of 33 names, and `build` / `new` / `set_*` are exactly the ones that touch no socket
+        // (`Sentinel::build` parses URLs via `into_connection_info`; `SentinelClientBuilder::build`
+        // assembles a config struct). The `contains("::Sentinel")` arm is not the loose match R321
+        // punished: the module's ENTIRE public surface was enumerated before writing it, and no item
+        // named `Sentinel*` exists anywhere else in the crate, nor any of these verb names.
+        if crate_name == "redis"
+            && (path.starts_with("redis::sentinel::") || path.contains("::Sentinel"))
+        {
+            let m = path.rsplit("::").next().unwrap_or(path);
+            if m == "build" || m == "new" || m.starts_with("set_") {
+                return None;
+            }
+            // §E1 HIT COUNTER (`CANDOR_ALIAS_DEBUG`) for `bin/corpus-ab.py --mark`.
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R335SENTINEL {path}");
+            }
+            return Some("Db");
+        }
         if crate_name == "redis"
             && (path.contains("Commands::")
                 // THE COVERAGE-GATE SWEEP (2026-08-27), a pre-existing over-report found in passing:
