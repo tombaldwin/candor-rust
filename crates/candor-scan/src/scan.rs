@@ -2194,7 +2194,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // into a curated model-provider client → `Llm` + `Net` (Net is never dropped — a model call IS
             // network I/O). No method gating (single-purpose clients), the analog of java's isModelSdkOwner.
             let model_sdk = c.path.contains("::") && candor_classify::is_model_sdk_crate(cr_real);
+            // SOUNDNESS R330 — the ONE arity-keyed refinement, applied where the argument count is in
+            // hand. `classify` charges `::hash_password` unconditionally because the PATH cannot tell
+            // password-hash 0.5.x's `(password, salt)` from 0.6.x's `(password)`; this narrows that
+            // charge, and only for the shape it can prove is the explicit-salt one. Direction: the
+            // refinement can only REMOVE a fabricated `Rand`, never create a silence — an unrecorded
+            // arity leaves the charge standing, which is why `Call::argc`'s 0 sentinel is safe.
+            let explicit_salt =
+                candor_classify::password_hash_explicit_salt(cr_real, &path_real, c.argc, c.method);
             let classified = candor_classify::classify(cr_real, &path_real)
+                .filter(|_| !explicit_salt)
                 .or_else(|| scan_builder_entry_effect(cr_real, &path_real))
                 .or(if model_sdk { Some("Llm") } else { None });
             // DROP-GLUE detection, ONE route. A `Type::<construct>` marker says the collector saw this

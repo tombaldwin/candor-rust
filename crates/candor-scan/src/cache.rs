@@ -44,6 +44,13 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev25: `Call` gained `argc`, the arity written at the call site (SOUNDNESS R330). A rev24 entry
+    // has no such field and deserializes to 0 — the "NOT RECORDED" sentinel — so every cached call in
+    // the password-hash family would keep the fabricated `Rand` this rev exists to remove, served from a
+    // warm cache and looking exactly like a fix that does not work. The direction is the safe one, which
+    // is why it needs the bump rather than being caught: a stale entry here degrades SILENTLY into the
+    // old answer, and the previous evening produced three separate cases of correct code on a path the
+    // failing case never takes. Discard rev24 wholesale rather than trust the default.
     // rev24: an ANALYSIS change that feeds `fninfos`, not a field (SOUNDNESS R271). The expression
     // WRAPPED around a callable is now peeled by one shared authority, so `v.retain(match 0 { _ =>
     // local_eff })` and `let g = unsafe { fptr }; g(..)` reach the callee instead of dropping it, and a
@@ -134,7 +141,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev24/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev25/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
