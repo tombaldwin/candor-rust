@@ -6993,6 +6993,74 @@ pub fn es_ctype(r: &elasticsearch::http::response::Response) { let _ = r.content
     }
 
     #[test]
+    fn a_bare_function_scope_that_binds_more_than_one_says_so() {
+        // SOUNDNESS R301 — §6.2 scope matching is a PREFIX match, which is the documented behaviour and
+        // is NOT changed here. What was wrong is that it was INVISIBLE: an UNBOUND rule announces
+        // itself (`matched NO function`), and an OVER-bound one announced nothing and looked exactly
+        // like a rule that bound the single function its author named. `deny Fs either` also binds
+        // `either_ifelse` and `either_match`, so a red gate under it is not evidence about `either` —
+        // and both matrix agents on 2026-09-07 were caught by exactly that, each noticing only because
+        // an unrelated control disagreed.
+        //
+        // THE TWO QUIET CASES ARE THE POINT. A disclosure that fires on every real policy gets ignored,
+        // so a scope binding exactly one stays silent, and a LAYER scope (`::`) — which is MEANT to bind
+        // many — stays silent too. Without those, this is noise rather than a signal.
+        let src = "pub fn either() {}\n\
+pub fn either_ifelse() { let _ = std::fs::read(\"a\"); }\n\
+pub fn either_match() { let _ = std::fs::read(\"b\"); }\n";
+        let v = scan_fixture("r301prefix", src);
+        // the fixture itself must be the shape the row describes
+        assert_eq!(fixture_effects(&v, "either_ifelse"), vec!["Fs".to_string()], "{v:#}");
+        assert!(fixture_effects(&v, "either").is_empty(),
+                "`either` must be SILENT — it is the function the scope names and the one the prefix \
+                 match hides:\n{v:#}");
+
+        use candor_classify::gate::{gate, GateInput};
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> =
+            vec!["either".into(), "either_ifelse".into(), "either_match".into()];
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let effects: HashMap<String, BTreeSet<String>> = names
+            .iter()
+            .map(|n| {
+                let mut s = BTreeSet::new();
+                if n != "either" {
+                    s.insert("Fs".to_string());
+                }
+                (n.clone(), s)
+            })
+            .collect();
+        let calls: HashMap<String, Vec<String>> = HashMap::new();
+        let empty_sets: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let gi = GateInput {
+            all: &names,
+            display: &empty_map,
+            hash: &empty_map,
+            inferred: &effects,
+            calls: &empty_sets,
+            hosts: &empty_sets,
+            cmds: &empty_sets,
+            paths: &empty_sets,
+            tables: &empty_sets,
+            surface_incomplete: &empty_sets,
+            reason_classes: &empty_sets,
+            net_classes: &calls,
+        };
+        let policy = |t: &str| candor_classify::policy::parse_policy(t);
+
+        let over = gate(&policy("deny Fs either"), &gi);
+        assert_eq!(over.multi_match.len(), 1, "a bare scope binding three must be disclosed");
+        assert_eq!(over.multi_match[0].1,
+                   vec!["either".to_string(), "either_ifelse".to_string(), "either_match".to_string()],
+                   "the disclosure must NAME them — the count alone does not tell you which");
+
+        assert!(gate(&policy("deny Fs either_ifelse"), &gi).multi_match.is_empty(),
+                "a scope binding exactly one must stay quiet");
+        assert!(gate(&policy("deny Fs mod::"), &gi).multi_match.is_empty(),
+                "a LAYER scope is meant to bind many and must stay quiet");
+    }
+
+    #[test]
     fn a_rust_2015_bare_closure_trait_object_no_longer_drops_the_whole_file() {
         // SOUNDNESS R308 — `syn` rejects the 2015 spelling `&Fn(..)`, and a parse failure is per-FILE,
         // so ONE elided `dyn` dropped every function in it. Measured on `serial-core-0.4.0`: the whole
