@@ -600,6 +600,25 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                 "Option" | "Result" | "IoResult" => type_path(first_ty, uses),
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
+                //
+                // SOUNDNESS R347 — the INTERIOR-MUTABILITY wrappers (`Mutex`, `RwLock`, `RefCell`,
+                // `OnceLock`…) BELONG here and are deliberately ABSENT. Adding them closes a real
+                // silence — `self.m.lock().unwrap().iter().for_each(|h| h.run())` over an
+                // `Arc<Mutex<Vec<Guard>>>` reads ABSENT while the identical statement over
+                // `Arc<Mutex<Vec<Box<dyn Doer>>>>` charges `Fs`, because the DISPATCH index peels them
+                // and this one does not. It was written, measured working, and BACKED OUT.
+                //
+                // WHAT IT COST, measured on the corpus rather than reasoned about: peeling `Mutex` here
+                // makes the HOF closure-typing route hand a container element to a closure whose
+                // parameter is NOT one. `async-process-2.5.0`'s
+                // `!self.zombies.lock().unwrap_or_else(|x| x.into_inner()).is_empty()` types `x` — a
+                // `PoisonError` — as the map's `ChildGuard` element, so `x.into_inner()` resolves to
+                // `ChildGuard::into_inner`, and `Reaper::has_zombies` is charged **Exec** for asking
+                // whether a map is empty. A fabrication on a function that spawns nothing.
+                //
+                // So the type peel needs the closure route to know that `unwrap_or_else`'s parameter is
+                // the ERROR and not the element, which is a separate fix in a separate place. The
+                // silence is recorded rather than traded for an over-report.
                 "Box" | "Arc" | "Rc" => elem_type(first_ty, uses),
                 _ => None,
             }
@@ -2108,6 +2127,60 @@ pub(crate) const GLOB_KEY: &str = "*";
 /// implied: on the platform pair, `deny Exec` and `pure run_it` still exit 0 over a real `Command`
 /// under one arm order. **This is a live cardinal sin held open on purpose, waiting on R287's ruling,
 /// not an oversight.**
+/// SOUNDNESS R347 — DOES THIS METHOD YIELD THE SAME ELEMENT AS ITS RECEIVER? ONE authority, for both
+/// element resolvers.
+///
+/// **THE DEFECT THIS CLOSES IS THE DUPLICATION ITSELF.** `resolve_elem_type` (concrete element types)
+/// and `resolve_elem_trait_leaves` (trait-object elements) each carried their own copy of this list,
+/// and the second one's doc said it peels *"exactly like `resolve_elem_type`"* — a sentence that was
+/// already false before either was touched. They diverged in BOTH directions and each divergence was a
+/// live silence, measured with the other resolver as its own control:
+///
+/// * The CONCRETE list had no GUARD CHAIN. `self.m.lock().unwrap().iter().for_each(|h| h.run())` over
+///   an `Arc<Mutex<Vec<Guard>>>` — one of the most common shapes in real Rust — read ABSENT, while the
+///   identical statement over `Arc<Mutex<Vec<Box<dyn Doer>>>>` charged `Fs`. Same for `RefCell::borrow`
+///   and `RwLock::read`.
+/// * The DISPATCH list had none of the iterator adapters R346 added. `self.vd.iter().rev()
+///   .for_each(|d| d.go())` read ABSENT while the same chain without `.rev()` charged.
+///
+/// So a name being on one list and not the other decided whether an effect was seen, and which way it
+/// fell depended on whether the element happened to be a trait object. Neither list was wrong about
+/// its own entries; the defect was that there were two.
+///
+/// **The union is sound because every entry answers the same question for both resolvers** — a
+/// `Mutex` guard yields the wrapped collection whatever its element is, and `.rev()` preserves the
+/// element whatever it is. The EXCLUSIONS carry over unchanged and are the half worth guarding:
+/// `map`/`flat_map`/`flatten`/`zip`/`enumerate` change the element, and `windows`/`chunks` yield a
+/// SLICE of it (R346's pinned residual).
+pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
+    matches!(
+        method,
+        // collection adapters and map value views
+        "iter" | "into_iter" | "iter_mut" | "clone" | "drain" | "as_slice" | "as_mut_slice"
+            | "to_vec" | "values" | "values_mut"
+        // R345 — the `as_*` family: `Option::as_ref` gives `Option<&T>`, `Vec::as_ref` gives `&[T]`
+            | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut"
+        // R346 — the element-preserving ITERATOR adapters
+            | "rev" | "take" | "skip" | "step_by" | "peekable" | "by_ref" | "fuse"
+            | "chain" | "filter" | "take_while" | "skip_while" | "inspect"
+            | "cloned" | "copied"
+        // the interior-mutability / smart-pointer GUARD chain, which peels back to the wrapped
+        // collection: `reg.lock().unwrap().iter()`, `cell.borrow().iter()`, `rw.read().unwrap().iter()`
+            | "lock" | "expect" | "borrow" | "borrow_mut" | "read" | "write"
+        // R101 — the deferred-init CELL accessors, which yield the cell's contents exactly as
+        // `lock`/`borrow`/`read` yield a `Mutex`/`RefCell`'s …
+            | "get_or_init" | "get_mut"
+        // … and the Option-returning ELEMENT accessors, whose payload IS the receiver's element, so
+        // `if let Some(h) = v.last()` and `for h in v.last()` both want what this returns (R346).
+            | "first" | "last" | "get"
+        // `unwrap` is here for the guard chain (`lock().unwrap()`) and is the one entry that is a
+        // judgement rather than a fact: it also unwraps an `Option<T>`/`Result<T, _>` whose `T` is NOT
+        // a collection, where both resolvers then find no element and return nothing. Harmless in that
+        // direction, which is why it was already on the dispatch list.
+            | "unwrap"
+    )
+}
+
 /// SOUNDNESS R308 — PARSE A FILE, AND IF AND ONLY IF THAT FAILS, RETRY ONCE WITH RUST-2015 BARE
 /// CLOSURE-TRAIT OBJECTS NORMALISED.
 ///

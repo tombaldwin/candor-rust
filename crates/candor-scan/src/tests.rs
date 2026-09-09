@@ -7094,6 +7094,69 @@ pub fn touches_fs() { let _ = std::fs::read(\"x\"); }\n";
     }
 
     #[test]
+    fn the_two_element_resolvers_answer_from_one_list() {
+        // SOUNDNESS R347 — `resolve_elem_type` (concrete elements) and `resolve_elem_trait_leaves`
+        // (trait-object elements) each kept their OWN copy of the element-preserving adapter list, and
+        // the second one's doc claimed it peeled "exactly like" the first — a sentence already false
+        // when written. They diverged in BOTH directions and each divergence was a live silence, with
+        // the other resolver serving as its own control:
+        //
+        //   the CONCRETE list had no guard chain   `m.lock().unwrap().iter()` over Arc<Mutex<Vec<Guard>>>
+        //                                          ABSENT, while the same over Vec<Box<dyn Doer>> charged
+        //   the DISPATCH list had no iterator      `vd.iter().rev()` ABSENT, `vd.iter()` charged
+        //
+        // So a name being on one list and not the other decided whether an effect was seen, and which
+        // way it fell depended on whether the element happened to be a trait object. Neither list was
+        // wrong about its own entries; the defect was that there were two.
+        //
+        // BOTH DIRECTIONS ARE ASSERTED, each beside the control that exposed it. A test for either
+        // alone would pass for a scanner that had simply copied one list over the other.
+        let src = "\
+use std::sync::{Arc, Mutex, RwLock};\n\
+use std::cell::RefCell;\n\
+pub struct Guard;\n\
+impl Guard { pub fn run(&self) { let _ = std::fs::write(\"/tmp/r347\", \"x\"); } }\n\
+pub trait Doer { fn go(&self); }\n\
+pub struct D;\n\
+impl Doer for D { fn go(&self) { let _ = std::fs::write(\"/tmp/r347d\", \"x\"); } }\n\
+pub struct H { m: Arc<Mutex<Vec<Guard>>>, c: RefCell<Vec<Guard>>, w: RwLock<Vec<Guard>>,\n\
+               md: Arc<Mutex<Vec<Box<dyn Doer>>>>, vd: Vec<Box<dyn Doer>> }\n\
+impl H {\n\
+  pub fn g_mutex(&self) { self.m.lock().unwrap().iter().for_each(|h| h.run()); }\n\
+  pub fn g_refcell(&self) { self.c.borrow().iter().for_each(|h| h.run()); }\n\
+  pub fn g_rwlock(&self) { self.w.read().unwrap().iter().for_each(|h| h.run()); }\n\
+  pub fn g_dispatch(&self) { self.md.lock().unwrap().iter().for_each(|d| d.go()); }\n\
+  pub fn a_dispatch_rev(&self) { self.vd.iter().rev().for_each(|d| d.go()); }\n\
+  pub fn a_dispatch_plain(&self) { self.vd.iter().for_each(|d| d.go()); }\n\
+}\n";
+        let v = scan_fixture("r347onelist", src);
+        // FIXED: the dispatch side gains the iterator adapters, and the guard chain keeps working.
+        for f in ["H::g_dispatch", "H::a_dispatch_rev", "H::a_dispatch_plain"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f}: whether an element is a trait object must not decide which adapters \
+                        are peeled — one list, both resolvers:\n{v:#}");
+        }
+        // STILL SILENT, PINNED, and this is the half that was built and BACKED OUT rather than the
+        // half nobody tried. The shared list peels `lock`/`borrow`/`read` off the EXPRESSION, but
+        // `elem_type` does not peel `Mutex`/`RwLock`/`RefCell` off the TYPE, so a CONCRETE element
+        // behind a guard still resolves to nothing while the DISPATCH element beside it resolves.
+        //
+        // Adding the type peel closes it and costs a FABRICATION measured on the corpus:
+        // `async-process`'s `!self.zombies.lock().unwrap_or_else(|x| x.into_inner()).is_empty()` types
+        // `x` — a `PoisonError` — as the map's `ChildGuard` element, and `Reaper::has_zombies` is
+        // charged Exec for asking whether a map is empty. The closure route has to learn that
+        // `unwrap_or_else`'s parameter is the ERROR first.
+        //
+        // If these three go green, the type peel landed: check `async-process`'s `has_zombies` in the
+        // same A/B before deleting this pin.
+        for f in ["H::g_mutex", "H::g_refcell", "H::g_rwlock"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} is a PINNED residual — a concrete element behind a guard chain. See the \
+                     comment above before changing this:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn every_element_preserving_adapter_keeps_the_element() {
         // SOUNDNESS R346 — `resolve_elem_type`'s adapter list is an ALLOWLIST, the shape that goes
         // stale in the SILENT direction, and it carried four iterator adapters. With
