@@ -2202,8 +2202,18 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 ///
 /// Everything else in the union — the R346 iterator adapters, the R345 `as_deref` family, `clone`,
 /// `to_vec`, `first`, `last`, and the R101 cell accessors — falls back, which is byte-for-byte the
-/// route it took before R347. `partition_is_total` in the test module asserts this set is a SUBSET of
-/// the union, so the two can never drift into disagreeing about a name.
+/// route it took before R347 for the empty-receiver path — though note the arm now tries
+/// `resolve_elem_trait_leaves(receiver)` FIRST and short-circuits, which pre-R347 it did not for these
+/// names; that ordering is the safe direction (a resolved receiver beats a leaf-keyed guess) but the
+/// first draft of this sentence said "byte-for-byte" without the qualifier.
+///
+/// `the_receiver_only_denylist_is_a_subset_of_the_adapter_union` in the test module asserts BOTH
+/// directions: that each of these seventeen IS in the union, and that a name deliberately OUTSIDE the
+/// union (`map`, `flat_map`, `zip`, `windows`, …) is not on this denylist. **The first draft of this
+/// comment named `partition_is_total`, a symbol that does not exist, and claimed a guarantee the test
+/// did not make** — it walked a hardcoded literal, so adding an out-of-union name here passed 430/430.
+/// Both were found by review, and both are the class this very function was written to close: a
+/// sentence that makes its own diff look correct.
 pub(crate) fn is_receiver_only_adapter(method: &str) -> bool {
     matches!(
         method,
