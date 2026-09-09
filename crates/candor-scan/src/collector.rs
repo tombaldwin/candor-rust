@@ -2818,6 +2818,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     return;
                 }
+                // SOUNDNESS R185 — …and the CONCRETE payload, which the comment above dismissed as
+                // "→ default walk". The default walk types the binding as nothing, so
+                // `if let Some(h) = &self.o { h.run() }` over an `Option<Guard>` read the caller as
+                // ABSENT — a purity claim — while the SAME field as `Vec<Guard>` (`for h in &self.v`)
+                // and as a bare `Guard` both charge correctly. One wrapper, silently.
+                //
+                // The FOR-LOOP arm below is the model and is deliberately mirrored rather than
+                // reinvented: resolve the element type, prefer dispatch leaves when there are any, and
+                // otherwise `scoped_var` the concrete type over the branch. `elem_type` now peels
+                // `Option`, which is what makes `resolve_elem_type` answer here at all.
+                //
+                // The row said the remedy was "the same peel `unwrap_result_option` already does" and
+                // named `elem_type`. Adding `Option` to `elem_type` ALONE moves nothing: this arm
+                // returns early only for dispatch, so the concrete answer had no route to the binding.
+                // Both halves are needed, and only measuring showed it.
+                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                    self.visit_expr(&el.expr);
+                    self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.then_branch));
+                    if let Some((_, else_b)) = &node.else_branch {
+                        self.visit_expr(else_b);
+                    }
+                    return;
+                }
             } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&el.pat) {
                 // R77: a LOCAL enum tuple-variant if-let (`if let Msg::Cb(f) = m { f() }`) — NOT
                 // `Some`/`Ok`, so the branch above never fires; type from the VARIANT's own declared
@@ -2877,6 +2900,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.scoped_binding(&binding, Bound::Traits(leaves), |s| s.visit_block(&node.body));
                     return;
                 }
+                // SOUNDNESS R185 — the while-let twin of the concrete fallthrough added to
+                // `visit_expr_if`. Same defect, same fix; kept beside its sibling so the pair cannot
+                // drift, which is how the dispatch half of this arm came to exist without it.
+                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                    self.visit_expr(&el.expr);
+                    self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.body));
+                    return;
+                }
             } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&el.pat) {
                 // R77: the while-let twin of `visit_expr_if`'s new branch — a LOCAL enum tuple-variant
                 // pattern, NOT `Some`/`Ok`. Scoped to the BODY, like the if-let form.
@@ -2932,6 +2963,30 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
             return;
+        }
+        // SOUNDNESS R185 — the MATCH twin of the concrete fallthrough. The comment above says an
+        // "empty-leaves scrutinee falls through to the default walk", and the default walk types the
+        // arm payload as nothing: `match &self.o { Some(h) => h.run(), None => {} }` over an
+        // `Option<Guard>` read the caller ABSENT. `visit_arm` cannot fix this on its own — it never
+        // sees the scrutinee — which is why it belongs here beside the dispatch route rather than there.
+        if let Some(elem) = self.resolve_elem_type(&node.expr) {
+            if node.arms.iter().any(|a| some_ok_binding(&a.pat).is_some()) {
+                self.visit_expr(&node.expr);
+                for arm in &node.arms {
+                    match some_ok_binding(&arm.pat) {
+                        Some(binding) => self.scoped_var(&binding, Some(elem.clone()), |s| {
+                            if let Some((_, guard)) = &arm.guard {
+                                s.visit_expr(guard);
+                            }
+                            s.visit_expr(&arm.body);
+                        }),
+                        // A non-`Some`/`Ok` arm (`None`, `_`, a local enum variant) keeps the normal
+                        // route — the payload type resolved here is not its binding's type.
+                        None => self.visit_arm(arm),
+                    }
+                }
+                return;
+            }
         }
         syn::visit::visit_expr_match(self, node);
     }
@@ -3299,6 +3354,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     self.vars.remove(&binding);
                     self.trait_vars.insert(binding, leaves);
+                } else if let Some(elem) =
+                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr))
+                {
+                    // SOUNDNESS R185 — the let-else twin. The comment above notes "a concrete payload
+                    // yields no leaves" and stops there; the concrete payload then had no route at all,
+                    // so `let Some(h) = &self.o else { return }; h.run();` read the caller ABSENT.
+                    //
+                    // Read through `with_pre_bindings` for the SAME reason the leaves are: the RHS names
+                    // the OUTER binding when this statement self-shadows (`let Some(f) = f.produce()
+                    // else ...`), and resolving it against the new one is the R92 defect. Written
+                    // fn-wide, not scoped, because let-else binds for the rest of the fn — and `trait_vars`
+                    // is cleared alongside so the two tables cannot both answer for this name.
+                    self.trait_vars.remove(&binding);
+                    self.vars.insert(binding, elem);
                 }
             }
         } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {

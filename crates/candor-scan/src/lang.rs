@@ -586,6 +586,18 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                 // The single-type-arg sequence collections: their first generic arg IS the element.
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
                 | "LinkedList" => type_path(first_ty, uses),
+                // SOUNDNESS R185 — `Option<T>` yields `T` here too. It is not a collection in the
+                // sense of the doc above, but every CONSUMER of this function asks the same question —
+                // "if I bind a name out of this type, what is the name's type?" — and `Option` answers
+                // it: `if let Some(h) = &self.o` binds `h: &T`, and `for h in &self.o` is legal Rust
+                // that binds the same thing. Measured before the change: a field `Vec<Guard>` and a
+                // bare field `Guard` both charge `Fs`, while `Option<Guard>` reads ABSENT — the same
+                // value, the same call, silent on the one wrapper nobody added.
+                // …and `Result<T, E>`, whose FIRST arg is the payload for exactly the same reason.
+                // `if let Ok(h) = &self.r` binds `h: &T`, and `for h in &self.r` is legal Rust too.
+                // The error type is deliberately not reachable here: nothing binds a name out of it
+                // through any of this function's callers.
+                "Option" | "Result" | "IoResult" => type_path(first_ty, uses),
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
                 "Box" | "Arc" | "Rc" => elem_type(first_ty, uses),

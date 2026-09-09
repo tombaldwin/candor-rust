@@ -6925,6 +6925,53 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn unwrapping_an_option_binds_the_payload_type_in_every_binder() {
+        // SOUNDNESS R185 — `elem_type` did not peel `Option`, so the payload of an unwrap was typed as
+        // nothing and its method calls dropped to pure. The SIBLING SHAPES ARE THE PROOF the row is
+        // about a wrapper and not about the value: the same field as `Vec<Guard>` (`for h in &self.v`)
+        // and as a bare `Guard` both charged `Fs`, while `Option<Guard>` read ABSENT.
+        //
+        // EVERY BINDER IS HERE ON PURPOSE. The row named `elem_type` and a field; measuring found the
+        // hole in five binders and in parameters as well as fields, and each binder needed its own
+        // fallthrough because each returns early for the DISPATCH case and dropped the concrete one.
+        // Fixing if-let alone would have left `while let`, `let else`, `match` and `Ok` silent — the
+        // boundary drawn around its own trigger.
+        let src = "\
+pub struct Guard;\n\
+impl Guard { pub fn run(&self) { let _ = std::fs::write(\"/tmp/r185\", \"x\"); } }\n\
+pub struct Pure;\n\
+impl Pure { pub fn run(&self) -> u32 { 7 } }\n\
+pub struct H { o: Option<Guard>, r: Result<Guard, ()>, p: Option<Pure> }\n\
+impl H {\n\
+  pub fn iflet(&self) { if let Some(h) = &self.o { h.run(); } }\n\
+  pub fn whilelet(&self) { while let Some(h) = &self.o { h.run(); break; } }\n\
+  pub fn matcharm(&self) { match &self.o { Some(h) => h.run(), None => {} } }\n\
+  pub fn forloop(&self) { for h in &self.o { h.run(); } }\n\
+  pub fn iflet_ok(&self) { if let Ok(h) = &self.r { h.run(); } }\n\
+  pub fn pure_iflet(&self) -> u32 { if let Some(h) = &self.p { h.run() } else { 0 } }\n\
+}\n\
+pub fn p_letelse(o: Option<Guard>) { let Some(h) = &o else { return }; h.run(); }\n\
+pub fn p_iflet(o: Option<Guard>) { if let Some(h) = &o { h.run(); } }\n\
+pub fn p_pure_letelse(o: Option<Pure>) -> u32 { let Some(h) = &o else { return 0 }; h.run() }\n";
+        let v = scan_fixture("r185optpeel", src);
+
+        for f in ["H::iflet", "H::whilelet", "H::matcharm", "H::forloop", "H::iflet_ok",
+                  "p_letelse", "p_iflet"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} unwraps a Guard and calls it — the wrapper must not decide whether the \
+                        effect is seen:\n{v:#}");
+        }
+        // THE FABRICATION CONTROLS, and they are why the typing may be widened at all: binding a name
+        // out of an `Option` types it, it does not charge it. A PURE payload through the same binders
+        // must stay pure, or this fix trades a silence for an over-report on the commonest shape in
+        // Rust.
+        for f in ["H::pure_iflet", "p_pure_letelse"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} unwraps a PURE payload and must stay pure:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn a_use_item_under_an_inactive_feature_binds_nothing() {
         // SOUNDNESS R140, the DECIDABLE half. `use_item_applies`'s own doc calls itself "THE ONE RULE
         // for does this `use` item bind a name in the build we are describing" and answered only the
@@ -8376,7 +8423,21 @@ trait G {
         assert_eq!(p("Arc<Vec<Sender>>").as_deref(), Some("net::Sender"));
         // a non-collection is NOT an element source
         assert_eq!(p("Sender"), None);
-        assert_eq!(p("Option<Sender>"), None);
+        // SOUNDNESS R185 — `Option`/`Result` ARE, and this assertion is INVERTED ON PURPOSE rather than
+        // edited past. It used to read `assert_eq!(p("Option<Sender>"), None)` under the heading above,
+        // encoding "collection" literally. Every CONSUMER of `elem_type` asks a narrower question —
+        // "if I bind a name out of this type, what is the name's type?" — and for `Option`/`Result` the
+        // answer is `T` in every one of them: `for h in &opt` is legal Rust, `opt.iter().map(|h| ..)`
+        // binds `T`, and the `field_elem` index feeds `resolve_elem_type`, which is what the if-let /
+        // while-let / let-else / match binders now consult. There is no subscript case to fabricate on
+        // (`opt[0]` does not compile).
+        //
+        // What it cost while it read `None`: a field `Vec<Guard>` and a bare field `Guard` both charged
+        // `Fs`, and the SAME value as `Option<Guard>` read ABSENT — a purity claim on one wrapper.
+        assert_eq!(p("Option<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("Result<Sender, Error>").as_deref(), Some("net::Sender"));
+        // …and the ERROR type stays unreachable: nothing binds a name out of it through any consumer.
+        assert_eq!(p("Result<(), Sender>"), None);
         // a map's value carries the element only via `.values()` (not the bare type here)
         assert_eq!(p("HashMap<String, Sender>"), None);
     }

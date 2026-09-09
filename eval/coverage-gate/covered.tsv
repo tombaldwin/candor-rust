@@ -1029,7 +1029,7 @@ lettre	lettre::TlsParametersBuilder::build_native	Fs	Fs	lettre::transport::smtp:
 lettre	lettre::TlsParametersBuilder::build_rustls	Fs,Log	Fs	lettre::transport::smtp::client::tls::TlsParametersBuilder::build_rustls
 lscolors	lscolors::LsColors::from_env	Env	Env	lscolors::LsColors::from_env
 mongodb	mongodb::Client::with_options	Clock,Env,Fs,Ipc,Net,Unknown	Db	mongodb::client::Client::with_options
-mongodb	mongodb::ClientEncryption::decrypt	Ipc,Net	Net	mongodb::client::csfle::client_encryption::ClientEncryption::decrypt
+mongodb	mongodb::ClientEncryption::decrypt	Exec,Ipc,Net	Net	mongodb::client::csfle::client_encryption::ClientEncryption::decrypt
 mysql	mysql::Pool::get_conn	Clock,Unknown	Db	mysql::conn::pool::Pool::get_conn
 mysql_async	mysql_async::Conn::from_url	Clock,Ipc,Net,Unknown	Db	mysql_async::conn::Conn::from_url
 mysql_async	mysql_async::Conn::new	Clock,Ipc,Net,Unknown	Db	mysql_async::conn::Conn::new
@@ -1094,7 +1094,7 @@ rdkafka	rdkafka::BaseProducer::poll	Clock,Log	Net	rdkafka::producer::base_produc
 rdkafka	rdkafka::Client::fetch_metadata	Log	Net	rdkafka::client::Client::fetch_metadata
 rdkafka	rdkafka::FutureProducer::flush	Clock,Log	Net	rdkafka::producer::future_producer::FutureProducer::flush
 rdkafka	rdkafka::FutureProducer::poll	Clock,Log	Net	rdkafka::producer::future_producer::FutureProducer::poll
-rdkafka	rdkafka::FutureProducer::send	Clock	Net	rdkafka::producer::future_producer::FutureProducer::send
+rdkafka	rdkafka::FutureProducer::send	Clock,Log	Net	rdkafka::producer::future_producer::FutureProducer::send
 rdkafka	rdkafka::PartitionQueue::poll	Clock,Log	Net	rdkafka::consumer::base_consumer::PartitionQueue::poll
 rdkafka	rdkafka::StreamConsumer::fetch_metadata	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::fetch_metadata
 rdkafka	rdkafka::StreamConsumer::seek	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::seek
