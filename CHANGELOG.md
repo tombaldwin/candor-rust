@@ -9,6 +9,13 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **`.as_ref()` was missing from the element-preserving adapter list — SOUNDNESS R345.** The list
+  already held `iter`, `clone`, `to_vec` and `values`, so `self.o.iter().for_each(..)` charged while
+  `self.o.as_ref().map(|h| h.run())` and `if let Some(h) = self.o.as_ref()` read ABSENT — a hole in the
+  R185 fix below, for the idiom most Rust actually writes. Seven of eight spellings were silent.
+  ADDED 33, REMOVED 0 over 500 crates that use it, including a real `Env` in anyhow reached through
+  `{:?}` on a now-typed payload.
+
 - ⚠ **Unwrapping an `Option` bound no type, so the payload's calls read pure — SOUNDNESS R185.**
   `if let Some(h) = &self.o { h.run() }` read the caller ABSENT over a real `std::fs::write`, while the
   SAME field as `Vec<Guard>` and as a bare `Guard` both charged `Fs` — a wrapper deciding whether an
