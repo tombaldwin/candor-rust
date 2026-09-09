@@ -356,15 +356,14 @@ rdkafka	rdkafka::TopicPartitionList::from_topic_map	Log	src/topic_partition_list
 rdkafka	rdkafka::TopicPartitionList::new	Log	src/topic_partition_list.rs	rdkafka::topic_partition_list::TopicPartitionList::new
 rdkafka	rdkafka::TopicPartitionList::with_capacity	Log	src/topic_partition_list.rs	rdkafka::topic_partition_list::TopicPartitionList::with_capacity
 rdkafka	rdkafka::current_time_millis	Clock	src/util.rs	rdkafka::util::current_time_millis
-redis	redis::Client::check_connection	Clock,Fs,Ipc,Net,Unknown	src/client.rs	redis::client::Client::check_connection
+redis	redis::Client::check_connection	Clock,Ipc,Net,Unknown	src/client.rs	redis::client::Client::check_connection
 redis	redis::Client::get_async_monitor	Net,Unknown	src/client.rs	redis::client::Client::get_async_monitor
 redis	redis::Client::get_async_pubsub	Net	src/client.rs	redis::client::Client::get_async_pubsub
-redis	redis::Client::is_open	Clock,Fs,Ipc,Net,Unknown	src/client.rs	redis::client::Client::is_open
+redis	redis::Client::is_open	Clock,Ipc,Net,Unknown	src/client.rs	redis::client::Client::is_open
 redis	redis::ClusterClient::get_pending_async_connection_with_config	Log,Unknown	src/cluster_handling/client.rs	redis::cluster_handling::client::ClusterClient::get_pending_async_connection_with_config
 redis	redis::ClusterConnection::route_command	Log	src/cluster_handling/async_connection/mod.rs	redis::cluster_handling::async_connection::ClusterConnection::route_command
 redis	redis::ClusterConnection::route_command	Rand,Unknown	src/cluster_handling/sync_connection/mod.rs	redis::cluster_handling::sync_connection::ClusterConnection::route_command
 redis	redis::ClusterPipeline::exec	Rand,Unknown	src/cluster_handling/sync_connection/pipeline.rs	redis::cluster_handling::sync_connection::pipeline::ClusterPipeline::exec
-redis	redis::Cmd::iter_async	Clock,Fs,Ipc,Net,Rand,Unknown	src/cmd.rs	redis::cmd::Cmd::iter_async
 redis	redis::EntraIdCredentialsProvider::start	Log,Unknown	src/entra_id.rs	redis::entra_id::EntraIdCredentialsProvider::start
 redis	redis::MultiplexedConnection::connect_with_config	Net,Unknown	src/cluster_handling/async_connection/mod.rs	redis::cluster_handling::async_connection::MultiplexedConnection::connect_with_config
 redis	redis::Replicas::choose_random	Rand	src/cluster_handling/read_routing/interface.rs	redis::cluster_handling::read_routing::interface::Replicas::choose_random
@@ -496,7 +495,7 @@ tempfile	tempfile::reopen	Fs	src/file/imp/unix.rs	tempfile::file::imp::unix::reo
 tempfile	tempfile::temp_dir	Env	src/env.rs	tempfile::env::temp_dir
 time	time::Instant::elapsed	Clock	src/instant.rs	time::instant::Instant::elapsed
 time	time::SignedDuration::time_fn	Clock,Unknown	src/signed_duration.rs	time::signed_duration::SignedDuration::time_fn
-time	time::UtcOffset::current_local_offset	Clock	src/utc_offset.rs	time::utc_offset::UtcOffset::current_local_offset
+time	time::UtcOffset::current_local_offset	Clock,Unknown	src/utc_offset.rs	time::utc_offset::UtcOffset::current_local_offset
 tokio_postgres	tokio_postgres::Client::execute_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::execute_raw
 tokio_postgres	tokio_postgres::Client::query_typed_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::query_typed_raw
 tokio_postgres	tokio_postgres::Client::simple_query_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::simple_query_raw

