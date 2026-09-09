@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.36.0] — 2026-09-09
+
 - **R350's decision test asserted a hardcoded list rather than the function.** Adding an out-of-union
   name to the receiver-only denylist passed 430/430 — the dead-rule shape, inside the test written to
   prevent exactly that drift. It now asserts both directions. No behaviour change.
