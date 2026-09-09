@@ -1063,8 +1063,32 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // `rustls::KeyLogFile::new` (key_log_file.rs:88) reads `$SSLKEYLOGFILE` and, if set, opens (creating
     // if needed) that file in append mode — a real, if opt-in, disk write path independent of the sync
     // TLS record-layer I/O the `rustls` arm above already covers.
+    // SOUNDNESS R331 — …and `TlsConnector::builder`, which is the SAME trust-store read reached by the
+    // other spelling. `TlsConnector::new` is literally `TlsConnector::builder().build()`
+    // (`native-tls-0.2.18/src/lib.rs:481`), and `TlsConnectorBuilder::build` (`:451`) is where
+    // `imp::TlsConnector::new` — the openssl-backend cert-file/dir load — actually runs. The builder
+    // spelling is the DOMINANT idiom the moment any option is set, and it is what `reqwest` itself
+    // writes (`reqwest-0.12.28/src/async_impl/client.rs:529`).
+    //
+    // **KEYED ON `builder`, NOT ON `build`, AND THAT IS THE WHOLE FIX.** The first attempt added
+    // `ends_with("TlsConnectorBuilder::build")` and moved nothing, so the row was closed with the
+    // conclusion that the scanner "never types `TlsConnector::builder()`" and the repair had to be
+    // receiver typing. **That conclusion was wrong.** `.build()` is a method on a foreign-returned
+    // receiver and cannot be typed without a return index for a foreign crate — but `TlsConnector::
+    // builder()` is a PATH call, recorded and classified exactly like `TlsConnector::new` beside it.
+    // Charging the constructor rather than the terminal is also this file's own convention
+    // (`Command::new`). Over-charge direction: a `builder()` whose `.build()` never happens, which is
+    // not a shape anyone writes.
+    //
+    // WHY IT LOOKED LIKE NOTHING WAS RECORDED: under the calibration exemption a call that classifies
+    // `None` is DROPPED from the report, so "no calls recorded" is what a correct scan of an exempt
+    // crate looks like — not evidence that the receiver went untyped. Measured: under the PLAIN
+    // `native_tls::` spelling (not calibrated) the same body is PRESENT with `invisible: ["native_tls"]`,
+    // a disclosure; under `native_tls_crate` (the calibrated rename reqwest and tungstenite use) it is
+    // ABSENT with nothing hidden. The rename is what turns a disclosure into a purity claim.
     if matches!(crate_name, "native_tls" | "native_tls_crate")
         && (path.ends_with("TlsConnector::new")
+            || path.ends_with("TlsConnector::builder")
             || path.ends_with("Identity::from_pkcs8")
             || path.ends_with("Identity::from_pkcs12"))
     {
@@ -1161,6 +1185,24 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "lettre::transport::smtp::client::TlsParameters::new"
             || path == "lettre::TlsParameters::new_rustls"
             || path == "lettre::transport::smtp::client::TlsParameters::new_rustls"
+            // SOUNDNESS R331 — the `_native` half of the same family, which this enumeration never had.
+            // It surfaced the moment `TlsConnector::builder` started charging: the coverage gate's
+            // oracle saw `Fs` on `TlsParameters::new_native` and `TlsParametersBuilder::build_native`
+            // and `classify()` had no rule for either. `build_native` is `TlsConnector::builder()`
+            // (`lettre-0.11.23/src/transport/smtp/client/tls.rs:338`) and `new_native` delegates
+            // straight to it (`:610`); the already-listed `build`/`new` reach whichever backend is
+            // enabled and were covered, so the list held every variant EXCEPT the one named after the
+            // backend that does the disk read.
+            //
+            // `build_boring`/`new_boring` are deliberately NOT added. `build_boring` (`:384`) builds a
+            // `boring::ssl::SslConnector`, and openssl's `SslConnector::builder` calls
+            // `set_default_verify_paths()` — so it is PROBABLY `Fs` too, but `boring` is not a crate
+            // this file has read, and the last three defects in this area came from charging a path
+            // whose body nobody had opened. Left for a pass that reads it.
+            || path == "lettre::TlsParameters::new_native"
+            || path == "lettre::transport::smtp::client::TlsParameters::new_native"
+            || path == "lettre::TlsParametersBuilder::build_native"
+            || path == "lettre::transport::smtp::client::TlsParametersBuilder::build_native"
             || path == "lettre::SmtpTransport::from_url"
             || path == "lettre::SmtpTransport::relay"
             || path == "lettre::SmtpTransport::starttls_relay"
