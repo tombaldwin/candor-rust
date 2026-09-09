@@ -7257,6 +7257,19 @@ pub fn ctl_pure(r: &Reg) { for p in r.p.iter() { p.go(); } }\n";
                      a live rule, and the fallback decision it is supposed to govern never consults \
                      it — see R348 for the same shape in candor-swift.");
         }
+        // …and NO NAME MAY BE ON THE DENYLIST WITHOUT BEING IN THE UNION. The loop above walks a
+        // hardcoded 17-name literal, which pins that those seventeen are in the union — and says
+        // NOTHING about a name added to `is_receiver_only_adapter` later. A review measured the gap:
+        // adding `map`/`flat_map`/`zip` to the denylist left this file at 430 passed, 0 failed, which
+        // is the R348 dead-rule shape (a rule that reads as live and cannot fire) inside the very test
+        // written to prevent two-list drift. These are the names most likely to be added by mistake:
+        // they CHANGE the element, which is why they are deliberately outside the union.
+        for m in ["map", "flat_map", "flatten", "zip", "enumerate", "windows", "chunks", "collect"] {
+            assert!(!crate::lang::is_receiver_only_adapter(m),
+                    "{m} is NOT in the element-preserving union, so it must not be on the receiver-only \
+                     denylist either — a denylist entry outside the set it narrows is dead code that \
+                     reads as a live rule, and the fallback decision it governs never consults it.");
+        }
         // …and the twenty names R347 moved into the dispatch arm must FALL BACK. This is the R350
         // regression itself, stated as a property of the lists rather than of one fixture.
         for m in ["clone", "to_vec", "as_deref", "as_deref_mut", "rev", "take", "skip", "step_by",
