@@ -2181,6 +2181,39 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R350 — OF THE ADAPTERS ABOVE, THE ONES THAT MUST **NOT** FALL BACK TO THE `returns`
+/// INDEX when the receiver route answers nothing. This is a DENYLIST, and the direction is the whole
+/// point: a name added to `is_element_preserving_adapter` in future falls back BY DEFAULT, which is
+/// the safe direction. **The allowlist spelling is what caused R350 in the first place** — R347
+/// unified the two element-resolver lists and the dispatch arm's fallback stayed keyed on a
+/// three-name allowlist (`get`/`get_mut`/`get_or_init`), so the twenty names that moved into that arm
+/// silently lost the `returns`-index route they had always had. Every one became a purity CLAIM over a
+/// caller-supplied trait object. See `candor-denylist-over-allowlist`: when you narrow a sound
+/// over-approximation, narrow with a denylist and say which direction it fails in.
+///
+/// **THESE SEVENTEEN, AND WHY EACH.** They are exactly the pre-R347 DISPATCH list minus the R101 cell
+/// accessors — i.e. the set whose fallback was MEASURED bad, not the set that looked risky. Extending
+/// the fallback to them cost 4 real rows their `invisible` disclosure across 78 registry crates
+/// (sea-query-derive `iden::find_attr`, wit-bindgen-rust `declare_import`, x509-parser 0.17/0.18
+/// `find_attribute`) — each an `xs.iter().find(..)` whose closure param stopped resolving through the
+/// field route once a local `fn iter` answered for `.iter()`. `returns` is keyed by bare method LEAF
+/// crate-wide, so one local `fn iter` answers for EVERY `.iter()` in the crate; these are the names a
+/// crate is most likely to define itself.
+///
+/// Everything else in the union — the R346 iterator adapters, the R345 `as_deref` family, `clone`,
+/// `to_vec`, `first`, `last`, and the R101 cell accessors — falls back, which is byte-for-byte the
+/// route it took before R347. `partition_is_total` in the test module asserts this set is a SUBSET of
+/// the union, so the two can never drift into disagreeing about a name.
+pub(crate) fn is_receiver_only_adapter(method: &str) -> bool {
+    matches!(
+        method,
+        "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
+            | "values" | "values_mut"
+            | "lock" | "unwrap" | "expect" | "borrow" | "borrow_mut" | "read" | "write"
+            | "as_ref" | "as_mut"
+    )
+}
+
 /// SOUNDNESS R308 — PARSE A FILE, AND IF AND ONLY IF THAT FAILS, RETRY ONCE WITH RUST-2015 BARE
 /// CLOSURE-TRAIT OBJECTS NORMALISED.
 ///

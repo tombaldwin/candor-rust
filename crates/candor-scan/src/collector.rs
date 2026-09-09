@@ -829,15 +829,27 @@ impl<'a> CallCollector<'a> {
                 //     `xs.iter().find(..)` whose closure param stopped resolving through the field route once
                 //     a local `fn iter` answered for `.iter()`). Losing a disclosure is the wrong direction
                 //     and R101 does not need it, so the fallback is confined to the names that need it.
-                // Receiver-first, fallback for the cell accessors only ⇒ ZERO removals by construction for
-                // every adapter that existed before this change.
-                let cell_accessor = matches!(m.method.to_string().as_str(), "get" | "get_mut" | "get_or_init");
+                // SOUNDNESS R350 — RECEIVER-FIRST, THEN FALL BACK UNLESS THE NAME IS ON THE DENYLIST.
+                // This line read `let cell_accessor = matches!(.., "get" | "get_mut" | "get_or_init")`
+                // and the sentence above it claimed "ZERO removals by construction for every adapter
+                // that existed before this change" — TRUE WHEN WRITTEN, and false the moment R347
+                // roughly doubled the adapter set without touching it. The twenty names R347 moved into
+                // this arm (`first`/`take`/`to_vec`/`filter`/`rev`/`clone`/… — precisely the pre-R347
+                // CONCRETE list minus the pre-R347 DISPATCH list) hit `return Vec::new()` and every
+                // caller reaching a real effect through a trait object went ABSENT: no row, no
+                // `Unknown`, no `invisible`. A purity claim over a body that writes a file.
+                //
+                // Inverted to a DENYLIST so the default is the safe direction — see
+                // `lang::is_receiver_only_adapter` for the seventeen names and the measurement behind
+                // each. A future addition to the union falls back automatically instead of silently
+                // losing its route, which is the failure this row IS.
+                let receiver_only = crate::lang::is_receiver_only_adapter(&m.method.to_string());
                 if adapter {
                     let by_recv = self.resolve_elem_trait_leaves(&m.receiver);
                     if !by_recv.is_empty() {
                         return by_recv;
                     }
-                    if !cell_accessor {
+                    if receiver_only {
                         return Vec::new();
                     }
                     self.returns.get(&m.method.to_string())
