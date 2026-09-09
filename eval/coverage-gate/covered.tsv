@@ -568,6 +568,10 @@ elasticsearch	elasticsearch::RankEval::send	Clock,Net	Net	elasticsearch::root::R
 elasticsearch	elasticsearch::Reindex::send	Clock,Net	Net	elasticsearch::root::Reindex::send
 elasticsearch	elasticsearch::ReindexRethrottle::send	Clock,Net	Net	elasticsearch::root::ReindexRethrottle::send
 elasticsearch	elasticsearch::RenderSearchTemplate::send	Clock,Net	Net	elasticsearch::root::RenderSearchTemplate::send
+elasticsearch	elasticsearch::Response::bytes	Net	Net	elasticsearch::http::response::Response::bytes
+elasticsearch	elasticsearch::Response::exception	Net	Net	elasticsearch::http::response::Response::exception
+elasticsearch	elasticsearch::Response::json	Net	Net	elasticsearch::http::response::Response::json
+elasticsearch	elasticsearch::Response::text	Net	Net	elasticsearch::http::response::Response::text
 elasticsearch	elasticsearch::RollupDeleteJob::send	Clock,Net	Net	elasticsearch::rollup::RollupDeleteJob::send
 elasticsearch	elasticsearch::RollupGetJobs::send	Clock,Net	Net	elasticsearch::rollup::RollupGetJobs::send
 elasticsearch	elasticsearch::RollupGetRollupCaps::send	Clock,Net	Net	elasticsearch::rollup::RollupGetRollupCaps::send
@@ -930,6 +934,7 @@ grep_cli	grep_cli::CommandReader::new	Exec	Exec	grep_cli::process::CommandReader
 grep_cli	grep_cli::CommandReaderBuilder::build	Exec	Exec	grep_cli::process::CommandReaderBuilder::build
 grep_cli	grep_cli::DecompressionMatcher::command	Exec	Exec	grep_cli::decompress::DecompressionMatcher::command
 grep_cli	grep_cli::DecompressionMatcherBuilder::build	Env,Log	Exec	grep_cli::decompress::DecompressionMatcherBuilder::build
+grep_cli	grep_cli::DecompressionReader::close	Exec,Log	Exec	grep_cli::decompress::DecompressionReader::close
 grep_cli	grep_cli::DecompressionReader::new	Exec,Fs,Log	Exec	grep_cli::decompress::DecompressionReader::new
 grep_cli	grep_cli::DecompressionReaderBuilder::build	Exec,Fs,Log	Exec	grep_cli::decompress::DecompressionReaderBuilder::build
 grep_cli	grep_cli::patterns_from_path	Fs	Fs	grep_cli::pattern::patterns_from_path
@@ -1140,6 +1145,19 @@ reqwest	reqwest::Identity::from_pkcs12_der	Fs	Fs	reqwest::tls::Identity::from_pk
 reqwest	reqwest::Identity::from_pkcs8_pem	Fs	Fs	reqwest::tls::Identity::from_pkcs8_pem
 reqwest	reqwest::Part::file	Fs	Fs	reqwest::blocking::multipart::Part::file
 reqwest	reqwest::RequestBuilder::send	Log	Net	reqwest::async_impl::request::RequestBuilder::send
+reqwest	reqwest::Response::bytes	Log,Unknown	Net	reqwest::async_impl::response::Response::bytes
+reqwest	reqwest::Response::bytes	Log,Unknown	Net	reqwest::blocking::response::Response::bytes
+reqwest	reqwest::Response::bytes	Log,Unknown	Net	reqwest::wasm::response::Response::bytes
+reqwest	reqwest::Response::bytes_stream	Log,Unknown	Net	reqwest::async_impl::response::Response::bytes_stream
+reqwest	reqwest::Response::bytes_stream	Log,Unknown	Net	reqwest::wasm::response::Response::bytes_stream
+reqwest	reqwest::Response::json	Log,Unknown	Net	reqwest::async_impl::response::Response::json
+reqwest	reqwest::Response::json	Log,Unknown	Net	reqwest::blocking::response::Response::json
+reqwest	reqwest::Response::json	Log,Unknown	Net	reqwest::wasm::response::Response::json
+reqwest	reqwest::Response::text	Log,Unknown	Net	reqwest::async_impl::response::Response::text
+reqwest	reqwest::Response::text	Log,Unknown	Net	reqwest::blocking::response::Response::text
+reqwest	reqwest::Response::text	Log,Unknown	Net	reqwest::wasm::response::Response::text
+reqwest	reqwest::Response::text_with_charset	Log,Unknown	Net	reqwest::async_impl::response::Response::text_with_charset
+reqwest	reqwest::Response::text_with_charset	Log,Unknown	Net	reqwest::blocking::response::Response::text_with_charset
 rusqlite	rusqlite::Backup::new	Db,Unknown	Db	rusqlite::backup::Backup::new
 rusqlite	rusqlite::Backup::new_with_names	Db,Unknown	Db	rusqlite::backup::Backup::new_with_names
 rusqlite	rusqlite::Backup::run_to_completion	Db,Unknown	Db	rusqlite::backup::Backup::run_to_completion
@@ -1161,6 +1179,7 @@ rusqlite	rusqlite::Connection::open_with_flags	Db,Unknown	Db	rusqlite::Connectio
 rusqlite	rusqlite::Connection::open_with_flags_and_vfs	Db,Unknown	Db	rusqlite::Connection::open_with_flags_and_vfs
 rusqlite	rusqlite::Connection::restore	Db,Unknown	Db	rusqlite::backup::Connection::restore
 rusqlite	rusqlite::InnerConnection::prepare	Db,Unknown	Db	rusqlite::inner_connection::InnerConnection::prepare
+rusqlite	rusqlite::Rows::next	Db	Db	rusqlite::row::Rows::next
 rusqlite	rusqlite::Statement::execute	Db,Unknown	Db	rusqlite::statement::Statement::execute
 rusqlite	rusqlite::Statement::insert	Db,Unknown	Db	rusqlite::statement::Statement::insert
 rusqlite	rusqlite::Statement::raw_execute	Db	Db	rusqlite::statement::Statement::raw_execute
