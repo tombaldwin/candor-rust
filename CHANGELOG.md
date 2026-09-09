@@ -9,6 +9,10 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **R350's decision test asserted a hardcoded list rather than the function.** Adding an out-of-union
+  name to the receiver-only denylist passed 430/430 — the dead-rule shape, inside the test written to
+  prevent exactly that drift. It now asserts both directions. No behaviour change.
+
 - ⚠ **Twenty adapter names lost their trait-object route — SOUNDNESS R350.** R347 unified the two
   element-resolver lists, and the dispatch arm's `returns`-index fallback stayed keyed on a three-name
   allowlist (`get`/`get_mut`/`get_or_init`). The twenty names R347 moved into that arm — `first`,
