@@ -9,6 +9,65 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **`reqwest::Client::builder().build()` reads the system trust store and carried no `Fs` —
+  SOUNDNESS R331.** `TlsConnector::new` is literally `TlsConnector::builder().build()`, so the builder
+  spelling — the dominant idiom the moment any option is set, and what reqwest itself writes — reached
+  the same openssl-backend cert load with nothing charged. **The rule now keys on `builder`, not on
+  `build`, and the earlier revert of this row was wrong on both counts:** `.build()` is a method on a
+  foreign-returned receiver and cannot be typed, but `TlsConnector::builder()` is a PATH call
+  classified exactly like `TlsConnector::new`; and "no calls recorded" was read as untyped receivers
+  when it is simply what a correct scan of a CALIBRATED crate looks like. The row's prevalence claim
+  was also wrong: under plain `native_tls::` the chain is DISCLOSED, and only crates that RENAME it
+  (reqwest, tungstenite) were silent. A/B over the 25 registry crates writing the surface: 8 rows
+  move, 0 removed, including reqwest 0.11/0.12 `ClientBuilder::build` and lettre's `TlsParameters`.
+
+- ⚠ **A `use` item under an INACTIVE feature still bound its name — SOUNDNESS R140, decidable half.**
+  `use_item_applies` answered only the `test` half of its own "one rule", so a
+  `#[cfg(feature = "mock")] use crate::mockproc::Runner;` competed with the real arm on a build where
+  `mock` is declared and off — and SOURCE ORDER decided it. With the real arm first the caller read
+  ABSENT over a genuine `Command::new(..).status()`. `deny Exec`, `deny Exec Unknown` and `pure` all
+  move 0 -> 1 on the losing order. **The platform half (`unix`/`windows`) is deliberately unfixed:**
+  the join that would settle it routes into an adjudicator SPEC §4 says is wrong (the effects are the
+  UNION of the arms), which is R287, open and owed a ruling. 199 rows leave the report; 186 carry no
+  effects and all 13 that do were checked against their crate's own `default` list — every one is a
+  function that does not exist in a default build.
+
+- ⚠ **The OS entropy source handed over as an ARGUMENT read pure — SOUNDNESS R334.** Every entropy
+  rule keyed on the callee, so `StdRng::try_from_rng(&mut SysRng)` — the idiomatic way to seed a
+  userspace CSPRNG — matched nothing, in the old `OsRng` spelling as well as the new one. `from_rng`
+  itself cannot be charged: it is deterministic with a seeded PRNG, and that population is the larger
+  one. `Call` gains `entropy_arg`. A/B: 17 rows move, 0 removed, including **`atuin`'s `Key::generate`
+  and `Key::try_load_or_generate`** — key generation in a real application that disclosed no entropy —
+  and `quinn-proto`'s `Endpoint::new`.
+
+- ⚠ **The native-tls Identity WRAPPERS read pure — SOUNDNESS R337.** candor charges
+  `native_tls::Identity::from_pkcs8`/`from_pkcs12` because on macOS each writes a real keychain into a
+  temp dir, but it classifies the call a CONSUMER writes, not the dependency body behind it — so
+  `reqwest::tls::Identity::from_pkcs12_der`, `::from_pkcs8_pem` and lettre's `Identity::from_pem`
+  matched nothing, and in a calibrated crate an unmatched path is a claim of reviewed purity. A call
+  taking only bytes writes a file. Suffix-matched so the root re-export elasticsearch uses is covered.
+
+- ⚠ **A TLS entry point kept its transport effect and dropped the trust-store read — SOUNDNESS R338.**
+  `classify` returns one effect, so `tungstenite::client_tls` resolving to `Net` dropped the `Fs` it
+  also performs and `deny Fs` passed over it. Added as a second effect. Four other crates that build a
+  connector internally are deliberately left, each on measured evidence — notably `ureq`, whose
+  default build uses compiled-in webpki-roots and touches no disk at all.
+
+- ⚠ **redis's SENTINEL lookup surface read pure at redis 1.6.0 — its own reviewed ceiling —
+  SOUNDNESS R335.** Twelve verbs, in both the receiver-typed and qualified spellings. Written as a
+  DENYLIST over the module rather than an enumeration, because enumerating connecting verbs goes stale
+  in the SILENT direction, which is how the hole appeared.
+
+- ⚠ **The OS entropy source lost its safety margin when it was renamed — SOUNDNESS R320.**
+  `rand::rngs::SysRng` resolves to crate `rand`, not `getrandom`, so the `contains("OsRng")` margin
+  protected the deleted spelling and not its replacement: an unrecognised verb on `OsRng` charged
+  `Rand` and the same verb on `SysRng` read pure.
+
+- **The FALLIBLE draw verbs and their regression test — SOUNDNESS R333.** `try_next_u32`/`try_next_u64`
+  are the natural API on rand 0.10's fallible `SysRng` and `ends_with("::next_u32")` does not match
+  them. The test asserts BOTH rule blocks, because the first attempt widened only one and moved
+  nothing.
+
 - ⚠ **A closure INVOKED AND DISCARDED in this scope no longer reads as escaping — SOUNDNESS
   R209(b)/R198.** `let f = || H::new("a"); let _ = f();` builds the value here, runs here and drops it
   here, but the closure's body was pushed onto the escape set UNCONDITIONALLY, so the enclosing
