@@ -9,6 +9,15 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **The two element resolvers kept SEPARATE copies of the adapter list — SOUNDNESS R347.** The
+  concrete-element resolver had no interior-mutability guard chain and the trait-object one had none of
+  the iterator adapters, so which silence you got depended on whether the element happened to be a
+  trait object: `vd.iter().rev().for_each(|d| d.go())` was ABSENT while `vd.iter().for_each(..)`
+  charged. One authority now, and both call it. The guard-chain half (`m.lock().unwrap().iter()` over
+  `Arc<Mutex<Vec<T>>>`) is a PINNED residual — closing it needs a type peel that the corpus A/B showed
+  fabricates `Exec` on `async-process`'s `has_zombies`, because `unwrap_or_else`'s closure parameter is
+  the error, not the element.
+
 - ⚠ **The element-preserving adapter list carried FOUR iterator names — SOUNDNESS R346.** With
   `self.v.iter().for_each(..)` as the baseline, sixteen ordinary spellings between a collection and its
   closure were silent: `.rev()`, `.take(n)`, `.skip(n)`, `.filter(..)`, `.peekable()`, `.chain(..)`,
