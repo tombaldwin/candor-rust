@@ -7094,6 +7094,60 @@ pub fn touches_fs() { let _ = std::fs::read(\"x\"); }\n";
     }
 
     #[test]
+    fn every_element_preserving_adapter_keeps_the_element() {
+        // SOUNDNESS R346 — `resolve_elem_type`'s adapter list is an ALLOWLIST, the shape that goes
+        // stale in the SILENT direction, and it carried four iterator adapters. With
+        // `self.v.iter().for_each(..)` as the baseline, SIXTEEN ordinary spellings between the
+        // collection and the closure were all silent.
+        //
+        // The real instance is `execute-0.2.15`, whose `execute_multiple` does
+        // `for other in others.iter_mut().take(n) { .. other.spawn()? }` — a process spawn reached
+        // through `.take(n)`. Eight of its functions gained `Exec` when that one name was added.
+        //
+        // THE EXCLUSIONS ARE ASSERTED TOO, and they are the reason this may be widened at all:
+        // `windows`/`chunks` yield a SLICE of the element rather than the element, so typing the
+        // binder as `T` inside one would be a fabrication one index deep. They stay silent ON PURPOSE
+        // and this test pins that, so a later widening has to argue with a fixture rather than a
+        // hunch.
+        let src = "\
+pub struct Guard;\n\
+impl Guard { pub fn run(&self) { let _ = std::fs::write(\"/tmp/r346\", \"x\"); } }\n\
+pub struct Pure;\n\
+impl Pure { pub fn run(&self) -> u32 { 7 } }\n\
+pub struct H { v: Vec<Guard>, o: Option<Guard>, vp: Vec<Pure> }\n\
+impl H {\n\
+  pub fn base(&self) { self.v.iter().for_each(|h| h.run()); }\n\
+  pub fn a_rev(&self) { self.v.iter().rev().for_each(|h| h.run()); }\n\
+  pub fn a_take(&self) { self.v.iter().take(1).for_each(|h| h.run()); }\n\
+  pub fn a_skip(&self) { self.v.iter().skip(1).for_each(|h| h.run()); }\n\
+  pub fn a_filter(&self) { self.v.iter().filter(|_| true).for_each(|h| h.run()); }\n\
+  pub fn a_chain(&self) { self.v.iter().chain(self.v.iter()).for_each(|h| h.run()); }\n\
+  pub fn a_peek(&self) { self.v.iter().peekable().for_each(|h| h.run()); }\n\
+  pub fn a_last(&self) { if let Some(h) = self.v.last() { h.run(); } }\n\
+  pub fn a_first(&self) { if let Some(h) = self.v.first() { h.run(); } }\n\
+  pub fn a_get(&self) { if let Some(h) = self.v.get(0) { h.run(); } }\n\
+  pub fn a_optfilter(&self) { if let Some(h) = self.o.as_ref().filter(|_| true) { h.run(); } }\n\
+  pub fn x_windows(&self) { self.v.windows(1).for_each(|w| w[0].run()); }\n\
+  pub fn fab(&self) -> u32 { self.vp.iter().rev().map(|h| h.run()).sum() }\n\
+}\n";
+        let v = scan_fixture("r346adapters", src);
+        for f in ["H::base", "H::a_rev", "H::a_take", "H::a_skip", "H::a_filter", "H::a_chain",
+                  "H::a_peek", "H::a_last", "H::a_first", "H::a_get", "H::a_optfilter"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f}: an element-PRESERVING adapter must not decide whether the effect is \
+                        seen:\n{v:#}");
+        }
+        // A STATED RESIDUAL, pinned so its closure names itself: `windows` yields `&[T]`, not `T`.
+        assert!(fixture_effects(&v, "H::x_windows").is_empty(),
+                "windows/chunks are deliberately NOT element-preserving — if this goes green, the \
+                 slice-element question was answered somewhere and this pin should be revisited \
+                 rather than deleted:\n{v:#}");
+        // …and the fabrication control: the same chain over a PURE payload stays pure.
+        assert!(fixture_effects(&v, "H::fab").is_empty(),
+                "an adapter types the element, it does not charge it:\n{v:#}");
+    }
+
+    #[test]
     fn as_ref_is_element_preserving_like_iter_and_clone_beside_it() {
         // SOUNDNESS R345 — `as_ref`/`as_mut`/`as_deref` were missing from `resolve_elem_type`'s
         // element-preserving adapter list, which already held `iter`, `clone`, `to_vec` and the rest.

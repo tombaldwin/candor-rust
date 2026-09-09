@@ -724,11 +724,33 @@ impl<'a> CallCollector<'a> {
                 // `self.o.as_ref().map(|h| h.run())` and `.and_then(..)` were absent for the same
                 // reason, while `self.o.iter().for_each(..)` charged — because `iter` was on this list
                 // and `as_ref` was not.
+                // SOUNDNESS R346 — THE REST OF THE ELEMENT-PRESERVING FAMILY. This list is an
+                // ALLOWLIST, which is the shape that goes stale in the SILENT direction, and it had
+                // exactly four iterator adapters on it. Measured with `self.v.iter().for_each(..)` as
+                // the baseline: sixteen ordinary spellings between the collection and the closure were
+                // ALL silent — `.rev()`, `.take(n)`, `.skip(n)`, `.filter(..)`, `.peekable()`,
+                // `.chain(..)`, `.step_by(n)`, `.take_while(..)`, `.by_ref()`, and the
+                // `Option<&T>`-returning accessors `.first()`, `.last()`, `.get(i)`.
+                //
+                // Every name added here yields the SAME element as its receiver, which is the only
+                // property this function is about. The exclusions are the interesting half and they are
+                // deliberate: `map`/`flat_map`/`flatten`/`zip`/`enumerate` CHANGE the element and must
+                // stay off, and `windows`/`chunks` yield a SLICE of the element rather than the element
+                // — `w[0].run()` inside one is a stated residual, not an oversight, because typing `w`
+                // as `T` there would be a fabrication one index deep.
+                //
+                // `first`/`last`/`get` return `Option<&T>` rather than an iterator, and belong for the
+                // same reason: the Option's payload IS the receiver's element, so both
+                // `if let Some(h) = v.last()` and `for h in v.last()` want exactly what this returns.
                 let adapter = matches!(
                     m.method.to_string().as_str(),
                     "iter" | "into_iter" | "iter_mut" | "clone" | "drain" | "as_slice" | "as_mut_slice"
                         | "to_vec" | "values" | "values_mut"
                         | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut"
+                        | "rev" | "take" | "skip" | "step_by" | "peekable" | "by_ref" | "fuse"
+                        | "chain" | "filter" | "take_while" | "skip_while" | "inspect"
+                        | "cloned" | "copied"
+                        | "first" | "last" | "get"
                 );
                 if adapter {
                     self.resolve_elem_type(&m.receiver)
