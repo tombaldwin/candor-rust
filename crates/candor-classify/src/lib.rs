@@ -917,6 +917,34 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // `reqwest::tls::Identity::from_pem` is rustls-only, a `Cursor` over a buffer (tls.rs:373), and
         // lettre's `Certificate::from_der`/`from_pem` reach `native_tls::Certificate::*`, which imports
         // items with no keychain and no temp dir (security_framework.rs:206,212).
+        // SOUNDNESS R342 — THE RESPONSE BODY IS READ FROM THE SOCKET, and `resp.text().await` is one of
+        // the most-written lines in Rust networking. `send()` is charged; the methods that DRAIN what it
+        // returned were not, so a helper that takes a `Response` and reads it — an extremely common
+        // shape — was a positive purity claim on a CALIBRATED crate. Executed at reqwest 0.13.4:
+        // `r.text()`, `r.json()` and `r.bytes()` all ABSENT while `c.get(..).send()` was `['Net']`.
+        //
+        // Verified in the source rather than assumed: `text` -> `text_with_charset` -> `bytes` ->
+        // `do_bytes`, which is `BodyExt::collect(self.res.into_body()).await`
+        // (`async_impl/response.rs:433`) — it drains the body off the wire. `chunk` and `bytes_stream`
+        // are the streaming spellings of the same read; charging the stream CONSTRUCTOR follows this
+        // file's own `Command::new` convention, where the effect is attributed at the point the caller
+        // asks for it rather than at the poll nobody can see.
+        //
+        // Scoped by `Response::` and not by the bare verb: `::text` and `::json` are far too common a
+        // leaf to match crate-wide. Found by the coverage gate the moment R185 taught the scanner to
+        // see through `Option`/`Result` unwraps — the same "closing a silence makes consumers' gaps
+        // visible" shape recorded on R302 and R337.
+        if crate_name == "reqwest"
+            && path.contains("Response::")
+            && (path.ends_with("::text")
+                || path.ends_with("::text_with_charset")
+                || path.ends_with("::json")
+                || path.ends_with("::bytes")
+                || path.ends_with("::chunk")
+                || path.ends_with("::bytes_stream"))
+        {
+            return Some("Net");
+        }
         if crate_name == "reqwest"
             && (path.ends_with("::Identity::from_pkcs12_der")
                 || path.ends_with("::Identity::from_pkcs8_pem"))
@@ -1281,6 +1309,25 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     }
     // elasticsearch: request builders are pure; only the `.send()` dispatch is HTTP I/O
     // (same shape as reqwest / the AWS SDK). (Found on an elasticsearch consumer.)
+    // SOUNDNESS R342 — …and the RESPONSE BODY, one wrapper up from reqwest's. `Response::json` is
+    // `self.response.json::<B>().await` (`http/response.rs:102`) — reqwest's body drain, which this file
+    // now charges — and `text`/`bytes`/`exception` are the same read. A consumer writing
+    // `client.search(..).send().await?.json().await?` had the `send` charged and the read silent.
+    //
+    // This is EXACTLY the distinction this file's own exclusion list already draws for this type:
+    // `Response::content_type` is documented there as a pure accessor reading a header off an
+    // ALREADY-received response. `status_code`/`headers` are the same shape and stay pure; the body
+    // methods are not accessors, they pull the remaining bytes off the wire. Both halves are asserted
+    // in the test so the line between them cannot move by accident.
+    if crate_name == "elasticsearch"
+        && path.contains("Response::")
+        && (path.ends_with("::json")
+            || path.ends_with("::text")
+            || path.ends_with("::bytes")
+            || path.ends_with("::exception"))
+    {
+        return Some("Net");
+    }
     if crate_name == "elasticsearch" && path.ends_with("::send") {
         return Some("Net");
     }
@@ -1660,7 +1707,16 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                     || path == "rusqlite::Statement::insert"
                     || path == "rusqlite::statement::Statement::insert"
                     || path == "rusqlite::Statement::raw_execute"
-                    || path == "rusqlite::statement::Statement::raw_execute")
+                    || path == "rusqlite::statement::Statement::raw_execute"
+                    // SOUNDNESS R342 — `Rows::next` STEPS the statement: it is `self.advance()?`
+                    // (`rusqlite-0.39.0/src/row.rs:40`), i.e. `sqlite3_step`, which is where a query's
+                    // rows actually come from. Iterating a result set is the ordinary way to read from
+                    // sqlite and it carried no `Db`. `advance` is listed beside it because it is `pub`
+                    // and is the same call one level down.
+                    || path == "rusqlite::Rows::next"
+                    || path == "rusqlite::row::Rows::next"
+                    || path == "rusqlite::Rows::advance"
+                    || path == "rusqlite::row::Rows::advance")
             {
                 return Some("Db");
             }
@@ -2958,10 +3014,31 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // which calls the already-covered `CommandReaderBuilder::build` two hops down.
         // `patterns_from_path` (pattern.rs:82) opens and reads the given file directly (`std::fs::File::
         // open`) — unrelated to the Exec family above, genuinely Fs.
+        // SOUNDNESS R342 — `DecompressionReader::close` was the sibling this enumeration missed. It is
+        // `match self.rdr { Ok(ref mut rdr) => rdr.close(), Err(_) => Ok(()) }` (`decompress.rs:383`),
+        // i.e. the already-listed `CommandReader::close` one level up, so it reaps the same child. Its
+        // `CommandReader` counterpart was listed and it was not — measured on a consumer fixture:
+        // `CommandReader::close` charged `Exec` and `DecompressionReader::close` read ABSENT.
+        //
+        // The `read` pair is listed for the same reason one hop over: reading a `DecompressionReader`
+        // or a `CommandReader` pulls bytes from the child's stdout, which is the point of having
+        // spawned it. FQN-exact rather than a `::read`/`::close` suffix, because both are far too
+        // common a leaf to match crate-wide — the R321 lesson.
+        //
+        // Found because R185 taught the scanner to see through `match self.rdr { Ok(..) }`, which made
+        // grep-cli's own self-scan nominate it. The rule is what a CONSUMER needs; the self-scan only
+        // pointed at it.
         if path == "grep_cli::CommandReader::new"
             || path == "grep_cli::CommandReader::close"
+            || path == "grep_cli::CommandReader::read"
             || path == "grep_cli::DecompressionMatcher::command"
             || path == "grep_cli::DecompressionReader::new"
+            || path == "grep_cli::DecompressionReader::close"
+            || path == "grep_cli::DecompressionReader::read"
+            || path == "grep_cli::decompress::DecompressionReader::close"
+            || path == "grep_cli::decompress::DecompressionReader::read"
+            || path == "grep_cli::process::CommandReader::close"
+            || path == "grep_cli::process::CommandReader::read"
         {
             return Some("Exec");
         }

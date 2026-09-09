@@ -175,7 +175,6 @@ filetime	filetime::set_times	Fs,Unknown	src/unix/utimes.rs	filetime::unix::utime
 grep_cli	grep_cli::DecompressionMatcher::new	Env,Log	src/decompress.rs	grep_cli::decompress::DecompressionMatcher::new
 grep_cli	grep_cli::DecompressionMatcherBuilder::associate	Env	src/decompress.rs	grep_cli::decompress::DecompressionMatcherBuilder::associate
 grep_cli	grep_cli::DecompressionMatcherBuilder::try_associate	Env	src/decompress.rs	grep_cli::decompress::DecompressionMatcherBuilder::try_associate
-grep_cli	grep_cli::DecompressionReader::close	Exec,Log	src/decompress.rs	grep_cli::decompress::DecompressionReader::close
 grep_cli	grep_cli::is_readable_stdin	Log	src/lib.rs	grep_cli::is_readable_stdin
 grep_cli	grep_cli::resolve_binary	Env	src/decompress.rs	grep_cli::decompress::resolve_binary
 isahc	isahc::CookieJar::set	Log	src/cookies/jar.rs	isahc::cookies::jar::CookieJar::set
@@ -377,19 +376,6 @@ reqwest	reqwest::NoProxy::from_env	Env	src/proxy.rs	reqwest::proxy::NoProxy::fro
 reqwest	reqwest::Pool::new_connection	Log	src/async_impl/h3_client/pool.rs	reqwest::async_impl::h3_client::pool::Pool::new_connection
 reqwest	reqwest::Pool::try_pool	Log	src/async_impl/h3_client/pool.rs	reqwest::async_impl::h3_client::pool::Pool::try_pool
 reqwest	reqwest::PoolClient::send_request	Log,Net	src/async_impl/h3_client/pool.rs	reqwest::async_impl::h3_client::pool::PoolClient::send_request
-reqwest	reqwest::Response::bytes	Log,Unknown	src/async_impl/response.rs	reqwest::async_impl::response::Response::bytes
-reqwest	reqwest::Response::bytes	Log,Unknown	src/blocking/response.rs	reqwest::blocking::response::Response::bytes
-reqwest	reqwest::Response::bytes	Log,Unknown	src/wasm/response.rs	reqwest::wasm::response::Response::bytes
-reqwest	reqwest::Response::bytes_stream	Log,Unknown	src/async_impl/response.rs	reqwest::async_impl::response::Response::bytes_stream
-reqwest	reqwest::Response::bytes_stream	Log,Unknown	src/wasm/response.rs	reqwest::wasm::response::Response::bytes_stream
-reqwest	reqwest::Response::json	Log,Unknown	src/async_impl/response.rs	reqwest::async_impl::response::Response::json
-reqwest	reqwest::Response::json	Log,Unknown	src/blocking/response.rs	reqwest::blocking::response::Response::json
-reqwest	reqwest::Response::json	Log,Unknown	src/wasm/response.rs	reqwest::wasm::response::Response::json
-reqwest	reqwest::Response::text	Log,Unknown	src/async_impl/response.rs	reqwest::async_impl::response::Response::text
-reqwest	reqwest::Response::text	Log,Unknown	src/blocking/response.rs	reqwest::blocking::response::Response::text
-reqwest	reqwest::Response::text	Log,Unknown	src/wasm/response.rs	reqwest::wasm::response::Response::text
-reqwest	reqwest::Response::text_with_charset	Log,Unknown	src/async_impl/response.rs	reqwest::async_impl::response::Response::text_with_charset
-reqwest	reqwest::Response::text_with_charset	Log,Unknown	src/blocking/response.rs	reqwest::blocking::response::Response::text_with_charset
 rusqlite	rusqlite::Connection::deserialize	Db,Unknown	src/serialize.rs	rusqlite::serialize::Connection::deserialize
 rusqlite	rusqlite::Connection::deserialize_bytes	Db,Unknown	src/serialize.rs	rusqlite::serialize::Connection::deserialize_bytes
 rusqlite	rusqlite::Connection::deserialize_read_exact	Db,Unknown	src/serialize.rs	rusqlite::serialize::Connection::deserialize_read_exact
@@ -400,7 +386,6 @@ rusqlite	rusqlite::InnerConnection::enable_load_extension	Db	src/inner_connectio
 rusqlite	rusqlite::InnerConnection::load_extension	Db	src/inner_connection.rs	rusqlite::inner_connection::InnerConnection::load_extension
 rusqlite	rusqlite::InnerConnection::open_with_flags	Db,Unknown	src/inner_connection.rs	rusqlite::inner_connection::InnerConnection::open_with_flags
 rusqlite	rusqlite::RawStatement::step	Db	src/raw_statement.rs	rusqlite::raw_statement::RawStatement::step
-rusqlite	rusqlite::Rows::next	Db	src/row.rs	rusqlite::row::Rows::next
 rusqlite	rusqlite::Wal::checkpoint	Db	src/hooks/mod.rs	rusqlite::hooks::Wal::checkpoint
 rusqlite	rusqlite::Wal::checkpoint_v2	Db	src/hooks/mod.rs	rusqlite::hooks::Wal::checkpoint_v2
 rusqlite	rusqlite::cancel_auto_extension	Db	src/auto_extension.rs	rusqlite::auto_extension::cancel_auto_extension

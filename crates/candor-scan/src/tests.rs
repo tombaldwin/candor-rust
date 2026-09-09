@@ -6925,6 +6925,74 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn the_response_body_and_the_row_step_are_charged_where_they_happen() {
+        // SOUNDNESS R342 — three entries the coverage gate nominated the moment R185 taught the scanner
+        // to see through `Option`/`Result` unwraps. All three are consumer-facing and all three read as
+        // positive purity claims on CALIBRATED crates.
+        //
+        // `resp.text().await` is one of the most-written lines in Rust networking. `send()` was charged
+        // and the methods that DRAIN what it returned were not, so a helper taking a `Response` and
+        // reading it — an extremely common shape — was silent. Verified in source, not assumed: `text`
+        // -> `text_with_charset` -> `bytes` -> `do_bytes`, which is
+        // `BodyExt::collect(self.res.into_body()).await` (async_impl/response.rs:433).
+        //
+        // THE PURE ACCESSORS ON THE SAME TYPE ARE THE POINT OF THE FIXTURE. `status`, `headers` and
+        // `url` read stored values; a rule keyed on the bare verb rather than on `Response::` would
+        // charge half the crate, and `::text`/`::json` are far too common a leaf to match crate-wide.
+        let src = "\
+pub async fn r_text(r: reqwest::Response) { let _ = r.text().await; }\n\
+pub async fn r_json(r: reqwest::Response) { let _: Result<u8,()> = r.json().await; }\n\
+pub async fn r_bytes(r: reqwest::Response) { let _ = r.bytes().await; }\n\
+pub async fn r_chunk(mut r: reqwest::Response) { let _ = r.chunk().await; }\n\
+pub fn r_stream(r: reqwest::Response) { let _ = r.bytes_stream(); }\n\
+pub fn r_status(r: &reqwest::Response) { let _ = r.status(); }\n\
+pub fn r_headers(r: &reqwest::Response) { let _ = r.headers(); }\n\
+pub fn r_url(r: &reqwest::Response) { let _ = r.url(); }\n\
+pub fn step(rows: &mut rusqlite::Rows) { let _ = rows.next(); }\n\
+pub fn dec_close(r: &mut grep_cli::DecompressionReader) { let _ = r.close(); }\n\
+pub fn cmd_close(r: &mut grep_cli::CommandReader) { let _ = r.close(); }\n\
+pub async fn es_json(r: elasticsearch::http::response::Response) { let _: Result<u8,()> = r.json().await; }\n\
+pub async fn es_text(r: elasticsearch::http::response::Response) { let _ = r.text().await; }\n\
+pub fn es_status(r: &elasticsearch::http::response::Response) { let _ = r.status_code(); }\n\
+pub fn es_ctype(r: &elasticsearch::http::response::Response) { let _ = r.content_type(); }\n";
+        let v = scan_fixture("r342bodies", src);
+
+        for f in ["r_text", "r_json", "r_bytes", "r_chunk", "r_stream"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Net".to_string()],
+                       "{f} drains the response body off the socket and must charge Net:\n{v:#}");
+        }
+        for f in ["r_status", "r_headers", "r_url"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} reads a stored value — it is the control that keeps the rule scoped to \
+                     Response:: and off the bare verb:\n{v:#}");
+        }
+        // `Rows::next` is `self.advance()?` (rusqlite row.rs:40) — sqlite3_step, which is where a
+        // query's rows actually come from. Iterating a result set carried no Db.
+        assert_eq!(fixture_effects(&v, "step"), vec!["Db".to_string()],
+                   "stepping a result set is how sqlite is READ:\n{v:#}");
+        // `DecompressionReader::close` is `CommandReader::close` one level up (decompress.rs:383) —
+        // the same child reaped. Its counterpart was enumerated and it was not; both are asserted so
+        // the pair cannot drift apart again.
+        for f in ["dec_close", "cmd_close"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaps the spawned child:\n{v:#}");
+        }
+        // …and ONE WRAPPER UP. elasticsearch's `Response::json` is `self.response.json().await`
+        // (http/response.rs:102) — reqwest's body drain, which the rule above now charges. The
+        // accessors beside it are the line this file's own exclusion list already draws for this exact
+        // type: `content_type` is documented there as reading a header off an ALREADY-received
+        // response. Both sides are asserted so that line cannot move by accident.
+        for f in ["es_json", "es_text"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Net".to_string()],
+                       "{f} drains the body through reqwest's:\n{v:#}");
+        }
+        for f in ["es_status", "es_ctype"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} reads an already-received header and must stay pure:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn unwrapping_an_option_binds_the_payload_type_in_every_binder() {
         // SOUNDNESS R185 — `elem_type` did not peel `Option`, so the payload of an unwrap was typed as
         // nothing and its method calls dropped to pure. The SIBLING SHAPES ARE THE PROOF the row is
