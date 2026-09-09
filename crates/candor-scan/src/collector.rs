@@ -724,34 +724,10 @@ impl<'a> CallCollector<'a> {
                 // `self.o.as_ref().map(|h| h.run())` and `.and_then(..)` were absent for the same
                 // reason, while `self.o.iter().for_each(..)` charged — because `iter` was on this list
                 // and `as_ref` was not.
-                // SOUNDNESS R346 — THE REST OF THE ELEMENT-PRESERVING FAMILY. This list is an
-                // ALLOWLIST, which is the shape that goes stale in the SILENT direction, and it had
-                // exactly four iterator adapters on it. Measured with `self.v.iter().for_each(..)` as
-                // the baseline: sixteen ordinary spellings between the collection and the closure were
-                // ALL silent — `.rev()`, `.take(n)`, `.skip(n)`, `.filter(..)`, `.peekable()`,
-                // `.chain(..)`, `.step_by(n)`, `.take_while(..)`, `.by_ref()`, and the
-                // `Option<&T>`-returning accessors `.first()`, `.last()`, `.get(i)`.
-                //
-                // Every name added here yields the SAME element as its receiver, which is the only
-                // property this function is about. The exclusions are the interesting half and they are
-                // deliberate: `map`/`flat_map`/`flatten`/`zip`/`enumerate` CHANGE the element and must
-                // stay off, and `windows`/`chunks` yield a SLICE of the element rather than the element
-                // — `w[0].run()` inside one is a stated residual, not an oversight, because typing `w`
-                // as `T` there would be a fabrication one index deep.
-                //
-                // `first`/`last`/`get` return `Option<&T>` rather than an iterator, and belong for the
-                // same reason: the Option's payload IS the receiver's element, so both
-                // `if let Some(h) = v.last()` and `for h in v.last()` want exactly what this returns.
-                let adapter = matches!(
-                    m.method.to_string().as_str(),
-                    "iter" | "into_iter" | "iter_mut" | "clone" | "drain" | "as_slice" | "as_mut_slice"
-                        | "to_vec" | "values" | "values_mut"
-                        | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut"
-                        | "rev" | "take" | "skip" | "step_by" | "peekable" | "by_ref" | "fuse"
-                        | "chain" | "filter" | "take_while" | "skip_while" | "inspect"
-                        | "cloned" | "copied"
-                        | "first" | "last" | "get"
-                );
+                // SOUNDNESS R347 — ONE authority, shared with `resolve_elem_trait_leaves`. The two
+                // resolvers each kept their own copy of this list and diverged in BOTH directions;
+                // see `lang::is_element_preserving_adapter` for what each divergence cost.
+                let adapter = crate::lang::is_element_preserving_adapter(&m.method.to_string());
                 if adapter {
                     self.resolve_elem_type(&m.receiver)
                 } else {
@@ -833,23 +809,13 @@ impl<'a> CallCollector<'a> {
                     .unwrap_or_default()
             }
             syn::Expr::MethodCall(m) => {
-                let adapter = matches!(
-                    m.method.to_string().as_str(),
-                    // element-preserving collection adapters + map value views…
-                    "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice" | "values" | "values_mut"
-                    // …and the interior-mutability / smart-pointer GUARD chain that peels back to the
-                    // wrapped collection: `reg.lock().unwrap().iter()` / `cell.borrow().iter()` /
-                    // `rw.read().unwrap().iter()` over an `Arc<Mutex<Vec<Box<dyn>>>>` etc.
-                    | "lock" | "unwrap" | "expect" | "borrow" | "borrow_mut" | "read" | "write" | "as_ref" | "as_mut"
-                    // R101 — the DEFERRED-INIT CELL accessors. `OnceLock`/`OnceCell::get`/`get_mut`/
-                    // `get_or_init` yield the cell's contents exactly as `lock`/`borrow`/`read` yield a
-                    // `Mutex`/`RefCell`'s, so they preserve the receiver's element leaves. Without them
-                    // `if let Some(f) = CB.get() { f() }` over `static CB: OnceLock<Box<dyn Fn()>>` resolved
-                    // to nothing and `f()` dropped silent-pure (SOUNDNESS R101). `get`/`get_mut` are also
-                    // `Vec`/`HashMap`'s element accessors, which this arm was already missing — R88's
-                    // stated-open "Option-returning element-yielding methods" gap, one shape of it.
-                    | "get" | "get_mut" | "get_or_init"
-                );
+                // SOUNDNESS R347 — ONE authority, shared with `resolve_elem_type`. This arm used to
+                // carry its own copy of the list, and its doc claimed it peeled "exactly like"
+                // that one — a sentence already false when written. The guard chain
+                // (`lock`/`borrow`/`read`) lived ONLY here and the iterator adapters lived only
+                // there, so which silence you got depended on whether the element happened to be a
+                // trait object. See `lang::is_element_preserving_adapter`.
+                let adapter = crate::lang::is_element_preserving_adapter(&m.method.to_string());
                 // …and of THOSE, the ones whose NAME a crate is likely to define itself. `returns` is keyed
                 // by bare method LEAF crate-wide, so one local `fn get(&self) -> Option<Box<dyn Doer>>`
                 // answers for EVERY `.get()` in the crate. The ordering between the two routes is therefore
