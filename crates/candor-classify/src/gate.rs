@@ -145,6 +145,23 @@ pub struct GateOutcome {
     /// DISCLOSURE beside the verdict, never a new verdict: the caller prints it and MUST NOT let it
     /// change the exit code (a zero-match rule is legitimate when one policy is shared across repos).
     pub zero_match: Vec<String>,
+    /// SOUNDNESS R301 — every `deny`/`pure` rule whose scope names a BARE FUNCTION (no `::`) and bound
+    /// MORE THAN ONE, as `(raw rule, the names it bound)`. Sorted, and a DISCLOSURE beside the verdict
+    /// exactly like `zero_match`: the exit code must not move.
+    ///
+    /// **WHY.** §6.2 scope matching is a PREFIX match, which is the documented behaviour and is not in
+    /// question here. What is in question is that it is INVISIBLE: `deny Fs either` also binds
+    /// `either_ifelse` and `either_match`, and `deny Fs t_fish` binds `t_fish_both`. An UNBOUND rule
+    /// announces itself (`matched NO function`); an OVER-bound one announced nothing and looked exactly
+    /// like a rule that bound the one function its author named. Both matrix agents on 2026-09-07 were
+    /// caught by it, each noticing only because an unrelated control disagreed, and in every case the
+    /// scoped column read exit 1 for a function that is actually SILENT — a cardinal sin hidden behind
+    /// a neighbour's name.
+    ///
+    /// **SCOPED TO BARE NAMES ON PURPOSE.** A layer scope (`handlers::`) is MEANT to bind many, so
+    /// announcing that would be noise on every real policy and the disclosure would be ignored. A scope
+    /// with no `::` is someone naming a function, and binding two is a surprise worth one line.
+    pub multi_match: Vec<(String, Vec<String>)>,
 }
 
 /// ⟨0.24⟩ What one §6.2 `deny`/`pure` rule DOES to one function's signature — see [`rule_hits`].
@@ -559,9 +576,36 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         }
     }
     let zero_match: Vec<String> = zero
-        .into_iter()
-        .filter(|(_, c)| *c == 0)
+        .iter()
+        .filter(|(_, c)| **c == 0)
         .map(|(raw, _)| raw.to_string())
         .collect();
-    GateOutcome { violations: out, withheld, zero_match }
+    // R301 — the OVER-bound counterpart of `zero_match`, from the same counting pass. Recomputing the
+    // names rather than accumulating them above keeps the hot loop allocation-free: this branch runs
+    // only for rules already known to have bound more than one function, which on a real policy is
+    // approximately never.
+    let mut multi_match: Vec<(String, Vec<String>)> = Vec::new();
+    for r in &p.rules {
+        let Some(sc) = &r.scope else { continue };
+        if sc.contains("::") {
+            continue; // a LAYER scope is meant to bind many — see the field's doc
+        }
+        if zero.get(r.raw.as_str()).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let mut names: std::collections::BTreeSet<&str> =
+            gi.all.iter().map(|q| q.as_str()).collect();
+        names.extend(gi.calls.keys().map(String::as_str));
+        let bound: Vec<String> = names
+            .into_iter()
+            .filter(|n| scope_matches(gi.disp(n), sc))
+            .map(|n| n.to_string())
+            .collect();
+        if bound.len() > 1 {
+            multi_match.push((r.raw.clone(), bound));
+        }
+    }
+    multi_match.sort();
+    multi_match.dedup();
+    GateOutcome { violations: out, withheld, zero_match, multi_match }
 }

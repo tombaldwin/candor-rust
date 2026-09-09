@@ -4444,6 +4444,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                  a typo'd layer name otherwise."
             );
         }
+        // SOUNDNESS R301 — and the OVER-bound counterpart, on the same channel and with the same rule
+        // about the exit code: this is a DISCLOSURE, never a verdict. §6.2 scope matching is a PREFIX
+        // match and that is the documented behaviour; what was wrong is that it was INVISIBLE. An
+        // unbound rule announced itself and an over-bound one did not, so `deny Fs either` reading
+        // exit 1 looked like evidence about `either` when it was evidence about `either_ifelse`.
+        for (raw, bound) in &outcome.multi_match {
+            eprintln!(
+                "candor: policy rule `{raw}` bound {} functions, not one — {}. \u{a7}6.2 scope matching is a PREFIX match, so a result under this rule is not evidence about the name you wrote. Rename or qualify the scope if you meant exactly one.",
+                bound.len(),
+                bound.join(", ")
+            );
+        }
         // ⟨0.27⟩ …and the SAME list rides the `--gate-json` verdict as `zeroMatch` (SPEC §4): stderr is
         // not the machine channel, and a wrapper that reads the document could not see that a rule bound
         // nothing — the typo'd-scope silent green, one channel over. Recorded toward the single verdict
