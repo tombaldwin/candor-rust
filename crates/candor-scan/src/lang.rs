@@ -2064,6 +2064,38 @@ pub(crate) const SELF_KEY: &str = "Self";
 /// disclosed in the ledger and `--deps` chaining recovers the effect — parity with a DIRECT `use`.
 pub(crate) const GLOB_KEY: &str = "*";
 
+/// SOUNDNESS R140, the UNDECIDABLE half — DELIBERATELY STILL ORDER-DEPENDENT HERE, and the reason is a
+/// SPEC clause, not a difficulty.
+///
+/// Two same-name module-level `use` items under mutually-exclusive NON-TEST cfgs resolve by SOURCE
+/// ORDER. Reproduced with the order of two lines as the only variable:
+/// `#[cfg(unix)] use std::process::Command as Runner;` followed by
+/// `#[cfg(windows)] use crate::mockproc::Runner;` reads ABSENT — a purity claim over a real
+/// `Command::new(..).status()` — and swapped reads `['Exec']`. Prevalence over 1490 crates: 221 crates
+/// (14.8%), 451 sites.
+///
+/// **The DECIDABLE half is fixed, in `use_item_applies`:** a `#[cfg(feature = "x")]` on a declared-but-
+/// inactive feature binds nothing in this build, so the arm is dropped and the remaining one answers
+/// precisely. Measured on that pair: ABSENT -> `['Exec']`, and `deny Exec`, `deny Exec Unknown` and
+/// `pure run_it` all move 0 -> 1 on the losing order with no policy losing its catch.
+///
+/// **The UNDECIDABLE half — `unix`/`windows`/`target_os`, which `cfg_eval` returns `None` for because a
+/// source scan does not assume a target — is NOT fixed here, and the obvious fix was BUILT AND BACKED
+/// OUT.** Routing these three inserts through `decls::record_alias` (R105's join, which keeps both arms
+/// and defers to scan.rs) does make the answer order-independent: measured, both orders come back
+/// `['Unknown']` instead of one reading ABSENT. But scan.rs adjudicates a joined arm set to
+/// `Unknown` + `ambiguous:cfg-duplicated alias`, and **SPEC §4's 2026-09-05 clarification says that is
+/// the wrong answer twice over**: the effects "are the union of the arms", picking is fabrication,
+/// dropping is a ⟨0.21⟩ purity claim, and `ambiguous:` is reserved for two separately-written
+/// definitions rather than a conditional-compilation arm set. That is R287, which is OPEN and owed a
+/// ruling plus a four-way rung because the union is a behaviour change candor-rust does not own.
+///
+/// So the join would have made a known-NONCONFORMANT behaviour more prevalent, and R287's own remedy
+/// names that move: "acting on half of it — the kind without the union — is precisely the
+/// boundary-drawn-around-the-trigger error". The measured cost of backing it out is stated rather than
+/// implied: on the platform pair, `deny Exec` and `pure run_it` still exit 0 over a real `Command`
+/// under one arm order. **This is a live cardinal sin held open on purpose, waiting on R287's ruling,
+/// not an oversight.**
 pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, String>) {
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
     // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what
@@ -2182,6 +2214,22 @@ pub(crate) fn collect_root_reexports(items: &[syn::Item], include_tests: bool) -
 /// the question. They all call this now, so there is one authority rather than five hand-rolled loops
 /// free to drift apart again.
 pub(crate) fn use_item_applies(u: &syn::ItemUse, include_tests: bool) -> bool {
+    // SOUNDNESS R140 — this function's own doc calls itself "THE ONE RULE for does this `use` item bind
+    // a name in the build we are describing", and it answered only the `test` half. `is_cfg_inactive`
+    // is the authority for the OTHER half and already exists: a `#[cfg(feature = "x")]` on a feature
+    // that is DECLARED and INACTIVE is `Some(false)`, so the item binds nothing in this build and
+    // keeping it made a second arm compete with the real one.
+    //
+    // This is the DECIDABLE half only. `cfg_eval` deliberately returns `None` for `unix`, `windows` and
+    // `target_os` — a source scan does not assume a target — so a platform-gated pair is genuinely
+    // undecidable here and is handled the other way, by `record_alias` keeping BOTH arms so the answer
+    // stops depending on source order. Dropping a decidable arm and hedging an undecidable one are the
+    // two halves of one fix, and neither is sufficient alone: without this, an inactive feature arm
+    // would turn a precise answer into `Unknown`; without the join, a platform arm would still be
+    // decided by whichever line was written last.
+    if is_cfg_inactive(&u.attrs) {
+        return false;
+    }
     include_tests || !is_cfg_test(&u.attrs)
 }
 
