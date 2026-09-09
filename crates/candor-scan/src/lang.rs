@@ -2108,6 +2108,120 @@ pub(crate) const GLOB_KEY: &str = "*";
 /// implied: on the platform pair, `deny Exec` and `pure run_it` still exit 0 over a real `Command`
 /// under one arm order. **This is a live cardinal sin held open on purpose, waiting on R287's ruling,
 /// not an oversight.**
+/// SOUNDNESS R308 — PARSE A FILE, AND IF AND ONLY IF THAT FAILS, RETRY ONCE WITH RUST-2015 BARE
+/// CLOSURE-TRAIT OBJECTS NORMALISED.
+///
+/// **THE DEFECT.** `syn` parses `&dyn Fn(..)` and rejects the 2015 spelling `&Fn(..)`, and a parse
+/// failure is per-FILE, so ONE elided `dyn` drops every function in the file. Measured on
+/// `serial-core-0.4.0`: 802 lines, 35 bodied fns, the entire crate reports zero rows over
+/// `fn reconfigure(&mut self, setup: &Fn(&mut SerialPortSettings) -> ::Result<()>)`. Two-line repro:
+/// `&Fn(&mut u8)` beside a `std::fs::read` gives analyzed=0 / rows=0; `&dyn Fn(&mut u8)` gives
+/// analyzed=1 / rows=1. The arrow is not required — `&Fn(&mut u8)` alone does it.
+///
+/// **WHY THIS CANNOT REGRESS A FILE THAT PARSES TODAY, by construction rather than by care.** The
+/// rewrite runs ONLY on text `syn` has already rejected. A file that parses is returned from the first
+/// attempt and never sees the transform, so the blast radius is exactly the set of files that
+/// currently contribute nothing. The worst case for a file in that set is that it still fails, which
+/// is where it already was.
+///
+/// **AND THE PARSER IS THE VALIDATOR.** If the rewrite produced nonsense, `syn` rejects the retry and
+/// we fall back — the normalisation cannot smuggle a mis-parse through, only fail to help. It is also
+/// semantics-preserving where it fires: in the 2015 edition `Fn(..)` in type position IS `dyn Fn(..)`,
+/// which is why rustc's own migration is this same insertion.
+///
+/// **SCOPE, and why it is not "insert `dyn` before every bare trait".** A general 2015 trait object
+/// (`&Error`, `Box<Error>`) cannot be told from a type by syntax, so normalising it would need name
+/// resolution. `Fn`/`FnMut`/`FnOnce` followed by `(` are unambiguous — they are traits, never types —
+/// which is the whole family the row names and the only one attempted. The match additionally requires
+/// a preceding `&`, `<` or `:` so a `Fn(` inside a string literal is not touched.
+pub(crate) fn parse_file_2015_tolerant(text: &str) -> Option<(syn::File, bool)> {
+    let first = match syn::parse_file(text) {
+        Ok(f) => return Some((f, false)),
+        Err(e) => e,
+    };
+    let mut out = String::with_capacity(text.len() + 32);
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let mut rewrote = false;
+    while i < b.len() {
+        let rest = &text[i..];
+        let hit = ["Fn(", "FnMut(", "FnOnce("]
+            .iter()
+            .find(|k| rest.starts_with(**k))
+            .filter(|_| {
+                // TYPE POSITION, approximated by the token that introduces it. Also refuse when the
+                // previous non-space char could make this an identifier tail (`MyFn(`) or when `dyn`
+                // or `impl` is already there.
+                let before = text[..i].trim_end();
+                // `=` is the TYPE-ALIAS position — `type Action = Fn(&siginfo_t) + Send + Sync;`,
+                // which is signal-hook-registry 1.4.8 lib.rs:140 and was the second real instance,
+                // found in seconds by the `PARSEFAIL` diagnostic below after the first one cost an
+                // hour of bisecting. It is as unambiguous as the others: `Fn` is a trait, and a trait
+                // is the only thing that can follow `=` in a type alias.
+                // `:` IS DELIBERATELY NOT HERE, and the reason is measured. It is ambiguous between a
+                // parameter type (`setup: &Fn(..)`, a trait object) and a GENERIC BOUND
+                // (`F: Fn() + Sync + Send`, where `dyn` is a syntax error) — signal-hook-registry
+                // 1.4.8 lib.rs:576 has both in one file. Dropping it costs nothing: every real trait
+                // object is already reached by `&`, `<` or `=`, because a bare `x: Fn()` parameter is
+                // unsized and does not compile in any edition.
+                //
+                // The wrong version of this shipped for about a minute and was caught by `syn`
+                // rejecting the retry rather than by review — which is the safety property working
+                // exactly as designed, and the reason a rewrite that only ever sees already-failing
+                // source can afford to be approximate.
+                (before.ends_with('&') || before.ends_with('<') || before.ends_with('='))
+                    && !before.ends_with("==")
+            });
+        match hit {
+            Some(k) => {
+                out.push_str("dyn ");
+                out.push_str(k);
+                i += k.len();
+                rewrote = true;
+            }
+            None => {
+                let c = text[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    if !rewrote {
+        report_parse_error(&first, text);
+        return None;
+    }
+    match syn::parse_file(&out) {
+        Ok(f) => Some((f, true)),
+        Err(e) => {
+            report_parse_error(&e, text);
+            None
+        }
+    }
+}
+
+/// SOUNDNESS R308 — say WHY a file could not be parsed, when asked.
+///
+/// The `unanalyzed` entry a failed parse produces reads `"source failed to read/parse"` and carries
+/// nothing else, so identifying the construct means bisecting the file by hand — which is how R308 was
+/// found and it cost an hour. `syn`'s error already knows the line, the column and the token it choked
+/// on; it was simply being dropped with `.ok()`. Behind `CANDOR_ALIAS_DEBUG` (the same switch the §E1
+/// hit counters use) rather than in the report, because a parse error is a diagnostic for whoever is
+/// extending the scanner, not a fact about the scanned crate's effects.
+fn report_parse_error(e: &syn::Error, text: &str) {
+    if std::env::var("CANDOR_ALIAS_DEBUG").is_err() {
+        return;
+    }
+    let start = e.span().start();
+    let line = text.lines().nth(start.line.saturating_sub(1)).unwrap_or("");
+    eprintln!(
+        "PARSEFAIL {}:{} — {} | {}",
+        start.line,
+        start.column,
+        e,
+        line.trim().chars().take(100).collect::<String>()
+    );
+}
+
 pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, String>) {
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
     // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what

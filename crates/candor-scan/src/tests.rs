@@ -6993,6 +6993,39 @@ pub fn es_ctype(r: &elasticsearch::http::response::Response) { let _ = r.content
     }
 
     #[test]
+    fn a_rust_2015_bare_closure_trait_object_no_longer_drops_the_whole_file() {
+        // SOUNDNESS R308 — `syn` rejects the 2015 spelling `&Fn(..)`, and a parse failure is per-FILE,
+        // so ONE elided `dyn` dropped every function in it. Measured on `serial-core-0.4.0`: the whole
+        // crate reported analyzed=0 / rows=0 over a single `&Fn(&mut SerialPortSettings)` parameter.
+        //
+        // THE THREE ASSERTIONS ARE THREE DIFFERENT CLAIMS and the last two are the ones that make this
+        // safe to ship:
+        //   1. the 2015 file is now analysed, and the effect beside the offending signature is found;
+        //   2. `parse_file_2015_tolerant` reports `false` for a file that parses on the FIRST attempt —
+        //      i.e. the rewrite never runs on healthy source, which is what makes the blast radius
+        //      exactly the set of files that currently contribute nothing;
+        //   3. a file that is broken for ANY OTHER reason still fails, so the fallback has not turned
+        //      into a general "try harder" that would smuggle a mis-parse through.
+        let src = "pub fn reconfigure(_s: &Fn(&mut u8)) {}\n\
+pub fn touches_fs() { let _ = std::fs::read(\"x\"); }\n";
+        let v = scan_fixture("r308bare2015", src);
+        assert_eq!(fixture_effects(&v, "touches_fs"), vec!["Fs".to_string()],
+                   "the whole file was dropped over the `&Fn(..)` in its NEIGHBOUR's signature:\n{v:#}");
+        assert!(v["unanalyzed"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+                "nothing should remain unanalyzed:\n{v:#}");
+
+        // (2) healthy source takes the first parse and is never rewritten.
+        let (_f, relaxed) = crate::lang::parse_file_2015_tolerant("pub fn f(x: &dyn Fn(u8)) {}\n")
+            .expect("modern spelling must parse");
+        assert!(!relaxed, "a file that parses must not be rewritten — the rewrite's whole safety \
+                           argument is that it only ever sees source syn has already rejected");
+
+        // (3) …and the fallback is not a general second chance.
+        assert!(crate::lang::parse_file_2015_tolerant("pub fn f( {{{ ;").is_none(),
+                "genuinely unparseable source must still fail");
+    }
+
+    #[test]
     fn unwrapping_an_option_binds_the_payload_type_in_every_binder() {
         // SOUNDNESS R185 — `elem_type` did not peel `Option`, so the payload of an unwrap was typed as
         // nothing and its method calls dropped to pure. The SIBLING SHAPES ARE THE PROOF the row is
