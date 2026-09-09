@@ -7149,10 +7149,125 @@ impl H {\n\
         //
         // If these three go green, the type peel landed: check `async-process`'s `has_zombies` in the
         // same A/B before deleting this pin.
+        // SOUNDNESS R350 — ABSENCE AS A PROXY IS WHY R350 WAS NOT CAUGHT HERE. This loop asserted
+        // `fixture_effects(..).is_empty()`, and candor emits only EFFECTFUL functions, so that
+        // predicate is satisfied identically by "absent from functions[] entirely" (a purity CLAIM)
+        // and by "present, disclosing an Unknown" (an honest hedge). Those are the two answers this
+        // pin most needs to tell apart, and R350 is exactly the transition it could not see: the
+        // trait-object route went silent and every `is_empty()` pin in this file stayed green.
+        // This same release fixed the identical shape in two other tests (`61c3579`); this one was
+        // written after that fix and re-committed the defect.
+        //
+        // So assert the DOCUMENT, not the effect list: the row must be ABSENT — which is what the
+        // residual actually is — and if it ever becomes PRESENT the pin fails and names itself,
+        // whether it arrived as a concrete effect or as a disclosure.
         for f in ["H::g_mutex", "H::g_refcell", "H::g_rwlock"] {
-            assert!(fixture_effects(&v, f).is_empty(),
-                    "{f} is a PINNED residual — a concrete element behind a guard chain. See the \
-                     comment above before changing this:\n{v:#}");
+            let present = v["functions"].as_array().into_iter().flatten()
+                .any(|r| r["fn"].as_str() == Some(f));
+            assert!(!present,
+                    "{f} is a PINNED residual — a concrete element behind a guard chain. It must be \
+                     ABSENT from functions[]; it is now PRESENT, which means the type peel landed \
+                     (check async-process's `has_zombies` in the same A/B) or something else began \
+                     disclosing here. See the comment above before changing this:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R350 — A CRATE-LOCAL FN NAMED AFTER AN ADAPTER, RETURNING A TRAIT-OBJECT
+    /// COLLECTION, MUST STILL REACH ITS ELEMENT'S EFFECTS.
+    ///
+    /// R347 unified the two element-resolver lists, and the dispatch arm's `returns`-index fallback
+    /// stayed keyed on a three-name ALLOWLIST (`get`/`get_mut`/`get_or_init`). The twenty names R347
+    /// moved into that arm therefore hit `return Vec::new()`, and every caller reaching a real effect
+    /// through a caller-supplied trait object went ABSENT — no row, no `Unknown`, no `invisible`. A
+    /// purity CLAIM over a body that writes a file, introduced by a commit whose headline was closing
+    /// the same class one resolver over.
+    ///
+    /// THE CONTROLS ARE THE POINT, and they are two: `via_fetch` (a name that was never on any
+    /// adapter list, so it always took the `else` arm) and `via_get` (on the list AND on the old
+    /// allowlist, so it kept its fallback throughout). Every fn here returns the SAME type and the
+    /// only variable is the method NAME — which is what pins the cause to the fallback decision
+    /// rather than to anything about the receiver or the trait.
+    #[test]
+    fn an_adapter_named_local_fn_returning_dyn_still_reaches_its_element() {
+        let src = "\
+pub trait Doer { fn go(&self); }\n\
+pub struct D;\n\
+impl Doer for D { fn go(&self) { let _ = std::fs::write(\"/tmp/r350\", \"x\"); } }\n\
+pub struct Pure;\n\
+impl Pure { pub fn go(&self) -> usize { 7 } }\n\
+pub struct Reg { p: Vec<Pure> }\n\
+impl Reg {\n\
+  pub fn fetch(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+  pub fn get(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+  pub fn first(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+  pub fn take(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+  pub fn to_vec(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+  pub fn filter(&self) -> Vec<Box<dyn Doer>> { Vec::new() }\n\
+}\n\
+pub fn via_fetch(r: &Reg) { for d in r.fetch() { d.go(); } }\n\
+pub fn via_get(r: &Reg) { for d in r.get() { d.go(); } }\n\
+pub fn via_first(r: &Reg) { for d in r.first() { d.go(); } }\n\
+pub fn via_take(r: &Reg) { for d in r.take() { d.go(); } }\n\
+pub fn via_to_vec(r: &Reg) { for d in r.to_vec() { d.go(); } }\n\
+pub fn via_filter(r: &Reg) { for d in r.filter() { d.go(); } }\n\
+pub fn ctl_pure(r: &Reg) { for p in r.p.iter() { p.go(); } }\n";
+        let v = scan_fixture("r350fallback", src);
+
+        for f in ["via_fetch", "via_get"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} is a CONTROL and must charge Fs on every build — if it does not, this \
+                        fixture is measuring a broken harness rather than R350:\n{v:#}");
+        }
+        for f in ["via_first", "via_take", "via_to_vec", "via_filter"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} must charge Fs. ABSENT here is R350's cardinal sin: a crate-local fn \
+                        named after an element-preserving adapter lost its `returns`-index fallback \
+                        when R347 moved it into the dispatch arm, and the caller became a purity \
+                        claim over a body that writes a file:\n{v:#}");
+        }
+        // OVER-CHARGE CONTROL — restoring a fallback is where fabrication gets introduced. A
+        // concrete `Vec<Pure>` whose element's `go` is PURE, reached through `iter` (a receiver-only
+        // name), must stay effect-free even though a crate-local `fn get`/`fn first` returning `dyn`
+        // is in scope and `returns` is keyed by bare leaf crate-wide.
+        assert!(fixture_effects(&v, "ctl_pure").is_empty(),
+                "ctl_pure must stay pure — the element is a concrete Pure whose `go` writes \
+                 nothing. Charging it would mean the fallback reached a receiver it had typed:\n{v:#}");
+    }
+
+    /// SOUNDNESS R350 — THE TWO ADAPTER SETS ARE A PARTITION, AND NOTHING ELSE CHECKS THAT.
+    /// `is_receiver_only_adapter` is a DENYLIST carved out of `is_element_preserving_adapter`, so a
+    /// name on the denylist that is NOT in the union is dead code that reads as a live rule — the
+    /// R348 shape, one engine over — and the union is where a future name gets added. This is a
+    /// DECISION test: it asserts the relationship between the two lists, not a behaviour, which is
+    /// the only kind of check that would have caught R350 at the moment R347 introduced it.
+    #[test]
+    fn the_receiver_only_denylist_is_a_subset_of_the_adapter_union() {
+        const RECEIVER_ONLY: [&str; 17] = [
+            "iter", "into_iter", "iter_mut", "drain", "as_slice", "as_mut_slice",
+            "values", "values_mut",
+            "lock", "unwrap", "expect", "borrow", "borrow_mut", "read", "write",
+            "as_ref", "as_mut",
+        ];
+        for m in RECEIVER_ONLY {
+            assert!(crate::lang::is_receiver_only_adapter(m),
+                    "{m} is in the documented denylist but `is_receiver_only_adapter` says no");
+            assert!(crate::lang::is_element_preserving_adapter(m),
+                    "{m} is on the receiver-only DENYLIST but not in the adapter UNION it carves \
+                     out of. A denylist entry outside the set it narrows is dead code that reads as \
+                     a live rule, and the fallback decision it is supposed to govern never consults \
+                     it — see R348 for the same shape in candor-swift.");
+        }
+        // …and the twenty names R347 moved into the dispatch arm must FALL BACK. This is the R350
+        // regression itself, stated as a property of the lists rather than of one fixture.
+        for m in ["clone", "to_vec", "as_deref", "as_deref_mut", "rev", "take", "skip", "step_by",
+                  "peekable", "by_ref", "fuse", "chain", "filter", "take_while", "skip_while",
+                  "inspect", "cloned", "copied", "first", "last", "get", "get_mut", "get_or_init"] {
+            assert!(crate::lang::is_element_preserving_adapter(m), "{m} left the adapter union");
+            assert!(!crate::lang::is_receiver_only_adapter(m),
+                    "{m} must fall back to the `returns` index when the receiver route answers \
+                     nothing — that is the route it took before R347, and denying it is R350: a \
+                     caller reaching a real effect through a trait object goes ABSENT, with no row, \
+                     no Unknown and no invisible.");
         }
     }
 
