@@ -9,6 +9,63 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **Twenty adapter names lost their trait-object route — SOUNDNESS R350.** R347 unified the two
+  element-resolver lists, and the dispatch arm's `returns`-index fallback stayed keyed on a three-name
+  allowlist (`get`/`get_mut`/`get_or_init`). The twenty names R347 moved into that arm — `first`,
+  `take`, `to_vec`, `filter`, `rev`, `clone` and the rest of the R345/R346 additions — therefore
+  returned nothing, and any caller reaching a real effect through a caller-supplied trait object went
+  ABSENT: no row, no `Unknown`, no `invisible`. Fixed by inverting the allowlist to a DENYLIST of the
+  seventeen receiver-only names whose fallback was measured bad, so a name added to the adapter union
+  in future falls back by default. Prevalence on the local registry is 0 (1,568 crates), so no
+  published report changes; the silence it closes is real.
+
+- ⚠ **A LIVE cardinal sin on the password-hash family, and eleven more classification fixes —
+  SOUNDNESS R318, with R312–R317, R319 and R321.** The shared argon2/scrypt/pbkdf2/`password_hash` rule charged `Rand` on
+  exactly one condition, `path.contains("SaltString::generate")` — and `SaltString` was DELETED
+  upstream in `password-hash` 0.6.0. Every consumer on 0.6.x minted OS entropy through
+  `hash_password(password)` and read pure. Eleven further rules in the same wave (R312–R317, R319,
+  R321), each measured against real source before landing.
+
+- ⚠ **`hash_password` is ONE name with TWO signatures, and the fix for the above over-charged the
+  other one — SOUNDNESS R330.** At `password-hash` 0.6.x, `hash_password(&self, password)` generates
+  its own salt; at 0.5.0 and argon2 0.5.3 the identical name is `(&self, password, salt)`, where the
+  caller supplies the salt and the call is deterministic recomputation. The path cannot separate
+  them; the call-site ARITY can, at every call site, with no lockfile. **This REMOVES `Rand` from the
+  explicit-salt spelling** — a charge the previous release added — so a saved baseline moves.
+
+- ⚠ **The calibration exemption now stops at each crate's REVIEWED version — SOUNDNESS R311.** An
+  unmatched path in a calibrated crate is a claim of reviewed purity with no disclosure. That claim
+  was made on crate NAME alone, with no version anywhere, so it kept being made for every version
+  published after the review. `CALIBRATED_CEILINGS` now records the reviewed version for all 24
+  calibrated crates that have one, and `calibration_exceeded` withdraws the exemption above it
+  (one-sided: it fires only when the resolved version is higher). Broad — it can move rows in any
+  calibrated crate. The coverage gate additionally records WHICH VERSION produced its rows.
+
+- ⚠ **The ceiling looked up TWO KEY SPACES and crossed neither — SOUNDNESS R322.** The exemption is
+  keyed on the syntactic first segment a consumer writes; the ceiling lookup was keyed on the
+  resolved package name. `CALIBRATED_CEILINGS` is populated from the crate IDENTIFIERS, so an entry
+  like `("native_tls_crate", "0.2.18")` sat under a key the lookup could never form and that ceiling
+  could never fire — while the exemption was still granted. Both keys are now consulted and either
+  saying "beyond review" is enough.
+
+- ⚠ **Nine ceiling entries were silently dropped by their own fix — SOUNDNESS R328.** The commit that
+  introduced the ceiling table replaced it wholesale with a freshly-computed dict and lost nine
+  crates (dialoguer, dotenv, dotenvy, grep_cli, isahc, lettre, portable_pty, tempfile, postgres)
+  while claiming in its own message that four were "deliberately absent, each with a stated reason".
+  Eight had no stated reason. The table is now MERGED, never rewritten, and the one deliberate
+  absence states itself in the code.
+
+- ⚠ **Two fabrications in the R209(b) fix — SOUNDNESS R303, R304.** Both discarded-call counters
+  counted at ANY closure depth, so a closure captured by another closure that invokes and discards it
+  satisfied the suppression condition and the Drop hedge was withdrawn. Found by a review agent
+  attacking the fix, which built 27 cells beyond the original 99 and executed all of them.
+
+- ⚠ **An unknown flag's OPERAND was resolved as the scan target — SOUNDNESS R232.** `candor-scan .
+  --scope src` correctly refuses at the unknown flag with exit 2, but the ⟨0.32⟩ refusal MARKER was
+  written to the prefix the run WOULD have used, and the target was resolved by taking the last bare
+  token — which on that argv is the rejected flag's operand. The marker landed in `src/.candor/`.
+  Found as a stray directory left in a working tree by a mistyped command.
+
 - ⚠ **The two element resolvers kept SEPARATE copies of the adapter list — SOUNDNESS R347.** The
   concrete-element resolver had no interior-mutability guard chain and the trait-object one had none of
   the iterator adapters, so which silence you got depended on whether the element happened to be a
@@ -119,7 +176,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   protected the deleted spelling and not its replacement: an unrecognised verb on `OsRng` charged
   `Rand` and the same verb on `SysRng` read pure.
 
-- **The FALLIBLE draw verbs and their regression test — SOUNDNESS R333.** `try_next_u32`/`try_next_u64`
+- ⚠ **The FALLIBLE draw verbs and their regression test — SOUNDNESS R333.** `try_next_u32`/`try_next_u64`
   are the natural API on rand 0.10's fallible `SysRng` and `ends_with("::next_u32")` does not match
   them. The test asserts BOTH rule blocks, because the first attempt widened only one and moved
   nothing.
@@ -150,14 +207,14 @@ after upgrading; review policies and regenerate baselines with the new build.
   file intact; `-V` in the same position exited 0 with the file DESTROYED. The two spellings of one
   fact are now one shared `VALUELESS_FLAGS` constant.
 
-- **The macro-opacity hedge is spelled `macro:`, not `ambiguous:` — SOUNDNESS R257.** The disclosure
+- ⚠ **The macro-opacity hedge is spelled `macro:`, not `ambiguous:` — SOUNDNESS R257.** The disclosure
   was right and the KIND was wrong. SPEC §4 reserves `ambiguous:` for two or more separately-written
   definitions competing for one bare name; a macro arm is selected by the invocation's own tokens, so
   nothing competes, and the engine is disclosing a limit of its own resolution. The prefix is not
   cosmetic: §6.2 projects `ambiguous:*` to class `dispatch`, so the first spelling put ~7,700 rows in
   front of every scoped `deny Unknown[dispatch]` gate that never meant to ask for them.
 
-- **Two MORE macro-opacity hedges were still `ambiguous:` — SOUNDNESS R270.** R257 re-kinded the two
+- ⚠ **Two MORE macro-opacity hedges were still `ambiguous:` — SOUNDNESS R270.** R257 re-kinded the two
   lines it was reported for, which drew the audit's boundary around its own trigger. A census of all
   ten `ambiguous:`-emitting spellings over 1,509 registry crates (22,826 rows) found two more with
   ZERO readable definitions — module items hidden by an unexpanded macro (291 rows / 45 crates) and a
@@ -165,7 +222,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   genuinely have two readable definitions and correctly KEEP the kind. One spelling, a cfg-duplicated
   alias, is filed unsettled rather than guessed at.
 
-- **The expression WRAPPED around a callable dropped it — SOUNDNESS R271.** `expr_is_fn_typed`
+- ⚠ **The expression WRAPPED around a callable dropped it — SOUNDNESS R271.** `expr_is_fn_typed`
   answered for the callable's access path while the named-fn-by-value edge answered for a bare
   `syn::Expr::Path`: two consumers of one question — "what can this expression evaluate to" —
   implemented separately, so a `match`, a block, `unsafe {}`, a deref, a cast, an indexed array
