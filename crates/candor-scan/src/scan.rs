@@ -1266,7 +1266,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             let p = &paths.iter().find(|(_, r)| r == rel)?.0;
             let text = std::fs::read_to_string(p).ok()?;
-            let file = syn::parse_file(&text).ok()?;
+            // SOUNDNESS R308 — see `parse_file_2015_tolerant`: a file `syn` rejects gets ONE retry with
+            // Rust-2015 bare closure-trait objects normalised, because one elided `dyn` currently drops
+            // every function in the file.
+            let (file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -1539,7 +1542,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .iter()
                 .find(|(_, r)| r == rel)
                 .and_then(|(p, _)| std::fs::read_to_string(p).ok())
-                .and_then(|t| syn::parse_file(&t).ok())
+                // R308 — the round-2 twin of the round-1 parse above.
+                .and_then(|t| crate::lang::parse_file_2015_tolerant(&t).map(|(f, _)| f))
                 .map(|file| {
                     // Resolve loc on THIS parse worker (span line/col is thread-local) — same as round 1.
                     let mut locs = Vec::new();
