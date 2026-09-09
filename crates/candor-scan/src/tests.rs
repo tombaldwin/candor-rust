@@ -7094,6 +7094,51 @@ pub fn touches_fs() { let _ = std::fs::read(\"x\"); }\n";
     }
 
     #[test]
+    fn as_ref_is_element_preserving_like_iter_and_clone_beside_it() {
+        // SOUNDNESS R345 — `as_ref`/`as_mut`/`as_deref` were missing from `resolve_elem_type`'s
+        // element-preserving adapter list, which already held `iter`, `clone`, `to_vec` and the rest.
+        // `Option::as_ref` gives `Option<&T>` and `Vec::as_ref` gives `&[T]`, so they preserve exactly
+        // what that list is about.
+        //
+        // THE FIRST ROW IS A HOLE IN R185's OWN FIX, shipped hours earlier the same day, and that is
+        // why it is asserted beside its twin: `if let Some(h) = &self.o` charges `Fs` and
+        // `if let Some(h) = self.o.as_ref()` read ABSENT. Same statement, one idiom over — and
+        // `.as_ref()` is how most Rust spells it, because `&self.o` does not compile where the payload
+        // is moved. A fix verified only through the spelling its fixture happened to use is verified
+        // for that spelling.
+        //
+        // `o_iter_foreach` is the row's own diagnostic: it charged all along, because `iter` was on the
+        // list and `as_ref` was not. Two spellings of one question with two answers is what identified
+        // the list as the site rather than the binder.
+        let src = "\
+pub struct Guard;\n\
+impl Guard { pub fn run(&self) { let _ = std::fs::write(\"/tmp/r345\", \"x\"); } }\n\
+pub struct Pure;\n\
+impl Pure { pub fn run(&self) -> u32 { 7 } }\n\
+pub struct H { o: Option<Guard>, r: Result<Guard, ()>, p: Option<Pure>, v: Vec<Guard> }\n\
+impl H {\n\
+  pub fn c_vec_foreach(&self) { self.v.iter().for_each(|h| h.run()); }\n\
+  pub fn c_iflet(&self) { if let Some(h) = &self.o { h.run(); } }\n\
+  pub fn o_if_some(&self) { if let Some(h) = self.o.as_ref() { h.run(); } }\n\
+  pub fn o_map(&self) { let _ = self.o.as_ref().map(|h| h.run()); }\n\
+  pub fn o_and_then(&self) { let _ = self.o.as_ref().and_then(|h| { h.run(); Some(1) }); }\n\
+  pub fn o_iter_foreach(&self) { self.o.iter().for_each(|h| h.run()); }\n\
+  pub fn r_map(&self) { let _ = self.r.as_ref().map(|h| h.run()); }\n\
+  pub fn fab_pure(&self) -> u32 { self.p.as_ref().map(|h| h.run()).unwrap_or(0) }\n\
+}\n";
+        let v = scan_fixture("r345asref", src);
+        for f in ["H::c_vec_foreach", "H::c_iflet", "H::o_if_some", "H::o_map", "H::o_and_then",
+                  "H::o_iter_foreach", "H::r_map"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} reaches Guard::run — an element-preserving adapter must not decide \
+                        whether the effect is seen:\n{v:#}");
+        }
+        // The control that keeps this an element question rather than a charging one.
+        assert!(fixture_effects(&v, "H::fab_pure").is_empty(),
+                "the same chain over a PURE payload must stay pure:\n{v:#}");
+    }
+
+    #[test]
     fn unwrapping_an_option_binds_the_payload_type_in_every_binder() {
         // SOUNDNESS R185 — `elem_type` did not peel `Option`, so the payload of an unwrap was typed as
         // nothing and its method calls dropped to pure. The SIBLING SHAPES ARE THE PROOF the row is

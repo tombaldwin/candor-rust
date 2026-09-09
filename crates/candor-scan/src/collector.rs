@@ -712,10 +712,23 @@ impl<'a> CallCollector<'a> {
             // and `for c in xs.iter()` both type the element. A transforming adapter (`.map`) changes
             // the element, so it is deliberately NOT listed (its element is indeterminate → None).
             syn::Expr::MethodCall(m) => {
+                // SOUNDNESS R345 — `as_ref`/`as_mut`/`as_deref` belong in this list and were the gap
+                // R185's own fix left. `Option::as_ref` gives `Option<&T>` and `Vec::as_ref` gives
+                // `&[T]`: element-preserving for every container this function answers about, exactly
+                // like the `iter`/`clone` entries already here.
+                //
+                // MEASURED, and the first row is a hole in a fix shipped hours earlier the same day:
+                // `if let Some(h) = &self.o` charges `Fs` (R185) and `if let Some(h) = self.o.as_ref()`
+                // read ABSENT — the same statement, one idiom over, and `.as_ref()` is how most Rust
+                // actually spells it because `&self.o` does not compile where the payload is moved.
+                // `self.o.as_ref().map(|h| h.run())` and `.and_then(..)` were absent for the same
+                // reason, while `self.o.iter().for_each(..)` charged — because `iter` was on this list
+                // and `as_ref` was not.
                 let adapter = matches!(
                     m.method.to_string().as_str(),
                     "iter" | "into_iter" | "iter_mut" | "clone" | "drain" | "as_slice" | "as_mut_slice"
                         | "to_vec" | "values" | "values_mut"
+                        | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut"
                 );
                 if adapter {
                     self.resolve_elem_type(&m.receiver)
