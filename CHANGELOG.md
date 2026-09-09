@@ -9,6 +9,15 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **The element-preserving adapter list carried FOUR iterator names — SOUNDNESS R346.** With
+  `self.v.iter().for_each(..)` as the baseline, sixteen ordinary spellings between a collection and its
+  closure were silent: `.rev()`, `.take(n)`, `.skip(n)`, `.filter(..)`, `.peekable()`, `.chain(..)`,
+  `.step_by(n)`, `.take_while(..)`, `.by_ref()`, and `.first()`/`.last()`/`.get(i)`. The real instance
+  is a process spawn — `execute-0.2.15`'s `execute_multiple` is
+  `for other in others.iter_mut().take(n) { .. other.spawn()? }`, and eight of its functions gained
+  `Exec` from adding one name. `map`/`flatten`/`zip` change the element and stay off;
+  `windows`/`chunks` yield a slice of it and are a residual PINNED in the test.
+
 - ⚠ **`.as_ref()` was missing from the element-preserving adapter list — SOUNDNESS R345.** The list
   already held `iter`, `clone`, `to_vec` and `values`, so `self.o.iter().for_each(..)` charged while
   `self.o.as_ref().map(|h| h.run())` and `if let Some(h) = self.o.as_ref()` read ABSENT — a hole in the
