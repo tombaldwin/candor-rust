@@ -9,6 +9,37 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **Unwrapping an `Option` bound no type, so the payload's calls read pure — SOUNDNESS R185.**
+  `if let Some(h) = &self.o { h.run() }` read the caller ABSENT over a real `std::fs::write`, while the
+  SAME field as `Vec<Guard>` and as a bare `Guard` both charged `Fs` — a wrapper deciding whether an
+  effect is seen. **Five binders needed it, not one**: `if let`, `while let`, `match Some/Ok`,
+  `let ... else`, and `Ok` on a `Result`; each returns early for the DISPATCH case and dropped the
+  concrete payload. A PARAMETER was as silent as a field. A/B over 600 crates: ADDED 84, REMOVED 0,
+  including `grep-cli`'s `DecompressionReader::close` (reaps a child) and `bencher`'s
+  `ConsoleTestState::write_log` (writes to an `Option<File>`).
+
+- ⚠ **`resp.text().await` read pure — SOUNDNESS R342.** `send()` was charged and the methods that
+  DRAIN what it returned were not, so a helper taking a `Response` and reading it — an extremely common
+  shape — was a purity claim on a calibrated crate. Verified in source: `text` -> `bytes` -> `do_bytes`
+  is `BodyExt::collect(self.res.into_body()).await`. Also `rusqlite::Rows::next` (sqlite3_step — how a
+  result set is actually read), `grep_cli::DecompressionReader::close`, and elasticsearch's own
+  `Response` wrappers one level up. Scoped to `Response::` with the pure accessors (`status`, `headers`,
+  `url`, `content_type`) asserted to stay pure.
+
+- ⚠ **A Rust-2015 bare closure-trait object dropped the whole FILE — SOUNDNESS R308.** One elided `dyn`
+  made `syn` reject the file, and a parse failure is per-file: `serial-core-0.4.0` reported analyzed=0
+  over a single `&Fn(&mut SerialPortSettings)` parameter. A rejected file now gets ONE retry with those
+  normalised — **which cannot regress a healthy file by construction**, because the rewrite only ever
+  sees source `syn` has already refused, and the parser is the validator. serial-core 0/28 and
+  signal-hook-registry 20/40 analyzed; the other seven crates with unanalyzed files are unchanged and
+  correctly so — theirs are not Rust.
+
+- **A policy rule whose bare function scope binds MORE THAN ONE now says so — SOUNDNESS R301.** §6.2
+  scope matching is a prefix match and is unchanged; what was wrong is that it was invisible. An
+  unbound rule announced itself and an over-bound one did not, so `deny Fs either` reading exit 1
+  looked like evidence about `either` when it was evidence about `either_ifelse`. A disclosure, never a
+  verdict — the exit code is untouched — and quiet for a scope binding exactly one or a layer scope.
+
 - ⚠ **`reqwest::Client::builder().build()` reads the system trust store and carried no `Fs` —
   SOUNDNESS R331.** `TlsConnector::new` is literally `TlsConnector::builder().build()`, so the builder
   spelling — the dominant idiom the moment any option is set, and what reqwest itself writes — reached
