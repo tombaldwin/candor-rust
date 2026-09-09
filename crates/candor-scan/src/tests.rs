@@ -6796,7 +6796,16 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// been declared working, and each fixable only once a verbatim lockfile could be written.
     #[test]
     fn calibration_ceiling_survives_the_lockfile_shapes_cargo_emits() {
-        let call = "pub fn go(i: native_tls_crate::Identity) { let _ = native_tls_crate::TlsConnector::builder().identity(i).build(); }";
+        // SOUNDNESS R331 — this fixture used to call `TlsConnector::builder().identity(i).build()`,
+        // chosen because it was UNMATCHED. It was unmatched because of the defect R331 records: the
+        // builder spelling reaches the same trust-store load as `TlsConnector::new` and now charges
+        // `Fs`. **A ceiling control built on a silent under-report stops being a control the moment
+        // the under-report is fixed** — which is how this test caught the fix rather than the fix
+        // quietly invalidating the test. The replacement is unmatched for a RECORDED reason rather
+        // than by accident: `native_tls::Certificate::from_pem` imports items with no keychain and no
+        // temp dir (`security_framework.rs:212`), verified while fixing R337, so it is genuinely pure
+        // and the classifier is right to leave it alone.
+        let call = "pub fn go(b: &[u8]) { let _ = native_tls_crate::Certificate::from_pem(b); }";
 
         // R322 — a `package =` ALIAS puts the version under the RESOLVED name while the ceiling is
         // keyed on the IDENTIFIER. Checking each key against itself finds a version with no ceiling
@@ -6840,6 +6849,45 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(!fixture_present(&at_ceiling, "go"),
                 "AT the reviewed ceiling the exemption must STAND — without this control the two \
                  assertions above pass for a scanner that discloses unconditionally:\n{at_ceiling:#}");
+    }
+
+    #[test]
+    fn the_native_tls_connector_builder_is_charged_like_its_new(){
+        // SOUNDNESS R331 — `TlsConnector::new` is literally `TlsConnector::builder().build()`
+        // (native-tls-0.2.18/src/lib.rs:481), so the builder spelling reaches the same openssl-backend
+        // cert-file/dir load, and it is the dominant idiom the moment any option is set.
+        //
+        // KEYED ON `builder`, NOT ON `build`. The first attempt matched
+        // `TlsConnectorBuilder::build`, moved nothing, and the row was closed concluding the scanner
+        // "never types TlsConnector::builder()". That was wrong: `.build()` is a method on a
+        // foreign-returned receiver and cannot be typed without a return index for a foreign crate,
+        // but `TlsConnector::builder()` is a PATH call, recorded and classified exactly like
+        // `TlsConnector::new` beside it. All three chain shapes are here because the first fix passed
+        // review while matching none of them.
+        //
+        // THE CALIBRATED RENAME IS THE FIXTURE'S POINT. `native_tls_crate` is in CALIBRATED_CRATES and
+        // plain `native_tls` is not, so under the rename an unmatched call is DROPPED from the report
+        // — a purity claim — while the plain spelling would merely disclose `invisible`. reqwest and
+        // tungstenite both rename it, which is why they were the live instances and the four consumers
+        // the row originally cited were not.
+        let src = "\
+pub fn only_connector_new() { let _ = native_tls_crate::TlsConnector::new(); }\n\
+pub fn builder_chain() { let _ = native_tls_crate::TlsConnector::builder().build(); }\n\
+pub fn builder_opt_chain() { let _ = native_tls_crate::TlsConnector::builder().danger_accept_invalid_certs(true).build(); }\n\
+pub fn builder_split() { let b = native_tls_crate::TlsConnector::builder(); let _ = b.build(); }\n\
+pub fn acceptor_new(i: native_tls_crate::Identity) { let _ = native_tls_crate::TlsAcceptor::new(i); }\n";
+        let v = scan_fixture_lock("r331builder", src, "native-tls", "0.2.18");
+
+        for f in ["only_connector_new", "builder_chain", "builder_opt_chain", "builder_split"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} reaches native-tls's trust-store load and must charge Fs — the builder \
+                        spelling as well as the `new` one:\n{v:#}");
+        }
+        // The SIBLING that must stay pure, and the row checked it before claiming a class:
+        // `imp::TlsAcceptor::new` on the openssl backend touches no filesystem.
+        assert!(fixture_effects(&v, "acceptor_new").is_empty(),
+                "TlsAcceptor::new reads no trust store — charging it would be the fabrication this \
+                 clause was narrowed to avoid:\n{v:#}");
     }
 
     #[test]

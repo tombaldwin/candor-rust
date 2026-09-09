@@ -1022,8 +1022,10 @@ lettre	lettre::SmtpTransport::from_url	Fs,Log,Unknown	Fs	lettre::transport::smtp
 lettre	lettre::SmtpTransport::relay	Fs,Log	Fs	lettre::transport::smtp::transport::SmtpTransport::relay
 lettre	lettre::SmtpTransport::starttls_relay	Fs,Log	Fs	lettre::transport::smtp::transport::SmtpTransport::starttls_relay
 lettre	lettre::TlsParameters::new	Fs,Log	Fs	lettre::transport::smtp::client::tls::TlsParameters::new
+lettre	lettre::TlsParameters::new_native	Fs	Fs	lettre::transport::smtp::client::tls::TlsParameters::new_native
 lettre	lettre::TlsParameters::new_rustls	Fs,Log	Fs	lettre::transport::smtp::client::tls::TlsParameters::new_rustls
 lettre	lettre::TlsParametersBuilder::build	Fs,Log	Fs	lettre::transport::smtp::client::tls::TlsParametersBuilder::build
+lettre	lettre::TlsParametersBuilder::build_native	Fs	Fs	lettre::transport::smtp::client::tls::TlsParametersBuilder::build_native
 lettre	lettre::TlsParametersBuilder::build_rustls	Fs,Log	Fs	lettre::transport::smtp::client::tls::TlsParametersBuilder::build_rustls
 lscolors	lscolors::LsColors::from_env	Env	Env	lscolors::LsColors::from_env
 mongodb	mongodb::Client::with_options	Clock,Env,Fs,Ipc,Net,Unknown	Db	mongodb::client::Client::with_options
