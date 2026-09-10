@@ -2357,6 +2357,42 @@ fn report_parse_error(e: &syn::Error, text: &str) {
 /// So `out` keeps exactly the value it has today — every existing reader is untouched — and the
 /// collision is recorded beside it. This mirrors `fn_alias`, which already holds a LIST of targets for
 /// a `let`-bound function alias and whose call site already pushes every target beyond the first as its
+/// own edge so the row carries the UNION. A `use` alias simply never reached that machinery.
+///
+/// **SOUNDNESS R375 — THE PARAGRAPH ABOVE IS HALF WRONG AND IS KEPT SO THE CORRECTION IS LEGIBLE.** It
+/// argues a joined value "would flow into path construction as a literal and produce malformed paths".
+/// The companion map did exactly that: `prev` is read straight out of `out`, and `out` ALREADY holds
+/// `ALIAS_ALT_SEP`-joined values written by `record_alias` and seeded by `seed_mod_aliases` —
+/// `arc-swap` binds `Arc` to `alloc::sync::Arc<SEP>std::sync::Arc`, `axum` binds `FromRef` to a
+/// trait/derive-macro pair. The call site then built `format!("{t}::{rest}")` over one, so the suffix
+/// reached only the LAST arm and `alloc::sync::Arc` lost its `::new`. Fixed at the point the value
+/// ENTERS rather than at each place it is read: the arms are SPLIT here, so `alts` can only ever hold
+/// flat single paths and every consumer's concatenation is safe by construction. 7 live sites / 6
+/// crates (`jiff` ×2, `redis` ×3, `similar`), all previously inert.
+///
+/// **SOUNDNESS R370 — THE ARM-SET TEST IS "DID THIS ITEM LIST BIND THE NAME TWICE", which this helper
+/// did not have.** It fired on "this name already had a different value in `out`" and nothing more, so
+/// ordinary legal SHADOWING was recorded as an alternative and the union charged a binding the code
+/// cannot reach: an inline `mod inner { use std::vec::Vec as Cmd; }` under a file-level `use
+/// std::process::Command as Cmd` read `["Exec"]` — Rust does not propagate a parent's imports into an
+/// inline `mod` at all — and so did a body that DECLARES the name, while rustc itself says
+/// `warning: unused import`. Gate teeth measured: `deny Exec` 0→1, bare `pure` 0→1, scoped
+/// `deny Exec <fn>` 0→1. 676 of 1,168 collision records over 1,545 registry crates had no `#[cfg]`.
+///
+/// **A CFG TEST WAS THE FIRST FIX AND IT WAS TOO BLUNT — the corpus priced it and the price is the
+/// reason this rule is the one it is.** Requiring a `#[cfg]` also silences a same-file pair that is
+/// genuinely two live bindings in two NAMESPACES: `tracing-subscriber`'s `fmt_layer.rs` binds `format`
+/// to `crate::fmt::format` (a MODULE) on line 3 and to `alloc::format` (the MACRO) on line 7, source
+/// order picks the macro, and `Layer::default` lost three real call edges to `fmt::format::*`. Same
+/// shape cost `lettre`, `quinn-proto` and `aws-smithy-types` their blind-spot disclosures. Two `use`
+/// items binding one name in ONE list is E0252 unless they are cfg-gated or in different namespaces —
+/// and in BOTH of those cases keeping every target is right, so the list is the test and the `#[cfg]`
+/// is not. Inheritance is what must be excluded, and `seen` excludes exactly it.
+///
+/// The narrowing is a DENYLIST on the recording side and it fails in the pre-R140 direction: an
+/// inherited rebind goes back to being decided by source order, which is no worse than before this
+/// helper existed and strictly better than a fabricated edge with gate teeth.
+///
 /// R140 — note that `name` now names a SECOND, different target. `out` is left alone; the alternative
 /// is appended to `alts`, deduped, with the value `out` already held recorded first so the set is the
 /// whole arm set rather than only the losers.
@@ -2371,20 +2407,31 @@ fn note_use_collision(
         _ => return,
     };
     let e = alts.entry(name.to_string()).or_default();
+    // R375 — SPLIT, never push a joined value. `prev` can already carry `ALIAS_ALT_SEP` arms.
+    let push = |t: &str, e: &mut Vec<String>| {
+        for arm in t.split(crate::decls::ALIAS_ALT_SEP) {
+            if !arm.is_empty() && !e.iter().any(|x| x == arm) {
+                e.push(arm.to_string());
+            }
+        }
+    };
     if e.is_empty() {
-        e.push(prev);
+        push(&prev, e);
     }
-    if !e.iter().any(|t| t == target) {
-        e.push(target.to_string());
-    }
+    push(target, e);
 }
 
-/// own edge so the row carries the UNION. A `use` alias simply never reached that machinery.
+/// Expand one `use` TREE into `out`, recording `#[cfg]` arm-set collisions in `alts`.
+///
+/// `seen` is the set of names ALREADY BOUND BY THIS ITEM LIST — the arm-set test. See
+/// `note_use_collision`'s R370 paragraph. It is per-SCOPE, so it is threaded through the `Path`/`Group`
+/// recursion and accumulated across the sibling `use` items of one list.
 pub(crate) fn collect_use(
     tree: &syn::UseTree,
     prefix: String,
     out: &mut HashMap<String, String>,
     alts: &mut HashMap<String, Vec<String>>,
+    seen: &mut std::collections::HashSet<String>,
 ) {
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
     // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what
@@ -2394,6 +2441,47 @@ pub(crate) fn collect_use(
     // (→ `mycore::…::net`). Resolving the FULL rebind path through `expand` (which follows the glob
     // fallback) recovers the origin crate; a target that resolves to nothing local is stored as-is.
     let rebound = |full: &str, out: &HashMap<String, String>| -> String {
+        // SOUNDNESS R378 — `super::X` IS RE-RESOLVED ONLY INSIDE AN INLINE MODULE, AND ONLY WHEN `X`
+        // IS A NAME THE ENCLOSING MODULE ACTUALLY IMPORTS. Both halves are load-bearing, and each was
+        // measured by the corpus rows the other one broke. Inside an INLINE module, `out` starts as the parent's `use` map
+        // (`submodule_uses`), so `use super::proc_alias` names a binding that is right there — and
+        // storing the literal `super::proc_alias` names no local def, so the origin was LOST and every
+        // call through it read silent-pure. Measured: `mod inner { use super::proc_alias; fn via_super()
+        // { proc_alias::Command::new("true").status(); } }` reported ABSENT while the identical call in
+        // the parent charged `Exec`. Found because R370's cfg gate stopped R140's union from ACCIDENTALLY
+        // masking it — the union had been pushing the parent's binding as a second edge, which papered
+        // over this for the effect but not for the row.
+        //
+        // The narrowing is the whole safety argument, and the comment below is why it is needed: a
+        // `super::` path is RELATIVE to a module whose path `collect_use` does not know, so re-resolving
+        // one blindly drops the module context and breaks tail2's link to a LOCAL def (clap's
+        // `super::core::display_width`). Requiring the first segment to be a key in `out` distinguishes
+        // the two exactly: `core` is a local MODULE and not a `use` key, so it keeps its literal; a
+        // parent's imported alias is a key, and resolving it is the only way to keep its origin.
+        //
+        // AND THE SCOPE TEST IS THE OTHER HALF, measured after the first version of this shipped without
+        // it. `out` is the ENCLOSING module's map only for an INLINE `mod` — `submodule_uses` clones it
+        // and plants `SUPER_SCOPE_MARKER`. For a FILE module `out` is that FILE's own map while `super::`
+        // still means its parent, which is a different scope entirely. `hyper`'s `proto/h1/conn.rs` binds
+        // `io` to `std::io` on line 2 and writes `use super::io::Buffered` on line 19, where `super::io`
+        // is hyper's own `proto::h1::io` MODULE: without the marker test that resolved to
+        // `std::io::Buffered`, dropped the local edge, and removed 19 rows from `hyper` — two of them
+        // carrying a real `Log`. A full-registry A/B caught it, in the REMOVED column.
+        let supers = {
+            let mut r = full;
+            while let Some(t) = r.strip_prefix("super::") { r = t; }
+            r
+        };
+        if !std::ptr::eq(supers, full) && out.contains_key(crate::decls::SUPER_SCOPE_MARKER) {
+            let head = supers.split("::").next().unwrap_or(supers);
+            if out.contains_key(head) {
+                let resolved = expand(supers, out);
+                if resolved != supers {
+                    return resolved;
+                }
+            }
+            return full.to_string();
+        }
         // ONLY a `crate::`-rooted re-bind (`use crate::net`) is re-resolved: `crate::X` names the CRATE
         // ROOT, where a re-export can bring an external name into scope. `self::`/`super::` are RELATIVE to
         // the current module (whose path `collect_use` doesn't know) — a `use super::core::foo` must keep
@@ -2417,7 +2505,7 @@ pub(crate) fn collect_use(
         if resolved == local { full.to_string() } else { resolved }
     };
     match tree {
-        syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out, alts),
+        syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out, alts, seen),
         syn::UseTree::Name(n) => {
             let id = n.ident.to_string();
             if id == "self" {
@@ -2427,23 +2515,29 @@ pub(crate) fn collect_use(
                 // Metadata}` then `fs::read_dir` was unresolved → a file lister reporting ZERO Fs.)
                 if let Some(last) = prefix.rsplit("::").next() {
                     let v = rebound(&prefix, out);
-                    note_use_collision(out, alts, last, &v);
-                        out.insert(last.to_string(), v);
+                    if !seen.insert(last.to_string()) {
+                        note_use_collision(out, alts, last, &v);
+                    }
+                    out.insert(last.to_string(), v);
                 }
             } else {
                 let v = rebound(&join(&prefix, &id), out);
-                note_use_collision(out, alts, &id.clone(), &v);
-                    out.insert(id.clone(), v);
+                if !seen.insert(id.clone()) {
+                    note_use_collision(out, alts, &id.clone(), &v);
+                }
+                out.insert(id.clone(), v);
             }
         }
         syn::UseTree::Rename(r) => {
             let v = rebound(&join(&prefix, &r.ident.to_string()), out);
-            note_use_collision(out, alts, &r.rename.to_string(), &v);
-                out.insert(r.rename.to_string(), v);
+            if !seen.insert(r.rename.to_string()) {
+                note_use_collision(out, alts, &r.rename.to_string(), &v);
+            }
+            out.insert(r.rename.to_string(), v);
         }
         syn::UseTree::Group(g) => {
             for t in &g.items {
-                collect_use(t, prefix.clone(), out, alts);
+                collect_use(t, prefix.clone(), out, alts, seen);
             }
         }
         // A GLOB re-export `use PATH::*` brings PATH's public items into scope under their own names. We
@@ -2536,10 +2630,14 @@ pub(crate) fn collect_item_uses(
     out: &mut HashMap<String, String>,
     alts: &mut HashMap<String, Vec<String>>,
 ) {
+    // R370 — the arm-set test is "THIS ITEM LIST bound the name twice", accumulated across the sibling
+    // `use` items of one scope. A name already in `out` because it was INHERITED (an inline module's
+    // map is its parent's, via `submodule_uses`) is being SHADOWED, not alternated with.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for it in items {
         if let syn::Item::Use(u) = it {
             if use_item_applies(u, include_tests) {
-                collect_use(&u.tree, String::new(), out, alts);
+                collect_use(&u.tree, String::new(), out, alts, &mut seen);
             }
         }
     }

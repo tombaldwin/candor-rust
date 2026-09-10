@@ -16,9 +16,61 @@ after upgrading; review policies and regenerate baselines with the new build.
   union is the right answer and the engine already gave it for a `#[cfg]` arm set inside one body. The
   collision is now recorded in a companion map beside `uses` — which keeps exactly the value it always
   held, so no existing reader changes — and the call site pushes every arm as its own edge, the same
-  shape a `let`-bound function alias has always used. A/B over 600 registry crates: no effect set moves
-  anywhere; 57 rows gain an `invisible` disclosure, naming both blind spots where they previously named
-  one.
+  shape a `let`-bound function alias has always used.
+
+  **The A/B figures published here first were measured over a PREFIX, not a sample, and are corrected —
+  SOUNDNESS R376.** The "600 registry crates" were the alphabetical `adaptive-barrier`…`indexmap-1.9.3`
+  head of a 1,545-crate registry, and the run printed `REACH: NOT MEASURED`. Over the whole registry:
+  **ADDED 17 / REMOVED 0 / CHANGED 300**, of which `invisible` 267, `calls` 19, `inferred` 14, `direct` 1.
+  No field loses a value anywhere. The correction is favourable: all 14 effect-set movements are
+  `sea-orm-2.0.2`, whose `driver::rusqlite::RusqliteSharedConnection::acquire` and 13 propagation targets
+  gain `Clock` over a real `Instant::now()` — `#[cfg(not(target_arch = "wasm32"))] use std::time::Instant`
+  written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
+  and the original slice could not see it because the crate sorts after "i".
+
+- ⚠ **A call through `use super::<parent import>` inside an inline module read SILENT-PURE —
+  SOUNDNESS R378.** `submodule_uses` seeds an inline module's import map from its parent's, so
+  `use super::proc_alias` names a binding that is already there — but it was stored as the literal
+  `super::proc_alias`, which names no local definition, and the origin was lost. `mod inner { use
+  super::proc_alias; pub fn via_super() { proc_alias::Command::new("true").status(); } }` reported
+  **nothing at all**, while the byte-identical call in the parent charged `Exec`. Real instances in
+  `sqlx-sqlite`, `mio`, `rustls` and `rustix`. `super::X` is now re-resolved when — and only when — `X`
+  is a name the parent actually imports, so a local module reached through `super::` keeps its literal
+  and its local link.
+
+  **This had been invisible because the R140 union was accidentally compensating for it**, pushing the
+  parent's binding as a second edge. Removing the union's over-reach (R370 above) exposed it, and the
+  full-registry A/B showed it as 12 REMOVED rows — every one a pure disclosure row, so the corpus alone
+  said "disclosure loss". Only a hand fixture showed the loss is an EFFECT. A removal has to be read
+  against source, not counted.
+
+- ⚠ **Four defects introduced by that fix, found by review and closed in the same release —
+  SOUNDNESS R370, R373, R374 and R375.** The collision recorder had no notion of `#[cfg]` at all: it fired
+  on ordinary legal SHADOWING, so a name rebound by an inline `mod`, by a body-declared item, or by a
+  body-level `use` was charged with the binding it shadows. Three compiling programs went from correct
+  and pure to `["Exec"]`, with `deny`, bare `pure` and scoped-`deny` gates all flipping — while rustc
+  itself emits `warning: unused import` for the import being charged. **The arm-set test is now "did
+  this item list bind the name twice"**, and the companion map is scoped by the same shadowing rule
+  `uses` already obeys. A `#[cfg]` test was tried first and the full-registry differential rejected it:
+  it also silences a same-file pair that is two genuinely live bindings in two NAMESPACES —
+  `tracing-subscriber` binds `format` to a module and to the `format!` macro in one file, and
+  `Layer::default` lost three real call edges. Two `use` items binding one name in one list is a
+  compile error unless they are cfg-gated or in different namespaces, and keeping every target is
+  right in both of those cases; what has to be excluded is INHERITANCE, since an inline module's map
+  is its parent's. Separately,
+  the two BODY-LOCAL `use` sites never applied the `#[cfg(test)]` filter that every module-level site
+  applies, so a test-only mock joined the union and turned a correct absent row into `inferred:["Fs"]`
+  on a pure production build; both now ask the one authority. **The over-charge controls shipped with the
+  original fix could not fail** — they probed a route the fix does not touch — and are replaced with
+  controls proven to go red when the code is wrong.
+
+  **Measured over the whole 1,545-crate registry, not a slice: ADDED 6 / REMOVED 0 / CHANGED 117.** No
+  row loses an effect anywhere. The six effect movements are all `[]` → `["Unknown"]` in
+  `aws-smithy-types`, the fail-closed direction. The 119 field-value changes are all one thing: a
+  `#[cfg]` arm the engine can DECIDE is inactive no longer contributes a blind-spot disclosure —
+  `similar`'s `web_time` behind an inactive feature, `quinn-proto`'s `aws_lc_rs` behind
+  `not(feature = "ring")` when `ring` is on by default. That is the decidable half of the cfg rule
+  being applied where it previously was not.
 
 ## [0.36.0] — 2026-09-09
 
