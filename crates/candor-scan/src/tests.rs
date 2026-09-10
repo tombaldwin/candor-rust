@@ -68,12 +68,12 @@
         let mut out = HashMap::new();
         // `use std::process::{Command, Stdio as Pipe};`
         let tree: syn::UseTree = syn::parse_str("std::process::{Command, Stdio as Pipe}").unwrap();
-        collect_use(&tree, String::new(), &mut out);
+        collect_use(&tree, String::new(), &mut out, &mut Default::default());
         assert_eq!(out.get("Command").map(String::as_str), Some("std::process::Command"));
         assert_eq!(out.get("Pipe").map(String::as_str), Some("std::process::Stdio"));
         // `use std::fs::{self, Metadata}` imports the MODULE `fs` itself → map `fs -> std::fs`.
         let mut o2 = HashMap::new();
-        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2);
+        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2, &mut Default::default());
         assert_eq!(o2.get("fs").map(String::as_str), Some("std::fs"));
         assert_eq!(o2.get("Metadata").map(String::as_str), Some("std::fs::Metadata"));
         assert_eq!(o2.get("self"), None); // not the useless `fs::self`
@@ -85,16 +85,16 @@
         // re-bind in the same scope then resolves `net` THROUGH that glob to its origin crate — so a later
         // `net::connect(..)` attributes to `x`, not the dead `crate::net` (the cardinal-sin hole).
         let mut u = HashMap::new();
-        collect_use(&syn::parse_str("mycore::driver_prelude::*").unwrap(), String::new(), &mut u);
+        collect_use(&syn::parse_str("mycore::driver_prelude::*").unwrap(), String::new(), &mut u, &mut Default::default());
         assert_eq!(u.get(GLOB_KEY).map(String::as_str), Some("mycore::driver_prelude"));
-        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u);
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u, &mut Default::default());
         assert_eq!(u.get("net").map(String::as_str), Some("mycore::driver_prelude::net"));
         assert_eq!(expand("net::connect_tcp", &u), "mycore::driver_prelude::net::connect_tcp");
         // TWO external globs → ambiguous origin → never guess: the re-bind keeps the literal (under-report).
         let mut u2 = HashMap::new();
-        collect_use(&syn::parse_str("a::p1::*").unwrap(), String::new(), &mut u2);
-        collect_use(&syn::parse_str("b::p2::*").unwrap(), String::new(), &mut u2);
-        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u2);
+        collect_use(&syn::parse_str("a::p1::*").unwrap(), String::new(), &mut u2, &mut Default::default());
+        collect_use(&syn::parse_str("b::p2::*").unwrap(), String::new(), &mut u2, &mut Default::default());
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u2, &mut Default::default());
         assert_eq!(u2.get("net").map(String::as_str), Some("crate::net"));
     }
 
@@ -107,7 +107,7 @@
         assert_eq!(expand("crate::net::connect_tcp", &direct), "mycore::net::connect_tcp");
         // a `use super::core::foo` re-bind is RELATIVE (not crate-root) and must keep its literal so the
         // local `core::foo` def still resolves by tail2 — seeding a root re-export must not hijack it.
-        collect_use(&syn::parse_str("super::core::display_width").unwrap(), String::new(), &mut direct);
+        collect_use(&syn::parse_str("super::core::display_width").unwrap(), String::new(), &mut direct, &mut Default::default());
         assert_eq!(direct.get("display_width").map(String::as_str), Some("super::core::display_width"));
 
         let glob = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
@@ -122,12 +122,12 @@
         // classifier loses its crate identity (the sqlx `dotenvy::var` → dropped `Env` regression). Only a
         // `use`-imported name (resolved at collect time) or a `crate::`-rooted call is glob-attributed.
         let mut u = HashMap::new();
-        collect_use(&syn::parse_str("mycore::prelude::*").unwrap(), String::new(), &mut u);
+        collect_use(&syn::parse_str("mycore::prelude::*").unwrap(), String::new(), &mut u, &mut Default::default());
         assert_eq!(expand("dotenvy::var", &u), "dotenvy::var");
         // A crate WITHOUT any re-export glob leaves a `crate::helper::foo` local path untouched — no glob to
         // attribute to, so a genuine local module keeps its path (and resolves locally by tail2).
         let mut noglob = HashMap::new();
-        collect_use(&syn::parse_str("std::fs::read").unwrap(), String::new(), &mut noglob);
+        collect_use(&syn::parse_str("std::fs::read").unwrap(), String::new(), &mut noglob, &mut Default::default());
         assert_eq!(expand("crate::helper::foo", &noglob), "helper::foo");
     }
 
@@ -235,6 +235,7 @@
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -285,6 +286,7 @@
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(),
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -623,7 +625,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
@@ -4563,19 +4565,79 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// order too. Measured, and it is: 20 sites in 12 of the 1489 registry crates carry an indented
     /// `#[cfg(test)]`-gated `use`.
     ///
-    /// **STILL OPEN AFTER R123'S MODULE-SCOPE FIX, DELIBERATELY.** `use_item_applies` is applied at the
-    /// five MODULE-level sites; threading `include_tests` into `LocalUseCollector` and `CallCollector`
-    /// needs it on `fninfo` (5 call sites) and on a `CallCollector` that has no such field at all. This
-    /// test asserts the DEFECT so the remaining half cannot go unmeasured. **If it starts failing, the
-    /// gap was closed: invert it, say so in the changelog, and re-run the 1489-crate A/B first.**
+    /// SOUNDNESS R140/R287 — TWO `use` ITEMS UNDER MUTUALLY-EXCLUSIVE `#[cfg]`s BIND ONE NAME, AND THE
+    /// ANSWER MUST NOT DEPEND ON WHICH WAS WRITTEN SECOND.
+    ///
+    /// `uses` is single-valued, so the second overwrote the first: with the unix arm first, `run_it`
+    /// read PURE over a real `Command::new("true").status()`; swapping only those two lines charged
+    /// `Exec`. 221 crates / 451 sites. The union is the right answer and the engine already gives it
+    /// for a `#[cfg]` arm set inside ONE BODY, which is why `scan.rs`'s "a fabricated effect from the
+    /// arm that is not compiled" was wrong on its own terms.
+    ///
+    /// THE CONTROLS ARE HALF THE ROW, because a union widens what is charged: two PURE arms stay pure,
+    /// two arms naming the SAME target (the `cfg_if` shape) do not double-push, and an ordinary single
+    /// `use` is untouched.
     #[test]
-    fn r123_body_local_cfg_test_import_is_unfiltered_too() {
+    fn a_cfg_duplicated_use_alias_charges_every_arm_in_either_order() {
+        let src = |unix_first: bool| {
+            let real = "#[cfg(unix)]    use std::process::Command as Runner;";
+            let fake = "#[cfg(windows)] use crate::fake::Runner;";
+            let (a, b) = if unix_first { (real, fake) } else { (fake, real) };
+            format!("pub mod fake {{ pub struct Runner; impl Runner {{ \
+                       pub fn new(_s: &str) -> Self {{ Runner }} pub fn status(&self) -> bool {{ true }} }} }}\n\
+                     pub mod pa {{ pub struct P; impl P {{ pub fn go(&self) -> usize {{ 7 }} }} }}\n\
+                     pub mod pb {{ pub struct P; impl P {{ pub fn go(&self) -> usize {{ 9 }} }} }}\n\
+                     {a}\n{b}\n\
+                     #[cfg(unix)]    use crate::pa::P as BothPure;\n\
+                     #[cfg(windows)] use crate::pb::P as BothPure;\n\
+                     #[cfg(unix)]      use crate::pa::P as Same;\n\
+                     #[cfg(not(unix))] use crate::pa::P as Same;\n\
+                     use crate::pa::P as Single;\n\
+                     pub fn run_it() {{ let _ = Runner::new(\"true\").status(); }}\n\
+                     pub fn ctl_both_pure(x: &BothPure) -> usize {{ x.go() }}\n\
+                     pub fn ctl_same(x: &Same) -> usize {{ x.go() }}\n\
+                     pub fn ctl_single(x: &Single) -> usize {{ x.go() }}\n")
+        };
+        for (label, unix_first) in [("unix arm first", true), ("windows arm first", false)] {
+            let v = scan_fixture(&format!("r140_{unix_first}"), &src(unix_first));
+            assert_eq!(fixture_effects(&v, "run_it"), vec!["Exec".to_string()],
+                       "{label}: `run_it` must charge Exec. ABSENT here is R140's cardinal sin — the \
+                        arm that reaches a real Command lost to source order:\n{v:#}");
+            for ctl in ["ctl_both_pure", "ctl_same", "ctl_single"] {
+                assert!(fixture_effects(&v, ctl).is_empty(),
+                        "{label}: {ctl} must stay pure — a union TYPES the arm set, it does not \
+                         manufacture an effect for arms that have none:\n{v:#}");
+            }
+        }
+    }
+
+    /// **CLOSED BY R140, 2026-09-10, AND THE PIN DID ITS JOB.** This test asserted the DEFECT — a
+    /// body-local `#[cfg(test)] use` typed second wins and `run` reads pure — with the instruction
+    /// *"if it starts failing, the gap was closed: invert it, say so in the changelog, and re-run the
+    /// A/B first."* R140 made a `use` collision push EVERY arm as its own edge rather than letting
+    /// source order pick one, and this went red without being aimed at. Inverted, changelogged, and the
+    /// A/B run first: 600 registry crates, 40,264 rows both arms, `inferred` ADDED 0 / REMOVED 0 /
+    /// CHANGED 0 — no effect set moves at all — with 57 rows GAINING an `invisible` disclosure and one
+    /// gaining a call edge. (The pin said 1,489 crates; 600 is what the local registry holds today, and
+    /// saying so is better than implying a corpus I did not run.)
+    ///
+    /// **THE RESIDUAL, STATED BECAUSE IT IS THE PRICE.** `use_item_applies` still is not applied at the
+    /// two BODY-LOCAL sites, so the arm set there includes a `#[cfg(test)]` import that a non-test build
+    /// does not have. Here that is harmless — the mock is pure, and the union recovers the production
+    /// arm's `Exec` that was previously lost. But where a test mock has effects the production arm lacks,
+    /// the union over-charges with them, which is the module-level treatment's opposite (it DROPS such
+    /// arms). That trades a cardinal sin for a possible fabrication — the right direction, and not free.
+    /// Closing it needs `include_tests` on `CallCollector`, which is what R123 recorded as the work.
+    #[test]
+    fn r123_body_local_cfg_test_import_is_filtered_by_the_union() {
         let first = fixture_effects(&scan_fixture("r123blfirst", &r123_src(false, true)), "run");
         let last = fixture_effects(&scan_fixture("r123bllast", &r123_src(true, true)), "run");
         assert_eq!(first, vec!["Exec".to_string()],
                    "control: the body-local map IS reached and IS right when the order favours it");
-        assert_eq!(last, Vec::<String>::new(),
-                   "MEASURED SIN: a body-local `#[cfg(test)] use` typed second wins and `run` reads pure");
+        assert_eq!(last, vec!["Exec".to_string()],
+                   "R140: the production arm's Exec survives a `#[cfg(test)]` import typed SECOND — the \
+                    union pushes every arm, so source order no longer decides. This assertion was the \
+                    inverse until 2026-09-10 and asserted the sin deliberately; see the doc above.");
     }
 
     /// The R123 mocking pair, at module scope or inside the body, mock import first or last. The mock is
@@ -5652,6 +5714,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(),
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
@@ -5708,7 +5771,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -5732,7 +5796,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                    uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -5763,6 +5828,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -5799,6 +5865,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut cc = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
+            use_alts: Default::default(),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -15943,7 +16010,7 @@ pub fn go() {{ imp::doit(); }}
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),

@@ -2338,7 +2338,54 @@ fn report_parse_error(e: &syn::Error, text: &str) {
     );
 }
 
-pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, String>) {
+/// SOUNDNESS R140/R287 — RECORD A SECOND TARGET FOR A NAME BOUND TWICE, in a COMPANION map rather
+/// than by making `out` multi-valued.
+///
+/// Two `use` items can bind one name under mutually-exclusive `#[cfg]`s. `out` is single-valued, so the
+/// second silently overwrites the first and the answer is decided by SOURCE ORDER: with the unix arm
+/// written first, `run_it` reads pure over a real `Command::new("true").status()`; swapping only those
+/// two lines charges `Exec`. That is R140, live at 221 crates / 451 sites.
+///
+/// **WHY A COMPANION MAP AND NOT A JOINED VALUE IN `out`.** `record_alias` already joins alternatives
+/// with `ALIAS_ALT_SEP`, and routing this insert through it was the obvious fix — it is also wrong: the
+/// collector reads these maps at 34 sites and only 17 places in the whole crate are join-aware, so a
+/// joined value would flow into path construction as a literal and produce malformed paths, which land
+/// as fabrication or as silence depending where. Measured before writing this: the obvious fix did not
+/// even fire, because `collect_use` has TWO callers and the alias substitution that builds a call's path
+/// runs through the OTHER one (R213's double-collection shape, in a second place).
+///
+/// So `out` keeps exactly the value it has today — every existing reader is untouched — and the
+/// collision is recorded beside it. This mirrors `fn_alias`, which already holds a LIST of targets for
+/// a `let`-bound function alias and whose call site already pushes every target beyond the first as its
+/// R140 — note that `name` now names a SECOND, different target. `out` is left alone; the alternative
+/// is appended to `alts`, deduped, with the value `out` already held recorded first so the set is the
+/// whole arm set rather than only the losers.
+fn note_use_collision(
+    out: &HashMap<String, String>,
+    alts: &mut HashMap<String, Vec<String>>,
+    name: &str,
+    target: &str,
+) {
+    let prev = match out.get(name) {
+        Some(p) if p != target => p.clone(),
+        _ => return,
+    };
+    let e = alts.entry(name.to_string()).or_default();
+    if e.is_empty() {
+        e.push(prev);
+    }
+    if !e.iter().any(|t| t == target) {
+        e.push(target.to_string());
+    }
+}
+
+/// own edge so the row carries the UNION. A `use` alias simply never reached that machinery.
+pub(crate) fn collect_use(
+    tree: &syn::UseTree,
+    prefix: String,
+    out: &mut HashMap<String, String>,
+    alts: &mut HashMap<String, Vec<String>>,
+) {
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
     // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what
     // that target ALREADY resolves to in the (inherited) `use` map rather than the literal `crate::net`,
@@ -2370,7 +2417,7 @@ pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap
         if resolved == local { full.to_string() } else { resolved }
     };
     match tree {
-        syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out),
+        syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out, alts),
         syn::UseTree::Name(n) => {
             let id = n.ident.to_string();
             if id == "self" {
@@ -2380,20 +2427,23 @@ pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap
                 // Metadata}` then `fs::read_dir` was unresolved → a file lister reporting ZERO Fs.)
                 if let Some(last) = prefix.rsplit("::").next() {
                     let v = rebound(&prefix, out);
-                    out.insert(last.to_string(), v);
+                    note_use_collision(out, alts, last, &v);
+                        out.insert(last.to_string(), v);
                 }
             } else {
                 let v = rebound(&join(&prefix, &id), out);
-                out.insert(id.clone(), v);
+                note_use_collision(out, alts, &id.clone(), &v);
+                    out.insert(id.clone(), v);
             }
         }
         syn::UseTree::Rename(r) => {
             let v = rebound(&join(&prefix, &r.ident.to_string()), out);
-            out.insert(r.rename.to_string(), v);
+            note_use_collision(out, alts, &r.rename.to_string(), &v);
+                out.insert(r.rename.to_string(), v);
         }
         syn::UseTree::Group(g) => {
             for t in &g.items {
-                collect_use(t, prefix.clone(), out);
+                collect_use(t, prefix.clone(), out, alts);
             }
         }
         // A GLOB re-export `use PATH::*` brings PATH's public items into scope under their own names. We
@@ -2432,7 +2482,11 @@ pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap
 /// does `use crate::net; net::connect_tcp(..)` — the TCP dial that read SILENT-PURE before this.
 pub(crate) fn collect_root_reexports(items: &[syn::Item], include_tests: bool) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    collect_item_uses(items, include_tests, &mut m);
+    // R140 — a re-export collision is a DIFFERENT question (glob fan-out, R190's territory), so this
+    // caller discards the companion map rather than pretending to answer it. Scoping the change to the
+    // `use`-alias case is deliberate: it is the one with a measured defect and a measured fixture.
+    let mut _alts = HashMap::new();
+    collect_item_uses(items, include_tests, &mut m, &mut _alts);
     m
 }
 
@@ -2480,11 +2534,12 @@ pub(crate) fn collect_item_uses(
     items: &[syn::Item],
     include_tests: bool,
     out: &mut HashMap<String, String>,
+    alts: &mut HashMap<String, Vec<String>>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
             if use_item_applies(u, include_tests) {
-                collect_use(&u.tree, String::new(), out);
+                collect_use(&u.tree, String::new(), out, alts);
             }
         }
     }

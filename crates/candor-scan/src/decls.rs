@@ -13,11 +13,13 @@ use crate::*;
 /// effect for a name that has none).
 struct LocalUseCollector<'a> {
     out: &'a mut HashMap<String, String>,
+    // R140 — the companion collision map; see `lang::collect_use`.
+    alts: &'a mut HashMap<String, Vec<String>>,
 }
 
 impl<'ast, 'a> Visit<'ast> for LocalUseCollector<'a> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
-        collect_use(&u.tree, String::new(), self.out);
+        collect_use(&u.tree, String::new(), self.out, self.alts);
         // A `use` tree contains no further `use` items — no need to recurse into it.
     }
     // A nested `fn`/`impl`/`mod` item inside a body is a SEPARATE scope: its `use`s belong to it, not the
@@ -57,7 +59,10 @@ pub(crate) fn scan_items(
     // R123: `#[cfg(test)]`-gated imports are the TEST build's, not this one's — one authority, applied
     // at all five sites (see `use_item_applies`). Unfiltered, an idiomatic mocking pair resolved a
     // production call through the mock whenever the mock's `use` was typed second.
-    crate::lang::collect_item_uses(items, include_tests, uses);
+    // R140 — the companion collision map travels with `uses` from here to every `fninfo`, and on
+    // into the CallCollector, because this is the map a call's path is expanded from.
+    let mut use_alts: HashMap<String, Vec<String>> = HashMap::new();
+    crate::lang::collect_item_uses(items, include_tests, uses, &mut use_alts);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
         match it {
@@ -70,7 +75,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -109,7 +114,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -162,7 +167,7 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
-                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                            Some(&tname), uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm
@@ -183,7 +188,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -1384,6 +1389,8 @@ pub(crate) fn fninfo(
     block: &syn::Block,
     self_ty: Option<&str>,
     uses: &HashMap<String, String>,
+    // R140 — collision alternatives for `uses`; see `lang::collect_use`.
+    use_alts: &HashMap<String, Vec<String>>,
     fields: &FieldIndex,
     returns: &ReturnIndex,
     traits: TraitIndexes,
@@ -1406,8 +1413,9 @@ pub(crate) fn fninfo(
     // disclosed in the ledger exactly as a module-level `use` would disclose it. Never fabrication: it only
     // resolves a name to its already-declared origin — a genuinely-local pure call stays pure.
     let mut local_uses = HashMap::new();
+    let mut local_use_alts: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut c = LocalUseCollector { out: &mut local_uses };
+        let mut c = LocalUseCollector { out: &mut local_uses, alts: &mut local_use_alts };
         c.visit_block(block);
     }
     // R106 — …and the mirror-image adjustment, which was missing entirely: a name the body DECLARES as
@@ -1487,6 +1495,9 @@ pub(crate) fn fninfo(
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
         uses: std::borrow::Cow::Borrowed(uses),
+        // R140 — the collision map for those same `use` items, so a cfg-duplicated alias can push
+        // every arm as its own edge instead of being decided by source order.
+        use_alts: use_alts.clone(),
         vars,
         trait_vars,
         // The `dyn`-spelled (type-ERASED) subset of the same bounds — the imported-trait CHA (R4) fires
@@ -1896,7 +1907,12 @@ pub(crate) fn collect_decls(
     callable_aliases: &mut std::collections::HashSet<String>,
 ) {
     // R123: same one authority as `scan_items` — see `use_item_applies`.
-    crate::lang::collect_item_uses(items, include_tests, uses);
+    // R140 — `collect_decls`' map feeds the DECL index; call paths are built from `scan_items`'
+    // map, which is where the collision matters. A throwaway here keeps this change scoped to the
+    // one consumer with a measured defect rather than threading a 25th argument through this
+    // signature (see R213 on what that costs).
+    let mut _decl_use_alts: HashMap<String, Vec<String>> = HashMap::new();
+    crate::lang::collect_item_uses(items, include_tests, uses, &mut _decl_use_alts);
     for it in items {
         // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
         // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be
