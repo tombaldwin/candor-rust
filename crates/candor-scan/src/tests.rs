@@ -4618,8 +4618,12 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// source order pick one, and this went red without being aimed at. Inverted, changelogged, and the
     /// A/B run first: 600 registry crates, 40,264 rows both arms, `inferred` ADDED 0 / REMOVED 0 /
     /// CHANGED 0 — no effect set moves at all — with 57 rows GAINING an `invisible` disclosure and one
-    /// gaining a call edge. (The pin said 1,489 crates; 600 is what the local registry holds today, and
-    /// saying so is better than implying a corpus I did not run.)
+    /// gaining a call edge. (The pin said 1,489 crates. I ran 600 — and this sentence
+    /// claimed 600 was "what the local registry holds today", which is FALSE: it holds 1,545. Corrected
+    /// 2026-09-10 by a planning review that counted. A wrong number inside the very clause written to be
+    /// careful about corpus size is worth more as a warning than the figure is: **600 of 1,545 is 39% of
+    /// the available corpus, and this A/B should be re-run over the remainder before the result is leaned
+    /// on.**)
     ///
     /// **THE RESIDUAL, STATED BECAUSE IT IS THE PRICE.** `use_item_applies` still is not applied at the
     /// two BODY-LOCAL sites, so the arm set there includes a `#[cfg(test)]` import that a non-test build
