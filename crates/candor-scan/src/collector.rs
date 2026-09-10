@@ -1794,7 +1794,43 @@ impl<'a> CallCollector<'a> {
                 p.path
                     .get_ident()
                     .and_then(|i| s.fn_alias.get(&i.to_string()).cloned())
-                    .unwrap_or_else(|| vec![expand(&path_to_string(&p.path), &s.uses)]),
+                    // SOUNDNESS R371 — A `let`-BOUND ALIAS MUST SEE THE SAME ARM SET THE CALL SITE
+                    // SEES. `fn_alias` is BUILT from the single-valued `uses` map, so R140's union
+                    // never reached this spelling: `let f = Runner::new; f("true").status()` over a
+                    // cfg-duplicated `Runner` read ABSENT with the unix arm written first and
+                    // `["Exec"]` when only those two lines were swapped — R140's own sentence, one
+                    // spelling over, still live after R140 was filed CLOSED. The commit that closed
+                    // R140 reused this map's CONSUMER (the call site pushes every target past the
+                    // first as its own edge) and left its PRODUCER picking by source order, which is
+                    // the §9 shape: the audit boundary was drawn around the trigger spelling.
+                    //
+                    // `fn_alias` already holds a LIST (R271), so the arms need no new machinery —
+                    // only the same `use_alts` lookup the call site does, with `alias_join` (R375)
+                    // rather than `format!` so a joined target cannot lose its suffix.
+                    .unwrap_or_else(|| {
+                        let written = expand(&path_to_string(&p.path), &s.uses);
+                        let mut targets = vec![written.clone()];
+                        let head = p.path.segments.first().map(|x| x.ident.to_string());
+                        let rest: Vec<String> =
+                            p.path.segments.iter().skip(1).map(|x| x.ident.to_string()).collect();
+                        if let Some(alts) = head.and_then(|h| s.use_alts.get(&h)).cloned() {
+                            let rest_refs: Vec<&str> = rest.iter().map(|x| x.as_str()).collect();
+                            for t in alts {
+                                let full = crate::lang::alias_join(&t, &rest_refs);
+                                if full != written && !targets.contains(&full) {
+                                    // Instrument the PRECONDITION, not just the output — the standing
+                                    // bar, and the same switch the R140/BODYSHADOW/ALTSHADOW counters
+                                    // use. A differential that prints 0/0/0 cannot tell "inert" from
+                                    // "never reached"; this is what tells them apart (R376).
+                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        eprintln!("R371ALIAS {written} :: {full}");
+                                    }
+                                    targets.push(full);
+                                }
+                            }
+                        }
+                        targets
+                    }),
             )
         })
     }
