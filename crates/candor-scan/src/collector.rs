@@ -130,6 +130,12 @@ pub(crate) struct CallCollector<'a> {
     /// `invisible: ["libgit2_sys"]` disclosure row entirely. A list is inert for a non-callable: an alias
     /// that is never invoked is never resolved, exactly as for the single-target form.
     pub(crate) fn_alias: std::collections::HashMap<String, Vec<String>>,
+    /// SOUNDNESS R140/R287 — names bound by MORE THAN ONE `use` item, with every target. Populated by
+    /// `lang::collect_use` beside `uses`/`local_uses`, which keep exactly the single value they always
+    /// held so no existing reader changes. Consumed at the call site, which pushes every target beyond
+    /// the first as its own edge — the same shape `fn_alias` uses — so the row carries the UNION rather
+    /// than whichever arm happened to be written second.
+    pub(crate) use_alts: std::collections::HashMap<String, Vec<String>>,
     /// Crate-wide LAZY/deferred static names (`once_cell`/`std` `Lazy`/`LazyLock`/`LazyCell`,
     /// `lazy_static!`, `thread_local!`). A body that NAMES one of these FORCES its deferred init on
     /// first use — so naming the static edges to its synthetic init unit (`<lazy>::NAME`), carrying the
@@ -2167,7 +2173,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// crate-local — the forcing/provenance sites below then had no way to learn the name's origin. Record
     /// it in `local_uses`, which `use_target` consults FIRST.
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses);
+        // R140 — a body-level `use` records its collisions beside `local_uses`, in the same shape
+        // `fn_alias` already uses for a `let`-bound function alias.
+        let mut alts = std::mem::take(&mut self.use_alts);
+        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses, &mut alts);
+        self.use_alts = alts;
         syn::visit::visit_item_use(self, node);
     }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
@@ -2219,6 +2229,39 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             for extra in ts.iter().skip(1) {
                                 let leaf2 = extra.rsplit("::").next().unwrap_or(extra).to_string();
                                 self.calls.push(Call { argc: 0, entropy_arg: false, path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            }
+                        }
+                        // SOUNDNESS R140/R287 — A `use` ALIAS BOUND TWICE PUSHES EVERY ARM, exactly as a
+                        // `let`-bound `fn_alias` does ten lines above. Two `use` items under
+                        // mutually-exclusive `#[cfg]`s bind one name; `uses` is single-valued, so the
+                        // second overwrote the first and the answer was decided by SOURCE ORDER —
+                        // `run_it` read PURE over a real `Command::new("true").status()` with the unix
+                        // arm written first, and charged `Exec` when only those two lines were swapped.
+                        //
+                        // The union is the right answer and the engine already gives it for a `#[cfg]`
+                        // arm set INSIDE one body (`fn go() { #[cfg(unix)] {fs::write} #[cfg(windows)]
+                        // {env::set_var} }` measures `['Env','Fs']`), which is why `scan.rs`'s comment
+                        // calling the union "a fabricated effect from the arm that is not compiled" is
+                        // wrong on the engine's own terms — it would condemn that behaviour and PART
+                        // 10's expected answer too. Picking is fabrication; dropping is a ⟨0.21⟩ purity
+                        // claim; the union is neither.
+                        if aliased.is_none() {
+                            if let Some(head) = p.path.segments.first().map(|s| s.ident.to_string()) {
+                                if let Some(ts) = self.use_alts.get(&head).cloned() {
+                                    let rest: Vec<String> = p.path.segments.iter().skip(1)
+                                        .map(|s| s.ident.to_string()).collect();
+                                    let written = expand(&path_to_string(&p.path), &self.uses);
+                                    for t in ts {
+                                        let full = if rest.is_empty() { t.clone() }
+                                                   else { format!("{t}::{}", rest.join("::")) };
+                                        if full == written { continue; }
+                                        let leaf2 = full.rsplit("::").next().unwrap_or(&full).to_string();
+                                        self.calls.push(Call {
+                                            argc: 0, entropy_arg: false, path: full, leaf: leaf2,
+                                            str_arg: None, typed: false, method: false,
+                                            is_macro: false, path_lits_partial: false, path_lit2: None });
+                                    }
+                                }
                             }
                         }
                         let mut path = aliased
