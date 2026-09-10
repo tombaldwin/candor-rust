@@ -4612,6 +4612,49 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// for a `#[cfg]` arm set inside ONE BODY, which is why `scan.rs`'s "a fabricated effect from the
     /// arm that is not compiled" was wrong on its own terms.
     ///
+    /// SOUNDNESS R371 — A `let`-BOUND ALIAS MUST SEE THE SAME ARM SET THE CALL SITE SEES.
+    ///
+    /// R140 made a cfg-duplicated `use` push every arm at the CALL site and was filed CLOSED. It reused
+    /// `fn_alias`'s CONSUMER and left its PRODUCER reading the single-valued `uses` map, so the same
+    /// program with the call spelled `let f = Runner::new; f("true")` still answered by SOURCE ORDER:
+    /// ABSENT with the unix arm first, `["Exec"]` when only those two lines were swapped. That is
+    /// R140's own sentence one spelling over, which is why R140 was REOPENED rather than extended.
+    ///
+    /// THE CONTROLS ARE THE HALF THAT MATTERS (R374): each is on the SAME route as the fix, over
+    /// DISTINCT type names, and each is capable of moving — `fake::Runner::mk` writes a file, so a
+    /// union that reached any control would charge `Fs` and fail this loudly.
+    #[test]
+    fn a_let_bound_alias_sees_every_cfg_arm_in_either_order() {
+        let src = |unix_first: bool| {
+            let real = "#[cfg(unix)]    use std::process::Command as Runner;";
+            let fake = "#[cfg(windows)] use crate::fake::Runner;";
+            let (a, b) = if unix_first { (real, fake) } else { (fake, real) };
+            format!("pub mod fake {{ pub struct Runner; impl Runner {{ \
+                       pub fn new(_s: &str) -> Self {{ Runner }} pub fn status(&self) -> bool {{ true }} \
+                       pub fn mk() -> usize {{ let _ = std::fs::write(\"a\",\"b\"); 3 }} }} }}\n\
+                     pub mod pa {{ pub struct PA; impl PA {{ pub fn mk() -> usize {{ 7 }} }} }}\n\
+                     pub mod pb {{ pub struct PB; impl PB {{ pub fn mk() -> usize {{ 9 }} }} }}\n\
+                     {a}\n{b}\n\
+                     #[cfg(unix)]    use crate::pa::PA as BothPure;\n\
+                     #[cfg(windows)] use crate::pb::PB as BothPure;\n\
+                     use crate::pa::PA as Single;\n\
+                     pub fn via_fn_alias() {{ let f = Runner::new; let _ = f(\"true\").status(); }}\n\
+                     pub fn ctl_alias_both_pure() -> usize {{ let g = BothPure::mk; g() }}\n\
+                     pub fn ctl_alias_single() -> usize {{ let g = Single::mk; g() }}\n")
+        };
+        for (label, unix_first) in [("unix arm first", true), ("windows arm first", false)] {
+            let v = scan_fixture(&format!("r371_{unix_first}"), &src(unix_first));
+            assert_eq!(fixture_effects(&v, "via_fn_alias"), vec!["Exec".to_string()],
+                       "{label}: `let f = Runner::new; f(..)` must charge Exec. ABSENT here is R371 — \
+                        R140 closed the PATH spelling and left this one deciding by source order:\n{v:#}");
+            for ctl in ["ctl_alias_both_pure", "ctl_alias_single"] {
+                assert!(fixture_effects(&v, ctl).is_empty(),
+                        "{label}: {ctl} must stay pure — a union over a `let`-bound alias TYPES the arm \
+                         set, it does not manufacture an effect for arms that have none:\n{v:#}");
+            }
+        }
+    }
+
     /// SOUNDNESS R378 — `use super::X` INSIDE AN INLINE MODULE MUST KEEP THE PARENT'S ORIGIN.
     ///
     /// `submodule_uses` seeds an inline module's map from its parent's, so `use super::proc_alias` names
