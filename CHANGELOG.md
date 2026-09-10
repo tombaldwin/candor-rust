@@ -28,6 +28,14 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **A `let`-bound alias now sees the same `#[cfg]` arm set the call site sees — SOUNDNESS R371.**
+  The cfg-duplicated-alias fix above pushed every arm at the CALL site but built the `let`-alias target
+  list from the single-valued import map, so `let f = Runner::new; f("true").status()` still answered by
+  source order: absent with the unix arm written first, `Exec` when only those two lines were swapped.
+  Same program, different spelling, same defect. Reach on the local registry is 11 sites in 2 crates and
+  all of them are `#[cfg]`-gated CONSTANT aliases (termios baud rates, curve25519-dalek's SIMD backend
+  tables), so no published report changes; the silence it closes is real.
+
 - ⚠ **A call through `use super::<parent import>` inside an inline module read SILENT-PURE —
   SOUNDNESS R378.** `submodule_uses` seeds an inline module's import map from its parent's, so
   `use super::proc_alias` names a binding that is already there — but it was stored as the literal
