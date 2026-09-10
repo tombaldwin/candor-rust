@@ -9,6 +9,17 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **A `#[cfg]`-duplicated `use` alias charges EVERY arm, not whichever was written second —
+  SOUNDNESS R140/R287.** Two `use` items binding one name under mutually-exclusive cfgs were resolved by
+  source order: with the unix arm first, a function calling `Runner::new("true").status()` read PURE over
+  a real process spawn, and swapping only those two lines charged `Exec`. 221 crates / 451 sites. The
+  union is the right answer and the engine already gave it for a `#[cfg]` arm set inside one body. The
+  collision is now recorded in a companion map beside `uses` — which keeps exactly the value it always
+  held, so no existing reader changes — and the call site pushes every arm as its own edge, the same
+  shape a `let`-bound function alias has always used. A/B over 600 registry crates: no effect set moves
+  anywhere; 57 rows gain an `invisible` disclosure, naming both blind spots where they previously named
+  one.
+
 ## [0.36.0] — 2026-09-09
 
 - **R350's decision test asserted a hardcoded list rather than the function.** Adding an out-of-union
