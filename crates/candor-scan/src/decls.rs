@@ -13,13 +13,33 @@ use crate::*;
 /// effect for a name that has none).
 struct LocalUseCollector<'a> {
     out: &'a mut HashMap<String, String>,
-    // R140 — the companion collision map; see `lang::collect_use`.
-    alts: &'a mut HashMap<String, Vec<String>>,
+    // SOUNDNESS R373 — the build this scan describes. A body-local `#[cfg(test)] use` is the TEST
+    // build's import, exactly as a module-level one is, and this site never asked.
+    include_tests: bool,
+    // R370 — names this body's own `use` items have bound; see `lang::collect_use`.
+    seen: std::collections::HashSet<String>,
 }
 
 impl<'ast, 'a> Visit<'ast> for LocalUseCollector<'a> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
-        collect_use(&u.tree, String::new(), self.out, self.alts);
+        // SOUNDNESS R373 — `use_item_applies`' own doc says "FIVE SITES ANSWERED THIS QUESTION … They
+        // all call this now, so there is one authority rather than five hand-rolled loops free to drift
+        // apart again." It enumerated MODULE-level sites. This one and `CallCollector::visit_item_use`
+        // answer the identical question for a `use` written inside a BODY and neither called it — the
+        // audit's boundary was drawn around its own trigger. Pre-R140 that let a body-local
+        // `#[cfg(test)]` mock win by source order in a production scan; post-R140 the union always
+        // included the test arm, which turned a CORRECT absent row into `inferred:["Fs"]` on a pure
+        // production build in one of the two source orders.
+        if !crate::lang::use_item_applies(u, self.include_tests) {
+            return;
+        }
+        // The collision map is deliberately NOT collected here: body-local arm sets reach the union
+        // through `CallCollector::visit_item_use`, which is the map a call's path is expanded from.
+        // A second map written here was dead code carrying an `// R140` comment, which reads as
+        // coverage — R373. `alts` is a throwaway rather than a parameter so this cannot silently
+        // start feeding a consumer again without someone changing this line.
+        let mut unused_alts: HashMap<String, Vec<String>> = HashMap::new();
+        collect_use(&u.tree, String::new(), self.out, &mut unused_alts, &mut self.seen);
         // A `use` tree contains no further `use` items — no need to recurse into it.
     }
     // A nested `fn`/`impl`/`mod` item inside a body is a SEPARATE scope: its `use`s belong to it, not the
@@ -75,7 +95,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -114,7 +134,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -167,7 +187,7 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
-                            Some(&tname), uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                            Some(&tname), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm
@@ -188,7 +208,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -227,8 +247,24 @@ pub(crate) fn submodule_uses(
             subuses.remove(&name);
         }
     }
+    // SOUNDNESS R378 — MARK THIS MAP AS THE CHILD'S PARENT SCOPE. `use super::X` inside an INLINE
+    // module names an item of the enclosing module, and for an inline module this map IS that module's
+    // `use` map — so `X` can be resolved through it. For a FILE module it is NOT: `hyper`'s
+    // `proto/h1/conn.rs` binds `io` to `std::io` at line 2 and writes `use super::io::Buffered` at line
+    // 19, where `super::io` is hyper's own `proto::h1::io` MODULE. Resolving that through the file's own
+    // map produced `std::io::Buffered`, dropped the local edge, and cost 19 rows in `hyper` — two of
+    // them a real `Log` effect. `rebound` therefore resolves `super::` ONLY when this marker is present.
+    //
+    // The key is `"super::"`, which no `use` can ever bind: `collect_use` stores bare identifiers and an
+    // identifier cannot contain `::`, so the marker can never collide with a real name and `expand`
+    // (which matches whole `::`-separated segments) can never match it.
+    subuses.insert(SUPER_SCOPE_MARKER.to_string(), String::new());
     subuses
 }
+
+/// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
+/// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
+pub(crate) const SUPER_SCOPE_MARKER: &str = "super::";
 
 /// The NAME an item declares in its enclosing scope — `None` for an item that declares none (an
 /// item-position macro INVOCATION, a `use`, an `impl`) and for one a production scan skips
@@ -1388,6 +1424,11 @@ pub(crate) fn fninfo(
     sig: &syn::Signature,
     block: &syn::Block,
     self_ty: Option<&str>,
+    // SOUNDNESS R373 — threaded so the two BODY-LOCAL `use` sites can ask `use_item_applies` the
+    // question every module-level site already asks. `collect_root_reexports` was once "the one site
+    // of the five that could not even express the question"; these were the sixth and seventh, and
+    // they could not either. Four call sites, all in this file, all of which already hold the flag.
+    include_tests: bool,
     uses: &HashMap<String, String>,
     // R140 — collision alternatives for `uses`; see `lang::collect_use`.
     use_alts: &HashMap<String, Vec<String>>,
@@ -1413,9 +1454,8 @@ pub(crate) fn fninfo(
     // disclosed in the ledger exactly as a module-level `use` would disclose it. Never fabrication: it only
     // resolves a name to its already-declared origin — a genuinely-local pure call stays pure.
     let mut local_uses = HashMap::new();
-    let mut local_use_alts: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut c = LocalUseCollector { out: &mut local_uses, alts: &mut local_use_alts };
+        let mut c = LocalUseCollector { out: &mut local_uses, include_tests, seen: Default::default() };
         c.visit_block(block);
     }
     // R106 — …and the mirror-image adjustment, which was missing entirely: a name the body DECLARES as
@@ -1450,6 +1490,31 @@ pub(crate) fn fninfo(
         m.extend(local_uses.clone());
         sig_merged = m;
         &sig_merged
+    };
+    // SOUNDNESS R370 — `use_alts` MUST BE SCOPED BY THE SAME RULE `uses` IS, and it was not. R106
+    // makes a body-declared item shadow a file-level import, and a body-level `use` rebind one; the
+    // companion map bypassed both, so the union pushed a binding the body cannot reach as a real call
+    // edge. Measured: a body declaring `struct Cmd` over a cfg-gated `Cmd` pair read `["Exec"]` on a
+    // body that spawns nothing — while rustc emits `warning: unused import` for the very import being
+    // charged. Removal, not rebinding: an alternative for a name the body has taken over is not an
+    // alternative for anything, and `uses` still carries the sentinel that makes the shadowing visible.
+    let alts_scoped: HashMap<String, Vec<String>>;
+    let use_alts: &HashMap<String, Vec<String>> = if use_alts.is_empty()
+        || (local_uses.is_empty() && shadowed.is_empty())
+    {
+        use_alts
+    } else {
+        let mut m = use_alts.clone();
+        for n in shadowed.iter().chain(local_uses.keys()) {
+            if m.remove(n).is_some() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                // Instrument the PRECONDITION, not just the output — the standing bar, and the same
+                // switch the `BODYSHADOW` counter twenty lines down uses. A removal that hits no key
+                // changes nothing, so only one that took an alternative away counts as this firing.
+                eprintln!("ALTSHADOW {qual} :: {n}");
+            }
+        }
+        alts_scoped = m;
+        &alts_scoped
     };
     let merged: HashMap<String, String>;
     let uses: &HashMap<String, String> = if local_uses.is_empty() && shadowed.is_empty() {
@@ -1498,6 +1563,9 @@ pub(crate) fn fninfo(
         // R140 — the collision map for those same `use` items, so a cfg-duplicated alias can push
         // every arm as its own edge instead of being decided by source order.
         use_alts: use_alts.clone(),
+        // R373 — so a body-local `use` can be judged by the same authority a module-level one is.
+        include_tests,
+        local_use_seen: Default::default(),
         vars,
         trait_vars,
         // The `dyn`-spelled (type-ERASED) subset of the same bounds — the imported-trait CHA (R4) fires
@@ -1907,10 +1975,18 @@ pub(crate) fn collect_decls(
     callable_aliases: &mut std::collections::HashSet<String>,
 ) {
     // R123: same one authority as `scan_items` — see `use_item_applies`.
-    // R140 — `collect_decls`' map feeds the DECL index; call paths are built from `scan_items`'
-    // map, which is where the collision matters. A throwaway here keeps this change scoped to the
-    // one consumer with a measured defect rather than threading a 25th argument through this
-    // signature (see R213 on what that costs).
+    // SOUNDNESS R372 — THE SENTENCE THAT USED TO BE HERE WAS FALSE, and it is what licensed this
+    // throwaway: "call paths are built from `scan_items`' map, which is where the collision matters."
+    // NINE consumers read THIS map — `type_path` at named-field, tuple-field, enum tuple-variant
+    // payload, enum struct-variant field and assoc-type positions, `elem_type` twice, and
+    // `record_return` for free fns and for methods — and every one resolves a TYPE, which decides
+    // receiver resolution, which decides dispatch, which decides whose effects attach to the caller.
+    // Measured on two fixtures differing only in the ORDER of two cfg-gated `use` lines: with the `Fs`
+    // arm first, both the `returns` route (`fn make() -> A`) and the `fields` route (`struct H { h: A }`)
+    // are ABSENT; swapped, both charge `["Fs"]`. The uncollided control charges `["Fs"]` in every cell.
+    // Still a throwaway, now with the reason stated honestly: the CONSUMER design is open, because
+    // "push an extra edge" is right for a CALL and not obviously right for a TYPE — a receiver has one
+    // type, not a set. R372 owns that question; this line is not evidence that it does not exist.
     let mut _decl_use_alts: HashMap<String, Vec<String>> = HashMap::new();
     crate::lang::collect_item_uses(items, include_tests, uses, &mut _decl_use_alts);
     for it in items {

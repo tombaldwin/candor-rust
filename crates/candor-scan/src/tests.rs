@@ -68,12 +68,12 @@
         let mut out = HashMap::new();
         // `use std::process::{Command, Stdio as Pipe};`
         let tree: syn::UseTree = syn::parse_str("std::process::{Command, Stdio as Pipe}").unwrap();
-        collect_use(&tree, String::new(), &mut out, &mut Default::default());
+        collect_use(&tree, String::new(), &mut out, &mut Default::default(), &mut Default::default());
         assert_eq!(out.get("Command").map(String::as_str), Some("std::process::Command"));
         assert_eq!(out.get("Pipe").map(String::as_str), Some("std::process::Stdio"));
         // `use std::fs::{self, Metadata}` imports the MODULE `fs` itself → map `fs -> std::fs`.
         let mut o2 = HashMap::new();
-        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2, &mut Default::default());
+        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2, &mut Default::default(), &mut Default::default());
         assert_eq!(o2.get("fs").map(String::as_str), Some("std::fs"));
         assert_eq!(o2.get("Metadata").map(String::as_str), Some("std::fs::Metadata"));
         assert_eq!(o2.get("self"), None); // not the useless `fs::self`
@@ -85,16 +85,16 @@
         // re-bind in the same scope then resolves `net` THROUGH that glob to its origin crate — so a later
         // `net::connect(..)` attributes to `x`, not the dead `crate::net` (the cardinal-sin hole).
         let mut u = HashMap::new();
-        collect_use(&syn::parse_str("mycore::driver_prelude::*").unwrap(), String::new(), &mut u, &mut Default::default());
+        collect_use(&syn::parse_str("mycore::driver_prelude::*").unwrap(), String::new(), &mut u, &mut Default::default(), &mut Default::default());
         assert_eq!(u.get(GLOB_KEY).map(String::as_str), Some("mycore::driver_prelude"));
-        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u, &mut Default::default());
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u, &mut Default::default(), &mut Default::default());
         assert_eq!(u.get("net").map(String::as_str), Some("mycore::driver_prelude::net"));
         assert_eq!(expand("net::connect_tcp", &u), "mycore::driver_prelude::net::connect_tcp");
         // TWO external globs → ambiguous origin → never guess: the re-bind keeps the literal (under-report).
         let mut u2 = HashMap::new();
-        collect_use(&syn::parse_str("a::p1::*").unwrap(), String::new(), &mut u2, &mut Default::default());
-        collect_use(&syn::parse_str("b::p2::*").unwrap(), String::new(), &mut u2, &mut Default::default());
-        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u2, &mut Default::default());
+        collect_use(&syn::parse_str("a::p1::*").unwrap(), String::new(), &mut u2, &mut Default::default(), &mut Default::default());
+        collect_use(&syn::parse_str("b::p2::*").unwrap(), String::new(), &mut u2, &mut Default::default(), &mut Default::default());
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u2, &mut Default::default(), &mut Default::default());
         assert_eq!(u2.get("net").map(String::as_str), Some("crate::net"));
     }
 
@@ -107,7 +107,7 @@
         assert_eq!(expand("crate::net::connect_tcp", &direct), "mycore::net::connect_tcp");
         // a `use super::core::foo` re-bind is RELATIVE (not crate-root) and must keep its literal so the
         // local `core::foo` def still resolves by tail2 — seeding a root re-export must not hijack it.
-        collect_use(&syn::parse_str("super::core::display_width").unwrap(), String::new(), &mut direct, &mut Default::default());
+        collect_use(&syn::parse_str("super::core::display_width").unwrap(), String::new(), &mut direct, &mut Default::default(), &mut Default::default());
         assert_eq!(direct.get("display_width").map(String::as_str), Some("super::core::display_width"));
 
         let glob = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
@@ -122,12 +122,12 @@
         // classifier loses its crate identity (the sqlx `dotenvy::var` → dropped `Env` regression). Only a
         // `use`-imported name (resolved at collect time) or a `crate::`-rooted call is glob-attributed.
         let mut u = HashMap::new();
-        collect_use(&syn::parse_str("mycore::prelude::*").unwrap(), String::new(), &mut u, &mut Default::default());
+        collect_use(&syn::parse_str("mycore::prelude::*").unwrap(), String::new(), &mut u, &mut Default::default(), &mut Default::default());
         assert_eq!(expand("dotenvy::var", &u), "dotenvy::var");
         // A crate WITHOUT any re-export glob leaves a `crate::helper::foo` local path untouched — no glob to
         // attribute to, so a genuine local module keeps its path (and resolves locally by tail2).
         let mut noglob = HashMap::new();
-        collect_use(&syn::parse_str("std::fs::read").unwrap(), String::new(), &mut noglob, &mut Default::default());
+        collect_use(&syn::parse_str("std::fs::read").unwrap(), String::new(), &mut noglob, &mut Default::default(), &mut Default::default());
         assert_eq!(expand("crate::helper::foo", &noglob), "helper::foo");
     }
 
@@ -235,7 +235,7 @@
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -286,7 +286,7 @@
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -625,7 +625,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
@@ -4466,9 +4466,41 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
-        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        // R377 — record what the FIXTURE SOURCE declares, so `fixture_effects` can tell a legitimately
+        // omitted pure function (SPEC ⟨0.24⟩) from a name that does not exist. Every file the fixture
+        // is built from, because a control can live in an `extra` file.
+        let mut declared: Vec<String> = fn_names_in(src);
+        for (_, body) in extra {
+            declared.extend(fn_names_in(body));
+        }
+        v["_fixture_fns"] = serde_json::json!(declared);
         let _ = std::fs::remove_dir_all(&d);
         v
+    }
+
+    /// The identifiers following `fn ` in a fixture's source. Deliberately crude — it is a SPELLING
+    /// check, not a parser, and it only ever has to answer "is this name written in the fixture at
+    /// all". Exact leaf equality, never a prefix test: a prefix match here would re-create the silent
+    /// pass this exists to remove (`deny Fs either` matching `either_ifelse` is the same trap).
+    #[cfg(test)]
+    fn fn_names_in(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let b = src.as_bytes();
+        let mut i = 0usize;
+        while let Some(p) = src[i..].find("fn ") {
+            let at = i + p;
+            let before_ok = at == 0 || (!(b[at - 1] as char).is_alphanumeric() && b[at - 1] != b'_');
+            let mut j = at + 3;
+            while j < b.len() && (b[j] as char).is_whitespace() { j += 1; }
+            let st = j;
+            while j < b.len() && ((b[j] as char).is_alphanumeric() || b[j] == b'_') { j += 1; }
+            if before_ok && j > st {
+                out.push(src[st..j].to_string());
+            }
+            i = at + 3;
+        }
+        out
     }
 
     /// SOUNDNESS R122, END TO END — the fixture the unit test above abstracts, through the real
@@ -4488,7 +4520,10 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"),
             "[package]\nname = \"r122\"\n\n[features]\ndefault = [\"extra\"]\nextra = []\n").unwrap();
-        std::fs::write(d.join("src/lib.rs"), r#"
+        // R377 — this fixture builds its crate inline rather than through `scan_fixture_files`, so it
+        // must hand `fixture_effects` the same declaration list; without it the two ABSENCE controls
+        // below cannot be told from a misspelling.
+        let src = r#"
             use std::process::Command;
             #[cfg(any(test, feature = "extra"))]
             pub fn prod_under_any(p: &str) -> bool { Command::new(p).status().is_ok() }
@@ -4499,7 +4534,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             pub fn only_in_tests(p: &str) -> bool { Command::new(p).status().is_ok() }
             #[cfg(all(test, feature = "extra"))]
             pub fn only_in_tests_all(p: &str) -> bool { Command::new(p).status().is_ok() }
-        "#).unwrap();
+        "#;
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let idx = load_dep_reports(None);
         let run = |include_tests: bool| {
             let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -4509,7 +4545,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 deps_idx: &idx, peek_excluded: false,
             }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
-            serde_json::from_str::<serde_json::Value>(&body.unwrap()).unwrap()
+            let mut v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            v["_fixture_fns"] = serde_json::json!(fn_names_in(src));
+            v
         };
         let v = run(false);
         for f in ["prod_under_any", "prod_under_any_platform", "control_plain"] {
@@ -4574,9 +4612,90 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// for a `#[cfg]` arm set inside ONE BODY, which is why `scan.rs`'s "a fabricated effect from the
     /// arm that is not compiled" was wrong on its own terms.
     ///
-    /// THE CONTROLS ARE HALF THE ROW, because a union widens what is charged: two PURE arms stay pure,
-    /// two arms naming the SAME target (the `cfg_if` shape) do not double-push, and an ordinary single
-    /// `use` is untouched.
+    /// SOUNDNESS R378 — `use super::X` INSIDE AN INLINE MODULE MUST KEEP THE PARENT'S ORIGIN.
+    ///
+    /// `submodule_uses` seeds an inline module's map from its parent's, so `use super::proc_alias` names
+    /// a binding that is already in the map — but `rebound` stored the literal `super::proc_alias`, which
+    /// names no local def, and every call through it read SILENT-PURE. The parent's byte-identical call is
+    /// the control that isolates the `super::` hop as the cause.
+    ///
+    /// **This was invisible until R370.** R140's union had been pushing the parent's binding as a second
+    /// edge — a non-`#[cfg]` rebind, exactly what R370 stops — so the effect was right for the wrong
+    /// reason. The A/B that exposed it read REMOVED 12; on the corpus every one of those was a pure
+    /// `invisible` row, and only a hand fixture showed the loss is an EFFECT.
+    ///
+    /// THE NARROWING IS PINNED HERE TOO: `super::` is re-resolved only when its head is a `use` KEY, so a
+    /// local MODULE reached through `super::` (clap's `super::core::display_width`) keeps its literal and
+    /// its tail2 link. `ctl_local_mod` is that case, and it must stay resolved to the local def.
+    #[test]
+    fn a_super_use_in_an_inline_module_keeps_the_parents_origin() {
+        let v = scan_fixture("r378super", "\
+use std::process as proc_alias;\n\
+pub mod core_mod { pub fn width() -> usize { 3 } }\n\
+pub mod inner {\n\
+    use super::proc_alias;\n\
+    use super::core_mod;\n\
+    pub fn via_super() { let _ = proc_alias::Command::new(\"true\").status(); }\n\
+    pub fn ctl_local_mod() -> usize { core_mod::width() }\n\
+}\n\
+pub fn ctl_parent_direct() { let _ = proc_alias::Command::new(\"true\").status(); }\n");
+        assert_eq!(fixture_effects(&v, "inner::via_super"), vec!["Exec".to_string()],
+                   "R378: a call through `use super::<parent import>` must keep the parent's origin. \
+                    ABSENT here is the cardinal sin — the origin was lost to a literal `super::` path \
+                    that names no local def:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "ctl_parent_direct"), vec!["Exec".to_string()],
+                   "the parent's identical call is the control that isolates the `super::` hop:\n{v:#}");
+        // The NARROWING control: `core_mod` is a local MODULE, not an imported name, so `super::core_mod`
+        // must NOT be re-resolved — it keeps its literal and resolves locally. A blanket `super::` resolve
+        // would drop the module context and break this edge, which is the failure the pre-existing comment
+        // in `rebound` was written about.
+        assert!(fixture_effects(&v, "inner::ctl_local_mod").is_empty(),
+                "a local module reached through `super::` is pure and must stay resolvable locally — \
+                 re-resolving every `super::` path blindly is what this narrowing exists to avoid:\n{v:#}");
+    }
+
+    /// SOUNDNESS R378, THE SCOPE HALF — a FILE module's `super::` must NOT resolve through the FILE's
+    /// own map.
+    ///
+    /// The first cut of R378 had only the "is the head a `use` key" test, and shipped a regression the
+    /// full-registry A/B caught in the REMOVED column: `hyper`'s `proto/h1/conn.rs` binds `io` to
+    /// `std::io` on line 2 and writes `use super::io::Buffered` on line 19, where `super::io` is
+    /// hyper's OWN `proto::h1::io` module. Resolving that through conn.rs's map gave
+    /// `std::io::Buffered`, dropped the local edge and removed 19 `hyper` rows — two of them a real
+    /// `Log`. `out` is the enclosing module's scope only for an INLINE `mod`; for a file module it is
+    /// the file's own, and `super::` still means the parent.
+    ///
+    /// This fixture is the shape verbatim: a SIBLING module named `io`, and a file-level `use std::io`
+    /// binding the same name to something else.
+    #[test]
+    fn a_super_use_in_a_file_module_does_not_resolve_through_that_files_own_map() {
+        let v = scan_fixture_files("r378filemod", "\
+pub mod io { pub struct Buffered; impl Buffered { pub fn run(&self) { let _ = std::fs::write(\"a\",\"b\"); } } }\n\
+pub mod conn;\n",
+            &[("conn.rs", "\
+use std::io;\n\
+use super::io::Buffered;\n\
+pub fn uses_local_buffered() { Buffered.run(); }\n\
+pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = None; let _ = p; Ok(()) }\n")]);
+        assert_eq!(fixture_effects(&v, "conn::uses_local_buffered"), vec!["Fs".to_string()],
+                   "R378 scope half: `super::io::Buffered` in a FILE module names the crate's OWN `io` \
+                    module, not this file's `use std::io`. Resolving through the file's own map drops \
+                    the local edge and the effect goes silent — the hyper regression, 19 rows:\n{v:#}");
+    }
+
+    /// **SOUNDNESS R374 — THE CONTROLS THIS TEST SHIPPED WITH COULD NOT FAIL, AND THAT IS WHY R370
+    /// SHIPPED.** They were spelled `pub fn ctl_both_pure(x: &BothPure) -> usize { x.go() }` — a METHOD
+    /// call on a parameter-typed receiver, i.e. the TYPE route — while the change under test lives in
+    /// `visit_expr_call`'s `Expr::Path` arm, which they cannot reach in either loop order. Worse, their
+    /// arms were `pa::P` and `pb::P`: same-named types in sibling modules, which is R213, an open row
+    /// that drops the edge on its own. So they asserted "a union does not manufacture an effect for arms
+    /// that have none" over a fixture in which NO arm had an effect to manufacture, on a route the fix
+    /// does not touch, through a path two open rows say returns nothing. Proved vacuous by making a
+    /// control arm effectful and watching it stay ABSENT.
+    ///
+    /// The controls below are on the PATH route with DISTINCT type names, so each one can move — and the
+    /// one that was actually owed is `ctl_not_an_arm_set`: **a union must not manufacture an effect for a
+    /// name that is not a `#[cfg]` arm set at all.** That is R370, and no control here asked it.
     #[test]
     fn a_cfg_duplicated_use_alias_charges_every_arm_in_either_order() {
         let src = |unix_first: bool| {
@@ -4584,30 +4703,47 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let fake = "#[cfg(windows)] use crate::fake::Runner;";
             let (a, b) = if unix_first { (real, fake) } else { (fake, real) };
             format!("pub mod fake {{ pub struct Runner; impl Runner {{ \
-                       pub fn new(_s: &str) -> Self {{ Runner }} pub fn status(&self) -> bool {{ true }} }} }}\n\
-                     pub mod pa {{ pub struct P; impl P {{ pub fn go(&self) -> usize {{ 7 }} }} }}\n\
-                     pub mod pb {{ pub struct P; impl P {{ pub fn go(&self) -> usize {{ 9 }} }} }}\n\
+                       pub fn new(_s: &str) -> Self {{ Runner }} pub fn status(&self) -> bool {{ true }} \
+                       pub fn mk() -> usize {{ let _ = std::fs::write(\"a\",\"b\"); 3 }} }} }}\n\
+                     pub mod pa {{ pub struct PA; impl PA {{ pub fn mk() -> usize {{ 7 }} }} }}\n\
+                     pub mod pb {{ pub struct PB; impl PB {{ pub fn mk() -> usize {{ 9 }} }} }}\n\
                      {a}\n{b}\n\
-                     #[cfg(unix)]    use crate::pa::P as BothPure;\n\
-                     #[cfg(windows)] use crate::pb::P as BothPure;\n\
-                     #[cfg(unix)]      use crate::pa::P as Same;\n\
-                     #[cfg(not(unix))] use crate::pa::P as Same;\n\
-                     use crate::pa::P as Single;\n\
+                     #[cfg(unix)]    use crate::pa::PA as BothPure;\n\
+                     #[cfg(windows)] use crate::pb::PB as BothPure;\n\
+                     #[cfg(unix)]      use crate::pa::PA as Same;\n\
+                     #[cfg(not(unix))] use crate::pa::PA as Same;\n\
+                     use crate::pa::PA as Single;\n\
+                     use crate::fake::Runner as NotAnArmSet;\n\
+                     pub mod inner {{ use crate::pa::PA as NotAnArmSet; \n\
+                       pub fn ctl_not_an_arm_set() -> usize {{ NotAnArmSet::mk() }} }}\n\
                      pub fn run_it() {{ let _ = Runner::new(\"true\").status(); }}\n\
-                     pub fn ctl_both_pure(x: &BothPure) -> usize {{ x.go() }}\n\
-                     pub fn ctl_same(x: &Same) -> usize {{ x.go() }}\n\
-                     pub fn ctl_single(x: &Single) -> usize {{ x.go() }}\n")
+                     pub fn ctl_both_pure() -> usize {{ BothPure::mk() }}\n\
+                     pub fn ctl_same() -> usize {{ Same::mk() }}\n\
+                     pub fn ctl_single() -> usize {{ Single::mk() }}\n")
         };
         for (label, unix_first) in [("unix arm first", true), ("windows arm first", false)] {
             let v = scan_fixture(&format!("r140_{unix_first}"), &src(unix_first));
             assert_eq!(fixture_effects(&v, "run_it"), vec!["Exec".to_string()],
                        "{label}: `run_it` must charge Exec. ABSENT here is R140's cardinal sin — the \
                         arm that reaches a real Command lost to source order:\n{v:#}");
-            for ctl in ["ctl_both_pure", "ctl_same", "ctl_single"] {
+            // R374 — all four are PATH-route calls (`Name::mk()`), the route the fix changes, over
+            // DISTINCT type names, so each one is CAPABLE of moving. `fake::Runner::mk` writes a file,
+            // so any control that wrongly unions it charges `Fs` and this fails loudly.
+            for ctl in ["ctl_both_pure", "ctl_same", "ctl_single", "inner::ctl_not_an_arm_set"] {
                 assert!(fixture_effects(&v, ctl).is_empty(),
                         "{label}: {ctl} must stay pure — a union TYPES the arm set, it does not \
                          manufacture an effect for arms that have none:\n{v:#}");
             }
+            // R370, the control that was owed and missing: `inner`'s `use … as NotAnArmSet` REBINDS a
+            // name the file already bound, with NO `#[cfg]` on either item. Rust does not propagate a
+            // parent module's imports into an inline `mod` at all, so `inner::ctl_not_an_arm_set` can
+            // only reach `pa::PA::mk` — and pre-fix it was charged `Fs` through `fake::Runner::mk`,
+            // with `deny Fs`, bare `pure` and the SCOPED `deny Fs <fn>` all going 0 -> 1.
+            assert!(fixture_effects(&v, "inner::ctl_not_an_arm_set").is_empty(),
+                    "{label}: a name REBOUND without any `#[cfg]` is shadowing, not an arm set. Two \
+                     `use` items binding one name with no cfg between them is E0252 unless they are in \
+                     different scopes or namespaces, so a union here charges a binding the code cannot \
+                     reach — R370, measured at 676 of 1,168 collision records over 1,545 crates:\n{v:#}");
         }
     }
 
@@ -5081,7 +5217,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
-        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        // R377 — same declaration capture as `scan_fixture_files`; see `fixture_effects`.
+        v["_fixture_fns"] = serde_json::json!(fn_names_in(src));
         let _ = std::fs::remove_dir_all(&d);
         v
     }
@@ -5116,17 +5254,54 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
         }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
-        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        // R377 — same declaration capture as `scan_fixture_files`; see `fixture_effects`.
+        v["_fixture_fns"] = serde_json::json!(fn_names_in(src));
         let _ = std::fs::remove_dir_all(&d);
         v
     }
 
+    /// **SOUNDNESS R377 — THIS PANICS WHEN THE NAME IS ABSENT, and that is the whole point.** It used
+    /// to return an empty `Vec` for a function that is not in the report, which made every
+    /// `assert!(fixture_effects(..).is_empty())` in this file pass vacuously for a name that was
+    /// misspelled, module-qualified (`inner::f`, not `f`) or simply never emitted — 21 purity
+    /// assertions had that shape. Found by falsifying R374's replacement control: the control was
+    /// spelled `ctl_not_an_arm_set`, the report names it `inner::ctl_not_an_arm_set`, and disabling
+    /// the code under test did not turn the test red. A purity claim over a function the report does
+    /// not contain is not a weak assertion, it is not an assertion. Use `fixture_absent` to say
+    /// "this function should not be in the report" — out loud, where a reader can see it.
     fn fixture_effects(v: &serde_json::Value, name: &str) -> Vec<String> {
+        // ABSENCE from the report is a legitimate answer — SPEC ⟨0.24⟩ lets an all-pure unit be
+        // omitted — so absence alone is not the error. The error is a name the FIXTURE NEVER DECLARES,
+        // which is a spelling mistake wearing a purity claim's clothes.
+        let leaf = name.rsplit("::").next().unwrap_or(name);
+        let declared = v["_fixture_fns"].as_array().into_iter().flatten()
+            .filter_map(|x| x.as_str()).any(|x| x == leaf);
+        assert!(declared || fixture_names(v).iter().any(|n| n == name),
+                "fixture_effects({name:?}): the fixture declares no `fn {leaf}` and the report has no \
+                 such function, so a `.is_empty()` assertion on it passes for the wrong reason — R377. \
+                 Reported: {:?}. Declared: {:?}",
+                fixture_names(v), v["_fixture_fns"]);
         v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some(name))
             .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
                 .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
             .collect()
+    }
+
+    /// Every function name the report contains, for `fixture_effects`' presence check and for the
+    /// message it prints when the name is not one of them.
+    fn fixture_names(v: &serde_json::Value) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter_map(|f| f["fn"].as_str().map(String::from)).collect()
+    }
+
+    /// Assert a function is NOT in the report — the claim `fixture_effects(..).is_empty()` used to make
+    /// by accident. Spelled out so it is a decision rather than a spelling mistake (R377).
+    #[allow(dead_code)]
+    fn fixture_absent(v: &serde_json::Value, name: &str) {
+        assert!(!fixture_names(v).iter().any(|n| n == name),
+                "{name} must NOT appear in the report. Present: {:?}", fixture_names(v));
     }
 
     /// ⟨0.29⟩ THE SCOPE IS IN THE REPORT — the missing DENOMINATOR.
@@ -5718,7 +5893,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
@@ -5776,7 +5951,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -5801,7 +5976,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -5832,7 +6007,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut c = CallCollector {
             modpath: String::new(),
             uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -5869,7 +6044,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut cc = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -16014,7 +16189,7 @@ pub fn go() {{ imp::doit(); }}
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),

@@ -136,6 +136,11 @@ pub(crate) struct CallCollector<'a> {
     /// the first as its own edge — the same shape `fn_alias` uses — so the row carries the UNION rather
     /// than whichever arm happened to be written second.
     pub(crate) use_alts: std::collections::HashMap<String, Vec<String>>,
+    // SOUNDNESS R373 — the build this scan describes, so `visit_item_use` can ask `use_item_applies`.
+    pub(crate) include_tests: bool,
+    // R370 — names bound by THIS BODY's own `use` items, so two of them can be an arm set while a name
+    // inherited from the enclosing module is shadowing. One set per body: this is a per-SCOPE question.
+    pub(crate) local_use_seen: std::collections::HashSet<String>,
     /// Crate-wide LAZY/deferred static names (`once_cell`/`std` `Lazy`/`LazyLock`/`LazyCell`,
     /// `lazy_static!`, `thread_local!`). A body that NAMES one of these FORCES its deferred init on
     /// first use — so naming the static edges to its synthetic init unit (`<lazy>::NAME`), carrying the
@@ -2173,10 +2178,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// crate-local — the forcing/provenance sites below then had no way to learn the name's origin. Record
     /// it in `local_uses`, which `use_target` consults FIRST.
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        // SOUNDNESS R373 — one authority, asked here too. See `LocalUseCollector::visit_item_use`:
+        // this is the seventh site answering "does this `use` item bind a name in the build we are
+        // describing", and the five-site audit that unified the question did not reach either body-
+        // local one. A `#[cfg(test)]` mock imported inside a body is the TEST build's import.
+        if !crate::lang::use_item_applies(node, self.include_tests) {
+            syn::visit::visit_item_use(self, node);
+            return;
+        }
         // R140 — a body-level `use` records its collisions beside `local_uses`, in the same shape
-        // `fn_alias` already uses for a `let`-bound function alias.
+        // `fn_alias` already uses for a `let`-bound function alias. R370 — only a `#[cfg]`-gated item
+        // can be an ARM SET; a plain rebind is shadowing, and recording it as an alternative charged
+        // bindings the code cannot reach.
         let mut alts = std::mem::take(&mut self.use_alts);
-        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses, &mut alts);
+        let mut seen = std::mem::take(&mut self.local_use_seen);
+        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses, &mut alts, &mut seen);
+        self.local_use_seen = seen;
         self.use_alts = alts;
         syn::visit::visit_item_use(self, node);
     }
@@ -2252,8 +2269,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         .map(|s| s.ident.to_string()).collect();
                                     let written = expand(&path_to_string(&p.path), &self.uses);
                                     for t in ts {
-                                        let full = if rest.is_empty() { t.clone() }
-                                                   else { format!("{t}::{}", rest.join("::")) };
+                                        // R375 — `alias_join`, never `format!`. It is the join-aware
+                                        // concatenation that distributes a suffix over `ALIAS_ALT_SEP`
+                                        // arms; the bare `format!` that stood here appended `rest` to
+                                        // the LAST arm only and silently truncated the first. R375's
+                                        // real fix splits the arms before they are stored, so this is
+                                        // now a no-op — kept because the next value to reach this loop
+                                        // should not depend on that invariant holding somewhere else.
+                                        let rest_refs: Vec<&str> = rest.iter().map(|x| x.as_str()).collect();
+                                        let full = crate::lang::alias_join(&t, &rest_refs);
                                         if full == written { continue; }
                                         let leaf2 = full.rsplit("::").next().unwrap_or(&full).to_string();
                                         self.calls.push(Call {
