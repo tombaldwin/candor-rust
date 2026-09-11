@@ -28,6 +28,21 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **The AS-EFF-008 masking guard could be walked past: `allow Net <host>` returned exit 0 over a DNS
+  lookup of a caller-supplied hostname — SOUNDNESS R379.** The guard marks a `Net` call whose host is a
+  runtime value as an incomplete surface, so a benign sibling literal cannot certify it. Its verb list
+  omitted the DNS resolver verbs, while the classifier already mapped them to `Net` — two lists, one
+  question. Measured against real `hickory-resolver`: a function calling `lookup_ip("good.example.com")`
+  beside `lookup_ip(caller_host)` published only the benign literal, claimed a complete surface, and
+  **passed `allow Net good.example.com`**. `TcpStream::connect(host)`, one verb over, correctly failed
+  closed — the mechanism was sound and only its enumeration was short. Fixed, with the whole record-type
+  family (`srv_`/`txt_`/`mx_`/`cname_`/`reverse_`…) covered rather than the one spelling found.
+
+  Over the local registry: 39 rows gain an incomplete-surface marking and none loses one; every one is a
+  real DNS resolution with a runtime host (`mongodb`, `async-rs`). **If you gate with `allow Net <host>`
+  and your code resolves hostnames at runtime, that gate was passing and will now fail closed** — which
+  is the answer it should always have given.
+
 - ⚠ **A `let`-bound alias now sees the same `#[cfg]` arm set the call site sees — SOUNDNESS R371.**
   The cfg-duplicated-alias fix above pushed every arm at the CALL site but built the `let`-alias target
   list from the single-valued import map, so `let f = Runner::new; f("true").status()` still answered by

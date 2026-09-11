@@ -2694,6 +2694,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 if c.str_arg.is_none() {
                     if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
+                        // R379 — instrument the TRIGGER, not the outcome. Which verb marked this
+                        // surface incomplete is the whole question when pricing the denylist.
+                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                            eprintln!("R379MASK {} :: {}", f.qual, c.leaf);
+                        }
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
                     } else if eff == "Exec" && candor_classify::is_cmd_naming_method(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Exec");
