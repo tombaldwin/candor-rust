@@ -28,6 +28,22 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **`allow Fs <path>` returned exit 0 over `OpenOptions::new().open(runtime_path)` — SOUNDNESS R383.**
+  The masking guard marks an `Fs` call whose path is a runtime value as an incomplete surface, so a benign
+  sibling literal cannot certify it. It skipped every METHOD form, because the path-stat methods
+  (`p.exists()`, `p.metadata()`) carry their path as the RECEIVER — but `OpenOptions::open(path)` is a
+  method whose path is the ARGUMENT. So a function opening `/etc/hostname` and then opening a
+  caller-supplied path published only the first and claimed a complete surface. The free-function
+  spelling of the same call always failed closed, which is what isolates it to the method form.
+
+  Fixed for the pairs whose path really is an argument — `OpenOptions::open` and `DirBuilder::create`,
+  matched so that std, tokio, `cap_std` and `fs_err` are all covered. Builder modifiers (`read`,
+  `truncate`, `mode`), combinators, and `File`'s use-verbs are untouched: over the local registry, 88 rows
+  gain an incomplete-surface marking, **none loses one**, and no effect set changes anywhere.
+
+  **If you gate with `allow Fs <path>` and open paths built at runtime through `OpenOptions`, that gate
+  was passing and will now fail closed.**
+
 - ⚠ **A trait-object field reached through a chain was SILENT — `opt.as_ref().unwrap().go()` read pure
   while the binder spelling charged — SOUNDNESS R380.** Two resolvers answer "what does this receiver
   resolve to": the concrete-type one walks a method chain back to the base receiver, the dispatch one did
