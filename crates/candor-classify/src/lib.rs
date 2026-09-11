@@ -3668,6 +3668,33 @@ pub fn is_fs_path_arg_method(call_path: &str) -> bool {
 /// Under-catching an unusual query verb is a missed mask (sound-with-disclosure), never a broken gate.
 /// The arg is the method leaf (the path's last segment).
 pub fn is_db_query_arg(leaf: &str) -> bool {
+    // SOUNDNESS R386 — THE `sqlite3_*` C API TAKES SQL AND WAS ABSENT, so a benign sibling literal
+    // certified arbitrary caller-supplied SQL. `classify` in this same crate maps `sqlite3_exec`/
+    // `sqlite3_step`/`sqlite3_prepare*` to `Db`; this list had none of them, while candor-swift covers
+    // the whole family by prefix — a cross-engine divergence, which is how it was found.
+    //
+    // MEASURED, calibrated first (`deny Db` exits 1): `conn.execute("INSERT INTO users (id) VALUES (1)",
+    // [])` beside `sqlite3_exec(db, caller_sql, …)` reported `tables:['users'] incomplete:NONE` and
+    // **`allow Db users` exited 0**. R383 recorded this gap as "REAL BUT NOT LIVE" on the grounds that a
+    // C-string literal never reaches `tables` — true of an ISOLATED function, and the wrong shape: the
+    // literal does not have to come from the masked call, only from the same FUNCTION.
+    //
+    // ONLY THE SQL-BEARING SPELLINGS. `sqlite3_step`/`_close`/`_serialize`/`_deserialize` carry no query,
+    // and `sqlite3_open*` takes a FILENAME — masking that would claim a Db surface for an Fs locator,
+    // which is the over-mask this allowlist exists to avoid. Direction stays an ALLOWLIST for the reason
+    // R379 measured: a denylist over a whole-crate-Db crate masks every lifecycle verb in it.
+    if matches!(
+        leaf,
+        "sqlite3_exec"
+            | "sqlite3_prepare"
+            | "sqlite3_prepare_v2"
+            | "sqlite3_prepare_v3"
+            | "sqlite3_prepare16"
+            | "sqlite3_prepare16_v2"
+            | "sqlite3_prepare16_v3"
+    ) {
+        return true;
+    }
     matches!(
         leaf,
         "execute"
@@ -5013,6 +5040,36 @@ mod tests {
     /// their absence was a GATE BYPASS, not a missed disclosure: `allow Net good.example.com` exited 0
     /// over `r.lookup_ip(caller_host)` sitting beside a benign literal, measured against real
     /// hickory-resolver 0.26.2.
+    /// SOUNDNESS R386 — the `sqlite3_*` C API takes SQL, and its absence let a benign SIBLING literal
+    /// certify arbitrary caller-supplied SQL.
+    ///
+    /// R383 recorded this gap as "REAL BUT NOT LIVE" because a C-string literal never reaches `tables`.
+    /// That is true of an ISOLATED function and is the WRONG SHAPE: the literal only has to come from
+    /// the same FUNCTION, not the same call. Measured, calibrated first (`deny Db` exits 1):
+    /// `conn.execute("INSERT INTO users (id) VALUES (1)", [])` beside `sqlite3_exec(db, caller_sql, …)`
+    /// gave `tables:['users'] incomplete:NONE` and `allow Db users` exited 0.
+    #[test]
+    fn db_query_arg_covers_the_sqlite3_sql_bearing_family() {
+        // Every spelling that TAKES SQL — the whole family, not the one that was measured (R346).
+        for f in ["sqlite3_exec", "sqlite3_prepare", "sqlite3_prepare_v2", "sqlite3_prepare_v3",
+                  "sqlite3_prepare16", "sqlite3_prepare16_v2", "sqlite3_prepare16_v3"] {
+            assert!(is_db_query_arg(f), "{f} carries SQL — a runtime query there is invisible (R386)");
+        }
+        // THE OVER-MASK CONTROLS, and they carry as much weight as the fix. These take no query, so
+        // masking them would fail `allow Db` closed over nothing. `sqlite3_open*` is the sharpest: it
+        // takes a FILENAME, so masking it would claim a Db surface for an Fs locator.
+        for f in ["sqlite3_step", "sqlite3_close", "sqlite3_open", "sqlite3_open_v2", "sqlite3_open16",
+                  "sqlite3_serialize", "sqlite3_deserialize", "sqlite3_finalize", "sqlite3_reset"] {
+            assert!(!is_db_query_arg(f),
+                    "{f} carries no SQL — masking it claims an incomplete surface over nothing, and for \
+                     the open* family it would claim a Db surface for a FILENAME");
+        }
+        // The pre-existing high-level verbs must survive.
+        for f in ["execute", "query", "prepare", "prepare_cached", "simple_query"] {
+            assert!(is_db_query_arg(f), "{f} was already covered and must stay covered");
+        }
+    }
+
     /// SOUNDNESS R383 — the METHOD forms whose path is an ARGUMENT. The guard's `!c.method` gate
     /// excluded every method form because the path-STAT methods carry the path as their RECEIVER;
     /// `OpenOptions::open(path)` is the counter-example, and `allow Fs <lit>` exited 0 over a
