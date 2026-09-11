@@ -5370,11 +5370,47 @@ pub(crate) fn named_arg_value<'e>(e: &'e syn::Expr, name: &str) -> Option<&'e sy
     (p.path.get_ident()? == name).then_some(&*a.right)
 }
 
-/// One parsed `{…}` hole of a format string: which arg it draws, and whether it requests `Debug` (`{:?}`/
-/// `{:#?}`) rather than `Display`.
+/// One parsed `{…}` hole of a format string: which arg it draws, and WHICH `std::fmt` trait it requests.
+///
+/// SOUNDNESS R388 — this carried a `debug: bool`, i.e. TWO of the NINE std format traits. A type
+/// implementing only `LowerHex` and formatted `{:x}` was checked against `Display`, found not to
+/// implement it, and — per the resolve-or-skip discipline, which never hedges to `Unknown` here — was
+/// DROPPED SILENTLY. Measured: a `HexOnly` whose `fmt` writes a file reads ABSENT through `{:x}`, while
+/// the byte-identical `Display` control through `{}` charges `['Fs']`.
 pub(crate) struct FmtHole {
     pub(crate) arg: FmtArg,
-    pub(crate) debug: bool,
+    /// The `std::fmt` trait this hole's type char names — `Display` when the spec names none.
+    pub(crate) trait_leaf: &'static str,
+}
+
+/// The `std::fmt` trait a format spec's TYPE names. The whole family, written out rather than the two
+/// spellings that were implemented (R346).
+///
+/// `?` is tested FIRST and wins: `{:x?}` and `{:X?}` are `Debug` with hex-formatted integers, NOT
+/// `LowerHex`/`UpperHex` — reading the trailing type char alone would send them to the wrong trait, which
+/// is the same class of error as checking only two traits, one layer down.
+pub(crate) fn fmt_trait_of_spec(spec: &str) -> &'static str {
+    let t = spec.trim_end();
+    if t.ends_with('?') {
+        return "Debug";
+    }
+    if std::env::var("CANDOR_FMT_DEBUG").is_ok() {
+        if let Some(c) = t.chars().last() {
+            if matches!(c, 'x' | 'X' | 'o' | 'b' | 'e' | 'E' | 'p') {
+                eprintln!("R388HIT {t}");
+            }
+        }
+    }
+    match t.chars().last() {
+        Some('x') => "LowerHex",
+        Some('X') => "UpperHex",
+        Some('o') => "Octal",
+        Some('b') => "Binary",
+        Some('e') => "LowerExp",
+        Some('E') => "UpperExp",
+        Some('p') => "Pointer",
+        _ => "Display",
+    }
 }
 
 /// Parse the `{…}` holes of a format string (`std::fmt` mini-grammar, the subset that matters for picking
@@ -5409,10 +5445,9 @@ pub(crate) fn parse_format_holes(fmt: &str) -> Vec<FmtHole> {
                     Some((n, s)) => (n.trim(), s),
                     None => (inner.trim(), ""),
                 };
-                // Debug = the spec's type char is `?` (optionally after `#` for pretty `{:#?}`), i.e. the
-                // spec (after stripping fill/align/flags/width/precision) ENDS in `?`. A simple, robust
-                // test: the spec contains `?` as its trailing type.
-                let debug = spec.trim_end().ends_with('?');
+                // R388 — the spec's TYPE names one of nine traits, not one of two. See
+                // `fmt_trait_of_spec`: `?` wins over a preceding `x`/`X` because `{:x?}` is Debug.
+                let trait_leaf = fmt_trait_of_spec(spec);
                 let arg = if name_part.is_empty() {
                     FmtArg::Implicit
                 } else if let Ok(idx) = name_part.parse::<usize>() {
@@ -5420,7 +5455,7 @@ pub(crate) fn parse_format_holes(fmt: &str) -> Vec<FmtHole> {
                 } else {
                     FmtArg::Named(name_part.to_string())
                 };
-                holes.push(FmtHole { arg, debug });
+                holes.push(FmtHole { arg, trait_leaf });
                 i = j + 1;
             }
             '}' => {

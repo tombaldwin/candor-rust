@@ -1263,7 +1263,10 @@ impl<'a> CallCollector<'a> {
         // consumes no positional slot (we can't resolve the captured ident's type here → skip it).
         let mut next_positional = 0usize;
         for hole in parse_format_holes(&fmt) {
-            let (tr, m) = if hole.debug { ("Debug", "fmt") } else { ("Display", "fmt") };
+            // R388 — the hole names its own trait now (nine, not two). A `{:x}` on a type that
+            // implements only `LowerHex` used to be checked against `Display`, miss, and be dropped
+            // silently — the resolve-or-skip path never hedges to Unknown here.
+            let (tr, m) = (hole.trait_leaf, "fmt");
             let idx = match hole.arg {
                 FmtArg::Implicit => {
                     let i = next_positional;
