@@ -4655,6 +4655,59 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         }
     }
 
+    /// SOUNDNESS R380 — A TRAIT-OBJECT FIELD REACHED THROUGH A CHAIN. Two resolvers were answering one
+    /// question about one receiver and only one of them walked the chain.
+    ///
+    /// `resolve_recv_type` (concrete types) walks through a method call to the base receiver unless the
+    /// method CHANGES the type. `resolve_recv_traits` (dispatch leaves) did not walk at all — it only
+    /// decoded a `<dyn>` factory-return sentinel by method leaf. So a trait-object field reached through
+    /// any chain resolved to NOTHING: no row, no `Unknown`, no `invisible`, over a body that writes a
+    /// file. R347's finding at a third site, and they now share `is_recv_type_changing`.
+    ///
+    /// THE SECOND HALF WAS A CORRECTION TO THIS ROW'S OWN STATED MECHANISM. `Option` was missing from
+    /// `trait_leaves`' wrapper peel, so an `Option<Box<dyn Doer>>` field had NO `trait_fields` entry.
+    /// The binder spelling charges correctly through the Option-PAYLOAD route, which made it look like a
+    /// control proving the field was recorded — it proves something else. Both halves are needed and
+    /// each is pinned below.
+    #[test]
+    fn a_trait_object_field_resolves_through_every_receiver_chain() {
+        let v = scan_fixture("r380chain", "\
+pub trait Doer { fn go(&self); }\n\
+pub struct Real;\n\
+impl Doer for Real { fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"y\"); } }\n\
+pub trait Pure { fn calm(&self); }\n\
+pub struct Quiet;\n\
+impl Pure for Quiet { fn calm(&self) {} }\n\
+pub struct H {\n\
+    pub direct: Box<dyn Doer>,\n\
+    pub opt: Option<Box<dyn Doer>>,\n\
+    pub guard: std::sync::Mutex<Box<dyn Doer>>,\n\
+    pub calm_opt: Option<Box<dyn Pure>>,\n\
+}\n\
+impl H {\n\
+    pub fn direct_plain(&self) { self.direct.go(); }\n\
+    pub fn opt_binder(&self) { if let Some(h) = &self.opt { h.go(); } }\n\
+    pub fn opt_as_ref_unwrap(&self) { self.opt.as_ref().unwrap().go(); }\n\
+    pub fn opt_expect(&self) { self.opt.as_ref().expect(\"x\").go(); }\n\
+    pub fn guard_lock(&self) { self.guard.lock().unwrap().go(); }\n\
+    pub fn ctl_pure_chain(&self) { self.calm_opt.as_ref().unwrap().calm(); }\n\
+}\n");
+        // Every spelling of "call the handler" must agree. The binder form is the control that was
+        // already green; the other four were ABSENT — silent purity over a body that writes a file.
+        for f in ["direct_plain", "opt_binder", "opt_as_ref_unwrap", "opt_expect", "guard_lock"] {
+            assert_eq!(fixture_effects(&v, &format!("H::{f}")), vec!["Fs".to_string()],
+                       "R380: `H::{f}` reaches `Real::go`, which writes a file. ABSENT here is the \
+                        cardinal sin — the only difference between these spellings is how the receiver \
+                        is written:\n{v:#}");
+        }
+        // THE OVER-CHARGE CONTROL, because widening a resolver is where fabrication gets introduced: the
+        // same chain over a field whose impl is PURE must stay pure. Walking the chain TYPES the
+        // receiver, it does not charge it.
+        assert!(fixture_effects(&v, "H::ctl_pure_chain").is_empty(),
+                "the identical chain over a PURE trait-object field must stay pure — resolving a \
+                 receiver types it, it does not manufacture an effect:\n{v:#}");
+    }
+
     /// SOUNDNESS R378 — `use super::X` INSIDE AN INLINE MODULE MUST KEEP THE PARENT'S ORIGIN.
     ///
     /// `submodule_uses` seeds an inline module's map from its parent's, so `use super::proc_alias` names

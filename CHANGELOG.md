@@ -28,6 +28,20 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **A trait-object field reached through a chain was SILENT — `opt.as_ref().unwrap().go()` read pure
+  while the binder spelling charged — SOUNDNESS R380.** Two resolvers answer "what does this receiver
+  resolve to": the concrete-type one walks a method chain back to the base receiver, the dispatch one did
+  not walk at all. So a `dyn` field reached through any chain produced no row, no `Unknown` and no
+  `invisible` over a body that writes a file — the only difference being how the receiver was spelled.
+  `Option` was also missing from the wrapper peel that records a field's trait leaves, so an
+  `Option<Box<dyn T>>` field had no entry at all. Both fixed; the two resolvers now share one list.
+
+  **This closes a real silence in published code.** `criterion`'s HTML reporter holds its plotter as
+  `RefCell<Box<dyn Plotter>>` and reaches it through `borrow_mut()`; its gnuplot backend spawns
+  subprocesses. `Html::generate_plots`/`summarize`/`measurement_complete` reported no `Exec` and now do.
+  Over the local registry: 57 rows added (37 `Unknown`, 18 pure-disclosure, 2 a verified `Rand` in
+  `quinn-proto`'s BBR congestion factory), 24 effect sets changed, **and nothing removed anywhere**.
+
 - ⚠ **The AS-EFF-008 masking guard could be walked past: `allow Net <host>` returned exit 0 over a DNS
   lookup of a caller-supplied hostname — SOUNDNESS R379.** The guard marks a `Net` call whose host is a
   runtime value as an incomplete surface, so a benign sibling literal cannot certify it. Its verb list

@@ -283,8 +283,22 @@ pub(crate) fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<
                 return generic_bounds.get(&id.to_string()).cloned().unwrap_or_default();
             }
             // Box<dyn T> / Rc / Arc / RefCell / Mutex / RwLock — peel the wrapper, recurse on the arg.
+            //
+            // SOUNDNESS R380 — `Option` BELONGS HERE AND WAS MISSING, which is why an
+            // `Option<Box<dyn Doer>>` field had no entry in `trait_fields` at all and every chain
+            // through it resolved to nothing. The binder spelling `if let Some(h) = &self.opt { h.go() }`
+            // charges correctly, but it does so through the Option-PAYLOAD binder route, not this index —
+            // so it looked like a control proving the field was recorded when it proves something else.
+            // A row's stated mechanism is a hypothesis too.
+            //
+            // Peeling `Option` is sound in the strict sense: the field can YIELD a `dyn Doer` and nothing
+            // else, and `self.opt.go()` does not compile, so the only way to reach the method is through
+            // an unwrap — which is exactly the chain the caller writes. `Result` is deliberately NOT added
+            // with it: its `Err` arm is a different type, and R347 already priced the shape where a peel
+            // hands a closure an error value it types as the payload (`async-process`'s
+            // `unwrap_or_else(|x| x.into_inner())`, which fabricated `Exec`). One wrapper, measured.
             let Some(seg) = p.path.segments.last() else { return Vec::new() };
-            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Mutex" | "RwLock" | "Cell");
+            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Mutex" | "RwLock" | "Cell" | "Option");
             if !wrapper {
                 return Vec::new();
             }
