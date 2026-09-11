@@ -28,6 +28,20 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **`allow Db <table>` returned exit 0 over arbitrary caller-supplied SQL — SOUNDNESS R386.** The
+  masking guard marks a `Db` call whose query is a runtime value as an incomplete surface, so a benign
+  sibling literal cannot certify it. Its verb list had **no `sqlite3_*` entry at all**, while the
+  classifier already mapped `sqlite3_exec`/`sqlite3_prepare*` to `Db` — and candor-swift already covered
+  the family. A function running `conn.execute("INSERT INTO users …")` and then `sqlite3_exec(db,
+  caller_sql, …)` published only the benign table, claimed a complete surface, and **passed `allow Db
+  users`**. Fixed for the SQL-bearing spellings only: `sqlite3_step`/`_close`/`_open*` carry no query and
+  are deliberately excluded — masking `sqlite3_open*` would claim a Db surface for a FILENAME.
+
+  Over the local registry, 11 rows gain an incomplete-surface marking and **none loses one**: every one
+  is a SQLite driver's prepare/exec wrapper (`rusqlite`, `diesel`, `sqlx-sqlite`) whose SQL arrives as a
+  parameter. **If you gate with `allow Db <table>` and build SQL at runtime through the sqlite3 C API,
+  that gate was passing and will now fail closed.**
+
 - ⚠ **`allow Fs <path>` returned exit 0 over `OpenOptions::new().open(runtime_path)` — SOUNDNESS R383.**
   The masking guard marks an `Fs` call whose path is a runtime value as an incomplete surface, so a benign
   sibling literal cannot certify it. It skipped every METHOD form, because the path-stat methods
