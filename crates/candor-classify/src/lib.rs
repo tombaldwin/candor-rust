@@ -3338,24 +3338,66 @@ pub fn is_cmd_naming_method(method: &str) -> bool {
 /// closed (else a benign sibling literal masks the runtime endpoint). An ALLOWLIST of connection-
 /// establishing verbs — the SAFE direction: a USE-verb on an already-connected socket
 /// (`stream.write`/`read`/`flush`, `socket.send`/`recv`) is NOT here, so a missing literal there (the
-/// host was fixed at `connect`) never false-positives. Under-catching an unusual establishing verb is a
-/// missed mask (sound-with-disclosure), never a broken gate. The arg is the method (path's last segment).
+/// host was fixed at `connect`) never false-positives. **THAT LAST CLAIM WAS FALSE AND IS WITHDRAWN —
+/// see R379 in the body: under-catching an establishing verb IS a broken gate whenever a benign sibling
+/// literal sits in the same function, which is the exact scenario the first sentence names.** The list is
+/// now a DENYLIST of use-verbs. The arg is the method (path's last segment).
 pub fn is_net_establishing(method: &str) -> bool {
-    matches!(
-        method,
-        "connect"
-            | "connect_timeout"
-            | "get"
-            | "post"
-            | "put"
-            | "patch"
-            | "delete"
-            | "head"
-            | "request"
-            | "send_to"
-            | "lookup_host"
-            | "to_socket_addrs"
-    )
+    // SOUNDNESS R379 — the DNS RESOLVER verbs were missing, and their absence was a GATE BYPASS.
+    //
+    // `classify` (see the `hickory_resolver` arm) already maps `::lookup_ip`, `::lookup` and any
+    // `*_lookup` to `Net`, and asserts it. This list did not, so a `Net` call whose host is a runtime
+    // value was never marked `incomplete` and a benign sibling literal certified it. Measured against
+    // real hickory-resolver 0.26.2, on a fixture that builds clean:
+    //
+    //     pub async fn masked(r: &Resolver<TokioRuntimeProvider>, host: &str) {
+    //         let _ = r.lookup_ip("good.example.com").await;   // the benign literal
+    //         let _ = r.lookup_ip(host).await;                 // the runtime target
+    //     }
+    //
+    // reported `hosts:['good.example.com'] incomplete:NONE`, and `allow Net good.example.com` exited
+    // **0** over a DNS resolution of a caller-controlled hostname. `TcpStream::connect(host)` — one
+    // verb over, same fixture — marked `incomplete:['Net']` and failed closed. The mechanism was
+    // sound; only the enumeration was short.
+    //
+    // THE DOC ABOVE USED TO CLAIM under-catching here is "a missed mask (sound-with-disclosure), never
+    // a broken gate". That is false and is withdrawn: it is a broken gate whenever a benign sibling
+    // literal shares the function, which is the scenario the guard's own first sentence names.
+    //
+    // **AND IT STAYS AN ALLOWLIST, WHICH IS NOT THE FAMILY'S USUAL DIRECTION — the exception is
+    // measured and it is the same one `is_cmd_naming_method` states two doc-blocks up.** Inverting to
+    // a denylist of use-verbs was built and A/B'd over all 1,545 registry crates: **544 rows gained
+    // `incomplete` and none lost it**, because a WHOLE-CRATE-Net crate classifies EVERY method as Net,
+    // so a denylist masks essentially everything in one — `cap-std` 66 rows, `hickory-net` 44. The
+    // triggers it added were conversions, accessors and combinators (`into` 24, `from_std` 20,
+    // `as_socket` 15, `setsockopt` 32, `map_err` 7, `ok` 5, `try_clone` 4) — none of which hides a
+    // host. Worse, it masked **`bind` (31)**, which this very file has `is_net_local_bind` to exclude
+    // because a bind address is where the process LISTENS, never a destination it reaches. So here the
+    // allowlist is the precise side and the denylist is the leaky one, exactly as recorded for Exec.
+    //
+    // The resolver family is written out rather than the one spelling in hand (R346): `_lookup`
+    // catches `reverse_lookup`/`srv_lookup`/`mx_lookup`/`txt_lookup`/`ipv4_lookup`/`ipv6_lookup` and
+    // the rest of the record-type verbs in one test, mirroring `classify`'s own `ends_with("_lookup")`.
+    method.ends_with("_lookup")
+        || matches!(
+            method,
+            "connect"
+                | "connect_timeout"
+                | "get"
+                | "post"
+                | "put"
+                | "patch"
+                | "delete"
+                | "head"
+                | "request"
+                | "send_to"
+                | "lookup_host"
+                | "to_socket_addrs"
+                // R379 — the DNS resolver verbs `classify` already calls Net.
+                | "lookup"
+                | "lookup_ip"
+                | "resolve"
+        )
 }
 
 /// ⟨0.29⟩ A LOCAL BIND/LISTEN VERB — the address it names is where the process LISTENS, never a
@@ -4935,16 +4977,59 @@ mod tests {
         assert!(!is_cmd_naming_method("arg") && !is_cmd_naming_method("env") && !is_cmd_naming_method("current_dir"));
     }
 
+    /// SOUNDNESS R379 — THE MASKING GUARD'S ALLOWLIST, AND THE DENYLIST THAT WAS MEASURED AND REJECTED.
+    ///
+    /// The verbs here take the HOST as an argument, so a runtime value in that position is invisible to
+    /// the gate and the surface must be marked incomplete. The DNS resolver verbs were missing, and
+    /// their absence was a GATE BYPASS, not a missed disclosure: `allow Net good.example.com` exited 0
+    /// over `r.lookup_ip(caller_host)` sitting beside a benign literal, measured against real
+    /// hickory-resolver 0.26.2.
     #[test]
     fn net_establishing_allowlist() {
-        // sweep [3]/[7]: the masking guard's establishing-verb allowlist — host-bearing connect/request
-        // verbs establish (a runtime host there is invisible); USE-verbs on a connected socket do NOT.
-        assert!(is_net_establishing("connect") && is_net_establishing("connect_timeout"));
-        assert!(is_net_establishing("get") && is_net_establishing("post") && is_net_establishing("request"));
-        assert!(is_net_establishing("send_to") && is_net_establishing("to_socket_addrs"));
-        // use-verbs (host fixed at connect) must NOT be establishing — else `connect("h").write()` flags.
-        assert!(!is_net_establishing("write") && !is_net_establishing("read") && !is_net_establishing("send"));
-        assert!(!is_net_establishing("flush") && !is_net_establishing("recv") && !is_net_establishing("peek"));
+        // Host-bearing verbs establish — a runtime value here is invisible, so the gate must fail closed.
+        for m in ["connect", "connect_timeout", "get", "post", "put", "patch", "delete", "head",
+                  "request", "send_to", "lookup_host", "to_socket_addrs"] {
+            assert!(is_net_establishing(m), "`{m}` takes the host as an argument and must establish");
+        }
+        // R379: the DNS resolver verbs `classify` already maps to Net. The WHOLE FAMILY, not the one
+        // spelling that was found — `_lookup` is a suffix test mirroring `classify`'s own.
+        for m in ["lookup", "lookup_ip", "resolve", "reverse_lookup", "srv_lookup", "mx_lookup",
+                  "txt_lookup", "ipv4_lookup", "ipv6_lookup", "ns_lookup", "soa_lookup"] {
+            assert!(is_net_establishing(m),
+                    "`{m}` resolves a caller-supplied host — R379. Without it, `allow Net <benign \
+                     literal>` exits 0 over a DNS lookup of a runtime hostname.");
+        }
+        // USE-verbs on an already-established connection: the host was fixed at `connect`, so a missing
+        // literal here hides nothing and must NOT flag — else `connect("h").write(..)` fails closed.
+        for m in ["write", "read", "send", "flush", "recv", "peek", "write_all", "read_to_end",
+                  "write_vectored", "shutdown", "status", "headers", "text", "json"] {
+            assert!(!is_net_establishing(m), "`{m}` is a use-verb on an established connection");
+        }
+    }
+
+    /// R379 — WHY THIS STAYS AN ALLOWLIST, which is NOT this family's usual direction.
+    ///
+    /// `candor-denylist-over-allowlist` says narrow a sound over-approximation with a denylist, and
+    /// R350 made exactly that inversion one list over. It is wrong HERE, for the reason
+    /// `is_cmd_naming_method` states two doc-blocks above for Exec: a WHOLE-CRATE-Net crate classifies
+    /// every method as Net, so a denylist of use-verbs masks essentially everything in one. Measured by
+    /// building the inversion and A/B-ing all 1,545 registry crates: **544 rows gained `incomplete`,
+    /// none lost it** — `cap-std` 66, `hickory-net` 44 — and the triggers were conversions, accessors
+    /// and combinators that hide no host.
+    ///
+    /// These are the measured leaks, pinned so the inversion cannot be re-attempted without meeting
+    /// them. `bind` is the sharpest: this file has `is_net_local_bind` precisely because a bind address
+    /// is where the process LISTENS, never a destination it reaches.
+    #[test]
+    fn the_rejected_denylist_leaks_are_not_establishing() {
+        for m in ["bind", "into", "from", "from_std", "as_socket", "setsockopt", "getsockopt",
+                  "map_err", "map", "ok", "try_clone", "complete_io"] {
+            assert!(!is_net_establishing(m),
+                    "`{m}` hides no host and must not mark a surface incomplete. It was a MEASURED \
+                     trigger of the rejected denylist inversion (544 rows gained `incomplete` over the \
+                     registry, 0 lost) — a whole-crate-Net crate classifies every method as Net, which \
+                     is why the allowlist is the precise side here. See R379.");
+        }
     }
 
     #[test]
