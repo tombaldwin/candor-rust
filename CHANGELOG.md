@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.36.1] — 2026-09-11
+
 - ⚠ **A `#[cfg]`-duplicated `use` alias charges EVERY arm, not whichever was written second —
   SOUNDNESS R140/R287.** Two `use` items binding one name under mutually-exclusive cfgs were resolved by
   source order: with the unix arm first, a function calling `Runner::new("true").status()` read PURE over
