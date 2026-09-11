@@ -7,6 +7,7 @@ behavioural changes (always in the soundness-increasing direction — see the §
 **⚠ marks a verdict-affecting change** — a gate/guard/report that was green may read differently
 after upgrading; review policies and regenerate baselines with the new build.
 
+
 ## Unreleased
 
 - ⚠ **A `#[cfg]`-duplicated `use` alias charges EVERY arm, not whichever was written second —
@@ -27,6 +28,12 @@ after upgrading; review policies and regenerate baselines with the new build.
   gain `Clock` over a real `Instant::now()` — `#[cfg(not(target_arch = "wasm32"))] use std::time::Instant`
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
+
+  **The TYPE route is NOT closed by this.** A cfg-duplicated alias used as a TYPE — a parameter or
+  field typed by the aliased name, or a local bound from a function returning it — still resolves by
+  source order, so half the arm orders under-report (SOUNDNESS R372). A first fix was measured *worse*
+  than the defect and reverted; the remaining design question is recorded in the row. `deny` still
+  fires on the call route this entry closes.
 
 - ⚠ **A type formatted through `{:x}`, `{:o}`, `{:b}` or an exponent spec read SILENT-PURE —
   SOUNDNESS R388.** The format-hole parser recognised two of the nine `std::fmt` traits: a hole either
