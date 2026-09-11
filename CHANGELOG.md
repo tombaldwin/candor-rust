@@ -28,6 +28,21 @@ after upgrading; review policies and regenerate baselines with the new build.
   written first and losing to the wasm arm. **That is a silent under-report on published code, closed** —
   and the original slice could not see it because the crate sorts after "i".
 
+- ⚠ **A type formatted through `{:x}`, `{:o}`, `{:b}` or an exponent spec read SILENT-PURE —
+  SOUNDNESS R388.** The format-hole parser recognised two of the nine `std::fmt` traits: a hole either
+  asked for `Debug` or for `Display`. So a type implementing only `LowerHex`, formatted `{:x}`, was
+  checked against `Display`, missed, and dropped without even an `Unknown` — its `fmt` body could write
+  a file and the caller read pure. Six of nine traits were affected; the two that worked are exactly the
+  two the code knew about.
+
+  Fixed by naming the trait from the spec's type char, with the whole family written out. `?` is tested
+  first and wins, because `{:x?}` is `Debug` with hex-formatted integers, not `LowerHex`. Width, fill and
+  precision before the type char are handled.
+
+  The local registry shows **no report changing** — while the changed branch is reached **842 times
+  across 246 crates**, so published types implementing these traits essentially never perform effects
+  when formatting. Reached and inert; the silence it closes is real.
+
 - ⚠ **`allow Db <table>` returned exit 0 over arbitrary caller-supplied SQL — SOUNDNESS R386.** The
   masking guard marks a `Db` call whose query is a runtime value as an incomplete surface, so a benign
   sibling literal cannot certify it. Its verb list had **no `sqlite3_*` entry at all**, while the

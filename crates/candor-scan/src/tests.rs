@@ -4655,6 +4655,33 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         }
     }
 
+    /// SOUNDNESS R388 — the format spec names one of NINE `std::fmt` traits, not one of two.
+    ///
+    /// `FmtHole` carried a `debug: bool`, so a type implementing only `LowerHex` and formatted `{:x}`
+    /// was checked against `Display`, missed, and was DROPPED SILENTLY. Measured PRE/POST on eight types
+    /// each implementing exactly one formatter whose `fmt` writes a file: `{:x}`/`{:X}`/`{:o}`/`{:b}`/
+    /// `{:e}`/`{:E}` were ALL absent while the `{:?}` and `{}` controls charged.
+    #[test]
+    fn a_format_spec_names_one_of_nine_std_fmt_traits() {
+        use crate::lang::fmt_trait_of_spec;
+        for (spec, want) in [("x", "LowerHex"), ("X", "UpperHex"), ("o", "Octal"), ("b", "Binary"),
+                             ("e", "LowerExp"), ("E", "UpperExp"), ("p", "Pointer"),
+                             ("?", "Debug"), ("", "Display")] {
+            assert_eq!(fmt_trait_of_spec(spec), want, "spec {spec:?} names {want}");
+        }
+        // `?` WINS over a preceding type char: `{:x?}` is Debug with hex-formatted integers, NOT
+        // LowerHex. Reading the trailing char alone routes it to the wrong trait — the same class of
+        // error as knowing only two traits, one layer down.
+        for spec in ["x?", "X?", "#?", "#x?"] {
+            assert_eq!(fmt_trait_of_spec(spec), "Debug", "{spec:?} is Debug, not a hex trait");
+        }
+        // Width, fill, align and precision precede the type char and must not confuse it.
+        for (spec, want) in [(">8x", "LowerHex"), ("08b", "Binary"), ("+.3e", "LowerExp"),
+                             ("<10", "Display"), (".2", "Display")] {
+            assert_eq!(fmt_trait_of_spec(spec), want, "spec {spec:?} names {want}");
+        }
+    }
+
     /// SOUNDNESS R380 — A TRAIT-OBJECT FIELD REACHED THROUGH A CHAIN. Two resolvers were answering one
     /// question about one receiver and only one of them walked the chain.
     ///
