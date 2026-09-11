@@ -346,6 +346,26 @@ fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
     ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t))
 }
 
+/// The methods that return a DIFFERENT type from their receiver, so a chain must NOT be walked through
+/// them to the base receiver. Extracted for R380: `resolve_recv_type` and `resolve_recv_traits` ask this
+/// same question about the same expression and only one of them used to, which is R347's shape — two
+/// resolvers for one receiver, diverging.
+///
+/// The list is unchanged from `resolve_recv_type`'s inline copy and its reasoning is kept there. NOTE
+/// R347's still-open residual: `ctor_type` (`lang.rs`) holds a SECOND copy of this question that lacks
+/// the four `Command` read-backs, and R347 priced unifying it as a behaviour change made on a guess with
+/// no live instance to justify it. That copy is deliberately NOT folded in here — this extraction adds a
+/// consumer, it does not resolve R347.
+fn is_recv_type_changing(method: &str) -> bool {
+    matches!(
+        method,
+        "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
+            | "as_bytes" | "as_str" | "to_vec" | "keys" | "values" | "values_mut"
+            | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
+            | "get_program" | "get_args" | "get_envs" | "get_current_dir"
+    )
+}
+
 impl<'a> CallCollector<'a> {
     /// SOUNDNESS R182/R196 — the drop route's REFUSALS, disclosed instead of certified.
     ///
@@ -624,13 +644,7 @@ impl<'a> CallCollector<'a> {
                 // DIFFERENT type (`&OsStr`, `CommandArgs`, `CommandEnvs`, `Option<&Path>`) — the exact
                 // hard-type-change shape this guard is for, and `get_argv` (portable_pty's spelling of the
                 // same read-back) was already here for the same reason.
-                if matches!(
-                    m.method.to_string().as_str(),
-                    "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
-                        | "as_bytes" | "as_str" | "to_vec" | "keys" | "values" | "values_mut"
-                        | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
-                        | "get_program" | "get_args" | "get_envs" | "get_current_dir"
-                ) {
+                if is_recv_type_changing(&m.method.to_string()) {
                     return None;
                 }
                 // Otherwise walk through the chain to the base receiver's type. We deliberately do NOT
@@ -1333,11 +1347,31 @@ impl<'a> CallCollector<'a> {
             // A METHOD factory returning a dispatch trait object (`self.handler().go()` where
             // `handler(&self) -> &dyn Doer`): decode the recorded `<dyn>` sentinel by the method leaf,
             // exactly like the free/static-fn Call arm above (an ambiguous leaf was dropped upstream).
-            syn::Expr::MethodCall(m) => self
-                .returns
-                .get(&m.method.to_string())
-                .and_then(|t| ret_dyn_leaves(t))
-                .unwrap_or_default(),
+            syn::Expr::MethodCall(m) => {
+                // The factory case first: a method whose recorded return IS a `<dyn>` sentinel.
+                if let Some(leaves) =
+                    self.returns.get(&m.method.to_string()).and_then(|t| ret_dyn_leaves(t))
+                {
+                    return leaves;
+                }
+                // SOUNDNESS R380 — OTHERWISE WALK THE CHAIN, exactly as `resolve_recv_type` has always
+                // done for the concrete-type question about this same expression. This arm used to stop
+                // here, so a trait-object field reached through ANY chain resolved to nothing: measured
+                // on one fixture whose impl writes a file, `if let Some(h) = &self.inner { h.go() }`
+                // charges `['Fs']` — the control proving the field and its dyn leaves are recorded —
+                // while `self.inner.as_ref().unwrap().go()` was ABSENT. No row, no `Unknown`, no
+                // `invisible`: a purity claim over a body that writes a file, and the only difference is
+                // how the receiver is spelled. `as_ref().unwrap()` is one of the most ordinary ways Rust
+                // calls an optional handler.
+                //
+                // Two resolvers were answering one question about one receiver and only one walked,
+                // which is R347's finding at a third site. They now share `is_recv_type_changing`, so a
+                // name added to it cannot make them drift apart again.
+                if is_recv_type_changing(&m.method.to_string()) {
+                    return Vec::new();
+                }
+                self.resolve_recv_traits(&m.receiver)
+            }
             syn::Expr::Field(f) => {
                 let Some(base) = self.resolve_recv_type(&f.base) else { return Vec::new() };
                 let key = match &f.member {
