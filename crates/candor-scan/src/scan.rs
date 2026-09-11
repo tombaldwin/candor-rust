@@ -2702,7 +2702,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
                     } else if eff == "Exec" && candor_classify::is_cmd_naming_method(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Exec");
-                    } else if eff == "Fs" && !c.method && candor_classify::is_fs_path_arg(&c.leaf) {
+                    } else if eff == "Fs"
+                        && (!c.method && candor_classify::is_fs_path_arg(&c.leaf)
+                            // SOUNDNESS R383 — …OR a METHOD whose path is an ARGUMENT rather than the
+                            // receiver. `!c.method` alone let `OpenOptions::new().open(runtime_path)`
+                            // through unmasked, so a benign sibling literal certified it and
+                            // `allow Fs <lit>` exited 0 over a caller-supplied path.
+                            || (c.method && candor_classify::is_fs_path_arg_method(&c.path)))
+                    {
                         // A path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)` — a free fn / constructor,
                         // `method=false`) with NO captured path literal → the path is a runtime value,
                         // invisible to the gate. Mark Fs incomplete so a benign sibling literal can't certify
@@ -2717,6 +2724,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // excludes build-then-execute terminals (`fetch_all`/`load`/`all`) and lifecycle ops
                         // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
                         incomplete.entry(f.qual.clone()).or_default().insert("Db");
+                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        // THE INVERSE PROBE (R379/R381 follow-on, diagnostic only — no behaviour).
+                        // R379 was found because a verb `classify` calls Net was absent from the
+                        // masking ALLOWLIST, and `allow Net <benign literal>` then certified a runtime
+                        // endpoint. R381 is the same defect in candor-swift. Both rows left the same
+                        // note: the Fs, Exec and Db analogues answer the identical question for their
+                        // effects and NEITHER HAS BEEN CHECKED.
+                        //
+                        // This prints every call that carries an allowlisted effect, has NO captured
+                        // literal, and was NOT marked incomplete — i.e. exactly the population a
+                        // missing establishing verb hides in. It is the R379 trigger sweep inverted:
+                        // that one asked "what do we mask", this asks "what do we let through".
+                        eprintln!("UNMASKED {} :: {} :: {} :: path={} method={} argc={}",
+                                  eff, f.qual, c.leaf, c.path, c.method, c.argc);
                     }
                 }
                 // ⟨0.29⟩ A BIND/LISTEN ADDRESS IS LOCAL — it never enters `hosts`, the DESTINATION

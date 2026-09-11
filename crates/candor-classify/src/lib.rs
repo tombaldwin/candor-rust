@@ -3628,6 +3628,35 @@ pub fn fs_path_arity(leaf: &str) -> usize {
     }
 }
 
+/// SOUNDNESS R383 — THE METHOD FORMS WHOSE PATH IS AN ARGUMENT, not the receiver.
+///
+/// `scan.rs`'s Fs masking arm reads `!c.method && is_fs_path_arg(leaf)`. The `!c.method` gate exists for
+/// a real reason — the path-STAT methods (`p.metadata()`, `p.exists()`) carry the path as the RECEIVER,
+/// so masking them would be wrong — but it excluded EVERY method form, and `OpenOptions::open(path)` is
+/// a method whose path IS the argument. Measured, with the instrument calibrated first: a function doing
+/// `File::open("/etc/hostname")` beside `OpenOptions::new().read(true).open(caller_path)` reported
+/// `paths:['/etc/hostname'] incomplete:NONE`; `deny Fs` exited 1 and **`allow Fs /etc/hostname` exited
+/// 0** — a policy saying "only /etc/hostname" going green over a caller-supplied path. The FREE-fn
+/// spelling of the same call is the isolating control: it marks incomplete and fails closed.
+///
+/// **`argc` does not discriminate; the RECEIVER TYPE does.** Instrumented, the four shapes are
+/// `OpenOptions::open` (argc 1, path IS the arg), `File::read_to_string` and `File::write` (argc 1,
+/// BUFFER arg) and `Path::exists` (argc 0, path is the receiver).
+///
+/// **The family is from a 1,545-crate sweep, not from the one spelling that was found (R346):** the only
+/// path-taking METHOD pairs in the registry are `OpenOptions::open` (69 std + 2 tokio + 9
+/// `cap_primitives`) and `DirBuilder::create` (5 std + tokio). Every other method on those same receivers
+/// is a builder modifier (`read`/`write`/`truncate`/`mode`) or a combinator (`map`/`map_err`/`or_else`/
+/// `with_context`), and `std::fs::File`'s 267 method hits are all use-verbs whose path was fixed at open.
+///
+/// Matched on the TAIL of the resolved call path, so std, tokio, `cap_primitives` and `fs_err` are all
+/// covered by one rule without naming a crate. **Stays an ALLOWLIST:** R379 built the denylist inversion
+/// for the Net twin and the corpus refused it, and here a denylist over method forms would mask all 267
+/// `File` use-verbs and every combinator on a whole-crate-Fs receiver.
+pub fn is_fs_path_arg_method(call_path: &str) -> bool {
+    call_path.ends_with("OpenOptions::open") || call_path.ends_with("DirBuilder::create")
+}
+
 /// The masking guard (AS-EFF-008), the `Db` analog of `is_net_establishing`: whether a `Db`-classified
 /// call takes the raw SQL QUERY as a string argument (so a missing literal leaves the table
 /// structurally INVISIBLE — a runtime-built query — and the surface is incomplete, fail-closed). An
@@ -4984,6 +5013,31 @@ mod tests {
     /// their absence was a GATE BYPASS, not a missed disclosure: `allow Net good.example.com` exited 0
     /// over `r.lookup_ip(caller_host)` sitting beside a benign literal, measured against real
     /// hickory-resolver 0.26.2.
+    /// SOUNDNESS R383 — the METHOD forms whose path is an ARGUMENT. The guard's `!c.method` gate
+    /// excluded every method form because the path-STAT methods carry the path as their RECEIVER;
+    /// `OpenOptions::open(path)` is the counter-example, and `allow Fs <lit>` exited 0 over a
+    /// caller-supplied path because of it.
+    #[test]
+    fn fs_path_arg_methods_are_the_receiver_pairs_not_the_leaf() {
+        // The path-taking pairs, matched on the TAIL so std/tokio/cap_primitives/fs_err all qualify.
+        for p in ["std::fs::OpenOptions::open", "tokio::fs::OpenOptions::open",
+                  "cap_primitives::fs::OpenOptions::open", "fs_err::OpenOptions::open",
+                  "std::fs::DirBuilder::create", "tokio::fs::DirBuilder::create"] {
+            assert!(is_fs_path_arg_method(p), "{p} takes its path as an ARGUMENT — R383");
+        }
+        // THE CONTROLS, and they are the row: every other method on the SAME receivers is a builder
+        // modifier or a combinator, and `File`'s methods are use-verbs whose path was fixed at open.
+        // Masking these is the over-mask a denylist would have caused (R379 measured that cost).
+        for p in ["std::fs::File::read_to_string", "std::fs::File::write", "std::fs::File::write_all",
+                  "std::fs::File::read", "std::fs::File::seek", "std::path::Path::exists",
+                  "std::fs::OpenOptions::read", "std::fs::OpenOptions::truncate",
+                  "std::fs::OpenOptions::map_err", "tokio::fs::OpenOptions::mode"] {
+            assert!(!is_fs_path_arg_method(p),
+                    "{p} hides no path — it is a builder modifier, a combinator, or a use-verb whose \
+                     path was fixed at open. Masking it is the over-mask this allowlist avoids.");
+        }
+    }
+
     #[test]
     fn net_establishing_allowlist() {
         // Host-bearing verbs establish — a runtime value here is invisible, so the gate must fail closed.
