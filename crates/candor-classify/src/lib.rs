@@ -3341,7 +3341,11 @@ pub fn is_cmd_naming_method(method: &str) -> bool {
 /// host was fixed at `connect`) never false-positives. **THAT LAST CLAIM WAS FALSE AND IS WITHDRAWN —
 /// see R379 in the body: under-catching an establishing verb IS a broken gate whenever a benign sibling
 /// literal sits in the same function, which is the exact scenario the first sentence names.** The list is
-/// now a DENYLIST of use-verbs. The arg is the method (path's last segment).
+/// now an ALLOWLIST still — see the R379 body below: the denylist inversion was BUILT, A/B'd over
+/// 1,545 crates and REFUSED (544 rows over-masked). An earlier draft of this line said "now a
+/// DENYLIST", which was a leftover from the rejected cut and asserted the opposite of the code it
+/// sits on — the comment-asserting-safety shape this register records. The arg is the method (path's
+/// last segment).
 pub fn is_net_establishing(method: &str) -> bool {
     // SOUNDNESS R379 — the DNS RESOLVER verbs were missing, and their absence was a GATE BYPASS.
     //
@@ -3692,6 +3696,12 @@ pub fn is_db_query_arg(leaf: &str) -> bool {
             | "sqlite3_prepare16"
             | "sqlite3_prepare16_v2"
             | "sqlite3_prepare16_v3"
+            // R386's OWN BOUNDARY DEFECT, found by a release panel: `sqlite3_get_table(db, zSql, …)`
+            // takes SQL as its second argument and `classify` maps it to `Db`, and the first cut of
+            // this list — which cites R346 — omitted it. Two of the family's SQL-bearing spellings
+            // written down out of three. Reach on the local registry is ZERO call sites (only
+            // declarations in `libsqlite3-sys` and `sqlite-wasm-rs`), so this is latent, not live.
+            | "sqlite3_get_table"
     ) {
         return true;
     }
@@ -5052,14 +5062,18 @@ mod tests {
     fn db_query_arg_covers_the_sqlite3_sql_bearing_family() {
         // Every spelling that TAKES SQL — the whole family, not the one that was measured (R346).
         for f in ["sqlite3_exec", "sqlite3_prepare", "sqlite3_prepare_v2", "sqlite3_prepare_v3",
-                  "sqlite3_prepare16", "sqlite3_prepare16_v2", "sqlite3_prepare16_v3"] {
+                  "sqlite3_prepare16", "sqlite3_prepare16_v2", "sqlite3_prepare16_v3",
+                  // R386's own boundary, found by a release panel: SQL is arg 1 here too.
+                  "sqlite3_get_table"] {
             assert!(is_db_query_arg(f), "{f} carries SQL — a runtime query there is invisible (R386)");
         }
         // THE OVER-MASK CONTROLS, and they carry as much weight as the fix. These take no query, so
         // masking them would fail `allow Db` closed over nothing. `sqlite3_open*` is the sharpest: it
         // takes a FILENAME, so masking it would claim a Db surface for an Fs locator.
         for f in ["sqlite3_step", "sqlite3_close", "sqlite3_open", "sqlite3_open_v2", "sqlite3_open16",
-                  "sqlite3_serialize", "sqlite3_deserialize", "sqlite3_finalize", "sqlite3_reset"] {
+                  "sqlite3_serialize", "sqlite3_deserialize", "sqlite3_finalize", "sqlite3_reset",
+                  // the backup/blob handle verbs carry no query either — the other half of the family
+                  "sqlite3_backup_init", "sqlite3_backup_step", "sqlite3_blob_open", "sqlite3_blob_read"] {
             assert!(!is_db_query_arg(f),
                     "{f} carries no SQL — masking it claims an incomplete surface over nothing, and for \
                      the open* family it would claim a Db surface for a FILENAME");
