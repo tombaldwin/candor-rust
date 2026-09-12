@@ -1187,6 +1187,37 @@ impl<'a> CallCollector<'a> {
     /// arg resolved the same way. One level deep — a nested/runtime shape yields `None` (no fabrication).
     fn resolve_str_expr(&self, expr: &syn::Expr) -> Option<String> {
         match expr {
+            // SOUNDNESS R416 — A PATH WRAPPER IS NOT A TRANSFORMATION. `let p = Path::new("/tmp/x");
+            // fs::write(p, …)` published NO path and marked the surface `incomplete`, so `allow Fs /tmp/x`
+            // REFUSED a fully determined write — while the inline spelling, a plain `&str` local and a
+            // `const` were all captured. The literal was there; the wrapper call hid it.
+            //
+            // Measured by the ⟨0.37⟩ stat PART's OVER-CHARGE control arm on its first run, which is the
+            // arm that exists so a fix in the other direction cannot be shipped blind: java and swift
+            // credit this shape, rust and ts did not.
+            //
+            // Only these two constructors, and only with ONE argument that itself resolves. Both are
+            // documented identity over the string — `Path::new(s)` borrows `s` unchanged, `PathBuf::from(s)`
+            // owns a copy — so crediting the inner value FABRICATES nothing; anything else (`join`, `with_extension`,
+            // `canonicalize`) TRANSFORMS the value and must keep returning None, which is why this is a
+            // two-name match and not a suffix test.
+            syn::Expr::Call(c) if c.args.len() == 1 => {
+                let syn::Expr::Path(fp) = &*c.func else { return None };
+                // the LAST TWO segments, so `std::path::Path::new` and a bare `Path::new` read alike
+                let segs: Vec<String> = fp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let ident = segs.iter().rev().take(2).rev().cloned().collect::<Vec<_>>().join("::");
+                if matches!(ident.as_str(), "Path::new" | "PathBuf::from") {
+                    let inner =
+                        const_str_value(&c.args[0]).or_else(|| self.resolve_str_expr(&c.args[0]));
+                    // REACH probe for the A/B: an empty diff must be distinguishable from a corpus
+                    // that never reached this arm (R242/R289). Env-gated, stderr, off by default.
+                    if inner.is_some() && std::env::var_os("CANDOR_R416_DEBUG").is_some() {
+                        eprintln!("R416FIRE");
+                    }
+                    return inner;
+                }
+                None
+            }
             // A bare path: a local resolvable string binding first (`let url = …`), then a crate const.
             syn::Expr::Path(_) => {
                 let leaf = path_leaf_ident(expr)?;

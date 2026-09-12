@@ -3283,3 +3283,152 @@ fn multi_level_glob_workspace_members_resolve_and_deny_net_catches_the_violation
         "all three multi-level-glob members must be fanned out, matching cargo metadata's ground \
          truth, not collapsed into a single root-level scan: {names:?}");
 }
+
+/// ⟨R416, 2026-09-12⟩ A PATH WRAPPER IS NOT A TRANSFORMATION: `let p = Path::new("/tmp/benign")`
+/// must leave the locator DETERMINED, exactly as the inline literal, a `&str` local and a `const` do.
+///
+/// Pre-fix this shape published `paths: null` and `incomplete: ["Fs"]`, so AS-EFF-008 REFUSED
+/// `allow Fs /tmp/benign` over a write whose destination is a compile-time literal one hop away —
+/// "performs Fs with no visible literal", of a call site that has nothing but a visible literal.
+/// The three sibling spellings all passed, which is what made it a drift rather than a policy.
+///
+/// Direction matters: this moves a gate from FAIL to PASS, so it is the FABRICATION direction's
+/// mirror and can only ever credit a literal it can prove. `Path::new`/`PathBuf::from` are
+/// documented identity over the string; `join`, `with_extension` and `canonicalize` are not and
+/// must keep returning None — `path_join_is_not_credited_as_a_determined_locator` below is that
+/// half, and the two are one test in two functions.
+///
+/// PROVEN to discriminate: with only the `Expr::Call` arm of `resolve_str_expr` reverted AND THE
+/// BINARY REBUILT (a stale binary faked this pass once already — see the 2026-09-12 note in
+/// SOUNDNESS-LOG), this asserts exit 1 with "no visible literal" and goes red.
+#[test]
+fn a_path_wrapper_keeps_a_determined_locator_determined() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r416-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r416\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), concat!(
+        "pub fn via_path_new() {\n",
+        "    let p = std::path::Path::new(\"/tmp/benign\");\n",
+        "    let _ = std::fs::write(p, b\"x\");\n",
+        "}\n",
+        "pub fn via_pathbuf_from() {\n",
+        "    let p = std::path::PathBuf::from(\"/tmp/benign\");\n",
+        "    let _ = std::fs::write(p, b\"x\");\n",
+        "}\n",
+    )).unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "allow Fs /tmp/benign\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let so = String::from_utf8_lossy(&out.stdout).to_string();
+    let se = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_eq!(out.status.code(), Some(0),
+        "`allow Fs /tmp/benign` must PASS over a write whose path is a literal behind Path::new / \
+         PathBuf::from — both spellings name the same determined destination as the inline form.\n\
+         stdout:\n{so}\nstderr:\n{se}");
+    assert!(!format!("{so}{se}").contains("no visible literal"),
+        "the surface must not be reported incomplete when the literal is one documented-identity \
+         constructor away.\nstdout:\n{so}\nstderr:\n{se}");
+}
+
+/// ⟨R416, 2026-09-12⟩ THE OVER-CHARGE HALF, and the reason the fix above is a TWO-NAME MATCH rather
+/// than "anything taking a string returns that string".
+///
+/// `Path::new(base).join(tail)` does not evaluate to `base`. Crediting it would let
+/// `allow Fs /tmp/benign` certify a write to `/tmp/benign/<anything a caller chose>` — the
+/// gate-bypass shape of AS-EFF-008, arrived at through a fix aimed at the opposite direction.
+/// SOUNDNESS [[feedback-fabrication-fixes-cause-misses]]: write the second fixture FIRST.
+#[test]
+fn path_join_is_not_credited_as_a_determined_locator() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r416j-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r416j\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), concat!(
+        "pub fn via_join(tail: &str) {\n",
+        "    let p = std::path::Path::new(\"/tmp/benign\").join(tail);\n",
+        "    let _ = std::fs::write(p, b\"x\");\n",
+        "}\n",
+    )).unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "allow Fs /tmp/benign\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let so = String::from_utf8_lossy(&out.stdout).to_string();
+    let se = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_ne!(out.status.code(), Some(0),
+        "a caller-chosen `.join(tail)` is NOT the literal it was built from: `allow Fs /tmp/benign` \
+         must not certify it.\nstdout:\n{so}\nstderr:\n{se}");
+}
+
+/// ⟨R417, 2026-09-12⟩ AS-EFF-008 GATE BYPASS via the CAPABILITY-`Dir` API: `d.write(caller, …)` on a
+/// `cap_std::fs::Dir` performs `Fs` with an invisible, caller-chosen path and did NOT mark the surface
+/// incomplete, so a benign sibling literal in the same function CERTIFIED it and `allow Fs /tmp/benign`
+/// exited 0. Found by probing the masking guard's method half rather than its free-fn half.
+///
+/// Three arms, because two of them are what make the third mean anything:
+///   `control`        — the free-fn spelling of the identical hazard. Must stay red. If this ever goes
+///                      green the fixture has stopped testing the guard at all.
+///   `mixed`          — the defect. Must be red.
+///   `noop_exception` — `d.try_clone()`, a `Dir` method that provably takes NO path. Must stay GREEN:
+///                      the fix masks by default on a `Dir` receiver, so this is the over-mask control
+///                      that prices that decision. Without it the fix could be "mask everything".
+///
+/// PROVEN to discriminate: with `is_fs_path_arg_method`'s `Dir` arm reverted to the two-name form AND
+/// THE CLI REBUILT, `mixed` goes green (exit 0) while the other two are unchanged.
+#[test]
+fn a_capability_dir_method_path_cannot_be_certified_by_a_sibling_literal() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r417-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r417\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), concat!(
+        "use cap_std::fs::Dir;\n",
+        "pub fn mixed(d: &Dir, caller: &str) {\n",
+        "    let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n",
+        "    let _ = d.write(caller, b\"pwned\");\n",
+        "}\n",
+        "pub fn control(caller: &str) {\n",
+        "    let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n",
+        "    let _ = std::fs::write(caller, b\"pwned\");\n",
+        "}\n",
+        "pub fn noop_exception(d: &Dir) {\n",
+        "    let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n",
+        "    let _ = d.try_clone();\n",
+        "}\n",
+    )).unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "allow Fs /tmp/benign\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert!(all.contains("`mixed`"),
+        "`cap_std::fs::Dir::write(caller, …)` names its path as an ARGUMENT: with the path invisible \
+         the Fs surface must be incomplete, so the sibling `/tmp/benign` literal cannot certify it.\n{all}");
+    assert!(all.contains("`control`"),
+        "CALIBRATION: the free-fn spelling of the same hazard must still be caught — if it is not, this \
+         fixture is no longer exercising the masking guard.\n{all}");
+    assert!(!all.contains("`noop_exception`"),
+        "OVER-MASK CONTROL: `Dir::try_clone()` takes no path, so masking by default on a `Dir` receiver \
+         must not swallow it.\n{all}");
+    assert_eq!(out.status.code(), Some(1), "two of the three arms violate, so the gate must exit 1\n{all}");
+}

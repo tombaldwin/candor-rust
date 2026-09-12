@@ -3670,8 +3670,78 @@ pub fn fs_path_arity(leaf: &str) -> usize {
 /// covered by one rule without naming a crate. **Stays an ALLOWLIST:** R379 built the denylist inversion
 /// for the Net twin and the corpus refused it, and here a denylist over method forms would mask all 267
 /// `File` use-verbs and every combinator on a whole-crate-Fs receiver.
+///
+/// **SOUNDNESS R417 — THE CAPABILITY-`Dir` FAMILY WAS ABSENT, AND IT IS A LIVE GATE BYPASS.**
+/// `cap_std::fs::Dir` (and its `fs_utf8`/`cap_async_std` twins, and `openat::Dir`) is a whole second
+/// filesystem API whose path is an ARGUMENT to a METHOD on a directory handle — `d.write(caller, …)`,
+/// `d.open(caller)`, `d.remove_file(caller)`. MEASURED, with the free-fn spelling as the isolating
+/// control in the same fixture:
+///
+/// ```text
+/// control(caller)  std::fs::write("/tmp/benign",…); std::fs::write(caller,…)
+///                  → paths:['/tmp/benign'] incomplete:['Fs']   allow Fs /tmp/benign → exit 1  ✔
+/// mixed(d,caller)  std::fs::write("/tmp/benign",…); d.write(caller,…)
+///                  → paths:['/tmp/benign'] incomplete:NONE     allow Fs /tmp/benign → exit 0  ✘
+/// ```
+///
+/// The call path resolves in full (`cap_std::fs::Dir::write`), so this is not a resolution gap — the
+/// guard simply had two names in it. `alone(d,caller)` confirms the call IS classified `Fs`: the
+/// effect was seen, the locator was not, and nothing said so.
+///
+/// **WHY THIS HALF IS A DENYLIST WHILE THE REST OF THE GUARD IS AN ALLOWLIST**, which is not a
+/// contradiction but the point: the allowlist above exists because the receiver is UNKNOWN, so masking
+/// by default would swallow `File`'s 267 use-verbs. Here the receiver is KNOWN to be a directory
+/// capability, and on that receiver essentially every method names a path — 24 of the 49 declared on
+/// `cap_std::fs::Dir` are already `is_fs_path_arg` leaves, and most of the remaining 25 (`open_with`,
+/// `open_dir`, `is_file`, `is_dir`, `symlink_contents`, `read_link_contents`, `create_dir_with`,
+/// the `bind_unix_*`/`connect_unix_*` socket-path verbs) take one too. An allowlist here would be the
+/// R346→R348 hand-list vein by construction: every name I failed to write down is a silent bypass, and
+/// R399 settled that an under-catch on this guard is a BROKEN GATE, not a missed mask.
+///
+/// So the default on a `Dir` receiver is MASK, and the exceptions are the handful of methods that
+/// provably take no path: handle-to-handle conversions and the iterator/`self`-only verbs. Being wrong
+/// about one of those costs an over-mask on a rare API (fails CLOSED, disclosed); being wrong the other
+/// way is the exit-0 above. [[candor-denylist-over-allowlist]] — say which direction it fails in first.
+///
+/// Scoped on the RECEIVER SEGMENT being exactly `Dir`, so `cap_std`, `cap_std::fs_utf8`,
+/// `cap_async_std` and `openat` are covered by one rule without naming a crate — the same tail-matching
+/// discipline as the two names above. A non-filesystem type that happens to be called `Dir` would be
+/// over-masked, which fails closed.
 pub fn is_fs_path_arg_method(call_path: &str) -> bool {
-    call_path.ends_with("OpenOptions::open") || call_path.ends_with("DirBuilder::create")
+    if call_path.ends_with("OpenOptions::open") || call_path.ends_with("DirBuilder::create") {
+        return true;
+    }
+    let mut segs = call_path.rsplit("::");
+    let (Some(leaf), Some(recv)) = (segs.next(), segs.next()) else { return false };
+    if recv != "Dir" {
+        return false;
+    }
+    // The no-path exceptions on a directory capability: handle↔handle conversions, the entry
+    // iterators, and the verbs whose only operand is `self`. Everything else on a `Dir` names a path.
+    //
+    // EVERY NAME HERE WAS CHECKED AGAINST ITS SIGNATURE, because a wrong entry here is not a precision
+    // loss, it is the exit-0 above. `read_dir` was in this list on the first cut on the reasonable-
+    // sounding grounds that `entries()` is the self-only form — and `cap_std::fs::Dir::read_dir` is
+    // `fn read_dir<P: AsRef<Path>>(&self, path: P)`, so that entry was a bypass I had just written.
+    // Adding a name here requires reading its signature, not recognising it.
+    !matches!(
+        leaf,
+        "try_clone"
+            | "into_std_file"
+            | "from_std_file"
+            | "into_std"
+            | "from_std"
+            | "entries"
+            | "entries_utf8"
+            | "dir_metadata"
+            | "reopen_dir"
+            | "remove_open_dir"
+            | "remove_open_dir_all"
+            | "open_parent_dir"
+            | "rewind"
+            | "as_raw_fd"
+            | "as_fd"
+    )
 }
 
 /// The masking guard (AS-EFF-008), the `Db` analog of `is_net_establishing`: whether a `Db`-classified

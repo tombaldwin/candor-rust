@@ -2710,6 +2710,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // `allow Fs <lit>` exited 0 over a caller-supplied path.
                             || (c.method && candor_classify::is_fs_path_arg_method(&c.path)))
                     {
+                        // R379's rule — instrument the TRIGGER, not the outcome — applied to the Fs
+                        // twin, which had no probe. R417 needed one: the `Dir` arm masks by DEFAULT on
+                        // a directory-capability receiver, and "how often does that fire, and on what"
+                        // is the question that prices the decision. Without it an A/B showing no change
+                        // cannot distinguish a safely-narrow rule from a corpus that never reached it.
+                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                            eprintln!("R417MASK {} :: {} (method={})", f.qual, c.path, c.method);
+                        }
                         // A path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)` — a free fn / constructor,
                         // `method=false`) with NO captured path literal → the path is a runtime value,
                         // invisible to the gate. Mark Fs incomplete so a benign sibling literal can't certify
