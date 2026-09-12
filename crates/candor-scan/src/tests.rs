@@ -6493,6 +6493,68 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn masking_r399_posix_ownership_verbs_fail_closed() {
+        // SOUNDNESS R399 — the POSIX ownership/root verbs took their path as ARGUMENT 0 and were absent
+        // from `is_fs_path_arg`, so nothing marked the Fs surface incomplete and a benign sibling literal
+        // CERTIFIED a caller-controlled target: `allow Fs /etc/hostname` exited 0 over
+        // `unixfs::chown(caller, …)`. That is a broken gate, not the "missed mask" the guard's own
+        // doc-comment promised — the sentence R379 had already withdrawn from `is_net_establishing`
+        // after measuring it false, and which survived verbatim on this guard and its Db sibling because
+        // nobody re-read them. Both sentences are now struck at the source.
+        //
+        // Priced before shipping, since a widening is a typing change: A/B over 1,552 registry crates,
+        // 286,892 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 5 — all five GAINED `incomplete` and lost
+        // nothing, and every one is a library wrapper whose own parameter is the locator (`fs_err`'s
+        // chown/lchown/chroot, `postgres`' copy_in/copy_out). 0.0017%, in the fail-closed direction.
+        let run = |name: &str, src: &str, policy: &str| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-r399-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, policy).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+
+        // THE DEFECT: a benign ALLOWED literal beside a caller-controlled chown target.
+        let masked = r#"
+            use std::fs;
+            use std::os::unix::fs as unixfs;
+            pub fn go(caller: &str) {
+                let _ = fs::write("/etc/hostname", b"x");
+                let _ = unixfs::chown(caller, Some(0), Some(0));
+            }
+        "#;
+        assert_eq!(run("r399mask", masked, "allow Fs /etc/hostname\n"), 1,
+                   "a benign sibling literal must not certify a runtime chown target");
+
+        // CONTROL: no sibling — already failed closed before this fix, and must still.
+        let alone = r#"
+            use std::os::unix::fs as unixfs;
+            pub fn go(caller: &str) { let _ = unixfs::chown(caller, Some(0), Some(0)); }
+        "#;
+        assert_eq!(run("r399alone", alone, "allow Fs /etc/hostname\n"), 1,
+                   "an unmasked runtime chown must still fail closed");
+
+        // CONTROL: fully determined — must STILL certify, or the widening is unusable over-masking.
+        let determined = r#"
+            use std::fs;
+            pub fn go() { let _ = fs::write("/etc/hostname", b"x"); }
+        "#;
+        assert_eq!(run("r399ok", determined, "allow Fs /etc/hostname\n"), 0,
+                   "a fully literal path must still pass — no false positive");
+    }
+
+    #[test]
     fn gate_over_unparseable_source_fails_closed() {
         // SOUNDNESS: a policy gate over a crate where a source file failed to PARSE must NOT report
         // green — the unparsed file's effects are absent from the report, so a `policy ✓` over it is a

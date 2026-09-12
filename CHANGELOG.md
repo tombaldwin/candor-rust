@@ -10,6 +10,32 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **The sentence R379 withdrew as FALSE was still shipping on both sibling guards, and both are live gate
+  bypasses — SOUNDNESS R399.** `is_fs_path_arg` and `is_db_query_arg` each carried *"under-catching … is a
+  missed mask (sound-with-disclosure), never a broken gate"* — the exact claim R379 removed from
+  `is_net_establishing` after measuring it wrong, and which R383 and R386 had already disproved on these
+  two guards. It survived because nobody re-read it, and it is what licensed leaving the lists short. Both
+  sentences are now struck at the source with the measurement beside them, rather than deleted.
+
+  Nine verbs added, each checked against the crate's own signature for taking its locator as an argument
+  of THAT call: `chown`/`lchown`/`chroot` (`std::os::unix::fs`), mysql's `query_drop`/`query_iter`/
+  `query_first`/`query_fold` (`Q: AsRef<str>`), and postgres' `copy_in`/`copy_out`. Measured: `allow Fs
+  /etc/hostname` exited **0** over `unixfs::chown(caller, …)` beside a benign literal and now exits 1;
+  both controls hold — an unmasked runtime chown still fails closed, and a fully literal path still
+  certifies.
+
+  **Priced before shipping, because a widening is a typing change and two earlier ones over-reached:**
+  A/B over **1,552 registry crates, 286,892 rows per arm — ADDED 0, REMOVED 0, CHANGED 5.** All five
+  GAINED `incomplete` and lost nothing, and each is a library wrapper whose own parameter is the locator
+  (`fs_err`'s three POSIX verbs, `postgres`' `copy_in`/`copy_out`). 0.0017%, entirely fail-closed.
+
+  **Two boundaries stated rather than implied.** (1) mysql's `query_*` produced NO changed rows — that
+  crate is not exercised in this registry snapshot — so that quarter rests on a fixture and the crate's
+  signatures, not on this corpus. (2) cap-std's `Dir::open`/`write`/`read` are deliberately NOT added:
+  the method guard matches on path suffix, so `ends_with("Dir::write")` would fire on any type named
+  `Dir`. That is a much wider blast radius than three POSIX verbs and needs its own measurement.
+
+
 ## [0.36.1] — 2026-09-11
 
 - ⚠ **A `#[cfg]`-duplicated `use` alias charges EVERY arm, not whichever was written second —
