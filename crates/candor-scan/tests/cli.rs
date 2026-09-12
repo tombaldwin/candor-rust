@@ -3432,3 +3432,84 @@ fn a_capability_dir_method_path_cannot_be_certified_by_a_sibling_literal() {
          must not swallow it.\n{all}");
     assert_eq!(out.status.code(), Some(1), "two of the three arms violate, so the gate must exit 1\n{all}");
 }
+
+/// ⟨R414 / SPEC ⟨0.37⟩, 2026-09-12⟩ A RECEIVER-FORM PATH STAT NAMES ITS DESTINATION. `p.exists()` reaches
+/// the filesystem against the path it is invoked ON, so an indeterminate receiver leaves the `Fs` surface
+/// incomplete exactly as `fs::metadata(p)` does — and a DETERMINED receiver is captured and published
+/// instead, not masked.
+///
+/// Pre-fix, `fs::write("/tmp/benign", …); p.exists()` reported `paths:['/tmp/benign'] incomplete:NONE`, so
+/// `allow Fs /tmp/benign` exited 0 over a caller-chosen path while the run printed "nothing hidden". The
+/// ARGUMENT spelling of the identical reach was already marked, which is what makes it drift rather than
+/// policy: the method form was excluded on the assumption that a receiver is an OPEN HANDLE. True of
+/// `File`, false of `Path` — a `Path` is a path VALUE.
+///
+/// ONE TREE PER ARM, deliberately. The gate's exit code answers for the WHOLE scan, so putting these
+/// functions in one package lets an already-correct sibling (`arg_masked`) make the gate red with the fix
+/// REVERTED — a test that passes with and without the change. candor-swift's agent hit exactly that on
+/// this rung the same day and restructured for the same reason.
+///
+/// Four arms: the defect, the argument-form CALIBRATION control (if it ever goes green this fixture has
+/// stopped testing the guard), the handle OVER-MASK control (`File::write_all` must still certify — marking
+/// it would fail every program that opens a file by a literal name), and the determined-receiver over-mask
+/// control in BOTH spellings, inline and `let`-bound.
+///
+/// PROVEN to discriminate: with `is_fs_receiver_locator`'s disjunct removed AND THE CLI REBUILT, the
+/// masked arm goes green while the three controls are unchanged.
+#[test]
+fn a_receiver_form_path_stat_names_its_own_destination() {
+    let base = std::env::temp_dir().join(format!("candor-scan-cli-r414-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+
+    // (arm, body, must the gate refuse?)
+    let arms: &[(&str, &str, bool)] = &[
+        ("recv_masked",
+         "use std::path::Path;\npub fn f(p: &Path) {\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let _ = p.exists();\n}\n",
+         true),
+        ("arg_masked",
+         "use std::path::Path;\npub fn f(p: &Path) {\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let _ = std::fs::metadata(p);\n}\n",
+         true),
+        ("handle_use",
+         "pub fn f(h: &mut std::fs::File) {\n  use std::io::Write;\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let _ = h.write_all(b\"y\");\n}\n",
+         false),
+        ("recv_determined_inline",
+         "use std::path::Path;\npub fn f() {\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let _ = Path::new(\"/tmp/benign\").exists();\n}\n",
+         false),
+        ("recv_determined_local",
+         "use std::path::Path;\npub fn f() {\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let p = Path::new(\"/tmp/benign\");\n  let _ = p.metadata();\n}\n",
+         false),
+        // The two arms above prove the determined receiver is NOT OVER-MASKED, and nothing more: both
+        // exit 0 with the fix reverted too, because an unmarked-and-uncaptured receiver also certifies.
+        // This arm is the one that proves it is actually CAPTURED — the stat names a directory the policy
+        // does NOT allow, so publishing the locator is what makes the gate refuse. Reverted, it exits 0
+        // (nothing published, nothing marked, silently certified against a policy naming somewhere else),
+        // which is the SECOND, quieter half of R414 and would otherwise ship untested.
+        ("recv_determined_elsewhere",
+         "use std::path::Path;\npub fn f() {\n  let _ = std::fs::write(\"/tmp/benign\", b\"x\");\n  let _ = Path::new(\"/tmp/elsewhere\").exists();\n}\n",
+         true),
+    ];
+
+    for (name, body, must_refuse) in arms {
+        let d = base.join(name);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), body).unwrap();
+        let pp = d.join("candor.policy");
+        std::fs::write(&pp, "allow Fs /tmp/benign\n").unwrap();
+
+        let out = Command::new(bin())
+            .arg(d.to_string_lossy().as_ref())
+            .arg("--policy").arg(pp.to_string_lossy().as_ref())
+            .output()
+            .expect("run candor-scan");
+        let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let refused = out.status.code() != Some(0);
+
+        assert_eq!(refused, *must_refuse,
+            "arm `{name}`: expected `allow Fs /tmp/benign` to {} this tree, got exit {:?}.\n\
+             recv_masked and arg_masked are the SAME filesystem reach written two ways and must agree; \
+             handle_use and the two determined arms are over-mask controls and must certify.\n{all}",
+            if *must_refuse { "REFUSE" } else { "certify" }, out.status.code());
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

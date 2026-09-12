@@ -2676,6 +2676,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R330 — `node.args` on an ExprMethodCall EXCLUDES the receiver, so this
                 // count is already the non-receiver arity; `method: true` records which convention it
                 // was written in so the consumer does not have to guess.
+                // SOUNDNESS R414 / SPEC ⟨0.37⟩ — THE LOCATOR MAY BE THE RECEIVER. For a stat on a path
+                // VALUE (`Path`/`PathBuf`), the destination is the thing the method is invoked ON, so
+                // resolve the RECEIVER through the same resolver the argument positions use and record
+                // it as this call's locator. Without this the whole receiver-locator class would be
+                // marked incomplete unconditionally — including `Path::new("/lit").exists()`, whose
+                // destination is fully determined — which is the over-mask the rung's a4local control
+                // exists to forbid. R416's `Path::new`/`PathBuf::from` peeling is what makes both the
+                // inline and the `let`-bound spelling resolve here.
+                //
+                // Only when `str_arg` is None, so an argument-position locator always wins: this is a
+                // FALLBACK for calls that have no argument locator, never an override of one.
+                let str_arg = match (&str_arg, ty.as_str()) {
+                    (None, "std::path::Path" | "std::path::PathBuf") => {
+                        self.resolve_str_expr(&node.receiver)
+                    }
+                    _ => str_arg,
+                };
                 self.calls.push(Call { argc: node.args.len().min(255) as u8,
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,

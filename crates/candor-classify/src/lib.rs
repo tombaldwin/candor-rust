@@ -3707,6 +3707,40 @@ pub fn fs_path_arity(leaf: &str) -> usize {
 /// `cap_async_std` and `openat` are covered by one rule without naming a crate — the same tail-matching
 /// discipline as the two names above. A non-filesystem type that happens to be called `Dir` would be
 /// over-masked, which fails closed.
+/// SOUNDNESS R414 / SPEC ⟨0.37⟩ — **a RECEIVER-form path stat names its destination, and every engine
+/// in this family was silent on it.** `p.exists()`, `p.metadata()`, `p.canonicalize()` reach the
+/// filesystem against the path they are invoked ON; the locator is the RECEIVER, not an argument.
+/// MEASURED before the clause was written, one variable, a benign allowed literal beside a
+/// caller-chosen path:
+///
+/// ```text
+/// fn f(p: &Path) { fs::write("/tmp/benign", b"x"); p.exists(); }
+///   -> paths:['/tmp/benign'] incomplete:NONE   allow Fs /tmp/benign -> exit 0, "nothing hidden"
+/// ```
+///
+/// The ARGUMENT spelling of the identical reach (`fs::metadata(p)`) was already marked, which is what
+/// makes this a drift rather than a policy: `is_fs_path_arg` deliberately excluded the method form
+/// because its receiver was assumed to be an OPEN HANDLE. That assumption holds for `File` and is
+/// false for `Path` — a `Path` is a path VALUE, and a stat on it is `Fs` reaching that value.
+///
+/// **NO CARVE-OUT LIST, and that is structural rather than lucky.** The pure `Path` algebra —
+/// `join`, `parent`, `file_name`, `extension`, `to_str`, `display`, `starts_with`, `to_path_buf`,
+/// `as_path` — is NOT classified `Fs` (measured: a function calling all nine reports `fs:['write']`
+/// from an unrelated sibling call and nothing else), so it never reaches the branch that consults
+/// this predicate. The carve-out falls out of the classification, exactly as it does on the java
+/// side, instead of being a list that must be kept in sync with `std`.
+///
+/// Matched on the RECEIVER SEGMENT so `std::path` and the `camino` mirrors are covered by one rule
+/// without naming a crate. Being generous here is the SAFE direction: the predicate is only ever
+/// consulted for a call the classifier ALREADY resolved to `Fs`, so an extra receiver name can at
+/// worst over-mask (fails closed, disclosed), while a missing one is the exit-0 above — R399's
+/// ruling that an under-catch on a masking guard is a broken gate, not a missed mask.
+pub fn is_fs_receiver_locator(call_path: &str) -> bool {
+    let mut segs = call_path.rsplit("::");
+    let (Some(_leaf), Some(recv)) = (segs.next(), segs.next()) else { return false };
+    matches!(recv, "Path" | "PathBuf" | "Utf8Path" | "Utf8PathBuf")
+}
+
 pub fn is_fs_path_arg_method(call_path: &str) -> bool {
     if call_path.ends_with("OpenOptions::open") || call_path.ends_with("DirBuilder::create") {
         return true;
