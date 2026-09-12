@@ -2708,7 +2708,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // receiver. `!c.method` alone let `OpenOptions::new().open(runtime_path)`
                             // through unmasked, so a benign sibling literal certified it and
                             // `allow Fs <lit>` exited 0 over a caller-supplied path.
-                            || (c.method && candor_classify::is_fs_path_arg_method(&c.path)))
+                            || (c.method && candor_classify::is_fs_path_arg_method(&c.path))
+                            // SOUNDNESS R414 / SPEC ⟨0.37⟩ — …OR a method whose locator is its RECEIVER.
+                            // `p.exists()` stats the path it is invoked on; the argument spelling of the
+                            // same reach (`fs::metadata(p)`) was already marked, so a silent receiver form
+                            // is AS-EFF-008's masked-literal evasion by another spelling. The DETERMINED
+                            // case does not arrive here at all: the collector resolves a determined
+                            // receiver into `str_arg`, so `Path::new("/lit").exists()` is captured and
+                            // published rather than marked, and only an indeterminate receiver reaches
+                            // this branch. That split is the rung's over-charge control (arm a4local).
+                            || (c.method && candor_classify::is_fs_receiver_locator(&c.path)))
                     {
                         // R379's rule — instrument the TRIGGER, not the outcome — applied to the Fs
                         // twin, which had no probe. R417 needed one: the `Dir` arm masks by DEFAULT on
