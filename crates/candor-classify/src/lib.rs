@@ -3461,13 +3461,26 @@ pub fn is_net_binding(method: &str) -> bool {
 /// invoked method-form and the caller gates on `!is_method`, so this never sees it; an op on an
 /// already-opened handle (`file.write_all`, `mmap.flush`, `tempfile()` — a random name, no path arg)
 /// is not here, so a missing literal there never false-positives. Under-catching an unusual
-/// path-naming fn is a missed mask (sound-with-disclosure), never a broken gate. The arg is the
+/// path-naming fn is a missed mask (sound-with-disclosure), ~~never a broken gate~~ — **AND THAT LAST
+/// CLAUSE IS FALSE. SOUNDNESS R399.** R379 withdrew this exact sentence from `is_net_establishing` after
+/// MEASURING it wrong, and R383 and R386 are counter-examples on this guard and its Db sibling: an
+/// unlisted path-taking call contributes no locator, nothing marks the surface incomplete, and a benign
+/// sibling literal then CERTIFIES the invisible destination — `allow Fs /etc/hostname` exit 0 over
+/// `unixfs::chown(caller, …)`, with the control (`OpenOptions::open(caller)`) exiting 1. The sentence
+/// survived here only because nobody re-read it after R379, and it is what licenses leaving the list
+/// short. Under-catching is a BROKEN GATE, not a missed mask. The arg is the
 /// method/fn leaf (the path's last segment).
 pub fn is_fs_path_arg(leaf: &str) -> bool {
     matches!(
         leaf,
+        // SOUNDNESS R399 — the POSIX ownership/root verbs take a path as argument 0 and were absent, so a
+        // benign sibling literal certified them: `allow Fs /etc/hostname` exit 0 over
+        // `unixfs::chown(caller, …)`, control `OpenOptions::open(caller)` exit 1. `std::os::unix::fs`.
+        "chown"
+            | "lchown"
+            | "chroot"
         // std::fs / tokio::fs / async_std::fs / fs_err free functions taking a path argument
-        "write"
+            | "write"
             | "read"
             | "read_to_string"
             | "read_dir"
@@ -3669,8 +3682,11 @@ pub fn is_fs_path_arg_method(call_path: &str) -> bool {
 /// `all`/`one`/`stream`, the document-store `find*`/`insert*`/…), and a non-query op (`connect`/
 /// `open`/`acquire`/`begin`/`commit`/`ping`/`get_conn`), are NOT here — their query is built
 /// structurally (never a maskable string literal) so a missing literal must not false-positive.
-/// Under-catching an unusual query verb is a missed mask (sound-with-disclosure), never a broken gate.
-/// The arg is the method leaf (the path's last segment).
+/// Under-catching an unusual query verb is a missed mask (sound-with-disclosure), ~~never a broken
+/// gate~~ — **FALSE, SOUNDNESS R399**, and R386 three lines below is this guard's own counter-example.
+/// `mysql`'s `query_drop`/`query_iter` are that crate's PRIMARY API, take `Q: AsRef<str>`, and were
+/// absent: `allow Db users` exited 0 over `c.query_drop(caller_sql)` beside one literal query, with the
+/// verb-only control exiting 1. The arg is the method leaf (the path's last segment).
 pub fn is_db_query_arg(leaf: &str) -> bool {
     // SOUNDNESS R386 — THE `sqlite3_*` C API TAKES SQL AND WAS ABSENT, so a benign sibling literal
     // certified arbitrary caller-supplied SQL. `classify` in this same crate maps `sqlite3_exec`/
@@ -3718,6 +3734,19 @@ pub fn is_db_query_arg(leaf: &str) -> bool {
             | "query_raw"
             | "query_row"
             | "query_map"
+            // SOUNDNESS R399 — `mysql`'s OWN PRIMARY API was absent, and this is a live gate bypass rather
+            // than the "missed mask" the struck sentence above promised. All four take `Q: AsRef<str>`
+            // (`mysql-28.0.2/src/conn/queryable.rs:29,50,126`), so the SQL is a maskable string argument of
+            // THIS call, which is the exact condition this list encodes. Measured: `allow Db users` exits 0
+            // over `c.query_drop(caller_sql)` beside one literal query; the control, the same fixture with
+            // the verb changed to `query`, exits 1.
+            | "query_drop"
+            | "query_iter"
+            | "query_first"
+            | "query_fold"
+            // postgres COPY: the statement is a SQL string argument (`postgres-0.19.14/src/client.rs:492,520`).
+            | "copy_in"
+            | "copy_out"
             | "query_and_then"
             | "query_typed"
             | "query_all"
