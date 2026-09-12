@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.36.2] — 2026-09-12
+
 - **The sentence R379 withdrew as FALSE was still shipping on both sibling guards, and both are live gate
   bypasses — SOUNDNESS R399.** `is_fs_path_arg` and `is_db_query_arg` each carried *"under-catching … is a
   missed mask (sound-with-disclosure), never a broken gate"* — the exact claim R379 removed from
