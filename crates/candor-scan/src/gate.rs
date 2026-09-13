@@ -1068,7 +1068,30 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
         // whereas an over-reach would delete something that is not ours — the opposite of the armer
         // above, where a miss leaves a stale report and an over-reach destroys a file. Both directions
         // are chosen so the WRONG guess costs the least.
-        for seg in ["callgraph", "hierarchy", "locs", "calibrated", "layerreach"] {
+        // ONE OWNER FOR THE RESERVED SET, with the two exclusions NAMED rather than achieved by
+        // omission. This was a hardcoded five-name copy of `candor_report::SIDECAR_KINDS` (seven), and
+        // a copy that is SHORTER than its source is unreadable: nothing distinguished "these two are
+        // deliberately not swept" from "these two were forgotten", and the comment above claims the
+        // names "come from §2.2's family-wide list" while listing five of its seven.
+        //
+        // Both exclusions are load-bearing, and in the direction OPPOSITE to a miss — sweeping either
+        // would destroy something:
+        //   `gate`     `<stem>.gate.json` is a VERDICT SINK by designation, not a sidecar of this
+        //              report. candor-query's `gate_report_input_files` excludes it for the same reason
+        //              and says so: "each because refusing it would break a legitimate spelling, not
+        //              because destroying it is fine".
+        //   `refused`  the ⟨0.32⟩ refusal MARKER has its own lifecycle — a run that COMPLETES its write
+        //              phase removes it, and the rung's whole point is that a LOST marker fails OPEN
+        //              while a STALE one fails CLOSED. Sweeping it here makes a lost marker the common
+        //              case, inverting the direction ⟨0.32⟩ exists to guarantee.
+        //
+        // Derived rather than copied, so an eighth reserved segment reaches this sweep by being added
+        // to `SIDECAR_KINDS` — which is where §2.2 says the family's set lives. Behaviour-preserving on
+        // the day it landed: SIDECAR_KINDS minus {gate, refused} is exactly the five names it replaced.
+        for seg in candor_report::SIDECAR_KINDS {
+            if seg == "gate" || seg == "refused" {
+                continue;
+            }
             let side = full.with_extension("").to_string_lossy().into_owned() + "." + seg + ".json";
             if std::path::Path::new(&side).exists() {
                 // Never a path this run READS, on the same rule as the report itself.
