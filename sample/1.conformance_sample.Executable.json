@@ -1,0 +1,274 @@
+{
+  "candor": {
+    "version": "4349978",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.37"
+  },
+  "package": "conformance_sample",
+  "resolves": [
+    "fs",
+    "incomplete"
+  ],
+  "excluded": [],
+  "functions": [
+    {
+      "fn": "<Writer as Action>::run",
+      "loc": "src/main.rs:78:5: 78:18",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc4297a1e3672aff748017",
+      "fs": [
+        "write"
+      ],
+      "paths": [
+        "/tmp/x"
+      ]
+    },
+    {
+      "fn": "dispatch",
+      "loc": "src/main.rs:82:1: 82:28",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc42977ee067032e94d5fa",
+      "fs": [
+        "write"
+      ],
+      "paths": [
+        "/tmp/x"
+      ],
+      "calls": [
+        "<Writer as Action>::run"
+      ]
+    },
+    {
+      "fn": "greet",
+      "loc": "src/main.rs:54:1: 54:47",
+      "inferred": [],
+      "declared": [
+        "Clock"
+      ],
+      "undeclared": [],
+      "overdeclared": [
+        "Clock"
+      ],
+      "hash": "3a4b406f47cc42971dc9467cca39b2bd"
+    },
+    {
+      "fn": "home",
+      "loc": "src/main.rs:65:1: 65:38",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [
+        "Env"
+      ],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc4297ac3b98b7ad8fd8be"
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs:91:1: 91:10",
+      "inferred": [
+        "Clock",
+        "Env",
+        "Exec",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Clock",
+        "Env",
+        "Exec",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "entryPoint": true,
+      "hash": "3a4b406f47cc42975056d57e7c764110",
+      "fs": [
+        "read",
+        "write"
+      ],
+      "cmds": [
+        "ls"
+      ],
+      "paths": [
+        "/tmp/x"
+      ],
+      "calls": [
+        "dispatch",
+        "home",
+        "now_ms",
+        "run_callback",
+        "run_tool",
+        "sneaky_read",
+        "stamp"
+      ],
+      "unknownWhy": [
+        "callback:unresolvable callback passed"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "now_ms",
+      "loc": "src/main.rs:40:1: 40:20",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [
+        "Clock"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc4297f2421eb0677e4baf"
+    },
+    {
+      "fn": "read_config",
+      "loc": "src/main.rs:30:1: 30:64",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [
+        "Fs"
+      ],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc42975ec26913d944a506",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "run_callback",
+      "loc": "src/main.rs:87:1: 87:30",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "3a4b406f47cc4297a8e637eca4acb664",
+      "unknownWhy": [
+        "callback:invoked param (opaque from the HOF's own standpoint)"
+      ]
+    },
+    {
+      "fn": "run_tool",
+      "loc": "src/main.rs:59:1: 59:35",
+      "inferred": [
+        "Exec",
+        "Fs"
+      ],
+      "direct": [
+        "Exec"
+      ],
+      "declared": [
+        "Exec",
+        "Fs"
+      ],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc429737a05dd65622bbf1",
+      "fs": [
+        "read"
+      ],
+      "cmds": [
+        "ls"
+      ],
+      "calls": [
+        "read_config"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "sneaky_read",
+      "loc": "src/main.rs:35:1: 35:54",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc4297a220fb6e8274333f",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "stamp",
+      "loc": "src/main.rs:48:1: 48:31",
+      "inferred": [
+        "Clock",
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [
+        "Fs"
+      ],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "hash": "3a4b406f47cc4297c8076f129741343e",
+      "fs": [
+        "write"
+      ],
+      "calls": [
+        "now_ms"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    }
+  ]
+}

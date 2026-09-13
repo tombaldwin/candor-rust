@@ -29,7 +29,24 @@ after upgrading; review policies and regenerate baselines with the new build.
   block-scoped. Measured exit 1 before R416 and exit 0 after, so this release's own fix widened an
   existing hole to the dominant rust path spelling before closing both. **Found by construction, not by
   corpus: 1,554 crates and 286,904 rows show zero rows losing a marker — the shape is not out there.**
-- **The deep (nightly/dylint) engine now implements the rung it declares.** It still carried the
+- **The deep (nightly/dylint) engine now implements the rung it declares — PRICED, and the feared cost
+  does not exist.** A release panel's objection was that marking unconditionally would make `allow Fs`
+  unusable, since `if p.exists()` on a determined path is among the commonest rust spellings. Measured
+  PRE/POST on the dylint lib, two fixtures:
+
+      masked shape (benign allowed literal beside a caller-controlled `p.exists()`)
+          PRE  not flagged  ← the bypass        POST  flagged   ← closed
+          control `fs::metadata(p)`: flagged in BOTH, unchanged
+      determined-only shape (`Path::new("/etc/hosts").exists()`, `allow Fs /etc/hosts`)
+          PRE  3 refusals   POST  3 refusals    ← identical
+
+  Zero new refusals on determined paths, because this engine never credited a determined RECEIVER to
+  begin with — it has no receiver-literal resolution, so those shapes were already "a path candor cannot
+  determine". The precision half is still owed; what is not owed is a regression, and there isn't one.
+  (First attempt at this measurement read the dylint WARNING TEXT for `incomplete` and got 0 vs 0 — a
+  null result from the wrong artifact, over a `sample/` that contains no receiver-form stat at all.)
+
+- **The deep engine's exclusion, for the record.** It still carried the
   `Path::*`/`PathBuf::*` stat exclusion ⟨0.37⟩ overturns while reporting `spec 0.37`, and it is the engine
   `--help` calls "the sound gate". It marks unconditionally, which is a deliberate under-approximation the
   clause permits; the precision half is owed.
