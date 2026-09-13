@@ -2035,12 +2035,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         incomplete.entry(f.qual.clone()).or_default().insert(eff);
                     }
                     (true, None) => {}
+                    // RULED 2026-09-12 — UNION (SOUNDNESS.md "OWED TO TOM"). This arm used to answer
+                    // `Unknown` + `ambiguous:cfg-duplicated alias`. That is the HEDGE, and the ruling
+                    // replaced it with "a hedge replaced by a COMPLETE answer, not a withdrawal": both
+                    // arms were READ, so charging both is not fabrication under SPEC §4's own definition
+                    // ("asserting something the engine did not read from the code"), while withdrawing a
+                    // determined effect into `{Unknown}` — which §4.0 says is not `⊤` — stops `deny Fs`
+                    // firing on a call that reaches `Fs` in one configuration.
+                    //
+                    // THE RULING'S PREMISE WAS THAT THIS CHANGED NOTHING ("the engines already do it"),
+                    // AND THAT WAS MEASURED FALSE. `main` unioned only on the DEFINITION route
+                    // (`collector.rs`, R140/R287); this — the `use`-ALIAS route — still hedged, so one
+                    // program answered two ways depending on whether its alias crossed a module
+                    // boundary. Measured on the same fixture in both spellings: the union route made
+                    // `deny Fs`, `deny Env` and `allow Fs <lit>` all fire, and the hedge route made all
+                    // three SILENT. That is the R347 shape — two mechanisms answering one question
+                    // differently — which the family treats as a defect, not a choice.
+                    //
+                    // THE SURFACE IS STILL WITHHELD, and that is not a leftover: the arms are DIFFERENT
+                    // paths, so their `fs`/`cmds`/`hosts` literals are different claims and publishing
+                    // one arm's would be the pick-by-position R105 removed. Marking every charged effect
+                    // `incomplete` is what stops an empty surface reading as a complete one — the same
+                    // treatment the agreeing arm above already gets, now applied to the disagreeing one.
                     (false, _) => {
-                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                        unknown_why
-                            .entry(f.qual.clone())
-                            .or_default()
-                            .insert("ambiguous:cfg-duplicated alias".to_string());
+                        for eff in arms().flatten() {
+                            direct.entry(f.qual.clone()).or_default().insert(eff);
+                            incomplete.entry(f.qual.clone()).or_default().insert(eff);
+                        }
                     }
                 }
                 // …AND THE κ LEDGER STILL RUNS, once per arm. This branch `continue`s, so without it an
