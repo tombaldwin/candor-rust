@@ -29,6 +29,15 @@ after upgrading; review policies and regenerate baselines with the new build.
   block-scoped. Measured exit 1 before R416 and exit 0 after, so this release's own fix widened an
   existing hole to the dominant rust path spelling before closing both. **Found by construction, not by
   corpus: 1,554 crates and 286,904 rows show zero rows losing a marker — the shape is not out there.**
+  **PRICED AFTERWARDS, and the zero needed interpreting rather than quoting.** A/B over 1,545 crates /
+  286,099 rows: ADDED 0, REMOVED 0, CHANGED 0 — which is the most flattering and least informative number
+  available unless you can say WHY it is zero. Three facts together make it meaningful: the fix demonstrably
+  FIRES (four constructed spellings go exit 0 → exit 1, and an unshadowed determined locator still
+  certifies, so it is neither inert nor a blanket over-mask); the corpus DOES contain the syntactic shape
+  (44 files in the first 400 crates nest a shadow of a path-literal binding); and a row only moves when that
+  shadowed name is then the LOCATOR of an Fs call after the block. The shape is common, the exploitable
+  composition is not. Block-scoping therefore costs nothing measurable and loses no correctly-published
+  path.
 - **The deep (nightly/dylint) engine now implements the rung it declares — PRICED, and the feared cost
   does not exist.** A release panel's objection was that marking unconditionally would make `allow Fs`
   unusable, since `if p.exists()` on a determined path is among the commonest rust spellings. Measured
