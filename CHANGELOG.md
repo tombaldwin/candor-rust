@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.37.0] — 2026-09-13
+
 - **SPEC ⟨0.37⟩ (NON-ADDITIVE): a receiver-form path stat names its own destination.** `p.exists()`
   reaches the filesystem against the path it is invoked ON, and this engine was silent on it — the
   ARGUMENT spelling of the identical reach was already marked. Both the marking and the capture halves
