@@ -3030,9 +3030,29 @@ impl Candor {
                     // an arg (`p.metadata()`/`p.exists()` resolve to `std::path::Path::*`/`PathBuf::*`) —
                     // those carry no path arg, so a missing literal there must not false-positive.
                     let leaf = path.rsplit("::").next().unwrap_or("");
-                    let stat_method = path.starts_with("std::path::Path::")
-                        || path.starts_with("std::path::PathBuf::");
-                    if !stat_method && candor_classify::is_fs_path_arg(leaf) {
+                    // SPEC ⟨0.37⟩ / SOUNDNESS R414 — A RECEIVER-FORM PATH STAT NAMES ITS DESTINATION.
+                    //
+                    // This arm used to EXCLUDE `std::path::Path::*` / `PathBuf::*` on the stated grounds
+                    // that "those carry no path arg, so a missing literal there must not false-positive".
+                    // ⟨0.37⟩ overturns exactly that: a call's locator may arrive as an ARGUMENT or as the
+                    // RECEIVER, and both are the call's own. `p.exists()` reaches the filesystem against
+                    // the path it is invoked ON.
+                    //
+                    // THIS ENGINE IS THE ONE `--help` CALLS "the sound gate", AND IT WAS THE ONE STILL
+                    // EXEMPTING THE SHAPE — while declaring `spec 0.37` from the shared constant. Found
+                    // by review: the syntactic backend refused the R414 fixture at exit 1 and this engine
+                    // certified it at exit 0, with a policy that allows only a sibling literal.
+                    //
+                    // MARKED UNCONDITIONALLY, which is a deliberate UNDER-APPROXIMATION. This arm has no
+                    // receiver-literal resolution, so it cannot tell `Path::new("/lit").exists()` from
+                    // `p.exists()` and will mark both. ⟨0.37⟩ permits that in as many words — "an engine
+                    // MAY under-approximate and mark a determined locator incomplete: that fails CLOSED
+                    // and stays conformant" — and the alternative on offer was to keep certifying a
+                    // caller-controlled stat, which does not. The precision half is owed, not free: it
+                    // needs the receiver resolved the way `candor-scan`'s collector does.
+                    if candor_classify::is_fs_path_arg(leaf)
+                        || candor_classify::is_fs_receiver_locator(&path)
+                    {
                         self.incomplete_direct.entry(caller).or_default().insert("Fs");
                     }
                 }

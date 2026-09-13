@@ -10,6 +10,36 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **SPEC ⟨0.37⟩ (NON-ADDITIVE): a receiver-form path stat names its own destination.** `p.exists()`
+  reaches the filesystem against the path it is invoked ON, and this engine was silent on it — the
+  ARGUMENT spelling of the identical reach was already marked. Both the marking and the capture halves
+  landed: a DETERMINED receiver is now published rather than masked, where before it was neither. R414.
+- **R417 — the capability-`Dir` API was masked by nothing.** `cap_std::fs::Dir::write(caller, …)` beside
+  a benign literal took `allow Fs /tmp/benign` to exit **0**; the free-fn spelling of the same hazard
+  exits 1. Not a resolution gap — the path resolved in full and `is_fs_path_arg_method` had two names in
+  it. Now mask-by-default on a `Dir` receiver with a signature-checked denylist.
+- **R416 — a path wrapper is not a transformation.** `let p = Path::new("/tmp/x"); fs::write(p, …)`
+  published no path and marked the surface incomplete, so `allow Fs /tmp/x` REFUSED a fully determined
+  write. Fixed by peeling `Path::new`/`PathBuf::from` and only those two; `join`/`with_extension`/
+  `canonicalize` transform the value and still resolve to nothing.
+- **R422 — a nested-block SHADOW published a FALSE destination, and R416 widened it.** `let target =
+  Path::new(user); if v { let target = Path::new("/tmp/log"); } fs::write(target, …)` published
+  `paths:["/tmp/log"]` with no `incomplete` and gated at exit **0** over a caller-controlled write — a
+  fabricated destination AND a lost disclosure. `str_locals` was keyed by bare name and never
+  block-scoped. Measured exit 1 before R416 and exit 0 after, so this release's own fix widened an
+  existing hole to the dominant rust path spelling before closing both. **Found by construction, not by
+  corpus: 1,554 crates and 286,904 rows show zero rows losing a marker — the shape is not out there.**
+- **The deep (nightly/dylint) engine now implements the rung it declares.** It still carried the
+  `Path::*`/`PathBuf::*` stat exclusion ⟨0.37⟩ overturns while reporting `spec 0.37`, and it is the engine
+  `--help` calls "the sound gate". It marks unconditionally, which is a deliberate under-approximation the
+  clause permits; the precision half is owed.
+- **The sidecar sweep derives from `SIDECAR_KINDS`** with `gate` and `refused` excluded BY NAME. It was a
+  hardcoded five-name copy of the seven under a comment claiming to be §2.2's family-wide set. Unifying
+  the lists would have been a file-DELETION bug: the sweep is a deletion path where a miss is cheap and an
+  over-reach destroys a verdict sink or inverts the ⟨0.32⟩ marker's fail-closed guarantee.
+- `assert-audit` runs as a CI gate, and a source-hygiene census guards the one-owner rule.
+
+
 ## [0.36.2] — 2026-09-12
 
 - **The sentence R379 withdrew as FALSE was still shipping on both sibling guards, and both are live gate

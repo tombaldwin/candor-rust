@@ -2254,7 +2254,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // is `r142_e_a_nested_block_macro_does_not_leak_to_a_later_sibling`, which goes red (FABRICATED
         // `Fs` on a pure fn) with these two lines removed.
         let saved_macros = self.body_macros.clone();
+        // SOUNDNESS — A NESTED-BLOCK SHADOW MUST NOT ESCAPE ITS BLOCK, and before this it did, as a
+        // CARDINAL SIN with a gate bypass on top:
+        //
+        //     pub fn exfil(user: &str, verbose: bool) {
+        //         let target = Path::new(user);
+        //         if verbose { let target = Path::new("/tmp/candor-log"); drop(target); }
+        //         let _ = fs::write(target, b"secret");        // the destination is `user`
+        //     }
+        //
+        // `str_locals` is keyed by BARE NAME and was never block-scoped: the inner `let` overwrote the
+        // map and nothing restored it, so the write published `paths:["/tmp/candor-log"]` — a literal
+        // from a binding that is out of scope and was dropped — with NO `incomplete`, and
+        // `allow Fs /tmp/candor-log` exited 0 printing "nothing hidden". A FALSE destination published
+        // AND the disclosure dropped, which is the worst pair this analysis can produce.
+        //
+        // `scoped_binding` / `capture_bindings` already do this for BINDER forms (a `for` pattern, a
+        // closure parameter, a `match` arm). A plain `let` in a nested block had no such path — the one
+        // spelling nobody had written a restore for. Saving the table here covers every block uniformly,
+        // which is why it goes beside R142's `body_macros` rather than into the `let` arm.
+        //
+        // Measured both directions: the `Path::new(lit)` spelling was refused (exit 1) before R416 and
+        // certified (exit 0) after, so R416 WIDENED this to the dominant rust path spelling; the plain
+        // `&str` spelling was already certified at both commits. This restore closes both.
+        let saved_str_locals = self.str_locals.clone();
         syn::visit::visit_block(self, node);
+        self.str_locals = saved_str_locals;
         self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;
     }
