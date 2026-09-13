@@ -15063,25 +15063,49 @@ pub fn go() {{ imp::doit(); }}
              resolved by source position:\nA:\n{a:#}\nB:\n{b:#}"
         );
         for (tag, v) in [("A", &a), ("B", &b)] {
+            // RULED 2026-09-12 — UNION. This assertion used to demand `["Unknown"]` and "never both
+            // charged". Tom's ruling replaced the hedge with "a COMPLETE answer, not a withdrawal":
+            // both arms were READ, so charging both is not fabrication under SPEC §4's own definition,
+            // while collapsing to `{Unknown}` — which §4.0 says is not `⊤` — WITHDRAWS a determined
+            // effect and stops `deny Fs` firing on a call that reaches `Fs` in one configuration.
+            //
+            // The ORDER-INDEPENDENCE assertion above is R105's actual invariant and is untouched: it is
+            // what the row was filed for, and it holds under either answer. Only the answer changed.
             assert_eq!(
-                effs_opt(v, "go"), vec!["Unknown".to_string()],
-                "R105 ({tag}): the arms classify differently (Fs vs Env), so the honest answer is \
-                 `Unknown` — never one arm picked, never both charged:\n{v:#}"
+                effs_opt(v, "go"), vec!["Env".to_string(), "Fs".to_string()],
+                "R105 ({tag}): the arms classify differently (Fs vs Env) and BOTH were read, so the \
+                 answer is the union of both — never one arm picked, and never withdrawn into \
+                 `Unknown`, which would stop `deny Fs` firing on a call that reaches Fs:\n{v:#}"
             );
-            let why: Vec<String> = v["functions"]
+            // AND THE SURFACE IS STILL WITHHELD, which is the half a union could get wrong. The arms
+            // are different paths, so publishing either one's literal would be the pick-by-position
+            // this row removed — `incomplete` is what stops an empty surface reading as a complete one
+            // and letting `allow Fs <lit>` certify a claim the engine never made.
+            let inc: Vec<String> = v["functions"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|f| f["fn"] == "go")
-                .and_then(|f| f["unknownWhy"].as_array().cloned())
+                .and_then(|f| f["incomplete"].as_array().cloned())
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|r| r.as_str().map(str::to_string))
                 .collect();
             assert!(
-                why.iter().any(|r| r.starts_with("ambiguous:")),
-                "R105 ({tag}): the disclosure must carry a reason, and the SPEC §4 kind for \
-                 `two candidates, cannot say which runs` is `ambiguous:`:\n{v:#}"
+                inc.contains(&"Fs".to_string()),
+                "R105 ({tag}): charging the union WITHOUT disclosing that no locator was captured is \
+                 the masked-literal evasion — `allow Fs <benign>` would certify it:\n{v:#}"
+            );
+            let paths = v["functions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|f| f["fn"] == "go")
+                .map(|f| f["paths"].clone());
+            assert!(
+                paths.as_ref().is_none_or(|p| p.is_null() || p.as_array().is_some_and(|a| a.is_empty())),
+                "R105 ({tag}): no arm's literal may be published — that is the pick-by-position this \
+                 row exists to remove, re-entering through the union:\n{v:#}"
             );
         }
     }
