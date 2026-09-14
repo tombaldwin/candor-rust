@@ -10,6 +10,29 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### ⚠ Fixed
+
+- **The 2026-09-12 UNION ruling, carried out on the `use`-alias route.** A `#[cfg]`-duplicated binding
+  whose arms differ now charges the UNION of their effects instead of hedging to `{Unknown}`. The
+  ruling's own premise was that the engines already did this; measured, `main` unioned on the DEFINITION
+  route and HEDGED on the alias route, so one program answered two ways depending on whether its alias
+  crossed a module boundary — `deny Fs`, `deny Env` and `allow Fs <lit>` were all silent on one route
+  and all fired on the other. The surface is still withheld (the arms are different paths, so publishing
+  one's literal would be resolution-by-position arriving another way). Pinned cross-engine by PART 89.
+- **R400 — `super::super::X` resolved against ONE level of scope.** The stripper removed N levels of
+  `super::` and then resolved the remainder against the map one level up, so a two-level path asked the
+  PARENT for a name belonging to the GRANDPARENT. Both directions were measured: a real spawn went
+  ABSENT (`deny Exec <fn>` exit 0), and with the bindings reversed a body that constructs a `Vec` and
+  nothing else reported `['Exec']` — a FABRICATION. Now strips exactly one level and refuses beyond,
+  because the grandparent's binding is not recoverable there (the parent's map has already shadowed it).
+  The under-report half is deliberately still open; the half that charges an effect the program cannot
+  have is closed. 0/0/0 over 400 crates with reach proven at 74 hits.
+- **R401 — `Pin` and `ManuallyDrop` join the direct-dispatch wrapper peel.** `Pin<Box<dyn T>>` is the
+  dominant async spelling and it read silent-pure. Both qualify by `Deref`, so the receiver genuinely IS
+  the inner type; `Weak` and a `HashMap` value do not and remain open. ADDED 3 / REMOVED 0 / CHANGED 25
+  over 400 crates, every change in the disclosure direction — previously-pure async bodies now report
+  `Unknown` with `unresolved: true` rather than claiming purity.
+
 ## [0.37.0] — 2026-09-13
 
 - **SPEC ⟨0.37⟩ (NON-ADDITIVE): a receiver-form path stat names its own destination.** `p.exists()`
