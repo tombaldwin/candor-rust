@@ -1,0 +1,135 @@
+name: binaries
+
+# Build `candor-scan` + `candor-query` per platform, PROVE THEM, and attach them to the GitHub release.
+#
+# WHY THIS REPO NEEDED ONE. candor-java and candor-swift both ship native binaries — their `candor update`
+# rows say "no JVM required" and "no Swift toolchain required" — while candor-rust published NO release
+# assets at all. So the RUST engine was the only one that demanded a compiler on the user's machine,
+# which is the reverse of what anyone would guess, and it dead-ended the front door: `candor scan .` on a
+# Rust project with no toolchain announced "fetching the rust engine…", then `candor update` printed
+# "skipped (no Rust toolchain)", then the scan advised `candor update rust` — a remedy whose second lap
+# prints the same skip.
+#
+# IT RUNS ON `main` AND ON PULL REQUESTS, NOT ONLY ON A RELEASE, and that is candor-java's hard-won
+# lesson rather than a preference: a gate positioned after the irreversible step GRADES the release, it
+# does not guard it. Its `native.yml` fired only on `release: published` until 2026-08-25, and on v0.32.0
+# it correctly withheld two binaries that reported an EMPTY scan at exit 0 — by which time v0.32.0
+# existed without them and the repair cost a whole second family cut. Here the same check costs one push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# The default GITHUB_TOKEN is read-only; attaching assets needs write. Scoped to the only write here.
+permissions:
+  contents: write
+
+# Supersede an in-flight PR build when its branch is pushed again — but NEVER cancel a release or a
+# `main` build. `release-preflight [10]` reads every run on the released commit's SHA and a cancelled
+# run is not `success`, so cancelling `main` would turn this into a release blocker on a race.
+concurrency:
+  group: binaries-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-x64
+          - os: macos-latest
+            suffix: macos-arm64
+          # macOS x64 (Intel) deliberately absent: candor-java dropped it because the macos-13 runner
+          # reliably hangs in the queue and never completes, stalling every release's native job (0.16,
+          # 0.17). Apple Silicon + Linux are what `candor update` fetches. Add it back only if asked for.
+    runs-on: ${{ matrix.os }}
+    # A deadline. Without one GitHub's 6-hour default applies, so a stuck runner blocks the release gate
+    # while looking exactly like a slow job. Enforced across the family by release-preflight [7b].
+    timeout-minutes: 45
+    steps:
+      # Refuse a dispatch against a branch. The upload below fires only for a tag ref or a `release`
+      # event, so dispatching against `main` — whose tip right after a cut IS the tagged commit, the
+      # natural mistake — would build, verify, go GREEN, and silently skip the upload. That is the exact
+      # bug workflow_dispatch exists to recover from, and `release-preflight [10]` keys on `headSha`
+      # alone, so the green run would even satisfy the release gate while no binary reached the release.
+      - name: Refuse a workflow_dispatch that is not against a tag ref
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "::error::workflow_dispatch ran against '${{ github.ref_name }}' (a branch), not a release tag."
+          echo "::error::The upload step only fires for a tag ref or a 'release' event — dispatching against a branch builds, verifies and then SILENTLY SKIPS the upload."
+          echo "::error::Fix: Actions -> binaries -> Run workflow, and pick the RELEASE TAG (e.g. v0.38.0) in the ref dropdown, not 'main'."
+          exit 1
+
+      - uses: actions/checkout@v6
+
+      # Two dispatch-only hazards, ruled out before the build rather than accepted:
+      # `softprops/action-gh-release` defaults to overwrite_files, so a dispatch against an OLD tag would
+      # replace that historical release's binary with a non-reproducible rebuild from today's toolchain;
+      # and dispatching against a tag with no Release yet would CREATE one, non-draft and without the
+      # curated notes `release.sh` writes. This workflow only ever UPLOADS to a release that exists.
+      - name: Guard workflow_dispatch against the wrong tag
+        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "::error::no GitHub Release exists for tag $TAG — this workflow uploads to a release, it does not create one."
+            exit 1
+          fi
+          for a in candor-scan-${{ matrix.suffix }} candor-query-${{ matrix.suffix }}; do
+            if gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$a"; then
+              echo "::error::release $TAG already has '$a'. Dispatch is for recovering an upload that never completed; this one did."
+              echo "::error::Delete the asset first if you really mean to replace it, or re-check which tag you selected."
+              exit 1
+            fi
+          done
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `--locked` so the shipped binary is built from the committed Cargo.lock rather than from whatever
+      # crates.io resolved this morning. A release artifact that cannot be rebuilt from the tag is not a
+      # release artifact.
+      - name: Build
+        run: cargo build --release --locked -p candor-scan -p candor-query
+
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp target/release/candor-scan  "dist/candor-scan-${{ matrix.suffix }}"
+          cp target/release/candor-query "dist/candor-query-${{ matrix.suffix }}"
+
+      # THE GATE. Not "parity" — there is no second implementation to compare against, since a release
+      # binary is the same code `cargo install` builds. What CAN go wrong, and did go wrong in this
+      # family, is the other half of candor-java's v0.32.0 defect: a binary that runs, exits 0 and finds
+      # NOTHING. `ci/verify-binary.sh` scans `sample/` — a fixture already in this repo with known ground
+      # truth — and requires the analysed count, the function count and the effect SET it demonstrably
+      # contains. It checks BOTH binaries, because shipping a working scanner beside a broken
+      # `candor-query` looks entirely healthy until the user's first question.
+      #
+      # The verdict is a FILE, not a heredoc, so it can be run by hand and reasoned about; its own
+      # ability to FAIL was established against a stub that exits 0 with an empty report.
+      - name: Verify the packaged binaries
+        run: |
+          bash ci/verify-binary.sh \
+            "dist/candor-scan-${{ matrix.suffix }}" \
+            "dist/candor-query-${{ matrix.suffix }}" \
+            "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+
+      # The only release-only step in this file: uploading is the one thing that genuinely cannot happen
+      # before there is a release to upload to. Everything above already ran on the `main` commit the tag
+      # points at.
+      - name: Attach to the release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          files: |
+            dist/candor-scan-${{ matrix.suffix }}
+            dist/candor-query-${{ matrix.suffix }}

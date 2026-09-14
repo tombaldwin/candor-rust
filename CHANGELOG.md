@@ -10,6 +10,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **This engine now ships release BINARIES — `candor-scan-<plat>` and `candor-query-<plat>`, for
+  `macos-arm64` and `linux-x64`.** candor-java and candor-swift have shipped native binaries for
+  releases (*"no JVM required"*, *"no Swift toolchain required"*); candor-rust published **no release
+  assets at all**, so the Rust engine was the only one in the family that demanded a compiler on the
+  user's machine — the reverse of what a reader would guess. It dead-ended the front door: `candor scan .`
+  on a Rust project with no toolchain announced a fetch, `candor update` printed *"skipped (no Rust
+  toolchain)"*, and the scan then advised `candor update rust`, whose second lap prints the same skip.
+
+- **`ci/verify-binary.sh` gates every packaged binary, and it is NOT a parity check.** There is no second
+  implementation here — a release binary is the same code `cargo install` builds — so the question it can
+  answer is the other half of candor-java's v0.32.0 defect: *does the packaged binary analyse anything*.
+  It scans `sample/`, whose ground truth is known (12 analyzed, 10 functions, effects
+  `Clock/Env/Exec/Fs/Unknown`), and requires floors plus the effect SET, so an engine improvement that
+  finds more cannot redden a release while a binary that runs, exits 0 and finds nothing cannot pass.
+  It checks BOTH binaries: a working scanner shipped beside a broken `candor-query` looks entirely
+  healthy until the user's first question. Its own ability to fail was established against a stub that
+  exits 0 with an empty report. **On its first real run it caught a stale `target/release/candor-scan`
+  still reporting 0.37.0** — the version check is the only thing that can catch a build from the wrong ref.
+
+- **The workflow runs on `main` and pull requests, not only on a release.** candor-java's `native.yml`
+  fired only on `release: published` until 2026-08-25; on v0.32.0 it correctly withheld two binaries that
+  reported an empty scan at exit 0, by which time the release existed without them and the repair cost a
+  whole second family cut. A gate positioned after the irreversible step grades the release rather than
+  guarding it.
+
 ## [0.38.0] — 2026-09-14
 
 - **A version number in HISTORICAL prose is a bump-miss signature that is not a bump miss.** `src/lib.rs`
