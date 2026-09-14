@@ -10,6 +10,18 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`ci/verify-binary-selftest.sh` — the gate that guards the release-asset gate**, wired into `ci.yml`
+  so it runs on every push. `verify-binary.sh` is the only thing between a broken build and a published
+  binary, and its green was otherwise unfalsifiable: loosen a floor or make a check unreachable and every
+  release keeps going green while the next empty binary ships. Seven arms, both directions — a sound
+  binary must PASS (a checker that only refuses is as useless as one that only passes), and an empty
+  report, an under-report, a **missing effect class** with correct counts, a wrong version, and a broken
+  `candor-query` must each be refused; plus the control that the wrong-version binary PASSES when no
+  version is demanded, without which the version arm proves nothing. Verified to redden: neutralising the
+  three floors in `verify-binary.sh` fails exactly 3 arms, and restoring them returns it to green.
+  Stubs only — no build, no network — because a gate guarding a gate has to be cheaper than what it
+  guards or it gets skipped in the wave where it matters.
+
 - **This engine now ships release BINARIES — `candor-scan-<plat>` and `candor-query-<plat>`, for
   `macos-arm64` and `linux-x64`.** candor-java and candor-swift have shipped native binaries for
   releases (*"no JVM required"*, *"no Swift toolchain required"*); candor-rust published **no release
