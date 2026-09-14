@@ -294,6 +294,18 @@ jobs:
       - name: Coverage-gate generator selftest
         run: python3 eval/coverage-gate/generate.py --selftest
 
+      # THE GATE THAT GUARDS THE RELEASE-ASSET GATE. `ci/verify-binary.sh` is the only thing between a
+      # broken build and a published binary, and its green is otherwise unfalsifiable: loosen a floor,
+      # invert a check, and every release keeps going green while the next empty binary ships. That is
+      # candor-java's v0.32.0 defect — two native binaries that ran, exited 0 and reported 0 functions
+      # where the jar found 210 — and its `ci/native-parity-selftest.sh` runs here for the same reason.
+      #
+      # Stubs, no build, no network: the gate guarding a gate has to be cheaper than the thing it
+      # guards, or it gets skipped in exactly the wave where it matters. Runs on every push, while
+      # `binaries.yml` needs a full cargo build on two runners.
+      - name: Release-binary gate selftest (it must be able to FAIL)
+        run: bash ci/verify-binary-selftest.sh
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)
