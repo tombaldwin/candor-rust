@@ -96,7 +96,29 @@ jobs:
       # `--locked` so the shipped binary is built from the committed Cargo.lock rather than from whatever
       # crates.io resolved this morning. A release artifact that cannot be rebuilt from the tag is not a
       # release artifact.
+      # `RUSTFLAGS: ""` IS LOAD-BEARING, AND THE OBVIOUS ALTERNATIVES DO NOT WORK.
+      #
+      # This repo's `.cargo/config.toml` sets `target.'cfg(all())'.rustflags = ["-C","linker=dylint-link"]`
+      # for the custom dylint lint, so ANY `cargo build` here needs `dylint-link` on PATH. `ci.yml`
+      # installs it (cached) because the lint job needs it; a release binary does not, and installing a
+      # lint toolchain to ship a binary is a lot of build to carry for nothing.
+      #
+      # An empty `RUSTFLAGS` env wins over the config's rustflags — that is cargo's documented
+      # precedence. MEASURED on 2026-09-14 with `dylint-link` genuinely renamed away, which is the only
+      # way to reproduce this (rustup's shim re-adds ~/.cargo/bin to the child PATH, so simply dropping
+      # it from PATH does NOT reproduce it and reports a false pass):
+      #
+      #     RUSTFLAGS='' cargo build …                       rc=0   ← this
+      #     mv .cargo/config.toml away; cargo build …        rc=0   (works, but mutates the checkout)
+      #     cargo build --config 'build.rustflags=[]'        rc=101
+      #     CARGO_BUILD_RUSTFLAGS='' cargo build …           rc=101
+      #
+      # The two that fail are the two a reader would reach for first, which is why they are written down
+      # rather than left to be rediscovered. The first draft of this workflow used
+      # `--config target."cfg(all())".rustflags=[]` and failed in CI on both runners.
       - name: Build
+        env:
+          RUSTFLAGS: ""
         run: cargo build --release --locked -p candor-scan -p candor-query
 
       - name: Stage
