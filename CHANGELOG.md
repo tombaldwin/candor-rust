@@ -19,7 +19,14 @@ after upgrading; review policies and regenerate baselines with the new build.
   crossed a module boundary — `deny Fs`, `deny Env` and `allow Fs <lit>` were all silent on one route
   and all fired on the other. The surface is still withheld (the arms are different paths, so publishing
   one's literal would be resolution-by-position arriving another way). Pinned cross-engine by PART 89.
-- **R400 — `super::super::X` resolved against ONE level of scope.** The stripper removed N levels of
+- **R400 — REVERTED before release; the fix was wrong and the revert is the finding.** It is described
+  below as it was written; a pre-release review falsified its premise at the root. `submodule_uses`
+  CLONES the parent's map and removes only names the inline module itself declares, so `out` is a
+  flattened chain and the grandparent's binding is shadowed ONLY when the parent rebinds that exact
+  name — the uncommon case. The refusal therefore closed a rare fabrication and opened a commoner
+  SILENT UNDER-REPORT: `mod b { mod c { use super::super::Command; … } }` went from `['Exec']` to absent,
+  and `deny Exec <fn>` from 1 to 0 over a real spawn. R400 is open again with both halves measured.
+- ~~**R400 — `super::super::X` resolved against ONE level of scope.**~~ The stripper removed N levels of
   `super::` and then resolved the remainder against the map one level up, so a two-level path asked the
   PARENT for a name belonging to the GRANDPARENT. Both directions were measured: a real spawn went
   ABSENT (`deny Exec <fn>` exit 0), and with the bindings reversed a body that constructs a `Vec` and
