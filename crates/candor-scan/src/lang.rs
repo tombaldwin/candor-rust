@@ -298,7 +298,23 @@ pub(crate) fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<
             // hands a closure an error value it types as the payload (`async-process`'s
             // `unwrap_or_else(|x| x.into_inner())`, which fabricated `Exec`). One wrapper, measured.
             let Some(seg) = p.path.segments.last() else { return Vec::new() };
-            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Mutex" | "RwLock" | "Cell" | "Option");
+            // SOUNDNESS R401 — `Pin` and `ManuallyDrop` join the list, and the criterion is the one
+            // `elem_trait_leaves` states below rather than a longer list of names: a wrapper belongs in
+            // THIS resolver only when the receiver genuinely IS the inner type, because peeling one that
+            // is not fabricates a receiver. Both qualify by Deref and nothing weaker —
+            // `impl<P: Deref> Deref for Pin<P> { type Target = P::Target; }` and
+            // `impl<T> Deref for ManuallyDrop<T> { type Target = T; }` — so `p.go()` on a
+            // `Pin<Box<dyn Doer>>` COMPILES and dispatches to the trait object. `Pin<Box<dyn _>>` is the
+            // dominant async spelling, and it read silent-pure.
+            //
+            // MEASURED ABSENT on HEAD with `Box`/`Arc`/`Vec[i]` charging in the same scan as controls.
+            //
+            // `Weak` and a `HashMap` VALUE are the other two R401 names and are deliberately NOT here:
+            // neither Derefs, so `w.go()` does not compile and the method is reached through a named
+            // accessor (`upgrade()`, `get()`). They belong to the ELEMENT route, which is where a
+            // payload reached through an accessor is already modelled — putting them here would be the
+            // `OnceLock` mistake that comment warns about, one row later.
+            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Mutex" | "RwLock" | "Cell" | "Option" | "Pin" | "ManuallyDrop");
             if !wrapper {
                 return Vec::new();
             }
