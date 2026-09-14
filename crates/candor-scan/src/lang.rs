@@ -2447,6 +2447,7 @@ pub(crate) fn collect_use(
     alts: &mut HashMap<String, Vec<String>>,
     seen: &mut std::collections::HashSet<String>,
 ) {
+    static SUPER_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
     // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what
     // that target ALREADY resolves to in the (inherited) `use` map rather than the literal `crate::net`,
@@ -2481,11 +2482,45 @@ pub(crate) fn collect_use(
         // is hyper's own `proto::h1::io` MODULE: without the marker test that resolved to
         // `std::io::Buffered`, dropped the local edge, and removed 19 rows from `hyper` — two of them
         // carrying a real `Log`. A full-registry A/B caught it, in the REMOVED column.
-        let supers = {
-            let mut r = full;
-            while let Some(t) = r.strip_prefix("super::") { r = t; }
-            r
-        };
+        // SOUNDNESS R400 — EXACTLY ONE LEVEL, AND A REFUSAL BEYOND IT. This was a `while let` that
+        // stripped N levels of `super::` and then resolved the remainder against `out` — which is the
+        // map of ONE level up. For `super::super::X` that asks the PARENT for a name that belongs to the
+        // GRANDPARENT, and the answer it gets is whatever the parent happens to bind.
+        //
+        // Both directions were measured on HEAD, with a one-level calibration arm charging correctly in
+        // the same scan:
+        //   grandparent = Command, parent = Vec  → `a::b::c::go` ABSENT, and `deny Exec <fn>` exits 0
+        //                                          over a real spawn (silent under-report)
+        //   grandparent = Vec, parent = Command  → `a::b::c::definitely_pure` reports ['Exec'] for a
+        //                                          body that only constructs a Vec (FABRICATION)
+        //
+        // THE GRANDPARENT'S BINDING IS NOT RECOVERABLE HERE, and that is why this refuses rather than
+        // reaching further. `submodule_uses` builds each inline module's map FROM its parent's, so by
+        // the time `c` is walked the grandparent's `Runner` has been SHADOWED by the parent's — `out`
+        // holds one scope, not a stack of them. Resolving depth ≥ 2 would need the module path
+        // `collect_use` deliberately does not track (see the `hyper` note above, where re-resolving
+        // blindly dropped 19 rows).
+        //
+        // So depth ≥ 2 keeps its literal, which names no local def. That is still a MISS — it does not
+        // close the under-report half, and the row stays open for it — but it retires the half that can
+        // charge an effect the program does not have, which is the direction this engine cannot be
+        // trusted to be wrong in.
+        let supers = full.strip_prefix("super::").unwrap_or(full);
+        // REACH PROBE (R400). An A/B over this change reports an empty diff, and an empty diff with no
+        // reach measurement is indistinguishable from having measured nothing — `corpus-ab.py` refuses
+        // one outright. `SUPER1` counts every one-level rebind (the path that must keep working — the
+        // `hyper` 19-row regression above lives here); `SUPER2` counts the depth-≥2 refusals this row
+        // added. Env lookup hoisted to a `OnceLock` so a probe that is off costs nothing per call.
+        if *SUPER_DEBUG.get_or_init(|| std::env::var_os("CANDOR_R400_DEBUG").is_some()) {
+            if supers.starts_with("super::") {
+                eprintln!("SUPER2 {full}");
+            } else if !std::ptr::eq(supers, full) {
+                eprintln!("SUPER1 {full}");
+            }
+        }
+        if supers.starts_with("super::") {
+            return full.to_string();
+        }
         if !std::ptr::eq(supers, full) && out.contains_key(crate::decls::SUPER_SCOPE_MARKER) {
             let head = supers.split("::").next().unwrap_or(supers);
             if out.contains_key(head) {
