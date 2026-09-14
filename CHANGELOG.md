@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.38.0] — 2026-09-14
+
 ### ⚠ Fixed
 
 - **R438 — a MIXED `#[cfg]` alias arm set picked the external arm and published its literal.**
