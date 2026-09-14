@@ -1042,6 +1042,97 @@ fn collect_module_glob(
     record_alias(aliases, qualify(modpath, MOD_GLOB_KEY), target);
 }
 
+/// SOUNDNESS R438 — HOW MANY `#[cfg]`-GATED `use` LEAVES IN THIS MODULE DECLARE EACH ALIAS NAME.
+///
+/// The defect this exists for: a `#[cfg]` arm set whose arms are MIXED — one naming an external/std
+/// item, the other a LOCAL one — splits across the two routes below and therefore reaches NEITHER
+/// adjudicator. The external arm goes to `aliases` via `record_alias`, which joins duplicate arms with
+/// `ALIAS_ALT_SEP` so `scan.rs`'s R105 branch can put "do the arms agree?" to the classifier. The local
+/// arm goes to the `Reexport` list, applied later by `reexport_aliases`. With one arm in each, the
+/// alias value carries NO separator, R105's branch never fires, and the external arm answers for the
+/// whole set — MEASURED: `#[cfg(unix)] pub use std::fs::write as put;` beside
+/// `#[cfg(not(unix))] pub use crate::loc::put;` reported the caller as `Fs` with
+/// `paths: ["/tmp/allowed.txt"]` and NO `incomplete`, so `allow Fs /tmp/allowed.txt` certified a program
+/// that sets an environment variable in its other configuration. `CANDOR_ALIAS_DEBUG` printed zero
+/// `ALIASCOLLIDE` lines, which is how the split was confirmed rather than assumed.
+///
+/// WHY NOT SIMPLY "RECORD EVERY LOCAL `use` INTO `aliases`". Recording a SINGLE cfg-gated local
+/// re-export there would make its key `aliased`, and `scan.rs` skips local resolution for an aliased
+/// path (`if resolvable && !aliased`) — so the ordinary one-armed case would LOSE the call edge
+/// `reexport_target` supplies today. That is the cardinal-sin direction, traded for a fix.
+///
+/// AND "DECLARED MORE THAN ONCE" WAS STILL TOO WIDE — THIS RETURNS (has_external, has_local) AND THE
+/// CALLER DEMANDS BOTH. The first cut of this gate counted arms and fired on any name declared twice
+/// under `#[cfg]`, which swept in the ALL-LOCAL arm set — the commonest `#[cfg]` shape in real Rust,
+/// a platform module pair. Those arms all classify to `None`, so R105's branch took its
+/// `(true, None) => {}` path, charged nothing, and `continue`d past the ordinary handling that used to
+/// charge them. MEASURED over 1,556 crates: **8 rows DISAPPEARED from `functions[]` entirely** —
+/// `openssl-sys` `build::find_normal::try_pkg_config` and `try_vcpkg` lost `["Env","Exec","Fs"]` and
+/// `simdutf8`'s four `from_utf8` entry points lost their `Unknown`/`unresolved` hedge. A vanished row
+/// is an affirmative purity claim, so this fix's own first cut introduced the class it was closing —
+/// found ONLY because the A/B audits the REMOVED set rather than reporting the headline.
+///
+/// So the gate is the MIXED set and nothing else: one arm external, one arm local, which is the exact
+/// shape that splits across the two routes. An all-local set never had a split — both arms are already
+/// on the `Reexport` route and `reexport_aliases` already unions them — and an all-external set never
+/// had one either, since `record_alias` already joins both arms. Neither needs this, and the measurement
+/// above is what a fix costs when it is drawn around its trigger rather than around its mechanism.
+fn cfg_gated_use_alias_counts(
+    items: &[syn::Item],
+    modpath: &str,
+    mods: &HashMap<String, Vec<String>>,
+    include_tests: bool,
+) -> HashMap<String, (bool, bool, bool)> {
+    let mut n: HashMap<String, (bool, bool, bool)> = HashMap::new();
+    for it in items {
+        let syn::Item::Use(u) = it else { continue };
+        // The SAME three skips the recording loop applies, in the same order. A count taken over a
+        // wider set than the one that records would gate on arms that never arrive.
+        match &u.vis {
+            syn::Visibility::Inherited => continue,
+            syn::Visibility::Restricted(r) if r.path.is_ident("self") => continue,
+            _ => {}
+        }
+        if !include_tests && is_cfg_test(&u.attrs) {
+            continue;
+        }
+        if !has_cfg(&u.attrs) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        use_leaves(&u.tree, Vec::new(), &mut leaves);
+        for (segs, _name, alias) in leaves {
+            // THE SAME external/local test the recording loop makes, so the two cannot disagree about
+            // which arm is which. `resolve_use_base` empty AND a head that is not `crate`/`self`/`super`
+            // is the external arm; everything else is a local one.
+            let local = !resolve_use_base(&segs, modpath, mods).is_empty();
+            let e = n.entry(alias).or_insert((false, false, false));
+            if local { e.1 = true } else { e.0 = true }
+        }
+    }
+    // SOUNDNESS R438 — A `#[cfg]`-GATED DEFINITION IS AN ARM OF THE SAME SET, and it lives in neither
+    // map. `simdutf8`'s `validate_utf8_basic` is the shape: an x86 `fn` DEFINITION beside
+    // `#[cfg] use aarch64::validate_utf8_basic` and two more `use` arms. Joining only the `use` arms
+    // makes the key aliased, and an aliased path skips the ordinary local resolution (`resolvable &&
+    // !aliased`) that used to find the definition — so recording the `use` arms without this flag DROPS
+    // the definition arm. MEASURED: simdutf8's four `from_utf8` entry points went from
+    // `Unknown` + `unresolved` to ABSENT, which is the ⟨0.21⟩ claim. The third flag says a definition
+    // exists; the caller records the alias KEY itself as an arm so that arm resolves like any other.
+    for it in items {
+        let syn::Item::Fn(fun) = it else { continue };
+        if !include_tests && is_cfg_test(&fun.attrs) {
+            continue;
+        }
+        if !has_cfg(&fun.attrs) {
+            continue;
+        }
+        if let Some(e) = n.get_mut(&fun.sig.ident.to_string()) {
+            e.2 = true;
+        }
+    }
+    n
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
@@ -1054,6 +1145,9 @@ pub(crate) fn collect_reexports(
     let mods = mod_targets(items, modpath, dir, include_tests);
     let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
     collect_module_glob(items, modpath, &mods, include_tests, aliases);
+    // SOUNDNESS R438 — see `cfg_gated_use_alias_counts`. Taken over the whole module BEFORE any item is
+    // recorded, because the arm that decides the question may be written after the one being recorded.
+    let cfg_arm_kinds = cfg_gated_use_alias_counts(items, modpath, &mods, include_tests);
     for it in items {
         match it {
             syn::Item::Use(u) => {
@@ -1084,6 +1178,36 @@ pub(crate) fn collect_reexports(
                             }
                         }
                         continue;
+                    }
+                    // SOUNDNESS R438 — a LOCAL arm of a MIXED `#[cfg]` arm set is ALSO recorded into
+                    // `aliases`, so `record_alias` joins it with the external arm and R105's branch in
+                    // `scan.rs` sees the complete set. ADDITIVE: the `Reexport` push below still happens,
+                    // so nothing this route already supplied is withdrawn — the local arm keeps its
+                    // `reexport_aliases` entry and gains a seat at the adjudication it was missing.
+                    // Bounded to names declared more than once under `#[cfg]` in this module; the
+                    // one-armed case is untouched, for the reason recorded on the counter.
+                    let kinds = cfg_arm_kinds.get(&alias).copied().unwrap_or((false, false, false));
+                    // MIXED means the arm set straddles the two routes: at least one arm recorded into
+                    // `aliases` (an external `use`, or a `#[cfg]` DEFINITION of the same name) and at
+                    // least one pushed onto the `Reexport` list. Either of the first two satisfies the
+                    // first half — a definition splits the set exactly as an external `use` does.
+                    if has_cfg(&u.attrs) && (kinds.0 || kinds.2) && kinds.1 {
+                        // The DEFINITION arm, recorded as the alias key itself so it resolves through
+                        // the ordinary local route like every other arm rather than being suppressed by
+                        // the aliasing this block introduces.
+                        if kinds.2 {
+                            record_alias(aliases, qualify(modpath, &alias), qualify(modpath, &alias));
+                        }
+                        // INSTRUMENT THE PRECONDITION, NOT JUST THE OUTPUT — the standing bar in this
+                        // file, and the reason R438's own corpus number is worth anything: a
+                        // byte-identical A/B over a corpus that never reaches this line is the most
+                        // flattering measurement available, and reads exactly like a safely-inert fix.
+                        if std::env::var("CANDOR_R438_PROBE").is_ok() {
+                            eprintln!("R438 REACH {}", qualify(modpath, &alias));
+                        }
+                        for m in &from {
+                            record_alias(aliases, qualify(modpath, &alias), format!("{m}::{name}"));
+                        }
                     }
                     // R176 — a `#[cfg]`-gated `pub use` is one ARM of a platform split, not a shadow of
                     // its siblings. Recorded here, applied in `reexport_aliases`.

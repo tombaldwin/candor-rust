@@ -2106,6 +2106,121 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                     }
                 }
+                // ── SOUNDNESS R438 — AN ARM THE CLASSIFIER CANNOT NAME IS NOT AN ARM WITH NO EFFECT ──
+                // The `arms()` adjudication above asks the CLASSIFIER what each arm does, and a LOCAL
+                // arm is exactly the one the classifier has no answer for — `classify("loc","loc::put")`
+                // is `None` whether that function writes a file or does nothing at all. So a mixed arm
+                // set came out of the match above charged with the EXTERNAL arm's effect and nothing
+                // else, which is the pick this branch exists to prevent, arriving one level down.
+                //
+                // The local arm's effects are not the classifier's to supply; they are its own, and they
+                // already propagate — through the call graph — to every caller with an EDGE to it. So
+                // the fix is an edge, not an effect: resolve each unclassifiable arm the ordinary local
+                // way and record the call. Whatever `loc::put` turns out to do, `probe` inherits it,
+                // including transitively and including effects added to it later.
+                //
+                // WHY THIS MUST BE HERE AND NOT BELOW. The branch `continue`s, so an aliased path never
+                // reaches the local-resolution block at `resolvable && !aliased` — the same `continue`
+                // the κ ledger above had to be lifted over, for the same reason and with the same shape
+                // of consequence. MEASURED before this loop existed: `probe` came back `['Fs']` with
+                // `incomplete: ['Fs']` and NO `Env`, while `loc::put` sat in the same report carrying
+                // `Env`. A BARE `deny Env` therefore fired and looked correct; only the FUNCTION-level
+                // attribution was wrong, which is why a scoped rule is the discriminator here exactly as
+                // it is for R429 and R439.
+                //
+                // NARROW BY CONSTRUCTION, in the direction that matters: an arm the classifier DOES name
+                // is skipped (it was already charged), and an arm that does not resolve to a local
+                // definition adds nothing. `resolve_target` refuses a key with competing claimants
+                // rather than guessing between them, so a tail2 collision between an external arm's
+                // spelling and an unrelated local one costs a missing edge, not a fabricated one — the
+                // honest under-report this file takes everywhere else. The synthetic LAZY marker is not
+                // a call site and is skipped by name.
+                let mut r438_gained_edge = false;
+                for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
+                    // Every synthetic marker, not just the lazy one: these are not call sites, they
+                    // are encodings this file consumes elsewhere, and resolving one locally would
+                    // invent an edge from a name no source text spells.
+                    if alt.contains(LAZY_UNIT_PREFIX)
+                        || alt.contains(DROP_MARKER)
+                        || alt.contains(CONSTRUCT_MARKER)
+                        || alt.contains(UNTYPED_RECV_MARKER)
+                    {
+                        continue;
+                    }
+                    let acr = alt.split("::").next().unwrap_or("");
+                    let acr_real: &str = dep_renames.get(acr).map(String::as_str).unwrap_or(acr);
+                    if candor_classify::classify(acr_real, alt).is_some()
+                        || scan_builder_entry_effect(acr_real, alt).is_some()
+                    {
+                        continue;
+                    }
+                    let targets = resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf)
+                        .or_else(|| reexport_target(alt, c.method, &by_tail2, &by_reexport));
+                    if let Some(targets) = targets {
+                        for t in targets {
+                            if t != &f.qual {
+                                // The GAIN probe, distinct from the REACH probe in `decls.rs`: reaching
+                                // the arm set and actually gaining an edge from it are two facts, and a
+                                // fix that reaches everything and gains nothing is inert in the way that
+                                // looks like success.
+                                if std::env::var("CANDOR_R438_PROBE").is_ok() {
+                                    eprintln!("R438 EDGE {} -> {t}", f.qual);
+                                }
+                                r438_gained_edge = true;
+                                calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                            }
+                        }
+                    }
+                }
+                // ── SOUNDNESS R438 — THIS BRANCH `continue`s, SO SAYING NOTHING HERE IS SAYING PURE ──
+                // Every path above can charge nothing: `(true, None)` is "no arm was classifiable", and
+                // the edge loop adds nothing when no arm resolves locally. The `continue` skips ALL
+                // ordinary handling, so reaching the end in that state leaves the call with no trace at
+                // all and its caller absent from `functions[]` — a ⟨0.21⟩ purity claim.
+                //
+                // THIS STATE IS MEASURED, NOT ASSUMED ABSENT. A first cut of this fix hedged it to
+                // `Unknown`, and the corpus said that was the wrong fix TWICE over. First it fired on
+                // every unclassifiable arm set, adding 259 rows over 1,556 crates, because the commonest
+                // such set is ALL-EXTERNAL and is already disclosed — the κ ledger above records each
+                // arm's crate in `invisible`, which is the ⟨0.24⟩ answer and names WHO, where `Unknown`
+                // does not. Narrowed to arms the κ ledger cannot reach it still added 47 `Unknown` rows
+                // to pure arithmetic (`minimal-lexical::bigint::*`, `crossbeam-epoch::atomic::*`), where
+                // the "arm set" is a pair of `#[cfg(target_pointer_width)]` TYPE aliases carrying no
+                // effect at all. And it prevented nothing: with the DEFINITION arm recorded (see
+                // `decls.rs`), the same corpus reports REMOVED 0 with the hedge off — the silence the
+                // hedge existed for was the dropped definition arm, and it is fixed at its cause.
+                //
+                // So the hedge is GONE and the state is instrumented instead. `CANDOR_R438_SILENT` makes
+                // a real occurrence countable on a corpus rather than argued about here: the honest
+                // claim is "this did not occur on 1,556 crates", and that claim needs a counter, not a
+                // comment. If it ever fires, the answer is another arm route recorded at its cause — the
+                // definition arm was one — and not a hedge laid over the top.
+                if !r438_gained_edge
+                    && arms().flatten().next().is_none()
+                    && std::env::var("CANDOR_R438_SILENT").is_ok()
+                {
+                    {
+                        // Silence and UNDISCLOSED silence are two different numbers, and only the
+                        // second is a finding: the κ ledger above records a dep-crate arm in
+                        // `invisible`, so an all-external set still says "I could not see into X" even
+                        // when this branch charges nothing. Splitting them is the difference between
+                        // "960 occurrences" and a number that means something.
+                        let undisc = c.path.split(crate::decls::ALIAS_ALT_SEP).any(|alt| {
+                            let head = alt.split("::").next().unwrap_or("");
+                            let head_real: &str =
+                                dep_renames.get(head).map(String::as_str).unwrap_or(head);
+                            !deps.contains(head)
+                                && !deps_idx.crates.contains(head_real)
+                                && !matches!(head_real, "std" | "core" | "alloc")
+                        });
+                        eprintln!(
+                            "R438 SILENT{} {} :: {}",
+                            if undisc { "-UNDISCLOSED" } else { "-disclosed" },
+                            f.qual,
+                            c.path
+                        );
+                    }
+                }
                 continue;
             }
             let cr = c.path.split("::").next().unwrap_or("");
