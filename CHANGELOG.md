@@ -12,6 +12,20 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ### ⚠ Fixed
 
+- **R438 — a MIXED `#[cfg]` alias arm set picked the external arm and published its literal.**
+  `#[cfg(unix)] pub use std::fs::write as put;` beside `#[cfg(not(unix))] pub use crate::loc::put;`
+  split across two routes — the external arm to `decls::record_alias`, the local one to the `Reexport`
+  list — so the alias value carried no `ALIAS_ALT_SEP`, R105's adjudication never fired (zero
+  `ALIASCOLLIDE` lines), and the caller came back `["Fs"]` with `paths: ["/tmp/allowed.txt"]` and no
+  `incomplete`: `allow Fs <lit>` certified a program that sets an environment variable in its other
+  configuration. Now the local arm is recorded into the alias map when the set is genuinely MIXED, and
+  each unclassifiable arm becomes a call EDGE — the classifier cannot name a local arm, so an edge is
+  what keeps the caller correct as that function changes. A cfg-gated DEFINITION counts as an arm too.
+  **Measured over 1,556 crates: ADDED 6, REMOVED 0, CHANGED 158**, reach 108 in 39 crates. The six
+  additions are the defect closing — `notify::recommended_watcher` gains `Clock,Fs` + `incomplete`,
+  `termwiz::new_terminal` gains `Env,Fs,Ipc` with `/dev/tty`, `CONIN$`, `CONOUT$`. Three earlier cuts
+  of this fix each lost rows and are recorded in the code beside the narrowings they produced.
+
 - **The 2026-09-12 UNION ruling, carried out on the `use`-alias route.** A `#[cfg]`-duplicated binding
   whose arms differ now charges the UNION of their effects instead of hedging to `{Unknown}`. The
   ruling's own premise was that the engines already did this; measured, `main` unioned on the DEFINITION

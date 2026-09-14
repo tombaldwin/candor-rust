@@ -15110,6 +15110,174 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    /// SOUNDNESS R438 — A **MIXED** `#[cfg]` ARM SET (ONE EXTERNAL ARM, ONE LOCAL) IS ALSO AN ARM SET.
+    ///
+    /// R105 above closed the ALL-EXTERNAL set. A mixed one — `#[cfg(unix)] pub use std::fs::write as
+    /// put;` beside `#[cfg(not(unix))] pub use crate::loc::put;` — split across two routes and reached
+    /// NEITHER adjudicator: the external arm went to `decls::record_alias` (which joins duplicates) and
+    /// the local arm to the `Reexport` list, so the alias value carried no `ALIAS_ALT_SEP`, R105's
+    /// branch never fired (measured: zero `ALIASCOLLIDE` lines under `CANDOR_ALIAS_DEBUG`), and the
+    /// external arm answered for the whole set. Pre-fix `probe` reported `["Fs"]` with
+    /// `paths: ["/tmp/allowed.txt"]` and NO `incomplete` — so `allow Fs /tmp/allowed.txt` CERTIFIED a
+    /// program that sets an environment variable in its other configuration. That is AS-EFF-008 with a
+    /// benign sibling literal doing the certifying, which is the gate-bypass shape.
+    ///
+    /// THREE ASSERTIONS, AND THE SECOND AND THIRD ARE THE ONES THAT WOULD HAVE CAUGHT THE FIX'S OWN
+    /// FIRST TWO CUTS:
+    ///   1. ORDER-INVARIANCE — the two arm orders answer identically. R105's invariant, one shape over.
+    ///   2. THE LOCAL ARM'S EFFECT ARRIVES, and it arrives as a call EDGE rather than as a charge. The
+    ///      classifier has no answer for a local arm (`classify("loc","loc::put")` is `None` whether it
+    ///      writes a file or does nothing), so charging from the arm list cannot work; the edge makes
+    ///      whatever `loc::put` does — now and after someone edits it — reach `probe` by propagation.
+    ///   3. NO ARM'S LITERAL IS PUBLISHED and the surface is `incomplete`. This is the assertion that
+    ///      fails if a future change re-publishes the external arm's path, which is the exact bypass.
+    #[test]
+    fn r438_a_mixed_cfg_arm_set_charges_both_arms_and_certifies_off_neither() {
+        let src = |first: &str, second: &str| {
+            format!(
+                "pub mod loc {{ pub fn put(_p: &str, _v: &str) {{ std::env::set_var(\"K\", \"1\"); }} }}\n\
+                 pub mod sys {{\n  #[cfg(unix)] pub use {first};\n  #[cfg(not(unix))] pub use {second};\n}}\n\
+                 use crate::sys::put;\n\
+                 pub fn probe() {{ let _ = put(\"/tmp/r438\", \"x\"); }}\n"
+            )
+        };
+        let ext = "std::fs::write as put";
+        let loc = "crate::loc::put";
+        let a = scan_src_to_json("r438a", &src(ext, loc));
+        let b = scan_src_to_json("r438b", &src(loc, ext));
+
+        let probe = |j: &serde_json::Value| -> serde_json::Value {
+            j["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["fn"] == "probe")
+                .expect(
+                    "R438: `probe` is ABSENT from functions[] — under SPEC ⟨0.21⟩ that is an \
+                     affirmative claim it is pure, over a call that reaches Fs in one configuration \
+                     and Env in the other",
+                )
+                .clone()
+        };
+        let (pa, pb) = (probe(&a), probe(&b));
+
+        // `hash` carries the per-scan tag (`r438a#probe` vs `r438b#probe`) and is the ONE field that
+        // must differ; everything else is the answer and must not. Stripping it rather than comparing
+        // a hand-picked field list, so a field ADDED later is compared by default instead of silently
+        // escaping this assertion — the direction a hand list fails in.
+        let strip = |v: &serde_json::Value| {
+            let mut o = v.as_object().unwrap().clone();
+            o.remove("hash");
+            serde_json::Value::Object(o)
+        };
+        assert_eq!(
+            strip(&pa), strip(&pb),
+            "R438: two crates differing ONLY in `#[cfg]` arm ORDER answered differently — the mixed \
+             arm set is being resolved by position, which is R105's cardinal sin one route over"
+        );
+
+        for (tag, p) in [("A", &pa), ("B", &pb)] {
+            let eff: Vec<&str> =
+                p["inferred"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
+            assert!(
+                eff.contains(&"Fs") && eff.contains(&"Env"),
+                "R438 ({tag}): the arms are `std::fs::write` and a LOCAL fn that sets an env var, and \
+                 BOTH were read, so both effects are owed. Got {eff:?}"
+            );
+            let calls: Vec<&str> =
+                p["calls"].as_array().map(|a| a.iter().map(|c| c.as_str().unwrap()).collect())
+                    .unwrap_or_default();
+            assert!(
+                calls.contains(&"loc::put"),
+                "R438 ({tag}): the LOCAL arm must arrive as a call EDGE, not as a charge — the \
+                 classifier cannot name a local arm, so an edge is the only thing that keeps `probe` \
+                 correct when `loc::put` is later edited. Got calls {calls:?}"
+            );
+            assert!(
+                p.get("paths").is_none(),
+                "R438 ({tag}): the arms name DIFFERENT destinations, so publishing either one's \
+                 literal is the pick-by-position this row exists for — and it is what let \
+                 `allow Fs <lit>` certify the other configuration. Got {:?}",
+                p.get("paths")
+            );
+            let inc: Vec<&str> = p["incomplete"].as_array()
+                .map(|a| a.iter().map(|e| e.as_str().unwrap()).collect()).unwrap_or_default();
+            assert!(
+                inc.contains(&"Fs"),
+                "R438 ({tag}): an EMPTY surface must not read as a COMPLETE one — without \
+                 `incomplete: [Fs]` an allowlist has nothing to refuse. Got {inc:?}"
+            );
+        }
+    }
+
+    /// SOUNDNESS R438 OVER-CHARGE CONTROLS — the three narrowings the fix introduced, each with a
+    /// fixture on its far side. Written WITH the defect arm above rather than after it, because every
+    /// one of these was measured wrong in a first cut over 1,556 real crates:
+    ///
+    ///   (a) ALL-LOCAL arm set. The first cut fired on any name declared twice under `#[cfg]`, which
+    ///       swept in the commonest `#[cfg]` shape in Rust — a platform module pair. Those arms all
+    ///       classify to `None`, the branch charged nothing and `continue`d past the ordinary handling,
+    ///       and **8 rows DISAPPEARED from `functions[]`** including `openssl-sys`'s `try_pkg_config`
+    ///       losing `["Env","Exec","Fs"]`. A vanished row is a purity claim: the fix introduced the
+    ///       class it was closing.
+    ///   (b) SINGLE cfg-gated local re-export. Recording it into `aliases` makes its key `aliased`, and
+    ///       `scan.rs` skips local resolution for an aliased path — so the one-armed case would LOSE
+    ///       the edge `reexport_target` supplies today.
+    ///   (c) A cfg-gated DEFINITION beside `use` arms (`simdutf8`'s `validate_utf8_basic`). The
+    ///       definition lives in neither map, so joining only the `use` arms suppressed the ordinary
+    ///       resolution that used to find it and simdutf8's four `from_utf8` entry points went from
+    ///       `Unknown` + `unresolved` to ABSENT.
+    #[test]
+    fn r438_controls_the_shapes_the_mixed_gate_must_not_touch() {
+        // (a) ALL-LOCAL: both arms local, so there is no route split and nothing to adjudicate here —
+        //     `reexport_aliases` already unions them. Both effects must arrive, as they did pre-fix.
+        let all_local = scan_src_to_json(
+            "r438ca",
+            "pub mod a { pub fn put(_p: &str, _v: &str) { std::env::set_var(\"K\", \"1\"); } }\n\
+             pub mod b { pub fn put(_p: &str, _v: &str) { let _ = std::fs::write(\"/tmp/o\", b\"x\"); } }\n\
+             pub mod sys {\n  #[cfg(unix)] pub use crate::a::put;\n  #[cfg(not(unix))] pub use crate::b::put;\n}\n\
+             use crate::sys::put;\npub fn probe() { let _ = put(\"/tmp/r438\", \"x\"); }\n",
+        );
+        let p = all_local["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "probe")
+            .expect("R438 (a): an ALL-LOCAL arm set must still reach its caller — this shape vanished \
+                     from functions[] in the fix's first cut, which is the ⟨0.21⟩ sin");
+        let eff: Vec<&str> = p["inferred"].as_array().unwrap().iter()
+            .map(|e| e.as_str().unwrap()).collect();
+        assert!(eff.contains(&"Fs") && eff.contains(&"Env"),
+            "R438 (a): both local arms were read, so both effects are owed. Got {eff:?}");
+
+        // (b) SINGLE cfg-gated local re-export — one arm, no set, and the ordinary edge must survive.
+        let single = scan_src_to_json(
+            "r438cb",
+            "pub mod loc { pub fn put(_p: &str, _v: &str) { std::env::set_var(\"K\", \"1\"); } }\n\
+             pub mod sys { #[cfg(unix)] pub use crate::loc::put; }\n\
+             use crate::sys::put;\npub fn probe() { let _ = put(\"/tmp/r438\", \"x\"); }\n",
+        );
+        let p = single["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "probe")
+            .expect("R438 (b): a ONE-ARMED cfg-gated local re-export is not an arm set; aliasing its \
+                     key would suppress the local resolution that supplies this edge");
+        let eff: Vec<&str> = p["inferred"].as_array().unwrap().iter()
+            .map(|e| e.as_str().unwrap()).collect();
+        assert!(eff.contains(&"Env"), "R438 (b): got {eff:?}");
+
+        // (c) An ORDINARY single-arm alias must still resolve AND still certify off its own literal. If
+        //     a widening makes this red, the fix has made determined code uncertifiable — R416's shape.
+        let ordinary = scan_src_to_json(
+            "r438cc",
+            "pub mod sys { pub use std::fs::write as put; }\n\
+             use crate::sys::put;\npub fn probe() { let _ = put(\"/tmp/r438\", b\"x\"); }\n",
+        );
+        let p = ordinary["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "probe")
+            .expect("R438 (c): an ordinary alias must still resolve");
+        let paths: Vec<&str> = p["paths"].as_array().map(|a| a.iter()
+            .map(|e| e.as_str().unwrap()).collect()).unwrap_or_default();
+        assert!(paths.contains(&"/tmp/r438"),
+            "R438 (c): a DETERMINED single-arm alias still names its destination — withholding here \
+             would make certifiable code uncertifiable. Got {paths:?}");
+        assert!(p.get("incomplete").is_none(),
+            "R438 (c): nothing is hidden in a one-armed alias, so nothing is incomplete");
+    }
+
     /// R105 UNION CONTROL — the cost side, and the reason this fix does not make 6.6% of a real corpus
     /// noisier. When the duplicated arms ANSWER THE SAME, nothing is disclosed:
     ///
