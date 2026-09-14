@@ -3039,7 +3039,13 @@ impl Candor {
                     // the path it is invoked ON.
                     //
                     // THIS ENGINE IS THE ONE `--help` CALLS "the sound gate", AND IT WAS THE ONE STILL
-                    // EXEMPTING THE SHAPE — while declaring `spec 0.37` from the shared constant. Found
+                    // EXEMPTING THE SHAPE — while declaring the rung that forbids it, from the shared
+                    // SPEC_VERSION constant. (Written as a literal `spec 0.37` until the ⟨0.38⟩ bump,
+                    // where it became the third thing a floor bump has to triage by hand. A version
+                    // number in HISTORICAL prose is indistinguishable to `release-preflight [2]` from a
+                    // declaration the bump MISSED — which is the whole signature that check exists to
+                    // catch — so name the rung, not the number, when recording what was true once.)
+                    // Found
                     // by review: the syntactic backend refused the R414 fixture at exit 1 and this engine
                     // certified it at exit 0, with a policy that allows only a sibling literal.
                     //

@@ -12,6 +12,13 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.38.0] — 2026-09-14
 
+- **A version number in HISTORICAL prose is a bump-miss signature that is not a bump miss.** `src/lib.rs`
+  recorded that this engine was "still EXEMPTING THE SHAPE — while declaring `spec 0.37`". True when
+  written, and at the ⟨0.38⟩ bump indistinguishable to `release-preflight [2]` from a declaration the
+  bump had missed — which is the entire signature that check exists to catch. Reworded to name the rung
+  rather than the number. Same class as the comment-goes-stale rule this codebase already carries: when
+  recording what was true once, do not pin it to a value that must move.
+
 ### ⚠ Fixed
 
 - **R438 — a MIXED `#[cfg]` alias arm set picked the external arm and published its literal.**
