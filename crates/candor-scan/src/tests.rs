@@ -7770,6 +7770,78 @@ impl H {\n\
     }
 
     #[test]
+    fn a_cfg_twinned_alias_used_as_a_type_is_not_resolved_by_source_order() {
+        // SOUNDNESS R372 — `collect_decls` was handed a THROWAWAY `use_alts` map, so a name bound twice
+        // under `#[cfg]` left `uses` holding whichever arm was written LAST, and NINE type consumers
+        // (`type_path` at five positions, `elem_type` twice, `record_return` for free fns and methods)
+        // resolved a TYPE by SOURCE ORDER. A type decides receiver resolution, which decides dispatch,
+        // which decides whose effects attach to the caller.
+        //
+        // THE TWO FIXTURES ARE BYTE-IDENTICAL EXCEPT THE ORDER OF TWO `use` LINES — that is the whole
+        // measurement, and the uncollided `Solo` control (one arm, same target, no `#[cfg]`) is what
+        // isolates the collision as the cause rather than anything about the routes. Before this fix,
+        // `Fs` arm first → `caller` (the `returns` route, `fn make() -> A`) and `field_caller` (the
+        // `fields` route, `struct HolderA { h: A }`) were BOTH ABSENT — a §4 purity claim decided by
+        // which line the author happened to write first — while the swapped order charged `["Fs"]`.
+        //
+        // The remedy is the UNION, which is the posture R438 already landed for the alias route: both
+        // arms become call edges and the effect is the union over configurations. `fab_*` is the price
+        // control — a twin whose BOTH arms are pure must stay pure, or "union" has become "charge".
+        let arms = "\
+pub mod fs_arm {\n\
+  pub struct FR;\n\
+  impl FR { pub fn run(&self) -> u32 { let _ = std::fs::write(\"/tmp/r372\", \"x\"); 1 } }\n\
+}\n\
+pub mod pure_arm {\n\
+  pub struct PR;\n\
+  impl PR { pub fn run(&self) -> u32 { 7 } }\n\
+}\n\
+pub mod calm_arm {\n\
+  pub struct CR;\n\
+  impl CR { pub fn run(&self) -> u32 { 9 } }\n\
+}\n\
+pub use crate::fs_arm::FR as Solo;\n\
+pub fn make() -> A { A }\n\
+pub struct HolderA { pub h: A }\n\
+pub fn caller() { make().run(); }\n\
+pub fn field_caller(hh: &HolderA) { hh.h.run(); }\n\
+pub fn make_solo() -> Solo { Solo }\n\
+pub fn caller_solo() { make_solo().run(); }\n\
+pub struct HolderSolo { pub h: Solo }\n\
+pub fn field_caller_solo(hh: &HolderSolo) { hh.h.run(); }\n\
+pub fn fab_caller() { fab_make().run(); }\n\
+pub fn fab_make() -> B { B }\n\
+pub struct HolderB { pub h: B }\n\
+pub fn fab_field_caller(hh: &HolderB) { hh.h.run(); }\n";
+        // BOTH twins appear in both fixtures; only the ORDER of A's two arms differs.
+        let fs_first = "\
+#[cfg(unix)]\npub use crate::fs_arm::FR as A;\n\
+#[cfg(not(unix))]\npub use crate::pure_arm::PR as A;\n\
+#[cfg(unix)]\npub use crate::pure_arm::PR as B;\n\
+#[cfg(not(unix))]\npub use crate::calm_arm::CR as B;\n";
+        let pure_first = "\
+#[cfg(not(unix))]\npub use crate::pure_arm::PR as A;\n\
+#[cfg(unix)]\npub use crate::fs_arm::FR as A;\n\
+#[cfg(unix)]\npub use crate::pure_arm::PR as B;\n\
+#[cfg(not(unix))]\npub use crate::calm_arm::CR as B;\n";
+        for (label, order) in [("fsfirst", fs_first), ("purefirst", pure_first)] {
+            let v = scan_fixture("r372ty", &format!("{order}{arms}"));
+            for f in ["caller", "field_caller", "caller_solo", "field_caller_solo"] {
+                assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                           "[{label}] {f} reaches FR::run in one configuration — the ORDER of two \
+                            cfg-gated `use` lines must not decide whether the effect is seen:\n{v:#}");
+            }
+            // The price control: a twin whose arms are BOTH pure stays pure, through the same two
+            // routes. Without this, "resolve every arm" and "charge every arm" are indistinguishable.
+            for f in ["fab_caller", "fab_field_caller"] {
+                assert!(fixture_effects(&v, f).is_empty(),
+                        "[{label}] {f} must stay pure — the union is over the arms' OWN effects, and \
+                         both of B's arms are pure:\n{v:#}");
+            }
+        }
+    }
+
+    #[test]
     fn the_element_parameter_that_is_not_parameter_zero_is_typed() {
         // SOUNDNESS R349 (rust half) — the adapter list typed parameter 0 of a ONE-parameter closure
         // and its comment said *"`fold`'s accumulator is its first param so it is NOT a single-param

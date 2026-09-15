@@ -2054,6 +2054,19 @@ pub(crate) fn record_return(
 /// `alloc`-rooted path names no local type, so a collision with one could never have been charged
 /// anything), and recording what could not be charged is exactly the false uncertainty the 8-25% flood
 /// measurement rejected.
+/// SOUNDNESS R372 — `type_path` against the decl map's JOINED view, with the §E1 REACH COUNTER on the
+/// CHANGED branch. An unchanged corpus row is not evidence the code ran, and the open question here is
+/// how often a TYPE is resolved through a `#[cfg]`-twinned `use` at all — so it is counted, not assumed.
+fn r372_type_path(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> Option<String> {
+    let tp = type_path(ty, uses_ty);
+    if tp.as_deref().is_some_and(|t| t.contains(ALIAS_ALT_SEP))
+        && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+    {
+        eprintln!("R372TY");
+    }
+    tp
+}
+
 pub(crate) fn note_amb_ret(rets: &mut HashMap<String, Option<String>>, fn_leaf: &str, tp: &str) {
     if let Some(ty_leaf) = crate::lang::local_type_leaf(tp) {
         rets.insert(
@@ -2111,8 +2124,31 @@ pub(crate) fn collect_decls(
     // Still a throwaway, now with the reason stated honestly: the CONSUMER design is open, because
     // "push an extra edge" is right for a CALL and not obviously right for a TYPE — a receiver has one
     // type, not a set. R372 owns that question; this line is not evidence that it does not exist.
-    let mut _decl_use_alts: HashMap<String, Vec<String>> = HashMap::new();
-    crate::lang::collect_item_uses(items, include_tests, uses, &mut _decl_use_alts);
+    let mut decl_use_alts: HashMap<String, Vec<String>> = HashMap::new();
+    crate::lang::collect_item_uses(items, include_tests, uses, &mut decl_use_alts);
+    // SOUNDNESS R372 — AND THE MAP IS NO LONGER A THROWAWAY. A name bound twice under `#[cfg]` leaves
+    // `uses` holding whichever arm was written LAST, so the nine type consumers below resolved a TYPE by
+    // SOURCE ORDER. Measured on two fixtures byte-identical except the order of the two `use` lines:
+    // with the `Fs` arm first, `caller` (the `returns` route) and `field_caller` (the `fields` route) are
+    // both ABSENT; swapped, both charge `["Fs"]`; the uncollided control charges in every cell. A §4
+    // purity claim decided by which line the author happened to write first.
+    //
+    // `uses_ty` is the SAME map with every collided name replaced by its `ALIAS_ALT_SEP`-joined arm set —
+    // the spelling R105 already gave the alias route, so the receiver-typing arm in `collector.rs`
+    // (`any_arm_recordable` + `alias_join`) and `scan.rs`'s collision branch adjudicate the arms they are
+    // handed instead of this pass silently picking one. It is passed ONLY to the type consumers: `uses`
+    // itself also names the units this pass DECLARES, and a joined value there is what made R372's first
+    // recorded attempt strictly WORSE than the defect (`make` vanished from the report entirely).
+    let uses_ty_owned = decl_use_alts.values().any(|a| a.len() > 1).then(|| {
+        let mut m = uses.clone();
+        for (k, a) in &decl_use_alts {
+            if a.len() > 1 {
+                m.insert(k.clone(), a.join(&ALIAS_ALT_SEP.to_string()));
+            }
+        }
+        m
+    });
+    let uses_ty: &HashMap<String, String> = uses_ty_owned.as_ref().unwrap_or(&*uses);
     for it in items {
         // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
         // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be
@@ -2227,7 +2263,7 @@ pub(crate) fn collect_decls(
                                         .entry(s.ident.to_string())
                                         .or_default()
                                         .insert(name.to_string(), leaves);
-                                } else if let Some(ty) = type_path(&f.ty, uses) {
+                                } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                     entry.insert(name.to_string(), ty);
                                 }
                                 // SOUNDNESS R238 — A FIELD-HELD CALLBACK IS A CALLBACK. `trait_leaves`
@@ -2275,7 +2311,7 @@ pub(crate) fn collect_decls(
                                 }
                                 // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
                                 // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
-                                if let Some(e) = elem_type(&f.ty, uses) {
+                                if let Some(e) = elem_type(&f.ty, uses_ty) {
                                     field_elem
                                         .entry(s.ident.to_string())
                                         .or_default()
@@ -2304,7 +2340,7 @@ pub(crate) fn collect_decls(
                             if has_cfg(&f.attrs) {
                                 continue;
                             }
-                            if let Some(ty) = type_path(&f.ty, uses) {
+                            if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                 entry.insert(i.to_string(), ty);
                             }
                             // SOUNDNESS R238 — the TUPLE-struct position of the named-field rule above;
@@ -2324,7 +2360,7 @@ pub(crate) fn collect_decls(
                                     .or_default()
                                     .insert(i.to_string(), vec!["Fn".to_string()]);
                             }
-                            if let Some(e) = elem_type(&f.ty, uses) {
+                            if let Some(e) = elem_type(&f.ty, uses_ty) {
                                 field_elem
                                     .entry(s.ident.to_string())
                                     .or_default()
@@ -2342,7 +2378,7 @@ pub(crate) fn collect_decls(
                     syn::Fields::Unit => {}
                 }
             }
-            syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None, callable_aliases),
+            syn::Item::Fn(f) => record_return(&f.sig, uses_ty, rets, None, callable_aliases),
             // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
             // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
@@ -2389,7 +2425,7 @@ pub(crate) fn collect_decls(
                                     }
                                     _ => {}
                                 }
-                            } else if let Some(tp) = type_path(payload_ty, uses) {
+                            } else if let Some(tp) = r372_type_path(payload_ty, uses_ty) {
                                 match enum_tmp.get(&leaf) {
                                     None => {
                                         enum_tmp.insert(leaf.clone(), Some(tp));
@@ -2433,7 +2469,7 @@ pub(crate) fn collect_decls(
                                         }
                                         _ => {}
                                     }
-                                } else if let Some(tp) = type_path(&f.ty, uses) {
+                                } else if let Some(tp) = r372_type_path(&f.ty, uses_ty) {
                                     match enum_tmp.get(&key) {
                                         None => {
                                             enum_tmp.insert(key.clone(), Some(tp));
@@ -2563,7 +2599,7 @@ pub(crate) fn collect_decls(
                             for it in &im.items {
                                 if let syn::ImplItem::Type(at) = it {
                                     if at.ident == "Target" {
-                                        if let Some(tp) = type_path(&at.ty, uses) {
+                                        if let Some(tp) = r372_type_path(&at.ty, uses_ty) {
                                             let tl = tp.rsplit("::").next().unwrap_or(&tp).to_string();
                                             let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
                                             deref_target.insert(kl, tl);
@@ -2576,7 +2612,7 @@ pub(crate) fn collect_decls(
                 }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        record_return(&m.sig, uses, rets, self_ty.as_deref(), callable_aliases);
+                        record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases);
                     }
                     // `impl X { const BASE: &str = "https://api.openai.com/v1"; }` — an associated const
                     // string. Indexed by its LEAF (`BASE`) exactly like a module const, so a body's
