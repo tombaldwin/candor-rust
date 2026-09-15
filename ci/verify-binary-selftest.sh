@@ -87,6 +87,11 @@ check "a MISSING EFFECT CLASS is refused" "$WORK/noexec" 1 0.38.0
 mkstub "$WORK/oldver" "candor-scan 0.1.0 (spec 0.1)" "$GOOD_FNS" 12
 check "a WRONG VERSION is refused" "$WORK/oldver" 1 0.38.0
 
+# 4b. THE TAG FORM. Callers pass `github.ref_name` — `v0.38.1`, not `0.38.1` — and that mismatch made
+#     the gate refuse two good binaries on the first real release run. The check was right and the
+#     argument was wrong; this arm is why that cannot recur silently.
+check "a TAG-shaped version (v-prefixed) is accepted" "$WORK/good" 0 v0.38.0
+
 # 5. …and with no expected version passed, that same binary must PASS — otherwise the version check is
 #    firing on something other than the version, and arm 4 proves nothing.
 check "…and passes when no version is demanded" "$WORK/oldver" 0 ""
@@ -99,7 +104,7 @@ check "a BROKEN candor-query is refused" "$WORK/badq" 1 0.38.0
 
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "verify-binary-selftest: OK — 7 arms, both directions: a sound binary passes, and an empty report,"
+  echo "verify-binary-selftest: OK — 8 arms, both directions: a sound binary passes, and an empty report,"
   echo "  an under-report, a missing effect class, a wrong version and a broken query are each refused."
   exit 0
 fi

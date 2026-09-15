@@ -12,6 +12,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.38.1] — 2026-09-15
 
+- **`ci/verify-binary.sh` accepts a TAG as well as a bare version, and the gate's first real release run
+  is why.** The workflow passes `github.ref_name` — `v0.38.1`, not `0.38.1` — so the substring test
+  failed and the gate REFUSED two perfectly good binaries. It was right to refuse (its question is "does
+  this binary say what I expect") and the argument was wrong. One leading `v` is stripped in the script
+  rather than at each call site, so a caller cannot get it wrong again, and the selftest gained the arm
+  that makes it impossible to regress silently (8 arms now). Verified the strip does not weaken the
+  check: `v0.99.0` is still refused.
+
 - **The release-binary selftest's wrong-version fixture no longer impersonates a bump-miss.** It used
   `"candor-scan 0.37.0 (spec 0.37)"` — the immediately-prior floor, which is the exact string
   `release-preflight [2]` exists to catch — so it was flagged as a leftover on the very next cut, and
