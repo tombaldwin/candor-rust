@@ -12,6 +12,13 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.38.1] — 2026-09-15
 
+- **The release-binary selftest's wrong-version fixture no longer impersonates a bump-miss.** It used
+  `"candor-scan 0.37.0 (spec 0.37)"` — the immediately-prior floor, which is the exact string
+  `release-preflight [2]` exists to catch — so it was flagged as a leftover on the very next cut, and
+  correctly. Any wrong version proves that arm; `0.1.0` proves it without ever colliding with a live
+  floor again. The same rule the ⟨0.38⟩ pass applied to historical prose in `src/lib.rs`: do not pin a
+  fixture to a value that has to move.
+
 - **`ci/verify-binary-selftest.sh` — the gate that guards the release-asset gate**, wired into `ci.yml`
   so it runs on every push. `verify-binary.sh` is the only thing between a broken build and a published
   binary, and its green was otherwise unfalsifiable: loosen a floor or make a check unreachable and every
