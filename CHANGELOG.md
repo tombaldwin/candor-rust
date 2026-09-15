@@ -10,6 +10,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Release BINARIES are published for the first time.** `candor-scan` and `candor-query` are attached
+  to the release for macOS arm64 and Linux x64, so `candor update rust` no longer requires a Rust
+  toolchain. Until now candor-rust was the only engine that demanded a compiler on the user’\s machine —
+  the reverse of what anyone would guess — and on a box without one the front door dead-ended in a
+  remedy whose second lap printed the same skip. The binaries are gated by `ci/verify-binary.sh`
+  (both binaries, against a fixture with known ground truth), which is itself gated by an 8-arm selftest
+  proving it can FAIL.
+
 ## [0.38.1] — 2026-09-15
 
 - **`ci/verify-binary.sh` accepts a TAG as well as a bare version, and the gate's first real release run
