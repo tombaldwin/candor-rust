@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.38.2] — 2026-09-15
+
 - **Release BINARIES are published for the first time.** `candor-scan` and `candor-query` are attached
   to the release for macOS arm64 and Linux x64, so `candor update rust` no longer requires a Rust
   toolchain. Until now candor-rust was the only engine that demanded a compiler on the user’\s machine —
