@@ -7770,6 +7770,76 @@ impl H {\n\
     }
 
     #[test]
+    fn a_containers_element_reached_through_an_accessor_receiver_resolves() {
+        // SOUNDNESS R401 (the `Weak` half) + R446. R401 records `Weak` and "a `HashMap` VALUE" as its
+        // open residual. Measuring it FALSIFIED the second half of that framing: over a `Vec<G>` whose
+        // method spawns a process, with `v[0].run()` and `if let Some(g) = v.get(0) { g.run() }` both
+        // charging as calibration, `v.get(0).unwrap().run()` was ABSENT TOO. So the axis is not the
+        // container's shape — it is the BINDING SITE. The `for`, `if let` and index sites resolve an
+        // ELEMENT and the RECEIVER position did not, so the same container answered or stayed silent
+        // according to how the caller spelled the reach, on the concrete route and the dispatch one.
+        //
+        // `Weak` is the row's own criterion applied: it does not `Deref`, so it belongs to the ELEMENT
+        // resolver and not to `trait_leaves` — peeling it there would fabricate a receiver, because
+        // `w.go()` does not compile. Its payload arrives through the named accessor `upgrade()`.
+        //
+        // THE GUARD OPENER IS LOAD-BEARING. R401's lead: a minimal crate whose only function is
+        // `v[0].go()` does NOT charge, because `resolve_recv_traits` has a crate-wide hot-path guard
+        // (`has_dyn_return` is one flag in it). `make_doer() -> Box<dyn Doer>` opens it. Without that,
+        // this fixture would measure the guard and not the fix — which is how the row's own first
+        // element-route attempt came back "inert" and was reverted.
+        let src = "\
+use std::collections::HashMap;\n\
+use std::sync::{Arc, Weak};\n\
+pub trait Doer { fn go(&self); }\n\
+pub struct Spawner;\n\
+impl Doer for Spawner { fn go(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub struct G;\n\
+impl G { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub struct Calm;\n\
+impl Calm { pub fn run(&self) -> u32 { 7 } }\n\
+pub trait Quiet { fn go(&self); }\n\
+pub struct QuietImpl;\n\
+impl Quiet for QuietImpl { fn go(&self) {} }\n\
+pub fn make_doer() -> Box<dyn Doer> { Box::new(Spawner) }\n\
+pub fn direct_spawn() { let _ = std::process::Command::new(\"true\").status(); }\n\
+pub fn cal_box(d: &Box<dyn Doer>) { d.go(); }\n\
+pub fn cal_vec(v: &Vec<Box<dyn Doer>>) { v[0].go(); }\n\
+pub fn cal_map_iflet(m: &HashMap<String, Box<dyn Doer>>, k: &str) { if let Some(v) = m.get(k) { v.go(); } }\n\
+pub fn cal_c_index(v: &Vec<G>) { v[0].run(); }\n\
+pub fn a_weak_iflet(w: &Weak<dyn Doer>) { if let Some(s) = w.upgrade() { s.go(); } }\n\
+pub fn a_weak_unwrap(w: &Weak<dyn Doer>) { w.upgrade().unwrap().go(); }\n\
+pub fn a_weak_box(w: &Weak<Box<dyn Doer>>) { if let Some(s) = w.upgrade() { s.go(); } }\n\
+pub fn a_map_unwrap(m: &HashMap<String, Box<dyn Doer>>, k: &str) { m.get(k).unwrap().go(); }\n\
+pub fn a_vec_unwrap(v: &Vec<Box<dyn Doer>>) { v.get(0).unwrap().go(); }\n\
+pub fn a_c_get_unwrap(v: &Vec<G>) { v.get(0).unwrap().run(); }\n\
+pub fn a_c_first_unwrap(v: &Vec<G>) { v.first().unwrap().run(); }\n\
+pub fn fab_c_get(v: &Vec<Calm>) { v.get(0).unwrap().run(); }\n\
+pub fn fab_c_first(v: &Vec<Calm>) { v.first().unwrap().run(); }\n\
+pub fn fab_dyn_map(m: &HashMap<String, Box<dyn Quiet>>, k: &str) { m.get(k).unwrap().go(); }\n\
+pub fn fab_weak(w: &Weak<dyn Quiet>) { if let Some(s) = w.upgrade() { s.go(); } }\n";
+        let v = scan_fixture("r401acc", src);
+        // The calibration FIRST. R401's own first repro proved nothing because its controls failed too.
+        for f in ["direct_spawn", "cal_box", "cal_vec", "cal_map_iflet", "cal_c_index"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "CALIBRATION {f} must charge — a fixture whose control fails is not evidence in \
+                        either direction:\n{v:#}");
+        }
+        for f in ["a_weak_iflet", "a_weak_unwrap", "a_weak_box", "a_map_unwrap", "a_vec_unwrap",
+                  "a_c_get_unwrap", "a_c_first_unwrap"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches a body that spawns — HOW the element is reached must not decide \
+                        whether the effect is seen:\n{v:#}");
+        }
+        // The price: the same five spellings over a PURE element stay pure. Without these, "resolve the
+        // element" and "charge the container" are indistinguishable.
+        for f in ["fab_c_get", "fab_c_first", "fab_dyn_map", "fab_weak"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — the element's OWN effects are what propagate:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn a_portability_twin_sharing_a_type_leaf_still_gets_both_arms_edges() {
         // SOUNDNESS R440 — R438's arm loop resolves each unclassifiable arm with `resolve_target`, which
         // keys a qualified call on its TWO-SEGMENT TAIL and refuses a tail with several claimants

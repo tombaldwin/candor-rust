@@ -647,6 +647,50 @@ impl<'a> CallCollector<'a> {
                 if is_recv_type_changing(&m.method.to_string()) {
                     return None;
                 }
+                // SOUNDNESS R446 — AN ELEMENT-YIELDING ACCESSOR IS NOT A STEP IN A BUILDER CHAIN.
+                // `v.get(0).unwrap().run()` walks `unwrap` -> `get` -> `v` and ends at `vars["v"]`,
+                // which holds nothing for a CONTAINER parameter (its answer lives in `elem_of`), so the
+                // chain resolved to nothing and the caller read silent-pure — while `v[0].run()` and
+                // `if let Some(g) = v.get(0) { g.run() }` over the SAME container both charged. Those
+                // two sites resolve an ELEMENT and this one did not, so the container answered or
+                // stayed silent according to how the caller spelled the reach. Narrow by construction:
+                // `resolve_elem_type` answers only for a type it already knows to be a container, so a
+                // `.get()` on anything else (a builder, a map of non-locals) adds nothing.
+                // The DISPATCH element WINS, and declining here is what lets it. `visit_expr_method_call`
+                // takes the concrete branch whenever THIS function answers at all, so a chain walk that
+                // ran past `get` and ended at the CONTAINER's own type (`vars["v"]` = "Vec") shadowed
+                // `resolve_recv_traits`' bounded CHA on the same receiver and formed a useless
+                // `Vec::go`. Measured: `if let Some(v) = m.get(k) { v.go() }` charged while
+                // `m.get(k).unwrap().go()` over the same `HashMap<_, Box<dyn Doer>>` was ABSENT. Same
+                // rule as every other binder in this file — prefer the trait-object route whenever the
+                // element is a dispatch type.
+                if crate::lang::is_element_yielding_accessor(&m.method.to_string()) {
+                    // §E1 REACH COUNTER, on the CHANGED branch — this arm both ADDS an element answer
+                    // and WITHDRAWS a chain-walk one, so "it did not fire" and "it fired and moved
+                    // nothing" are different claims and the A/B must be able to tell them apart.
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R446ACC");
+                    }
+                    if !self.resolve_elem_trait_leaves(&m.receiver).is_empty() {
+                        return None;
+                    }
+                    // STRICTLY ADDITIVE, and the alternative was BUILT AND MEASURED. An
+                    // element-yielding accessor never evaluates to its receiver's OWN type, so
+                    // `return`ing here rather than walking on would also close a pre-existing
+                    // FABRICATION — `impl Cfg { fn get(&self, k) -> Calm; fn run(&self) { spawn } }`
+                    // with `c.get("x").run()` charges the caller `['Exec']` through a phantom
+                    // `Cfg::run`, over a body that spawns nothing. That version cost **REMOVED 14** on
+                    // the 1,563-crate A/B, and one of the fourteen was quinn's
+                    // `SendStream::poll_write` LOSING its `['Unknown']`: `Pin::get_mut`,
+                    // `UnsafeCell::get` and `NonZeroI32::get` are not container accessors, and for them
+                    // the ordinary chain walk (which collapses a smart pointer to its pointee) was
+                    // already right. Trading a silence for a lost disclosure is the direction this
+                    // register ranks worst, so the narrowing is filed as its own finding rather than
+                    // smuggled in beside a fix that only adds.
+                    if let Some(e) = self.resolve_elem_type(&m.receiver) {
+                        return Some(e);
+                    }
+                }
                 // Otherwise walk through the chain to the base receiver's type. We deliberately do NOT
                 // consult the return-type index by method NAME here: a method name doesn't identify the
                 // method, so a single crate-wide `fn conn() -> redis::Connection` would otherwise hijack
@@ -1447,6 +1491,22 @@ impl<'a> CallCollector<'a> {
                 // name added to it cannot make them drift apart again.
                 if is_recv_type_changing(&m.method.to_string()) {
                     return Vec::new();
+                }
+                // SOUNDNESS R446 — the dispatch twin of the accessor arm in `resolve_recv_type`, and it
+                // is here for the reason R380 and R347 both record: two resolvers answering ONE question
+                // about one receiver must not walk differently, or the same expression resolves on one
+                // route and not the other. `m.get(k).unwrap().go()` over a `HashMap<_, Box<dyn Doer>>`
+                // and `w.upgrade().unwrap().go()` over a `Weak<dyn Doer>` were both ABSENT while
+                // `if let Some(v) = m.get(k) { v.go() }` charged.
+                if crate::lang::is_element_yielding_accessor(&m.method.to_string()) {
+                    let e = self.resolve_elem_trait_leaves(&m.receiver);
+                    if !e.is_empty() {
+                        // §E1 REACH COUNTER, on the CHANGED branch.
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R446DYN");
+                        }
+                        return e;
+                    }
                 }
                 self.resolve_recv_traits(&m.receiver)
             }
