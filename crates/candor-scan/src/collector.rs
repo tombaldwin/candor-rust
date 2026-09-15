@@ -4542,6 +4542,59 @@ pub(crate) fn resolve_target<'a>(
     }
 }
 
+/// SOUNDNESS R440 — THE ONE PLACE `resolve_target`'s AMBIGUITY REFUSAL IS BACKWARDS, and it is the
+/// place the arm set itself creates. `resolve_target` keys a qualified call on its two-segment tail and
+/// refuses a tail with several claimants, because `a::Job::run` and `b::Job::run` share one and linking
+/// a many-way tail would fabricate one type's effect onto the other's caller. That is right everywhere
+/// except inside R438's arm loop, where the several claimants ARE the arms:
+///
+///     #[cfg(…linux…)]  use crate::sys::unix::waker::eventfd::WakerInternal;
+///     #[cfg(…bsd…)]    use crate::sys::unix::waker::pipe::WakerInternal;
+///     impl Waker { pub fn wake(&self) -> io::Result<()> { self.waker.wake() } }
+///
+/// is mio's own `Waker`, re-exported as `mio::Waker`. Both arms are LOCAL, both `WakerInternal::wake`
+/// bodies write to a file descriptor, and both charge `Fs` in their own rows — while `Waker::wake`
+/// shares the tail `WakerInternal::wake` with them BOTH, so `resolve_target` refused BOTH arms, the R438
+/// branch gained no edge, charged nothing and `continue`d: `fdbased::Waker::wake` was ABSENT from
+/// `functions[]`, an affirmative purity claim under ⟨0.21⟩ over two writes, on a public API.
+///
+/// **THIS FALSIFIES R440's OWN SAMPLE CONCLUSION** — the row records that every sampled undisclosed
+/// occurrence was a pure-type arm set, "so the under-report may be of NOTHING". It is not: a full census
+/// of the 62 undisclosed occurrences over 1,563 crates found this one, and the reason the earlier sample
+/// missed it is that a *portability* twin (`unix::X` / `windows::X`) is exactly the shape that shares a
+/// type LEAF, which is what makes it invisible to a tail-keyed index.
+///
+/// The disambiguation is the arm's OWN path, which names its claimant in full. Only a claimant the arm
+/// path names — as an exact qual, or as one qual being the other's `::`-suffix, which is how a written
+/// `crate::`-rooted arm and a module-relative qual meet — is taken, and a second match REFUSES exactly
+/// as `resolve_target` does. So this can only ever pick a definition the source text spelled out; it
+/// never guesses between claimants, and it is strictly MORE precise than the tail it is rescuing.
+/// A single-claimant tail is left alone — that is `resolve_target`'s case and it already answers it.
+pub(crate) fn arm_exact_target<'a>(
+    path: &str,
+    by_tail2: &'a HashMap<String, Vec<String>>,
+) -> Option<&'a String> {
+    let cands = by_tail2.get(&tail2(path)?)?;
+    if cands.len() < 2 {
+        return None;
+    }
+    // `expand` leaves a `use`-map value crate-rooted; a definition qual never is.
+    let bare = path.strip_prefix("crate::").unwrap_or(path);
+    let mut hit: Option<&String> = None;
+    for c in cands {
+        let names_it = c == bare
+            || bare.ends_with(&format!("::{c}"))
+            || c.ends_with(&format!("::{bare}"));
+        if names_it {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(c);
+        }
+    }
+    hit
+}
+
 /// SOUNDNESS R128 — is this call path's OWNING MODULE one whose items candor could not read in full?
 ///
 /// `path` is the RESOLVED callee path as `expand` left it, and a surviving `crate::` head means one

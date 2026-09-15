@@ -2154,10 +2154,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     {
                         continue;
                     }
-                    let targets = resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf)
-                        .or_else(|| reexport_target(alt, c.method, &by_tail2, &by_reexport));
+                    // SOUNDNESS R440 — `arm_exact_target` LAST, and only when the two above declined.
+                    // It is the narrow rescue of the one ambiguity that this loop's own input creates:
+                    // a portability twin whose arms share a type LEAF (`unix::X` / `windows::X`) makes
+                    // the tail2 many-way, so `resolve_target` refused BOTH arms and the branch fell
+                    // through to R440's no-trace state. Measured on mio: `Waker::wake` ABSENT over two
+                    // `WakerInternal::wake` bodies that each write a file descriptor and each charge
+                    // `Fs` in their own row.
+                    let targets: Option<Vec<String>> =
+                        resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf)
+                            .or_else(|| reexport_target(alt, c.method, &by_tail2, &by_reexport))
+                            .cloned()
+                            .or_else(|| {
+                                let t = crate::collector::arm_exact_target(alt, &by_tail2)?;
+                                // §E1 REACH COUNTER, on the CHANGED branch.
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R440ARM");
+                                }
+                                Some(vec![t.clone()])
+                            });
                     if let Some(targets) = targets {
-                        for t in targets {
+                        for t in &targets {
                             if t != &f.qual {
                                 // The GAIN probe, distinct from the REACH probe in `decls.rs`: reaching
                                 // the arm set and actually gaining an edge from it are two facts, and a
