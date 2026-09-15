@@ -32,6 +32,12 @@ set -euo pipefail
 SCAN="${1:?usage: verify-binary.sh <candor-scan> <candor-query> [expected-version]}"
 QUERY="${2:?usage: verify-binary.sh <candor-scan> <candor-query> [expected-version]}"
 WANT_VER="${3:-}"
+# ACCEPT A TAG AS WELL AS A VERSION. Callers naturally pass `github.ref_name`, which is `v0.38.1`, while
+# a binary reports `0.38.1` — so the substring test below failed on the FIRST real release run and the
+# gate refused two perfectly good binaries. It was right to refuse (the check is "does this binary say
+# what I expect"), and the argument was wrong. Strip one leading `v` here rather than at each call site,
+# so a caller cannot get it wrong again.
+WANT_VER="${WANT_VER#v}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
