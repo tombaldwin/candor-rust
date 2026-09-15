@@ -767,7 +767,14 @@ pub(crate) fn elem_trait_leaves(
                 // driver `pf_oncelock_cb` — a kernel-witnessed silent under-report). Only `elem_trait_leaves`
                 // gains them, NOT `trait_leaves`: a `OnceLock<Box<dyn Doer>>` is not itself a `Doer` (it does
                 // not `Deref`), so peeling it in the direct-dispatch resolver would fabricate a receiver type.
-                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell"
+                // SOUNDNESS R401 — `Weak<T>` belongs on THIS list and on no other, by the criterion
+                // the `OnceLock` note above already states. `Weak` does NOT `Deref`, so `w.go()` does
+                // not compile and peeling it in `trait_leaves` would fabricate a receiver; its payload
+                // is reached through the named accessor `upgrade()`, which is the ELEMENT route — the
+                // same shape as `OnceLock::get`. Measured at HEAD with `p_box`/`p_arc`/`p_vec`/`p_opt`
+                // charging `['Exec']` as the calibration and the guard opened by a `-> Box<dyn Doer>`
+                // factory: `if let Some(s) = w.upgrade() { s.go() }` over a `Weak<dyn Doer>` was ABSENT.
+                "Box" | "Arc" | "Rc" | "Weak" | "Mutex" | "RwLock" | "RefCell" | "Cell"
                 | "OnceLock" | "OnceCell" | "LazyLock" | "LazyCell" | "Lazy" => dispatch(first_ty),
                 _ => Vec::new(),
             }
@@ -2203,6 +2210,10 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
         // … and the Option-returning ELEMENT accessors, whose payload IS the receiver's element, so
         // `if let Some(h) = v.last()` and `for h in v.last()` both want what this returns (R346).
             | "first" | "last" | "get"
+        // R401 — `Weak::upgrade` is one of those: it returns `Option<Arc<T>>`, whose payload is the
+        // `Weak`'s own element. It is the accessor that makes `Weak` reachable at all, since `Weak`
+        // does not `Deref` (see `elem_trait_leaves`).
+            | "upgrade"
         // `unwrap` is here for the guard chain (`lock().unwrap()`) and is the one entry that is a
         // judgement rather than a fact: it also unwraps an `Option<T>`/`Result<T, _>` whose `T` is NOT
         // a collection, where both resolvers then find no element and return nothing. Harmless in that
@@ -2234,6 +2245,24 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// definition — the same warrant every entry on the single-parameter list already has. A user type
 /// with its own `fold` carries the same (pre-existing) risk as one with its own `map`, and the binding
 /// fires at all only once the receiver already resolved to a known collection.
+/// SOUNDNESS R446 — THE ACCESSORS WHOSE RESULT IS THE RECEIVER'S ELEMENT, asked at a RECEIVER
+/// position. `is_element_preserving_adapter` beside this one answers "does this adapter keep the
+/// element the same", which is the question the element RESOLVERS ask as they peel a chain; this one
+/// answers "is this expression the element of the thing it was called on", which is what the two
+/// RECEIVER resolvers need in order to type `c.get(k).unwrap().run()` at all.
+///
+/// MEASURED AT HEAD, over a `Vec<G>` / `HashMap<String, Box<dyn Doer>>` whose method spawns a process,
+/// with `v[0].run()` and `if let Some(g) = v.get(0) { g.run() }` both charging as the calibration:
+/// `v.get(0).unwrap().run()`, `v.first().unwrap().run()`, `m.get(k).unwrap().go()` and
+/// `w.upgrade().unwrap().go()` were ALL ABSENT — on the concrete route and the dispatch route alike.
+/// **That is a wider class than R401's "a `HashMap` VALUE" framing, and the framing is what hid it:
+/// `v.get(0).unwrap()` over a `Vec` is absent too, so the axis is not the container's shape, it is the
+/// BINDING SITE.** The `if let` / `for` / index sites resolve an element and the receiver position did
+/// not, so the same container answered or stayed silent according to how the caller spelled the reach.
+pub(crate) fn is_element_yielding_accessor(method: &str) -> bool {
+    matches!(method, "get" | "get_mut" | "first" | "last" | "upgrade")
+}
+
 pub(crate) fn is_elem_last_param_adapter(method: &str) -> bool {
     matches!(method, "fold" | "rfold" | "try_fold" | "try_rfold" | "scan")
 }

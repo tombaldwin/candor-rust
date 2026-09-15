@@ -10,6 +10,30 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R401 (`Weak`) + R446 — a container's ELEMENT reached through an ACCESSOR RECEIVER
+  resolved to nothing, and R401's "a `HashMap` VALUE" framing is what hid the size of it.** Measured
+  over a `Vec<G>` whose method spawns a process, with `v[0].run()` and
+  `if let Some(g) = v.get(0) { g.run() }` both charging as calibration: `v.get(0).unwrap().run()` was
+  **ABSENT TOO**, over a `Vec`. So the axis is not the container's shape — it is the BINDING SITE. The
+  `for`, `if let` and index sites resolve an element and the receiver position did not, so the same
+  container answered or stayed silent according to how the caller spelled the reach, on the concrete
+  route and the dispatch route alike: `m.get(k).unwrap().go()`, `v.get(0).unwrap().go()`,
+  `v.first().unwrap().run()` and `w.upgrade().unwrap().go()` were all purity claims under ⟨0.21⟩.
+
+  Both receiver resolvers now ask the element question at an element-yielding accessor
+  (`get`/`get_mut`/`first`/`last`/`upgrade`), the dispatch answer winning as it does at every other
+  binder; and `Weak` joins the ELEMENT wrapper list — and only that one, by the criterion the file
+  already states: `Weak` does not `Deref`, so peeling it in the direct-dispatch resolver would fabricate
+  a receiver. **1,563-crate A/B: ADDED 7, REMOVED 0, CHANGED 29, 0 on `inferred`; reach 13,628 accessor
+  resolutions across 768 crates plus 290 dispatch ones across 54.** Every change is a new `calls` edge or
+  a new `invisible` disclosure: the shapes are everywhere on the corpus and the elements they reach
+  happen to be pure, which is the reach-measured inert case rather than an unmeasured one.
+
+  The GUARD is why this was open: a minimal crate whose only function is `v[0].go()` does not charge at
+  all, because `resolve_recv_traits` has a crate-wide hot-path guard. Any fixture for this route must
+  contain a `-> Box<dyn …>` factory or it measures the guard and not the fix — which is how this row's
+  first element-route attempt came back "inert" and was reverted.
+
 - **⚠ SOUNDNESS R440 — a portability twin whose two arms share a type LEAF lost BOTH of its edges, and
   the row's own "the under-report may be of NOTHING" is now falsified.** R438's arm loop resolves each
   unclassifiable `#[cfg]` arm with `resolve_target`, which keys a qualified call on its two-segment tail
