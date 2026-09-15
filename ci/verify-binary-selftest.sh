@@ -79,7 +79,12 @@ check "a MISSING EFFECT CLASS is refused" "$WORK/noexec" 1 0.38.0
 
 # 4. Sound report, wrong build. The only arm that can catch a binary built from the wrong ref — and the
 #    one that caught a stale 0.37.0 target/release on this checker's first real run.
-mkstub "$WORK/oldver" "candor-scan 0.37.0 (spec 0.37)" "$GOOD_FNS" 12
+# A version that can never be a live floor. Using the IMMEDIATELY-PRIOR one (0.37) made this fixture
+# impersonate the exact string a real bump-miss produces, and `release-preflight [2]` flagged it as one
+# on the very next cut. Any wrong version proves this arm; an ancient one proves it without ever
+# colliding with a floor again. (Same rule as historical prose: do not pin a fixture to a value that
+# has to move.)
+mkstub "$WORK/oldver" "candor-scan 0.1.0 (spec 0.1)" "$GOOD_FNS" 12
 check "a WRONG VERSION is refused" "$WORK/oldver" 1 0.38.0
 
 # 5. …and with no expected version passed, that same binary must PASS — otherwise the version check is
