@@ -877,6 +877,42 @@ pub fn unverified_hole_rule<'a, S: AsRef<str>>(
     })
 }
 
+/// R443 — THE PROVABLE-PURITY ADVISORY'S LINES, ONE RENDERER FOR BOTH GATE ROUTES.
+///
+/// `candor-scan --policy` printed this note and `candor-query gate --report` printed NOTHING over the
+/// identical tree, the identical rule and the identical verdict (MEASURED 2026-09-15 on
+/// `pub fn via_callback(f: impl Fn()) { f(); }` under `pure via_callback`: route B three lines naming
+/// `deny Unknown via_callback`, route A `policy ✓` and silence). **The silent route is the DEPLOYED
+/// one** — gating a precomputed report is what the query layer is for, so it is what CI runs.
+///
+/// The SET is already single-sourced ([`unverified_hole_rule`], which both routes have always called);
+/// this is the other half — the rendering, which would otherwise be the same three sentences written
+/// twice in two crates, i.e. the R288/R347 shape arriving through the fix for it. Only the `prefix`
+/// differs, because the two routes must name themselves (an operator has to know which command to
+/// re-run). `holes` is `(fn, upgrade)` in the caller's own order — already the shape candor-scan's
+/// `unverified_holes` returns.
+///
+/// ADVISORY: the caller prints these and does NOT touch its verdict or exit code. Whether `pure`/`deny`
+/// should FAIL CLOSED on `Unknown` is a SPEC question (R443's expensive half) and is deliberately not
+/// decided here.
+pub fn unverified_note_lines(prefix: &str, holes: &[(String, String)]) -> Vec<String> {
+    if holes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![format!(
+        "{prefix}: note — {} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):",
+        holes.len()
+    )];
+    for (fq, up) in holes {
+        out.push(format!("    `{fq}`  → add  `{up}`"));
+    }
+    out.push(
+        "  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-query unverified` for detail — the gate verdict is unchanged)"
+            .to_string(),
+    );
+    out
+}
+
 /// Parse a CANDOR_POLICY file (SPEC §6.2). One rule per line; `#` comments and blanks ignored:
 ///
 /// ```text
@@ -1267,6 +1303,36 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
 
 #[cfg(test)]
 mod tests {
+    /// R443 — the note's bytes, pinned. Both gate routes render through this one function now, so the
+    /// only thing a route may vary is the PREFIX; anything else drifting is this assertion failing.
+    /// The strings are the ones candor-scan has printed since ⟨0.19⟩, character for character, because
+    /// the point of the change was to give the SILENT route the EXISTING disclosure — not a new one.
+    #[test]
+    fn unverified_note_lines_render_one_note_for_both_routes() {
+        let holes = vec![
+            ("via_callback".to_string(), "deny Unknown via_callback".to_string()),
+            ("domain::price".to_string(), "deny Net Unknown domain".to_string()),
+        ];
+        let scan = super::unverified_note_lines("candor-scan", &holes);
+        let query = super::unverified_note_lines("candor-query gate", &holes);
+        assert_eq!(scan.len(), 4, "header + one line per hole + the advisory footer");
+        assert_eq!(
+            scan[0],
+            "candor-scan: note — 2 function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):"
+        );
+        assert_eq!(scan[1], "    `via_callback`  → add  `deny Unknown via_callback`");
+        assert_eq!(scan[2], "    `domain::price`  → add  `deny Net Unknown domain`");
+        assert_eq!(
+            scan[3],
+            "  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-query unverified` for detail — the gate verdict is unchanged)"
+        );
+        // The prefix, and NOTHING else, is what the two routes differ in.
+        assert_eq!(scan[1..], query[1..]);
+        assert_eq!(query[0], scan[0].replacen("candor-scan", "candor-query gate", 1));
+        // A clean pass renders NO lines at all — the over-charge control, at the renderer.
+        assert!(super::unverified_note_lines("candor-scan", &[]).is_empty());
+    }
+
     #[test]
     fn db_table_covering_is_strict() {
         use super::db_table_covered as c;

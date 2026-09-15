@@ -1792,7 +1792,48 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     ) {
         return 2;
     }
+    // ── R443: THE PROVABLE-PURITY DISCLOSURE, ON THE ROUTE CI ACTUALLY RUNS ──────────────────────────
+    //
+    // `candor-scan --policy` has printed this note since ⟨0.19⟩ and THIS verb printed nothing — same
+    // tree, same rule, same verdict, opposite disclosure, and gating a precomputed report is the whole
+    // point of the query layer, so the SILENT route is the DEPLOYED one. Consequence for a first-day
+    // adopter: `candor init` proposes rules that currently pass and none of them mentions `Unknown`, so a
+    // `deny Net com.acme.domain` goes green through a DI-wired port and nothing ever says purity was
+    // UNVERIFIED rather than verified.
+    //
+    // NOT A THIRD COMPUTATION, which is the constraint that shaped this: the hole PREDICATE
+    // (`unverified_hole_rule`) has always been shared with candor-scan, the report-side SET is
+    // `unverified::hole_set` — the same call `candor-query unverified` makes, over the same entries and
+    // the SAME `sig` this gate was judged from — and the WORDS are `unverified_note_lines`, which
+    // candor-scan now also calls. One predicate, one set per route-side, one renderer.
+    //
+    // **ADVISORY, so it touches neither the verdict nor the exit code**, and it is not in the
+    // `--gate-json` document either: §3.1 makes the two routes' verdict documents byte-equal and
+    // candor-scan does not carry holes there, so adding the key on one route only would break the MUST
+    // this fix exists to serve. Whether `pure`/`deny` should FAIL CLOSED on `Unknown` is R443's expensive
+    // half and a SPEC question — deliberately not bundled.
+    //
+    // PLACED HERE, and the position is load-bearing: candor-scan prints its note AFTER its
+    // parse-failure/out-of-scope/withheld/unread arms have already returned 2, so on that route a gate
+    // that REFUSES for want of evidence never reaches the note. This is the same position on this route
+    // — past `refuse_disclosing` and the sole-refusal return, before the verdict lines — so the two
+    // routes disclose over the same set of RUNS as well as the same set of functions. The exit-2 arms
+    // below are the ones that print no note on either side.
+    //
+    // COMPUTED here, PRINTED in the two arms that reach a verdict (1 and 0) and in neither of the four
+    // that refuse — written as one value emitted twice rather than as a second reading of the four
+    // refusal conditions, because a duplicated condition is how the two routes drifted in the first place.
+    let unverified_note = candor_classify::policy::unverified_note_lines(
+        "candor-query gate",
+        &crate::unverified::hole_upgrades(&rep.entries, &p.rules, &sig),
+    );
+    let say_note = || {
+        for line in &unverified_note {
+            eprintln!("{line}");
+        }
+    };
     if !violations.is_empty() {
+        say_note();
         eprintln!("candor-query gate: {} policy violation(s)", violations.len());
         eprintln!("→ candor-query fix-gate names the remedy for each (or `candor fix <fn> <Effect>` for one)");
         1
@@ -1883,6 +1924,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         }
         2
     } else {
+        say_note();
         eprintln!("candor-query gate: policy ✓ (the report's own signature — no re-scan, no re-derivation)");
         0
     }

@@ -29,6 +29,63 @@ use candor_report::ReportEntry;
 // coincidence. Both this verb and `fix-gate` now read [`crate::gate::report_signature`], the accumulator
 // `gate --report` itself is judged from, and take the ANSWERABILITY set from the same object.
 
+/// R443 — THE HOLE SET ON THE REPORT SIDE, computed ONCE for the two verbs that disclose it: this one
+/// and `gate --report`, which printed NOTHING at all until R443 (see
+/// [`candor_classify::policy::unverified_note_lines`] for the measurement). The verbs differ in what they
+/// do with the set — `unverified` narrows it by `--class` and renders per-function detail, the gate
+/// renders the three-line note — and NOT in what the set is.
+///
+/// **R448 — THE LOOKUP IS BY [`crate::gate::entry_key`], NOT BY `e.func`, AND THAT IS A FIX.** Every
+/// accumulator on [`crate::gate::ReportSignature`] is keyed by the §2.2 unit key (`hash` when the
+/// producer emitted one, else the bare name) — its own doc comment says so and names this exact hazard:
+/// *"a name-keyed lookup into a hash-keyed map does not error, it returns None"*. `cmd_unverified` was
+/// doing precisely that, so on EVERY real candor-rust report (whose `hash` is `pkg#fn`, never the bare
+/// name) the hole predicate ran with `reason_classes = None` — the gate's narrowing `Unknown[…]` filter
+/// was never given the classes it narrows on. MEASURED 2026-09-16 on the R443 fixture under
+/// `deny Unknown[indirect] via_callback`: `gate --report` exits **1** with an AS-EFF-006 violation on
+/// `via_callback`, and `unverified` over the same bytes named it a hole and printed
+/// ***"The gate still PASSES — this is advisory"***. Not "less certain than the gate" — the opposite of
+/// the gate, in prose, about the same function. The direction of the key fault is to over-disclose holes
+/// (a withheld filter counts as passing), so no hole was lost; what was lost was the truth of the
+/// sentence underneath them.
+pub(crate) fn hole_set<'e, 'r>(
+    entries: &'e [ReportEntry],
+    rules: &'r [PolicyRule],
+    sig: &crate::gate::ReportSignature,
+) -> Vec<(&'e ReportEntry, &'r PolicyRule)> {
+    let no_classes: Vec<String> = Vec::new();
+    entries
+        .iter()
+        .filter_map(|e| {
+            // ⟨0.20⟩ `netClass` is read VERBATIM off the wire, exactly as `gate --report` reads it — the
+            // gate does not recompute it from the hosts on this route and neither may the disclosure.
+            let nets = if e.net_class.is_empty() { &no_classes } else { &e.net_class };
+            unverified_hole_rule(
+                &e.func,
+                &e.inferred,
+                sig.reason_classes.get(&crate::gate::entry_key(e)),
+                nets,
+                rules,
+            )
+            .map(|r| (e, r))
+        })
+        .collect()
+}
+
+/// R443 — the `(fn, upgrade)` pairs [`candor_classify::policy::unverified_note_lines`] renders, in report
+/// order. The gate route's whole share of this disclosure: one call, no second predicate, no second
+/// fixpoint, and the SET is [`hole_set`]'s by construction rather than by agreement.
+pub(crate) fn hole_upgrades(
+    entries: &[ReportEntry],
+    rules: &[PolicyRule],
+    sig: &crate::gate::ReportSignature,
+) -> Vec<(String, String)> {
+    hole_set(entries, rules, sig)
+        .into_iter()
+        .map(|(e, r)| (e.func.clone(), rule_and_upgrade(r).1))
+        .collect()
+}
+
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true, verb: "unverified" });
     let Some(prefix) = report_or_discover(&g) else {
@@ -104,17 +161,12 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
             None => true, // no --class ⇒ no filter
         }
     };
-    let no_classes: Vec<String> = Vec::new();
-    let holes: Vec<Hole> = entries
-        .iter()
-        .filter_map(|e| {
-            // ⟨0.20⟩ `netClass` is read VERBATIM off the wire, exactly as `gate --report` reads it — the
-            // gate does not recompute it from the hosts on this route and neither may the disclosure.
-            let nets = if e.net_class.is_empty() { &no_classes } else { &e.net_class };
-            unverified_hole_rule(&e.func, &e.inferred, reason_acc.get(&e.func), nets, rules)
-                .filter(|_| class_matches(e))
-                .map(|rule| Hole { func: e, rule })
-        })
+    // R443/R448 THROUGH THE SHARED CORE — the identical set `gate --report` now discloses, with
+    // `--class` applied AFTER it as a narrowing of that set rather than as a second definition of it.
+    let holes: Vec<Hole> = hole_set(&entries, rules, &sig)
+        .into_iter()
+        .filter(|(e, _)| class_matches(e))
+        .map(|(func, rule)| Hole { func, rule })
         .collect();
 
     // ⟨0.24⟩ **THE FUNCTIONS THE GATE COULD NOT JUDGE AT ALL** — SPEC §3.2, candor-spec `4fd140c`:

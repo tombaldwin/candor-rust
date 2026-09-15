@@ -4813,19 +4813,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             &hole_nets,
             &unknown_aliases,
         );
-        if !holes.is_empty() {
-            let mut upgrades: BTreeSet<String> = BTreeSet::new();
-            eprintln!(
-                "candor-scan: note — {} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):",
-                holes.len()
-            );
-            for (fq, up) in &holes {
-                eprintln!("    `{fq}`  → add  `{up}`");
-                upgrades.insert(up.clone());
-            }
-            eprintln!(
-                "  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-query unverified` for detail — the gate verdict is unchanged)"
-            );
+        // R443 THE LINES COME FROM THE SHARED RENDERER NOW — `candor-query gate --report` prints the
+        // identical note from the identical function, so the two routes can no longer disagree about the
+        // WORDS any more than they can about the SET. Byte-identical to the hand-written block it
+        // replaces — pinned by `unverified_note_lines_render_one_note_for_both_routes` (candor-classify)
+        // and end-to-end by `gate_note_matches_the_scan_route` (candor-query tests/cli.rs).
+        for line in candor_classify::policy::unverified_note_lines("candor-scan", &holes) {
+            eprintln!("{line}");
         }
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");

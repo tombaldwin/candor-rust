@@ -6663,3 +6663,136 @@ fn whatif_names_the_pre_033_cause_instead_of_a_different_deny_set() {
         "the ⟨0.34⟩ message split must be invisible on the machine channel — old={v_old} \
          current={v_current}");
 }
+
+// ── R443: the two gate routes disclose the SAME holes ─────────────────────────────────────────────
+//
+// `candor-scan --policy` has printed the provable-purity note since ⟨0.19⟩; `candor-query gate
+// --report` printed NOTHING over the identical tree, rule and verdict — and gating a precomputed
+// report is the point of the query layer, so the SILENT route is the one CI runs. These pin the note
+// onto route A, pin it OFF for a clean pass, and pin that the two verbs on this side of the report
+// boundary name the same set.
+
+/// The R443 fixture as a report: one Unknown-carrying function that PASSES `deny Net domain`, one
+/// provably-clean sibling in the same scope. `hash` is `pkg#fn` shaped, exactly as candor-scan writes
+/// it — which is what makes the R448 arm below reachable at all.
+fn write_hole_report(f: &Fixture) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.38" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::price", "loc": "src/d.rs:1:1", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["callback:injected"], "hash": "of#domain::price", "paths": ["/x"] },
+    { "fn": "domain::calc",  "loc": "src/d.rs:9:1", "inferred": [], "hash": "of#domain::calc", "paths": ["/x"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+}
+
+/// stderr of `gate --report <prefix> --policy <pol>`, with the exit code.
+fn gate_stderr(prefix: &str, pol: &str) -> (i32, String) {
+    let out = Command::new(bin())
+        .args(["gate", "--report", prefix, "--policy", pol])
+        .output()
+        .expect("run candor-query");
+    (out.status.code().unwrap_or(-1), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn gate_report_discloses_the_unverified_holes_the_scan_route_names() {
+    // MEASURED before the fix (release build, same bytes): rc 0 and the ONLY stderr line was
+    // `policy ✓ (the report's own signature …)`. The verdict and the exit code are unchanged by this —
+    // R443's expensive half (should `pure`/`deny` FAIL CLOSED on Unknown) is a SPEC question and is not
+    // bundled here. This is disclosure only.
+    let f = Fixture::new("r443gate");
+    write_hole_report(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let (code, err) = gate_stderr(&f.prefix, &pol);
+    assert_eq!(code, 0, "advisory: the verdict and exit code are untouched — stderr:\n{err}");
+    assert!(
+        err.contains("candor-query gate: note — 1 function(s) PASS the policy but are Unknown"),
+        "route A must print the note route B prints — stderr:\n{err}"
+    );
+    assert!(
+        err.contains("`domain::price`  → add  `deny Net Unknown domain`"),
+        "and name the same function + the same upgrade — stderr:\n{err}"
+    );
+    assert!(
+        !err.contains("domain::calc"),
+        "the provably-clean sibling is NOT a hole — stderr:\n{err}"
+    );
+    assert!(
+        err.contains("the gate verdict is unchanged"),
+        "…and say it is advisory — stderr:\n{err}"
+    );
+}
+
+#[test]
+fn gate_report_prints_no_note_for_a_provably_clean_pass() {
+    // THE OVER-CHARGE CONTROL. A disclosure that fires on everything is not a disclosure; a green gate
+    // over resolvable code must stay byte-identical to its pre-R443 self.
+    let f = Fixture::new("r443ctl");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.38" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::calc", "loc": "src/d.rs:1:1", "inferred": [], "hash": "of#domain::calc", "paths": ["/x"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let (code, err) = gate_stderr(&f.prefix, &pol);
+    assert_eq!(code, 0, "clean pass — stderr:\n{err}");
+    assert!(!err.contains("PASS the policy but are Unknown"), "no hole, no note — stderr:\n{err}");
+}
+
+#[test]
+fn gate_note_matches_the_scan_route() {
+    // THE SET, NOT MERELY THE PRESENCE OF OUTPUT. `gate --report` and `unverified` are the two verbs on
+    // this side of the report boundary; a third answer would be worse than the silence R443 replaces, so
+    // they are wired to ONE `hole_set` call and this asserts the result rather than the wiring. The
+    // scan-route half of the same claim is the shared renderer's own test, in candor-classify.
+    let f = Fixture::new("r443same");
+    write_hole_report(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let (_, err) = gate_stderr(&f.prefix, &pol);
+    let from_gate: Vec<String> = err
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('`').and_then(|r| r.split('`').next()).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (_, from_unverified) = unverified_names(&f.prefix, &pol, None);
+    assert_eq!(from_gate, from_unverified, "the two report-side verbs must name the SAME holes");
+    assert_eq!(from_gate, vec!["domain::price".to_string()]);
+}
+
+#[test]
+fn unverified_reads_reason_classes_by_unit_key_not_by_name() {
+    // R448. Every accumulator on `ReportSignature` is keyed by the §2.2 unit key (`hash` when the
+    // producer emitted one), and `cmd_unverified` looked its reason classes up by the bare `fn` — a
+    // name-keyed lookup into a hash-keyed map, which does not error, it returns None. On EVERY real
+    // candor-rust report (`hash` is `pkg#fn`) the hole predicate therefore ran with no reason classes at
+    // all, so a narrowing `deny Unknown[<class>]` was never given the classes it narrows on.
+    //
+    // MEASURED before the fix, this exact fixture: `gate --report` exits 1 with an AS-EFF-006 violation
+    // on `domain::price`, and `unverified` over the same bytes called it a hole and printed
+    // "The gate still PASSES — this is advisory". The verb whose whole job is "your green gate is not
+    // provably green" asserting the OPPOSITE of the gate, about the same function, in prose.
+    let f = Fixture::new("r448key");
+    write_hole_report(&f);
+
+    // (a) the filter MATCHES the fn's class → the gate FIRES, so the function is a violation, not a hole.
+    let hit = write_policy(&f, "hit.policy", "deny Unknown[indirect,unresolved] domain\n");
+    let (code, err) = gate_stderr(&f.prefix, &hit);
+    assert_eq!(code, 1, "a matching class must FIRE on this route — stderr:\n{err}");
+    let (ucode, named) = unverified_names(&f.prefix, &hit, None);
+    assert!(named.is_empty(), "a function the gate REJECTS is not an unverified PASS, got {named:?}");
+    assert_eq!(ucode, 0, "no holes → exit 0");
+
+    // (b) the filter MISSES it → the gate tolerates, so it IS a hole, on both verbs. The mirror arm:
+    // without it, "reports nothing" would pass (a) and the disclosure would be dead.
+    let miss = write_policy(&f, "miss.policy", "deny Unknown[reflect] domain\n");
+    let (mcode, merr) = gate_stderr(&f.prefix, &miss);
+    assert_eq!(mcode, 0, "a non-matching class is tolerated — stderr:\n{merr}");
+    assert!(merr.contains("PASS the policy but are Unknown"), "…and IS a hole — stderr:\n{merr}");
+    let (_, mnamed) = unverified_names(&f.prefix, &miss, None);
+    assert_eq!(mnamed, vec!["domain::price".to_string()]);
+}
