@@ -3848,8 +3848,15 @@ pub(crate) fn owned_drop_params(
             syn::FnArg::Receiver(r)
                 if r.reference.is_none() && !type_borrows(&r.ty) =>
             {
-                if escaping_names.contains("self") {
+                // §6d S2 — the NAME half of the same escape gate. Under charge-at-construction a
+                // by-value receiver is charged whatever its name does, which is the whole point:
+                // `escapes.names` is the site-free twin of `escaping_ctors` and it is keyed on a bare
+                // identifier with no scope (R323/R305), so two bindings of one name are one key.
+                if escaping_names.contains("self") && !crate::collector::charge_at_construction() {
                     continue;
+                }
+                if escaping_names.contains("self") && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("S2SELF {}", self_ty.unwrap_or("?"));
                 }
                 if let Some(t) = self_ty {
                     out.push(leaf_of(t.to_string()));
@@ -3860,8 +3867,11 @@ pub(crate) fn owned_drop_params(
                     continue;
                 }
                 let Some(name) = single_pat_ident(&pt.pat) else { continue };
-                if escaping_names.contains(&name) {
+                if escaping_names.contains(&name) && !crate::collector::charge_at_construction() {
                     continue;
+                }
+                if escaping_names.contains(&name) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("S2PARAM {name}");
                 }
                 if let Some(t) = type_path(&pt.ty, uses) {
                     out.push(leaf_of(t));

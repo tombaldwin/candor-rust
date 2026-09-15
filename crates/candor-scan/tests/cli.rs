@@ -3513,3 +3513,78 @@ fn a_receiver_form_path_stat_names_its_own_destination() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ── BACKLOG §6d S2 — the charge-at-construction PRICING flag ──────────────────────────────────────
+//
+// The flag is default-OFF and priced NOT-adopted (see `collector::charge_at_construction` for the
+// 1,561-crate measurement). These two arms keep it honest in both directions: the escape model must
+// still suppress when the flag is unset, and the flag must still charge when it is set — a pricing
+// instrument that silently stops working is worse than none, because the next re-price reads its
+// inertness as a result.
+
+/// The two shapes, in one crate: a construction that ESCAPES by return (the over-charge control — 0
+/// executed in-frame drops, measured) and one that dies in frame through a shadowed closure name
+/// (R323 — 2 executed in-frame drops, measured).
+const S2_SRC: &str = r#"
+use std::fs;
+pub struct H { pub p: String }
+impl H { pub fn mk(p: &str) -> H { H { p: p.to_string() } } }
+impl Drop for H { fn drop(&mut self) { let _ = fs::write(&self.p, b"x"); } }
+pub fn oc_factory(p: &str) -> H { H::mk(p) }
+pub fn r323_shadowed(p: &str) { let c = || H::mk(p); c(); let c = || H::mk("b"); c(); }
+"#;
+
+fn s2_inferred(charge: bool) -> std::collections::BTreeMap<String, Vec<String>> {
+    let d = make_crate(if charge { "s2on" } else { "s2off" }, S2_SRC);
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref()).arg("--json");
+    if charge {
+        cmd.env("CANDOR_CHARGE_AT_CTOR", "1");
+    } else {
+        cmd.env_remove("CANDOR_CHARGE_AT_CTOR");
+    }
+    let out = cmd.output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim())
+        .expect("--json stdout must parse");
+    v["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["fn"].as_str().unwrap().to_string(),
+                f["inferred"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn charge_at_construction_is_off_by_default() {
+    // THE INERTNESS ARM. Measured at corpus scale too — flag-off vs the pre-change binary over 300
+    // crates, 17,419 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 0 — but that measurement is not in
+    // the repo and this is. `oc_factory` returning its construction must stay uncharged, and the
+    // R323 shadowed-closure silence must stay silent: the flag changes NOTHING while unset, INCLUDING
+    // the open rows, which is what makes it a switch rather than a half-landed fix.
+    let off = s2_inferred(false);
+    assert!(!off.contains_key("oc_factory"), "escape model ON: a returned construction is not charged, got {off:?}");
+    assert!(!off.contains_key("r323_shadowed"), "escape model ON: R323 is still OPEN, got {off:?}");
+    assert_eq!(off.get("H::drop").map(Vec::as_slice), Some(&["Fs".to_string()][..]), "the Drop impl itself is always charged");
+}
+
+#[test]
+fn charge_at_construction_charges_both_the_row_and_the_fabrication() {
+    // THE OVER-CHARGE CONTROL IS THE POINT OF THIS ARM, not an afterthought. Turning the flag on
+    // closes R323 (`r323_shadowed` — 2 executed in-frame drops) AND fabricates on `oc_factory`
+    // (0 executed in-frame drops). A future edit that made the flag close the row WITHOUT the
+    // fabrication would be the change worth shipping, and it would fail this assertion loudly rather
+    // than passing unnoticed — which is the only reason the fabrication is asserted rather than
+    // merely described.
+    let on = s2_inferred(true);
+    assert_eq!(on.get("r323_shadowed").map(Vec::as_slice), Some(&["Fs".to_string()][..]),
+               "the flag must still close R323, got {on:?}");
+    assert_eq!(on.get("oc_factory").map(Vec::as_slice), Some(&["Fs".to_string()][..]),
+               "…and must still FABRICATE on a returned construction — this is the priced cost, got {on:?}");
+}

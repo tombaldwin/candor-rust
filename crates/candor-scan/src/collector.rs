@@ -3,6 +3,87 @@
 
 use crate::*;
 
+/// **BACKLOG §6d S2 — CHARGE AT CONSTRUCTION. BUILT, PRICED OVER 1,561 CRATES, AND *NOT* ADOPTED.**
+///
+/// The drop-glue charge is gated on `escaping_ctors` / `escapes.names`, computed by
+/// `lang::escaping_ctor_leaves` — the model whose job is to prove a constructed value leaves this
+/// frame, so its destructor runs in the CALLER. Seven open silent rows live in it, and R297 shows it
+/// is blind BY CONSTRUCTION: `*slot = v` has no construction site to key on. §6d S2 proposed deleting
+/// it — charge every construction and every by-value parameter of a drop-relevant type, escape or no
+/// escape. Sound, no name keys, no site keys, no scopes.
+///
+/// **IT IS AN ENV FLAG, DEFAULT OFF, BECAUSE THE DELIVERABLE WAS THE A/B AND THE A/B SAYS NO.** Kept
+/// so the price can be RE-MEASURED in one command instead of rebuilt from a prose description — the
+/// same argument `bin/corpus-ab.py` exists for. Proven inert when unset: flag-off vs the pre-change
+/// binary, 300 crates, 17,419 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 0.
+///
+/// **WHAT IT CLOSES (executed ground truth, in-frame drops counted with the frame's own counter):**
+/// R189 `either` 1 / `condesc_other_root` 1, R195 `reassign_no_q` 2, R198 both arms, R201 both arms,
+/// R297 `overwrite_place` 1, R300 body-local `fn` 1, R323 shadowed closure 2, R200's CALLER half 1 —
+/// eight fixtures, every one ABSENT before and charged after. **It does NOT close three the brief
+/// grouped in:** R197 (turbofish type ORIGIN — its own row says so and it is measured ABSENT in both
+/// arms), R200's CALLEE half (`Option<H>`/`Vec<H>`/tuple params — a `type_path` container-unwrapping
+/// defect; ABSENT in both arms), and R209(a) (macro-borne `?` — charged in both arms here).
+///
+/// **WHAT IT COSTS, and this is why it is off.** 1,561 registry crates, one binary, one boolean:
+/// **ADDED 1,953 rows / REMOVED 0 / CHANGED 3,587**, reach 13,290 hits across 465 entries. 1,666
+/// functions gain an effect — 551 a HARD one (Fs/Db/Net/Exec/Env/Clock/Log) across 30 crates, and
+/// 1,115 only `Unknown`. **REMOVED 0 is the one thing that held**: the change introduces no silence.
+///
+/// On those 1,115: all 1,115 also flip to `unresolved: true`, and 928 of them carry a NEW
+/// `<Type>::drop` call edge (187 do not). **The CAUSE is NOT established and is deliberately not
+/// asserted here** — the first draft of this comment said "the `ambiguous:` refusal firing more
+/// often" and that was a guess; none of the 1,115 gained an `unknownWhy`, which is what that refusal
+/// writes. What is measured is the shape, not the mechanism. It matters for pricing either way: an
+/// `Unknown` is a DISCLOSURE rather than a false effect claim, so these are the cheaper half of the
+/// cost — but 1,115 functions moving from a definite answer to "candor cannot say" is the population
+/// that makes a `deny` rule unadoptable, which is R443's own argument one rung down.
+///
+/// The gains are not catches. Of 584 hard-effect gain cases, **327 (56%) are functions whose declared
+/// return type contains the very type they are now charged for** — the definition of an escape. **28
+/// were read against source; 23–24 are fabrications, 4–5 are transitive consequences of one, and ZERO
+/// were a confirmed real in-frame drop.** The shapes are `fn new() -> Self` (lapin `ConnectionCloser::new`,
+/// jni `Weak::null`, async-io `Timer::never`, tempfile `TempPath::from_path`, rusqlite
+/// `Connection::from_handle`), one-line delegations (x11rb `ConnectionExt::clear_area`), and — worst —
+/// functions whose bodies say `std::mem::forget(self)` or `ManuallyDrop::new(self)` outright (x11rb
+/// `into_seg`, jni `Global::into_raw`, tokio `RwLockWriteGuard::skip_drop`). Executed ground truth on
+/// the same five shapes: **0 in-frame drops each**, while all eight row fixtures drop 1–2.
+///
+/// **SO THE BRIEF'S PREMISE IS WRONG BY TWO ORDERS OF MAGNITUDE.** §6d S2 says the model "exists to
+/// buy off ONE over-charge (`anyhow` `render`)". Measured, it buys off at least 551 hard-effect
+/// fabrications plus 1,115 `Unknown` degradations, and the dominant shape is not one library function
+/// but **the constructor of every effectful-`Drop` type in the program** — `H::new` itself is charged,
+/// so the fabrication propagates to every caller. The concentration is in exactly the RAII crates
+/// people gate against: x11rb 175, jni 65, tokio 48, lapin 38, rdkafka 28, tempfile 28, rusqlite 25.
+///
+/// An over-charge being the "acceptable direction" is a statement about WHICH way to fail, not a
+/// budget. Trading 8 closed rows for ~550 fabricated effect claims in 30 widely-depended-on crates
+/// makes `deny Fs`/`deny Log` unadoptable there, which is the same argument R443 records against
+/// `deny X Unknown`. **The measurement does point somewhere:** 56% of the fabrications are decided
+/// correctly by a purely syntactic test on the RETURN TYPE — no names, no sites, no scopes, which is
+/// where all seven rows actually fail. That is a different change from this one and it is NOT sound as
+/// an exemption on its own (`fn replace(&mut self, v: H) -> H` returns the charged type and really
+/// drops), so it must be priced in its own right rather than bolted on here.
+pub(crate) fn charge_at_construction() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("CANDOR_CHARGE_AT_CTOR").is_ok_and(|v| v != "0");
+        if on {
+            // LOUD, ONCE. A flag that silently turns 551 measured fabrications on in a CI job is a
+            // footgun; one that says what it is on stderr is an experiment. The numbers are this
+            // file's own measurement — see `charge_at_construction`'s doc comment.
+            eprintln!(
+                "candor-scan: CANDOR_CHARGE_AT_CTOR is SET — the escape model is OFF and every \
+                 construction of a drop-relevant type is charged. This is a PRICING EXPERIMENT \
+                 (BACKLOG §6d S2), not a supported mode: measured over 1,561 crates it adds 551 \
+                 hard-effect charges of which 0 of 28 sampled were real in-frame drops. Do not \
+                 gate on this output."
+            );
+        }
+        on
+    })
+}
+
 /// What a binder knows about the name it introduces — the argument to `scoped_binding`.
 /// `Unknown` is a real case, not a fallback: a loop variable over an untypable iterator still BINDS the
 /// name, and it is precisely that case where a stale side-table entry is not masked by a fresh one.
@@ -470,8 +551,18 @@ impl<'a> CallCollector<'a> {
 
     fn note_release(&mut self, leaf: Option<String>, gate_on_escape: bool) {
         let Some(leaf) = leaf else { return };
-        if !self.drop_relevant.contains(&leaf) || (gate_on_escape && self.escaping_ctors.contains(&leaf)) {
+        if !self.drop_relevant.contains(&leaf)
+            || (gate_on_escape && !charge_at_construction() && self.escaping_ctors.contains(&leaf))
+        {
             return;
+        }
+        // S2 REACH COUNTER — the branch charge-at-construction ADDS is exactly "the escape model
+        // WOULD have suppressed this construction's drop". Printed only when it really fires, so a
+        // zero count in an A/B means the corpus never reached the change.
+        if gate_on_escape && charge_at_construction() && self.escaping_ctors.contains(&leaf)
+            && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+        {
+            eprintln!("S2CTOR {} in {}", leaf, self.modpath);
         }
         if !gate_on_escape && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.escaping_ctors.contains(&leaf) {
             // §E1 HIT COUNTER — the branch this change adds is exactly "the leaf gate WOULD have
@@ -530,7 +621,12 @@ impl<'a> CallCollector<'a> {
     pub(crate) fn note_cross_construction(&mut self, ctor: Option<(String, String)>) {
         let Some((cr, leaf)) = ctor else { return };
         if self.escaping_ctors.contains(&leaf) {
-            return;
+            if !charge_at_construction() {
+                return;
+            }
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("S2CROSS {cr}::{leaf} in {}", self.modpath);
+            }
         }
         if !self.marked_cross_ctors.insert(format!("{cr}\u{0}{leaf}")) {
             return;
