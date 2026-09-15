@@ -7770,6 +7770,58 @@ impl H {\n\
     }
 
     #[test]
+    fn a_portability_twin_sharing_a_type_leaf_still_gets_both_arms_edges() {
+        // SOUNDNESS R440 — R438's arm loop resolves each unclassifiable arm with `resolve_target`, which
+        // keys a qualified call on its TWO-SEGMENT TAIL and refuses a tail with several claimants
+        // (`a::Job::run` / `b::Job::run` — linking a many-way tail fabricates one type's effect onto the
+        // other's caller). That refusal is right everywhere except HERE, where the several claimants ARE
+        // the arms: a portability twin is `unix::X` beside `windows::X`, which is precisely the shape
+        // that shares a type leaf. Both arms were refused, the branch gained no edge, charged nothing and
+        // `continue`d — leaving the call with NO TRACE and its caller absent from `functions[]`.
+        //
+        // MEASURED ON mio: `#[cfg(…linux…)] use crate::sys::unix::waker::eventfd::WakerInternal;` beside
+        // the `pipe::WakerInternal` arm, and `Waker::wake` calling `self.waker.wake()`. Both
+        // `WakerInternal::wake` bodies write to a file descriptor and both carry `Fs` in their own rows;
+        // `fdbased::Waker::wake` — re-exported as `mio::Waker` — was ABSENT. That also FALSIFIES R440's
+        // own sample conclusion, which recorded every sampled undisclosed occurrence as a pure-type arm
+        // set, "so the under-report may be of NOTHING".
+        //
+        // `c_imp` IS THE DISCRIMINATOR AND NOT DECORATION: it declares a THIRD `Inner::go`, so the tail
+        // `Inner::go` has three claimants while the arm set names only two. Its `Env` must not appear.
+        // Without it, "take the claimant the arm names" and "take every claimant of the tail" — the
+        // fabrication this refusal exists to prevent — are indistinguishable.
+        let src = "\
+#[cfg(unix)]\npub use crate::a_imp::Inner;\n\
+#[cfg(not(unix))]\npub use crate::b_imp::Inner;\n\
+pub mod a_imp {\n\
+  pub struct Inner;\n\
+  impl Inner { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r440a\", \"x\"); } }\n\
+}\n\
+pub mod b_imp {\n\
+  pub struct Inner;\n\
+  impl Inner { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r440b\", \"x\"); } }\n\
+}\n\
+pub mod c_imp {\n\
+  pub struct Inner;\n\
+  impl Inner { pub fn go(&self) { let _ = std::env::var(\"HOME\"); } }\n\
+}\n\
+pub struct W { inner: Inner }\n\
+impl W { pub fn wake(&self) { self.inner.go(); } }\n";
+        let v = scan_fixture("r440arm", src);
+        assert_eq!(fixture_effects(&v, "W::wake"), vec!["Fs".to_string()],
+                   "W::wake reaches a `go` that writes a file in BOTH configurations — a twin whose \
+                    arms share a type LEAF must not lose both edges to the tail-ambiguity refusal, \
+                    and `Env` must not appear: only the claimants the arm set NAMES are taken:\n{v:#}");
+        // …and both arms are really there, not one of them twice.
+        for f in ["a_imp::Inner::go", "b_imp::Inner::go"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "{f}:\n{v:#}");
+        }
+        assert_eq!(fixture_effects(&v, "c_imp::Inner::go"), vec!["Env".to_string()],
+                   "the unnamed third claimant is present in the crate — which is what makes its \
+                    ABSENCE from W::wake evidence:\n{v:#}");
+    }
+
+    #[test]
     fn a_cfg_twinned_alias_used_as_a_type_is_not_resolved_by_source_order() {
         // SOUNDNESS R372 — `collect_decls` was handed a THROWAWAY `use_alts` map, so a name bound twice
         // under `#[cfg]` left `uses` holding whichever arm was written LAST, and NINE type consumers

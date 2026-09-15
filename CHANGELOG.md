@@ -10,6 +10,36 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R440 — a portability twin whose two arms share a type LEAF lost BOTH of its edges, and
+  the row's own "the under-report may be of NOTHING" is now falsified.** R438's arm loop resolves each
+  unclassifiable `#[cfg]` arm with `resolve_target`, which keys a qualified call on its two-segment tail
+  and refuses a tail with several claimants — right everywhere except inside that loop, where the several
+  claimants ARE the arms. `unix::X` beside `windows::X` is exactly the shape that shares a type leaf, so
+  both arms were refused, the branch gained no edge, charged nothing and `continue`d past all ordinary
+  handling: no charge, no edge, no disclosure. **Measured on mio:
+  `#[cfg(…linux…)] use crate::sys::unix::waker::eventfd::WakerInternal;` beside the `pipe::WakerInternal`
+  arm, with `Waker::wake` calling `self.waker.wake()`. Both `WakerInternal::wake` bodies write to a file
+  descriptor and both carry `Fs` in their own rows; `fdbased::Waker::wake` — re-exported as `mio::Waker`
+  — was ABSENT from `functions[]`.** R440 records that every occurrence it sampled was a pure-type arm
+  set; a full census of all 62 undisclosed occurrences over 1,563 crates found this one, and the reason
+  the earlier sample missed it is that a *portability* twin is the shape a tail-keyed index cannot see.
+
+  An arm is now disambiguated by its OWN path, which names its claimant in full; a second match refuses
+  exactly as `resolve_target` does, so this can only ever pick a definition the source text spelled out.
+  **1,563-crate A/B: ADDED 2, REMOVED 0, CHANGED 2, 0 on `inferred` for anything but the new rows; reach
+  12 across 4 crates.** `subprocess::Communicator::read` gains edges to both `posix::RawCommunicator::read`
+  and `win32::RawCommunicator::read` and discloses `invisible: ["libc", "winapi"]`; `libloading`'s
+  `safe::Symbol::fmt` gains an honest `Unknown`.
+
+  **The `loom` lead in R440's remedy column is measured NOT WORTH TAKING.** `loom` accounts for 14 of the
+  58 remaining undisclosed occurrences (`core::sync::atomic::fence`, `AtomicUsize::new`, `Arc::new`,
+  `Arc::ptr_eq`), every one a pure atomic or `Arc` constructor in a test-only configuration; teaching the
+  κ ledger about dev-dependencies would move them from undisclosed to `invisible: ["loom"]` on functions
+  that do nothing, which is the same noise R438's own narrowing measured as preventing nothing — and it
+  would contradict the deliberate runtime-vs-harness split `manifest_dependency_tables` documents. Of the
+  58 that remain, **zero** have an arm whose tail matches any local row in the same crate carrying an
+  effect, so on this corpus the residual is an under-report of nothing. The CLASS stands.
+
 - **⚠ SOUNDNESS R372 — a `#[cfg]`-twinned `use` used as a TYPE was resolved by SOURCE ORDER.**
   `collect_decls` was handed a throwaway `use_alts` map, so a name bound twice under `#[cfg]` left the
   decl `use` map holding whichever arm was written LAST. Nine consumers read that map — `type_path` at
