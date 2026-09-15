@@ -2211,6 +2211,86 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R349 — THE HOFs WHOSE ELEMENT PARAMETER IS **NOT** PARAMETER 0.
+///
+/// The adapter list in `collector.rs` types parameter 0 of a SINGLE-parameter closure from the
+/// receiver's element, and its comment said *"`fold`'s accumulator is its first param so it is NOT a
+/// single-param closure and is skipped (would mis-type the accumulator)"*. **That sentence is correct
+/// and it is the defect**: it settles parameter 0 and reads as a ruling on `fold`, so parameter 1 —
+/// which IS the element — was never typed by anything, and `v.iter().fold(0, |a, g| a + g.run())` over
+/// a `Vec<Guard>` whose `run()` writes a file left the CALLER absent from `functions[]`: a §4 purity
+/// claim over a file write, on one of the most common HOFs in the language. The swift engine had the
+/// same hole in the same place for the same reason (`reduce`), which is what the row is about.
+///
+/// Two categories, because arity alone does not say WHICH parameter is the element:
+///
+/// * **LAST parameter** — the FOLD family. `fold`/`rfold`/`try_fold`/`try_rfold` take `(Acc, Item)`
+///   and `scan` takes `(&mut State, Item)`: parameter 0 is the accumulator/state and must NOT be typed
+///   from the element — that is exactly the mis-typing the old comment was right to refuse, and the
+///   `trap_acc` control in the fixture is what holds this half honest.
+/// * **EVERY parameter** — the COMPARATOR family, `(&Item, &Item)`; `reduce` is `(Item, Item)`.
+///
+/// Both lists are `Iterator`/slice inherent methods, so the element is the receiver's element by
+/// definition — the same warrant every entry on the single-parameter list already has. A user type
+/// with its own `fold` carries the same (pre-existing) risk as one with its own `map`, and the binding
+/// fires at all only once the receiver already resolved to a known collection.
+pub(crate) fn is_elem_last_param_adapter(method: &str) -> bool {
+    matches!(method, "fold" | "rfold" | "try_fold" | "try_rfold" | "scan")
+}
+
+/// SOUNDNESS R349 — see `is_elem_last_param_adapter`. EVERY closure parameter is the element.
+/// `eq_by`/`cmp_by`/`partial_cmp_by` are deliberately ABSENT: their second parameter is the OTHER
+/// iterator's item, not this receiver's, so typing it from this element would FABRICATE.
+pub(crate) fn is_elem_pair_adapter(method: &str) -> bool {
+    matches!(
+        method,
+        "sort_by"
+            | "sort_unstable_by"
+            | "max_by"
+            | "min_by"
+            | "dedup_by"
+            | "reduce"
+            | "is_sorted_by"
+            | "chunk_by"
+            | "chunk_by_mut"
+            | "select_nth_unstable_by"
+    )
+}
+
+/// SOUNDNESS R349 — the (name, element type) bindings a TUPLE pattern takes from a per-slot element
+/// answer (`Collector::resolve_elem_tuple`). Used by BOTH tuple consumers — the `for (_, g) in
+/// xs.iter().enumerate()` binder and the `for_each(|(_, g)| ..)` closure parameter — because they are
+/// the same question and this family's bugs recur wherever one question has two implementations.
+///
+/// STRICTLY ADDITIVE: a slot with no resolved type contributes no binding and is left ALONE rather than
+/// cleared, and a pattern whose arity disagrees with the answer contributes NOTHING — an arity mismatch
+/// means the shape is not what the resolver thinks it is, and binding positionally through it would
+/// mistype every slot after the disagreement.
+pub(crate) fn tuple_pat_elem_binds(
+    pat: &syn::Pat,
+    slots: Option<&[Option<String>]>,
+) -> Vec<(String, String)> {
+    let slots = match slots {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let inner = match pat {
+        syn::Pat::Reference(r) => &*r.pat,
+        syn::Pat::Paren(p) => &*p.pat,
+        syn::Pat::Type(t) => &*t.pat,
+        p => p,
+    };
+    let syn::Pat::Tuple(tup) = inner else { return Vec::new() };
+    if tup.elems.len() != slots.len() {
+        return Vec::new();
+    }
+    tup.elems
+        .iter()
+        .zip(slots)
+        .filter_map(|(el, slot)| Some((single_pat_ident(el)?, slot.clone()?)))
+        .collect()
+}
+
 /// SOUNDNESS R350 — OF THE ADAPTERS ABOVE, THE ONES THAT MUST **NOT** FALL BACK TO THE `returns`
 /// INDEX when the receiver route answers nothing. This is a DENYLIST, and the direction is the whole
 /// point: a name added to `is_element_preserving_adapter` in future falls back BY DEFAULT, which is

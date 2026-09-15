@@ -10,6 +10,36 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R349 (rust half) — the closure parameter that IS the element, when it is not parameter
+  0, was never typed by anything.** The iterator-adapter list typed parameter 0 of a one-parameter
+  closure, and the comment beside it said *"`fold`'s accumulator is its first param so it is NOT a
+  single-param closure and is skipped"*. That sentence is correct and it is the defect: it settles
+  parameter 0 and reads as a ruling on `fold`, so parameter 1 — which IS the element — had no owner.
+  **Thirty-six fixture functions were MEASURED absent** over a `Vec<Guard>` whose `run()` writes a
+  file, against `iter().for_each(|g| g.run())` charging `Fs` as the control: the fold family
+  (`fold`/`rfold`/`try_fold`/`try_rfold`/`scan`), the comparator family
+  (`sort_by`/`sort_unstable_by`/`max_by`/`min_by`/`dedup_by`/`reduce`), ten single-parameter names the
+  list simply never had (`binary_search_by`, `binary_search_by_key`, `partition_point`,
+  `is_sorted_by_key`, `rposition`, `retain_mut`, `dedup_by_key`, `sort_by_cached_key`,
+  `sort_unstable_by_key`, `extract_if`, plus `is_some_and`/`is_none_or`/`take_if` on `Option`), and
+  every tuple-yielding adapter (`enumerate`/`zip`) reaching a tuple pattern — in a closure parameter
+  AND in a `for` binder. Each one left its CALLER absent from `functions[]`: an affirmative purity
+  claim under ⟨0.21⟩. Thirteen over-charge controls and fabrication probes stay absent on both arms —
+  the same spellings over a PURE element, the accumulator/state parameter, `enumerate`'s index slot,
+  the other side of a `zip`, and a tuple pattern whose arity disagrees with the resolver.
+
+  **Measured on real code, 1,563 registry crates (`bin/corpus-ab.py`): ADDED 103, REMOVED 0, CHANGED
+  137 (7 on `inferred`), reach 670 closure-parameter bindings across 231 crates and 899 `for`-binder
+  bindings across 329.** The row it is worth naming: `subprocess::Pipeline::popen`, whose body is
+  `for (idx, mut runner) in self.cmds.into_iter().enumerate() { ret.push(runner.popen()?) }`, was
+  ABSENT — and `deny Exec Pipeline::popen` over subprocess-0.2.15 **exited 0**. It now exits 1, and
+  `join`/`capture`/`communicate`/`stream_stdin`/`stream_stdout` pick the effects up transitively.
+
+  Every new charge is in the disclosure direction: of the 103 ADDED rows, 82 are an honest `Unknown`
+  (a newly-listed invoking HOF reaching the opaque-callback hedge), 17 carry no effect at all, and 4
+  are the `subprocess` pipeline traced to `Exec::popen`'s body. **REMOVED 0** — no effect was narrowed
+  and no `Unknown` dropped.
+
 ## [0.38.2] — 2026-09-15
 
 - **Release BINARIES are published for the first time.** `candor-scan` and `candor-query` are attached

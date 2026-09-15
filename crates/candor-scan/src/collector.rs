@@ -765,6 +765,50 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R349 — the PER-SLOT element types of an expression evaluating to an iterator of
+    /// TUPLES. `resolve_elem_type` deliberately answers `None` for `enumerate`/`zip` (they CHANGE the
+    /// element — that exclusion is R346's and is correct), which left every tuple-destructuring consumer
+    /// of them with nothing at all: `for (_, g) in v.iter().enumerate()` and
+    /// `v.iter().zip(o).for_each(|(g, _)| ..)` both read the caller as ABSENT — a §4 purity claim — while
+    /// the same body under `for g in v.iter()` charged. So this is the SHAPE that exclusion threw away,
+    /// recovered as a per-position answer rather than by pretending the element is preserved.
+    ///
+    /// `None` for any slot whose own element does not resolve (the `usize` of `enumerate`, a `zip`
+    /// against `0..`), and `None` for the whole expression when neither side resolves — never a guess.
+    /// The element-preserving adapters are peeled through the ONE authority the other two resolvers use,
+    /// because it is the same question one level up: `.rev()`/`.skip(1)`/`.filter(..)` preserve whatever
+    /// the item is, and here the item is the tuple.
+    fn resolve_elem_tuple(&self, expr: &syn::Expr) -> Option<Vec<Option<String>>> {
+        match expr {
+            syn::Expr::Reference(r) => self.resolve_elem_tuple(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_elem_tuple(&p.expr),
+            syn::Expr::Group(g) => self.resolve_elem_tuple(&g.expr),
+            syn::Expr::MethodCall(m) => {
+                let leaf = m.method.to_string();
+                match leaf.as_str() {
+                    // `xs.iter().enumerate()` yields `(usize, Item)` — slot 0 is the index and has no
+                    // element type by construction, which is why the slots are individually optional.
+                    "enumerate" => self
+                        .resolve_elem_type(&m.receiver)
+                        .map(|t| vec![None, Some(t)]),
+                    // `a.zip(b)` yields `(A::Item, B::Item)` — two INDEPENDENT collections, so each slot
+                    // is resolved from its own side. Answering with one side resolved is the point:
+                    // `for (g, _) in v.iter().zip(0..)` is the common spelling.
+                    "zip" => {
+                        let a = self.resolve_elem_type(&m.receiver);
+                        let b = m.args.first().and_then(|x| self.resolve_elem_type(x));
+                        (a.is_some() || b.is_some()).then(|| vec![a, b])
+                    }
+                    _ if crate::lang::is_element_preserving_adapter(&leaf) => {
+                        self.resolve_elem_tuple(&m.receiver)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The DISPATCH-trait leaves of an expression evaluating to a COLLECTION OF TRAIT OBJECTS — the
     /// `resolve_elem_type` counterpart backed by `elem_trait_of`. Lets `for it in items { it.go() }` over
     /// an `items: Vec<Box<dyn Doer>>` type the loop var into `trait_vars` (bounded-CHA dispatch) instead
@@ -1645,6 +1689,19 @@ impl<'a> CallCollector<'a> {
         } else {
             self.scoped_var(name, ty.clone(), move |s| s.bind_enum_struct_variant_fields(rest, body));
         }
+    }
+
+    /// SOUNDNESS R349 — introduce several element bindings at once, each through THE ONE BINDER, then
+    /// run `body` inside all of them. Recursive for the same reason
+    /// `bind_enum_struct_variant_fields` is: `scoped_binding` restores on the way out, so nesting is the
+    /// only spelling that both scopes every name and restores every name.
+    fn bind_elem_slots(&mut self, binds: &[(String, String)], body: Box<dyn FnOnce(&mut Self) + '_>) {
+        let Some(((name, ty), rest)) = binds.split_first() else {
+            body(self);
+            return;
+        };
+        let (name, ty) = (name.clone(), ty.clone());
+        self.scoped_var(&name, Some(ty), move |s| s.bind_elem_slots(rest, body));
     }
     /// The DISPATCH leaves of a single element inside an inline tuple LITERAL (`(x, 1)`) — a cast
     /// (`x as Box<dyn Doer>`), or a bare local PATH already known dispatch-typed via `fn_typed_vars`
@@ -2875,21 +2932,86 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 | "all" | "position" | "inspect" | "take_while" | "skip_while" | "map_while"
                 | "partition" | "fold" | "try_for_each" | "retain" | "sort_by" | "sort_by_key"
                 | "min_by_key" | "max_by_key" | "count"
+                // SOUNDNESS R349 — the single-element-param names this list simply never had. Each was
+                // MEASURED absent over a `Vec<Guard>` whose `run()` writes a file, against
+                // `iter().for_each(|g| { g.run(); })` charging `Fs` as the control, and each takes ONE
+                // parameter that IS the element, exactly like the names above it. This is the boundary
+                // widening the row's own six spellings would not have reached: the audit was told about
+                // `fold`, and grepping only what it was handed is how this project's audits miss the
+                // next instance (CLAUDE.md, "an audit's boundary must not be drawn around its trigger").
+                | "rposition" | "retain_mut" | "dedup_by_key" | "sort_by_cached_key"
+                | "sort_unstable_by_key" | "partition_point" | "binary_search_by"
+                | "binary_search_by_key" | "is_sorted_by_key" | "extract_if"
+                // Option/Result single-element-param predicates, the twins of `and_then`/`map_or` below.
+                | "is_some_and" | "is_none_or" | "take_if"
                 // Option/Result synchronous callback-invokers: the combinator calls the callback on the
                 // unwrapped value in-line (single element param, like the iterator adapters). Adding them
                 // lets an OPAQUE callable passed directly (`o.and_then(cb)`, `o.map_or(d, cb)`) disclose
                 // Unknown via the opaque-arg guard above, while an inline closure keeps its analyzed body.
                 | "and_then" | "map_or" | "map_or_else" | "unwrap_or_else" | "get_or_insert_with"
         );
-        // The single-ident closure param of the FIRST closure arg (`|c| ..` or `|c, ..| ..`). We
-        // only type the FIRST element param — `fold`'s accumulator is its first param so it is NOT a
-        // single-param closure and is skipped (would mis-type the accumulator); the common adapters
-        // take a single element param. Default-visit the rest; visit the typed closure under scope.
-        let elem_ty = if elem_adapter { self.resolve_elem_type(&node.receiver) } else { None };
+        // SOUNDNESS R349 — the two OTHER places a closure parameter can be the element. `elem_adapter`
+        // above is "parameter 0 of a one-parameter closure"; these are "the LAST parameter of a fold"
+        // and "EVERY parameter of a comparator". Kept as separate flags rather than folded into
+        // `elem_adapter` because that flag ALSO gates the named-fn-by-value edge and the opaque-callback
+        // `Unknown` above, and widening those is a different change with a different failure direction —
+        // one variable per diff, so a REMOVED row in the A/B has one candidate cause.
+        let elem_last = crate::lang::is_elem_last_param_adapter(leaf.as_str());
+        let elem_pair = crate::lang::is_elem_pair_adapter(leaf.as_str());
+        let elem_hof = elem_adapter || elem_last || elem_pair;
+        // The single-ident closure param of the FIRST closure arg (`|c| ..`). Parameter 0 of a
+        // ONE-parameter closure only: `fold`'s accumulator is its first parameter, so a two-parameter
+        // closure is not typed HERE — it is typed by `elem_binds` below, which knows which parameter is
+        // the element. Default-visit the rest; visit the typed closure under scope.
+        let elem_ty = if elem_hof { self.resolve_elem_type(&node.receiver) } else { None };
         let closure_param = if elem_adapter {
             node.args.iter().find_map(|a| match a {
                 syn::Expr::Closure(cl) if cl.inputs.len() == 1 => single_pat_ident(cl.inputs.first()?),
                 _ => None,
+            })
+        } else {
+            None
+        };
+        // SOUNDNESS R349 — element bindings for the closure parameters `closure_param` cannot name:
+        // a fold's LAST parameter, a comparator's BOTH, and a TUPLE pattern destructuring the item of a
+        // tuple-yielding adapter (`xs.iter().enumerate().for_each(|(_, g)| g.run())`). Strictly
+        // ADDITIVE: a slot whose type does not resolve is left ALONE, never cleared. Clearing is the
+        // principled rule for a binder position (see `scoped_binding`) but it is a SECOND change in the
+        // opposite direction — it can only ever remove a charge — and this register's most-measured way
+        // to get a silent under-report is a fix for a silent under-report.
+        let elem_binds: Option<(usize, Vec<(String, String)>)> = if elem_hof && closure_param.is_none()
+        {
+            let want = if elem_adapter && !elem_last && !elem_pair { 1 } else { 2 };
+            let elem_tuple = self.resolve_elem_tuple(&node.receiver);
+            node.args.iter().enumerate().find_map(|(i, a)| {
+                let syn::Expr::Closure(cl) = a else { return None };
+                if cl.inputs.len() != want {
+                    return None;
+                }
+                // WHICH parameters are the element. `elem_pair` is tested before `elem_last` so the
+                // precedence is stated rather than latent: no name is on both lists today, and if one
+                // ever were, the comparator reading (type BOTH) is the sound one — typing more
+                // parameters from the element can only add a charge, never withdraw one.
+                let positions: Vec<usize> = if elem_pair {
+                    (0..cl.inputs.len()).collect()
+                } else if elem_last {
+                    vec![cl.inputs.len() - 1]
+                } else {
+                    vec![0]
+                };
+                let mut binds: Vec<(String, String)> = Vec::new();
+                for pos in positions {
+                    let pat = &cl.inputs[pos];
+                    match single_pat_ident(pat) {
+                        Some(name) => {
+                            if let Some(t) = &elem_ty {
+                                binds.push((name, t.clone()));
+                            }
+                        }
+                        None => binds.extend(tuple_pat_elem_binds(pat, elem_tuple.as_deref())),
+                    }
+                }
+                (!binds.is_empty()).then_some((i, binds))
             })
         } else {
             None
@@ -3011,6 +3133,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         } else {
                             self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
                         }
+                        continue;
+                    }
+                }
+                self.visit_expr(a);
+            }
+        } else if let Some((idx, binds)) = elem_binds {
+            // SOUNDNESS R349 — the fold/comparator/tuple-slot closure. Same shape as the branch above:
+            // every other argument is default-visited, and only the ONE closure body is walked under the
+            // element bindings, so the typing cannot reach a sibling argument.
+            for (i, a) in node.args.iter().enumerate() {
+                if i == idx {
+                    if let syn::Expr::Closure(cl) = a {
+                        // §E1 REACH COUNTER, on the CHANGED branch — an unchanged corpus row is not
+                        // evidence the code ran, so the A/B counts this rather than inferring reach.
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R349BIND");
+                        }
+                        self.bind_elem_slots(&binds, Box::new(|s| s.visit_expr(&cl.body)));
                         continue;
                     }
                 }
@@ -3259,9 +3399,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
             }
         } else {
-            // A destructuring loop pattern (`for (k, v) in ..`, `for [a, b] in ..`) — no single name
-            // to type; just walk the body. (Tuple-pair value typing is left to the under-report.)
-            self.visit_block(&node.body);
+            // SOUNDNESS R349 — a TUPLE destructuring loop pattern over a TUPLE-YIELDING adapter:
+            // `for (_, g) in v.iter().enumerate()` and `for (g, _) in v.iter().zip(..)`. Both were
+            // MEASURED absent while the byte-identical body under `for g in v.iter()` charged `Fs`, and
+            // the enumerate spelling is the one candor-swift gets RIGHT — i.e. the two engines are
+            // silent on overlapping-but-different sets and neither fix is a port of the other.
+            // `resolve_elem_tuple` answers per SLOT; a slot it cannot type is left alone (additive).
+            // A non-tuple destructure (`for [a, b] in ..`) still has no per-slot answer here.
+            let binds = tuple_pat_elem_binds(&node.pat, self.resolve_elem_tuple(&node.expr).as_deref());
+            if binds.is_empty() {
+                self.visit_block(&node.body);
+            } else {
+                // §E1 REACH COUNTER — see `R349BIND`.
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R349FOR");
+                }
+                self.bind_elem_slots(&binds, Box::new(|s| s.visit_block(&node.body)));
+            }
         }
     }
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
