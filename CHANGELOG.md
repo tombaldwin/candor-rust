@@ -10,6 +10,28 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R372 — a `#[cfg]`-twinned `use` used as a TYPE was resolved by SOURCE ORDER.**
+  `collect_decls` was handed a throwaway `use_alts` map, so a name bound twice under `#[cfg]` left the
+  decl `use` map holding whichever arm was written LAST. Nine consumers read that map — `type_path` at
+  the named-field, tuple-field, enum tuple-variant payload, enum struct-variant field and assoc-type
+  positions, `elem_type` twice, and `record_return` for free fns and for methods — and every one
+  resolves a TYPE, which decides receiver resolution, which decides dispatch, which decides whose
+  effects attach to the caller. **Measured on two fixtures byte-identical except the ORDER of two
+  cfg-gated `use` lines: `Fs` arm first → the `returns` route (`fn make() -> A`) and the `fields` route
+  (`struct HolderA { h: A }`) were BOTH ABSENT; swapped → both `["Fs"]`; the uncollided control charged
+  in every cell.** An affirmative purity claim under ⟨0.21⟩ decided by which line the author wrote first.
+
+  The decl map now has a joined companion view (`uses_ty`) passed to those nine consumers alone — the
+  `ALIAS_ALT_SEP` spelling R105 already gave the alias route, so the receiver-typing arm and `scan.rs`'s
+  collision branch adjudicate the arm set instead of this pass silently picking one. `uses` itself stays
+  single-valued: it also names the units the pass DECLARES, and a joined value there is what made this
+  row's first recorded attempt strictly worse than the defect. **1,563-crate A/B: ADDED 12, REMOVED 0,
+  CHANGED 7, 0 on `inferred` — nothing narrowed, nothing lost; reach 44 type resolutions through a
+  twinned name across 31 crates.** `redis` is the textbook instance (`#[cfg(feature = "ahash")] use
+  ahash::AHashMap as HashMap` beside `#[cfg(not(...))] use std::collections::HashMap`, with `HashMap` a
+  field type of `InfoDict`) and now discloses `invisible: ["ahash"]`; `tracing-subscriber`'s
+  `fmt_layer::Layer` gains four real edges to `FmtSpanConfig::trace_*`.
+
 - **⚠ SOUNDNESS R349 (rust half) — the closure parameter that IS the element, when it is not parameter
   0, was never typed by anything.** The iterator-adapter list typed parameter 0 of a one-parameter
   closure, and the comment beside it said *"`fold`'s accumulator is its first param so it is NOT a
