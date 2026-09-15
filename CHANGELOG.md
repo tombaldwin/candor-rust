@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.38.1] — 2026-09-15
+
 - **`ci/verify-binary-selftest.sh` — the gate that guards the release-asset gate**, wired into `ci.yml`
   so it runs on every push. `verify-binary.sh` is the only thing between a broken build and a published
   binary, and its green was otherwise unfalsifiable: loosen a floor or make a check unreachable and every
