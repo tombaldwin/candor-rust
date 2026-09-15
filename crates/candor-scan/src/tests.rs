@@ -7770,6 +7770,87 @@ impl H {\n\
     }
 
     #[test]
+    fn the_element_parameter_that_is_not_parameter_zero_is_typed() {
+        // SOUNDNESS R349 (rust half) — the adapter list typed parameter 0 of a ONE-parameter closure
+        // and its comment said *"`fold`'s accumulator is its first param so it is NOT a single-param
+        // closure and is skipped (would mis-type the accumulator)"*. That sentence is correct and it is
+        // the defect: it settles parameter 0 and reads as a ruling on `fold`, so parameter 1 — which IS
+        // the element — was never typed by anything.
+        //
+        // THE CONTROL IS THE FIRST LINE, not an afterthought: `iter().for_each(|g| ..)` over the SAME
+        // `Vec<Guard>` charged all along. One variable — which parameter the element is in — separates
+        // it from every row below it, all of which read ABSENT before this fix.
+        //
+        // MEASURED ON REAL CODE, 1,563 registry crates: `subprocess::Pipeline::popen` — whose body is
+        // `for (idx, mut runner) in self.cmds.into_iter().enumerate() { ret.push(runner.popen()?) }` —
+        // was ABSENT from `functions[]`, an affirmative purity claim under ⟨0.21⟩ over a function that
+        // spawns a process pipeline, and `deny Exec Pipeline::popen` over that crate EXITED 0.
+        let src = "\
+pub struct Guard;\n\
+impl Guard { pub fn run(&self) -> usize { let _ = std::fs::write(\"/tmp/r349\", \"x\"); 1 } }\n\
+pub struct Calm;\n\
+impl Calm { pub fn run(&self) -> usize { 7 } }\n\
+pub struct H;\n\
+impl H {\n\
+  pub fn ctl_for_each(&self, v: &Vec<Guard>) { v.iter().for_each(|g| { g.run(); }); }\n\
+  pub fn a_fold(&self, v: &Vec<Guard>) -> usize { v.iter().fold(0, |a, g| a + g.run()) }\n\
+  pub fn a_rfold(&self, v: &Vec<Guard>) -> usize { v.iter().rfold(0, |a, g| a + g.run()) }\n\
+  pub fn a_try_fold(&self, v: &Vec<Guard>) -> Option<usize> { v.iter().try_fold(0usize, |a, g| Some(a + g.run())) }\n\
+  pub fn a_scan(&self, v: &Vec<Guard>) -> usize { v.iter().scan(0usize, |a, g| { *a += g.run(); Some(*a) }).count() }\n\
+  pub fn b_sort_by(&self, v: &mut Vec<Guard>) { v.sort_by(|a, b| a.run().cmp(&b.run())); }\n\
+  pub fn b_max_by(&self, v: &Vec<Guard>) { let _ = v.iter().max_by(|a, b| a.run().cmp(&b.run())); }\n\
+  pub fn b_reduce(&self, v: Vec<Guard>) { let _ = v.into_iter().reduce(|a, b| if a.run() > b.run() { a } else { b }); }\n\
+  pub fn c_binary_search_by(&self, v: &Vec<Guard>) { let _ = v.binary_search_by(|a| a.run().cmp(&1)); }\n\
+  pub fn c_partition_point(&self, v: &Vec<Guard>) { let _ = v.partition_point(|g| g.run() > 0); }\n\
+  pub fn c_retain_mut(&self, v: &mut Vec<Guard>) { v.retain_mut(|g| g.run() > 0); }\n\
+  pub fn c_rposition(&self, v: &Vec<Guard>) { let _ = v.iter().rposition(|g| g.run() > 0); }\n\
+  pub fn d_enum_closure(&self, v: &Vec<Guard>) { v.iter().enumerate().for_each(|(_, g)| { g.run(); }); }\n\
+  pub fn d_enum_rev_closure(&self, v: &Vec<Guard>) { v.iter().enumerate().rev().for_each(|(_, g)| { g.run(); }); }\n\
+  pub fn d_zip_closure(&self, v: &Vec<Guard>) { v.iter().zip([1].iter()).for_each(|(g, _)| { g.run(); }); }\n\
+  pub fn e_enum_for(&self, v: &Vec<Guard>) { for (_, g) in v.iter().enumerate() { g.run(); } }\n\
+  pub fn e_enum_skip_for(&self, v: &Vec<Guard>) { for (_, g) in v.iter().enumerate().skip(1) { g.run(); } }\n\
+  pub fn e_zip_for(&self, v: &Vec<Guard>) { for (g, _) in v.iter().zip([1].iter()) { g.run(); } }\n\
+  pub fn fab_fold(&self, v: &Vec<Calm>) -> usize { v.iter().fold(0, |a, g| a + g.run()) }\n\
+  pub fn fab_sort_by(&self, v: &mut Vec<Calm>) { v.sort_by(|a, b| a.run().cmp(&b.run())); }\n\
+  pub fn fab_enum_for(&self, v: &Vec<Calm>) { for (_, g) in v.iter().enumerate() { g.run(); } }\n\
+  pub fn fab_acc(&self, v: &Vec<Guard>) -> usize { v.iter().fold(0usize, |a, _g| a.run()) }\n\
+  pub fn fab_scan_state(&self, v: &Vec<Guard>) -> usize { v.iter().scan(0usize, |st, _g| Some(st.run())).count() }\n\
+  pub fn fab_enum_index(&self, v: &Vec<Guard>) { for (i, _g) in v.iter().enumerate() { i.run(); } }\n\
+  pub fn fab_enum_index_closure(&self, v: &Vec<Guard>) { v.iter().enumerate().for_each(|(i, _g)| { i.run(); }); }\n\
+  pub fn fab_zip_slot(&self, c: &Vec<Calm>, g: &Vec<Guard>) { for (a, _b) in c.iter().zip(g.iter()) { a.run(); } }\n\
+  pub fn e_zip_slot(&self, c: &Vec<Calm>, g: &Vec<Guard>) { for (_a, b) in c.iter().zip(g.iter()) { b.run(); } }\n\
+  pub fn fab_arity(&self, v: &Vec<Guard>) { for (_i, g, _x) in v.iter().enumerate() { g.run(); } }\n\
+}\n";
+        let v = scan_fixture("r349elem", src);
+        for f in ["H::ctl_for_each", "H::a_fold", "H::a_rfold", "H::a_try_fold", "H::a_scan",
+                  "H::b_sort_by", "H::b_max_by", "H::b_reduce", "H::c_binary_search_by",
+                  "H::c_partition_point", "H::c_retain_mut", "H::c_rposition", "H::d_enum_closure",
+                  "H::d_enum_rev_closure", "H::d_zip_closure", "H::e_enum_for", "H::e_enum_skip_for",
+                  "H::e_zip_for", "H::e_zip_slot"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f} reaches Guard::run — WHICH closure parameter the element arrives in must \
+                        not decide whether the effect is seen:\n{v:#}");
+        }
+        // THE FABRICATION HALF, written as its own set because this register's most-measured way to
+        // introduce a silent under-report is a fix for one — and its mirror, the over-charge, is what a
+        // typing change buys it with. Three distinct claims:
+        //   · the same five spellings over a PURE element stay pure (`fab_fold`/`fab_sort_by`/
+        //     `fab_enum_for`) — this is an ELEMENT question, not a charging one;
+        //   · the ACCUMULATOR/STATE parameter is NOT typed from the element (`fab_acc`/
+        //     `fab_scan_state`) — exactly the mis-typing the old comment was right to refuse;
+        //   · a slot with no element type is not guessed at (`fab_enum_index`, `fab_zip_slot` — the
+        //     Calm side of a zip), and an arity DISAGREEMENT binds nothing rather than sliding the
+        //     positions along (`fab_arity`).
+        for f in ["H::fab_fold", "H::fab_sort_by", "H::fab_enum_for", "H::fab_acc",
+                  "H::fab_scan_state", "H::fab_enum_index", "H::fab_enum_index_closure",
+                  "H::fab_zip_slot", "H::fab_arity"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — typing the element parameter must not type its \
+                     accumulator, its index slot, or the other side of a zip:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn as_ref_is_element_preserving_like_iter_and_clone_beside_it() {
         // SOUNDNESS R345 — `as_ref`/`as_mut`/`as_deref` were missing from `resolve_elem_type`'s
         // element-preserving adapter list, which already held `iter`, `clone`, `to_vec` and the rest.
