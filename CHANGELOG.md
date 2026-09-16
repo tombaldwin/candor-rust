@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.38.3] — 2026-09-16
+
 - **⚠ SOUNDNESS R454 — a map's CONCRETE value was not an element, so `m[k].run()` over a
   `HashMap<String, G>` read silent-pure while the byte-identical statement over `HashMap<String, Box<dyn
   Doer>>` charged.** `elem_trait_leaves` (the trait-object element resolver) has had a map arm since R46;
