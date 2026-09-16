@@ -10,6 +10,19 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **The coverage-gate manifest is refreshed, and it carries a version stamp for the first time.**
+  `covered.tsv`/`open.tsv` had fallen ~11,000 rows behind across R451, R452 and R454, so the weekly
+  `coverage-gate-refresh` job was permanently red — which also made `bin/ci-watch.sh --wait` return
+  immediately on every call, degrading the release instrument. Regenerated against a fresh 74-crate
+  fetch: **0 regressed, 0 oracle-dropped, 37 newly-uncovered**, every one of them an effect the R451/R454
+  fixes newly FIND (`tokio_postgres::Client::cancel_query` → `Ipc,Net`; sea_orm's `stream_partial_model`
+  → `Db,Unknown`).
+- **R212's platform confound does not bite this manifest — measured, not assumed.** The checked-in copy
+  was historically macOS and CI runs Linux, and a same-commit run had measured a different row count
+  across them with the cause never established. This macOS regeneration produced **the same 37 rows CI's
+  Linux run reported**. That is one data point against the confound for this artifact, not a closure of
+  R212; the decisive test is whether the next CI run agrees with this committed manifest.
+
 - **The passing-gate banner no longer points at the deep engine, and no longer overstates its own
   pessimism (SOUNDNESS R456).** It read *"advisory floor — the syntactic backend under-reports; the
   nightly engine is the sound gate"*. Both clauses were wrong in opposite directions. The second sent
