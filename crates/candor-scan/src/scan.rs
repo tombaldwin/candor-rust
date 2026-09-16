@@ -2883,7 +2883,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R379MASK {} :: {}", f.qual, c.leaf);
                         }
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
-                    } else if eff == "Exec" && candor_classify::is_cmd_naming_method(&c.leaf) {
+                    } else if eff == "Exec"
+                        && (candor_classify::is_cmd_naming_method(&c.leaf)
+                            // SOUNDNESS R460 / SPEC ⟨0.37⟩ — …OR a METHOD whose locator is its RECEIVER.
+                            // `cmd.spawn()` runs the program the `Command` it is invoked ON was built
+                            // with; when that construction is not in this function, nothing here names
+                            // the program, and the naming-method arm above has nothing to fire on. So a
+                            // benign sibling `Command::new("git")` certified a caller-supplied spawn —
+                            // AS-EFF-008's masked-literal evasion, the same one R414 closed for the Fs
+                            // stat, by another spelling. The DETERMINED case does not arrive here: the
+                            // collector resolves a receiver whose chain is rooted at `Command::new(lit)`
+                            // into `str_arg`, so `Command::new("git").status()` is certifiable exactly as
+                            // before and only an unnamed receiver reaches this branch.
+                            || (c.method && candor_classify::is_exec_receiver_locator(&c.path)))
+                    {
+                        // R379's rule — instrument the TRIGGER, not the outcome. Which verb masked the
+                        // surface is the question when pricing a denylist, and this arm IS a denylist.
+                        //
+                        // The two arms are marked SEPARATELY on purpose: the naming arm is pre-existing
+                        // and fires on every crate that builds a command at all, so one shared marker
+                        // would report its traffic as this fix's REACH. Measured: 402 mask lines over the
+                        // registry, of which only the `R460MASK` half is new.
+                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                            // The two tags share NO PREFIX, and that is deliberate: `corpus-ab.py`
+                            // counts a mark by substring, so `R460MASK` / `R460MASKNAMING` reported the
+                            // old arm's traffic as this fix's REACH — 409 instead of 217, measured,
+                            // before the rename.
+                            let tag = if candor_classify::is_cmd_naming_method(&c.leaf) {
+                                "R460NAMING" // the pre-existing arm
+                            } else {
+                                "R460RECV" // the receiver-locator arm this row adds
+                            };
+                            eprintln!("{tag} {} :: {} (method={})", f.qual, c.path, c.method);
+                        }
                         incomplete.entry(f.qual.clone()).or_default().insert("Exec");
                     } else if eff == "Fs"
                         && (!c.method && candor_classify::is_fs_path_arg(&c.leaf)

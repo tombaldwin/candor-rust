@@ -1488,7 +1488,35 @@ impl<'a> CallCollector<'a> {
                     }
                     return inner;
                 }
+                // SOUNDNESS R460 — `Command::new(<head>)` IS the program head, by the same argument the
+                // two names above are the path: the constructor is documented identity over the string
+                // it is handed. Crediting it is what lets the collector tell a DETERMINED spawn receiver
+                // (`Command::new("git").status()`, `let c = Command::new("git"); c.spawn()`) apart from
+                // one whose program this function never names — without which the receiver mask below
+                // would swallow the dominant Exec spelling and `allow Exec git` would refuse a fully
+                // determined spawn. Nothing is published from here: `cmds` is written only at a
+                // `is_cmd_naming_method` call site, so this cannot widen the literal surface.
+                if ident == "Command::new" {
+                    let inner =
+                        const_str_value(&c.args[0]).or_else(|| self.resolve_str_expr(&c.args[0]));
+                    if inner.is_some() && std::env::var_os("CANDOR_R460_DEBUG").is_some() {
+                        eprintln!("R460ROOT");
+                    }
+                    return inner;
+                }
                 None
+            }
+            // SOUNDNESS R460 — peel a COMMAND BUILDER CHAIN back to its head. `is_cmd_builder_method`
+            // is the family's existing authority on which methods configure a command without renaming
+            // it (`arg`, `env`, `stdin`, `current_dir`, …), and it is consulted rather than copied. The
+            // receiver is the only thing read; the ARGUMENTS are deliberately ignored, because
+            // `.arg("curl")` names an argument and not a program — the fabrication `is_cmd_naming_method`
+            // exists to prevent. Every other method stays `None` via the fall-through, so R416's rule
+            // that a TRANSFORMING call (`join`, `with_extension`) must not resolve is untouched.
+            syn::Expr::MethodCall(m)
+                if candor_classify::is_cmd_builder_method(&m.method.to_string()) =>
+            {
+                self.resolve_str_expr(&m.receiver)
             }
             // A bare path: a local resolvable string binding first (`let url = …`), then a crate const.
             syn::Expr::Path(_) => {
@@ -1517,6 +1545,29 @@ impl<'a> CallCollector<'a> {
                 format_literal_head_host(&m.mac)
             }
             _ => None,
+        }
+    }
+
+    /// SOUNDNESS R460 — resolve the program head a `Command`-receiver call will actually run, by
+    /// peeling the chain back to where the command was CONSTRUCTED.
+    ///
+    /// Deliberately separate from `resolve_str_expr` and deliberately NOT folded into it: this peels
+    /// EVERY method call, which is correct for a command chain and would be a fabrication for a path.
+    /// `Path::new("/a").join(user).exists()` must keep returning None — R416's rule that a TRANSFORMING
+    /// call cannot be peeled — whereas no method on a `Command` renames its program, so
+    /// `Command::new("git").args(a).status().unwrap()` genuinely runs `git` however long the chain is.
+    /// The two questions look alike and answer differently, so they get two functions; §G's rule about
+    /// one question with two implementations is about the reverse case.
+    ///
+    /// The MEASURED reason this exists rather than a simple `is_cmd_builder_method` peel: the first cut
+    /// peeled only builder methods and masked `Command::new("git").arg("status").status().unwrap()` —
+    /// the commonest Exec spelling there is — because `status` and `unwrap` are not builders. A guard
+    /// that masks the fully-determined case is the over-charge this fix's own control forbids, and it
+    /// showed up on the benign arm of the fixture rather than in review.
+    fn resolve_cmd_recv(&self, expr: &syn::Expr) -> Option<String> {
+        match peel_recv(expr) {
+            syn::Expr::MethodCall(m) => self.resolve_cmd_recv(&m.receiver),
+            other => self.resolve_str_expr(other),
         }
     }
 
@@ -3013,10 +3064,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 //
                 // Only when `str_arg` is None, so an argument-position locator always wins: this is a
                 // FALLBACK for calls that have no argument locator, never an override of one.
-                let str_arg = match (&str_arg, ty.as_str()) {
-                    (None, "std::path::Path" | "std::path::PathBuf") => {
+                //
+                // SOUNDNESS R460 — the same clause for Exec. A `Command` receiver's locator is the
+                // program its chain was CONSTRUCTED with, which is a different function-local fact from
+                // anything in the argument list, so resolve it the same way. Matched on the receiver
+                // type's last SEGMENT rather than a fixed list of paths, so `std::process::Command`,
+                // `tokio::process::Command` and `async_process::Command` are one rule. When this
+                // resolves, `is_exec_receiver_locator` never sees the call; when it does not, the
+                // program was never named here and the surface is masked.
+                let recv_seg = ty.rsplit("::").next().unwrap_or("");
+                let str_arg = match (&str_arg, ty.as_str(), recv_seg) {
+                    (None, "std::path::Path" | "std::path::PathBuf", _) => {
                         self.resolve_str_expr(&node.receiver)
                     }
+                    (None, _, "Command") => self.resolve_cmd_recv(&node.receiver),
                     _ => str_arg,
                 };
                 self.calls.push(Call { argc: node.args.len().min(255) as u8,

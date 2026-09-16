@@ -10,6 +10,45 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **R460 — a spawn whose `Command` arrives as a RECEIVER is no longer certified by a benign sibling
+  literal.** The Exec twin of R414, and a LIVE gate bypass in the shipped engine. `is_cmd_naming_method`
+  marks the surface incomplete at `Command::new(<runtime value>)`, which covers every spelling that names
+  the program *inside* the function — and nothing covered the spelling that names it somewhere else. So
+  `fn go(cmd: &mut Command) { Command::new("git").status(); cmd.spawn(); }` reported
+  `cmds:['git'] incomplete:NONE`, and `allow Exec git` exited **0** printing *"nothing hidden — every
+  effect sits where its name says it should"* over a caller-supplied program. Measured with one variable:
+  deleting the benign line, and nothing else, turns the same gate to exit 1. The real instance is tokio's
+  own production `process::unix::spawn_child(cmd: &mut std::process::Command)`.
+- **The catch that pays for it is `aws-config`'s `credential_process`.**
+  `CredentialProcessProvider::credentials` wraps a **user-supplied command string from the AWS profile**
+  in `sh -c` / `cmd.exe /C` and spawns it through `tokio::process::Command::from(command).output()`. It
+  reported `cmds:['cmd.exe','sh'] incomplete:NONE`, so `allow Exec sh` certified running an arbitrary
+  configured program. Four rows across `aws-config` 1.11/1.12; ground-truthed from the crate's source,
+  not from candor's own report.
+- **Priced over 1,608 registry crates, 304,702 rows per arm: ADDED 0 · REMOVED 0 · CHANGED 52, and
+  `inferred` CHANGED 0** — every changed row moves exactly one field, `incomplete`, and every move is a
+  GAIN (48 `None -> ['Exec']`, 4 `['Fs'] -> ['Exec','Fs']`). **All 52 audited in full, not sampled: zero
+  rows lose an effect, a cmd, a path, a host, a call or any disclosure.** 20 crate-versions touched.
+  Reach: 217 receiver-arm triggers across 62 of the 1,608 crates, counted by `CANDOR_MASK_DEBUG=1` on the `R460RECV` marker
+  that is SEPARATE from the pre-existing naming arm's, so the old arm's 192 hits are not reported as
+  this change's.
+- **The over-mask is stated because it was measured, not because it is comfortable.** Of the 217
+  triggers, 116 are genuine boundary verbs (`output` 60, `spawn` 31, `status` 21, `wait`, `kill`, `exec`)
+  and 101 are names that are not `Command` methods at all — `Result`/`Option` combinators (`ok`, `is_ok`,
+  `map_err`, `success`, `expect`, 84 in total) reaching this branch because the engine types
+  `let status = cmd.status()` as a `Command`, plus 17 real builder methods missing from
+  `is_cmd_builder_method` (`cc`'s `set_family_detection_env`, `raw_arg`, tokio's `kill_on_drop`). They
+  cost **4 gate-affecting rows in 1,608 crates** — `wasm_bindgen::publish` x2, `dylint_internal`'s
+  `preinstall-toolchains` x2, each fully determined and now refused. Fail-closed and disclosed in every
+  case. No carve-out was added for them: on a masking guard an under-catch is a broken gate (R399), and
+  every name added to a carve-out is a candidate bypass.
+- **The determined receiver still certifies, and that is the control this fix is gated on.** The
+  collector resolves a `Command` receiver by peeling its chain back to `Command::new(<literal>)` — inline,
+  through a `let` binding, through builders and through the terminal and its `unwrap` — so
+  `Command::new("git").arg("status").output().unwrap()` reports `incomplete:NONE` exactly as before. The
+  first cut peeled only `is_cmd_builder_method` names and masked that spelling; the fixture's benign arm
+  caught it before any corpus run.
+
 - **`candor-scan` 0.38.4 — a version-only republish, so ONE pin covers the source-install path.**
   `candor update rust` falls back to `cargo install --version $ENGINE_PIN_RUST candor-scan candor-query`
   when no prebuilt binary matches the platform (Intel Macs, arm64 Linux). A single `--version` covers both

@@ -3741,6 +3741,46 @@ pub fn is_fs_receiver_locator(call_path: &str) -> bool {
     matches!(recv, "Path" | "PathBuf" | "Utf8Path" | "Utf8PathBuf")
 }
 
+/// SOUNDNESS R460 / SPEC ⟨0.37⟩ — **the Exec twin of `is_fs_receiver_locator`: a spawn's locator is
+/// its RECEIVER, and rust was silent on it.** `is_cmd_naming_method` marks the surface incomplete at
+/// `Command::new(<runtime value>)`, which covers every spelling that NAMES the program inside the
+/// function. It cannot cover the spelling that names it somewhere else:
+///
+/// ```text
+/// fn masked(cmd: &mut Command) { Command::new("git").status(); cmd.spawn(); }
+///   -> cmds:['git'] incomplete:NONE   allow Exec git -> exit 0, "nothing hidden"
+/// ```
+///
+/// MEASURED on the pre-fix binary, one variable — deleting the benign `Command::new("git")` line, and
+/// nothing else, turns the same gate to exit 1. The real instance is tokio's own
+/// `process::unix::spawn_child(cmd: &mut std::process::Command) { cmd.spawn()? }`, production source,
+/// charged `Exec` with no `cmds` and no `incomplete`.
+///
+/// **A DENYLIST, and the direction is the point.** On a `Command` receiver essentially every method
+/// that is not a documented BUILDER modifier reaches the boundary (`spawn`, `status`, `output`, `exec`,
+/// and every async / pty mirror of them), so an allowlist of terminal names would be the R346→R348
+/// hand-list vein by construction: each name not written down is a silent bypass. The carve-out is
+/// `is_cmd_builder_method` — the SAME list the head-refinement already trusts, not a second copy of it
+/// (§G, ask the authority) — plus the `get_*` getters that list's own doc-block names. Being wrong
+/// about a carve-out costs an over-mask on a configure-only call (fails closed, disclosed); being
+/// wrong the other way is the exit-0 above.
+///
+/// Scoped on the RECEIVER SEGMENT being exactly `Command`, so `std::process`, `tokio::process`,
+/// `async_process` and the `std::os::unix` extension trait are one rule without naming a crate — the
+/// same tail-matching discipline as `is_fs_receiver_locator`. The predicate is only ever consulted for
+/// a call the classifier ALREADY resolved to `Exec`, so a non-spawning type that happens to be called
+/// `Command` (clap's builder) is unreachable unless something already charged it Exec.
+///
+/// The DETERMINED receiver does not arrive here: the collector resolves a builder chain rooted at
+/// `Command::new("git")` — inline or through a `let` binding — into `str_arg`, so only a receiver whose
+/// program was never named in this function reaches the mask. That split is this fix's over-charge
+/// control, and it is what keeps the dominant spelling certifiable.
+pub fn is_exec_receiver_locator(call_path: &str) -> bool {
+    let mut segs = call_path.rsplit("::");
+    let (Some(leaf), Some(recv)) = (segs.next(), segs.next()) else { return false };
+    recv == "Command" && !is_cmd_builder_method(leaf) && !leaf.starts_with("get_")
+}
+
 pub fn is_fs_path_arg_method(call_path: &str) -> bool {
     if call_path.ends_with("OpenOptions::open") || call_path.ends_with("DirBuilder::create") {
         return true;

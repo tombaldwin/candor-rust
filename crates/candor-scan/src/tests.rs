@@ -6555,6 +6555,117 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn masking_r460_exec_receiver_locator_fails_closed() {
+        // SOUNDNESS R460 / SPEC ⟨0.37⟩ — THE EXEC TWIN OF R414. A spawn's locator can be its RECEIVER:
+        // `cmd.spawn()` runs whatever the `Command` was built with, and when that construction is not in
+        // this function nothing here names the program. `is_cmd_naming_method` only ever fires at
+        // `Command::new(<runtime value>)`, so it had nothing to fire on, the surface was marked complete,
+        // and a benign sibling `Command::new("git")` CERTIFIED the caller-supplied spawn:
+        //
+        //     fn masked(cmd: &mut Command) { Command::new("git").status().unwrap(); cmd.spawn(); }
+        //       -> cmds:['git'] incomplete:NONE   allow Exec git -> exit 0, "nothing hidden"
+        //
+        // Measured on the pre-fix binary with ONE variable — deleting the benign line and nothing else
+        // turned the same gate to exit 1 — and calibrated three ways (`deny Exec` 1, `allow Exec notgit`
+        // 1, the masked fn alone 1). The real instance is tokio's own production
+        // `process::unix::spawn_child(cmd: &mut std::process::Command)`, charged Exec with no `cmds` and
+        // no `incomplete`.
+        //
+        // THE DETERMINED ARMS ARE THE POINT OF THIS TEST, not an afterthought: `Command::new("git")` with
+        // any chain of builders and terminals must STILL certify, because that is the dominant Exec
+        // spelling in Rust and an over-mask there makes `allow Exec` unusable. The first cut of the fix
+        // peeled only `is_cmd_builder_method` names and masked `…::new("git").arg("x").status().unwrap()`
+        // — caught here, on the benign arm, before any corpus run.
+        let run = |name: &str, src: &str, policy: &str| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-r460-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, policy).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+
+        // THE DEFECT: a benign ALLOWED head beside a spawn whose Command arrives as a PARAMETER.
+        let masked = r#"
+            use std::process::Command;
+            pub fn go(cmd: &mut Command) {
+                let _ = Command::new("git").arg("status").status();
+                let _ = cmd.spawn();
+            }
+        "#;
+        assert_eq!(run("r460mask", masked, "allow Exec git\n"), 1,
+                   "a benign sibling head must not certify a caller-supplied Command");
+
+        // ...and through a FIELD — the sibling spelling the parameter fixture would not have caught by
+        // itself (A.2: a test inherits the blind spot of the report that prompted it).
+        let field = r#"
+            use std::process::Command;
+            pub struct H { pub cmd: Command }
+            pub fn go(h: &mut H) {
+                let _ = Command::new("git").arg("status").status();
+                let _ = h.cmd.spawn();
+            }
+        "#;
+        assert_eq!(run("r460field", field, "allow Exec git\n"), 1,
+                   "a benign sibling head must not certify a field-held Command");
+
+        // CONTROL: no sibling — already failed closed before this fix, and must still.
+        let alone = r#"
+            use std::process::Command;
+            pub fn go(cmd: &mut Command) { let _ = cmd.spawn(); }
+        "#;
+        assert_eq!(run("r460alone", alone, "allow Exec git\n"), 1,
+                   "an unnamed spawn must still fail closed on its own");
+
+        // OVER-CHARGE CONTROLS — every spelling that NAMES its program must still certify: an inline
+        // chain through a terminal and `unwrap`, a `let`-bound command mutated by later statements, and
+        // a `let`-bound builder chain.
+        let inline = r#"
+            use std::process::Command;
+            pub fn go() { let _ = Command::new("git").arg("status").env("A", "b").output().unwrap(); }
+        "#;
+        assert_eq!(run("r460inline", inline, "allow Exec git\n"), 0,
+                   "an inline determined chain must still pass — no false positive");
+
+        let bound = r#"
+            use std::process::Command;
+            pub fn go() {
+                let mut c = Command::new("git");
+                c.arg("status");
+                let _ = c.spawn();
+            }
+        "#;
+        assert_eq!(run("r460bound", bound, "allow Exec git\n"), 0,
+                   "a let-bound determined command must still pass — no false positive");
+
+        let bound_chain = r#"
+            use std::process::Command;
+            pub fn go() {
+                let mut c = Command::new("git").arg("status").env("A", "b");
+                let _ = c.status();
+            }
+        "#;
+        assert_eq!(run("r460boundchain", bound_chain, "allow Exec git\n"), 0,
+                   "a let-bound determined builder chain must still pass — no false positive");
+
+        // CALIBRATION: the instrument must be able to FAIL on the determined arms too, or the three
+        // zeros above are not evidence of anything — §6, "0 violations" is not evidence until the
+        // instrument is proven able to fail. Same source, one variable: the allowed program's name.
+        assert_eq!(run("r460cal", inline, "allow Exec notgit\n"), 1,
+                   "the determined arm must FAIL under a policy naming a different program");
+    }
+
+    #[test]
     fn gate_over_unparseable_source_fails_closed() {
         // SOUNDNESS: a policy gate over a crate where a source file failed to PARSE must NOT report
         // green — the unparsed file's effects are absent from the report, so a `policy ✓` over it is a
