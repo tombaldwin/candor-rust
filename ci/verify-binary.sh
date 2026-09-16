@@ -48,8 +48,22 @@ fail() { echo "verify-binary: ✘ $*" >&2; exit 1; }
 
 # [1] It runs at all, and it is the build we think it is. A binary built from the wrong ref passes every
 #     behavioural check below — the version string is the only thing that can catch it.
-sv="$("$SCAN"  --version 2>/dev/null | head -1)" || fail "candor-scan --version failed"
-qv="$("$QUERY" --version 2>/dev/null | head -1)" || fail "candor-query --version failed"
+# NO PIPE HERE, AND THAT IS THE POINT. This was `… --version | head -1` under `set -euo pipefail`, and on
+# 2026-09-16 it failed the macOS arm64 leg with `✘ candor-query --version failed` on a commit whose only
+# change was a version bump — then PASSED on a re-run of the identical SHA, while the Linux leg said
+# `verify-binary: OK` throughout. Both binaries print TWO lines (`<name> <ver> (spec X.Y)` then an
+# `upgrade:` hint), so `head -1` can close the pipe before the second write and hand the producer SIGPIPE;
+# `pipefail` then makes the whole substitution non-zero and the gate refuses a healthy binary.
+#
+# THE CAUSE IS NOT CONFIRMED — 40 local runs of the exact construct did not reproduce it (SOUNDNESS R455).
+# It is fixed this way anyway because the repair REMOVES THE CLASS rather than the instance: with no pipe
+# there is no SIGPIPE to race on, whatever the cause turns out to have been. A flaky gate on RELEASE ASSETS
+# is worth more than a confirmed diagnosis — a harness FAIL is indistinguishable from a real one, and this
+# one blocked a cut.
+sv="$("$SCAN"  --version 2>/dev/null)" || fail "candor-scan --version failed"
+qv="$("$QUERY" --version 2>/dev/null)" || fail "candor-query --version failed"
+sv="${sv%%$'\n'*}"   # first line, without a pipe
+qv="${qv%%$'\n'*}"
 echo "verify-binary: scan  = $sv"
 echo "verify-binary: query = $qv"
 if [ -n "$WANT_VER" ]; then
