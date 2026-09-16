@@ -10,6 +10,12 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`candor-scan` 0.38.4 — a version-only republish, so ONE pin covers the source-install path.**
+  `candor update rust` falls back to `cargo install --version $ENGINE_PIN_RUST candor-scan candor-query`
+  when no prebuilt binary matches the platform (Intel Macs, arm64 Linux). A single `--version` covers both
+  crates, so leaving the pin at 0.38.3 would have kept installing the AFFECTED `candor-query` 0.38.3.
+  candor-scan 0.38.3 was itself clean; this bump exists only to let the pin move.
+
 - **`candor-query` 0.38.4 — a redaction republish.** Cargo packages SOURCE, so the doc comment in
   `src/tour.rs` that named a private client's package root was preserved verbatim in every published
   tarball, and served live by docs.rs. javac discards comments and the Java jars were clean; Cargo does
