@@ -10,7 +10,7 @@ use crate::*;
 /// The report's `package` name (the §2 envelope field), or `None` if absent/unreadable — the tour header
 /// prefers it (meaningful, locator-independent) over the prefix basename. A `packages` PLURAL envelope
 /// (the JVM shape, SPEC §2) is honoured too: one entry names it verbatim; several name their longest
-/// common dotted prefix (`com.the field case.actions` + `com.the field case.dao` → `com.the field case`); none shared → None.
+/// common dotted prefix (`com.acme.actions` + `com.acme.dao` → `com.acme`); none shared → None.
 fn report_package(prefix: &str) -> Option<String> {
     let path = glob_reports(prefix).into_iter().next()?;
     let text = std::fs::read_to_string(&path).ok()?;
