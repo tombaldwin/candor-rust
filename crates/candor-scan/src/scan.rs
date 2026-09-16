@@ -1182,13 +1182,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
             continue;
         }
-        // A `#[cfg(test)] mod tests;` FILE module is invisible here — its test-ness is declared at the
-        // `mod` site, not in the file — so a `tests.rs` / `*_tests.rs` / `*_test.rs` file's effects (a
-        // seeded RNG, a temp file) would be mis-read as the crate's. By convention these stems are test
-        // modules; skip them by default. (base64's `engine/tests.rs` otherwise reported a phantom `Rand`.)
+        // A `tests.rs` / `*_tests.rs` / `*_test.rs` FILE module is usually a `#[cfg(test)]` tree whose
+        // effects (a seeded RNG, a temp file) would be mis-read as the crate's — base64's
+        // `engine/tests.rs` otherwise reported a phantom `Rand`. This used to skip on the NAME alone,
+        // and its own reason text named the hazard it then walked into: *"test-ness is declared at the
+        // `mod` site, invisible when walking files."* It is not invisible — R457 — so the stem now only
+        // selects a CANDIDATE and `test_stem_file_is_test_module` looks for the evidence (the file's own
+        // `#![cfg(test)]`, or the declaring `mod`'s `#[cfg]`), keeping today's answer only where no
+        // declaration can be found. A production file that merely LOOKS like a test module — `regex-cli`'s
+        // `cmd/compile_test.rs`, the actual source of that binary — is now scanned.
         if !include_tests {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                if is_test_file_stem(stem) {
+                if is_test_file_stem(stem) && crate::decls::test_stem_file_is_test_module(root, rel) {
                     excluded.push((rel.to_string_lossy().into_owned(), "test-module"));
                     if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
                     continue;
@@ -4174,8 +4179,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     "non-library-target" => "tests/, benches/ and examples/ describe what the crate's \
                          HARNESS does, not what the crate does; --include-tests keeps them"
                         .to_string(),
-                    "test-module" => "a `tests.rs`/`*_test.rs` file module is a #[cfg(test)] tree whose \
-                         test-ness is declared at the `mod` site, invisible when walking files"
+                    // R457 — this used to read "…whose test-ness is declared at the `mod` site,
+                    // invisible when walking files", which was both the rationale and the defect: the
+                    // rule trusted the NAME and dropped production source that merely looked like a
+                    // test module. The `mod` site is not invisible, so it is now read, and this text
+                    // states the EVIDENCE that was found rather than the convention that was assumed.
+                    "test-module" => "a #[cfg(test)] file module: the declaring `mod` carries a cfg that \
+                         cannot hold in a non-test build, or the file's own #![cfg(test)] says so, or no \
+                         declaration was found for a `tests.rs`/`*_test.rs` file; --include-tests keeps them"
                         .to_string(),
                     "build-output" => "target/ and hidden directories hold build artifacts and tooling, \
                          not library code"

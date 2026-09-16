@@ -1857,8 +1857,12 @@ pub(crate) fn has_cfg(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg"))
 }
 
-/// True if a file stem names a conventional `#[cfg(test)] mod` FILE module (`tests.rs`, `foo_tests.rs`,
-/// `foo_test.rs`) — whose test-ness is declared at the `mod` site, invisible when walking the file.
+/// True if a file stem names a CONVENTIONAL test-module file (`tests.rs`, `foo_tests.rs`, `foo_test.rs`).
+///
+/// R457 — this is a CANDIDATE filter, not a verdict. It used to be the whole rule, and `regex-cli`'s
+/// `cmd/compile_test.rs` (the real source of that binary) was dropped for matching it. The verdict is
+/// `decls::test_stem_file_is_test_module`, which goes and reads the declaring `mod`. Measured over 1,608
+/// registry crates: 365 files match this stem and 17 of them are production source.
 pub(crate) fn is_test_file_stem(stem: &str) -> bool {
     stem == "tests" || stem == "test" || stem.ends_with("_tests") || stem.ends_with("_test")
 }

@@ -710,6 +710,142 @@ fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
     out
 }
 
+/// R457 — IS A FILE WHOSE STEM LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
+///
+/// The file walk used to answer this from the NAME alone (`tests.rs`/`test.rs`/`*_test.rs`/`*_tests.rs`),
+/// and the reason text it printed named its own hazard: *"test-ness is declared at the `mod` site,
+/// invisible when walking files."* It is not invisible — the walk has the whole tree on disk — and the
+/// consequence of trusting the name was that `regex-cli`'s `cmd/compile_test.rs`, the real source of that
+/// binary, was dropped wholesale and the crate's `cmds` shrank from `[cargo, git, rustfmt, ucd-generate]`
+/// to `[rustfmt, ucd-generate]`.
+///
+/// So: EXCLUDE only on positive evidence of test-ness, and otherwise scan. Three sources, in order:
+///
+///   1. the file's OWN inner attribute — `#![cfg(test)]` at the top of `tests.rs` is the whole
+///      declaration and is visible right here;
+///   2. the declaring `mod` item's `#[cfg(...)]`, read from the parent module file (`<dir>/mod.rs`,
+///      `<dir>.rs`, `<dir>/lib.rs`, `<dir>/main.rs`) with `is_cfg_test` — the SAME authority every other
+///      site in this engine uses, so R122's `any(test, feature = "x")` correction is inherited rather
+///      than re-derived (`value-bag`'s `#[cfg(any(test, feature = "test"))] pub mod test;` is one of the
+///      files this moves, and a hand-rolled "does the attr mention test" check gets it backwards);
+///   3. no declaration found in any of those -> keep the old answer (EXCLUDE). The `mod` site can sit
+///      somewhere this lookup does not reach — an inline `mod client { … }` in a distant file (rustls),
+///      a `#[path]` redirect from a sibling that is not a parent (aws-lc-sys, trybuild, rustls-webpki),
+///      or a `[[bin]]` target (phf_generator) — and guessing PRODUCTION there would charge a real test
+///      tree.
+///
+/// MEASURED over the 1,608-crate registry corpus, by the probe below rather than by argument — 365
+/// files match the stem and the routes split:
+///
+///     309  exclude  cfg-test-mod-site       the declaring `mod` is `#[cfg(test)]`
+///      25  exclude  inner-cfg-test          only the file's own `#![cfg(test)]` says so
+///      14  exclude  no-declaration-found    the conservative default; all 14 audited, all real tests
+///      17  SCAN     production-mod-site     R457 — production source the old rule dropped
+///
+/// The 17 are real public surface: `aws_lc_rs::test`, `ring::deprecated_test`, ratatui's `TestBackend`
+/// (`pub use self::test::TestBackend`), `rusty_fork::fork_test` (which really does SPAWN), criterion's
+/// `t_test` plotting, ureq's `#[cfg(feature = "_test")]` transport, `value_bag::test`, arc-swap's
+/// `compile_fail_tests`. Corpus A/B: ADDED 37 · REMOVED 24 · CHANGED 98, reach 365 across 188 entries,
+/// and 0 of the 98 changed rows loses an effect. Deleting the rule outright instead measures ADDED
+/// 5,638 — 152x — which is what the exclusion is FOR, and why this narrows rather than removes.
+///
+/// THE 24 REMOVED ARE NOT THIS CHANGE'S, AND THAT WAS MEASURED RATHER THAN ARGUED. All 24 sit in
+/// `ratatui-core-0.1.2` and all 24 lose `['Unknown']`: `Terminal<B>::size` is `self.backend.size()` on
+/// a type PARAMETER, which had nothing in-crate to resolve to while `src/backend/test.rs` was excluded.
+/// Admitting that file gives the crate its only `impl Backend` — `TestBackend`, pure — and the engine
+/// resolves the generic onto it and certifies purity with no disclosure. The control holds everything
+/// constant but the FILENAME: copy the crate, rename `src/backend/test.rs` to `membackend.rs`, fix the
+/// one `mod` line, and the PRE binary produces the POST answer exactly (analyzed 455, 90 rows,
+/// `Terminal::size` absent); delete the file instead and the PRE binary reproduces PRE exactly
+/// (analyzed 426, 111 rows, `Terminal::size` = `Unknown`). So this is a pre-existing resolution defect
+/// the old exclusion happened to be masking, filed as R458 — not a silence bought by this fix.
+///
+/// The direction is deliberate and is this family's denylist rule: the change only ever scans MORE, so
+/// its failure mode is an over-charge that a reader can see, never a silent shrink.
+pub(crate) fn test_stem_file_is_test_module(root: &Path, rel: &Path) -> bool {
+    // REACH, not a report diff. `CANDOR_TESTMOD_DEBUG=1` prints one line per candidate with the verdict,
+    // so "0 changed rows" can be told apart from "the code never ran" — SOUNDNESS §E1, and the reason
+    // this fix is not another inert clause. Counted by `bin/corpus-ab.py --mark R457PROBE`.
+    let debug = std::env::var("CANDOR_TESTMOD_DEBUG").is_ok();
+    let (verdict, route) = test_stem_file_is_test_module_inner(root, rel);
+    if debug {
+        eprintln!("R457PROBE {} {route} {}", if verdict { "exclude" } else { "SCAN" }, rel.display());
+    }
+    verdict
+}
+
+/// `(exclude?, which of the three evidence routes decided it)` — the route is reported by the probe
+/// so the population can be counted per source rather than asserted from one sample.
+fn test_stem_file_is_test_module_inner(root: &Path, rel: &Path) -> (bool, &'static str) {
+    // 1. the file's own `#![cfg(test)]`.
+    let abs = root.join(rel);
+    if let Ok(txt) = std::fs::read_to_string(&abs) {
+        if let Ok(f) = syn::parse_file(&txt) {
+            if crate::lang::is_cfg_test(&f.attrs) {
+                return (true, "inner-cfg-test");
+            }
+        }
+    }
+    // 2. the declaring `mod` item, in one of the parent module files.
+    let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) else { return (true, "no-stem") };
+    let dir = rel.parent().unwrap_or(Path::new(""));
+    let parents = [
+        dir.join("mod.rs"),
+        // the 2018 sibling form: `a/b.rs` declares the children of `a/b/`
+        if dir.as_os_str().is_empty() { std::path::PathBuf::new() } else { dir.with_extension("rs") },
+        dir.join("lib.rs"),
+        dir.join("main.rs"),
+    ];
+    for prel in parents.iter() {
+        if prel.as_os_str().is_empty() || prel == rel {
+            continue;
+        }
+        let Ok(txt) = std::fs::read_to_string(root.join(prel)) else { continue };
+        let Ok(f) = syn::parse_file(&txt) else { continue };
+        if let Some(is_test) = declaring_mod_is_cfg_test(&f.items, stem) {
+            return (is_test, if is_test { "cfg-test-mod-site" } else { "production-mod-site" });
+        }
+    }
+    // 3. nothing found — keep the old answer.
+    (true, "no-declaration-found")
+}
+
+/// `Some(is_cfg_test)` for the `mod <stem>;` FILE-module declaration naming `stem`, searched through
+/// inline `mod … { … }` bodies too (rustls declares `src/client/test.rs` inside an inline `mod client`).
+/// A `#[path = "…"]` redirect is matched on the TARGET's file stem, which is what actually names the
+/// file — `#[path = "foo_test.rs"] mod tests;` declares `foo_test.rs`, not `tests.rs`.
+fn declaring_mod_is_cfg_test(items: &[syn::Item], stem: &str) -> Option<bool> {
+    for it in items {
+        let syn::Item::Mod(m) = it else { continue };
+        match &m.content {
+            // an inline body — recurse; it can hold file-module declarations of its own.
+            Some((_, inner)) => {
+                if let Some(v) = declaring_mod_is_cfg_test(inner, stem) {
+                    // An inline `#[cfg(test)] mod foo { mod bar; }` makes `bar` test-only too.
+                    return Some(v || crate::lang::is_cfg_test(&m.attrs));
+                }
+            }
+            None => {
+                let paths = mod_path_attrs(&m.attrs);
+                let names = if paths.is_empty() {
+                    vec![m.ident.to_string()]
+                } else {
+                    paths
+                        .iter()
+                        .filter_map(|p| {
+                            Path::new(p).file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                        })
+                        .collect()
+                };
+                if names.iter().any(|n| n == stem) {
+                    return Some(crate::lang::is_cfg_test(&m.attrs));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Lexically normalise a source-relative path (`src/imp/../shared/x.rs` -> `src/shared/x.rs`) so
 /// `module_path` sees the same spelling the file walk produced. Purely textual — no filesystem access,
 /// so it cannot depend on what happens to exist.

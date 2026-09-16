@@ -10,6 +10,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **R457 — a PRODUCTION source file named `*_test.rs` is no longer dropped on its NAME.** The walk
+  excluded any `tests.rs`/`test.rs`/`*_test.rs`/`*_tests.rs` file wholesale, and the reason text it
+  printed named the hazard it then walked into: *"test-ness is declared at the `mod` site, invisible
+  when walking files."* It is not invisible. `regex-cli`'s `cmd/compile_test.rs` — the real source of
+  that binary, dispatched by its own `"compile-test"` subcommand — was dropped, narrowing the crate's
+  `cmds` from `[cargo, git, rustfmt, ucd-generate]` to `[rustfmt, ucd-generate]`; it now reports all
+  four. The stem is a CANDIDATE filter and the verdict reads the evidence: the file's own
+  `#![cfg(test)]`, or the declaring `mod`'s `#[cfg]` via `is_cfg_test` (so R122's `any(test, feature)`
+  correction is inherited, not re-derived), falling back to today's answer where no declaration is found.
+- **The exclusion is still load-bearing, and that was PRICED rather than argued.** Over 1,608 registry
+  crates, 365 files match the stem: 309 excluded at the `mod` site, 25 by their own `#![cfg(test)]`,
+  14 by the conservative no-declaration default (all 14 audited, all real test trees), and **17
+  scanned** — `aws_lc_rs::test`, `ring::deprecated_test`, ratatui's `pub use self::test::TestBackend`,
+  `rusty_fork::fork_test` (which really does spawn), criterion's `t_test` plotting, ureq's
+  `#[cfg(feature = "_test")]` transport, `value_bag::test`, arc-swap's `compile_fail_tests`. Corpus
+  A/B: **ADDED 37 · REMOVED 24 · CHANGED 98, reach 365 across 188 entries**, 0 of the 98 changed rows
+  losing an effect. **Deleting the rule outright instead measures ADDED 5,638 — 152x**, essentially
+  all of it test harness charged to the crate, which is why this narrows rather than removes.
+- **The 24 removals are a pre-existing defect the exclusion was masking, not a silence bought by this
+  fix (R458).** All 24 are in `ratatui-core-0.1.2` and lose `['Unknown']`: `Terminal<B>::size` calls
+  `self.backend.size()` on a type parameter, and admitting `src/backend/test.rs` gives the crate its
+  only `impl Backend` (`TestBackend`, pure), onto which the engine resolves the generic and certifies
+  purity. Held constant against the filename: the same PRE binary on the same bytes with the file
+  merely RENAMED produces the POST answer exactly, and with the file DELETED reproduces PRE exactly.
+
 - **The coverage-gate manifest is refreshed, and it carries a version stamp for the first time.**
   `covered.tsv`/`open.tsv` had fallen ~11,000 rows behind across R451, R452 and R454, so the weekly
   `coverage-gate-refresh` job was permanently red — which also made `bin/ci-watch.sh --wait` return

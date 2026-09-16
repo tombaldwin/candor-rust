@@ -6710,6 +6710,144 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         assert!(!is_build_script(Path::new("build/mod.rs"))); // a `build` module dir, not the script
     }
 
+    /// Build a throwaway crate from an arbitrary file list (nested paths allowed) and return its
+    /// report. `scan_fixture_files` writes `extra` flat under `src/`; R457's cases need `src/foo.rs`
+    /// declaring `src/foo/bar_test.rs`, so the directories have to be created.
+    #[cfg(test)]
+    fn scan_tree(name: &str, files: &[(&str, &str)]) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+        for (rel, body) in files {
+            let f = d.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, body).unwrap();
+        }
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        v
+    }
+
+    /// `(was it excluded as a test-module, which fns carry Exec)` — the two facts every R457 case
+    /// turns on, read from the report rather than from the walk, so the assertion is about what a
+    /// USER sees.
+    #[cfg(test)]
+    fn testmod_verdict(v: &serde_json::Value) -> (bool, Vec<String>) {
+        let excluded = v["excluded"].as_array().map(|a| {
+            a.iter().any(|e| e["class"] == "test-module")
+        }).unwrap_or(false);
+        let mut spawns: Vec<String> = v["functions"].as_array().unwrap_or(&vec![]).iter()
+            .filter(|f| f["inferred"].as_array().is_some_and(|es| es.iter().any(|e| e == "Exec")))
+            .map(|f| f["fn"].as_str().unwrap_or("").to_string())
+            .collect();
+        spawns.sort();
+        (excluded, spawns)
+    }
+
+    /// SOUNDNESS R457 — a PRODUCTION source file named `*_test.rs` was excluded wholesale on the
+    /// FILENAME alone. `regex-cli`'s `cmd/compile_test.rs` is the real source of that binary, and
+    /// dropping it narrowed the crate's `cmds` from `[cargo, git, rustfmt, ucd-generate]` to
+    /// `[rustfmt, ucd-generate]`. The exclusion's own reason text named the hazard — *"test-ness is
+    /// declared at the `mod` site, invisible when walking files"* — and the defect sat inside it: a
+    /// comment that names a hazard is not a guard against it.
+    ///
+    /// The `mod` site here is `pub mod compile_test;` with NO `#[cfg]`, so there is no evidence of
+    /// test-ness anywhere and the file must be scanned.
+    #[test]
+    fn a_production_file_named_test_rs_is_scanned_r457() {
+        let v = scan_tree("r457-prod", &[
+            ("src/lib.rs", "pub mod compile_test;\n"),
+            ("src/compile_test.rs",
+             "use std::process::Command;\npub fn run_cargo() { let _ = Command::new(\"cargo\").status(); }\n"),
+        ]);
+        let (excluded, spawns) = testmod_verdict(&v);
+        assert!(!excluded, "a production `*_test.rs` must not be excluded as a test module: {v}");
+        assert_eq!(spawns, vec!["compile_test::run_cargo".to_string()],
+                   "the spawn in the production file must be charged: {v}");
+    }
+
+    /// THE OVER-CHARGE CONTROL, and the half that could be worse than the bug. Every case below is a
+    /// real `#[cfg(test)]` tree; a naive removal of the filename rule charges all of them to the
+    /// crate. Measured over 1,608 registry crates: removing the rule outright adds 5,638 report rows,
+    /// against 37 for the evidence-based narrowing — 152x, and essentially all of it test harness.
+    #[test]
+    fn a_real_cfg_test_file_module_is_still_excluded_r457() {
+        // (a) the `mod` site carries `#[cfg(test)]` — the case the rule exists for.
+        let a = scan_tree("r457-ctl-a", &[
+            ("src/lib.rs", "#[cfg(test)]\nmod tests;\n"),
+            ("src/tests.rs", "use std::process::Command;\n#[test]\nfn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&a), (true, vec![]), "cfg(test) at the mod site: {a}");
+
+        // (b) the FILE's own inner attribute is the whole declaration — 25 of 365 corpus hits are
+        // this and only this (bitvec, rayon, rayon-core, mysql_async all declare `mod tests;`
+        // unconditionally and put `#![cfg(test)]` at the top of the file).
+        let b = scan_tree("r457-ctl-b", &[
+            ("src/lib.rs", "mod tests;\n"),
+            ("src/tests.rs", "#![cfg(test)]\nuse std::process::Command;\n#[test]\nfn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&b), (true, vec![]), "inner #![cfg(test)]: {b}");
+
+        // (c) the mod site is a directory level down (`src/foo.rs` declares `src/foo/bar_test.rs`).
+        let c = scan_tree("r457-ctl-c", &[
+            ("src/lib.rs", "mod foo;\n"),
+            ("src/foo.rs", "#[cfg(test)]\nmod bar_test;\npub fn real() {}\n"),
+            ("src/foo/bar_test.rs", "use std::process::Command;\n#[test]\nfn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&c), (true, vec![]), "cfg(test) one directory down: {c}");
+
+        // (d) NO declaration found anywhere this lookup reaches — keep the old answer. 16 of 365
+        // corpus hits land here and every one is a genuine test tree, so the unresolved case must
+        // stay EXCLUDED rather than flip to production.
+        let d = scan_tree("r457-ctl-d", &[
+            ("src/lib.rs", "pub fn real() {}\n"),
+            ("src/orphan_test.rs", "use std::process::Command;\npub fn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&d), (true, vec![]), "no declaration found: {d}");
+
+        // (e) a `#[path]` redirect — `#[cfg(test)] #[path = "renamed_test.rs"] mod tests;` declares
+        // `renamed_test.rs`, not `tests.rs`, so the match is on the TARGET's stem (trybuild,
+        // aws-lc-sys and terminal-colorsaurus all use this shape).
+        let e = scan_tree("r457-ctl-e", &[
+            ("src/lib.rs", "#[cfg(test)]\n#[path = \"renamed_test.rs\"]\nmod tests;\n"),
+            ("src/renamed_test.rs", "use std::process::Command;\n#[test]\nfn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&e), (true, vec![]), "#[path] redirect: {e}");
+
+        // (f) the declaration is nested inside an INLINE `mod client { … }` (rustls declares
+        // `src/client/test.rs` exactly this way, and no `src/client/mod.rs` exists to look in).
+        let f = scan_tree("r457-ctl-f", &[
+            ("src/lib.rs", "mod client {\n    #[cfg(test)]\n    mod test;\n    pub fn real() {}\n}\n"),
+            ("src/client/test.rs", "use std::process::Command;\n#[test]\nfn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        assert_eq!(testmod_verdict(&f), (true, vec![]), "inline mod nesting: {f}");
+    }
+
+    /// R457 inherits R122 rather than re-deriving it: `#[cfg(any(test, feature = "x"))] mod helper_test;`
+    /// compiles into an ORDINARY build whenever `x` is on, so the file is production and must be
+    /// scanned. This is not hypothetical — `value-bag`'s `#[cfg(any(test, feature = "test"))] pub mod
+    /// test;` is one of the 12 crate-versions the corpus A/B moved, and a hand-rolled "does the attr
+    /// mention test" check (which is what a first census used) gets it backwards.
+    #[test]
+    fn an_any_test_feature_mod_site_is_production_r457() {
+        let v = scan_tree("r457-any", &[
+            ("src/lib.rs", "#[cfg(any(test, feature = \"extra\"))]\nmod helper_test;\npub fn real() {}\n"),
+            ("src/helper_test.rs", "use std::process::Command;\npub fn t() { let _ = Command::new(\"sh\").status(); }\n"),
+        ]);
+        let (excluded, spawns) = testmod_verdict(&v);
+        assert!(!excluded, "any(test, feature) is production-reachable — R122: {v}");
+        assert_eq!(spawns, vec!["helper_test::t".to_string()], "{v}");
+    }
+
     #[test]
     fn cfg_test_modules_are_recognised() {
         let yes1: syn::ItemMod = syn::parse_str("#[cfg(test)] mod tests {}").unwrap();
