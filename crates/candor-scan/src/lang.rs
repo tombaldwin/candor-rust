@@ -590,6 +590,31 @@ pub(crate) fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
     }
 }
 
+/// SOUNDNESS R454 — the SEQUENCE containers whose FIRST type argument is the element, and the MAP
+/// containers whose SECOND is. ONE authority each, because `elem_type` (concrete elements) and
+/// `elem_trait_leaves` (trait-object elements) each held their own copy and **the map list existed in
+/// only one of them**: `HashMap<String, Box<dyn Doer>>` + `.values()` charged while the byte-identical
+/// statement over `HashMap<String, G>` read silent-pure, and so did `m[k].run()` and
+/// `m.get(k).unwrap().run()`. That is R347's §G shape one level up — R347 unified the ADAPTER list the
+/// two resolvers peel with, and left the CONTAINER-SHAPE list they dispatch on as two copies.
+///
+/// WHAT IS **NOT** UNIFIED, AND DELIBERATELY. The two functions' remaining arms differ on purpose and
+/// collapsing them would be the file-deletion mistake: `elem_type` answers for `IoResult` and
+/// `elem_trait_leaves` does not; `elem_trait_leaves` peels the INTERIOR-MUTABILITY cells
+/// (`Mutex`/`RwLock`/`RefCell`/`OnceLock`/`Weak`) and `elem_type` must not, which is R347's backed-out
+/// half and is recorded at the arm itself. Only the two lists that should be IDENTICAL are shared.
+pub(crate) fn is_sequence_container(name: &str) -> bool {
+    matches!(
+        name,
+        "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap" | "LinkedList"
+    )
+}
+
+/// See `is_sequence_container`. The element is the SECOND type argument — a map's VALUE.
+pub(crate) fn is_map_container(name: &str) -> bool {
+    matches!(name, "HashMap" | "BTreeMap" | "IndexMap" | "DashMap" | "FxHashMap" | "AHashMap")
+}
+
 /// The ELEMENT type path of a COLLECTION `syn::Type`: `Vec<T>` / `&[T]` / `[T; N]` / `HashSet<T>` /
 /// `BTreeSet<T>` / `VecDeque<T>` / `Box<[T]>` (and `Arc`/`Rc`-wrapped slices) -> the expanded type path
 /// of `T` (via `uses`, like `type_path`). `None` for a non-collection type. Used to type a loop /
@@ -614,8 +639,48 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
             })?;
             match name.as_str() {
                 // The single-type-arg sequence collections: their first generic arg IS the element.
-                "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
-                | "LinkedList" => type_path(first_ty, uses),
+                n if is_sequence_container(n) => type_path(first_ty, uses),
+                // SOUNDNESS R454 — a MAP's VALUE (2nd type arg), the arm `elem_trait_leaves` has had
+                // since R46 and this one never got. The consequence was an asymmetry nobody chose:
+                // `HashMap<String, Box<dyn Doer>>` answered and `HashMap<String, G>` did not, so which
+                // silence you got depended on whether the value happened to be a trait object — the
+                // same shape R347 recorded for the adapter list, one level up.
+                //
+                // R347's NOTE SAID A MAP ARM "HITS THE FABRICATION ROUTE". IT DOES NOT — the route it
+                // named cannot fire for a map, and that was measured before this shipped.
+                // `iter`/`into_iter`/`drain` are on `is_element_preserving_adapter` and on a MAP they
+                // yield `(&K, &V)` rather than `&V`, so `m.iter().for_each(|x| x.run())` would type `x`
+                // as the VALUE. Two things close it: that spelling does not COMPILE (a tuple has no
+                // `run`), and the spelling that DOES occur — `m.iter().for_each(|(k, v)| ..)`, and
+                // `for (k, v) in &m` — goes through `resolve_elem_tuple`, which has NO map arm and so
+                // contributes no binding at all rather than a wrong one. Those two tuple spellings stay
+                // a STATED under-report (`a_maps_tuple_spellings_are_still_an_under_report` pins them),
+                // because recovering them means answering with a PAIR and that is a different change.
+                //
+                // MEASURED over 1,561 registry crates: **ADDED 18 · REMOVED 0 · CHANGED 51** (4 on
+                // `inferred`), reach **3,811** element resolutions across **307** crates, and 0 changed
+                // rows lose an effect. The reach is large and the movement is small because a map's
+                // VALUE is usually plain data; where it is not, the silence was total — all six
+                // spellings (`m[k]`, `m.get(k).unwrap()`, `for v in m.values()`, `m.values()` HOF, and
+                // both param/local forms) went ABSENT while the `Vec` controls beside them charged.
+                //
+                // THE ONE OVER-CHARGE, TRACED RATHER THAN EXPLAINED AWAY: 14 rows in lapin (3 versions)
+                // gain a drop-glue edge and 2 of them gain `Log`, because `channels::Inner` owns a
+                // `Channel` through a map and `owned_drops` is LEAF-KEYED, so the unrelated
+                // `frames::Inner` inherits it. **That is R213, it is pre-existing, and the arms of the
+                // fixture prove it: a `b::Inner` beside an `a::Inner { v: Vec<Closer> }` is charged
+                // `Exec` on BOTH sides of this change** — the map arm only hands an already-broken
+                // index a new and CORRECT fact. Over-charge, disclosed in `inferred`, one crate.
+                n if is_map_container(n) => {
+                    let v = args.args.iter().filter_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    }).nth(1).and_then(|v| type_path(v, uses));
+                    if v.is_some() && std::env::var_os("CANDOR_R454_INSTR").is_some() {
+                        eprintln!("R454HIT\t{}\t{}", n, v.as_deref().unwrap_or(""));
+                    }
+                    v
+                }
                 // SOUNDNESS R185 — `Option<T>` yields `T` here too. It is not a collection in the
                 // sense of the doc above, but every CONSUMER of this function asks the same question —
                 // "if I bind a name out of this type, what is the name's type?" — and `Option` answers
@@ -745,16 +810,15 @@ pub(crate) fn elem_trait_leaves(
                 Vec::new()
             };
             match name.as_str() {
-                "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
-                | "LinkedList" => dispatch(first_ty),
+                n if is_sequence_container(n) => dispatch(first_ty),
                 // Option<Box<dyn T>> / Result<Box<dyn T>, E> — the payload (Ok/Some) is a trait object; its
                 // leaves let `o.map(|d| d.go())` / `for d in o` / `o.iter().for_each(..)` dispatch. (if-let /
                 // `.unwrap()` are separate binding sites handled at their pattern.)
                 "Option" | "Result" => dispatch(first_ty),
                 // A MAP's VALUE (2nd type arg) — a `.values()`/`for v in m.values()` iteration of
                 // trait-object values (`HashMap<String, Box<dyn Handler>>`, the keyed-registry shape).
-                "HashMap" | "BTreeMap" | "IndexMap" | "DashMap" | "FxHashMap" | "AHashMap" =>
-                    type_args().nth(1).map(dispatch).unwrap_or_default(),
+                // R454 — the list is shared with `elem_type`, which did not have this arm at all.
+                n if is_map_container(n) => type_args().nth(1).map(dispatch).unwrap_or_default(),
                 // Smart-pointer / interior-mutability wrappers around a COLLECTION: peel one layer and
                 // recurse so a `Arc<Mutex<Vec<Box<dyn>>>>` / `Rc<RefCell<Vec<Box<dyn>>>>` surfaces the element.
                 //

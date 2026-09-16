@@ -44,6 +44,14 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev29: `elem_type` gained the MAP arm (SOUNDNESS R454 — a map's concrete VALUE is its element).
+    // It runs in Pass A and its answer is STORED, in `FileDecls::field_elem`, so a rev28 entry holds a
+    // `field_elem` with no map rows — the silent purity claim this rev exists to remove, served warm.
+    // `decl_index_hash` cannot save it (computed FROM the cached decls, so a stale entry agrees with
+    // itself) and neither does the embedded package version, which did not move for this change.
+    // MEASURED rather than reasoned: pre-fix binary writes the cache, post-fix binary reads it, and
+    // `Reg::map_index` over a `HashMap<String, G>` stays ABSENT — while the same tree scanned COLD
+    // charges `['Exec']`. The FIFTH rev for this identical reason; see rev28/rev27/rev26/rev25.
     // rev28: `FileDecls` gained `macro_hidden_types` + `macro_hidden_fns` (SOUNDNESS R452 — the types
     // declared inside a module whose items an unexpanded macro hid, and the `fn` names that text
     // mentions). A rev27 entry has none and deserializes EMPTY, which
@@ -161,7 +169,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev28/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev29/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

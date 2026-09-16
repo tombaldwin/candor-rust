@@ -10,6 +10,51 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R454 — a map's CONCRETE value was not an element, so `m[k].run()` over a
+  `HashMap<String, G>` read silent-pure while the byte-identical statement over `HashMap<String, Box<dyn
+  Doer>>` charged.** `elem_trait_leaves` (the trait-object element resolver) has had a map arm since R46;
+  `elem_type` (the concrete one) never had one. **Which silence you got therefore depended on whether the
+  value happened to be a trait object** — R347's §G shape one level up: R347 unified the ADAPTER list the
+  two resolvers peel with, and left the CONTAINER-SHAPE list they dispatch on as two copies. The two
+  lists that should be identical are now one authority each (`is_sequence_container`,
+  `is_map_container`); the arms that differ ON PURPOSE are untouched and stay commented as such —
+  `elem_type` answers for `IoResult`, and only `elem_trait_leaves` peels the interior-mutability cells,
+  which is R347's backed-out half.
+
+  **R446's residual named two spellings; all six were silent.** Measured at the previous commit,
+  `m[k].run()`, `m.get(k).unwrap().run()`, `for v in m.values()`, `m.values().for_each(..)` and the
+  parameter and local forms were ALL absent, while every `Vec` control beside them charged.
+
+  **A/B over 1,561 registry crates: ADDED 18 · REMOVED 0 · CHANGED 51** (4 on `inferred`), reach
+  **3,811** element resolutions across **307** crates, and **0 changed rows lose an effect**. The reach
+  is large and the movement small because a map's value is usually plain data; where it is not the
+  silence was total. Real gains read against source: `tinytemplate::TinyTemplate::render` (a map of
+  templates), `diesel`'s `serialize_query` and `BindData::value`/`is_null`,
+  `hickory-resolver::ConnectionPolicy::compare_connection_configs`, `plotters::FontMap::get_fallback`,
+  `wit_parser::MergeMap::map_name`.
+
+  **R347's note said a map arm "hits the fabrication route". Measured, it does not — the route it named
+  cannot fire for a map.** `iter`/`into_iter`/`drain` are element-preserving adapters and on a map they
+  yield `(&K, &V)`, so a single-binder closure would take the VALUE type; but that spelling does not
+  COMPILE, and the spellings that occur (`for (k, v) in &m`, `m.iter().for_each(|(k, v)| ..)`) go through
+  `resolve_elem_tuple`, which has no map arm and contributes no binding rather than a wrong one. Those
+  two stay a STATED under-report with a test pinning them.
+
+  **The one over-charge, traced rather than explained away, and it is R213.** 14 rows in lapin (3
+  versions) gain a drop-glue edge and 2 gain `Log`, because `channels::Inner` owns a `Channel` through a
+  map and `owned_drops` is LEAF-KEYED, so the unrelated `frames::Inner` inherits it. **That mechanism
+  pre-dates this change and the fixture proves it:** a `b::Inner` beside an `a::Inner { v: Vec<Closer> }`
+  is charged `Exec` on BOTH sides of the change, and only the map spelling of the same collision moves.
+  The map arm hands an already-broken index a new and CORRECT fact. Over-charge, on the record in
+  `inferred`, one crate — and it is why R213 is worth closing.
+
+  **Cache schema rev28 → rev29.** `elem_type` runs in Pass A and its answer is STORED, in
+  `FileDecls::field_elem`, so a rev28 entry holds a `field_elem` with no map rows. Measured rather than
+  reasoned: with the pre-fix binary writing the cache and the post-fix binary reading it,
+  `m[k].run()` over a `HashMap<String, G>` stays ABSENT, while the same tree scanned cold charges
+  `['Exec']` — a fix that is correct but NOT REACHED, byte-identical from the outside to one that does
+  not work. The fifth rev for that identical reason.
+
 - **⚠ SOUNDNESS R452 — a typed method call that resolved to NO LOCAL UNIT was dropped with no edge, no
   `Unknown`, no `unresolved` and no `unknownWhy`: an affirmative §4 purity claim over a body this engine
   never read.** Measured: `bare(s: &Sel) { s.deregister(3) }` over a `Sel::deregister` that really spawns

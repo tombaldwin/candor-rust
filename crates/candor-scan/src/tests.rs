@@ -9778,8 +9778,55 @@ trait G {
         assert_eq!(p("Result<Sender, Error>").as_deref(), Some("net::Sender"));
         // …and the ERROR type stays unreachable: nothing binds a name out of it through any consumer.
         assert_eq!(p("Result<(), Sender>"), None);
-        // a map's value carries the element only via `.values()` (not the bare type here)
-        assert_eq!(p("HashMap<String, Sender>"), None);
+        // SOUNDNESS R454 — A MAP'S VALUE, and this assertion is the second one in this test INVERTED ON
+        // PURPOSE. It read `assert_eq!(p("HashMap<String, Sender>"), None)` under the comment "a map's
+        // value carries the element only via `.values()` (not the bare type here)" — which was a
+        // statement about the `.values()` ADAPTER and not about this function, and it was wrong in the
+        // silent direction: `elem_trait_leaves`, the trait-object twin of this function, has had a map
+        // arm since R46, so `HashMap<String, Box<dyn Doer>>` answered and `HashMap<String, G>` did not.
+        // Which silence you got depended on whether the value happened to be a trait object.
+        assert_eq!(p("HashMap<String, Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("BTreeMap<u32, Sender>").as_deref(), Some("net::Sender"));
+        // The hasher/allocator third argument is not a value type and must not be reached for.
+        assert_eq!(p("HashMap<String, Sender, FxBuildHasher>").as_deref(), Some("net::Sender"));
+        // …and the KEY stays unreachable, which is what keeps `m.keys()` from typing as the element:
+        // with `Sender` in KEY position the answer is the VALUE type, never the key.
+        assert_eq!(p("HashMap<Sender, String>").as_deref(), Some("String"));
+    }
+
+    /// SOUNDNESS R454 — the two container-shape lists the element resolvers dispatch on are ONE
+    /// authority each, so the divergence that made this row (a map arm in `elem_trait_leaves` and none
+    /// in `elem_type`) cannot recur by editing one copy. Asserted on the FUNCTIONS rather than on a
+    /// hand-copied list, so a name added to either authority is covered here automatically.
+    #[test]
+    fn the_two_element_resolvers_agree_on_which_containers_are_containers() {
+        let u = uses(&[]);
+        let g: HashMap<String, Vec<String>> = HashMap::new();
+        let aliases = std::collections::HashSet::new();
+        for n in ["Vec", "VecDeque", "HashSet", "BTreeSet", "ContiguousArray", "BinaryHeap", "LinkedList"] {
+            assert!(crate::lang::is_sequence_container(n), "{n} must be a sequence container");
+            let conc: syn::Type = syn::parse_str(&format!("{n}<Sender>")).unwrap();
+            let dynn: syn::Type = syn::parse_str(&format!("{n}<Box<dyn Doer>>")).unwrap();
+            assert_eq!(elem_type(&conc, &u).as_deref(), Some("Sender"), "{n}: concrete element");
+            assert_eq!(crate::lang::elem_trait_leaves(&dynn, &g, &aliases), vec!["Doer".to_string()],
+                       "{n}: dispatch element");
+        }
+        for n in ["HashMap", "BTreeMap", "IndexMap", "DashMap", "FxHashMap", "AHashMap"] {
+            assert!(crate::lang::is_map_container(n), "{n} must be a map container");
+            let conc: syn::Type = syn::parse_str(&format!("{n}<String, Sender>")).unwrap();
+            let dynn: syn::Type = syn::parse_str(&format!("{n}<String, Box<dyn Doer>>")).unwrap();
+            assert_eq!(elem_type(&conc, &u).as_deref(), Some("Sender"),
+                       "{n}: the CONCRETE value is the element — the half R454 closed");
+            assert_eq!(crate::lang::elem_trait_leaves(&dynn, &g, &aliases), vec!["Doer".to_string()],
+                       "{n}: the DISPATCH value is the element — the half that already worked");
+        }
+        // The deliberate divergences stay: `elem_type` answers for `IoResult` and does NOT peel the
+        // interior-mutability cells (R347's backed-out half), and neither is unified away.
+        let io: syn::Type = syn::parse_str("IoResult<Sender>").unwrap();
+        assert_eq!(elem_type(&io, &u).as_deref(), Some("Sender"));
+        let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
+        assert_eq!(elem_type(&mx, &u), None,
+                   "R347: peeling Mutex here costs a fabrication and is deliberately absent");
     }
 
     /// The Pass-A enum-variant index keeps only UNAMBIGUOUS single-payload variant leaves; a leaf two
@@ -12983,11 +13030,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -12998,7 +13045,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev28/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev29/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14644,6 +14691,121 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                    "the SAME arm set answered differently in the two source orders: {answers:?} — a \
                     union is order-independent by construction, so this is R208's shape, an answer that \
                     depends on which definition the scanner reached first");
+    }
+
+    /// SOUNDNESS R454 — A MAP'S CONCRETE VALUE, the residual [[R446]] stated and did not close.
+    ///
+    /// `elem_trait_leaves` (the trait-object element resolver) has had a map arm since R46;
+    /// `elem_type` (the CONCRETE one) never had one. So `HashMap<String, Box<dyn Doer>>` + `.values()`
+    /// charged and the byte-identical statement over `HashMap<String, G>` read silent-pure — **which
+    /// silence you got depended on whether the value happened to be a trait object**, which is R347's
+    /// §G shape one level up: R347 unified the ADAPTER list the two resolvers peel with, and left the
+    /// CONTAINER-SHAPE list they dispatch on as two copies.
+    ///
+    /// **THE ROW NAMED TWO SPELLINGS AND ALL SIX WERE SILENT.** R446's residual says `m[k].run()` and
+    /// `m.get(k).unwrap().run()`; measured at `f6f667e`, `for v in m.values()`, `m.values().for_each`,
+    /// and the param and local forms were silent too, while every `Vec` control beside them charged.
+    /// The `Vec` arms are in this fixture for exactly that reason — they are what make the map arms a
+    /// measured difference rather than an absence.
+    #[test]
+    fn a_maps_concrete_value_is_an_element_on_every_binding_site() {
+        let v = scan_src_to_json("r454map", "\
+            use std::collections::HashMap;\n\
+            pub struct G;\n\
+            impl G { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+            pub struct Reg { pub m: HashMap<String, G>, pub v: Vec<G> }\n\
+            impl Reg {\n\
+              pub fn map_index(&self, k: &str) { self.m[k].run(); }\n\
+              pub fn map_get_unwrap(&self, k: &str) { self.m.get(k).unwrap().run(); }\n\
+              pub fn map_values_for(&self) { for g in self.m.values() { g.run(); } }\n\
+              pub fn map_values_hof(&self) { self.m.values().for_each(|g| g.run()); }\n\
+              pub fn vec_index(&self) { self.v[0].run(); }\n\
+              pub fn vec_for(&self) { for g in &self.v { g.run(); } }\n\
+            }\n\
+            pub fn param_index(m: &HashMap<String, G>, k: &str) { m[k].run(); }\n\
+            pub fn param_get(m: &HashMap<String, G>, k: &str) { m.get(k).unwrap().run(); }\n\
+            pub fn local_map(k: &str) { let m: HashMap<String, G> = HashMap::new(); m[k].run(); }\n");
+        for f in ["Reg::vec_index", "Reg::vec_for"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Exec".to_string()),
+                    "CALIBRATION [{f}]: the `Vec` control must charge, or the map arms below prove \
+                     nothing — an absence is not a difference:\n{v:#}");
+        }
+        for f in ["Reg::map_index", "Reg::map_get_unwrap", "Reg::map_values_for",
+                  "Reg::map_values_hof", "param_index", "param_get", "local_map"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Exec".to_string()),
+                    "R454 [{f}]: a map's CONCRETE value is its element on every binding site the `Vec` \
+                     beside it answers for; reading its absence as purity over a spawn is the cardinal \
+                     sin:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R454 — THE SPELLINGS IT DELIBERATELY DOES NOT CLOSE, pinned so the next attempt starts
+    /// from the boundary rather than rediscovering it.
+    ///
+    /// A map iterated WITHOUT `.values()` yields `(&K, &V)`, not `&V`. `iter`/`into_iter`/`drain` are on
+    /// `is_element_preserving_adapter`, so `resolve_elem_type` would hand the VALUE type to a
+    /// single-binder closure — which is the fabrication route R347's note predicted. It cannot fire:
+    /// the single-binder spelling does not COMPILE (a tuple has no `run`), and the spelling that does
+    /// occur goes through `resolve_elem_tuple`, which has NO map arm and therefore contributes no
+    /// binding rather than a wrong one. The price is that both tuple spellings stay silent. Recovering
+    /// them means answering with a PAIR (`(K, V)` slots), which is a different change with a different
+    /// failure direction — and this test is the thing that will go red when someone makes it.
+    #[test]
+    fn a_maps_tuple_spellings_are_still_an_under_report() {
+        let v = scan_src_to_json("r454tuple", "\
+            use std::collections::HashMap;\n\
+            pub struct G;\n\
+            impl G { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+            pub struct Reg { pub m: HashMap<String, G> }\n\
+            impl Reg {\n\
+              pub fn values_ctl(&self) { for g in self.m.values() { g.run(); } }\n\
+              pub fn tuple_for(&self) { for (_k, g) in &self.m { g.run(); } }\n\
+              pub fn tuple_hof(&self) { self.m.iter().for_each(|(_k, g)| g.run()); }\n\
+            }\n");
+        assert!(effs(fn_entry(&v, "Reg::values_ctl")).contains(&"Exec".to_string()),
+                "CALIBRATION: the `.values()` spelling must charge, or this fixture is measuring a \
+                 broken build rather than a boundary:\n{v:#}");
+        for f in ["Reg::tuple_for", "Reg::tuple_hof"] {
+            assert!(effs_opt(&v, f).is_empty(),
+                    "[{f}] R454's STATED under-report has closed — a map's tuple item now binds. That \
+                     is the better answer; delete this pin, say so in the row, and re-check that the \
+                     KEY slot is not being typed as the value:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R213, MEASURED AS THE PRICE OF R454 AND FOUND TO PRE-DATE IT. `owned_drops` is
+    /// LEAF-KEYED, so a struct that owns an effectful-`Drop` type makes EVERY same-named struct in the
+    /// crate drop-relevant. R454 hands that index a new and correct fact (a map VALUE is owned), and 14
+    /// rows in lapin gained a drop-glue edge as a result — 2 of them gaining `Log` on
+    /// `frames::Inner::drop_pending`, whose `Inner` is not the `channels::Inner` that owns the
+    /// `Channel`.
+    ///
+    /// **THE ARMS DIFFER IN ONE THING AND THAT IS WHY THIS IS NOT R454's DEFECT.** `b::Inner::touch`
+    /// returns a `u32` field and spawns nothing; it is charged `Exec` because `a::Inner` owns a
+    /// `Closer` through a **`Vec`** — a route that has been live all along. `d::Holder::touch` is the
+    /// same collision through a **map** and is the one R454 makes reachable. Measured across the
+    /// change: the `Vec` arm charges on BOTH sides, the map arm only after. So the mechanism is R213's
+    /// and pre-existing; what moved is which facts reach it.
+    #[test]
+    fn the_leaf_keyed_drop_owner_collision_is_r213_and_predates_the_map_arm() {
+        let v = scan_src_to_json("r454leaf", "\
+            use std::collections::HashMap;\n\
+            pub struct Closer;\n\
+            impl Drop for Closer { fn drop(&mut self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+            pub mod a { pub struct Inner { pub v: Vec<crate::Closer> } }\n\
+            pub mod b { pub struct Inner { pub n: u32 }\n\
+              impl Inner { pub fn touch(&mut self) -> u32 { Self::helper(); self.n } pub fn helper() {} } }\n\
+            pub mod c { use super::*; pub struct Holder { pub m: HashMap<u32, Closer> } }\n\
+            pub mod d { pub struct Holder { pub n: u32 }\n\
+              impl Holder { pub fn touch(&mut self) -> u32 { Self::helper(); self.n } pub fn helper() {} } }\n");
+        assert!(effs_opt(&v, "b::Inner::touch").contains(&"Exec".to_string()),
+                "R213, the PRE-EXISTING arm: a struct sharing only its LEAF with one that owns a \
+                 drop-type through a Vec is charged that Drop's effect. If this ever goes quiet, R213 \
+                 was closed and the note beside R454 needs re-reading:\n{v:#}");
+        assert!(effs_opt(&v, "d::Holder::touch").contains(&"Exec".to_string()),
+                "R213 through a MAP — the arm R454 makes reachable. It is the same over-charge as the \
+                 Vec arm above, on the same leaf-keyed index, and it is recorded rather than traded \
+                 for a silence:\n{v:#}");
     }
 
     /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO — RE-AIMED BY R452, AND THE OLD ASSERTION WAS
