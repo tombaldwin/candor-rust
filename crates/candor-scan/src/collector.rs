@@ -748,15 +748,20 @@ impl<'a> CallCollector<'a> {
         // `Selector::deregister` in epoll.rs, kqueue.rs AND poll.rs, and all three units are in the
         // report. `registry.selector().deregister(fd)` moved off the WRONG-but-unique
         // `Registry::deregister` onto a `Selector::deregister` with three claimants, which resolves to
-        // nothing — and an unresolvable typed call is DROPPED SILENTLY (R452, pinned by
-        // `an_unresolvable_typed_call_is_dropped_silently`, where the invisible-impl spelling of the
-        // same hole is the fixture). Three `IoSource` registration paths and every caller of them went
-        // from `['Unknown']` to ABSENT. Over 1,561 crates with only the first gate: **REMOVED 170, 106
-        // of them losing `['Unknown']`**, 78 in that one cascade. With this gate, REMOVED 0.
+        // nothing — and an unresolvable typed call WAS DROPPED SILENTLY (R452). Three `IoSource`
+        // registration paths and every caller of them went from `['Unknown']` to ABSENT. Over 1,561
+        // crates with only the first gate: **REMOVED 170, 106 of them losing `['Unknown']`**, 78 in that
+        // one cascade. With this gate, REMOVED 0.
         //
         // Declining here KEEPS the over-charge rather than buying a silence with it, which is the only
-        // direction this register treats as survivable — and it is why R452 must be closed BEFORE this
-        // gate can be relaxed, not after.
+        // direction this register treats as survivable.
+        //
+        // **R452 IS CLOSED (`scan.rs`, the two disclosure arms) AND THIS GATE IS STILL HERE.** The
+        // precondition for relaxing it is met — the corrected call would now DISCLOSE rather than vanish
+        // — but relaxing it is a different change with a different failure direction and it is NOT made
+        // here: it would withdraw a concrete charge at the old site and replace it with `Unknown` at the
+        // new one, so it can REMOVE rows, which this commit's A/B (REMOVED 0) says nothing about. Price
+        // it on its own corpus run before touching this line.
         let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
         self.returns
             .contains_key(&crate::model::impl_fn_key(ret_leaf, outer))

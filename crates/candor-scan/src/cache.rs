@@ -44,6 +44,12 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev28: `FileDecls` gained `macro_hidden_types` + `macro_hidden_fns` (SOUNDNESS R452 — the types
+    // declared inside a module whose items an unexpanded macro hid, and the `fn` names that text
+    // mentions). A rev27 entry has none and deserializes EMPTY, which
+    // is exactly the silent purity claim the field closes, replayed from a warm cache; and
+    // `decl_index_hash` cannot save it, because that digest is computed FROM the cached decls, so a
+    // stale entry agrees with itself. The fourth rev for that identical reason — see rev27/rev26/rev25.
     // rev27: `FileDecls::rets` gained the IMPL-QUALIFIED return keys (SOUNDNESS R451, `impl_ret_key`).
     // A rev26 entry holds a `rets` map recorded by a binary that never wrote one, and `decl_index_hash`
     // cannot save it: that digest is computed FROM the cached decls, so a stale entry agrees with itself
@@ -155,7 +161,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev27/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev28/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -269,6 +275,19 @@ pub(crate) struct FileDecls {
     /// the field closes, hence the rev bump in `cache_schema`.
     #[serde(default)]
     pub(crate) macro_modules: Vec<String>,
+    /// SOUNDNESS R452 — the TYPE names this file declares inside one of `macro_modules`. A typed method
+    /// call on such a type resolves to nothing through no fault of the program, so it HEDGES rather than
+    /// reading the absence of an `impl` as purity. See `collect_macro_hidden_types` for why this is keyed
+    /// on the TYPE where R128 is keyed on the call's module path. A cache entry written before this field
+    /// deserializes EMPTY — precisely the silent purity claim the field closes, hence the rev bump.
+    #[serde(default)]
+    pub(crate) macro_hidden_types: Vec<String>,
+    /// SOUNDNESS R452 — the `fn` NAMES this file's unexpanded macro text mentions, from an invocation's
+    /// arguments or a `macro_rules!` body. The second half of the hedge's evidence: without it the
+    /// module fact alone hedges four times as many callers, nearly all of them std combinators on a
+    /// mis-typed receiver. See `collect_macro_hidden_decls`. Absent from a pre-rev28 entry.
+    #[serde(default)]
+    pub(crate) macro_hidden_fns: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -313,6 +332,15 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut reexports = Vec::new();
     let mut mod_aliases = HashMap::new();
     collect_reexports(items, modpath, &dir, include_tests, &uses, &mut reexports, &mut mod_aliases);
+    // R128 + R452 — ONE walk, two facts: which of this file's modules had items hidden behind an
+    // unexpanded macro, and which TYPES those modules declare. Computed here rather than in the struct
+    // literal so the second cannot be derived from a different module set than the first.
+    let mut macro_mods = std::collections::HashSet::new();
+    crate::lang::collect_macro_modules(items, modpath, include_tests, &mut macro_mods);
+    let mut macro_hidden_ty = std::collections::HashSet::new();
+    let mut macro_hidden_fn = std::collections::HashSet::new();
+    crate::lang::collect_macro_hidden_decls(
+        items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn);
     FileDecls {
         fields,
         field_elem,
@@ -350,10 +378,21 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // Keyed on the module QUAL (the file's own `modpath` for its top level), which is the same key
         // space a call's resolved `crate::…` path reduces to at the resolver.
         macro_modules: {
-            let mut s = std::collections::HashSet::new();
-            crate::lang::collect_macro_modules(items, modpath, include_tests, &mut s);
-            let mut v: Vec<String> = s.into_iter().collect();
+            let mut v: Vec<String> = macro_mods.iter().cloned().collect();
             v.sort(); // deterministic on the wire — the cache entry is content-hashed
+            v
+        },
+        // R452 — the types declared INSIDE those modules. Derived from the SAME `items` and the SAME
+        // module set, computed once above, so the two facts cannot drift apart: a module that stops
+        // being macro-hidden withdraws its types in the same pass.
+        macro_hidden_types: {
+            let mut v: Vec<String> = macro_hidden_ty.iter().cloned().collect();
+            v.sort();
+            v
+        },
+        macro_hidden_fns: {
+            let mut v: Vec<String> = macro_hidden_fn.iter().cloned().collect();
+            v.sort();
             v
         },
     }
@@ -402,6 +441,10 @@ pub(crate) struct MergedDecls {
     /// macro invocations its decl walk could not read, so "this module declares no such name" is a
     /// statement candor is NOT entitled to make about it. See `collect_macro_modules`.
     pub(crate) macro_modules: std::collections::HashSet<String>,
+    /// R452 — every file's MACRO-HIDDEN TYPE names, unioned. See `FileDecls::macro_hidden_types`.
+    pub(crate) macro_hidden_types: std::collections::HashSet<String>,
+    /// R452 — every file's MACRO-MENTIONED `fn` names, unioned. See `FileDecls::macro_hidden_fns`.
+    pub(crate) macro_hidden_fns: std::collections::HashSet<String>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -666,6 +709,12 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.macro_modules {
         acc.macro_modules.insert(n.clone()); // set union — order-independent (R128)
     }
+    for n in &fd.macro_hidden_types {
+        acc.macro_hidden_types.insert(n.clone()); // set union — order-independent (R452)
+    }
+    for n in &fd.macro_hidden_fns {
+        acc.macro_hidden_fns.insert(n.clone()); // set union — order-independent (R452)
+    }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
     }
@@ -873,6 +922,26 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut mmk: Vec<&String> = m.macro_modules.iter().collect();
     mmk.sort();
     for a in mmk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // macro_hidden_types — R452, sorted set of type names declared in one of those modules. Read at the
+    // CALL RESOLVER for the same reason `macro_modules` is, and with the same cross-file consequence: a
+    // file that gains or loses an item-position macro changes which TYPES hedge, everywhere.
+    s.push_str("macro_hidden_types");
+    let mut mhk: Vec<&String> = m.macro_hidden_types.iter().collect();
+    mhk.sort();
+    for a in mhk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // macro_hidden_fns — R452, the other half of that hedge's evidence.
+    s.push_str("macro_hidden_fns");
+    let mut mhf: Vec<&String> = m.macro_hidden_fns.iter().collect();
+    mhf.sort();
+    for a in mhf {
         s.push('|');
         s.push_str(a);
     }

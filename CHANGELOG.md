@@ -10,6 +10,64 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R452 — a typed method call that resolved to NO LOCAL UNIT was dropped with no edge, no
+  `Unknown`, no `unresolved` and no `unknownWhy`: an affirmative §4 purity claim over a body this engine
+  never read.** Measured: `bare(s: &Sel) { s.deregister(3) }` over a `Sel::deregister` that really spawns
+  a process was ABSENT from `functions[]` and passed `deny Exec` while the gate named only a decoy. It is
+  also the spelling that produced R451's 170 removals — mio-0.8.11 declares `Selector::deregister` in
+  epoll.rs, kqueue.rs AND poll.rs, so a corrected receiver moved the call onto a tail with three
+  claimants and it vanished.
+
+  **The row said the engine "already HAS the vocabulary for this disclosure and does not reach for it,
+  so the silence is a gap in wiring". Half of that is wrong, and it decided the shape of the fix.** The
+  vocabulary is there; the EVIDENCE is not. R128's hedge asks whether the call path's OWNING MODULE is
+  one an unexpanded macro hid — and a receiver-typed method call is formed from the receiver's TYPE, so
+  its path is `Sel::deregister`, carrying no module for that question to be asked of and no `crate::`
+  head either. Wiring R128 to method calls was impossible; two new indexes were needed.
+
+  Three changes, each measured on its own before the whole was:
+
+  1. **The written path now settles an ambiguous tail where it names one claimant.** `arm_exact_target`
+     already existed (R440 added it for the `#[cfg]`-arm loop) and takes a claimant only where the
+     resolved path IS that claimant's qual, or one is the other's `::`-suffix, refusing on a second
+     match — so it can only ever pick a definition the source spelled out. The GENERAL resolution site
+     now consults it too, which is the *resolve on a wider key* repair R190(c)'s own note prescribes.
+     Reach **5,331** sites / 3,598 caller functions / 225 crates. This closes silences rather than
+     hedging them: `arboard`'s `platform::linux::Get::html` (was ABSENT, now reaches
+     `x11::Clipboard::get_html`), `crossbeam-channel`'s `Receiver::try_recv` (now `['Clock']` through the
+     `tick` flavour), `async_process::Child::status`, aho-corasick's `dfa::Builder::build`.
+  2. **An ambiguous tail the written path CANNOT settle now discloses** `Unknown` +
+     `ambiguous:same-name local methods` instead of vanishing. Reach **12,888** sites / 8,977 callers /
+     325 crates.
+  3. **A typed call onto a method an unexpanded macro hid now discloses** `Unknown` +
+     `macro:module items hidden by an unexpanded macro`, gated on TWO new decl indexes: the receiver's
+     type must be one this crate DECLARES inside a macro-hidden module (`macro_hidden_types`), and the
+     method name must appear as `fn <name>` inside unexpanded macro text (`macro_hidden_fns`). Reach
+     **1,024** sites / 738 callers / 87 crates — aho-corasick's `StateID::as_usize`/`as_u32` and
+     `PatternID::as_usize` (declared by `index_type_impls!`), bitflags' `Flag::bits`.
+
+  **Neither hedge is a general one, and the narrowing was priced rather than assumed.** Hedging every
+  unresolved typed method call is the sound over-approximation and it is a flood: 14,409 caller functions
+  across 230 of 250 registry crates, nearly all of them `str::trim` / `Vec::push` / `HashMap::get` — std
+  receivers this engine documents as an honest miss. The module fact alone still hedged 581 callers of
+  which the sample was almost entirely `BigDecimal::unwrap`, `SmallIndex::expect`, `Unstructured::collect`
+  — std combinators on a receiver typed wrongly, where nothing was hidden; requiring the method NAME to
+  appear in macro text cut that to 95 and kept every real catch.
+
+  **A/B over 1,561 registry crates: ADDED 8,626 · REMOVED 0 · CHANGED 8,369** (3,701 on `inferred`),
+  reach **19,243** hits across 421 entries. Of the 8,369 changed rows **0 lose an effect** and 3,593 gain
+  one; 110 of the added rows carry a hard effect rather than only `Unknown`. The cost, stated: 11,224
+  rows newly carry `Unknown` — **1.44% of the 676,572 analysed units hedge directly**, against the
+  4.88–7.02% that R190(c) priced and declined for the general qualified-tail hedge. Two `wasip3` rows
+  trade `native:extern fn` for `ambiguous:…` because the call now resolves to a local definition; both
+  keep `Unknown` and a reason. **Cache schema rev27 → rev28.**
+
+  **R451's second gate is NOT relaxed here.** Its precondition is met — a corrected call that lands on an
+  unresolvable tail would now disclose instead of vanishing — but relaxing it withdraws a concrete charge
+  at the old site and replaces it with `Unknown` at the new one, which is a REMOVED-bearing direction
+  this commit's A/B says nothing about. Priced separately, and the fixture that makes it possible is
+  `an_unresolvable_typed_call_discloses_instead_of_vanishing`.
+
 - **⚠ SOUNDNESS R447 + R451 — a method CHAIN was attributed to the BASE receiver's type even where the
   crate's own source declares the step's return type, and it failed in BOTH directions.** The builder-
   chain walk (`client.get(url).send()` → `Client::send`) is right for a fluent builder and wrong for a

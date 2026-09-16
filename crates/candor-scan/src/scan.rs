@@ -2606,6 +2606,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
                         }
                     }
+                } else if let Some(t) = arm_exact_target(&c.path, &by_tail2) {
+                    // SOUNDNESS R452 (a) — THE WRITTEN PATH NAMES ONE OF THE CLAIMANTS, so the tail's
+                    // ambiguity is this INDEX's, not the program's. `resolve_target` keys on the
+                    // 2-segment tail and refuses a tail several definitions claim, because linking a
+                    // many-way tail fabricates one type's effect onto the other's caller. That refusal is
+                    // right — and it was throwing away the source text that settles it. `arm_exact_target`
+                    // takes a claimant ONLY where the path the collector resolved IS that claimant's qual,
+                    // or one is the other's `::`-suffix, and REFUSES on a second match exactly as
+                    // `resolve_target` does; it can therefore only ever pick a definition the source
+                    // spelled out, and it is strictly MORE precise than the tail it rescues.
+                    //
+                    // It is not new code and not a new warrant: R440 added it for the arm loop below,
+                    // where the several claimants ARE a portability twin's arms, and it has keyed that
+                    // resolution since. What is new is that the GENERAL site consults it too. Measured
+                    // over 250 registry crates, on typed method calls alone: of 856 caller functions
+                    // holding a silently-dropped ambiguous-tail method call, 216 (25%) have a written path
+                    // that names exactly one claimant — those become an EDGE here rather than the hedge
+                    // below, which is the better answer for every one of them.
+                    resolved_local = true;
+                    if t != &f.qual {
+                        calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                    }
+                    if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                        eprintln!("R452HIT\tARM\t{}\t{}", f.qual, c.path);
+                    }
                 } else if c.method && c.typed {
                     // No `T::leaf` resolved (T doesn't declare `leaf`). If T impls EXACTLY ONE trait whose
                     // DEFAULT `leaf` body exists (a `Trait::leaf` FnInfo), the call inherits it — edge there.
@@ -3000,6 +3025,94 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // charged ~80 pure tokio fns Unknown for ~0 genuine signal beyond this FFI case. See the task
             // report's residual note. The extern case below is the precise, non-flooding subset.)
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf || dep_join_hit;
+            // ── §4 HONESTY — SOUNDNESS R452: A TYPED METHOD CALL THAT RESOLVED TO NO UNIT ──────────
+            // A receiver-typed `Type::method` call that reached no local definition was dropped with NO
+            // edge, NO `Unknown`, NO `unresolved` and NO `unknownWhy` — an affirmative §4 purity claim
+            // over a body the engine never read. Measured: `bare(s: &Sel) { s.deregister(3) }` over a
+            // `Sel::deregister` that really spawns a process is ABSENT from `functions[]` and passes
+            // `deny Exec` while naming only a decoy.
+            //
+            // EVERY DISCLOSURE ABOVE EXCLUDES THIS SHAPE, AND NOT BY OVERSIGHT. The `ambiguous:` bare-leaf
+            // hedge is `!c.method` by construction; R190(e) and R128 are `!c.method` too; R184 needs an
+            // `aliased` receiver. R128's gate is the deeper reason: it asks `macro_hidden_owner` whether
+            // the call path's OWNING MODULE is one whose items a macro hid — and a receiver-typed method
+            // call is formed from the receiver's TYPE, so its path is `Type::method` and carries no
+            // module for that question to be asked of. **So "the engine already has the vocabulary, this
+            // is only wiring" is half true**: the vocabulary is there, the EVIDENCE R128 runs on is not
+            // available in this call shape, which is why (b) below needs an index keyed on the TYPE.
+            //
+            // TWO EVIDENCED CONDITIONS, NOT A GENERAL HEDGE. Hedging every unresolved typed method call
+            // is the sound over-approximation and it is a flood: measured over 250 registry crates,
+            // 14,409 caller functions across 230 of them — `str::trim`, `Vec::push`, `HashMap::get`,
+            // `Option::map` and every other std receiver, which this engine documents as an honest miss
+            // and must stay one. Each condition below NARROWS that over-approximation on a named,
+            // measured fact, which is the denylist direction; neither is an allowlist of shapes
+            // permitted to hedge.
+            if !c.is_macro && c.method && c.typed && !already_handled {
+                if let Some(t2) = tail2(&c.path) {
+                    let ty = t2.split("::").next().unwrap_or("").to_string();
+                    let claimants = by_tail2.get(&t2).map(|v| v.len()).unwrap_or(0);
+                    // (a) THE CRATE DECLARES `Type::method` MORE THAN ONCE. `resolve_target` keys on the
+                    // 2-segment tail and refuses a tail several DISTINCT definitions claim, because
+                    // linking a many-way tail fabricates one type's effect onto the other's caller. The
+                    // refusal is right and the silence after it is not: candor SAW the definitions and
+                    // declined to choose, which is what `ambiguous:` means. `arm_exact_target` has
+                    // already run above, so what reaches here is the residue the WRITTEN PATH could not
+                    // settle either — genuinely unresolvable, not merely unresolved-so-far.
+                    //
+                    // This is the spelling that produced [[R451]]'s 170 removals: mio-0.8.11 declares
+                    // `Selector::deregister` in epoll.rs, kqueue.rs AND poll.rs, so a corrected receiver
+                    // moved the call onto a tail with three claimants and it vanished. R451's second
+                    // gate exists to route around that, and this is the condition for relaxing it.
+                    //
+                    // `resolvable && !aliased` is the same gate the resolution block above ran under, so
+                    // this fires on exactly the population `resolve_target` refused — never on a call
+                    // into a dependency, and never where R184 is already disclosing the alias collision.
+                    if claimants >= 2 && resolvable && !aliased {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("ambiguous:same-name local methods".to_string());
+                        if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                            eprintln!("R452HIT\tAMBIG\t{}\t{}", f.qual, c.path);
+                        }
+                    } else if claimants == 0
+                        && merged.macro_hidden_types.contains(&ty)
+                        && merged.macro_hidden_fns.contains(&c.leaf)
+                    {
+                        // (b) THE RECEIVER'S TYPE IS ONE THIS CRATE DECLARES INSIDE A MACRO-HIDDEN
+                        // MODULE, and no `Type::method` unit exists. `collect_decls` skips an
+                        // item-position macro invocation, so an `impl` written inside `cfg_os_poll!{..}`
+                        // contributes no unit at all — and the absence of `Sel::deregister` from
+                        // `by_tail2` is then a fact about THIS ENGINE'S READING, not about the program.
+                        // That is precisely R128's argument, keyed on the TYPE because this call shape
+                        // carries no module (see above).
+                        //
+                        // WHAT KEEPS IT OFF THE FLOOD, AND BOTH HALVES WERE MEASURED. The type must be
+                        // one candor read a DECLARATION for, in a module it could not read in FULL — so a
+                        // std or dependency receiver can never match, which is what the 14,409-caller
+                        // general hedge could not say. That alone is NOT enough: it condemns every type
+                        // in the module, and over 250 registry crates it hedged 581 caller functions of
+                        // which the sample is nearly all `BigDecimal::unwrap` / `SmallIndex::expect` /
+                        // `Unstructured::collect` / `Vec::add` — std combinators on a receiver this
+                        // engine typed wrongly, where nothing was hidden. So the METHOD NAME must also
+                        // appear as `fn <name>` inside unexpanded macro text: 581 callers -> 95, keeping
+                        // aho-corasick's `StateID::as_usize`/`as_u32`, `PatternID::as_usize` (declared by
+                        // `index_type_impls!`) and bitflags' `Flag::bits`. The residual cost is a name
+                        // collision — some macro in the crate declares a `fn` of the same name — which is
+                        // over-disclosure, bounded twice over.
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("macro:module items hidden by an unexpanded macro".to_string());
+                        if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                            eprintln!("R452HIT\tMACRO\t{}\t{}", f.qual, c.path);
+                        }
+                    }
+                }
+            }
             if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string()); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)

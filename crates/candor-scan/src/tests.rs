@@ -7961,40 +7961,57 @@ pub fn uniq(r: &Reg) { r.only().deregister(3); }\n";
     }
 
     #[test]
-    fn an_unresolvable_typed_call_is_dropped_silently() {
-        // SOUNDNESS R452 — PINNED KNOWN-SILENT, asserting the WRONG answer on purpose so that closing
-        // the row turns this test red and names itself rather than rotting.
+    fn an_unresolvable_typed_call_discloses_instead_of_vanishing() {
+        // SOUNDNESS R452 — CLOSED. This test was a PIN asserting the WRONG answer on purpose
+        // (`an_unresolvable_typed_call_is_dropped_silently`) so that closing the row would turn it red
+        // and name itself rather than rot. It went red; this is the assertion it was replaced with.
         //
-        // A typed method call whose `Type::method` resolves to no local unit is dropped with NO trace:
-        // no `Unknown`, no `unresolved`, no `unknownWhy`, no `invisible`. `Sel::deregister` below really
-        // spawns a process and `bare` is ABSENT from `functions[]` — a §4 purity claim over a subprocess
-        // — while `deny Exec` over the same tree names only the decoy. The impl is hidden behind an
-        // unexpanded `macro_rules!`, which is mio-0.8.11's `cfg_os_poll!` shape, and it is the reason
-        // R451's fix needs its second gate: every correction of a receiver's type moves a call from a
-        // wrong-but-resolvable qual to a right-but-invisible one, and the second is silent.
+        // THE DEFECT. A typed method call whose `Type::method` reached no local unit was dropped with NO
+        // trace: no `Unknown`, no `unresolved`, no `unknownWhy`, no edge. `Sel::deregister` below really
+        // spawns a process and `bare` was ABSENT from `functions[]` — a §4 purity claim over a
+        // subprocess — while `deny Exec` over the same tree named only the decoy. The impl is hidden
+        // behind an unexpanded `macro_rules!`, which is mio-0.8.11's `cfg_os_poll!` shape.
         //
-        // This is NOT the documented "an honest miss beats a wrong effect" for std receivers: the type
-        // is LOCAL, the engine has a disclosure vocabulary for exactly this case (`unknownWhy`
-        // `macro:module items hidden by an unexpanded macro`), and it does not use it here.
+        // WHY EVERY EXISTING DISCLOSURE MISSED IT, and the half of R452's premise that is WRONG. The row
+        // says the engine "already HAS the vocabulary for exactly this disclosure — `macro:module items
+        // hidden by an unexpanded macro` — and does not reach for it", so the silence is "a gap in
+        // wiring". The vocabulary is there; the EVIDENCE is not. R128 asks `macro_hidden_owner` whether
+        // the call path's OWNING MODULE is macro-hidden, and a receiver-typed method call is formed from
+        // the receiver's TYPE — its path is `Sel::deregister`, which carries no module for that question
+        // to be asked of, and no `crate::` head either. Wiring R128 to method calls was therefore
+        // impossible; the fix needed a new index keyed on the TYPE (`macro_hidden_types`) and a second
+        // keyed on the `fn` names the macro text mentions (`macro_hidden_fns`).
         let src = "\
 macro_rules! os_only { ($($it:item)*) => { $($it)* }; }\n\
 pub struct Sel;\n\
 os_only! {\n\
   impl Sel { pub fn deregister(&self, _fd: i32) { let _ = std::process::Command::new(\"true\").status(); } }\n\
 }\n\
+pub struct Seen;\n\
+impl Seen { pub fn visible(&self) {} }\n\
 pub fn direct_spawn() { let _ = std::process::Command::new(\"true\").status(); }\n\
-pub fn bare(s: &Sel) { s.deregister(3); }\n";
+pub fn bare(s: &Sel) { s.deregister(3); }\n\
+pub fn ctl(s: &Seen) { s.visible(); }\n";
         let v = scan_fixture("r452silent", src);
         assert_eq!(fixture_effects(&v, "direct_spawn"), vec!["Exec".to_string()],
                    "CALIBRATION: a fixture whose control fails proves nothing:\n{v:#}");
-        assert!(fixture_effects(&v, "bare").is_empty(),
-                "R452 IS CLOSED — `bare` now carries an effect or a disclosure. Delete this pin, close \
-                 the row, and re-price R451's second gate (`impl_fn_key`): the gate exists only because \
-                 an unresolvable typed call was silent, and if it no longer is, the correction can be \
-                 allowed to fire where it currently declines:\n{v:#}");
-        let names = fixture_names(&v);
-        assert!(!names.iter().any(|n| n == "bare"),
-                "R452: `bare` appears in the report — see the message above:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "bare"), vec!["Unknown".to_string()],
+                   "R452: a typed call to a method an unexpanded macro hid must DISCLOSE, not vanish \
+                    into a purity claim over a subprocess:\n{v:#}");
+        let why: Vec<String> = fn_entry(&v, "bare")["unknownWhy"].as_array().into_iter().flatten()
+            .filter_map(|w| w.as_str().map(String::from)).collect();
+        assert!(why.iter().any(|w| w == "macro:module items hidden by an unexpanded macro"),
+                "R452: the `Unknown` must arrive with the reason §4 requires, and this state's reason is \
+                 the one the engine already had a token for:\n{v:#}");
+        assert_eq!(fn_entry(&v, "bare")["unresolved"].as_bool(), Some(true),
+                   "R452: `unresolved` mirrors the `Unknown`:\n{v:#}");
+        // THE OVER-DISCLOSURE CONTROL, and it is the half that keeps this from being a flood. `Seen` is
+        // declared in the SAME macro-hidden module (the crate root — `os_only!{..}` sits in it), and its
+        // method is one candor can read. A hedge keyed on the module alone would charge `ctl` Unknown
+        // for calling a method that is right there; the `macro_hidden_fns` half is why it does not.
+        assert!(fixture_effects(&v, "ctl").is_empty(),
+                "the over-disclosure control: a READABLE method on a type declared in the same \
+                 macro-hidden module must not hedge:\n{v:#}");
     }
 
     #[test]
@@ -11391,6 +11408,12 @@ trait G {
             // at the CALL RESOLVER, so a file gaining or losing an item-position macro changes how EVERY
             // other file's crate-local calls into that module resolve.
             macro_modules => |m| { m.macro_modules.insert("blocking".into()); },
+            // R452: the TYPES declared inside one of those modules, and the `fn` NAMES the unexpanded
+            // macro text mentions. Both are read at the CALL RESOLVER — a typed method call on such a
+            // type, naming such a fn, hedges `Unknown` instead of vanishing — so a file gaining or losing
+            // an item-position macro changes how EVERY other file's typed method calls resolve.
+            macro_hidden_types => |m| { m.macro_hidden_types.insert("Sel".into()); },
+            macro_hidden_fns => |m| { m.macro_hidden_fns.insert("deregister".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -12960,11 +12983,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -12975,7 +12998,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev27/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev28/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14623,17 +14646,33 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                     depends on which definition the scanner reached first");
     }
 
-    /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO. Two GENUINELY DIFFERENT definitions sharing
-    /// one key are a real ambiguity and must still be refused — deduplication collapses EQUAL quals
-    /// only, never distinct ones. `mod a`'s `Bar::go` beside `mod b`'s `Bar::go` are two quals sharing
-    /// a `tail2`, which is R190(c)'s subject and is untouched here.
+    /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO — RE-AIMED BY R452, AND THE OLD ASSERTION WAS
+    /// PINNING A SILENCE. Two GENUINELY DIFFERENT definitions sharing one key are a real ambiguity and
+    /// must still never be resolved BY GUESSING; deduplication collapses EQUAL quals only, never
+    /// distinct ones. `mod a`'s `Bar::go` beside `mod b`'s `Bar::go` are two quals sharing a `tail2`,
+    /// which is R190(c)'s subject.
+    ///
+    /// **WHAT CHANGED.** This test used to assert `caller` was ABSENT, on the reasoning that "resolving
+    /// it would guess". It would not: the call is WRITTEN `a::Bar::go`, which names exactly one of the
+    /// two claimants, and the one it names really writes a file — so the absence was a §4 purity claim
+    /// over a real `fs::write`, kept by a test. R190(c)'s own note says so in as many words: a call
+    /// "written with its module" that `tail2` throws the qualifier away from is "a resolution gap in the
+    /// KEY WIDTH, not a contest between definitions", and closing it "by RESOLVING (a wider key) would
+    /// add edges rather than `Unknown`s". `arm_exact_target` is that wider key — it takes a claimant only
+    /// where the written path IS that claimant's qual (or one is the other's `::`-suffix) and refuses on
+    /// a second match, so it can only ever pick a definition the source spelled out.
+    ///
+    /// The refusal this test exists to guard is still guarded, by the SECOND arm: `blind` reaches the
+    /// same ambiguous tail through a RECEIVER, whose path carries no module, so nothing selects a
+    /// claimant — and there the answer is the R452 hedge, `Unknown` with a reason, never a pick and
+    /// never silence.
     ///
     /// Measured over the corpus rather than argued: `by_tail2` dedup ADDS 1,941 rows and removes 5,
     /// none of which loses a concrete effect, and the `ambiguous:same-name local defs` disclosure count
     /// moves by 15 rows — the refusals that were about a real collision all survive. EXECUTED: the
     /// fixture writes 5 real bytes through `a::Bar::go`.
     #[test]
-    fn two_different_definitions_sharing_a_tail_are_still_an_ambiguity() {
+    fn two_different_definitions_sharing_a_tail_resolve_only_where_the_written_path_names_one() {
         let v = scan_src_to_json("r222realamb", "\
             pub mod a {\n\
                 pub struct Bar;\n\
@@ -14643,10 +14682,56 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 pub struct Bar;\n\
                 impl Bar { pub fn go(_p: &str) -> std::io::Result<()> { Ok(()) } }\n\
             }\n\
-            pub fn caller(p: &str) -> std::io::Result<()> { a::Bar::go(p) }\n");
-        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "caller"),
-                "`Bar::go` names TWO distinct definitions; resolving it would guess, and this engine \
-                 under-reports rather than guessing (SOUNDNESS R190(c), still open):\n{v:#}");
+            pub fn caller(p: &str) -> std::io::Result<()> { a::Bar::go(p) }\n\
+            pub fn blind(x: &a::Bar, p: &str) -> std::io::Result<()> { let _ = x; b::Bar::go(p) }\n");
+        assert!(effs(fn_entry(&v, "caller")).contains(&"Fs".to_string()),
+                "the WRITTEN path `a::Bar::go` names exactly one of the two claimants and that one \
+                 writes a file; reading the tail's ambiguity as purity is the cardinal sin R452 closed \
+                 (SOUNDNESS R190(c) — resolve on a wider key, do not hedge and do not vanish):\n{v:#}");
+        assert!(effs_opt(&v, "blind").is_empty()
+                    || effs_opt(&v, "blind").contains(&"Unknown".to_string()),
+                "a second claimant must never be PICKED — `b::Bar::go` is pure, so `blind` may be pure \
+                 or Unknown, but never `Fs` borrowed from its namesake:\n{v:#}");
+    }
+
+    /// SOUNDNESS R452 — THE SPELLING THE WRITTEN PATH CANNOT SETTLE, which is the one that produced
+    /// R451's 170 removals. A receiver-typed method call arrives as `Type::method`: it carries no
+    /// module, so nothing in the text selects between the claimants, and before this row it was dropped
+    /// with no edge, no `Unknown` and no reason. mio-0.8.11 is the shape — `Selector::deregister`
+    /// declared in epoll.rs, kqueue.rs AND poll.rs, reached through a `pub use` that makes the receiver
+    /// type `sys::Sel`.
+    ///
+    /// THE OVER-DISCLOSURE CONTROL IS IN THE SAME FIXTURE: `uniq` calls a method whose tail has exactly
+    /// ONE claimant, resolves, and must stay pure. The two arms differ only in how many modules declare
+    /// the type.
+    #[test]
+    fn an_ambiguous_tail_reached_through_a_receiver_discloses_rather_than_vanishing() {
+        let v = scan_src_to_json("r452recvamb", "\
+            pub mod sys {\n\
+                pub mod epoll { pub struct Sel; impl Sel { pub fn deregister(&self, _fd: i32) {} } }\n\
+                pub mod kqueue { pub struct Sel; impl Sel { pub fn deregister(&self, _fd: i32) { let _ = std::process::Command::new(\"true\").status(); } } }\n\
+                #[cfg(target_os = \"linux\")]\n\
+                pub use self::epoll::Sel;\n\
+                #[cfg(not(target_os = \"linux\"))]\n\
+                pub use self::kqueue::Sel;\n\
+                pub struct Uniq;\n\
+                impl Uniq { pub fn only(&self) {} }\n\
+            }\n\
+            pub fn direct_spawn() { let _ = std::process::Command::new(\"true\").status(); }\n\
+            pub fn amb(s: &crate::sys::Sel) { s.deregister(3); }\n\
+            pub fn uniq(u: &crate::sys::Uniq) { u.only(); }\n");
+        assert!(effs(fn_entry(&v, "direct_spawn")).contains(&"Exec".to_string()),
+                "CALIBRATION: a fixture whose control fails proves nothing:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "amb")), vec!["Unknown".to_string()],
+                   "R452: a receiver-typed call onto a tail several local definitions claim must \
+                    DISCLOSE — one of the claimants really spawns, and this engine saw both:\n{v:#}");
+        let why: Vec<String> = fn_entry(&v, "amb")["unknownWhy"].as_array().into_iter().flatten()
+            .filter_map(|w| w.as_str().map(String::from)).collect();
+        assert!(why.iter().any(|w| w == "ambiguous:same-name local methods"),
+                "R452: the reason must say WHICH state this is — candor saw the definitions and \
+                 declined to choose, which is what `ambiguous:` means:\n{v:#}");
+        assert!(effs_opt(&v, "uniq").is_empty(),
+                "the over-disclosure control: a UNIQUELY claimed tail resolves and stays pure:\n{v:#}");
     }
 
     /// SOUNDNESS R223 — THE PUBLISHED CARDINAL SIN. `tail2` throws the crate qualifier away, so a call

@@ -378,11 +378,10 @@ pub(crate) fn impl_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
 /// and forms `Registry::deregister` — the WRONG method, which happens to be unique and therefore
 /// resolves. The declared return of `Registry::selector` is `sys::Selector`, and mio declares
 /// `Selector::deregister` in THREE files (epoll, kqueue, poll), so the corrected call has three
-/// claimants on its `tail2` and resolves to NOTHING — and an unresolvable typed call is DROPPED
-/// SILENTLY (SOUNDNESS R452, pinned by `an_unresolvable_typed_call_is_dropped_silently`). The
-/// correction would have traded a fabrication for a silence. Measured over 1,561 crates before this
-/// gate existed: **REMOVED 170, of which 106 were rows losing `['Unknown']`**, 78 of them that one mio
-/// cascade. Hence the "declared EXACTLY ONCE" rule: a second declaration WITHDRAWS the key rather than
+/// claimants on its `tail2` and resolves to NOTHING — and an unresolvable typed call WAS DROPPED
+/// SILENTLY (SOUNDNESS R452). The correction would have traded a fabrication for a silence. Measured
+/// over 1,561 crates before this gate existed: **REMOVED 170, of which 106 were rows losing
+/// `['Unknown']`**, 78 of them that one mio cascade. Hence the "declared EXACTLY ONCE" rule: a second declaration WITHDRAWS the key rather than
 /// re-affirming it (`decls::scan_items` for the intra-file half, `cache::merge_decls` for the other).
 pub(crate) const RET_IMPL_FN: &str = "<implfn>";
 
@@ -398,6 +397,15 @@ pub(crate) fn impl_fn_key(type_leaf: &str, fn_leaf: &str) -> String {
 /// `tail2` do not resolve, and a key that outlived the merge would tell the R451 gate the call will land
 /// somewhere it will not. mio-0.8.11 declares `Selector::deregister` in THREE files (epoll, kqueue,
 /// poll) and is exactly this case.
+///
+/// **R452 IS NOW CLOSED, AND THIS GATE HAS NOT BEEN RELAXED — that is a SEPARATE change with its own
+/// A/B.** An ambiguous-tail typed method call now discloses `Unknown` +
+/// `ambiguous:same-name local methods` instead of vanishing, so the specific trade this gate was built
+/// to refuse — moving a call from a wrong-but-resolvable qual to a right-but-SILENT one — is no longer
+/// available to make. What relaxing it would cost is not measured here: the corrections it currently
+/// declines would land as `Unknown` at the corrected site while WITHDRAWING the (wrong) concrete charge
+/// at the old one, which is a REMOVED-bearing direction and must be priced on its own corpus run
+/// (`an_unresolvable_typed_call_discloses_instead_of_vanishing` is the fixture that made it possible).
 pub(crate) fn is_impl_fn_key(key: &str) -> bool {
     key.starts_with(RET_IMPL_FN)
 }

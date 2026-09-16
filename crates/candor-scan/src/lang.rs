@@ -2862,6 +2862,97 @@ pub(crate) fn collect_macro_modules(
     }
 }
 
+/// SOUNDNESS R452 — TWO facts about what an unexpanded macro hid in this file: the TYPE names declared
+/// inside a module `collect_macro_modules` just marked (a module whose item list candor could NOT read
+/// in full), and the `fn` NAMES that appear inside any unexpanded macro text at all.
+///
+/// WHY A SECOND INDEX AND NOT `local_types`. `local_types` is built in Pass B from FUNCTION quals, so a
+/// type whose every `impl` sits inside an unexpanded item-position macro is absent from it — and the
+/// call `s.deregister(3)` on such a type is then not even *attempted*: `resolvable` is false, the whole
+/// resolution block is skipped, and the call leaves NO edge, NO `Unknown` and NO reason. That is R452's
+/// measured fixture and mio-0.8.11's `cfg_os_poll!` shape.
+///
+/// WHY IT IS KEYED ON THE TYPE AND NOT ON THE CALL PATH, which is what R128 does. A receiver-typed
+/// method call arrives at the resolver as `Type::method` — the collector formed it from the receiver's
+/// TYPE, so it carries no module and `macro_hidden_owner` (which needs one, and needs a `crate::` head)
+/// can never answer for it. That is the half of R452's premise that does not hold: the engine has the
+/// disclosure VOCABULARY for this state but not the EVIDENCE, because the evidence R128 uses is a
+/// module qualifier this call shape does not have. Keying on the declared type restores it.
+///
+/// WHY BOTH, AND WHY THE SECOND IS NOT OPTIONAL — MEASURED. The module fact alone condemns every type
+/// in the module: over 250 registry crates it hedges 581 caller functions, and the sample is dominated
+/// by `BigDecimal::unwrap`, `SmallIndex::expect`, `Unstructured::collect`, `Vec::add` — std combinators
+/// on a receiver this engine typed wrongly, where nothing was hidden at all. Requiring the METHOD NAME
+/// to appear as `fn <name>` inside unexpanded macro text narrows that to 95 callers and keeps the real
+/// catches: aho-corasick's `StateID::as_usize`/`as_u32` and `PatternID::as_usize` (declared by
+/// `index_type_impls!`) and bitflags' `Flag::bits`. Both conditions NARROW a sound over-approximation on
+/// a named fact, which is the denylist direction; neither is an allowlist of shapes permitted to hedge.
+///
+/// THE BOUNDARY, STATED. Only a type whose DECLARATION candor could read is here — a `struct` declared
+/// *inside* the macro body (mio's own `IoSourceState`) is invisible to this walk exactly as its impls
+/// are, and stays an under-report. And the module set is this FILE's, so a type declared in a readable
+/// module whose `impl` lives in a macro-hidden module elsewhere is not covered either. Both are misses,
+/// both are stated; neither is a guess.
+pub(crate) fn collect_macro_hidden_decls(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    macro_modules: &std::collections::HashSet<String>,
+    types: &mut std::collections::HashSet<String>,
+    fns: &mut std::collections::HashSet<String>,
+) {
+    let hidden = macro_modules.contains(modpath);
+    for it in items {
+        if hidden {
+            match it {
+                syn::Item::Struct(s) if include_tests || !is_cfg_test(&s.attrs) => {
+                    types.insert(s.ident.to_string());
+                }
+                syn::Item::Enum(e) if include_tests || !is_cfg_test(&e.attrs) => {
+                    types.insert(e.ident.to_string());
+                }
+                syn::Item::Union(u) if include_tests || !is_cfg_test(&u.attrs) => {
+                    types.insert(u.ident.to_string());
+                }
+                _ => {}
+            }
+        }
+        // The `fn` NAMES the unexpanded text mentions — from an item-position INVOCATION's arguments
+        // (`os_only! { impl Sel { pub fn deregister(..) } }`, mio's `cfg_os_poll!` shape, where the items
+        // are at the call site) AND from a `macro_rules!` BODY (`index_type_impls!` declares
+        // `fn as_usize` inside itself and the invocation names only the type). Both are collected, in
+        // any module: a macro defined in one module and invoked in another is ordinary, and this index
+        // answers "did candor SEE this fn name inside something it could not expand", which is a fact
+        // about the text rather than about where it sits.
+        if let syn::Item::Macro(m) = it {
+            if include_tests || !is_cfg_test(&m.attrs) {
+                let toks = m.mac.tokens.to_string();
+                let mut prev_fn = false;
+                for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                    if prev_fn && !t.is_empty() {
+                        fns.insert(t.to_string());
+                    }
+                    if !t.is_empty() {
+                        prev_fn = t == "fn";
+                    }
+                }
+            }
+        }
+        if let syn::Item::Mod(m) = it {
+            if include_tests || !is_cfg_test(&m.attrs) {
+                if let Some((_, inner)) = &m.content {
+                    let sub = if modpath.is_empty() {
+                        m.ident.to_string()
+                    } else {
+                        format!("{modpath}::{}", m.ident)
+                    };
+                    collect_macro_hidden_decls(inner, &sub, include_tests, macro_modules, types, fns);
+                }
+            }
+        }
+    }
+}
+
 /// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
 /// glob under `crate::` + `GLOB_KEY`). A `use crate::net` / `crate::net::foo` in the file then resolves
 /// through the root re-export via `expand`, while a bare `net::foo` — which never keys on `crate::…` —
