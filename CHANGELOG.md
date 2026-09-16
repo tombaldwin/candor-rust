@@ -12,6 +12,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.38.3] — 2026-09-16
 
+- **The release-asset gate no longer has a pipe to race on (SOUNDNESS R455).** `ci/verify-binary.sh`
+  refused a healthy binary on the macOS arm64 leg with `candor-query --version failed`, on a commit whose
+  only change was a version bump, then PASSED on a re-run of the identical SHA while the Linux leg said
+  `OK` throughout — a flaky gate on published binaries, which blocked this cut. The cause is NOT confirmed
+  (40 local runs of the exact `--version | head -1` command substitution under `set -euo pipefail` did not
+  reproduce it), so the repair removes the CLASS rather than the instance: no pipe, first line taken by
+  parameter expansion. The 8-arm selftest still passes in both directions.
+
 - **⚠ SOUNDNESS R454 — a map's CONCRETE value was not an element, so `m[k].run()` over a
   `HashMap<String, G>` read silent-pure while the byte-identical statement over `HashMap<String, Box<dyn
   Doer>>` charged.** `elem_trait_leaves` (the trait-object element resolver) has had a map arm since R46;
