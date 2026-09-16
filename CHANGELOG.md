@@ -10,6 +10,35 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R447 + R451 — a method CHAIN was attributed to the BASE receiver's type even where the
+  crate's own source declares the step's return type, and it failed in BOTH directions.** The builder-
+  chain walk (`client.get(url).send()` → `Client::send`) is right for a fluent builder and wrong for a
+  step that yields a different type. R447 recorded the FABRICATION half: `impl Cfg { fn get(&self,k) ->
+  Calm; fn run(&self) { spawn } }` with `c.get("x").run()` charged the caller `['Exec']` through a
+  phantom `Cfg::run`, over a body that spawns nothing. **The larger half was not in that framing and is
+  filed as R451: where the delegating method SHARES ITS NAME with the step's declaring type, the walk
+  forms the enclosing function itself** — `fn cancel(&self) { self.token().cancel() }` becomes a self
+  edge that contributes nothing, and the caller is ABSENT from `functions[]` over a body that really
+  performs the effect. Read against source: `tokio_postgres::Client::cancel_query`
+  (`self.cancel_token().cancel_query(tls)` — a TCP connection, reported pure), `async_process`'s
+  `ChildGuard::drop` (`self.get_mut().kill()` — reported pure), `tokio::sync::Notify::notify_waiters`,
+  `sea_orm::Select::stream_partial_model` (a DB query, reported pure). **And R447's own "element-
+  yielding accessor" framing was the wrong axis, measured before anything was built:** the identical
+  fabrication fires for a method on no accessor list at all, so narrowing that predicate could not have
+  reached it and widening it could only have made it worse.
+
+  The fix consults the crate's OWN declaration keyed on **(TYPE, method)** — never the leaf-keyed return
+  index, which is the hijack `resolve_recv_type`'s comment has always refused — and it fires only when
+  the returned type declares the outer method **exactly once**, so the call is never moved somewhere it
+  resolves to nothing. **A/B over 1,561 registry crates: ADDED 1,297 · REMOVED 0 · CHANGED 2,254** (610
+  on `inferred`), reach **5,560** corrections across 328 crates. Of the 2,254 changed rows, 564 gain an
+  effect, 1,583 keep the same effect set with a corrected EDGE, and **0 lose one**; of the 1,297 added
+  rows, 605 are `['Unknown']` disclosures, 514 carry disclosure fields only and 121 gain a hard effect
+  (8 read against source, 0 fabrications). Three rows trade an `invisible:`/`unknownWhy:` label for
+  `['Unknown'] + unresolved: true`, which is the louder disclosure; that is the only movement in the
+  quiet direction. **Cache schema rev26 → rev27** — the recorded decls changed shape, and
+  `decl_index_hash` cannot notice because it is computed from them.
+
 - **⚠ SOUNDNESS R401 (`Weak`) + R446 — a container's ELEMENT reached through an ACCESSOR RECEIVER
   resolved to nothing, and R401's "a `HashMap` VALUE" framing is what hid the size of it.** Measured
   over a `Vec<G>` whose method spawns a process, with `v[0].run()` and

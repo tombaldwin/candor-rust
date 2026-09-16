@@ -1910,6 +1910,11 @@ pub(crate) fn record_return(
     // `seed_callable_aliases` BEFORE this walk starts. See the residual note below, which this closes
     // for a same-file alias and leaves standing for a cross-file one.
     callable_aliases: &std::collections::HashSet<String>,
+    // SOUNDNESS R451 — the enclosing `impl`'s type LEAF and its own generic type-param names, or `None`
+    // for a free fn. Present only so the NOMINAL branch at the bottom can file a second, IMPL-QUALIFIED
+    // entry; nothing above it reads this, because every sentinel shape up there is already leaf-keyed by
+    // a reader that wants the leaf answer.
+    impl_key: Option<(&str, &std::collections::HashSet<String>)>,
 ) {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
@@ -2027,6 +2032,36 @@ pub(crate) fn record_return(
         }
     }
     let leaf = sig.ident.to_string();
+    // SOUNDNESS R451 — FILE THE IMPL-QUALIFIED TWIN. `resolve_recv_type` walks a method CHAIN to the base
+    // receiver's type on the builder-chain assumption, and for a method the crate itself declares to
+    // return a DIFFERENT type that assumption FABRICATES: `impl Cfg { fn get(&self,k) -> Calm; fn
+    // run(&self) { spawn } }` with `c.get("x").run()` walked past `get` to `Cfg` and charged the caller
+    // `['Exec']` through a phantom `Cfg::run`, over a body that spawns nothing. The leaf-keyed entry
+    // beside this one CANNOT be used there — that is `resolve_recv_type`'s own documented refusal, and
+    // it is right: one crate-wide `fn conn() -> Connection` would hijack every `x.conn()`. Keyed on
+    // (TYPE, method) it is not a guess at all but the declaration the receiver's own type carries.
+    //
+    // THREE REFUSALS, each closing a way the key could name something it does not:
+    //   * a BLANKET impl (`impl<T> Trait for T`) — its self type IS a generic param, so the key would
+    //     claim a return for every type at once; the caller passes `None` for those.
+    //   * a GENERIC return (`fn get(&self) -> T`) — `type_path` yields the bogus param name, which is a
+    //     type no receiver has.
+    //   * a return of the impl type ITSELF (`fn arg(self) -> Self`) — the fluent builder step, where the
+    //     chain walk is already right and the reader would decline anyway. Not recorded, so the index
+    //     stays the size of the question.
+    if let Some((impl_ty, impl_generics)) = impl_key {
+        let tp_leaf = tp.rsplit("::").next().unwrap_or(&tp);
+        let is_generic = impl_generics.contains(&tp)
+            || sig.generics.params.iter().any(|g| matches!(g, syn::GenericParam::Type(t) if t.ident == tp));
+        if !is_generic && tp_leaf != impl_ty {
+            let k = crate::model::impl_ret_key(impl_ty, &leaf);
+            match rets.get(&k) {
+                None => { rets.insert(k, Some(tp.clone())); }
+                Some(Some(prev)) if *prev != tp => { rets.insert(k, None); }
+                _ => {}
+            }
+        }
+    }
     match rets.get(&leaf) {
         None => {
             rets.insert(leaf, Some(tp));
@@ -2378,7 +2413,7 @@ pub(crate) fn collect_decls(
                     syn::Fields::Unit => {}
                 }
             }
-            syn::Item::Fn(f) => record_return(&f.sig, uses_ty, rets, None, callable_aliases),
+            syn::Item::Fn(f) => record_return(&f.sig, uses_ty, rets, None, callable_aliases, None),
             // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
             // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
@@ -2553,6 +2588,23 @@ pub(crate) fn collect_decls(
             }
             syn::Item::Impl(im) => {
                 let self_ty = impl_type_name(&im.self_ty);
+                // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only
+                // when it is NOT one of them. A blanket `impl<T> Trait for T` names every type at once,
+                // so an impl-qualified return key written from it would claim `T::get -> R` for whatever
+                // the receiver happened to be; `record_return` gets `None` and the chain walk is left
+                // exactly as it was. Computed once per impl, not per method.
+                let impl_generic_params: std::collections::HashSet<String> = im
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|g| match g {
+                        syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                let impl_key_ty = self_ty
+                    .clone()
+                    .filter(|t| !impl_generic_params.contains(t));
                 // BLANKET impl (`impl<T> Trait for T` / `impl<T: Bound> Trait for T`): the self type IS one of
                 // the impl's own generic type params, so the impl provides `Trait`'s methods for EVERY type
                 // (bounded → every type meeting the bound). A `x.method()` that resolves to no CONCRETE
@@ -2612,7 +2664,27 @@ pub(crate) fn collect_decls(
                 }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases);
+                        record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
+                            impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
+                        // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
+                        // whatever it returns (inherent or trait impl). `record_return` above cannot
+                        // carry this: it files the impl-qualified RETURN only from its nominal branch,
+                        // so a `-> ()` / `-> Box<dyn _>` / `-> impl Fn()` method would be missing from
+                        // the very set the R447 correction has to consult. One constant VALUE, so two
+                        // contributors can never conflict and `merge_amb` has nothing to withdraw.
+                        // A SECOND declaration of the same `Type::method` — a `#[cfg]` twin, or two
+                        // impl blocks — makes the `tail2` resolution AMBIGUOUS, and an ambiguous typed
+                        // call is dropped as silently as an unresolvable one. So the second occurrence
+                        // WITHDRAWS the key rather than re-affirming it; the cross-file half of the
+                        // same rule is in `cache::merge_decls`.
+                        if let Some(ty) = &impl_key_ty {
+                            let k = crate::model::impl_fn_key(ty, &m.sig.ident.to_string());
+                            match rets.get(&k) {
+                                None => { rets.insert(k, Some(crate::model::RET_IMPL_FN.to_string())); }
+                                Some(Some(_)) => { rets.insert(k, None); }
+                                Some(None) => {}
+                            }
+                        }
                     }
                     // `impl X { const BASE: &str = "https://api.openai.com/v1"; }` — an associated const
                     // string. Indexed by its LEAF (`BASE`) exactly like a module const, so a body's

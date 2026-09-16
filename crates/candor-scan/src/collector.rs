@@ -706,13 +706,80 @@ impl<'a> CallCollector<'a> {
     /// (`client.get(url).send()`) it returns the BASE receiver's type — the chain stays within one
     /// crate's builder family, and the classifier verb-gates per crate, so attributing the terminal
     /// verb to the base type is correct in practice (`reqwest::Client` + `::send` -> Net).
+    /// SOUNDNESS R451 — the return type `base`'s OWN `impl` declares for method `leaf`, when the crate
+    /// declares one unambiguously and it is a different type. `None` means "this crate says nothing about
+    /// `base::leaf`", which leaves `resolve_recv_type`'s builder-chain walk exactly as it was.
+    ///
+    /// WHY THIS AND NOT THE FIX R447 FILED. R447 is a FABRICATION: `impl Cfg { fn get(&self,k) -> Calm;
+    /// fn run(&self) { spawn } }` with `c.get("x").run()` charges the caller `['Exec']` through a phantom
+    /// `Cfg::run`. The obvious repair — DECLINE (return `None`) at the element-accessor arm rather than
+    /// walking on — was built and measured **REMOVED 14** on the 1,563-crate A/B, one of them quinn's
+    /// `SendStream::poll_write` LOSING its `['Unknown']`: `Pin::get_mut`, `UnsafeCell::get` and
+    /// `NonZeroI32::get` are not container accessors, and for them the walk was already right. That
+    /// trade — a silence bought with a lost disclosure — is the one this register ranks worst.
+    ///
+    /// **AND THE ACCESSOR FRAMING WAS THE WRONG AXIS, measured before this was written.** The identical
+    /// fabrication fires for a method that is on NO accessor list at all: rename `get` to `pick` in the
+    /// fixture above and `fab_pick` is charged `['Exec']` just the same, because nothing about `get`
+    /// caused it — the builder-chain walk did. So narrowing the accessor predicate could not have
+    /// reached this defect, and widening it (the direction `candor-allowlist-chain` records) could only
+    /// have made it worse.
+    ///
+    /// The three ways this could name something it does not are refused where the key is WRITTEN, not
+    /// here (see `record_return`): a blanket impl, a generic return, and a fluent `-> Self` step. What is
+    /// left is a DECLARED fact about a type the receiver has already been resolved to — the same warrant
+    /// `ctor_leaf_from_call_returns` states. And declining costs nothing: the caller still answers
+    /// `Some(base)`, so a receiver that carried a type into the `Unknown` disclosure carries one out
+    /// either way. **A/B over 1,561 registry crates: ADDED 1,297 · REMOVED 0 · CHANGED 2,254**, reach
+    /// 5,560 corrections across 328 crates; 0 of the changed rows lose an effect, and 8 of the 121
+    /// hard-effect gains were read against source with 0 fabrications.
+    fn impl_declared_return(&self, base: &str, leaf: &str, outer: &str) -> Option<String> {
+        let base_leaf = base.rsplit("::").next().unwrap_or(base);
+        let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, leaf))?;
+        if ret == base || ret.rsplit("::").next() == Some(base_leaf) {
+            return None;
+        }
+        // THE SECOND GATE, and it is the whole of what makes this safe — SOUNDNESS R452. A corrected
+        // receiver type is worth having only if the engine can RESOLVE the method it moves the call to,
+        // and `impl_fn_key` is present only for a `Type::method` the crate declares EXACTLY ONCE, which
+        // is the condition `by_tail2` itself imposes.
+        //
+        // MEASURED, and the mechanism is the ambiguity and not invisibility — mio-0.8.11 declares
+        // `Selector::deregister` in epoll.rs, kqueue.rs AND poll.rs, and all three units are in the
+        // report. `registry.selector().deregister(fd)` moved off the WRONG-but-unique
+        // `Registry::deregister` onto a `Selector::deregister` with three claimants, which resolves to
+        // nothing — and an unresolvable typed call is DROPPED SILENTLY (R452, pinned by
+        // `an_unresolvable_typed_call_is_dropped_silently`, where the invisible-impl spelling of the
+        // same hole is the fixture). Three `IoSource` registration paths and every caller of them went
+        // from `['Unknown']` to ABSENT. Over 1,561 crates with only the first gate: **REMOVED 170, 106
+        // of them losing `['Unknown']`**, 78 in that one cascade. With this gate, REMOVED 0.
+        //
+        // Declining here KEEPS the over-charge rather than buying a silence with it, which is the only
+        // direction this register treats as survivable — and it is why R452 must be closed BEFORE this
+        // gate can be relaxed, not after.
+        let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
+        self.returns
+            .contains_key(&crate::model::impl_fn_key(ret_leaf, outer))
+            .then(|| ret.clone())
+    }
+
     fn resolve_recv_type(&self, expr: &syn::Expr) -> Option<String> {
+        self.resolve_recv_type_for(expr, "")
+    }
+
+    /// `resolve_recv_type`, told WHICH METHOD the answer is about to be joined to — SOUNDNESS R451's
+    /// second gate needs it, and nothing else in here does. Every caller that is not forming a
+    /// `<Type>::<method>` for a method call passes `""`, which matches no `impl_fn_key` and therefore
+    /// leaves that caller's answer exactly as it was; the peeling arms carry it down unchanged and the
+    /// method-chain arm hands each level its OWN step's leaf, which is the method that level's answer
+    /// will be joined to.
+    fn resolve_recv_type_for(&self, expr: &syn::Expr, outer: &str) -> Option<String> {
         match expr {
-            syn::Expr::Reference(r) => self.resolve_recv_type(&r.expr),
-            syn::Expr::Paren(p) => self.resolve_recv_type(&p.expr),
-            syn::Expr::Group(g) => self.resolve_recv_type(&g.expr),
-            syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
-            syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
+            syn::Expr::Reference(r) => self.resolve_recv_type_for(&r.expr, outer),
+            syn::Expr::Paren(p) => self.resolve_recv_type_for(&p.expr, outer),
+            syn::Expr::Group(g) => self.resolve_recv_type_for(&g.expr, outer),
+            syn::Expr::Try(t) => self.resolve_recv_type_for(&t.expr, outer),
+            syn::Expr::Await(a) => self.resolve_recv_type_for(&a.base, outer),
             syn::Expr::MethodCall(m) => {
                 // A method whose return is a DISPATCH trait object (`self.handler() -> &dyn Doer` /
                 // `-> Box<dyn Doer>`) has NO concrete type — return None so the dispatch path
@@ -792,7 +859,23 @@ impl<'a> CallCollector<'a> {
                 // method, so a single crate-wide `fn conn() -> redis::Connection` would otherwise hijack
                 // every `x.conn().get()` on an unrelated `x`, fabricating a Db effect. The return index
                 // is used only for free-function factory calls (the `Expr::Call` arm via `ctor_type`).
-                self.resolve_recv_type(&m.receiver)
+                //
+                // SOUNDNESS R451 — ...EXCEPT WHERE THE BASE'S OWN TYPE DECLARES THE STEP'S RETURN, which
+                // is not a name heuristic and not this paragraph's hijack. Walk first (the base type is
+                // the question's subject), then ask whether THAT type's own `m` is declared to return
+                // something else. See `impl_declared_return` for the measurement and for why the fix
+                // R447 filed — declining at the accessor arm — was the wrong one.
+                let base = self.resolve_recv_type_for(&m.receiver, &m.method.to_string())?;
+                if let Some(ret) = self.impl_declared_return(&base, &m.method.to_string(), outer) {
+                    // §E1 REACH COUNTER, on the CHANGED branch: this arm exists only to return a
+                    // DIFFERENT answer from the walk below it, so "never fired" and "fired and moved
+                    // nothing" must be distinguishable in the A/B.
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R451RET");
+                    }
+                    return Some(ret);
+                }
+                Some(base)
             }
             syn::Expr::Path(p) => {
                 let name = p.path.get_ident()?.to_string();
@@ -838,7 +921,7 @@ impl<'a> CallCollector<'a> {
             // Explicit DEREFERENCE receiver `(*b).method()` — transparent: candor already collapses a
             // smart-pointer/reference binding to its POINTEE (`let b = Box::new(W)` types `b` as `W`, a
             // `&W` param types as `W`), so `*b` has the same resolved type as `b`. Recurse into the operand.
-            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.resolve_recv_type(&u.expr),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.resolve_recv_type_for(&u.expr, outer),
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
@@ -2864,7 +2947,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the same function over a `tokio::process::Command` was caught, because tokio is not std. "An
         // honest miss beats a wrong effect" was the right instinct for `std::fs::Metadata` and the wrong
         // one for `std::fs::File`, and it was applied to both by a test on the crate ROOT.
-        if let Some(ty) = self.resolve_recv_type(&node.receiver) {
+        if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
             // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…

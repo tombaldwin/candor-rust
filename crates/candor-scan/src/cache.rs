@@ -44,6 +44,13 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev27: `FileDecls::rets` gained the IMPL-QUALIFIED return keys (SOUNDNESS R451, `impl_ret_key`).
+    // A rev26 entry holds a `rets` map recorded by a binary that never wrote one, and `decl_index_hash`
+    // cannot save it: that digest is computed FROM the cached decls, so a stale entry agrees with itself
+    // and the merged index simply comes out without the keys. The reader then finds nothing for every
+    // `base::leaf`, the chain walk stays as it was, and the fabrication this rev exists to remove is
+    // replayed from a warm cache — a fix that is correct but NOT REACHED, byte-identical from the
+    // outside to a fix that does not work. The third rev for that exact reason; see rev26 and rev25.
     // rev26: `Call` gained `entropy_arg` — an argument names the OS entropy source (SOUNDNESS R334). A
     // rev25 entry has no such field and deserializes to `false`, i.e. "no argument hands over the OS
     // RNG", which is precisely the silent purity claim this rev exists to remove, replayed from a warm
@@ -148,7 +155,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev26/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev27/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -548,10 +555,26 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
                      src: &HashMap<String, Option<String>>,
                      record_amb: bool| {
         for (leaf, val) in src {
+            // SOUNDNESS R451 — an impl-METHOD-EXISTS key is a claim that `Type::method` names ONE unit,
+            // which is the condition `by_tail2` resolution actually imposes. A second contributor is
+            // therefore a WITHDRAWAL, never a re-affirmation: mio-0.8.11 declares `Selector::deregister`
+            // in epoll.rs, kqueue.rs AND poll.rs, so the call resolves to nothing and is dropped
+            // silently — the very outcome the gate reading this key exists to avoid.
+            if crate::model::is_impl_fn_key(leaf) {
+                let dup = dst.contains_key(leaf);
+                dst.insert(leaf.clone(), if dup { None } else { val.clone() });
+                continue;
+            }
             // A sentinel entry (`<unit>x`, `<amb>x\x1fT`) is a fact about a key space no candidate
             // recording applies to; it merges like any other value but must never itself be recorded as
             // a candidate, or the key would nest.
-            let plain = record_amb && crate::model::split_amb_ret_key(leaf).is_none();
+            // SOUNDNESS R451 — `is_impl_ret_key` joins the `<amb>` refusal for the same reason: an
+            // impl-qualified entry is a fact about a key space no candidate recording applies to, and
+            // filing a conflict on one under `amb_ret_key` would NEST one sentinel inside the other and
+            // leave `ambiguous_return_leaves` an entry no fn leaf can ever match.
+            let plain = record_amb
+                && crate::model::split_amb_ret_key(leaf).is_none()
+                && !crate::model::is_impl_ret_key(leaf);
             match val {
                 None => {
                     // The contributor is already ambiguous, so its OWN candidates ride in as ordinary

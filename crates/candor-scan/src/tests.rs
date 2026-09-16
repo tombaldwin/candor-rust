@@ -7840,6 +7840,164 @@ pub fn fab_weak(w: &Weak<dyn Quiet>) { if let Some(s) = w.upgrade() { s.go(); } 
     }
 
     #[test]
+    fn a_chain_step_the_crate_declares_a_return_for_is_not_attributed_to_the_base_type() {
+        // SOUNDNESS R447 (the fabrication) and R451 (its UNDER-REPORT half, which is the bigger one and
+        // was not in R447's framing). `resolve_recv_type` walks a method CHAIN to the BASE receiver's
+        // type, on the assumption that a chain stays within one crate's builder family. For a step the
+        // crate itself declares to return a DIFFERENT type, that assumption is simply wrong, and it
+        // fails in BOTH directions:
+        //
+        //   * FABRICATION (R447): `impl Cfg { fn get(&self,k) -> Calm; fn run(&self) { spawn } }` with
+        //     `c.get("x").run()` charged the caller `['Exec']` through a phantom `Cfg::run`, over a body
+        //     that spawns nothing.
+        //   * SILENT UNDER-REPORT (R451): where the delegating method SHARES ITS NAME with the step's
+        //     declaring type — `fn cancel(&self) { self.token().cancel() }` — the walk forms `Cli::cancel`,
+        //     i.e. THIS function, a self edge that contributes nothing. `Cli::cancel` really spawns and
+        //     was ABSENT from `functions[]`. That is `tokio_postgres::Client::cancel_query` verbatim
+        //     (`self.cancel_token().cancel_query(tls).await`), and `async_process`'s `ChildGuard::drop`
+        //     (`self.get_mut().kill()`), read against source.
+        //
+        // AND THE ACCESSOR FRAMING WAS THE WRONG AXIS — measured before anything was built. `fab_pick`
+        // is on no accessor list at all and fabricates identically, so narrowing the accessor predicate
+        // could not have reached this and widening it (`candor-allowlist-chain`) could only have made it
+        // worse. What decides it is the crate's OWN declaration, keyed on (TYPE, method).
+        let src = "\
+pub struct Calm;\n\
+impl Calm { pub fn run(&self) {} }\n\
+pub struct Runner;\n\
+impl Runner { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub struct Cfg;\n\
+impl Cfg {\n\
+  pub fn get(&self, _k: &str) -> Calm { Calm }\n\
+  pub fn pick(&self, _k: &str) -> Calm { Calm }\n\
+  pub fn runner(&self) -> Runner { Runner }\n\
+  pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); }\n\
+}\n\
+pub struct Tok;\n\
+impl Tok { pub fn cancel(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub struct Cli;\n\
+impl Cli {\n\
+  pub fn token(&self) -> Tok { Tok }\n\
+  pub fn cancel(&self) { self.token().cancel(); }\n\
+}\n\
+pub struct B;\n\
+impl B {\n\
+  pub fn new() -> Self { B }\n\
+  pub fn arg(self, _a: &str) -> Self { self }\n\
+  pub fn fire(&self) { let _ = std::process::Command::new(\"true\").status(); }\n\
+}\n\
+pub fn direct_spawn() { let _ = std::process::Command::new(\"true\").status(); }\n\
+pub fn cal_recv(c: &Cfg) { c.run(); }\n\
+pub fn cal_builder() { B::new().arg(\"a\").arg(\"b\").fire(); }\n\
+pub fn a_delegate(c: &Cli) { c.cancel(); }\n\
+pub fn a_via_runner(c: &Cfg) { c.runner().run(); }\n\
+pub fn fab_get(c: &Cfg) { c.get(\"x\").run(); }\n\
+pub fn fab_pick(c: &Cfg) { c.pick(\"x\").run(); }\n";
+        let v = scan_fixture("r447chain", src);
+        // The calibration FIRST — a fixture whose controls fail is not evidence in either direction.
+        for f in ["direct_spawn", "cal_recv", "cal_builder"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "CALIBRATION {f} must charge:\n{v:#}");
+        }
+        // R451 — the under-report half. `Cli::cancel` spawns through `Tok::cancel`; before the fix the
+        // chain walk collapsed it onto ITSELF and the caller read pure.
+        for f in ["Cli::cancel", "a_delegate"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "R451 {f}: a delegation through an accessor whose return type declares the SAME \
+                        method name must reach the callee, not loop back onto the delegator:\n{v:#}");
+        }
+        // …and the same correction on a differently-named target, where the verdict was right by
+        // accident before (`Cfg::run` and `Runner::run` both spawn) but the EDGE was the wrong one.
+        assert_eq!(fixture_effects(&v, "a_via_runner"), vec!["Exec".to_string()],
+                   "a_via_runner must still charge:\n{v:#}");
+        // R447 — the fabrication half, and its price: the caller of a PURE inner value stays pure.
+        for f in ["fab_get", "fab_pick"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "R447 {f}: the outer method belongs to the type the step DECLARES it returns, not \
+                     to the base receiver — a body that spawns nothing must not be charged Exec through \
+                     a phantom `Cfg::run`:\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn a_type_leaf_declared_twice_declines_the_chain_correction_rather_than_going_silent() {
+        // SOUNDNESS R451/R452 — THE OVER-CHARGE CONTROL, and it is what keeps REMOVED at 0. A corrected
+        // receiver type is worth having only if the engine can see the method it moves the call to.
+        // Without this gate, mio-0.8.11's `registry.selector().deregister(fd)` moved off the WRONG-but-
+        // resolvable `Registry::deregister` onto `Selector::deregister` — declared in THREE files
+        // (epoll, kqueue, poll), so the `tail2` resolution is ambiguous and the call is dropped SILENTLY
+        // (R452). Three `IoSource` registration paths and every caller of them went `['Unknown']` ->
+        // ABSENT. Measured over 1,561 crates with only the first gate: REMOVED 170, of which 106 were
+        // rows losing `['Unknown']`, 78 of them that one cascade. With this gate: REMOVED 0.
+        //
+        // DECLINING KEEPS THE OVER-CHARGE, which is the survivable direction. `amb` below is charged
+        // through a `Reg::deregister` it does not call — filed as R447's residual, not traded for a
+        // silence. If this assertion ever flips to `is_empty()`, the withdrawal rule was removed and the
+        // mio cascade is back; that is what this test is for, and it names itself.
+        let src = "\
+pub mod epoll { pub struct Sel; impl Sel { pub fn deregister(&self, _fd: i32) {} } }\n\
+pub mod kqueue { pub struct Sel; impl Sel { pub fn deregister(&self, _fd: i32) {} } }\n\
+pub struct Uniq;\n\
+impl Uniq { pub fn deregister(&self, _fd: i32) {} }\n\
+pub struct Reg;\n\
+impl Reg {\n\
+  pub fn selector(&self) -> crate::epoll::Sel { crate::epoll::Sel }\n\
+  pub fn only(&self) -> Uniq { Uniq }\n\
+  pub fn deregister(&self, _fd: i32) { let _ = std::process::Command::new(\"true\").status(); }\n\
+}\n\
+pub fn cal_direct(r: &Reg) { r.deregister(3); }\n\
+pub fn amb(r: &Reg) { r.selector().deregister(3); }\n\
+pub fn uniq(r: &Reg) { r.only().deregister(3); }\n";
+        let v = scan_fixture("r451amb", src);
+        assert_eq!(fixture_effects(&v, "cal_direct"), vec!["Exec".to_string()],
+                   "CALIBRATION: the decoy `Reg::deregister` must itself charge:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "amb"), vec!["Exec".to_string()],
+                   "a type LEAF declared twice cannot be resolved by `tail2`, so the correction must \
+                    DECLINE and leave the (wrong, disclosed) charge standing rather than move the call \
+                    somewhere it resolves to nothing:\n{v:#}");
+        assert!(fixture_effects(&v, "uniq").is_empty(),
+                "the control for the control: a UNIQUELY declared `Uniq::deregister` is pure, so the \
+                 correction fires and the fabricated `Reg::deregister` charge goes:\n{v:#}");
+    }
+
+    #[test]
+    fn an_unresolvable_typed_call_is_dropped_silently() {
+        // SOUNDNESS R452 — PINNED KNOWN-SILENT, asserting the WRONG answer on purpose so that closing
+        // the row turns this test red and names itself rather than rotting.
+        //
+        // A typed method call whose `Type::method` resolves to no local unit is dropped with NO trace:
+        // no `Unknown`, no `unresolved`, no `unknownWhy`, no `invisible`. `Sel::deregister` below really
+        // spawns a process and `bare` is ABSENT from `functions[]` — a §4 purity claim over a subprocess
+        // — while `deny Exec` over the same tree names only the decoy. The impl is hidden behind an
+        // unexpanded `macro_rules!`, which is mio-0.8.11's `cfg_os_poll!` shape, and it is the reason
+        // R451's fix needs its second gate: every correction of a receiver's type moves a call from a
+        // wrong-but-resolvable qual to a right-but-invisible one, and the second is silent.
+        //
+        // This is NOT the documented "an honest miss beats a wrong effect" for std receivers: the type
+        // is LOCAL, the engine has a disclosure vocabulary for exactly this case (`unknownWhy`
+        // `macro:module items hidden by an unexpanded macro`), and it does not use it here.
+        let src = "\
+macro_rules! os_only { ($($it:item)*) => { $($it)* }; }\n\
+pub struct Sel;\n\
+os_only! {\n\
+  impl Sel { pub fn deregister(&self, _fd: i32) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+}\n\
+pub fn direct_spawn() { let _ = std::process::Command::new(\"true\").status(); }\n\
+pub fn bare(s: &Sel) { s.deregister(3); }\n";
+        let v = scan_fixture("r452silent", src);
+        assert_eq!(fixture_effects(&v, "direct_spawn"), vec!["Exec".to_string()],
+                   "CALIBRATION: a fixture whose control fails proves nothing:\n{v:#}");
+        assert!(fixture_effects(&v, "bare").is_empty(),
+                "R452 IS CLOSED — `bare` now carries an effect or a disclosure. Delete this pin, close \
+                 the row, and re-price R451's second gate (`impl_fn_key`): the gate exists only because \
+                 an unresolvable typed call was silent, and if it no longer is, the correction can be \
+                 allowed to fire where it currently declines:\n{v:#}");
+        let names = fixture_names(&v);
+        assert!(!names.iter().any(|n| n == "bare"),
+                "R452: `bare` appears in the report — see the message above:\n{v:#}");
+    }
+
+    #[test]
     fn a_portability_twin_sharing_a_type_leaf_still_gets_both_arms_edges() {
         // SOUNDNESS R440 — R438's arm loop resolves each unclassifiable arm with `resolve_target`, which
         // keys a qualified call on its TWO-SEGMENT TAIL and refuses a tail with several claimants
@@ -12754,6 +12912,13 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev26 -> rev27 a change to what an EXISTING field RECORDS (R451): `rets` now also carries the
+    ///                 IMPL-QUALIFIED return keys (`<implret>Cfg\x1fget -> Calm`). The field is
+    ///                 unchanged, so serde reads a rev26 entry happily and hands back a map a binary
+    ///                 that wrote none of them built — and `decl_index_hash` cannot notice, because it
+    ///                 is computed FROM those decls, so the stale entry agrees with itself. The warm
+    ///                 cache then replays the FABRICATION the rev exists to remove: `c.get("x").run()`
+    ///                 charged `['Exec']` through a phantom `Cfg::run` over a body that spawns nothing.
     ///   rev25 -> rev26 `Call` gained `entropy_arg` — an argument names the OS entropy source (R334).
     ///                 A rev25 entry deserializes it as `false`: "no argument hands over the OS RNG",
     ///                 which is exactly the silent purity claim the rev exists to remove, replayed warm.
@@ -12795,11 +12960,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -12810,7 +12975,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev26/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev27/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

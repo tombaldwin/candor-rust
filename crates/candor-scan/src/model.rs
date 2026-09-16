@@ -349,6 +349,66 @@ pub(crate) fn split_amb_ret_key(key: &str) -> Option<(&str, &str)> {
     key.strip_prefix(RET_AMB)?.split_once('\u{1f}')
 }
 
+/// SOUNDNESS R451 — sentinel prefix for an IMPL-QUALIFIED return type: the type a method declares
+/// when it is called ON THE TYPE THAT DECLARES IT. The plain leaf-keyed entry beside it answers "some
+/// fn called `get` returns `Calm`", which is exactly the claim `resolve_recv_type`'s own comment
+/// refuses to make at a method call ("a method name doesn't identify the method"); this one answers
+/// "`Cfg`'s OWN `get` returns `Calm`", which a receiver already typed `Cfg` may act on.
+///
+/// Rides the same key-space trick as `unit_twin_key`/`amb_ret_key` — the angle brackets keep it out of
+/// the identifier space every other reader keys on, and the VALUE is an ordinary type path, so
+/// `fninfo`'s `has_dyn_return` (the one reader that scans values rather than keying) cannot see it as
+/// a dyn sentinel. It is recorded ONLY from the plain nominal branch of `record_return`, so the four
+/// sentinel shapes above never acquire an impl-qualified twin.
+pub(crate) const RET_IMPL: &str = "<implret>";
+
+/// The `rets` key under which `impl Type { fn m() -> R }` files `R`. One place, so the writer
+/// (`record_return`) and the reader (`Collector::impl_declared_return`) cannot spell it differently —
+/// §F1.7's shape, the same argument as `unit_twin_key`.
+pub(crate) fn impl_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_IMPL}{type_leaf}\u{1f}{fn_leaf}")
+}
+
+/// SOUNDNESS R451 — sentinel prefix AND value for "this type declares a method with this name". The
+/// VALUE is the same constant for every entry, which is what makes these conflict-free under
+/// `merge_amb`'s "two values for one key ⇒ ambiguous" rule; the fact rides entirely in the KEY.
+///
+/// This exists because a corrected receiver type is only worth having if the engine can RESOLVE the
+/// method it moves the call to. `registry.selector().deregister(fd)` in mio-0.8.11 walks to `Registry`
+/// and forms `Registry::deregister` — the WRONG method, which happens to be unique and therefore
+/// resolves. The declared return of `Registry::selector` is `sys::Selector`, and mio declares
+/// `Selector::deregister` in THREE files (epoll, kqueue, poll), so the corrected call has three
+/// claimants on its `tail2` and resolves to NOTHING — and an unresolvable typed call is DROPPED
+/// SILENTLY (SOUNDNESS R452, pinned by `an_unresolvable_typed_call_is_dropped_silently`). The
+/// correction would have traded a fabrication for a silence. Measured over 1,561 crates before this
+/// gate existed: **REMOVED 170, of which 106 were rows losing `['Unknown']`**, 78 of them that one mio
+/// cascade. Hence the "declared EXACTLY ONCE" rule: a second declaration WITHDRAWS the key rather than
+/// re-affirming it (`decls::scan_items` for the intra-file half, `cache::merge_decls` for the other).
+pub(crate) const RET_IMPL_FN: &str = "<implfn>";
+
+/// The `rets` key under which `impl Type { fn m(..) }` records that `Type::m` EXISTS — every impl
+/// method, whatever it returns, which is why it cannot ride on `impl_ret_key` (that one is written
+/// only from the nominal-return branch). One place, so writer and reader cannot spell it differently.
+pub(crate) fn impl_fn_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_IMPL_FN}{type_leaf}\u{1f}{fn_leaf}")
+}
+
+/// True for a key `impl_fn_key` wrote. Read by the cache's cross-file merge, which must turn a SECOND
+/// declaration of one `Type::method` into an ambiguity rather than a re-affirmation: two units sharing a
+/// `tail2` do not resolve, and a key that outlived the merge would tell the R451 gate the call will land
+/// somewhere it will not. mio-0.8.11 declares `Selector::deregister` in THREE files (epoll, kqueue,
+/// poll) and is exactly this case.
+pub(crate) fn is_impl_fn_key(key: &str) -> bool {
+    key.starts_with(RET_IMPL_FN)
+}
+
+/// True for a key `impl_ret_key` wrote. Used by the cache's `merge_amb` to keep a cross-file conflict
+/// on one of these from being filed AS an ambiguity CANDIDATE under `amb_ret_key` — that would nest one
+/// sentinel key inside the other and put an unreachable entry in `ambiguous_return_leaves`.
+pub(crate) fn is_impl_ret_key(key: &str) -> bool {
+    key.starts_with(RET_IMPL) || key.starts_with(RET_IMPL_FN)
+}
+
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl
 /// Trait` / `-> &dyn Trait`). The trait bound leaves are joined after it (`"<dyn>Task"` /
 /// `"<dyn>Read+Seek"`), so `get().run()` on such a factory resolves the receiver's TRAIT bounds and
