@@ -68,8 +68,10 @@ under-report, never a wrong label.
 
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
 spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and
-JVM gates) over the scan and exits 1 on violation. It is the **advisory floor**: the syntactic backend
-under-reports, so a missed effect can pass — a clean run is necessary, never sufficient. It still
+JVM gates) over the scan and exits 1 on violation. It is the **syntactic floor**: resolution-heavy code can
+under-report silently, so a missed effect can pass — a clean run is necessary, never sufficient. Measured:
+**0 silent-pure across 19 syscall-oracle drivers** on executed Fs/Net/Exec, and **0 fabrications across 76
+curated-pure crates**. It still
 catches every boundary crossing the scan *can* see, deterministically, with zero extra install.
 
 **The baseline guard floor (AS-EFF-005).** `CANDOR_BASELINE=<saved report path or --out prefix>` (or

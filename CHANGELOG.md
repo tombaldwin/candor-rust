@@ -10,6 +10,16 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **The passing-gate banner no longer points at the deep engine, and no longer overstates its own
+  pessimism (SOUNDNESS R456).** It read *"advisory floor — the syntactic backend under-reports; the
+  nightly engine is the sound gate"*. Both clauses were wrong in opposite directions. The second sent
+  users to an engine **this product's own gate verb discounts** — the dylint lint stamps `spec: 0.38`
+  over a pre-⟨0.21⟩ report with no `analyzed` manifest, so `candor-query gate` answers it with *"re-scan
+  with a current engine"*; it is the family's soundness ORACLE, not a user route. The first was more
+  pessimistic than anything measured. SPEC §7 item 7 REQUIRES this profile to disclose that it can
+  under-report silently, so the disclosure stays — now stated as a measurement: **0 silent-pure across 19
+  syscall-oracle drivers** on executed Fs/Net/Exec, and **0 fabrications across 76 curated-pure crates**.
+
 ## [0.38.3] — 2026-09-16
 
 - **The release-asset gate no longer has a pipe to race on (SOUNDNESS R455).** `ci/verify-binary.sh`

@@ -160,7 +160,12 @@ installed (for the soundness contract) and **automatically fall back to the stab
 isn't** — so candor works with zero install on any machine, and the receipt says `· stable backend` when
 it's using the syntactic path. The wrapper's enforcement commands (`guard`/`policy`/`snapshot`/`diff`)
 still require the lint — blocking a PR needs the soundness guarantee — while the scanner offers its own
-**advisory floor** for both gates (`--policy`, and the AS-EFF-005 baseline guard below).
+**syntactic floor** for both gates (`--policy`, and the AS-EFF-005 baseline guard below). One caveat on the
+lint, recorded as SOUNDNESS R456: it is sound on the effect lattice but its report is **not spec-current**
+— it stamps `spec: 0.38` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so
+`candor-query gate` answers its output with *"re-scan with a current engine"*. Treat it as the soundness
+ORACLE it is used as (`soundness/run.sh`, `realworld/run_deep.sh`), not as a drop-in replacement for the
+scanner's report.
 
 The trade is **precision, disclosed**. The scanner is syntactic, so it sees what's *written*, not
 what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,

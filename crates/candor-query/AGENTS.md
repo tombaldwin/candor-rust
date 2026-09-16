@@ -68,8 +68,10 @@ candor-scan . --out /tmp/candor-report     # writes /tmp/candor-report.<crate>.s
 ```
 
 It can also enforce a policy file as a gate: `candor-scan . --policy .candor/policy` (exit 1 on
-violation) — an **advisory floor**: a clean run is necessary, never sufficient; the deep engine is
-the sound gate. The same floor applies to the AS-EFF-005 regression guard: with
+violation) — a **syntactic floor**: a clean run is necessary, never sufficient, because resolution-heavy
+code can under-report silently. (The dylint lint is the family's ORACLE instrument, not a route for users:
+it writes a pre-⟨0.21⟩ report that `candor-query gate` answers with "re-scan with a current engine" —
+SOUNDNESS R456.) The same floor applies to the AS-EFF-005 regression guard: with
 `CANDOR_BASELINE=<saved report path or --out prefix>` (or the `.candor/config` `baseline` key) a
 function that *gained* an effect vs the saved report exits 1; no baseline file → a note, guard
 inactive; a baseline from a **different scanner build** (or unparseable) → exit 2 without

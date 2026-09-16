@@ -4457,7 +4457,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     return (2, json_body);
                 }
                 if v.is_empty() {
-                    eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (advisory floor: the syntactic backend under-reports)");
+                    eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (syntactic floor: resolution-heavy code can under-report silently; see `candor blindspots`)");
                 } else {
                     eprintln!("candor-scan: {} baseline regression(s) — an existing function gained an effect (AS-EFF-005)", v.len());
                     guard_code = 1;
@@ -4935,7 +4935,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             eprintln!("{line}");
         }
         if v.is_empty() {
-            eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
+            // SPEC §7 item 7 REQUIRES this profile to disclose that it can under-report silently, so the
+            // disclosure stays. What changed (SOUNDNESS R456, 2026-09-16) is the SECOND clause, which used
+            // to read "the nightly engine is the sound gate" and pointed users at an engine THE REST OF
+            // THIS PRODUCT DISCOUNTS: the dylint lint stamps `spec: 0.38` over a pre-⟨0.21⟩ report with no
+            // `analyzed` manifest, so `candor-query gate` answers its output with "re-scan with a current
+            // engine". It is the family's oracle instrument, not a route to send a user down.
+            //
+            // AND THE FIRST CLAUSE WAS WRONG IN THE OTHER DIRECTION — "under-reports", unqualified, is more
+            // pessimistic than anything measured. The numbers below are this repo's own standing gates, so
+            // the disclosure is now item 7 done properly: what it misses, stated as a measurement.
+            eprintln!("candor-scan: policy ✓ (syntactic floor — a clean run is necessary, not sufficient: \
+                       resolution-heavy code can under-report SILENTLY. Measured: 0 silent-pure across 19 \
+                       syscall-oracle drivers on executed Fs/Net/Exec, and 0 fabrications across 76 \
+                       curated-pure crates. Run `candor blindspots` for what this scan could not see.)");
             // A CLEAN gate has no violation lines for the exploration opener to contradict, so emit it HERE
             // (after the ✓) — the pre-gate suppression at the top only exists to avoid a "nothing hidden"
             // line ABOVE a FAILING gate's violations (#18); a passing gated scan should not lose it (#8).
@@ -4943,7 +4956,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 crate::surface::emit(&inferred, &direct, &calls, &loc, coverage_ledger.len());
             }
         } else {
-            eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
+            eprintln!("candor-scan: {} policy violation(s) (syntactic floor — a clean run is necessary, not sufficient)", v.len());
             // Append-only remedy pointer (gate-FAILURE path only): the summary line above is
             // conformance-pinned, so this extra line must never alter it, the violation lines,
             // or the exit code — and a zero-violation run stays byte-identical.
