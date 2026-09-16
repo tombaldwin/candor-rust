@@ -10,6 +10,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`candor-query` 0.38.4 — a redaction republish.** Cargo packages SOURCE, so the doc comment in
+  `src/tour.rs` that named a private client's package root was preserved verbatim in every published
+  tarball, and served live by docs.rs. javac discards comments and the Java jars were clean; Cargo does
+  the opposite. **39 of 61 published `candor-query` versions are affected (0.11.0 → 0.38.3, 716
+  downloads); `candor-scan`, `candor-report` and `candor-classify` are clean.** 0.38.4 carries the
+  redacted comment and is verified clean from the registry. Deletion of the affected versions is
+  requested separately — `cargo yank` does not retract, it only affects resolution.
+
 - ⚠ **R457 — a PRODUCTION source file named `*_test.rs` is no longer dropped on its NAME.** The walk
   excluded any `tests.rs`/`test.rs`/`*_test.rs`/`*_tests.rs` file wholesale, and the reason text it
   printed named the hazard it then walked into: *"test-ness is declared at the `mod` site, invisible
