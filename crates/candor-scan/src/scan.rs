@@ -1872,6 +1872,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // output; consulted only by the ⟨0.29⟩ peek's out-of-scope block, far below, to test a policy's scope
     // against every in-scope function that could REACH a peeked declaration via dynamic dispatch — not
     // only the peeked declaration's own name.
+    // ⟨0.39⟩ `foreign_impls` under the 2-SEGMENT TAIL of the member, so the consumer half of the union
+    // can be asked in the spelling `dispatchesOn` uses (the trait LEAF) as well as the qualified one the
+    // wire key requires. Built once; see the lookup for why both are needed. A tail two keys share is
+    // MERGED rather than dropped — the value is a list of implementor quals and the union over them is
+    // what the rung publishes, which is §4 bounded CHA, not a choice between two traits.
+    let foreign_impls_by_tail2: HashMap<String, Vec<String>> = {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in merged.foreign_impls.iter() {
+            if let Some((owner, member)) = k.split_once('#') {
+                if let Some(t2) = tail2(member) {
+                    let e = m.entry(format!("{owner}#{t2}")).or_default();
+                    for q in v {
+                        if !e.contains(q) {
+                            e.push(q.clone());
+                        }
+                    }
+                }
+            }
+        }
+        m
+    };
     let mut direct_dispatchers: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
     for f in &fns {
         for site in &f.dispatch {
@@ -2908,7 +2929,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // implement the dependency's abstraction itself, and that body is LOCAL — so it
                         // joins as an ordinary call EDGE and its effects flow through the same fixpoint
                         // every other local call uses, rather than being re-derived here.
-                        if let Some(impl_quals) = merged.foreign_impls.get(&ukey) {
+                        // TWO SPELLINGS OF ONE KEY, and the difference is not cosmetic. `dispatchesOn`
+                        // carries the trait LEAF (`Backend::size`, which is what `dispatch_sites`
+                        // records), while `foreign_impls` is keyed by the trait's QUALIFIED path in the
+                        // owning crate (`backend::Backend::size`) — the ⟨0.23⟩ spelling obligation 2
+                        // requires. The chained half needs no reconciliation because `load_dep_reports`
+                        // already publishes every entry under its 2-segment tail as well; the LOCAL half
+                        // has no such index, so it is asked for both. Without this, a consumer that
+                        // implements the dependency's abstraction ITSELF is only found when the trait
+                        // happens to be declared at the owner's crate root — true of a fixture, false of
+                        // `ratatui_core::backend::Backend`.
+                        let tail2_key = tail2(&member)
+                            .map(|t2| format!("{cr_real}#{t2}"))
+                            .unwrap_or_else(|| ukey.clone());
+                        if let Some(impl_quals) = merged.foreign_impls.get(&ukey)
+                            .or_else(|| foreign_impls_by_tail2.get(&tail2_key))
+                        {
                             for cand in impl_quals {
                                 if let Some(ts) = by_tail2.get(cand) {
                                     // Unambiguous only — `resolve_target`'s never-guess rule. Two units

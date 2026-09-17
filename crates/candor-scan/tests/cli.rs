@@ -3713,3 +3713,80 @@ fn a_foreign_effectful_implementor_reaches_a_chained_consumer_and_a_pure_only_on
         "chaining only the FOREIGN implementor must leave `iface` disclosed as invisible — a synthetic \
          entry keyed under a package is not a claim to have analyzed it: {run}");
 }
+
+/// ⟨0.39⟩ obligation 3's FIRST half: "its own visible implementors". The test above covers the chained
+/// contributor; this one covers the consumer that supplies the effectful implementor ITSELF — and it
+/// puts the dependency's abstraction in a MODULE, which is what distinguishes the two key spellings.
+///
+/// `dispatchesOn` carries the trait LEAF (`Backend::size`, the spelling `dispatch_sites` records) while
+/// obligation 2's wire key is fully QUALIFIED in the owning package (`iface#backend::Backend::size`, the
+/// ⟨0.23⟩ rule). The chained half needs no reconciliation — `load_dep_reports` publishes every entry
+/// under its 2-segment tail as well — but the LOCAL half has no such index. Written with the abstraction
+/// at the dependency's crate ROOT, this arm passes whether or not that is handled, which is precisely the
+/// shape a fixture is flattered by: `ratatui_core::backend::Backend` is in a module, and so is this.
+#[test]
+fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_through_a_module_path() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r475own-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    // The abstraction lives in `iface::backend`, not at the crate root — the `ratatui_core` shape.
+    let iface = pkg("iface", "",
+        "pub mod backend {\n\
+         \x20   pub trait Backend { fn size(&self) -> usize; }\n\
+         \x20   pub struct TestBackend;\n\
+         \x20   impl Backend for TestBackend { fn size(&self) -> usize { 7 } }\n\
+         }\n\
+         pub fn term_size(b: &dyn backend::Backend) -> usize { b.size() }\n");
+    // The consumer implements the dependency's FOREIGN abstraction itself, effectfully.
+    let app = pkg("app", "iface = \"1\"\n",
+        "use iface::backend::Backend;\n\
+         pub struct Mine;\n\
+         impl Backend for Mine {\n\
+             fn size(&self) -> usize { let _ = std::net::TcpStream::connect(\"h:1\"); 0 }\n\
+         }\n\
+         pub fn app_size(b: &dyn Backend) -> usize { iface::term_size(b) }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG");
+        if deps.is_empty() { c.env_remove("CANDOR_DEPS"); }
+        else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+    let row = |v: &serde_json::Value, name: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == name).cloned()
+    };
+
+    let iface_rep = scan(&iface, &[]);
+    // The member is named by its LEAF here — the spelling the local dispatch machinery records.
+    assert_eq!(row(&iface_rep, "term_size").expect("the dispatching row is emitted")["dispatchesOn"],
+        serde_json::json!(["Backend::size"]), "{iface_rep}");
+    let iface_p = d.join("iface.json");
+    std::fs::write(&iface_p, serde_json::to_string(&iface_rep).unwrap()).unwrap();
+
+    // …and the consumer's own entry is keyed by the QUALIFIED path, per obligation 2.
+    let app_alone = scan(&app, &[]);
+    assert_eq!(row(&app_alone, "backend::Backend::size").expect(
+        "⟨0.39⟩ obligation 2 applies to the CONSUMER too — it implements a foreign abstraction")["hash"],
+        "iface#backend::Backend::size", "{app_alone}");
+
+    let chained = scan(&app, &[&iface_p]);
+    let app_size = row(&chained, "app_size").expect("app_size dispatches into the dependency");
+    assert!(app_size["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
+        "⟨0.39⟩ obligation 3 names the consumer's OWN visible implementors FIRST. The member arrives \
+         leaf-spelled (`Backend::size`) and the local index is keyed qualified \
+         (`iface#backend::Backend::size`); asking only one spelling silently drops this leg for every \
+         abstraction that is not at its crate's root — which is every real one: {app_size}");
+}
