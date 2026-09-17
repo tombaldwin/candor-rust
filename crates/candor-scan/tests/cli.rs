@@ -3790,3 +3790,52 @@ fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_thro
          (`iface#backend::Backend::size`); asking only one spelling silently drops this leg for every \
          abstraction that is not at its crate's root — which is every real one: {app_size}");
 }
+
+/// ⟨0.39⟩ THE REPORT MUST BE BYTE-STABLE, and obligation 2 is what stopped it being so.
+///
+/// Entries were sorted on `fn` alone, which was a total order for as long as one package's entries all
+/// carried one package's hashes. Obligation 2 breaks that: a crate implementing the SAME member of TWO
+/// different owners' abstractions (`reqwest` really does emit `Service::call` under both `tower#` and
+/// `tower_service#`) produces two rows that tie on `fn`, and a stable sort then preserves whatever order
+/// the `foreign_impls` HashMap iteration happened to produce. Measured live on reqwest-0.13.5: two runs
+/// of ONE binary over ONE crate, identical row multiset, different bytes.
+///
+/// Asserted by RE-RUNNING rather than by inspecting the order, because the order is not the property —
+/// same input, same bytes is. A single run cannot fail this test however the tie is resolved.
+#[test]
+fn two_owners_of_one_member_name_do_not_make_the_report_order_depend_on_hash_iteration() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r475order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"twoowners\"\n\n[dependencies]\nalpha = \"1\"\nbeta = \"1\"\n").unwrap();
+    // One method name, `call`, implemented for two DIFFERENT dependencies' abstractions — the reqwest
+    // shape. Both entries are emitted as `fn: "Service::call"`, under `alpha#…` and `beta#…`.
+    std::fs::write(d.join("src/lib.rs"),
+        "pub struct A;\n\
+         impl alpha::Service for A { fn call(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); } }\n\
+         pub struct B;\n\
+         impl beta::Service for B { fn call(&self) { let _ = std::fs::read(\"/tmp/x\"); } }\n").unwrap();
+
+    let once = || -> String {
+        let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+            .output().expect("run candor-scan");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let first = once();
+    let v: serde_json::Value = serde_json::from_str(first.trim()).expect("pure JSON report");
+    let unions: Vec<&str> = v["functions"].as_array().unwrap().iter()
+        .filter(|e| e["interfaceUnion"] == serde_json::json!(true))
+        .filter_map(|e| e["hash"].as_str()).collect();
+    assert!(unions.contains(&"alpha#Service::call") && unions.contains(&"beta#Service::call"),
+        "the fixture must actually produce the tie this test is about — got {unions:?}\n{v}");
+    // Ten runs: a HashMap's iteration order is stable within a process but not across them, so the
+    // instability only shows up by re-running the binary.
+    for i in 0..10 {
+        assert_eq!(once(), first,
+            "run {i} produced different BYTES for the same input. Two interface-union entries tie on \
+             `fn`, so the entry sort must break the tie on `hash` — otherwise the report order follows \
+             `foreign_impls`' hash iteration and no consumer can diff two scans of one tree.");
+    }
+}

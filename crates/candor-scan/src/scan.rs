@@ -4109,7 +4109,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             });
         }
     }
-    entries.sort_by(|a, b| a.func.cmp(&b.func));
+    // ⟨0.39⟩ TIE-BREAK ON THE HASH, or the report is not byte-stable. `func` alone stopped being a total
+    // order the moment obligation 2 let one package publish interface-union entries under SEVERAL owning
+    // crates: `reqwest` emits `Service::call` under BOTH `tower#` and `tower_service#`, the two rows tie
+    // on `func`, and a stable sort then preserves whatever order `foreign_impls`' HashMap iteration
+    // happened to produce — so two runs of ONE binary over ONE crate gave different bytes with an
+    // identical row multiset. Measured live on reqwest-0.13.5. `hash` is `crate#qual` and equals `func`'s
+    // own qualification for every ordinary row, so this can only break ties, never reorder.
+    entries.sort_by(|a, b| a.func.cmp(&b.func).then_with(|| a.hash.cmp(&b.hash)));
 
     let meta = candor_report::ReportMeta {
         version: format!("scan-{}", env!("CARGO_PKG_VERSION")),
