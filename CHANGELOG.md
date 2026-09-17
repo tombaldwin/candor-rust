@@ -10,6 +10,59 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **R478 — the ELEMENT route has R476's blind spot too: a CONTAINER field whose generic is bounded on
+  the `impl` block now dispatches.** `struct Reg<B> { bs: Vec<B> }` + `impl<B: Backend> Reg<B>` was ABSENT
+  from `functions[]` at EVERY implementor count — 0, 1 and 2 — whether the element was reached by index
+  (`self.bs[0].size()`), by a for-loop, or through an `Option<B>` `if let` binder. `field_elem_trait` is
+  `trait_fields`' parallel index — same shape, same field keys — so it carries the same reserved
+  `<gen-field>` key space and `decls::resolve_impl_bound_fields` joins BOTH routes from ONE bounds half:
+  the impl blocks record the bound once, in `trait_fields`, and the join reads it twice. Two indexes
+  recording one fact is how the two element resolvers drifted apart in `[[R347]]`.
+- ⚠ **R479 — a TUPLE-STRUCT position had no general dispatch route at all.** `trait_fields` had no
+  `Fields::Unnamed` arm: only `[[R238]]`'s synthetic callable answer was ever recorded there, so
+  `struct TupT<B>(pub B)` with `impl<B: Backend>` was silent — and so was the spelling that needs no
+  generics and no bound anywhere, `struct T(pub Box<dyn Backend>)`. `self.0` and `self.name` reach the
+  SAME `resolve_recv_traits` arm keyed by the member's string form, so the only thing between them was
+  the missing insert. Measured on the corpus: diesel's `Grouped`, `Nullable`, `WhereClause`,
+  `SelectClause`, `ReturningClause`, `DistinctOnClause` … `walk_ast` all gain their dispatch.
+- ⚠ **R482 — a `field_elem` entry naming the struct's own generic PARAMETER shadowed the element
+  dispatch route, and NOT only on the impl-block spelling.** `elem_type` answers `Vec<B>` with the
+  string `"B"`, which is not a type — inside the struct's own definition a parameter shadows any type of
+  that name — but `resolve_recv_type`'s `Index` arm asks `field_elem` and RETURNS EARLY, so
+  `self.bs[0].size()` typed to the phantom and the dispatch route beside it was never reached. Measured
+  pre-fix: `struct VecIdxS<B: Backend> { bs: Vec<B> }` — the bound on the STRUCT, where the for-loop and
+  `if let` spellings of the same field hedged `Unknown` and charged `['Fs']` — was ABSENT at 0, 1 and 2.
+  The removal is narrow for `[[R476]]`'s measured reason: it fires only where the string IS a parameter
+  name AND the element dispatches, so a `Vec<Mutex<T>>` whose entry names a REAL local type keeps it.
+- ⚠ **R483 — `T: ?Sized` is the REMOVAL of a bound and was being recorded as a bound.** `bound_leaves`
+  kept every `TypeParamBound::Trait`, modifier and all, so `struct MutexGuard<'a, T: ?Sized>(&'a
+  Mutex<T>)` reported the dispatch leaf `["Sized"]` — `trait_leaves` peels `Mutex` and finds the param —
+  and that leaf DISPLACED the `fields` entry naming the real `Mutex`. **Pre-existing for a NAMED field**
+  (a fixture function that really reads a file, ABSENT at every implementor count on the pre-fix binary);
+  found because the R479 arm gave the same leaf the same displacing power one index over and the
+  1,608-crate A/B answered REMOVED 19 — **13 of them this**: tokio's
+  `loom::std::parking_lot::Mutex::{lock,try_lock,get_mut}` (3), async-lock 2.8.0/3.4.2's
+  `MutexGuard::drop`/`MutexGuardArc::drop`/`Lock::poll`/`poll_with_strategy` (8) and
+  regex-lite/fancy-regex's `ReplacerRef::replace_append` (2), each losing a disclosed
+  `invisible`/`Unknown` and going ABSENT. The MODIFIER is the discriminator, not the name: `T: Sized` is a real bound, `T: ?Sized` is its
+  relaxation.
+- **A/B over 1,608 registry crates (pre 307,442 rows / post 308,268): ADDED 832 · REMOVED 6 · CHANGED 230**
+  (`--key unit`, wide value; inferred-only CHANGED 46). Of the additions 400 are `Unknown`-only, 268
+  present-but-pure and **142 carry a concrete effect** — ureq's `ConfigBuilder` accessors gain `Env`,
+  `rand`'s `RngReader::read` and `rand_core`'s `UnwrapMut`/`UnwrapErr` gain `Rand`, io-extras'
+  `ReadHalf`/`WriteHalf::as_handle_or_socket` gain `Fs`+`Net`, ureq's `ChainedConnector::connect` gains
+  `Net`. **All 6 REMOVED traced to ONE mechanism in ONE crate (diesel 2.3.12/2.3.13), and it is a
+  FABRICATED hedge being withdrawn:** `pub struct WithCacheStrategy<DB, Statement>` names its second
+  generic parameter `Statement`, diesel also has a `struct Statement` with an `impl Drop`, and
+  `owned_drops` is LEAF-KEYED — so the parameter-named `field_elem` entry made `WithCacheStrategy` own a
+  `Drop` type it does not own, which made `[[R182]]` hedge `Unknown` on every ambiguous `default()` call
+  in the crate (`i32::default`, `i64::default`, `DB::default`, `my_bool::default`). `i32::default()` is
+  provably pure; R482 removes the entry, the fabricated ownership edge goes with it, and the four hedges
+  and their two transitive rows go too. Nothing lost an `incomplete`, a `declared`, a `netClass` or a
+  concrete effect.
+- Cache schema **rev31 → rev32**: all four changes are per-file Pass A outputs, so a rev31 entry replays
+  exactly the silences these rows close. Reproduced rather than argued — see the note in `cache.rs`.
+
 - ⚠ **R476 — a trait bound on the `impl` BLOCK is now a bound, not a blind spot: a generic FIELD
   receiver dispatches exactly as it does when the bound sits on the STRUCT.** `struct Terminal<B>` +
   `impl<B: Backend> Terminal<B> { fn dims(&self) { self.backend.size() } }` was ABSENT from

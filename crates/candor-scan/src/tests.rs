@@ -3321,6 +3321,249 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
              that reads a file — got {:?}\n{v}", row(&v, "Shared::go"));
     }
 
+    /// SOUNDNESS R478 / R479 / R482 — THE THREE ROUTES THAT REACH A GENERIC FIELD AND DID NOT AGREE.
+    /// R476 made a bound on the `impl` block dispatch for the field's OWN type; this pins the other
+    /// three ways the same field is reached, each of which was silent for a DIFFERENT reason:
+    ///
+    ///   * R478 — the ELEMENT route (`bs: Vec<B>`, `b: Option<B>`). `field_elem_trait` is built from
+    ///     `struct_bounds` and had no join at all, so with the bound on the `impl` block every
+    ///     container spelling was ABSENT at 0, 1 and 2 implementors.
+    ///   * R479 — the TUPLE position. `trait_fields` had no `Fields::Unnamed` arm, so `self.0.size()`
+    ///     had no general dispatch route by ANY spelling — including `struct T(pub Box<dyn Backend>)`,
+    ///     which needs no generics and no bound anywhere.
+    ///   * R483 — a `?Sized` RELAXATION recorded as a trait BOUND, which then DISPLACED the concrete
+    ///     `fields` entry it should never have touched. Pre-existing for a NAMED field; found because
+    ///     the R479 arm below gave the same leaf the same displacing power one index over, and the
+    ///     1,608-crate A/B answered REMOVED 19 — 13 of them this: tokio's
+    ///     `parking_lot::Mutex::{lock,try_lock,get_mut}`, async-lock's `MutexGuard::drop` family and
+    ///     regex-lite's `ReplacerRef::replace_append`, each losing a disclosed `invisible`/`Unknown`
+    ///     and going ABSENT.
+    ///   * R482 — the INDEX spelling, and the one that is NOT about where the bound is written.
+    ///     `self.bs[0].size()` goes through `resolve_recv_type`'s `Index` arm, which asks `field_elem`
+    ///     and RETURNS EARLY; `field_elem` held the literal string `"B"`, which is not a type, so the
+    ///     dispatch route beside it was never reached. Pre-fix, `VecIdxS` — the bound on the STRUCT,
+    ///     the spelling where everything else already worked — was ABSENT at every count while the
+    ///     for-loop and `if let` spellings of the same field hedged `Unknown` and charged `['Fs']`.
+    ///
+    /// The matrix is 14 rows × 3 implementor counts, and each row's IMPL-bound spelling is asserted
+    /// against its STRUCT-bound twin as well as against the value, so it cannot pass by both going
+    /// equally wrong. Every program COMPILES as written (§E3), `cargo build`-ed before this test was
+    /// written. Pre-fix, 13 of the 14 were ABSENT in all three cells; `TupVecDyn` was the one that
+    /// worked, and it is kept as the control that says the element route existed at all.
+    #[test]
+    fn a_generic_field_reached_by_element_index_or_tuple_position_dispatches_too() {
+        let run = |src: String| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r478-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r478\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let row = |v: &serde_json::Value, q: &str| -> Option<Vec<String>> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(q))
+                .map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect())
+        };
+        let cell = |impls: usize| -> serde_json::Value {
+            let mut src = String::from(SRC_R478);
+            if impls >= 1 {
+                src.push_str(
+                    "pub struct MemBackend;\n\
+                     impl Backend for MemBackend { fn size(&self) -> usize { 7 } }\n\
+                     // OVER-CHARGE CONTROL: a CONCRETE container through the same site, pure element.\n\
+                     pub struct ConcVecPure { pub bs: Vec<MemBackend> }\n\
+                     impl ConcVecPure { pub fn go(&self) -> usize { self.bs[0].size() } }\n");
+            }
+            if impls >= 2 {
+                src.push_str(
+                    "pub struct FileBackend;\n\
+                     impl Backend for FileBackend {\n\
+                     \x20   fn size(&self) -> usize { std::fs::read(\"/tmp/r478.txt\").map(|v| v.len()).unwrap_or(0) }\n\
+                     }\n\
+                     // OVER-CHARGE CONTROLS: CONCRETE containers whose element really IS effectful —\n\
+                     // the direction this change did not intend, and it removes `field_elem` entries.\n\
+                     pub struct ConcVecFs { pub bs: Vec<FileBackend> }\n\
+                     impl ConcVecFs { pub fn go(&self) -> usize { self.bs[0].size() } }\n\
+                     pub struct ConcTupFs(pub FileBackend);\n\
+                     impl ConcTupFs { pub fn go(&self) -> usize { self.0.size() } }\n");
+            }
+            run(src)
+        };
+        let unknown = Some(vec!["Unknown".to_string()]);
+        let fs = Some(vec!["Fs".to_string()]);
+        // The four container spellings, each written twice — bound on the IMPL block, bound on the
+        // STRUCT. `OptChainI` is deliberately NOT here: it is the one cell this change does not close,
+        // and it has its own assertion below, which PINS the residual rather than omitting it.
+        let twins = [("VecIdxI::go", "VecIdxS::go"), ("VecForI::go", "VecForS::go"),
+                     ("OptIfI::go", "OptIfS::go")];
+        for n in [0usize, 1, 2] {
+            let v = cell(n);
+            let want = match n { 0 => unknown.clone(), 1 => None, _ => fs.clone() };
+            for (i, s) in twins {
+                let (a, b) = (row(&v, i), row(&v, s));
+                assert_eq!(a, b,
+                    "R478: the bound moved from the struct to the impl block and NOTHING else did; at \
+                     {n} implementor(s) {i} and {s} must give one answer — {a:?} vs {b:?}\n{v}");
+                assert_eq!(a, want,
+                    "R478 at {n} implementor(s): {i} is {a:?}, want {want:?}. Zero candidates MUST \
+                     hedge (SPEC §4), one PURE candidate is legitimately absent, two candidates one of \
+                     which reads a file is `Fs`\n{v}");
+            }
+            // R482, and it is NOT a bound-placement question: the INDEX spelling of the STRUCT-bound
+            // field is the cell that disagreed with its own siblings before this change.
+            assert_eq!(row(&v, "VecIdxS::go"), row(&v, "VecForS::go"),
+                "R482 at {n} implementor(s): `self.bs[0].size()` and `for b in &self.bs` read ONE \
+                 field of ONE struct whose bound is on the STRUCT — a `field_elem` entry naming the \
+                 struct's own generic PARAMETER must not shadow the dispatch route for one of them\n{v}");
+            // R479 — the tuple position, generic (both bound spellings), its element, and the
+            // newtype-over-`dyn` that needs no generics at all.
+            for f in ["TupI::go", "TupS::go", "TupVecI::go", "TupVecS::go", "TupDyn::go",
+                      "TupVecDyn::go"] {
+                assert_eq!(row(&v, f), want,
+                    "R479 at {n} implementor(s): {f} reaches a dispatch-typed TUPLE position; \
+                     `self.0` and `self.name` are one `Expr::Field` arm keyed by the member's string \
+                     form and must answer alike — got {:?}\n{v}", row(&v, f));
+            }
+            // OVER-CHARGE CONTROLS, every cell.
+            for f in ["HoldVec::held", "PlainVec::dup", "PlainTup::dup", "ConcVecPure::go"] {
+                let got = row(&v, f);
+                assert!(got.as_ref().is_none_or(|e| e.is_empty()),
+                    "OVER-CHARGE at {n} implementor(s): {f} performs nothing this scan cannot see and \
+                     must gain nothing — got {got:?}\n{v}");
+            }
+            if n >= 2 {
+                for f in ["ConcVecFs::go", "ConcTupFs::go"] {
+                    assert_eq!(row(&v, f), fs,
+                        "OVER-CHARGE CONTROL: a CONCRETE container/tuple whose element reads a file \
+                         resolved before this change and must still resolve — this is the direction \
+                         the `field_elem` removal could break — got {:?}\n{v}", row(&v, f));
+                }
+            }
+            // R482's OWN REGRESSION CONTROL, and it is R476's tokio shape one index over: the removal
+            // fires only where the entry IS the parameter's name. `Vec<Holder<T>>` answers the element
+            // probe while its `field_elem` entry names a REAL local type whose method reads a file;
+            // removing THAT would be the cardinal-sin direction the 1,608-crate A/B caught for R476.
+            assert_eq!(row(&v, "WrapVec::go"), fs,
+                "R482 REGRESSION CONTROL at {n} implementor(s): the `field_elem` entry for \
+                 `Vec<Mutex<T>>` names a real local type, not the parameter — it must survive and \
+                 keep resolving `self.hs[0].read()` — got {:?}\n{v}", row(&v, "WrapVec::go"));
+        }
+        // R483's OWN EVIDENCE, and it is a PRE-EXISTING silence rather than fallout of this change:
+        // `PlHold` is a NAMED field, and the `Fields::Named` `else if` that displaced its `fields`
+        // entry has been there all along. Measured on the pre-fix binary: ABSENT at 0, 1 and 2, over a
+        // `read()` that really reads a file. `PlGuard` is its TUPLE twin — it resolved BEFORE this
+        // change (the tuple arm asked no trait question at all) and is the control that the `else if`
+        // added beside it does not cost what R479 buys.
+        for n in [0usize, 1, 2] {
+            let v = cell(n);
+            for f in ["PlHold::go", "PlGuard::go"] {
+                assert_eq!(row(&v, f), fs,
+                    "R483 at {n} implementor(s): `T: ?Sized` REMOVES a bound, it does not add one — a \
+                     leaf of `[\"Sized\"]` must not displace the `fields` entry naming the real local \
+                     `Mutex` whose `read()` reads a file ({f}) — got {:?}\n{v}", row(&v, f));
+            }
+        }
+
+        // THE RESIDUAL, PINNED RATHER THAN OMITTED. `self.b.as_ref().unwrap().size()` on an
+        // `Option<B>` field bounded on the IMPL BLOCK is still ABSENT, while the same field's `if let`
+        // binder, a `let` rebind of it, a `.map()` over it, and the STRUCT-bound spelling of the same
+        // chain all charge. The cause is measured: the chain goes through `resolve_recv_type`'s
+        // `MethodCall` arm, which types `self.b` from `fields` — and with the bound on the impl block
+        // that entry exists and says `"Option"`, the WRAPPER's name rather than the parameter's, so
+        // R476's deliberately narrow removal does not touch it. Widening the removal to "whatever the
+        // entry happens to be" is exactly the cut that cost R476 12 rows in the cardinal-sin
+        // direction, so closing this needs its own A/B and its own row. NOT to be confused with
+        // `self.bs.iter().next().unwrap().size()`, which is silent in BOTH bound spellings and on the
+        // PRE binary too — a different, pre-existing gap in the adapter chain.
+        let v = cell(2);
+        assert_eq!(row(&v, "OptChainI::go"), None,
+            "R478 RESIDUAL PIN: if `OptChainI::go` now resolves, the residual is closed and this \
+             assertion is what tells you to say so — got {:?}\n{v}",
+            row(&v, "OptChainI::go"));
+        assert_eq!(row(&v, "OptChainS::go"), fs,
+            "…and its STRUCT-bound twin must keep charging, which is what makes the residual a \
+             SPELLING gap rather than a missing route — got {:?}\n{v}", row(&v, "OptChainS::go"));
+    }
+
+    /// The R478/R479/R482 fixture — the invariant half, held out of the test body for length. Every
+    /// item COMPILES as written; the whole file plus each implementor block was `cargo build`-ed
+    /// before the test was written (§E3).
+    const SRC_R478: &str = r##"
+pub trait Backend { fn size(&self) -> usize; }
+// ---- R478: the ELEMENT route, bound on the IMPL BLOCK -----------------------------
+pub struct VecIdxI<B> { pub bs: Vec<B> }
+impl<B: Backend> VecIdxI<B> { pub fn go(&self) -> usize { self.bs[0].size() } }
+pub struct VecForI<B> { pub bs: Vec<B> }
+impl<B: Backend> VecForI<B> { pub fn go(&self) -> usize { let mut n = 0; for b in &self.bs { n += b.size(); } n } }
+pub struct OptIfI<B> { pub b: Option<B> }
+impl<B: Backend> OptIfI<B> { pub fn go(&self) -> usize { if let Some(x) = &self.b { x.size() } else { 0 } } }
+pub struct OptChainI<B> { pub b: Option<B> }
+impl<B: Backend> OptChainI<B> { pub fn go(&self) -> usize { self.b.as_ref().unwrap().size() } }
+// ---- the same four with the bound on the STRUCT (the forgiving spelling) ----------
+pub struct VecIdxS<B: Backend> { pub bs: Vec<B> }
+impl<B: Backend> VecIdxS<B> { pub fn go(&self) -> usize { self.bs[0].size() } }
+pub struct VecForS<B: Backend> { pub bs: Vec<B> }
+impl<B: Backend> VecForS<B> { pub fn go(&self) -> usize { let mut n = 0; for b in &self.bs { n += b.size(); } n } }
+pub struct OptIfS<B: Backend> { pub b: Option<B> }
+impl<B: Backend> OptIfS<B> { pub fn go(&self) -> usize { if let Some(x) = &self.b { x.size() } else { 0 } } }
+pub struct OptChainS<B: Backend> { pub b: Option<B> }
+impl<B: Backend> OptChainS<B> { pub fn go(&self) -> usize { self.b.as_ref().unwrap().size() } }
+// ---- R479: the TUPLE-STRUCT position ---------------------------------------------
+pub struct TupI<B>(pub B);
+impl<B: Backend> TupI<B> { pub fn go(&self) -> usize { self.0.size() } }
+pub struct TupS<B: Backend>(pub B);
+impl<B: Backend> TupS<B> { pub fn go(&self) -> usize { self.0.size() } }
+pub struct TupVecI<B>(pub Vec<B>);
+impl<B: Backend> TupVecI<B> { pub fn go(&self) -> usize { self.0[0].size() } }
+pub struct TupVecS<B: Backend>(pub Vec<B>);
+impl<B: Backend> TupVecS<B> { pub fn go(&self) -> usize { self.0[0].size() } }
+pub struct TupDyn(pub Box<dyn Backend>);
+impl TupDyn { pub fn go(&self) -> usize { self.0.size() } }
+pub struct TupVecDyn(pub Vec<Box<dyn Backend>>);
+impl TupVecDyn { pub fn go(&self) -> usize { self.0[0].size() } }
+// ---- OVER-CHARGE CONTROLS ---------------------------------------------------------
+// a generic container HELD but never invoked
+pub struct HoldVec<B> { pub bs: Vec<B> }
+impl<B: Backend> HoldVec<B> { pub fn held(&self) -> &Vec<B> { &self.bs } }
+// an EXTERNAL bound on the impl block: `Clone` names no local trait, so the join supplies
+// leaves that resolve to nothing — never `Unknown`.
+pub struct PlainVec<T> { pub v: Vec<T> }
+impl<T: Clone> PlainVec<T> { pub fn dup(&self) -> T { self.v[0].clone() } }
+pub struct PlainTup<T>(pub Vec<T>);
+impl<T: Clone> PlainTup<T> { pub fn dup(&self) -> T { self.0[0].clone() } }
+// R482's REGRESSION CONTROL — R476's tokio shape, one index over, and it fails on a BROAD
+// removal. `Mutex` is on `trait_leaves`' peel list, so `Vec<Mutex<T>>` ANSWERS the position probe
+// through the wrapper — while its `field_elem` entry names a REAL local type whose `read()` reads
+// a file. Removing that entry is what took tokio's `watch::Receiver::borrow` from a disclosed
+// `Unknown` to ABSENT, 12 rows, on R476's first cut.
+pub struct Mutex<T: ?Sized> { pub inner: T }
+impl<T: ?Sized> Mutex<T> {
+    pub fn read(&self) -> usize { std::fs::read("/tmp/r478b.txt").map(|v| v.len()).unwrap_or(0) }
+}
+pub struct WrapVec<T> { pub hs: Vec<Mutex<T>> }
+impl<T: Clone> WrapVec<T> { pub fn go(&self) -> usize { self.hs[0].read() } }
+// R483 — a `?Sized` RELAXATION is not a bound. async-lock's `MutexGuard<'a, T: ?Sized>(&'a Mutex<T>)`
+// in miniature, written BOTH ways: the NAMED field was already silent before any of this (the
+// `Fields::Named` arm's `else if` has always been there), and the TUPLE one is the control for the
+// `else if` this change adds beside it.
+pub struct PlHold<'a, T: ?Sized> { pub m: &'a Mutex<T> }
+impl<'a, T: ?Sized> PlHold<'a, T> { pub fn go(&self) -> usize { self.m.read() } }
+pub struct PlGuard<'a, T: ?Sized>(pub &'a Mutex<T>);
+impl<'a, T: ?Sized> PlGuard<'a, T> { pub fn go(&self) -> usize { self.0.read() } }
+"##;
+
     /// The R238 fixture. Held out of the test body only because it is long; every item in it is
     /// exercised by `callback_held_in_a_struct_field_and_handed_to_an_invoker_is_unknown` above, and
     /// the whole of it COMPILES AND RUNS as written (an absence-shaped control over an uncompilable
@@ -13515,6 +13758,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev31 -> rev32 the same class, three indexes wider (R478/R479/R482): `field_elem_trait` carries
+    ///                 the pending key space too (the ELEMENT half of that join), `trait_fields` gains a
+    ///                 general `Fields::Unnamed` arm, and `field_elem` no longer records an entry that is
+    ///                 the struct's own generic PARAMETER name. All four are per-file Pass A outputs, so
+    ///                 a rev31 entry replays a `Reg<B> { bs: Vec<B> }` whose `Backend` reads a file as
+    ///                 ABSENT at every implementor count.
     ///   rev30 -> rev31 a change to what an EXISTING field RECORDS (R476): `trait_fields` carries two
     ///                 reserved key spaces whose crate-wide join gives a generic FIELD bounded on an
     ///                 `impl` block its dispatch leaves, and removes the `fields` entry that shadowed
@@ -13569,11 +13818,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -13584,7 +13833,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev31/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev32/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

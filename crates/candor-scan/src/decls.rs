@@ -2702,7 +2702,7 @@ pub(crate) fn collect_decls(
                                 // above states: this may only SUPPLY a leaf where there was none, never
                                 // displace one.
                                 if !had_trait_leaves && !gen_probe.is_empty() {
-                                    let at = crate::lang::trait_leaves(&f.ty, &gen_probe);
+                                    let at = gen_probe_positions(&f.ty, &gen_probe);
                                     if !at.is_empty() {
                                         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                             eprintln!("R476GEN {}.{}", s.ident, name); // §E1 HIT COUNTER
@@ -2713,24 +2713,56 @@ pub(crate) fn collect_decls(
                                             .insert(crate::model::tf_gen_field_key(&name.to_string()), at);
                                     }
                                 }
-                                // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
-                                // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
-                                if let Some(e) = elem_type(&f.ty, uses_ty) {
-                                    field_elem
-                                        .entry(s.ident.to_string())
-                                        .or_default()
-                                        .insert(name.to_string(), e);
-                                }
                                 // A COLLECTION-OF-TRAIT-OBJECTS field (`handlers: Vec<Box<dyn Handler>>`, or
                                 // `Vec<T>` on `struct Registry<T: Handler>`) records its element DISPATCH
                                 // leaves so `self.handlers.iter().for_each(|h| h.handle())` dispatches (R37
                                 // field form). Uses the struct's own generic bounds for a bounded element.
                                 let leaves = elem_trait_leaves(&f.ty, &struct_bounds, callable_aliases);
+                                let had_elem_leaves = !leaves.is_empty();
                                 if !leaves.is_empty() {
                                     field_elem_trait
                                         .entry(s.ident.to_string())
                                         .or_default()
                                         .insert(name.to_string(), leaves);
+                                }
+                                // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
+                                // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
+                                // SOUNDNESS R482 — and NOT when that "type" is the struct's own generic
+                                // PARAMETER while the element dispatches. See `elem_param_shadow`.
+                                if let Some(e) = elem_type(&f.ty, uses_ty) {
+                                    if had_elem_leaves && elem_param_shadow(&e, &gen_probe) {
+                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                            eprintln!("R482SHADOW {}.{} {e}", s.ident, name); // §E1
+                                        }
+                                    } else {
+                                        field_elem
+                                            .entry(s.ident.to_string())
+                                            .or_default()
+                                            .insert(name.to_string(), e);
+                                    }
+                                }
+                                // SOUNDNESS R478 — THE ELEMENT ROUTE HAS R476's BLIND SPOT. `leaves` above
+                                // is computed from `struct_bounds`, so `struct Reg<B> { bs: Vec<B> }` whose
+                                // bound is written `impl<B: Backend> Reg<B>` records NOTHING, and every
+                                // container spelling is silent at EVERY implementor count — including
+                                // ZERO, the cell that makes it a resolution gap rather than a CHA-bound
+                                // decision. Same probe, same join, one index over: ask the REAL resolver
+                                // (`elem_trait_leaves` — never a second copy of its container/wrapper
+                                // rules, §G) which generic POSITIONS this field's ELEMENT dispatches on,
+                                // and let `resolve_impl_bound_fields` pair them with the impl blocks'
+                                // bounds after the crate-wide merge. Additive exactly as R476 is: recorded
+                                // only where the struct's own bounds answered nothing.
+                                if !had_elem_leaves && !gen_probe.is_empty() {
+                                    let at = gen_probe_elem_positions(&f.ty, &gen_probe, callable_aliases);
+                                    if !at.is_empty() {
+                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                            eprintln!("R478ELEM {}.{}", s.ident, name); // §E1 HIT COUNTER
+                                        }
+                                        field_elem_trait
+                                            .entry(s.ident.to_string())
+                                            .or_default()
+                                            .insert(crate::model::tf_gen_field_key(&name.to_string()), at);
+                                    }
                                 }
                             }
                         }
@@ -2744,18 +2776,41 @@ pub(crate) fn collect_decls(
                             if has_cfg(&f.attrs) {
                                 continue;
                             }
-                            if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
+                            // SOUNDNESS R479 — THE TUPLE POSITION HAD NO GENERAL DISPATCH ROUTE AT ALL.
+                            // The comment this replaces said `trait_fields` has no `Unnamed` arm and
+                            // called that deliberate; the measurement says the deliberate part was the
+                            // R238 narrowing, and the cost is a silence: `struct TupT<B>(pub B)` with
+                            // `impl<B: Backend> TupT<B> { fn go(&self) { self.0.size() } }` was ABSENT
+                            // from `functions[]` at every implementor count, and so was the plainest
+                            // spelling of all — `struct T(pub Box<dyn Backend>)`, a newtype over a trait
+                            // OBJECT, which needs no generics and no bound anywhere. `self.0` and
+                            // `self.name` reach the SAME `resolve_recv_traits` `Expr::Field` arm keyed by
+                            // the member's string form (`"0"`), so the only thing between them was this
+                            // missing insert. Dispatch-typing FIRST, exactly as the `Named` arm does it:
+                            // a `Box<dyn Backend>` reads as concrete `Box` to `type_path`, which would
+                            // shadow the CHA route.
+                            let leaves = trait_leaves(&f.ty, &struct_bounds);
+                            let had_trait_leaves = !leaves.is_empty();
+                            if had_trait_leaves {
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R479TUP {}.{}", s.ident, i); // §E1 HIT COUNTER
+                                }
+                                trait_fields
+                                    .entry(s.ident.to_string())
+                                    .or_default()
+                                    .insert(i.to_string(), leaves);
+                            } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                 entry.insert(i.to_string(), ty);
                             }
                             // SOUNDNESS R238 — the TUPLE-struct position of the named-field rule above;
                             // `struct Tup(fn(&i32) -> bool)` and `t.0` handed to an invoking adapter is
                             // the same program as `h.cb`. Keyed by POSITION, exactly as `fields` and
-                            // `field_elem` are here. This position records ONLY the callable answer:
-                            // the general `trait_leaves` question was never asked for a tuple field
-                            // (`trait_fields` has no Unnamed arm at all — a separate, pre-existing gap
-                            // for `struct T(Box<dyn Handler>)`, left alone deliberately because widening
-                            // it changes DISPATCH, which is a different measurement).
-                            if crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases) {
+                            // `field_elem` are here. Additive over the general route just added, for the
+                            // R177 reason the `Named` arm states: it may only supply a leaf where there
+                            // is none.
+                            if !had_trait_leaves
+                                && crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases)
+                            {
                                 if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                     eprintln!("R238DECL {}.{}", s.ident, i); // §E1 HIT COUNTER
                                 }
@@ -2764,18 +2819,54 @@ pub(crate) fn collect_decls(
                                     .or_default()
                                     .insert(i.to_string(), vec!["Fn".to_string()]);
                             }
-                            if let Some(e) = elem_type(&f.ty, uses_ty) {
-                                field_elem
-                                    .entry(s.ident.to_string())
-                                    .or_default()
-                                    .insert(i.to_string(), e);
+                            // SOUNDNESS R479 — the impl-block half for a tuple position, the R476 probe
+                            // against the same key space. `trait_fields` is keyed by the member's string
+                            // form here too, so the join needs nothing tuple-specific.
+                            if !had_trait_leaves && !gen_probe.is_empty() {
+                                let at = gen_probe_positions(&f.ty, &gen_probe);
+                                if !at.is_empty() {
+                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        eprintln!("R479GEN {}.{}", s.ident, i); // §E1 HIT COUNTER
+                                    }
+                                    trait_fields
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(crate::model::tf_gen_field_key(&i.to_string()), at);
+                                }
                             }
                             let leaves = elem_trait_leaves(&f.ty, &struct_bounds, callable_aliases);
+                            let had_elem_leaves = !leaves.is_empty();
                             if !leaves.is_empty() {
                                 field_elem_trait
                                     .entry(s.ident.to_string())
                                     .or_default()
                                     .insert(i.to_string(), leaves);
+                            }
+                            // SOUNDNESS R482 — see the `Named` arm and `elem_param_shadow`.
+                            if let Some(e) = elem_type(&f.ty, uses_ty) {
+                                if had_elem_leaves && elem_param_shadow(&e, &gen_probe) {
+                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        eprintln!("R482SHADOW {}.{} {e}", s.ident, i); // §E1
+                                    }
+                                } else {
+                                    field_elem
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(i.to_string(), e);
+                                }
+                            }
+                            // SOUNDNESS R478 — the element route's impl-block half, tuple position.
+                            if !had_elem_leaves && !gen_probe.is_empty() {
+                                let at = gen_probe_elem_positions(&f.ty, &gen_probe, callable_aliases);
+                                if !at.is_empty() {
+                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        eprintln!("R478ELEM {}.{}", s.ident, i); // §E1 HIT COUNTER
+                                    }
+                                    field_elem_trait
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(crate::model::tf_gen_field_key(&i.to_string()), at);
+                                }
                             }
                         }
                     }
@@ -3114,6 +3205,49 @@ pub(crate) fn collect_decls(
     }
 }
 
+/// The POSITION probe's answer for a field's own type (R476: `backend: B`, `Box<B>`, `&B`), filtered
+/// to answers the probe map actually produced. A `<position>\u{1f}<param>` marker is one; anything
+/// else is a SYNTHETIC leaf the resolver adds on its own (R161/R177's `"Fn"` for a bare fn-pointer or
+/// a callable alias), which the `struct_bounds` call has already had its chance to record and which
+/// the join cannot pair with a position — recording it would put a literal `"Fn"` into the pending
+/// entry and, worse, could make the join supply a leaf the struct-bound spelling would not.
+fn gen_probe_positions(ty: &syn::Type, gen_probe: &HashMap<String, Vec<String>>) -> Vec<String> {
+    crate::lang::trait_leaves(ty, gen_probe).into_iter().filter(|l| l.contains('\u{1f}')).collect()
+}
+
+/// The same probe one container deep — `bs: Vec<B>`, `b: Option<B>`, `HashMap<K, B>` (R478).
+fn gen_probe_elem_positions(
+    ty: &syn::Type,
+    gen_probe: &HashMap<String, Vec<String>>,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    crate::lang::elem_trait_leaves(ty, gen_probe, callable_aliases)
+        .into_iter()
+        .filter(|l| l.contains('\u{1f}'))
+        .collect()
+}
+
+/// SOUNDNESS R482 — IS THIS `field_elem` ENTRY THE STRUCT'S OWN GENERIC PARAMETER, SHADOWING THE
+/// ELEMENT DISPATCH ROUTE? `elem_type` answers `Vec<B>` with the string `"B"`, and `"B"` is not a
+/// type: inside the struct's own definition a generic parameter shadows any type of that name, so the
+/// entry can never resolve to anything. It is not harmless, because `resolve_recv_type`'s `Index` arm
+/// consults `resolve_elem_type` (hence `field_elem`) and RETURNS EARLY — `self.bs[0].size()` typed to
+/// the phantom `"B"` and the dispatch route beside it was never reached. Measured pre-fix, and NOT
+/// only on the R476/R478 impl-block spelling: `struct VecIdxS<B: Backend> { bs: Vec<B> }` — the bound
+/// on the STRUCT, where every other spelling already worked — was ABSENT at 0, 1 and 2 implementors
+/// while the for-loop and `if let` spellings of the same field hedged `Unknown` and charged `['Fs']`.
+/// The for-loop binder goes through `resolve_elem_trait_leaves` and never asks `field_elem`, which is
+/// why one spelling of one field disagreed with the other three.
+///
+/// NARROW, for R476's measured reason: its first cut removed whatever the shadowing entry happened to
+/// be and cost 12 rows in the cardinal-sin direction, because these resolvers PEEL wrappers and a
+/// `Vec<RwLock<T>>` answers `"RwLock"` — a REAL type whose method was resolving. This fires only when
+/// the string IS one of the struct's own type-parameter names AND the element dispatches, so the
+/// entry it drops is useless by the language's own shadowing rule and a dispatch answer replaces it.
+fn elem_param_shadow(elem: &str, gen_probe: &HashMap<String, Vec<String>>) -> bool {
+    gen_probe.contains_key(elem)
+}
+
 /// SOUNDNESS R476 — THE CRATE-WIDE JOIN, and the reason it cannot happen in `collect_decls`: Pass A
 /// walks ONE file and is cached by that file's content hash, while a struct and the `impl` block that
 /// bounds its generic params are routinely in different files. So the struct records which generic
@@ -3128,22 +3262,57 @@ pub(crate) fn collect_decls(
 ///
 /// The union is SORTED because it is assembled from `HashMap` iteration order, and a report whose row
 /// order depends on a hash seed is not reproducible.
+///
+/// SOUNDNESS R478 — the ELEMENT route (`bs: Vec<B>`, `b: Option<B>`) has the identical blind spot and
+/// is joined here too, from the SAME bounds half. `field_elem_trait` is a parallel index with the same
+/// shape and the same keys, so it carries the `<gen-field>` key space unchanged; only the bounds half
+/// (`<impl-bound>`, written by the impl blocks) is single-sourced in `trait_fields`, which is why it is
+/// collected ONCE, before either join removes it, rather than recorded twice and left to drift (§G).
 pub(crate) fn resolve_impl_bound_fields(
     tf: &mut crate::model::TraitFieldIndex,
     fields: &mut crate::model::FieldIndex,
+    fet: &mut crate::model::FieldElemTraitIndex,
+    field_elem: &mut crate::model::FieldIndex,
 ) {
-    for (ty_leaf, m) in tf.iter_mut() {
+    // The BOUNDS half, for every type, taken BEFORE any join strips it: `trait_fields` is the only
+    // place an impl block records it, and both routes read it.
+    let mut by_ty: HashMap<String, HashMap<usize, Vec<String>>> = HashMap::new();
+    for (ty_leaf, m) in tf.iter() {
+        for k in m.keys() {
+            if let Some((pos, tr)) = crate::model::split_tf_impl_bound_key(k) {
+                by_ty
+                    .entry(ty_leaf.clone())
+                    .or_default()
+                    .entry(pos)
+                    .or_default()
+                    .push(tr.to_string());
+            }
+        }
+    }
+    join_impl_bound_pending(tf, fields, &by_ty, "R476JOIN");
+    join_impl_bound_pending(fet, field_elem, &by_ty, "R478JOIN");
+}
+
+/// One join, run over `trait_fields`/`fields` (R476, the field's OWN type) and over
+/// `field_elem_trait`/`field_elem` (R478, its ELEMENT). `concrete` is the index whose entry can shadow
+/// the dispatch route for that pair — see the `displaced` note below.
+fn join_impl_bound_pending(
+    idx: &mut HashMap<String, HashMap<String, Vec<String>>>,
+    concrete: &mut crate::model::FieldIndex,
+    by_ty: &HashMap<String, HashMap<usize, Vec<String>>>,
+    tag: &str,
+) {
+    for (ty_leaf, m) in idx.iter_mut() {
         if !m.keys().any(|k| crate::model::split_tf_gen_field_key(k).is_some()) {
             // No pending field for this type — but its reserved impl-bound keys still must go.
             m.retain(|k, _| crate::model::split_tf_impl_bound_key(k).is_none());
             continue;
         }
-        let mut by_pos: HashMap<usize, Vec<String>> = HashMap::new();
+        let empty = HashMap::new();
+        let by_pos: &HashMap<usize, Vec<String>> = by_ty.get(ty_leaf).unwrap_or(&empty);
         let mut pending: Vec<(String, Vec<String>)> = Vec::new();
         for (k, v) in m.iter() {
-            if let Some((pos, tr)) = crate::model::split_tf_impl_bound_key(k) {
-                by_pos.entry(pos).or_default().push(tr.to_string());
-            } else if let Some(field) = crate::model::split_tf_gen_field_key(k) {
+            if let Some(field) = crate::model::split_tf_gen_field_key(k) {
                 pending.push((field.to_string(), v.clone()));
             }
         }
@@ -3192,22 +3361,22 @@ pub(crate) fn resolve_impl_bound_fields(
             // construction and is the only spelling that can shadow this route. Same reason the
             // wrapper case still WORKS: `Box<B>`/`Option<B>` record `fields` as `"B"` too, because
             // `type_path` peels the same pointers.
-            let param_named = fields
+            let param_named = concrete
                 .get(ty_leaf)
                 .and_then(|f| f.get(&field))
                 .is_some_and(|v| split.iter().any(|(_, n)| *n == v.as_str()));
             let displaced = param_named
-                .then(|| fields.get_mut(ty_leaf).and_then(|f| f.remove(&field)))
+                .then(|| concrete.get_mut(ty_leaf).and_then(|f| f.remove(&field)))
                 .flatten();
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 // §E1 HIT COUNTER, on the CHANGED branch — and it prints what was DISPLACED, because
                 // that is the only thing this change can take away from a report.
-                eprintln!("R476JOIN {ty_leaf}.{field} {leaves:?} displaced={displaced:?}");
+                eprintln!("{tag} {ty_leaf}.{field} {leaves:?} displaced={displaced:?}");
             }
             m.insert(field, leaves);
         }
     }
     // A type whose ONLY entries were reserved would otherwise leave an empty inner map behind, which
     // flips `resolve_recv_traits`' `trait_fields.is_empty()` hot-path guard open for nothing.
-    tf.retain(|_, m| !m.is_empty());
+    idx.retain(|_, m| !m.is_empty());
 }

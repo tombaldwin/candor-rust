@@ -258,11 +258,30 @@ fn collect_trait_quals(ty: &syn::Type, out: &mut HashMap<String, String>) {
 /// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
 /// bounds need no filtering here: a leaf only ever matters if it later matches a local trait or a
 /// local impl, and nobody locally declares `trait Send`.
+///
+/// SOUNDNESS R483 — EXCEPT A `?Trait` RELAXATION, WHICH IS NOT A BOUND AND WAS BEING RECORDED AS ONE.
+/// `T: ?Sized` REMOVES the implicit `Sized` bound; it guarantees nothing about `T` and no method is
+/// reachable through it. The sentence above ("a leaf only matters if it matches a local trait") was
+/// true when written and stopped being true the moment a leaf could DISPLACE something: a field's
+/// dispatch leaves suppress its concrete `fields` entry, so `struct Mutex<T: ?Sized>(PhantomData<..>,
+/// parking_lot::Mutex<T>)` reported `["Sized"]` — `trait_leaves` peels `Mutex` and finds the param —
+/// and the entry naming the REAL `parking_lot::Mutex` went with it. Measured over 1,608 crates: of the
+/// 19 rows the first A/B REMOVED, THIRTEEN were this — tokio's
+/// `loom::std::parking_lot::Mutex::{lock,try_lock,get_mut}` (3), async-lock 2.8.0/3.4.2's
+/// `MutexGuard::drop`/`MutexGuardArc::drop`/`Lock::poll`/`poll_with_strategy` family (8), and
+/// regex-lite/fancy-regex's `ReplacerRef::replace_append` (2) — each losing a disclosed `invisible` or
+/// `Unknown` and going ABSENT, the cardinal-sin direction. (The remaining 6 were diesel's and have a
+/// different, benign cause; the CHANGELOG entry traces them.) The MODIFIER is the discriminator, not
+/// the name: `T: Sized` is a real (if useless) bound, `T: ?Sized` is its removal.
 pub(crate) fn bound_leaves(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<String> {
     bounds
         .iter()
         .filter_map(|b| match b {
-            syn::TypeParamBound::Trait(t) => t.path.segments.last().map(|s| s.ident.to_string()),
+            syn::TypeParamBound::Trait(t)
+                if !matches!(t.modifier, syn::TraitBoundModifier::Maybe(_)) =>
+            {
+                t.path.segments.last().map(|s| s.ident.to_string())
+            }
             _ => None,
         })
         .collect()

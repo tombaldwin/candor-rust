@@ -497,6 +497,12 @@ pub(crate) type TraitFieldIndex = HashMap<String, HashMap<String, Vec<String>>>;
 /// `decls::resolve_impl_bound_fields` performs that join and REMOVES both key spaces, so no consumer of
 /// `TraitFieldIndex` ever sees one.
 ///
+/// SOUNDNESS R478 — `<gen-field>` is written into `FieldElemTraitIndex` TOO, for the ELEMENT of a
+/// container field (`bs: Vec<B>`). That index is this one's parallel twin — same shape, same field
+/// keys, same per-file merge — so it carries the pending key space unchanged. `<impl-bound>` is NOT
+/// duplicated into it: the bounds half is written once, here, and the join reads it for both routes.
+/// Two indexes recording one fact is exactly how the two element resolvers drifted in R347 (§G).
+///
 ///   * `<impl-bound>` — `\u{1f}ib\u{1f}<generic POSITION>\u{1f}<trait leaf>`, written by every
 ///     `impl<..> Type<..>` block whose self-type argument at that position is one of the impl's own
 ///     bounded generic params. The trait leaf is in the KEY, not only the value, so two files each
