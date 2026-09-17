@@ -10,6 +10,19 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **R485 (second half) — `candor-query`'s dispatch frontier could not read THIS engine's own quals, and
+  R485 is what made that reachable.** `simple_method`/`declaring_type` split on the last `.`, so a
+  candor-scan qual `I7::op` has no separator at all and `by_method` was keyed on the whole string: a
+  lookup of `op` could never hit and `possibleViaUnknownDispatch` came back `[]` for every rust-produced
+  report. §3.1 rules that a dropped frontier entry is a false all-clear — a consumer reads an empty list
+  as "no function may reach the target through an unresolved dispatch". It was unreachable before this
+  round because candor-scan's only dispatch reason was the DOT-FREE
+  `dispatch:untyped cross-package receiver`, which takes the over-list branch before the dotted matcher
+  is consulted; the fix above made `dispatch:<Trait>.<method>` the scanner's normal case and the dotted
+  path started running against quals it could not parse. Now split on the last `::` OR `.`, whichever
+  ends later. The frontier test block's own header said "Names are dot-separated (the swift/JVM report
+  shape this arm serves)" — the assumption, written down, in the file that would have caught it.
+
 - **R485 — a trait dispatch with no visible implementor was disclosed as a CALLBACK.** `['Unknown']`,
   `unresolved: true` and every gate verdict were already right; the SPEC §4 *kind* was not, and §6.2
   classes the kind. `collector.rs` has eight `unresolved` write sites and `scan.rs` supplied

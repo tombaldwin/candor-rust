@@ -1418,6 +1418,62 @@ fn callers_include_unknown_without_hierarchy_over_lists_by_simple_name() {
                "empty hierarchy must fall back to simple-name over-listing: {v}");
 }
 
+/// THE SAME SCENARIO IN THIS ENGINE'S OWN SPELLING — `Type::method`, not `mod.Type.member`.
+///
+/// The header above this block says "Names are dot-separated (the swift/JVM report shape this arm
+/// serves)", and that sentence was the whole defect: `simple_method`/`declaring_type` split on the last
+/// `.`, so a candor-scan qual `I7::op` has no separator at all, `by_method` was keyed on the WHOLE
+/// STRING, and a lookup of `op` could never hit. `possibleViaUnknownDispatch` came back `[]` for every
+/// rust-produced report — and §3.1 rules exactly that a dropped entry is a false all-clear, because a
+/// consumer reads the empty list as "no function may reach the target through an unresolved dispatch".
+///
+/// IT WAS UNREACHABLE UNTIL SOUNDNESS R485, which is why a test that drives the real binary, an
+/// engine that ships this consumer, and a conformance PART all missed it: candor-scan's only dispatch
+/// reason was the DOT-FREE `dispatch:untyped cross-package receiver`, which takes the over-list branch
+/// several lines before the dotted matcher is consulted. R485 made the scanner emit
+/// `dispatch:<Trait>.<method>` — 28,311 of them over 1,608 crates.io crates — so the dotted path became
+/// this engine's normal case, against quals it could not parse.
+///
+/// Held constant against the two tests above: same scenario, same flag, same assertions; ONLY the qual
+/// SPELLING differs. That is what makes this a statement about the separator and not about anything else.
+#[test]
+fn callers_include_unknown_matches_this_engines_own_colon_separated_quals() {
+    let f = Fixture::new("frontier-rustquals");
+    // A candor-scan-shaped report: `Impl::op` is the confirmed reacher, `dispatcher` dispatches on
+    // `Base.op` (the §4-normative DOTTED detail every engine writes) and must be disclosed.
+    // `other` is the control that must stay OUT — a well-formed dotted reason whose member is not one
+    // any confirmed reacher implements, so condition (3) genuinely FAILS rather than being unanswerable.
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.38" },
+  "package": "app",
+  "functions": [
+    { "fn": "Sink::touch", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "Impl::op", "inferred": ["Fs"], "calls": ["Sink::touch"] },
+    { "fn": "dispatcher", "inferred": ["Unknown"], "unknownWhy": ["dispatch:Base.op"] },
+    { "fn": "other", "inferred": ["Unknown"], "unknownWhy": ["dispatch:Unrelated.frob"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(format!("{}.app.scan.callgraph.json", f.prefix),
+                   r#"{"Impl::op":["Sink::touch"],"Sink::touch":[]}"#).unwrap();
+    // No hierarchy sidecar — candor-scan writes none, so this is the over-listing fallback arm, which
+    // is the arm a rust report will ALWAYS take. Getting it wrong is therefore not an edge case here.
+    let out = Command::new(bin())
+        .arg("callers").arg(&f.prefix).arg("touch").arg("1").arg("--include-unknown")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["transitive"], serde_json::json!(["Impl::op"]),
+               "the confirmed set is unchanged by the frontier: {v}");
+    let poss = v["possibleViaUnknownDispatch"].as_array().expect("frontier array");
+    let fns: Vec<&str> = poss.iter().filter_map(|p| p["fn"].as_str()).collect();
+    assert_eq!(fns, vec!["dispatcher"],
+               "a `::`-spelled reacher must match a dotted `dispatch:OWNER.member`, and a genuinely \
+                unrelated member must still stay out: {v}");
+    assert_eq!(poss[0]["viaDispatchOn"], "op");
+}
+
 #[test]
 fn callers_without_the_flag_omits_the_frontier_key() {
     // The ⟨0.7⟩ flag is additive: without it the {of,direct,transitive} shape is unchanged — a

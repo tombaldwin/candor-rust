@@ -52,14 +52,47 @@ pub(crate) fn q_match(name: &str, q: &str, tier: u8) -> bool {
     tier > 0 && match_tier(name, q) >= tier
 }
 
-/// The bare method name / declaring type of a `mod.Type.member` qual (split on the last `.`). Used by
-/// the dispatch-frontier to match a confirmed reacher against a `dispatch:OWNER.member` owner.
+/// The bare method name / declaring type of a qual or of a `dispatch:OWNER.member` detail. Used ONLY by
+/// the dispatch-frontier, to match a confirmed reacher against a dispatch source's owner.
+///
+/// SPLIT ON THE LAST `::` **OR** `.`, WHICHEVER ENDS LATER, AND THE `::` HALF IS LOAD-BEARING. §4 pins
+/// the dispatch DETAIL as dotted `owner.member` in every engine, but the other side of this comparison
+/// is a REACHER's qual in its own engine's spelling — and this consumer reads reports from candor-java
+/// and candor-ts (`p.Type.member`) *and* from candor-scan (`mod::Type::member`). Dot-only, a rust qual
+/// `I7::op` has no dot at all, so `simple_method` returned the WHOLE STRING, `by_method` was keyed on
+/// `I7::op`, and a lookup of `op` could never hit: `possibleViaUnknownDispatch` came back `[]` for every
+/// rust-produced report. §3.1 rules that a dropped frontier entry is a false all-clear — a consumer
+/// reads the empty list as "no function may reach the target through an unresolved dispatch" — which is
+/// the same direction the dot-free guard in `callers.rs` exists to stop, one spelling over.
+///
+/// It was UNREACHABLE until SOUNDNESS R485 and that is why it survived: candor-scan's only dispatch
+/// reason was the dot-free `dispatch:untyped cross-package receiver`, which takes the over-list branch
+/// before this is consulted, so the dotted path was exercised exclusively by java/ts reports whose quals
+/// are dotted anyway. R485 made the scanner emit `dispatch:<Trait>.<method>` — 28,311 such reasons over
+/// 1,608 crates.io crates — and the dotted path became rust's normal case overnight. The comment one
+/// function down still says "this engine writes no hierarchy sidecar of its own, so every hierarchy it
+/// walks came from candor-java or candor-ts"; that is still true of the HIERARCHY and is exactly the
+/// assumption that made the qual spelling look like someone else's problem.
+///
+/// A qual with NO separator (a free fn `go`) yields itself, so it can match `dispatch:X.go` without
+/// being an override of anything. That is an OVER-LIST, which is the direction §3.1 requires: the
+/// frontier asserts nothing into `transitive`, so a spurious entry costs precision and a dropped one is
+/// a false all-clear. The dotted engines already behaved this way for an unqualified name.
+fn last_sep(f: &str) -> Option<(usize, usize)> {
+    let dot = f.rfind('.').map(|i| (i, 1));
+    let colons = f.rfind("::").map(|i| (i, 2));
+    match (dot, colons) {
+        (Some(d), Some(c)) => Some(if d.0 > c.0 { d } else { c }),
+        (a, b) => a.or(b),
+    }
+}
+
 pub(crate) fn simple_method(f: &str) -> &str {
-    f.rfind('.').map(|i| &f[i + 1..]).unwrap_or(f)
+    last_sep(f).map(|(i, w)| &f[i + w..]).unwrap_or(f)
 }
 
 pub(crate) fn declaring_type(f: &str) -> &str {
-    f.rfind('.').map(|i| &f[..i]).unwrap_or(f)
+    last_sep(f).map(|(i, _)| &f[..i]).unwrap_or(f)
 }
 
 /// The answer to a subtype question, ⟨0.26⟩ THREE-VALUED because the sidecar format now distinguishes
