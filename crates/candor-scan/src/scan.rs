@@ -1109,6 +1109,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // drift from what actually happened; deriving it afterwards would be a second walk that could
     // disagree with this one.
     let mut excluded: Vec<(String, &'static str)> = Vec::new();
+    // R459 — the mod-site memo, owned by this walk. Parent module files are parsed once each and reused
+    // for every file they declare, which is what keeps a per-FILE question from costing a per-file parse.
+    let mut modsite = crate::decls::ModSiteCache::default();
     // When peeking, every `continue` below becomes a KEEP and every keep becomes a skip — one flag, one
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
@@ -1191,13 +1194,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // `#![cfg(test)]`, or the declaring `mod`'s `#[cfg]`), keeping today's answer only where no
         // declaration can be found. A production file that merely LOOKS like a test module — `regex-cli`'s
         // `cmd/compile_test.rs`, the actual source of that binary — is now scanned.
+        // SOUNDNESS R459 — **AND THE MIRROR OF THAT, WHICH IS A FABRICATION AND SO RANKS HIGHER.** The
+        // block above still read the FILENAME as the question and only consulted the mod site for files
+        // whose stem already looked like a test. The same heuristic fails in the other direction:
+        // `#[cfg(test)] mod mock;` over `src/mock.rs` (hyper), `mod mocks;` (tokio), `mod test_helpers;`
+        // (tower-http, diesel, axum 0.7) — none of those filenames matches the convention, so test code
+        // was scanned as production and charged into the crate's report. The mod-site verdict now decides
+        // for EVERY file and the filename rule is the fallback for the one case it cannot answer:
+        //
+        //     Some(true)  -> exclude, on evidence
+        //     Some(false) -> scan, on evidence (this is R457's 17 production files)
+        //     None        -> no declaration reachable: keep today's answer, which IS the filename rule
+        //
+        // So the change can only move a file whose declaration was found, and `None` reproduces the old
+        // behaviour exactly — including R457's conservative EXCLUDE for an undeclared stem candidate.
         if !include_tests {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                if is_test_file_stem(stem) && crate::decls::test_stem_file_is_test_module(root, rel) {
-                    excluded.push((rel.to_string_lossy().into_owned(), "test-module"));
-                    if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
-                    continue;
-                }
+            let verdict = crate::decls::file_module_test_verdict(root, rel, &mut modsite);
+            let stem_says_test =
+                p.file_stem().and_then(|s| s.to_str()).is_some_and(is_test_file_stem);
+            // REACH, and the ONLY marker worth counting here: `R459PROBE` fires once per file, so it
+            // measures the walk, not the change. This one fires exactly when the EVIDENCE overrode the
+            // NAME — in either direction — which is the population that can move a row. Counted by
+            // `bin/corpus-ab.py --mark R459MOVE`; the tag shares no prefix with `R459PROBE`, because a
+            // substring mark that matches both reports the whole walk as the change's reach (measured
+            // on R460, where `R460MASK` swallowed `R460MASKNAMING` and read 409 for 217).
+            if verdict.is_some_and(|v| v != stem_says_test)
+                && std::env::var("CANDOR_TESTMOD_DEBUG").is_ok()
+            {
+                eprintln!("R459MOVE {} {}",
+                          if verdict == Some(true) { "now-excluded" } else { "now-scanned" },
+                          rel.display());
+            }
+            if verdict.unwrap_or(stem_says_test) {
+                excluded.push((rel.to_string_lossy().into_owned(), "test-module"));
+                if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
+                continue;
             }
         }
         if peeking {
@@ -4216,9 +4247,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // rule trusted the NAME and dropped production source that merely looked like a
                     // test module. The `mod` site is not invisible, so it is now read, and this text
                     // states the EVIDENCE that was found rather than the convention that was assumed.
-                    "test-module" => "a #[cfg(test)] file module: the declaring `mod` carries a cfg that \
-                         cannot hold in a non-test build, or the file's own #![cfg(test)] says so, or no \
-                         declaration was found for a `tests.rs`/`*_test.rs` file; --include-tests keeps them"
+                    // R459 — and the ANCESTOR clause, which the previous wording did not cover: a
+                    // `#[cfg(test)]` DIRECTORY module takes its children with it, so a file can be
+                    // excluded on evidence that sits two levels up rather than at its own `mod` site.
+                    "test-module" => "a #[cfg(test)] file module: the declaring `mod` (or an enclosing \
+                         module's) carries a cfg that cannot hold in a non-test build, or the file's own \
+                         #![cfg(test)] says so, or no declaration was found for a `tests.rs`/`*_test.rs` \
+                         file; --include-tests keeps them"
                         .to_string(),
                     "build-output" => "target/ and hidden directories hold build artifacts and tooling, \
                          not library code"

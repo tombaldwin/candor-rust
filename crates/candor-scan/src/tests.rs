@@ -6666,6 +6666,102 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn r459_cfg_test_file_module_is_excluded_whatever_its_filename() {
+        // SOUNDNESS R459 — THE MIRROR OF R457. A `#[cfg(test)] mod X;` file module whose FILENAME does
+        // not match the `tests.rs`/`*_test.rs` convention was scanned as PRODUCTION, so test code was
+        // charged into the crate's report: hyper's `src/mock.rs`, tokio's `src/fs/mocks.rs`,
+        // tower-http's and diesel's `src/test_helpers.rs`, futures-rustls' `src/common/test_stream.rs`,
+        // axum 0.7's whole `src/test_helpers/` directory (14 rows). A FABRICATION.
+        //
+        // FOUR ARMS, and the last two are the ones that make this a decision rather than a rename:
+        //   1. `#[cfg(test)] mod mock;` over `src/mock.rs`   -> excluded (the defect)
+        //   2. a plain `mod helper;`                          -> still scanned (no over-reach)
+        //   3. `#[cfg(any(test, feature = "x"))] mod api;`    -> still scanned. R122's correction is
+        //      INHERITED from `is_cfg_test` rather than re-derived, and this is not hypothetical:
+        //      `axum-0.8.9` declares `#[cfg(any(test, feature = "__private"))] pub mod test_helpers;`
+        //      and MUST keep being scanned while `axum-0.7.9`'s plain `#[cfg(test)]` form must not. A
+        //      census keyed on "does the attribute mention `test`" calls both of them test.
+        //   4. a `#[cfg(test)] mod dir;` DIRECTORY module     -> the whole subtree excluded, including
+        //      children its own `mod.rs` declares plainly. Without the ancestor step the fix reaches
+        //      `mod.rs` and none of its siblings, which is exactly axum's shape.
+        let run = |name: &str, files: &[(&str, &str)]| -> (usize, usize) {
+            let d = std::env::temp_dir().join(format!("candor-r459-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            for (rel, src) in files {
+                let p = d.join("src").join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, src).unwrap();
+            }
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (_rc, json) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            let v: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
+            let fns = v["functions"].as_array().map(|a| a.len()).unwrap_or(0);
+            // `excluded` aggregates by CLASS, so the file count is the entry's `count` field and not
+            // the number of entries — reading `.len()` here reported 1 for a two-file directory module
+            // and made arm 4 look broken when it was right.
+            let exc = v["excluded"].as_array().map(|a| {
+                a.iter().filter(|e| e["class"] == "test-module")
+                    .map(|e| e["count"].as_u64().unwrap_or(0) as usize).sum()
+            }).unwrap_or(0);
+            let _ = std::fs::remove_dir_all(&d);
+            (fns, exc)
+        };
+
+        // The EFFECT each arm's file performs is the same, so the only variable is the `mod` attribute.
+        let effectful = r#"pub fn go() { let _ = std::fs::write("/tmp/x", b"y"); }"#;
+
+        // 1. `#[cfg(test)]` over a file whose name says nothing.
+        let (fns, exc) = run("r459mock", &[
+            ("lib.rs", "#[cfg(test)]\nmod mock;\n"),
+            ("mock.rs", effectful),
+        ]);
+        assert_eq!((fns, exc), (0, 1),
+                   "a #[cfg(test)] mod must be excluded whatever the filename says");
+
+        // 2. CONTROL — the identical file declared plainly must still be scanned, or the fix is a
+        //    blanket exclusion wearing a mod-site costume.
+        let (fns, exc) = run("r459plain", &[
+            ("lib.rs", "mod helper;\n"),
+            ("helper.rs", effectful),
+        ]);
+        assert_eq!((fns, exc), (1, 0), "a plainly declared module must still be scanned");
+
+        // 3. CONTROL — R122: `any(test, feature = "x")` compiles into an ordinary build.
+        let (fns, exc) = run("r459anycfg", &[
+            ("lib.rs", "#[cfg(any(test, feature = \"x\"))]\nmod api;\n"),
+            ("api.rs", effectful),
+        ]);
+        assert_eq!((fns, exc), (1, 0),
+                   "cfg(any(test, feature)) is NOT test-only — axum 0.8's test_helpers must stay scanned");
+
+        // 4. A `#[cfg(test)]` DIRECTORY module: `mod.rs` AND the children it declares plainly.
+        let (fns, exc) = run("r459dir", &[
+            ("lib.rs", "#[cfg(test)]\nmod helpers;\n"),
+            ("helpers/mod.rs", "mod client;\n"),
+            ("helpers/client.rs", effectful),
+        ]);
+        assert_eq!((fns, exc), (0, 2),
+                   "a cfg(test) directory module must take its children with it");
+
+        // 5. CALIBRATION — the same directory shape declared PLAINLY keeps both files, so arm 4's zero
+        //    is the attribute and not the shape. Without this, arm 4 passes even if the walk simply
+        //    stopped admitting directory modules (§6 — "0" is not evidence until the instrument can fail).
+        let (fns, exc) = run("r459dirplain", &[
+            ("lib.rs", "mod helpers;\n"),
+            ("helpers/mod.rs", "mod client;\n"),
+            ("helpers/client.rs", effectful),
+        ]);
+        assert_eq!((fns, exc), (1, 0), "a plainly declared directory module must still be scanned");
+    }
+
+    #[test]
     fn gate_over_unparseable_source_fails_closed() {
         // SOUNDNESS: a policy gate over a crate where a source file failed to PARSE must NOT report
         // green — the unparsed file's effects are absent from the report, so a `policy ✓` over it is a
@@ -13283,7 +13379,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -13294,7 +13390,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev29/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev30/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

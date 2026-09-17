@@ -710,7 +710,27 @@ fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
     out
 }
 
-/// R457 — IS A FILE WHOSE STEM LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
+/// R459 — the memo for the mod-site walk, owned by the file walk and threaded through it.
+///
+/// R457 asked the mod site only for the ~365 files whose STEM looked like a test; R459 asks it for
+/// every file, which turns one parse per candidate into one per source file. Parent module files are
+/// parsed once each and reused — `src/lib.rs` answers for every file in `src/`, so the parse count is
+/// bounded by the number of MODULE files rather than the number of files. `verdict` memoises the whole
+/// answer, which is what makes the ancestor walk (below) free after the first file in a directory.
+///
+/// Single-threaded, and the COMPILER enforces that rather than this sentence: the cached `syn::File`s
+/// are held in `Rc`, which is `!Send`, so moving this cache into the rayon parse phase below does not
+/// compile. The walk loop that owns it finishes before that phase begins.
+#[derive(Default)]
+pub(crate) struct ModSiteCache {
+    parsed: HashMap<std::path::PathBuf, Option<std::rc::Rc<syn::File>>>,
+    verdict: HashMap<std::path::PathBuf, (Option<bool>, &'static str)>,
+}
+
+/// R457 — IS A FILE WHOSE NAME LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
+///
+/// (The R457 record, kept verbatim: this function was `test_stem_file_is_test_module` and answered
+/// only for files whose STEM matched. R459 below generalises the same evidence to every file.)
 ///
 /// The file walk used to answer this from the NAME alone (`tests.rs`/`test.rs`/`*_test.rs`/`*_tests.rs`),
 /// and the reason text it printed named its own hazard: *"test-ness is declared at the `mod` site,
@@ -762,33 +782,107 @@ fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
 ///
 /// The direction is deliberate and is this family's denylist rule: the change only ever scans MORE, so
 /// its failure mode is an over-charge that a reader can see, never a silent shrink.
-pub(crate) fn test_stem_file_is_test_module(root: &Path, rel: &Path) -> bool {
-    // REACH, not a report diff. `CANDOR_TESTMOD_DEBUG=1` prints one line per candidate with the verdict,
-    // so "0 changed rows" can be told apart from "the code never ran" — SOUNDNESS §E1, and the reason
-    // this fix is not another inert clause. Counted by `bin/corpus-ab.py --mark R457PROBE`.
-    let debug = std::env::var("CANDOR_TESTMOD_DEBUG").is_ok();
-    let (verdict, route) = test_stem_file_is_test_module_inner(root, rel);
-    if debug {
-        eprintln!("R457PROBE {} {route} {}", if verdict { "exclude" } else { "SCAN" }, rel.display());
+///
+/// R459 — **THE MIRROR OF R457, AND THE REASON THE FILENAME CANNOT BE THE QUESTION IN EITHER
+/// DIRECTION.** R457 fixed a production file EXCLUDED for looking like a test. This is the same
+/// heuristic failing the other way: a `#[cfg(test)] mod X;` file module whose filename does NOT match
+/// the convention was scanned as PRODUCTION, so test code was charged into the crate's report —
+/// hyper's `src/mock.rs`, tokio's `src/fs/mocks.rs`, tower-http's and diesel's `src/test_helpers.rs`,
+/// futures-rustls' `src/common/test_stream.rs`, axum 0.7's whole `src/test_helpers/` directory. A
+/// FABRICATION, which this family ranks above the R457 direction.
+///
+/// `Some(true)` exclude · `Some(false)` scan · `None` no declaration found — and the three-valued
+/// return is the whole change. The old `bool` could not distinguish "declared production" from "no
+/// evidence", so the caller had to supply a default, and the only default that was safe for a stem
+/// candidate (EXCLUDE) is exactly wrong for every other file. The caller now applies the filename rule
+/// ONLY on `None`, which is where it belongs: as the fallback for absent evidence, not as the question.
+///
+/// Evidence, in order:
+///
+///   1. the file's OWN `#![cfg(test)]` inner attribute;
+///   2. the declaring `mod` item's `#[cfg(...)]`, via `is_cfg_test` — the engine's own authority, so
+///      R122's `any(test, feature = "x")` correction is inherited rather than re-derived. **That
+///      inheritance is load-bearing here and not a formality: `axum-0.8.9` declares
+///      `#[cfg(any(test, feature = "__private"))] pub mod test_helpers;`, which compiles into an
+///      ordinary build and MUST keep being scanned, while `axum-0.7.9`'s plain `#[cfg(test)] mod
+///      test_helpers;` must not.** A census written against a regex that asks "does the attr mention
+///      `test`" calls both of them test — measured, this one did — which is why the verdict comes from
+///      the engine;
+///   3. an ANCESTOR module's `#[cfg(test)]`. A directory module is declared once, at the `mod` site of
+///      the directory, and everything beneath it inherits: axum's `#[cfg(test)] mod test_helpers;`
+///      makes `src/test_helpers/test_client.rs` test even though `mod.rs` declares that child plainly.
+///      Without this step the fix would reach the `mod.rs` and none of its siblings;
+///   4. nothing found -> `None`, and the caller keeps today's answer for this file.
+///
+/// The `mod.rs` normalisation in `module_site` is what makes step 3 work: a `<dir>/mod.rs` is not the
+/// module `mod`, it IS the module `<dir>`, and its declaration lives one level further up.
+pub(crate) fn file_module_test_verdict(
+    root: &Path,
+    rel: &Path,
+    cache: &mut ModSiteCache,
+) -> Option<bool> {
+    let (verdict, route) = file_module_test_verdict_inner(root, rel, cache, 0);
+    // REACH, not a report diff. `CANDOR_TESTMOD_DEBUG=1` prints one line per FILE with the verdict, so
+    // "0 changed rows" can be told apart from "the code never ran" — SOUNDNESS §E1, and the reason this
+    // fix is not another inert clause. `R459PROBE` fires once per FILE, so it measures the WALK — the
+    // marker to count a corpus A/B on is `R459MOVE` (scan.rs), which fires only where the evidence
+    // DISAGREED with the filename. The R457 line is still printed for stem candidates, so that row's
+    // 365-file census stays reproducible.
+    if std::env::var("CANDOR_TESTMOD_DEBUG").is_ok() {
+        let v = match verdict { Some(true) => "exclude", Some(false) => "SCAN", None => "no-evidence" };
+        eprintln!("R459PROBE {v} {route} {}", rel.display());
+        if rel.file_stem().and_then(|s| s.to_str()).is_some_and(crate::lang::is_test_file_stem) {
+            eprintln!("R457PROBE {} {route} {}",
+                      if verdict.unwrap_or(true) { "exclude" } else { "SCAN" }, rel.display());
+        }
     }
     verdict
 }
 
-/// `(exclude?, which of the three evidence routes decided it)` — the route is reported by the probe
-/// so the population can be counted per source rather than asserted from one sample.
-fn test_stem_file_is_test_module_inner(root: &Path, rel: &Path) -> (bool, &'static str) {
-    // 1. the file's own `#![cfg(test)]`.
-    let abs = root.join(rel);
-    if let Ok(txt) = std::fs::read_to_string(&abs) {
-        if let Ok(f) = syn::parse_file(&txt) {
-            if crate::lang::is_cfg_test(&f.attrs) {
-                return (true, "inner-cfg-test");
+/// `(verdict, which evidence route decided it)` — the route is reported by the probe so the population
+/// can be counted per source rather than asserted from one sample.
+fn file_module_test_verdict_inner(
+    root: &Path,
+    rel: &Path,
+    cache: &mut ModSiteCache,
+    depth: usize,
+) -> (Option<bool>, &'static str) {
+    if let Some(hit) = cache.verdict.get(rel) {
+        return *hit;
+    }
+    // A cycle cannot happen through well-formed module paths (each step strictly shortens the path),
+    // but a `#[path]` redirect can make two files declare each other. Bound it rather than trust that.
+    if depth > 16 {
+        return (None, "depth-limit");
+    }
+    let out = compute_file_module_test_verdict(root, rel, cache, depth);
+    cache.verdict.insert(rel.to_path_buf(), out);
+    out
+}
+
+fn compute_file_module_test_verdict(
+    root: &Path,
+    rel: &Path,
+    cache: &mut ModSiteCache,
+    depth: usize,
+) -> (Option<bool>, &'static str) {
+    // 1. the file's own `#![cfg(test)]`. Gated on a cheap textual necessary condition so the common
+    //    case — a source file with no inner attribute at all — costs a read and not a full `syn` parse.
+    //    An inner attribute is spelled `#` then `!`, optionally separated by whitespace; nothing else in
+    //    the language produces that pair at the start of an item, and a file that has no such pair
+    //    cannot carry one. (The pair also appears inside string literals and comments, which only ever
+    //    costs a parse that then finds nothing.)
+    if let Ok(txt) = std::fs::read_to_string(root.join(rel)) {
+        if has_inner_attr_marker(&txt) {
+            if let Ok(f) = syn::parse_file(&txt) {
+                if crate::lang::is_cfg_test(&f.attrs) {
+                    return (Some(true), "inner-cfg-test");
+                }
             }
         }
     }
-    // 2. the declaring `mod` item, in one of the parent module files.
-    let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) else { return (true, "no-stem") };
-    let dir = rel.parent().unwrap_or(Path::new(""));
+    // 2/3. the declaring `mod` item, then the ancestors it hangs from.
+    let Some((name, dir)) = module_site(rel) else { return (None, "no-stem") };
     let parents = [
         dir.join("mod.rs"),
         // the 2018 sibling form: `a/b.rs` declares the children of `a/b/`
@@ -796,18 +890,93 @@ fn test_stem_file_is_test_module_inner(root: &Path, rel: &Path) -> (bool, &'stat
         dir.join("lib.rs"),
         dir.join("main.rs"),
     ];
+    let mut first_existing: Option<std::path::PathBuf> = None;
     for prel in parents.iter() {
         if prel.as_os_str().is_empty() || prel == rel {
             continue;
         }
-        let Ok(txt) = std::fs::read_to_string(root.join(prel)) else { continue };
-        let Ok(f) = syn::parse_file(&txt) else { continue };
-        if let Some(is_test) = declaring_mod_is_cfg_test(&f.items, stem) {
-            return (is_test, if is_test { "cfg-test-mod-site" } else { "production-mod-site" });
+        let Some(f) = parse_module_file(root, prel, cache) else { continue };
+        if first_existing.is_none() {
+            first_existing = Some(prel.clone());
+        }
+        if let Some(is_test) = declaring_mod_is_cfg_test(&f.items, &name) {
+            if is_test {
+                return (Some(true), "cfg-test-mod-site");
+            }
+            // Declared plainly HERE — but the module this file hangs from may itself be test-only, and
+            // then so is every file under it. This is the step that reaches a directory module's
+            // children; without it `src/test_helpers/mod.rs` is excluded and its four siblings are not.
+            if let (Some(true), _) = file_module_test_verdict_inner(root, prel, cache, depth + 1) {
+                return (Some(true), "cfg-test-ancestor");
+            }
+            return (Some(false), "production-mod-site");
         }
     }
-    // 3. nothing found — keep the old answer.
-    (true, "no-declaration-found")
+    // No declaration names this file. If it nonetheless sits under a module file that is itself
+    // test-only, it is test-only too — a stray file in a `#[cfg(test)]` directory is either declared
+    // somewhere this lookup cannot see, or dead. Excluding it is the direction this fix is FOR.
+    if let Some(prel) = first_existing {
+        if let (Some(true), _) = file_module_test_verdict_inner(root, &prel, cache, depth + 1) {
+            return (Some(true), "cfg-test-ancestor");
+        }
+    }
+    (None, "no-declaration-found")
+}
+
+/// `(module name, the directory whose module file declares it)`.
+///
+/// The `mod.rs` case is the one that matters and the one the R457 code could not express: `a/b/mod.rs`
+/// is not a module called `mod`, it IS module `b`, and `mod b;` is written one level up in `a/`. Asking
+/// the old code about it searched `a/b/` for `mod mod;` and found nothing, so every directory module
+/// answered "no declaration found".
+fn module_site(rel: &Path) -> Option<(String, std::path::PathBuf)> {
+    let stem = rel.file_stem()?.to_str()?;
+    let dir = rel.parent().unwrap_or(Path::new(""));
+    if stem == "mod" {
+        let name = dir.file_name()?.to_str()?.to_string();
+        Some((name, dir.parent().unwrap_or(Path::new("")).to_path_buf()))
+    } else {
+        Some((stem.to_string(), dir.to_path_buf()))
+    }
+}
+
+/// Parse a parent module file once per scan. Absent / unparseable files are memoised as `None` so a
+/// missing `mod.rs` is not re-`stat`ed for every file in its directory.
+fn parse_module_file(
+    root: &Path,
+    prel: &Path,
+    cache: &mut ModSiteCache,
+) -> Option<std::rc::Rc<syn::File>> {
+    if let Some(hit) = cache.parsed.get(prel) {
+        return hit.clone();
+    }
+    let parsed = std::fs::read_to_string(root.join(prel))
+        .ok()
+        .and_then(|t| syn::parse_file(&t).ok())
+        .map(std::rc::Rc::new);
+    cache.parsed.insert(prel.to_path_buf(), parsed.clone());
+    parsed
+}
+
+/// A `#` followed by optional whitespace and a `!` — the necessary textual shape of an inner attribute.
+/// A necessary condition only: it fires on `#!/usr/bin/env` shebangs and on `#!` inside string literals
+/// too, which costs a parse that finds nothing. It must never MISS one, which is why the whitespace run
+/// is scanned rather than assuming the `#!` is adjacent.
+fn has_inner_attr_marker(txt: &str) -> bool {
+    let b = txt.as_bytes();
+    for (i, c) in b.iter().enumerate() {
+        if *c != b'#' {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < b.len() && (b[j] as char).is_whitespace() {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'!' {
+            return true;
+        }
+    }
+    false
 }
 
 /// `Some(is_cfg_test)` for the `mod <stem>;` FILE-module declaration naming `stem`, searched through

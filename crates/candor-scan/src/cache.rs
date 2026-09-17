@@ -44,6 +44,15 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev30: the ADMITTED FILE SET changed (SOUNDNESS R459 — a `#[cfg(test)]` file module is excluded
+    // whatever its filename). This is upstream of everything the cache stores: `decl_index_hash` is
+    // computed FROM the decls of the admitted set, so a warm rev29 cache plus a rev30 walk is two
+    // binaries disagreeing about which files exist. I could not construct a concrete stale READ — an
+    // excluded file's entry is simply never looked up, and a newly admitted one has no entry — so this
+    // bump is not backed by a reproduction, and it is taken anyway: this file's own rule is that a
+    // change in what FEEDS the cached representation needs a bump exactly as much as a field addition,
+    // and "I could not build the bad case" is the sentence this register keeps finding on the wrong
+    // side of a silent under-report.
     // rev29: `elem_type` gained the MAP arm (SOUNDNESS R454 — a map's concrete VALUE is its element).
     // It runs in Pass A and its answer is STORED, in `FileDecls::field_elem`, so a rev28 entry holds a
     // `field_elem` with no map rows — the silent purity claim this rev exists to remove, served warm.
@@ -169,7 +178,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev29/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev30/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

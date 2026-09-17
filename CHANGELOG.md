@@ -10,6 +10,71 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **R459 — a `#[cfg(test)]` file module is no longer scanned as production because of its FILENAME.**
+  The mirror of R457, and a FABRICATION rather than a silence, which is why it ranks higher. R457 made
+  the `mod` site decide for files whose stem already looked like a test; the same heuristic fails the
+  other way round for every file whose stem does not. `#[cfg(test)] mod mock;` over hyper's
+  `src/mock.rs`, tokio's `src/fs/mocks.rs`, tower-http's and diesel's `src/test_helpers.rs`,
+  futures-rustls' `src/common/test_stream.rs`, rustix's `src/check_types.rs` — all scanned as the
+  crate's own surface. The verdict is now three-valued and the NAME is only the fallback:
+  `Some(true)` exclude on evidence, `Some(false)` scan on evidence, `None` keep today's answer. Because
+  `None` reproduces the old behaviour exactly, the change can only move a file whose declaration was
+  actually found — including R457's conservative EXCLUDE for an undeclared `tests.rs`/`*_test.rs`.
+- **The ANCESTOR clause is the half that reaches most of the population.** A directory module is
+  declared once, at the `mod` site of the directory, and everything under it inherits: axum 0.7's
+  `#[cfg(test)] mod test_helpers;` makes all four files in `src/test_helpers/` test even though its own
+  `mod.rs` declares those children plainly. Without it the fix reaches the `mod.rs` and none of its
+  siblings — 14 of axum's 15 removed rows are in `test_client.rs`. The `mod.rs` normalisation in
+  `module_site` is what makes it work: `a/b/mod.rs` is not a module called `mod`, it IS module `b`, and
+  `mod b;` is written one level further up — which the R457 code could not express at all.
+- **R122's correction is INHERITED from `is_cfg_test` rather than re-derived, and that is load-bearing
+  here.** `axum-0.8.9` declares `#[cfg(any(test, feature = "__private"))] pub mod test_helpers;`, which
+  compiles into an ordinary build and MUST keep being scanned — it does: 13 rows before, 13 after, while
+  0.7.9's plain `#[cfg(test)]` form loses all 15. A census keyed on *"does the attribute mention
+  `test`"* calls both of them test; one written that way for this change did exactly that, and the
+  engine's own authority got it right.
+- **A/B over 1,608 registry crates: ADDED 0 · REMOVED 541 · CHANGED 52** (`inferred`-only: REMOVED 541,
+  CHANGED 4), reach **135 files whose verdict the evidence moved, across 101 entries**. **Every removal
+  traced to a body by the engine's own mod-site probe, none sampled.** 506 of the 541 are rows in files
+  excluded on cfg-test evidence — the intent. **The other 35 are NOT in an excluded file, they are
+  downstream of one, and that is the acceptance criterion this change did not meet cleanly.** All 35,
+  by mechanism:
+  - **21 are `#[test]` functions in production files** — rustix's `test_sizes`, `test_types`,
+    `check_dirent_layout`, `io_uring_layouts`. Their rows existed only because the `assert_eq_size!` /
+    `check_struct!` macros they expand are defined in `src/check_types.rs` and `src/static_assertions.rs`,
+    both `#[cfg(test)]` and now excluded. **20 of the 21 carried `inferred: []` and no `direct`** — no
+    effect was ever claimed and none is now.
+  - **12 are rustls production functions losing a name-collision FABRICATION.**
+    `crypto::ring::hash::Hash::start` calls ring's `digest::Context::new`; the engine's leaf resolution
+    matched it to the crate's own `verifybench::Context::new`, in `#[cfg(test)] mod verifybench`.
+    Excluding that file removes the false edge and the rows — all `inferred: []` — are omitted as
+    pure-with-nothing-to-disclose. Ground-truthed from rustls' source, not from candor's report.
+  - **2 are rustix production functions** (`as_libc_itimerspec_ptr`/`_mut_ptr`) whose bodies carry an
+    inline `#[cfg(test)] { assert_eq_size!(…) }`; same macro, same cause, `inferred: []` again.
+  - **1 row moves in the cardinal-sin direction, and it is R458's class rather than this one's:**
+    `rustix-0.38.31 :: io_uring::io_uring_layouts` loses a DISCLOSED `Unknown`
+    (`macro:unreadable macro_rules! template 'check_struct'`) and becomes absent. R458 is already open
+    and already measured on ratatui-core: a pre-existing resolution defect that an exclusion EXPOSES
+    rather than creates. **It is stated here rather than rounded off, and it is the reason this change
+    should not merge until R458 is ruled on.**
+  - Of the 52 CHANGED rows, 4 (plotters 0.3.5/0.3.7) lose an `Unknown` whose `unknownWhy` was
+    `ambiguous:same-name local defs` — an ambiguity that existed only against a third `fn new` in the
+    excluded `#[cfg(test)] mod mocked;`; the call now resolves and `invisible: [font_kit, ttf_parser]`
+    is retained. One tokio row drops one `unknownWhy` REASON while keeping `Unknown` and
+    `unresolved: true`. The remaining 47 are `calls`/`invisible` bookkeeping.
+- **The `--include-tests` arm is BYTE-IDENTICAL, measured rather than asserted: 1,607 entries,
+  373,506 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 0.** That is the control saying this narrows the
+  DEFAULT scan and not the engine. One entry is excluded and named: `tracing-0.1.44 --include-tests`
+  does not finish in 1,200s on the **PRE** binary — the arm that does not contain this change — so the
+  blow-up is pre-existing and is reported separately rather than attributed here.
+- **The cost of asking the mod site per FILE rather than per stem candidate** is paid by parsing each
+  parent module file once and memoising the verdict, plus a byte-scan for `#![` that skips the
+  inner-attribute parse on files that cannot carry one. Measured on an idle machine, min of 5:
+  rustls 0.136→0.145s (+6%), syn 0.862→0.913s (+6%), rustix 0.417→0.471s (+13%),
+  tokio 0.216→0.256s (+19%), diesel 0.144→0.181s (+25%), aws-sdk-sso 0.048→0.061s (+27%).
+- Cache schema rev29 → rev30: the ADMITTED FILE SET is upstream of `decl_index_hash`. No concrete stale
+  read could be constructed, and the bump is taken anyway — the comment says which of those two it is.
+
 - ⚠ **R460 — a spawn whose `Command` arrives as a RECEIVER is no longer certified by a benign sibling
   literal.** The Exec twin of R414, and a LIVE gate bypass in the shipped engine. `is_cmd_naming_method`
   marks the surface incomplete at `Command::new(<runtime value>)`, which covers every spelling that names
