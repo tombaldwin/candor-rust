@@ -2865,6 +2865,61 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // (No coverage marking here. A crate whose sibling report we joined is already
                     // covered by the `deps_idx.crates` arm of the ledger filter below — that arm is the
                     // reviewed claim, and it holds whether or not any single join happened to fire.)
+                    //
+                    // ⟨0.39⟩ SPEC §4 obligation 3 — THE CHAINED DISPATCH UNION. The row we just joined may
+                    // say it DISPATCHES on an abstraction member (`dispatchesOn`), and in the measured
+                    // instance (SOUNDNESS R475, live on `ratatui`) that is the only thing standing between
+                    // this consumer and a real effect: `app_size` calls `iface::term_size`, never spells the
+                    // dispatch itself, and `term_size`'s own row is PURE because the only implementor
+                    // `iface` can see is pure. The effectful implementor is in a THIRD package, and it
+                    // published its union under the OWNING crate's key — so the key is formed from the
+                    // dispatching crate, not from whoever implements it, and `by_key`'s entry-collision
+                    // UNION (ENTRY-COLLISION-DECISION.md) is what combines the contributors. That union
+                    // already exists; this adds a contributor to it, not a resolution rule.
+                    //
+                    // A MISS ADDS NOTHING — deliberately, and it is the c3_pure_only control in conformance
+                    // PART 92. An engine that hedges on "a dispatch occurred" rather than on "an implementor
+                    // is invisible" charges every consumer of every dispatching library for effects nobody
+                    // implements, which is the fabrication direction §4 forbids and the cost model this rung
+                    // was priced against explicitly rules out. The dependency's own row has already said
+                    // whatever it honestly can (its `Unknown` at zero implementors, its purity otherwise).
+                    let mut pending: Vec<String> = de.dispatches_on.iter().cloned().collect();
+                    let mut seen_members: std::collections::HashSet<String> =
+                        pending.iter().cloned().collect();
+                    while let Some(member) = pending.pop() {
+                        let ukey = format!("{cr_real}#{member}");
+                        if let Some(ude) = deps_idx.by_key.get(&ukey) {
+                            apply_dep_fn(ude, &f.qual, DepSink {
+                                direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                                tables: &mut tables, incomplete: &mut incomplete,
+                                unknown_why: &mut unknown_why, blind_direct: &mut blind_direct,
+                                dep_invisible: &mut dep_invisible, unknown_via_dep: &mut unknown_via_dep,
+                            });
+                            // A union entry may itself dispatch onward; bounded by `seen_members`, which
+                            // also makes a cyclic publication terminate.
+                            for m2 in &ude.dispatches_on {
+                                if seen_members.insert(m2.clone()) {
+                                    pending.push(m2.clone());
+                                }
+                            }
+                        }
+                        // …AND THE CONSUMER'S OWN VISIBLE IMPLEMENTORS, which §4 names first: "its own
+                        // visible implementors with every chained entry carrying that key". This crate may
+                        // implement the dependency's abstraction itself, and that body is LOCAL — so it
+                        // joins as an ordinary call EDGE and its effects flow through the same fixpoint
+                        // every other local call uses, rather than being re-derived here.
+                        if let Some(impl_quals) = merged.foreign_impls.get(&ukey) {
+                            for cand in impl_quals {
+                                if let Some(ts) = by_tail2.get(cand) {
+                                    // Unambiguous only — `resolve_target`'s never-guess rule. Two units
+                                    // under one tail would charge one implementor's effects to the other.
+                                    if ts.len() == 1 && ts[0] != f.qual {
+                                        calls.entry(f.qual.clone()).or_default().insert(ts[0].clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // SOUNDNESS R223 — WHICH resolution is allowed to silence the classifier. `resolved_local`
@@ -3520,6 +3575,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let tablesacc = propagate_str(&tables, &calls, &all);
     let incompleteacc = propagate(&incomplete, &calls, &all); // transitive masking-incompleteness
     let blind_acc = propagate_str(&blind_direct, &calls, &all); // transitive per-fn blind reach
+    // ⟨0.39⟩ SPEC §4 obligation 1 — `dispatchesOn`, TRANSITIVELY. The raw material is `FnInfo::dispatch`
+    // (`CallCollector::dispatch_sites`), which records the (trait leaf, method leaf) pairs a body dispatches
+    // on through a LOCAL bounded-CHA-eligible receiver, regardless of how many implementors are visible.
+    // That field was built for the ⟨0.29⟩ peek and is explicitly NOT part of the wire schema; this rung is
+    // the second reader, and it needs the same fact one step further on — the member a CALLER reaches
+    // through a dispatching callee, since in the measured instance (R475) the consumer calls
+    // `iface::term_size` and never spells the dispatch itself.
+    //
+    // The member is spelled in THIS package's namespace (`Backend::size`), which is the suffix of the
+    // interface-union entry hash `{crate}#{Backend::size}` — so a consumer forms the key by prefixing the
+    // row's own package and needs no second spelling rule (§4 ⟨0.39⟩ obligation 2's "MUST NOT invent a
+    // second spelling"). Propagated with the same fixpoint every other transitive fact uses.
+    let dispatch_direct: HashMap<String, BTreeSet<String>> = {
+        let mut m: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for f in &fns {
+            for (tr, meth) in &f.dispatch {
+                m.entry(f.qual.clone()).or_default().insert(format!("{tr}::{meth}"));
+            }
+        }
+        m
+    };
+    let dispatch_acc = propagate_str(&dispatch_direct, &calls, &all);
     // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
     // call graph the same way the Unknown EFFECT does, so `deny E Unknown[reflect]` at a caller inheriting
     // Unknown from a reflect-caused callee still fires. Classify each fn's DIRECT unknown_why tokens to
@@ -3761,7 +3838,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // Keep a pure fn if it has a BLIND reach — so the honesty disclosure survives on exactly the
         // `inferred: []` fns that need it (else `invisible` would be dropped with the pure entry).
         let has_blind = blind_acc.get(q).is_some_and(|s| s.iter().any(|c| global_blind.contains(c)));
-        if inf.is_empty() && !has_blind {
+        // ⟨0.39⟩ …AND KEEP A PURE FN THAT DISPATCHES. §2 rule 3 omits pure functions and §2 chaining rule 3
+        // makes that absence a POSITIVE purity claim — which is the whole defect: a dispatching function
+        // whose only visible implementor happens to be pure vanished from the report, so ADDING A PURE
+        // IMPLEMENTATION TO A LIBRARY DELETED A DISCLOSURE FROM EVERY CONSUMER OF IT. §4 ⟨0.39⟩ makes this
+        // one deliberate exception: absence keeps its meaning, but a dispatching row is no longer absent.
+        let dispatches: Vec<String> =
+            dispatch_acc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+        if inf.is_empty() && !has_blind && dispatches.is_empty() {
             continue;
         }
         // THE MARKER MUST TRAVEL WITH THE THING IT DESCRIBES. SPEC §4: `unknownWhy` is REQUIRED when a fn
@@ -3861,16 +3945,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 Vec::new()
             },
             interface_union: false,
+            dispatches_on: dispatches,
         });
     }
-    // ⟨workspace-chain, gated⟩ TRAIT-CHA union entries — the candor-ts/swift `interfaceUnion` analog. A
+    // ⟨0.23⟩/⟨0.39⟩ INTERFACE-UNION entries — the candor-ts/swift `interfaceUnion` analog. A
     // cross-crate consumer calling a trait method on a `&dyn Trait` whose Trait is imported from HERE keys
     // the chain lookup on `crate#Trait::method` (tail2), which has no body → no entry → the call reads pure.
     // Emit a synthetic entry = the UNION over local impls of that method's effects (inferred + invisible),
     // reusing `trait_impls`/`trait_decls` (the CHA universe in-crate dispatch already uses). Sound
-    // over-approximation; a `Trait::method` a consumer never resolves is harmless. GATED so a default scan
-    // stays byte-identical (four-way conformance unaffected until the rung is pinned).
-    if std::env::var_os("CANDOR_WORKSPACE_CHAIN").is_some() {
+    // over-approximation; a `Trait::method` a consumer never resolves is harmless.
+    //
+    // ⟨0.39⟩ NO LONGER GATED. This rode behind `CANDOR_WORKSPACE_CHAIN` while §2's ⟨0.23⟩ paragraph read
+    // "gated/opt-in until a floor rung pins it"; §4 ⟨0.39⟩ is that rung and makes the entry REQUIRED, its
+    // absence a non-conformance. The gate is not incidental to the defect — it is WHY the silent-purity
+    // toggle survived in default scans, which is the one thing a default scan must not let happen.
+    {
         let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
         for (trait_leaf, lt) in merged.trait_decls.iter() {
             // AMBIGUOUS same-leaf traits (`mod a { trait T } mod b { trait T }`): `trait_decls`/`trait_impls`
@@ -3920,6 +4009,68 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     ..Default::default()
                 });
             }
+        }
+        // ⟨0.39⟩ SPEC §4 obligation 2 — THE SAME UNION FOR AN ABSTRACTION THIS CRATE DOES NOT OWN, keyed
+        // under the crate that DOES. The loop above covers LOCAL traits only, and in the measured instance
+        // (SOUNDNESS R475, live on `ratatui`) that is exactly the leg that misses: `ratatui-core` declares
+        // `Backend` and sees one pure implementor, the effectful `CrosstermBackend` lives in a THIRD
+        // package, and a consumer chained onto both is told nothing by either report. Neither this entry
+        // nor `dispatchesOn` is any use without the other, which is why §4 says no two of the three
+        // obligations are separable.
+        //
+        // THE KEY TAKES NO NEW SPELLING RULE. `foreign_impls` is already keyed `{owner}#{trait qual}::
+        // {method}` — the ⟨0.23⟩ `typeSurface` rule, fully qualified in the OWNING package's namespace,
+        // the same namespace that package's own entry hashes use — so the consumer's ORDINARY chained
+        // lookup resolves it and `load_dep_reports` needs no special case. `func` carries the member alone
+        // so the index's tail2/full keys come out in the owner's namespace too.
+        //
+        // PROVENANCE IS CHECKED AGAINST THE MANIFEST, not against the spelling: `collect_foreign_trait_impls`
+        // admits anything that is not std/`crate`/`self`/`super`, which a local module spelled like a crate
+        // also passes. `deps` is Cargo.toml's real dependency set and is only known here.
+        for (key, impl_quals) in merged.foreign_impls.iter() {
+            let Some((owner, _)) = key.split_once('#') else { continue };
+            if owner == crate_name || !deps.contains(owner) {
+                continue;
+            }
+            if existing.contains(key) {
+                continue; // a real entry already claims this hash
+            }
+            let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+            let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for cand in impl_quals {
+                if let Some(s) = inferred.get(cand) {
+                    inf_u.extend(s.iter().copied());
+                }
+                if let Some(s) = blind_acc.get(cand) {
+                    blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                }
+                // `foreign_impls` values are 2-segment `Type::method` tails; a module-qualified unit is
+                // reached through the same tail2 index every other resolution uses, and ONLY when the tail
+                // is unambiguous — two units under one tail is `resolve_target`'s never-guess case, and
+                // guessing here would charge one type's effects to another type's implementor.
+                if let Some(ts) = by_tail2.get(cand) {
+                    if ts.len() == 1 {
+                        if let Some(s) = inferred.get(&ts[0]) {
+                            inf_u.extend(s.iter().copied());
+                        }
+                        if let Some(s) = blind_acc.get(&ts[0]) {
+                            blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                        }
+                    }
+                }
+            }
+            if inf_u.is_empty() && blind_u.is_empty() {
+                continue; // pure across every implementor this crate supplies — silence = purity
+            }
+            entries.push(ReportEntry {
+                func: key.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
+                inferred: inf_u.iter().map(|s| s.to_string()).collect(),
+                unresolved: inf_u.contains("Unknown"),
+                hash: key.clone(),
+                invisible: blind_u.into_iter().collect(),
+                interface_union: true,
+                ..Default::default()
+            });
         }
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));

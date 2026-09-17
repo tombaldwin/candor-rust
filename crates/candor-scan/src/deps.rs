@@ -79,6 +79,15 @@ pub(crate) struct DepFn {
     /// vocabulary (a conforming producer wrote them) and `dispatch:<owner>.<member>` carries a NORMATIVE
     /// detail that a consumer needs to resolve overrides — re-deriving would destroy exactly that.
     pub(crate) unknown_why: BTreeSet<String>,
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction members this dep fn DISPATCHES on, spelled in the
+    /// dep's OWN namespace (`Backend::size`). The consumer prefixes the dep's package to form the
+    /// interface-union key and unions every entry carrying it (obligation 3), which is how an effectful
+    /// implementor supplied from a THIRD package reaches a consumer that never spells the dispatch.
+    ///
+    /// NOT an effect and never charged as one: an unresolved member adds nothing, so a miss falls back to
+    /// whatever the dep's own row already said (its `Unknown`, or its honest purity) rather than to a new
+    /// hedge — §4 ⟨0.39⟩ adds a CONTRIBUTOR to the union, not a resolution rule.
+    pub(crate) dispatches_on: BTreeSet<String>,
 }
 
 impl DepFn {
@@ -95,7 +104,8 @@ impl DepFn {
     /// re-open the vein — the compiler names it here. This is the same reason the fields are sets: the
     /// invariant belongs in a place a later edit has to walk past, not in a comment.
     pub(crate) fn union_with(&mut self, other: &DepFn) {
-        let DepFn { effects, hosts, cmds, paths, tables, invisible, incomplete, unknown_why } = other;
+        let DepFn { effects, hosts, cmds, paths, tables, invisible, incomplete, unknown_why,
+                    dispatches_on } = other;
         self.effects.extend(effects.iter().copied());
         self.hosts.extend(hosts.iter().cloned());
         self.cmds.extend(cmds.iter().cloned());
@@ -104,6 +114,7 @@ impl DepFn {
         self.invisible.extend(invisible.iter().cloned());
         self.incomplete.extend(incomplete.iter().copied());
         self.unknown_why.extend(unknown_why.iter().cloned());
+        self.dispatches_on.extend(dispatches_on.iter().cloned());
     }
 }
 
@@ -639,7 +650,21 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 .map(|(c, _)| c.to_string())
                 .or_else(|| file_crate.clone());
             let Some(krate) = krate else { continue };
-            cover(krate.clone(), &mut idx);
+            // ⟨0.39⟩ AN INTERFACE-UNION ENTRY IS NOT COVERAGE, AND UNDER THIS RUNG IT MAY NAME A CRATE THIS
+            // REPORT DOES NOT COVER AT ALL. Obligation 2 makes a package publish a synthetic entry keyed
+            // under the package that OWNS the abstraction — `effimpl`'s report carries `iface#Backend::size`
+            // — and `cover()` is the single mechanism that turns a report's SILENCE into a purity claim
+            // (§2 chaining rule 3). Reading a foreign union entry as coverage of `iface` would tell a
+            // consumer chained onto `effimpl` alone that `iface` was analyzed, deleting the `invisible`
+            // disclosure for every call into it: the exact shape R475 is about, manufactured by its own fix.
+            // The report's OWN package is already covered by the envelope `package` field and the filename
+            // fallback above, both of which run before this loop, so nothing legitimate is withheld here.
+            if e.get("interfaceUnion").and_then(|x| x.as_bool()).unwrap_or(false) {
+                // The key must still ANSWER — obligation 3's union is the whole point — so only the
+                // coverage claim is withheld, exactly as `incomplete_pkgs` withholds it.
+            } else {
+                cover(krate.clone(), &mut idx);
+            }
             let mut de = DepFn::default();
             if stale {
                 de.effects.insert("Unknown"); // §2.1: a different producer version is not trusted
@@ -678,6 +703,10 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                         .filter_map(|s| s.as_str().map(str::to_string))
                         .collect()
                 };
+                // ⟨0.39⟩ obligation 1. Read even when `inferred` is empty: a PURE dispatching row is the
+                // whole point of the field — the toggle's silent side is precisely the row that says
+                // nothing else.
+                de.dispatches_on = strs("dispatchesOn");
                 de.hosts = strs("hosts");
                 de.cmds = strs("cmds");
                 de.paths = strs("paths");

@@ -3234,11 +3234,25 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
                  implementor(s) the two spellings of one program must give one answer — impl-bound \
                  {a:?} vs struct-bound {b:?}\n{on_impl}");
             // And pin the VALUE, so the equality above cannot be satisfied by both going silent.
-            let want = match n { 0 => unknown.clone(), 1 => None, _ => fs.clone() };
+            // ⟨0.39⟩ AT ONE PURE CANDIDATE THE ROW IS NOW EMITTED, EFFECT-FREE — it read `None`
+            // (absent) until SPEC §4 ⟨0.39⟩. The effect answer has not changed and must not: what
+            // changed is that the row's ABSENCE was a positive purity claim (§2 chaining rule 3), and
+            // that claim is exactly the toggle R475 measured — a library whose sole visible implementor
+            // is pure silently certified every chained consumer. `Some([])` is the same purity, said
+            // out loud, with `dispatchesOn` beside it.
+            let want = match n { 0 => unknown.clone(), 1 => Some(vec![]), _ => fs.clone() };
             assert_eq!(a, want,
                 "R476 at {n} implementor(s): {a:?} != {want:?}. Zero candidates MUST hedge (SPEC §4: \
-                 never silent purity); one PURE candidate is legitimately absent; two candidates, one \
+                 never silent purity); one PURE candidate is legitimately EFFECT-FREE — and ⟨0.39⟩ \
+                 EMITS that row rather than letting its absence speak; two candidates, one \
                  of which reads a file, is `Fs`.\n{on_impl}");
+            // …and the ⟨0.39⟩ member is on it, at EVERY implementor count. The dispatch is a fact about
+            // the program, not about how many implementors this crate happens to contain, so a consumer
+            // can form the interface-union key whichever cell of this matrix the library is in.
+            let disp = &on_impl["functions"].as_array().unwrap().iter()
+                .find(|e| e["fn"] == "Terminal::dims").cloned().unwrap_or_default()["dispatchesOn"];
+            assert_eq!(disp, &serde_json::json!(["Backend::size"]),
+                "⟨0.39⟩ at {n} implementor(s): the dispatching row must name the member\n{on_impl}");
             // OVER-CHARGE CONTROLS, in every cell of both spellings.
             for v in [&on_impl, &on_struct] {
                 for f in ["HolderT::held", "Plain::dup", "ConcTerminal::cdims"] {
@@ -3410,7 +3424,11 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
                      ("OptIfI::go", "OptIfS::go")];
         for n in [0usize, 1, 2] {
             let v = cell(n);
-            let want = match n { 0 => unknown.clone(), 1 => None, _ => fs.clone() };
+            // ⟨0.39⟩ — see the same change in the R476 matrix above: at ONE PURE candidate the row is
+            // now EMITTED effect-free rather than being absent, because the absence was itself a purity
+            // claim (§2 chaining rule 3) and that claim is the R475 toggle. The effect answer is
+            // unchanged in every cell.
+            let want = match n { 0 => unknown.clone(), 1 => Some(vec![]), _ => fs.clone() };
             for (i, s) in twins {
                 let (a, b) = (row(&v, i), row(&v, s));
                 assert_eq!(a, b,
@@ -3418,7 +3436,8 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
                      {n} implementor(s) {i} and {s} must give one answer — {a:?} vs {b:?}\n{v}");
                 assert_eq!(a, want,
                     "R478 at {n} implementor(s): {i} is {a:?}, want {want:?}. Zero candidates MUST \
-                     hedge (SPEC §4), one PURE candidate is legitimately absent, two candidates one of \
+                     hedge (SPEC §4), one PURE candidate is legitimately EFFECT-FREE (⟨0.39⟩ emits that \
+                     row rather than letting its absence speak), two candidates one of \
                      which reads a file is `Fs`\n{v}");
             }
             // R482, and it is NOT a bound-placement question: the INDEX spelling of the STRUCT-bound
@@ -12237,6 +12256,11 @@ trait G {
             // an item-position macro changes how EVERY other file's typed method calls resolve.
             macro_hidden_types => |m| { m.macro_hidden_types.insert("Sel".into()); },
             macro_hidden_fns => |m| { m.macro_hidden_fns.insert("deregister".into()); },
+            // ⟨0.39⟩: the abstractions this crate implements but does NOT own. Read at BOTH ends of the
+            // rung — the published foreign interface-union entry, and the consumer-side edge to this
+            // crate's own implementors — so a file gaining or losing such an impl changes what every
+            // consumer of the OWNING crate is told, which is exactly the silence R475 measured.
+            foreign_impls => |m| { m.foreign_impls.insert("iface#Backend::size".into(), vec!["Crossterm::size".into()]); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -13822,7 +13846,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -13833,7 +13857,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev33/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev34/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14172,8 +14196,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         for f in ["let_scalar", "let_vec", "let_map", "ctl_scalar_dyn", "ctl_param_scalar"] {
             assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()), "{f} must reach Fs:\n{v:#}");
         }
+        // ⟨0.39⟩ asserted on the EFFECTS, not on the row's presence: a dispatching row is now emitted
+        // even when pure (SPEC §4 ⟨0.39⟩ obligation 1), so "absent" no longer expresses "gained
+        // nothing" — and conflating the two is what let the R475 toggle hide. The fabrication direction
+        // this control guards is unchanged and is what is asserted: an all-pure bound gains no EFFECT.
         assert!(
-            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "let_pure_bound"),
+            effs(fn_entry(&v, "let_pure_bound")).is_empty(),
             "a bound whose local impls are all pure must gain nothing — this is the fabrication \
              direction, and the row above cannot see it:\n{v:#}"
         );

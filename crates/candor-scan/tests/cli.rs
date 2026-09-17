@@ -3588,3 +3588,128 @@ fn charge_at_construction_charges_both_the_row_and_the_fabrication() {
     assert_eq!(on.get("oc_factory").map(Vec::as_slice), Some(&["Fs".to_string()][..]),
                "…and must still FABRICATE on a returned construction — this is the priced cost, got {on:?}");
 }
+
+/// SPEC §4 ⟨0.39⟩ — THE CHAINED-DISPATCH UNION, all three obligations, on the shape SOUNDNESS R475
+/// measured live on `ratatui`.
+///
+/// THE DEFECT IS A TOGGLE AND IT RAN THE WRONG WAY. A library whose public abstraction has ZERO local
+/// implementors gave a chained consumer a disclosed `Unknown`; adding ONE PURE implementor to that library
+/// SILENTLY CERTIFIED the consumer pure — so **adding a pure implementation to a library removed a
+/// disclosure from every consumer of it**. `ratatui-core`'s `Terminal::size` dispatches `Backend::size`
+/// over its sole local implementor `TestBackend` (pure), `ratatui-crossterm`'s `CrosstermBackend::size`
+/// performs `Ipc`, and an app chained onto both reported that function ABSENT.
+///
+/// THREE PACKAGES, BECAUSE NO TWO-PACKAGE ARM CAN EXPRESS IT: the effectful implementor lives in a THIRD
+/// package, neither the dispatching dependency nor the consumer, which is why §4 says no two of the three
+/// obligations are separable and why each is asserted here on its own evidence rather than inferred from
+/// the consumer's verdict.
+///
+/// THE CONSUMER'S SOURCE IS BYTE-IDENTICAL ACROSS THE ARMS — one `app` tree, scanned three ways — so the
+/// only thing that differs between the effectful arm and the pure-only control is WHICH dependency reports
+/// were chained. A fixture-induced cross is what produced all three corrections to R475's original filing.
+#[test]
+fn a_foreign_effectful_implementor_reaches_a_chained_consumer_and_a_pure_only_one_does_not() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r475-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    // The dispatching dependency: ONE PURE local implementor. Nothing here is wrong on its own.
+    let iface = pkg("iface", "",
+        "pub trait Backend { fn size(&self) -> usize; }\n\
+         pub struct TestBackend;\n\
+         impl Backend for TestBackend { fn size(&self) -> usize { 7 } }\n\
+         pub fn term_size(b: &dyn Backend) -> usize { b.size() }\n");
+    // The THIRD package: implements the dependency's FOREIGN abstraction, effectfully.
+    let effimpl = pkg("effimpl", "iface = \"1\"\n",
+        "pub struct Crossterm;\n\
+         impl iface::Backend for Crossterm {\n\
+             fn size(&self) -> usize { let _ = std::net::TcpStream::connect(\"h:1\"); 0 }\n\
+         }\n");
+    // The consumer. `app_size` never spells the dispatch — it calls the dependency's dispatching fn —
+    // which is exactly why the producer has to name the member on the row.
+    let app = pkg("app", "iface = \"1\"\neffimpl = \"1\"\n",
+        "pub fn app_size(b: &dyn iface::Backend) -> usize { iface::term_size(b) }\n\
+         pub fn app_run() -> usize { app_size(&effimpl::Crossterm) }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG");
+        if deps.is_empty() {
+            c.env_remove("CANDOR_DEPS");
+        } else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+    let row = |v: &serde_json::Value, name: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == name).cloned()
+    };
+    let write = |dir: &std::path::Path, v: &serde_json::Value, file: &str| -> std::path::PathBuf {
+        let p = d.join(file);
+        let _ = dir;
+        std::fs::write(&p, serde_json::to_string(v).unwrap()).unwrap();
+        p
+    };
+
+    // ── OBLIGATION 1: the producer names the member ON A ROW THAT IS OTHERWISE PURE ────────────────
+    let iface_rep = scan(&iface, &[]);
+    let term = row(&iface_rep, "term_size").expect(
+        "⟨0.39⟩ obligation 1: a PURE function that DISPATCHES must be EMITTED. §2 rule 3 omits pure \
+         functions and §2 chaining rule 3 makes that absence a purity CLAIM — which is the defect: the \
+         row vanished precisely because the one implementor the library could see was pure");
+    assert_eq!(term["inferred"].as_array().map(Vec::len).unwrap_or(0), 0,
+        "…and it is emitted while still PURE — the row is the disclosure, not a new effect: {term}");
+    assert_eq!(term["dispatchesOn"], serde_json::json!(["Backend::size"]),
+        "…naming the dispatched member in this package's own namespace, so the consumer forms \
+         `iface#Backend::size` with no second spelling rule: {term}");
+
+    // ── OBLIGATION 2: the FOREIGN implementor publishes under the OWNING package's key ─────────────
+    let eff_rep = scan(&effimpl, &[]);
+    let union = row(&eff_rep, "Backend::size").expect(
+        "⟨0.39⟩ obligation 2: a package implementing a FOREIGN abstraction must publish an \
+         `interfaceUnion` entry — without it the only real-world instance measured is missed entirely");
+    assert_eq!(union["hash"], "iface#Backend::size",
+        "…keyed under the OWNING package (the ⟨0.23⟩ typeSurface spelling), never under the \
+         implementing one, or the consumer's ordinary chained lookup cannot reach it: {union}");
+    assert_eq!(union["interfaceUnion"], serde_json::json!(true), "{union}");
+    assert_eq!(union["inferred"], serde_json::json!(["Net"]), "{union}");
+
+    let iface_p = write(&iface, &iface_rep, "iface.json");
+    let eff_p = write(&effimpl, &eff_rep, "effimpl.json");
+
+    // ── OBLIGATION 3: the consumer's join unions per key ───────────────────────────────────────────
+    let chained = scan(&app, &[&iface_p, &eff_p]);
+    let app_size = row(&chained, "app_size").expect(
+        "⟨0.39⟩: the consumer's inherited signature must carry the effects of every implementor visible \
+         to it — this row was ABSENT, and `deny Ipc`/`pure` over it BOTH exited 0 (R475)");
+    assert!(app_size["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
+        "the foreign implementor's effect must REACH the consumer: {app_size}");
+
+    // ── CONTROL (the fabrication guard): chained onto the PURE-ONLY library, the SAME consumer source
+    //    must stay pure. An engine that unions indiscriminately — charging every consumer of a
+    //    dispatching library for effects nobody implements — reddens HERE and nowhere else. This is
+    //    conformance PART 92's `c3_pure_only`, and it is the arm that makes the one above evidence.
+    let pure_only = scan(&app, &[&iface_p]);
+    assert!(row(&pure_only, "app_size").is_none(),
+        "a consumer over a library whose only implementor ANYWHERE is pure is LEGITIMATELY pure and must \
+         stay absent — a hedge on `a dispatch occurred` is the fabrication direction §4 forbids: {pure_only}");
+
+    // ── CONTROL (the disclosure the fix must not delete): a foreign union entry is NOT coverage of the
+    //    package it names. `effimpl`'s report carries `iface#Backend::size`; reading that as "iface was
+    //    analyzed" would withdraw the κ ledger's `invisible` for every call into `iface` — R475's own
+    //    shape, manufactured by its own fix.
+    let eff_alone = scan(&app, &[&eff_p]);
+    let run = row(&eff_alone, "app_run").expect("app_run reaches an unanalyzed crate, so it is disclosed");
+    assert!(run["invisible"].as_array().unwrap().iter().any(|c| c == "iface"),
+        "chaining only the FOREIGN implementor must leave `iface` disclosed as invisible — a synthetic \
+         entry keyed under a package is not a claim to have analyzed it: {run}");
+}

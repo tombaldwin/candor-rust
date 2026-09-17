@@ -3040,6 +3040,72 @@ pub(crate) fn collect_macro_hidden_decls(
     }
 }
 
+/// ⟨0.39⟩ SPEC §4 obligation 2 — the FOREIGN abstractions this file implements, keyed under the package
+/// that OWNS the abstraction rather than under this one.
+///
+/// `"<owning crate>#<trait qual>::<method>"  ->  the LOCAL impl method quals (`Crossterm::size`) that
+/// implement it`. The key spelling is NOT a new convention: it is the ⟨0.23⟩ `typeSurface` rule — fully
+/// qualified in the OWNING package's namespace, the same namespace that package's own entry hashes use —
+/// so the consumer's ORDINARY chained lookup (`{crate}#{tail2}`) resolves it with no special case, and
+/// `ratatui_core#Backend::size` is that rule's rust spelling rather than a second one.
+///
+/// WHY THIS LEG CANNOT BE DROPPED. In the measured instance (SOUNDNESS R475, live on `ratatui`) the
+/// effectful implementor lives in a THIRD package — neither the dispatching dependency nor the consumer —
+/// so a producer that publishes a union only over its OWN traits misses it entirely: `ratatui-core` sees
+/// one pure `TestBackend`, `ratatui-crossterm` sees a trait it does not own, and the consumer chained onto
+/// both is told nothing.
+///
+/// PROVENANCE, not shape, is the gate: the trait path must expand (through this scope's `use` map) to a
+/// path rooted at something that is NOT std/`crate`/`self`/`super`. A local module spelled like a crate
+/// (`impl mymod::Tr for X`) survives that test and is filtered at emission against the manifest's real
+/// dependency set, where the answer is known — a bogus key here is inert wire noise, but it is cheaper to
+/// refuse it than to explain it.
+pub(crate) fn collect_foreign_trait_impls(
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    out: &mut HashMap<String, Vec<String>>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                let Some((None, tr, _)) = &im.trait_ else { continue };  // `impl !Tr for X` is not an impl
+                let Some(ty) = impl_type_name(&im.self_ty) else { continue };
+                // The trait as WRITTEN, then expanded through this scope's `use` map — both spellings
+                // (`use iface::Backend; impl Backend for X` and `impl iface::Backend for X`) must form
+                // the same key, which is R6's lesson on the receiver side.
+                let written: String =
+                    tr.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+                let full = expand(&written, uses);
+                let Some((root, qual)) = full.split_once("::") else { continue };
+                if !is_dependency_crate_root(root) {
+                    continue;
+                }
+                for ii in &im.items {
+                    if let syn::ImplItem::Fn(m) = ii {
+                        let method = m.sig.ident.to_string();
+                        out.entry(format!("{root}#{qual}::{method}"))
+                            .or_default()
+                            .push(format!("{ty}::{method}"));
+                    }
+                }
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    // The inner module's OWN imports on top of this scope's — the same widening
+                    // `collect_decls` does for a nested module, so an `impl` written beside its own
+                    // `use` resolves the same way it would at file level.
+                    let mut sub = uses.clone();
+                    let mut alts = HashMap::new();
+                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    collect_foreign_trait_impls(inner, include_tests, &sub, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
 /// glob under `crate::` + `GLOB_KEY`). A `use crate::net` / `crate::net::foo` in the file then resolves
 /// through the root re-export via `expand`, while a bare `net::foo` — which never keys on `crate::…` —

@@ -100,6 +100,13 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // reason; the reason is worth stating once more because it is the cheap half of a lesson whose
     // expensive half was learned three separate times this week: a fix that is correct but not REACHED
     // is byte-identical, from the outside, to a fix that does not work.
+    // rev34: `FileDecls` gained `foreign_impls` (SPEC §4 ⟨0.39⟩ obligation 2 — the abstractions a file
+    // implements that it does NOT own). A rev33 entry has no such field, so `#[serde(default)]` reads an
+    // EMPTY map and the crate publishes NO foreign interface-union entry — which is byte-for-byte the
+    // pre-rung report, i.e. the warm cache serves exactly the silent purity claim ⟨0.39⟩ exists to close
+    // and does so INVISIBLY (a missing entry and a crate with no foreign impl are the same bytes). Same
+    // trap as rev25/rev33: a fix that is correct but served from a stale cache is indistinguishable, from
+    // the outside, from a fix that does not work.
     // rev33: FnInfo gained `unresolved_why` (SOUNDNESS R485 — the SPEC §4 reason behind the `unresolved`
     // bool, recorded per write site). A rev32 entry has no such field, so `#[serde(default)]` reads an
     // EMPTY vec, and `scan.rs`'s fail-closed fallback then republishes the pre-fix `callback:unresolved
@@ -205,7 +212,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev33/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev34/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -332,6 +339,12 @@ pub(crate) struct FileDecls {
     /// mis-typed receiver. See `collect_macro_hidden_decls`. Absent from a pre-rev28 entry.
     #[serde(default)]
     pub(crate) macro_hidden_fns: Vec<String>,
+    /// ⟨0.39⟩ SPEC §4 obligation 2 — `"<owning crate>#<trait qual>::<method>" -> the LOCAL impl method
+    /// quals implementing it`, for abstractions this file implements that it does NOT own. See
+    /// `lang::collect_foreign_trait_impls`. A cache entry written before this field deserializes EMPTY,
+    /// which republishes precisely the silence the rung closes — hence the rev bump in `cache_schema`.
+    #[serde(default)]
+    pub(crate) foreign_impls: HashMap<String, Vec<String>>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -385,6 +398,11 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut macro_hidden_fn = std::collections::HashSet::new();
     crate::lang::collect_macro_hidden_decls(
         items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn);
+    // ⟨0.39⟩ obligation 2 — the FOREIGN abstractions this file implements, keyed under the OWNING crate.
+    // Walked here (not inside `collect_decls`) for the same reason the re-export walk is: it needs the
+    // file's assembled `use` map, which is what `collect_decls` has just finished producing.
+    let mut foreign_impls = HashMap::new();
+    crate::lang::collect_foreign_trait_impls(items, include_tests, &uses, &mut foreign_impls);
     FileDecls {
         fields,
         field_elem,
@@ -439,6 +457,15 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
             v.sort();
             v
         },
+        foreign_impls: {
+            // Deterministic on the wire — the cache entry is content-hashed.
+            let mut m = foreign_impls;
+            for v in m.values_mut() {
+                v.sort();
+                v.dedup();
+            }
+            m
+        },
     }
 }
 
@@ -489,6 +516,10 @@ pub(crate) struct MergedDecls {
     pub(crate) macro_hidden_types: std::collections::HashSet<String>,
     /// R452 — every file's MACRO-MENTIONED `fn` names, unioned. See `FileDecls::macro_hidden_fns`.
     pub(crate) macro_hidden_fns: std::collections::HashSet<String>,
+    /// ⟨0.39⟩ every file's FOREIGN-abstraction impls, unioned. See `FileDecls::foreign_impls`. Two files
+    /// implementing the same foreign member for DIFFERENT types both contribute — the union over them is
+    /// what the entry publishes, which is §4's bounded-CHA over-approximation, not a choice between them.
+    pub(crate) foreign_impls: HashMap<String, Vec<String>>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -759,6 +790,17 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.macro_hidden_fns {
         acc.macro_hidden_fns.insert(n.clone()); // set union — order-independent (R452)
     }
+    for (k, v) in &fd.foreign_impls {
+        // ⟨0.39⟩ UNION, never last-writer-wins: two files may implement the same foreign member for
+        // different types and the entry publishes the union over both (§4 bounded CHA). Picking one would
+        // withdraw the other's effect from every consumer — the direction this rung exists to close.
+        let e = acc.foreign_impls.entry(k.clone()).or_default();
+        for q in v {
+            if !e.contains(q) {
+                e.push(q.clone());
+            }
+        }
+    }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
     }
@@ -988,6 +1030,23 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for a in mhf {
         s.push('|');
         s.push_str(a);
+    }
+    s.push('\n');
+    // foreign_impls — ⟨0.39⟩, the abstractions this crate implements but does not own. Read at BOTH ends
+    // of the rung (the published foreign union entry, and the consumer-side edge to its own implementors),
+    // so a file that gains or loses such an impl changes what every consumer of the owning crate sees.
+    s.push_str("foreign_impls");
+    let mut fik: Vec<&String> = m.foreign_impls.keys().collect();
+    fik.sort();
+    for k in fik {
+        s.push('|');
+        s.push_str(k);
+        let mut v: Vec<&String> = m.foreign_impls[k].iter().collect();
+        v.sort();
+        for q in v {
+            s.push(',');
+            s.push_str(q);
+        }
     }
     s.push('\n');
     // drop_types — sorted set of local types with a local `impl Drop` (binding one adds the drop edge).

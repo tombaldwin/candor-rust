@@ -280,12 +280,28 @@ pub struct ReportEntry {
     /// call graph like the effect. Omitted when the function has no `Net`; never a claim a host is SAFE.
     #[serde(default, rename = "netClass", skip_serializing_if = "Vec::is_empty")]
     pub net_class: Vec<String>,
-    /// ⟨workspace-chain⟩ True on a synthetic TRAIT-CHA union entry — `crate#Trait::method` whose effects are
-    /// the UNION over local impls, emitted (gated behind CANDOR_WORKSPACE_CHAIN) so a cross-crate consumer's
-    /// trait-dispatch call resolves via chaining instead of reading pure. NOT an analyzed unit; omitted when
-    /// false. See WORKSPACE-CHAINING-DESIGN.md.
+    /// ⟨0.23⟩/⟨0.39⟩ True on a synthetic INTERFACE-UNION entry — `pkg#Iface::method` whose effects are the
+    /// UNION over the implementors this package can see, so a cross-crate consumer's trait-dispatch call
+    /// resolves via chaining instead of reading pure. NOT an analyzed unit; omitted when false. See
+    /// WORKSPACE-CHAINING-DESIGN.md.
+    ///
+    /// ⟨0.39⟩ UN-GATED (it rode behind `CANDOR_WORKSPACE_CHAIN` while §2 read "gated/opt-in until a floor
+    /// rung pins it"; §4 ⟨0.39⟩ is that rung and makes it REQUIRED), and the entry may now be keyed under a
+    /// FOREIGN package — the one that OWNS the abstraction, never the one that implements it — which is what
+    /// lets a consumer chained onto an effectful implementor see the effect at all.
     #[serde(default, rename = "interfaceUnion", skip_serializing_if = "std::ops::Not::not")]
     pub interface_union: bool,
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction members this function DISPATCHES on, transitively,
+    /// spelled `Iface::method` in this report's own package namespace (so a consumer forms the interface-union
+    /// key as `<this package>#<member>` with no second spelling rule).
+    ///
+    /// **Carried EVEN WHEN THE ROW IS OTHERWISE PURE, which is a deliberate exception to §2 rule 3's "reports
+    /// omit pure functions".** The defect this closes is a toggle running the wrong way: a dispatching
+    /// function whose only visible implementor is pure is absent from the report, and absence is a purity
+    /// claim — so ADDING A PURE IMPLEMENTATION TO A LIBRARY DELETED A DISCLOSURE FROM EVERY CONSUMER OF IT.
+    /// A pure function that dispatches is no longer a function about which there is nothing to say.
+    #[serde(default, rename = "dispatchesOn", skip_serializing_if = "Vec::is_empty")]
+    pub dispatches_on: Vec<String>,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
