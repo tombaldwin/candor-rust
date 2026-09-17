@@ -10,6 +10,37 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **SPEC §4 ⟨0.39⟩ — the chained-dispatch union (SOUNDNESS R475). candor-rust is the FIRST engine to
+  port it.** The defect is a toggle running the wrong way: a library whose public abstraction has ZERO
+  local implementors gave a chained consumer a disclosed `Unknown`; adding ONE PURE implementor to that
+  library SILENTLY CERTIFIED the consumer pure. **So adding a pure implementation to a library removed a
+  disclosure from every consumer of it.** Measured live on `ratatui`: `ratatui-core`'s `Terminal::size`
+  dispatches `Backend::size` over its sole local implementor `TestBackend` (pure), `ratatui-crossterm`'s
+  `CrosstermBackend::size` performs `Ipc`, and an app chained onto both reported `app_size` ABSENT with
+  `deny Ipc app_size` and `pure app_size` BOTH exiting 0. That app now reports `['Ipc']`.
+
+  Three parts, none of which works without the other two — in the measured case the effectful
+  implementor lives in a THIRD package, neither the dispatching dependency nor the consumer:
+
+  - the report gains **`dispatchesOn`** on every function that dispatches over an abstraction,
+    transitively, **and a function that dispatches is now emitted even when it is otherwise PURE** — the
+    deliberate exception §4 ⟨0.39⟩ names to §2 rule 3, because the row's ABSENCE was the purity claim;
+  - a crate implementing a **FOREIGN** abstraction now publishes an `interfaceUnion` entry keyed under
+    the crate that OWNS it (`ratatui_core#backend::Backend::size`), the ⟨0.23⟩ `typeSurface` spelling —
+    so a consumer's ordinary chained lookup resolves it with no special case;
+  - the consumer unions per key: its own visible implementors plus every chained entry carrying it.
+
+  **`interfaceUnion` is no longer gated behind `CANDOR_WORKSPACE_CHAIN`** — §2's ⟨0.23⟩ paragraph made it
+  opt-in "until a floor rung pins it", and ⟨0.39⟩ is that rung. The gate is why the toggle survived in
+  default scans.
+
+  A MISS ADDS NOTHING: an engine that hedged on "a dispatch occurred" rather than on "an implementor is
+  invisible" would charge every consumer of every dispatching library for effects nobody implements.
+  Pinned by conformance PART 92's `c3_pure_only` control, and by this repo's own three-package fixture.
+
+  Incremental cache rev33 → **rev34**: a rev33 entry has no `foreign_impls`, so a warm cache would
+  republish byte-for-byte the pre-rung report — the silence this closes, served invisibly.
+
 - **R485 (second half) — `candor-query`'s dispatch frontier could not read THIS engine's own quals, and
   R485 is what made that reachable.** `simple_method`/`declaring_type` split on the last `.`, so a
   candor-scan qual `I7::op` has no separator at all and `by_method` was keyed on the whole string: a
