@@ -108,6 +108,19 @@ pub(crate) struct FnInfo {
     /// soundness fallback) rather than silently reported clean.
     #[serde(rename = "u", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) unresolved: bool,
+    /// SOUNDNESS R485 — the SPEC §4 `kind:detail` reason(s) BEHIND `unresolved`, one per write site,
+    /// unioned. Before this field the flag was a bare bool and `scan.rs` supplied `callback:unresolved
+    /// call` for every site, so a trait dispatch with no visible implementor — no function value, no
+    /// owner-less anything — was published under the `callback:` kind and §6.2 class `indirect` while
+    /// candor-java published `dispatch:<owner>.<member>` / class `dispatch` for the same program. Nothing
+    /// about the VERDICT differed (`['Unknown']`, both gates closed) which is why it survived; `deny E
+    /// Unknown[dispatch]` is reason-scoped, so it passed on rust and failed on java.
+    ///
+    /// Distinct from `refusals`, which carries reasons for `Unknown`s this flag does NOT raise. Kept
+    /// separate rather than merged into it so that neither channel can withdraw the other's disclosure:
+    /// `scan.rs` emits `Unknown` for `unresolved` and for each refusal independently, exactly as before.
+    #[serde(rename = "uw", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unresolved_why: Vec<String>,
     /// The nominal type IDENTS of this fn's RETURN type (`-> Result<Compress, E>` → `["Result","Compress",
     /// "E"]`; `-> ()` → empty). Used only by the drop-glue ESCAPE GATE: a drop-type OWNED by the return type
     /// leaves via the returned value, so its `Drop` doesn't run in THIS scope — don't charge it (else a

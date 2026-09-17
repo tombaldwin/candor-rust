@@ -256,7 +256,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -307,7 +307,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -629,7 +629,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
-            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
+            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(), unresolved_why: Default::default(),
             ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
@@ -6468,7 +6468,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -6509,7 +6509,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -6534,7 +6534,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -6582,7 +6582,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -6619,7 +6619,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -13818,11 +13818,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -13833,7 +13833,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev32/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev33/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -18045,7 +18045,7 @@ pub fn go() {{ imp::doit(); }}
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
-            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
+            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(), unresolved_why: Default::default(),
             ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
         };
         let n = "x";
@@ -20735,4 +20735,184 @@ pub fn go() {{ imp::doit(); }}
                      key names neither, and one of the two claimants is invisible to this index. \
                      calls = {calls:?}\n{v:#}");
         }
+    }
+
+    // ═══ SOUNDNESS R485 — THE REASON CLASS BEHIND `unresolved` ═════════════════════════════════════
+    //
+    // NOT a soundness fix and filed so it is not mistaken for one: every arm below answered `['Unknown']`
+    // with `unresolved: true` BEFORE the fix too, and an unscoped `deny Unknown` was exit 1 on both sides.
+    // What was wrong is the §4 KIND, and therefore the §6.2 CLASS a reason-scoped policy quantifies over.
+    // `collector.rs` has eight `unresolved` write sites and `scan.rs` supplied `callback:unresolved call`
+    // for all eight, so a trait dispatch with no visible implementor — no function value anywhere near it
+    // — was published under `callback:` / class `indirect`, while candor-java published
+    // `dispatch:p.Store.put` / class `dispatch` for the same program. `deny Exec Unknown[dispatch]` passed
+    // on rust and failed on java.
+    //
+    // MEASURED PRE-FIX, on the published 0.38.4 shape (the fixture in `a_zero_implementor_dispatch…`):
+    //   deny Unknown[dispatch]    exit 0  (rust)   vs  exit 1 (java)     <- the divergence
+    //   deny Unknown[indirect]    exit 1           <- fired on something with no indirection in it
+    //   deny Unknown              exit 1  both sides, before and after   <- why no gate caught it
+    //   deny Unknown[unresolved]  exit 0  both sides, before and after
+    //
+    // EVERY ARM BELOW IS A DISTINCT WRITE SITE, and each is pinned on the reason string ONLY that site
+    // can produce — so this is a REACH measurement, not a coverage claim. The five corrected sites and
+    // the three that keep `callback:` verbatim are all here; without that the audit would be drawn around
+    // its own trigger, which is how the last one in this codebase missed the next instance.
+
+    /// THE ROW'S OWN INSTANCE (`dispatch_calls_for_trait_method`, the no-visible-impl arm). Zero
+    /// implementors of a local trait: the owner type and the member are both in hand, which is exactly
+    /// §4's dividing line between `dispatch:` and `callback:`, and §4's table names "no impl" among the
+    /// states `dispatch:` covers. The detail is the NORMATIVE dotted `<owner>.<member>`.
+    #[test]
+    fn a_zero_implementor_dispatch_discloses_dispatch_not_callback() {
+        let v = scan_src_to_json("r485zero",
+            "pub trait Store { fn put(&self, k: &str); }\n\
+             pub fn go(s: &dyn Store) { s.put(\"x\"); }\n");
+        let go = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "go")
+            .unwrap_or_else(|| panic!("`go` must be present — ABSENCE is the under-report's signature:\n{v:#}"));
+        assert_eq!(go["inferred"], serde_json::json!(["Unknown"]), "the EFFECT set is not what this row changes:\n{v:#}");
+        assert_eq!(go["unresolved"], serde_json::json!(true), "still unresolved:\n{v:#}");
+        assert_eq!(go["unknownWhy"], serde_json::json!(["dispatch:Store.put"]),
+                   "a trait dispatch with no visible implementor is §4 `dispatch:<owner>.<member>`, not \
+                    `callback:` — nothing owner-less and no function value is involved. candor-java \
+                    answers `dispatch:p.Store.put` on this program.\n{v:#}");
+        // The CLASS is the thing a reason-scoped policy reads, and the class is the thing that diverged.
+        assert_eq!(candor_classify::policy::ReasonClass::classify("dispatch:Store.put"),
+                   candor_classify::policy::ReasonClass::Dispatch);
+        assert_eq!(candor_classify::policy::ReasonClass::classify("callback:unresolved call"),
+                   candor_classify::policy::ReasonClass::Indirect,
+                   "the pre-fix reason classed `indirect`, which is why `deny E Unknown[dispatch]` passed here");
+    }
+
+    /// THE OTHER FOUR CORRECTED SITES, each pinned on the reason string only that site writes. Run
+    /// together so a future edit that collapses two of them cannot hide inside the other's assertion.
+    #[test]
+    fn every_non_callback_unresolved_site_names_its_own_kind() {
+        // `dispatch_calls_for_trait_method`, the >12-implementor arm — the same trait/method pair, a
+        // DIFFERENT branch of the same `match`. This is the shape the conformance frontier differential
+        // builds for java/ts/swift and could not build for rust, on the belief that rust emits no
+        // `dispatch:`.
+        let mut wide = String::from("pub trait Base { fn op(&self); }\n");
+        for i in 0..13 {
+            wide.push_str(&format!("pub struct I{i};\nimpl Base for I{i} {{ fn op(&self) {{}} }}\n"));
+        }
+        wide.push_str("pub fn dispatcher(b: &dyn Base) { b.op(); }\n");
+        let v = scan_src_to_json("r485wide", &wide);
+        assert_eq!(why_of(&v, "dispatcher"), vec!["dispatch:Base.op".to_string()],
+                   "a fan-out wider than the cross-engine bound is `dispatch:`, not `callback:`:\n{v:#}");
+
+        // `charge_stringify_bound` — the implicit-stringification coercion over a formatter bound with
+        // more local implementors than the bound. Owner `Display`, member `fmt`: both resolvable.
+        let mut strfy = String::from("use std::fmt;\n");
+        for i in 0..13 {
+            strfy.push_str(&format!(
+                "pub struct D{i};\nimpl fmt::Display for D{i} {{ fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {{ write!(f, \"d\") }} }}\n"));
+        }
+        strfy.push_str("pub fn show(x: &dyn fmt::Display) -> String { format!(\"{}\", x) }\n");
+        let v = scan_src_to_json("r485strfy", &strfy);
+        assert_eq!(why_of(&v, "show"), vec!["dispatch:Display.fmt".to_string()],
+                   "a stringify coercion over a too-wide formatter bound is `dispatch:`:\n{v:#}");
+
+        // The AMBIGUOUS-LOCAL-TRAIT arm. Two DISTINCT local traits declare the leaf `Doer`, so no owner
+        // can be formed at all — §4 ⟨0.24⟩'s `ambiguous:`, whose §6.2 class is `dispatch` all the same.
+        // NOT `dispatch:`: the normative `<owner>.<member>` detail cannot be written when the owner is
+        // the thing in question.
+        let v = scan_src_to_json("r485ambtrait",
+            "pub mod a { pub trait Doer { fn go(&self); } }\n\
+             pub mod b { pub trait Doer { fn go(&self); } }\n\
+             pub fn f(d: &dyn a::Doer) { d.go(); }\n");
+        assert_eq!(why_of(&v, "f"), vec!["ambiguous:same-name local traits `Doer`".to_string()],
+                   "an ambiguous local trait LEAF is name resolution failing, not a callback:\n{v:#}");
+
+        // R90's two enum-leaf-collision binders — the tuple-payload one and the struct-variant-field
+        // one. The shape is reqwest 0.13.4's real `Matcher_::Custom` / `PolicyKind::Custom`: one enum's
+        // variant carries a concrete payload, an unrelated enum's same-named variant carries a callable,
+        // so `drop_cross_ambiguous_enum_leaves` withdraws the leaf from BOTH indexes.
+        let v = scan_src_to_json("r485ambenum",
+            "pub struct Custom;\n\
+             impl Custom { pub fn call(&self) { std::fs::read(\"/etc/x\").ok(); } }\n\
+             pub enum Matcher { Custom(Custom) }\n\
+             pub enum PolicyKind { Custom(Box<dyn Fn()>) }\n\
+             pub fn intercept(m: &Matcher) { match m { Matcher::Custom(c) => c.call() } }\n");
+        assert_eq!(why_of(&v, "intercept"), vec!["ambiguous:same-name enum variant `Custom`".to_string()],
+                   "a withdrawn enum-variant payload type is an `ambiguous:` name resolution:\n{v:#}");
+        let v = scan_src_to_json("r485ambsv",
+            "pub struct Custom;\n\
+             impl Custom { pub fn call(&self) { std::fs::read(\"/etc/x\").ok(); } }\n\
+             pub enum A { V { f: Custom } }\n\
+             pub enum B { V { f: Box<dyn Fn()> } }\n\
+             pub fn go(a: &A) { match a { A::V { f } => f.call() } }\n");
+        assert_eq!(why_of(&v, "go"), vec!["ambiguous:same-name enum variant `V::f`".to_string()],
+                   "the struct-variant-FIELD counterpart of the arm above:\n{v:#}");
+    }
+
+    /// THE CONTROL FOR THE DIRECTION THIS FIX COULD HAVE GONE WRONG IN. The three sites that really are
+    /// `callback:` keep the detail BYTE-IDENTICAL, and — the load-bearing half — a body that hits a
+    /// callback site AND a dispatch site discloses BOTH. Recording reasons only at the sites being
+    /// corrected would have WITHDRAWN `callback:unresolved call` from such a body, silently narrowing
+    /// every `deny E Unknown[indirect]` in the field. Widening a disclosure is safe; withdrawing one is
+    /// the direction that costs, and that is why `mark_unresolved` is called at all eight sites.
+    #[test]
+    fn the_genuine_callback_sites_are_unchanged_and_a_mixed_body_discloses_both() {
+        let v = scan_src_to_json("r485cb",
+            "pub struct H { pub f: fn() }\n\
+             pub trait Store { fn put(&self, k: &str); }\n\
+             pub fn direct(cb: impl Fn()) { cb(); }\n\
+             pub fn computed(h: &H) { (h.f)(); }\n\
+             pub fn adapter<F: Fn(&u8)>(xs: &[u8], cb: F) { xs.iter().for_each(cb); }\n\
+             pub fn mixed(cb: impl Fn(), s: &dyn Store) { cb(); s.put(\"x\"); }\n");
+        for f in ["direct", "computed", "adapter"] {
+            assert_eq!(why_of(&v, f), vec!["callback:unresolved call".to_string()],
+                       "`{f}` invokes an owner-less function VALUE — it was already right, and the \
+                        detail must not drift:\n{v:#}");
+        }
+        assert_eq!(why_of(&v, "mixed"),
+                   vec!["callback:unresolved call".to_string(), "dispatch:Store.put".to_string()],
+                   "a body with both kinds of hole must disclose BOTH — the union only ever adds:\n{v:#}");
+    }
+
+    /// `unresolved` HAS EXACTLY ONE WRITER, and it is `mark_unresolved`. The bool and its reason are two
+    /// halves of one fact; a site that sets the bool directly publishes a reasonless `Unknown`, which
+    /// `gate.rs` classes as the `unresolved` catch-all — sound, but it silently drops out of
+    /// `Unknown[indirect]`/`Unknown[dispatch]` scoping, which is the exact class of divergence R485 is.
+    ///
+    /// Probed on a token that occurs ONCE in the file, and asserted by COUNT plus enclosure, not by
+    /// `contains` — a census that cannot fail is the failure mode this family has measured on itself.
+    #[test]
+    fn unresolved_has_exactly_one_writer_and_it_records_a_reason() {
+        let src = include_str!("collector.rs");
+        let writes = src.match_indices("self.unresolved = true").count();
+        assert_eq!(writes, 1,
+                   "`self.unresolved = true` must appear exactly ONCE — inside `mark_unresolved`, which \
+                    records the §4 reason beside it. Found {writes}. A new direct write publishes an \
+                    `Unknown` with no `unknownWhy`, i.e. SOUNDNESS R485 reintroduced one site at a time.");
+        // ENCLOSURE BY THE NEXT `fn`, NOT BY A BYTE DISTANCE. This read `write - helper < 200` for
+        // about an hour, which is not a property of the code at all — adding a four-line reach probe
+        // inside `mark_unresolved` pushed the write past the window and the control went red over a
+        // change that could not possibly have broken what it checks. A control whose threshold is an
+        // accident of formatting cries wolf, and a gate that cries wolf gets deleted.
+        let helper = src.find("fn mark_unresolved(&mut self, why: String) {")
+            .expect("`mark_unresolved` is the single writer — renaming it must update this control");
+        let body_end = src[helper..].find("\n    fn ").map(|i| helper + i).unwrap_or(src.len());
+        let write = src.find("self.unresolved = true").unwrap();
+        assert!(write > helper && write < body_end,
+                "the one write must be inside `mark_unresolved`'s BODY (helper at {helper}, body ends \
+                 at {body_end}, write at {write}) — not somewhere that merely follows it in the file");
+        // The control's own negative: if the probe token ever stops appearing at all, the count above
+        // would read 0 and this test would fail LOUD rather than pass vacuously — assert the token is
+        // the one the file really uses.
+        assert!(src.contains("self.unresolved_why.insert(why)"),
+                "`mark_unresolved` must record the reason, not just set the flag");
+    }
+
+    /// The `unknownWhy` entries of one function, sorted as emitted. A named shim so the R485 arms read as
+    /// assertions about a reason SET rather than as JSON indexing, and so an ABSENT function fails loudly
+    /// instead of comparing equal to an empty vec — absence is this family's under-report signature.
+    #[cfg(test)]
+    fn why_of(v: &serde_json::Value, name: &str) -> Vec<String> {
+        let f = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name)
+            .unwrap_or_else(|| panic!("`{name}` is ABSENT from functions[] — that is the under-report's \
+                                       signature, never a skip:\n{v:#}"));
+        f["unknownWhy"].as_array().unwrap_or_else(|| panic!("`{name}` has no unknownWhy:\n{v:#}"))
+            .iter().map(|w| w.as_str().unwrap().to_string()).collect()
     }

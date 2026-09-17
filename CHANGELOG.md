@@ -10,6 +10,40 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **R485 — a trait dispatch with no visible implementor was disclosed as a CALLBACK.** `['Unknown']`,
+  `unresolved: true` and every gate verdict were already right; the SPEC §4 *kind* was not, and §6.2
+  classes the kind. `collector.rs` has eight `unresolved` write sites and `scan.rs` supplied
+  `callback:unresolved call` for all eight, so `pub fn go(s: &dyn Store) { s.put("x") }` with zero
+  implementors of `Store` published `callback:` / class `indirect` where candor-java publishes
+  `dispatch:p.Store.put` / class `dispatch`. **`deny E Unknown[<class>]` is reason-scoped, so the same
+  program passed on rust and failed on java** — invisible to every gate that does not scope by class,
+  which is why it survived. Measured on the fixture, before: `deny Unknown[dispatch]` exit 0 (java exit
+  1), `deny Unknown[indirect]` exit 1 over a body containing no indirection; `deny Unknown` exit 1 on
+  both sides, before and after.
+  The audit was NOT scoped to the handed instance: all eight sites were read and five were wrong —
+  two are `dispatch:` (a trait method whose implementor set is absent or wider than the cross-engine
+  bound; a `{}`-stringify coercion over a formatter bound, owner and member resolvable in both) and
+  three are `ambiguous:` (two distinct local traits sharing a leaf; R90's two enum-variant-leaf
+  collisions — no owner formable at all, §4 ⟨0.24⟩). `mark_unresolved` is now the ONE writer of the
+  flag and every site passes a reason, the three genuine `callback:` ones included: a body can hit both
+  kinds of hole, and recording reasons only at the corrected sites would have WITHDRAWN
+  `callback:unresolved call` from it and silently narrowed `deny E Unknown[indirect]`.
+  **A/B, 1,608 registry crates, 308,268 rows per arm (`bin/corpus-ab.py`, wide key, pre = `e7dbcc1`):
+  ADDED 0, REMOVED 0, CHANGED 12,745 — and `unknownWhy` is the ONLY field that differs on any of them.
+  Keyed on `inferred`: ADDED 0 / REMOVED 0 / CHANGED 0.** Zero rows lost a reason, zero reason lists
+  got shorter, zero rows ended with an empty `unknownWhy`; the one §6.2 class withdrawn anywhere is
+  `indirect`, on 12,417 rows that never held a function value. REACH 115,548 hits across 863 of the
+  1,608 entries, counted on the changed branch (`CANDOR_ALIAS_DEBUG=1`, marker `R485HIT`) — an
+  unchanged row is not evidence the code ran. Ground-truthed from source, not from candor's own
+  report: syn's `visit_*`/`fold_*` take `V: Visit<'ast> + ?Sized` and call `Visit::visit_attribute`
+  with no implementor in the crate (`dispatch:Visit.visit_attribute`), and rustix declares
+  `pub trait AsFd` twice, in `io/fd/owned.rs` and `backend/libc/io_lifetimes.rs`
+  (`ambiguous:same-name local traits `AsFd``). Gate-level over 200 crates:
+  `deny Unknown` 149 -> 149 crates (unchanged, as required), `deny Unknown[dispatch]` 87 -> 99,
+  `deny Unknown[indirect]` 125 -> 116.
+  Cache schema rev32 -> rev33: a rev32 entry deserializes `unresolved_why` EMPTY and the warm cache
+  would republish the pre-fix reason, invisibly, since the effect set is `['Unknown']` on both sides.
+
 - ⚠ **R478 — the ELEMENT route has R476's blind spot too: a CONTAINER field whose generic is bounded on
   the `impl` block now dispatches.** `struct Reg<B> { bs: Vec<B> }` + `impl<B: Backend> Reg<B>` was ABSENT
   from `functions[]` at EVERY implementor count — 0, 1 and 2 — whether the element was reached by index

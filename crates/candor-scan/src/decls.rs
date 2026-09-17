@@ -2048,6 +2048,7 @@ pub(crate) fn fninfo(
         local_uses: std::collections::HashMap::new(),
         bound_names: bound_idents(sig, block),
         dispatch_sites: std::collections::BTreeSet::new(),
+        unresolved_why: std::collections::BTreeSet::new(),
         drop_relevant,
         // Computed ONCE per body, before the walk, because the answer is a property of the whole
         // function (a value constructed on line 2 may escape through a `return` on line 40) and the
@@ -2101,6 +2102,7 @@ pub(crate) fn fninfo(
         loc: loc.to_string(),
         calls: c.calls,
         unresolved: c.unresolved,
+        unresolved_why: c.unresolved_why.into_iter().collect(),
         ret_idents,
         ret_bound_type,
         refusals: c.refusals.into_iter().collect(),

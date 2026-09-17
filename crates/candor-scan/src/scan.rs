@@ -1967,7 +1967,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // receipt's unresolved count) instead of silently certifying the function pure.
         if f.unresolved {
             direct.entry(f.qual.clone()).or_default().insert("Unknown");
-            unknown_why.entry(f.qual.clone()).or_default().insert("callback:unresolved call".to_string());
+            // SOUNDNESS R485 — THE REASON COMES FROM THE SITE THAT RAISED THE FLAG, not from here.
+            // This line used to read `insert("callback:unresolved call")` unconditionally, for all eight
+            // of `collector.rs`'s write sites. Five of them are not callbacks: two are a trait dispatch
+            // whose implementor set is absent or wider than the cross-engine bound (SPEC §4's own
+            // "no impl, bounded-CHA over many impls", owner and member both in hand) and three are the
+            // analyser's own name resolution finding two same-named local definitions (§4 ⟨0.24⟩
+            // `ambiguous:`). The effect set is untouched — `Unknown` either way, `unresolved: true`
+            // either way — but §6.2 classes `callback:` as `indirect` and both corrected kinds as
+            // `dispatch`, and `deny E Unknown[dispatch]` is REASON-SCOPED: candor-java fired on the
+            // zero-implementor shape where this engine passed it.
+            //
+            // THE FALLBACK IS FAIL-CLOSED, NOT DECORATION. If a future site sets the flag through some
+            // path that records no reason, an `Unknown` with NO `unknownWhy` classes as `unresolved`
+            // (gate.rs's catch-all) — which is sound but LOSES the `indirect` scoping this line has
+            // always given callback holes. Re-supplying the historical reason keeps that narrowing from
+            // happening silently. `mark_unresolved` is the only writer of the flag, so this is reachable
+            // only through a regression, and `every_unresolved_site_records_a_reason` is the control.
+            let whys = &f.unresolved_why;
+            let e = unknown_why.entry(f.qual.clone()).or_default();
+            if whys.is_empty() {
+                e.insert("callback:unresolved call".to_string());
+            } else {
+                e.extend(whys.iter().cloned());
+            }
         }
         // SOUNDNESS R182/R196 — A REFUSAL MUST DISCLOSE, NOT CERTIFY. Each entry is a place where name
         // resolution found more than one answer, correctly refused to guess, and then had nothing to

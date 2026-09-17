@@ -100,6 +100,14 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // reason; the reason is worth stating once more because it is the cheap half of a lesson whose
     // expensive half was learned three separate times this week: a fix that is correct but not REACHED
     // is byte-identical, from the outside, to a fix that does not work.
+    // rev33: FnInfo gained `unresolved_why` (SOUNDNESS R485 — the SPEC §4 reason behind the `unresolved`
+    // bool, recorded per write site). A rev32 entry has no such field, so `#[serde(default)]` reads an
+    // EMPTY vec, and `scan.rs`'s fail-closed fallback then republishes the pre-fix `callback:unresolved
+    // call` for a dispatch or ambiguity hole — i.e. the warm cache serves exactly the wrong reason class
+    // this rev exists to correct, and it does so INVISIBLY: the effect set is `['Unknown']` on both sides,
+    // so nothing but the reason string distinguishes a stale entry from a fixed one. Same shape as rev10,
+    // and the same trap as rev25 — a fix that is correct but served from a stale cache is byte-identical,
+    // from the outside, to a fix that does not work.
     // rev25: `Call` gained `argc`, the arity written at the call site (SOUNDNESS R330). A rev24 entry
     // has no such field and deserializes to 0 — the "NOT RECORDED" sentinel — so every cached call in
     // the password-hash family would keep the fabricated `Rand` this rev exists to remove, served from a
@@ -197,7 +205,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev32/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev33/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

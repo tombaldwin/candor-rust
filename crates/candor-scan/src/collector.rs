@@ -246,7 +246,21 @@ pub(crate) struct CallCollector<'a> {
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
+    ///
+    /// NEVER WRITTEN DIRECTLY — go through `mark_unresolved`, which records the SPEC §4 reason beside
+    /// it in `unresolved_why`. SOUNDNESS R485: this flag used to be a bare bool and `scan.rs` supplied
+    /// `callback:unresolved call` for every one of its eight write sites, so a trait dispatch with no
+    /// visible implementor — nothing owner-less, no function value anywhere — was disclosed under the
+    /// `callback:` kind and therefore the §6.2 class `indirect`, where candor-java says
+    /// `dispatch:<owner>.<member>` / class `dispatch`. No verdict differed (both engines return
+    /// `['Unknown']` and both gate closed under an unscoped policy) but `deny E Unknown[dispatch]` is
+    /// REASON-SCOPED, so the same code PASSED on rust and FAILED on java.
     pub(crate) unresolved: bool,
+    /// The SPEC §4 `kind:detail` reason(s) for `unresolved` — one per write site, unioned because one
+    /// body can hit several. A `BTreeSet` so the emitted order is deterministic. Empty is possible only
+    /// if a future site sets the bool without a reason, which `scan.rs` still fails CLOSED on (it falls
+    /// back to the old `callback:unresolved call` rather than publishing a reasonless `Unknown`).
+    pub(crate) unresolved_why: std::collections::BTreeSet<String>,
     /// SOUNDNESS R182/R196 — the NAMED refusals this body hit; see `FnInfo::refusals`. A set, so a shape
     /// repeated in one body discloses once, and `BTreeSet` so the emitted order is deterministic.
     pub(crate) refusals: std::collections::BTreeSet<String>,
@@ -1394,7 +1408,10 @@ impl<'a> CallCollector<'a> {
                 // Too wide to enumerate: honest indeterminacy, exactly as the local-trait CHA route
                 // reports it. (NO local impl at all is the `None` arm — nothing, not Unknown: that is
                 // the no-flood default for the overwhelmingly common std-only-formatting crate.)
-                Some(_) => self.unresolved = true,
+                // R485 — `dispatch:`, not `callback:`: the owner type IS resolvable (the local trait
+                // `cha`) and so is the member, which is §4's own dividing line. Nothing owner-less and no
+                // function value is involved in a `{}` coercion over a local trait with too many impls.
+                Some(_) => self.mark_unresolved(format!("dispatch:{cha}.{target_method}")),
                 None => {}
             }
         }
@@ -1765,6 +1782,39 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// THE ONE WRITER of `unresolved` — set the flag AND say why, in SPEC §4's `kind:detail` vocabulary.
+    ///
+    /// SOUNDNESS R485. `unresolved` is one bool with eight write sites, and `scan.rs` used to turn it
+    /// into the single reason `callback:unresolved call` for all of them. Three of those sites really are
+    /// `callback:` (an owner-less function VALUE: a fn-typed binding invoked as `cb()`, a computed callee
+    /// `(self.f)()`, an opaque callable handed to an invoking adapter). The other five are not:
+    ///
+    ///   * two are `dispatch:` — a trait method whose implementor set is absent or wider than the
+    ///     cross-engine bound. §4's table names exactly this ("no impl, bounded-CHA over many impls") and
+    ///     its detail is NORMATIVE `<owner-type>.<member>`; both sites have the owner (the trait leaf) and
+    ///     the member (the method leaf) in hand, which is why no detail had to be invented to fix this.
+    ///   * three are `ambiguous:` — the analyser's own name resolution found two same-named local
+    ///     definitions (two local traits sharing a leaf; an enum-variant leaf declared by two unrelated
+    ///     enums) and correctly refused to guess, so NO owner could be formed at all. §4 ⟨0.24⟩ defines
+    ///     the kind by precisely that condition, and §6.2 classes `ambiguous:*` as `dispatch`.
+    ///
+    /// EVERY site passes a reason, including the three that keep `callback:unresolved call` VERBATIM.
+    /// That is deliberate and it is the direction that matters: a body can hit a callback site AND a
+    /// dispatch site, and recording reasons only at the sites being corrected would have WITHDRAWN the
+    /// `callback:` reason from such a body — narrowing `deny E Unknown[indirect]` in the field. The union
+    /// only ever adds.
+    fn mark_unresolved(&mut self, why: String) {
+        debug_assert!(why.contains(':'), "a §4 reason is `kind:detail`, got {why:?}");
+        // REACH PROBE, same `CANDOR_ALIAS_DEBUG` channel `R446DYN`/`R271ADAPT` already use. Prints the
+        // §4 KIND only, so a corpus A/B can count hits PER SITE CLASS on the changed branch rather than
+        // infer reach from a byte-identical diff — "CHANGED 0 is not evidence until REACH is measured".
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R485HIT {}", why.split(':').next().unwrap_or(""));
+        }
+        self.unresolved = true;
+        self.unresolved_why.insert(why);
+    }
+
     /// Bounded-CHA dispatch for a LOCAL trait's method, given the trait's leaf name and the method's
     /// leaf name — the fan-out logic shared by TWO call sites: a `.method()` call on a dispatch-typed
     /// RECEIVER (`resolve_recv_traits` above resolves the receiver to its trait leaves, then this decides
@@ -1794,7 +1844,13 @@ impl<'a> CallCollector<'a> {
         // `tr`'s method `leaf`" is true regardless of either, and costs nothing extra to record.
         self.dispatch_sites.insert((tr.to_string(), leaf.to_string()));
         if count > 1 {
-            self.unresolved = true; // ambiguous local leaf — never guess between traits
+            // R485 — `ambiguous:`, not `callback:`. TWO DISTINCT local traits declare this leaf, so no
+            // owner could be formed AT ALL, which is exactly the condition §4 ⟨0.24⟩ defines the kind by.
+            // Not `dispatch:` either: the NORMATIVE `<owner>.<member>` detail cannot be written when the
+            // owner is the thing in question. §6.2 classes `ambiguous:*` as `dispatch`, so the class is
+            // the same as the sibling arm below — the KIND is what differs, and the kind is what a
+            // `blindspots` reader acts on.
+            self.mark_unresolved(format!("ambiguous:same-name local traits `{tr}`")); // never guess between traits
             return true;
         }
         match self.trait_impls.get(tr) {
@@ -1811,7 +1867,12 @@ impl<'a> CallCollector<'a> {
                     });
                 }
             }
-            _ => self.unresolved = true, // >12, or no impl visible: honest indeterminacy
+            // R485 — THE ROW'S OWN INSTANCE. `dispatch:<owner>.<member>`, §4's normative dotted detail:
+            // the static target is known (trait `tr`'s `leaf`) and only the concrete body is not, which is
+            // verbatim what §4's table admits ("no impl, bounded-CHA over many impls"). candor-java answers
+            // `dispatch:p.Store.put` on the same shape; this engine answered `callback:unresolved call`,
+            // and `deny E Unknown[dispatch]` therefore passed here and failed there on identical code.
+            _ => self.mark_unresolved(format!("dispatch:{tr}.{leaf}")), // >12, or no impl visible: honest indeterminacy
         }
         true
     }
@@ -1930,7 +1991,10 @@ impl<'a> CallCollector<'a> {
         // this guard's own doc comment (it claimed an honest `Unknown`; measured, there was none). Set
         // the SAME flag an ambiguous local trait name or an unbounded dispatch fan-out already uses.
         if leaves.is_empty() && ty.is_none() && self.ambiguous_enum_leaves.contains(&leaf) {
-            self.unresolved = true;
+            // R485 — `ambiguous:`. The payload's type was WITHDRAWN because two unrelated enums declare
+            // this variant leaf (`drop_cross_ambiguous_enum_leaves`), so there is no owner to name and no
+            // function value in sight. Same kind as the ambiguous-trait-leaf site, same §6.2 class.
+            self.mark_unresolved(format!("ambiguous:same-name enum variant `{leaf}`"));
         }
         Some((name, leaves, ty))
     }
@@ -1951,7 +2015,8 @@ impl<'a> CallCollector<'a> {
                 // same collision, same composite `"VariantLeaf::field"` key space (see the type's doc
                 // comment on why struct-variant fields share `enum_variants`/`enum_variant_traits`).
                 if leaves.is_empty() && ty.is_none() && self.ambiguous_enum_leaves.contains(&key) {
-                    self.unresolved = true;
+                    // R485 — `ambiguous:`, the struct-variant-field counterpart of the arm above.
+                    self.mark_unresolved(format!("ambiguous:same-name enum variant `{key}`"));
                 }
                 (name, leaves, ty)
             })
@@ -2707,7 +2772,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // fn `cb`. (Found by the cross-engine generative differential: java/ts/swift propagated or
                 // marked Unknown, candor-scan read pure.)
                 if ident.as_ref().is_some_and(|n| self.fn_typed_vars.contains(n)) {
-                    self.unresolved = true;
+                    // R485 — genuinely `callback:`, and the detail is kept BYTE-IDENTICAL on purpose: an
+                    // owner-less function value invoked with call syntax is the kind's definition, so this
+                    // site had nothing to correct. It passes the reason explicitly all the same, because a
+                    // body that hits BOTH this site and a dispatch one must disclose both.
+                    self.mark_unresolved("callback:unresolved call".to_string());
                 } else {
                     // A local bound to a closure — `let f = |..| ..` — has its body walked LEXICALLY by
                     // this same visitor, so `f()` adds nothing and is NOT a blind spot. (Skip recording it
@@ -2867,7 +2936,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // The callee is a COMPUTED value, not a path or a visible local closure: `(self.handler)()`,
             // `arr[i]()`, `make_cb()()`. The scan can't identify the target or see its body — it could
             // perform any effect — so the enclosing function can't be certified pure: honest `Unknown`.
-            _ => self.unresolved = true,
+            // R485 — genuinely `callback:` (an owner-less computed function value); detail unchanged.
+            _ => self.mark_unresolved("callback:unresolved call".to_string()),
         }
         syn::visit::visit_expr_call(self, node);
     }
@@ -3353,7 +3423,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // and `let g = cb; for_each(g)` are covered too. Checked BEFORE the named-fn edge below so an
                 // opaque local never falls through to a phantom free-fn resolution.
                 if self.expr_is_fn_typed_leaf(a) {
-                    self.unresolved = true;
+                    // R485 — genuinely `callback:` (an opaque function value handed to an adapter that
+                    // invokes it); detail unchanged.
+                    self.mark_unresolved("callback:unresolved call".to_string());
                     if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                         eprintln!("R271ADAPT");
                     }
