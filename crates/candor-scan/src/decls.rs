@@ -2582,6 +2582,38 @@ pub(crate) fn collect_decls(
                 // the struct's OWN generic bounds (`struct Pipe<T: Saver>` / `where T: Saver`) — so a field
                 // typed as a bounded param resolves to its trait bound and dispatches (R31).
                 let struct_bounds = generic_bounds_of_generics(&s.generics);
+                // SOUNDNESS R476 — the POSITION probe. `struct_bounds` above carries only the bounds the
+                // STRUCT wrote; a bound on the `impl` block is invisible here and lives in another item
+                // (often another file). So each param is mapped to a marker naming its own POSITION and
+                // `trait_leaves` is asked the SAME question with that map: whatever comes back names the
+                // positions this field's type dispatches on. Asking the real resolver rather than
+                // re-deriving "is this a bare param / `&B` / `Box<B>` / `Option<B>`" is the point — a
+                // second copy of those rules is exactly how the two halves drift apart (§G).
+                //
+                // The position is the index in `generics.params` INCLUDING lifetimes and consts, because
+                // that is what an impl's self-type argument list is positional against; a trailing
+                // DEFAULTED param may be omitted there, and omitting a trailing one cannot shift a
+                // preceding index. Lifetimes cannot be elided in an impl header, so the prefix aligns.
+                let gen_probe: HashMap<String, Vec<String>> = s
+                    .generics
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, g)| match g {
+                        // The marker carries the param's NAME as well as its position, because the join
+                        // needs BOTH: the position to find the bound, and the name to tell a `fields`
+                        // entry that is merely the parameter's own spelling (`"B"` — useless, and the
+                        // thing that shadows the dispatch route) from one naming a REAL type reached by
+                        // peeling a wrapper (`RwLock<T>` -> `loom::sync::RwLock`), which must be left
+                        // alone. See `resolve_impl_bound_fields`; the 1,608-crate A/B is what
+                        // distinguished them.
+                        syn::GenericParam::Type(t) => Some((
+                            t.ident.to_string(),
+                            vec![format!("{i}\u{1f}{}", t.ident)],
+                        )),
+                        _ => None,
+                    })
+                    .collect();
                 match &s.fields {
                     syn::Fields::Named(named) => {
                         let entry = fields.entry(s.ident.to_string()).or_default();
@@ -2648,6 +2680,38 @@ pub(crate) fn collect_decls(
                                         .entry(s.ident.to_string())
                                         .or_default()
                                         .insert(name.to_string(), vec!["Fn".to_string()]);
+                                }
+                                // SOUNDNESS R476 — A BOUND ON THE `impl` BLOCK IS STILL A BOUND, and
+                                // this records the half of that join the STRUCT knows. `Terminal<B>`
+                                // with `impl<B: Backend> Terminal<B> { fn dims(&self) {
+                                // self.backend.size() } }` produced NOTHING here: `struct_bounds` is
+                                // empty, so `trait_leaves` returned empty, so `backend` never entered
+                                // `trait_fields` and `resolve_recv_traits`' `Expr::Field` arm resolved
+                                // to nothing — the dispatch machinery was never ENTERED. That is why
+                                // it was silent at ZERO implementors too, where
+                                // `dispatch_calls_for_trait_method` hedges `Unknown` by design and
+                                // SPEC §4 requires it ("a local abstraction with no visible
+                                // implementor … is disclosed indeterminacy, never silent purity").
+                                // Measured pre-fix on a 6-cell matrix: the impl-bound spelling was
+                                // ABSENT at 0, 1 AND 2 implementors while the struct-bound spelling
+                                // hedged `Unknown` at 0 and charged `Fs` at 2.
+                                //
+                                // Only the POSITIONS are recorded; the bounds are elsewhere and the
+                                // join is `resolve_impl_bound_fields`, after the crate-wide merge.
+                                // Guarded on `!had_trait_leaves` for the R177 reason the R238 block
+                                // above states: this may only SUPPLY a leaf where there was none, never
+                                // displace one.
+                                if !had_trait_leaves && !gen_probe.is_empty() {
+                                    let at = crate::lang::trait_leaves(&f.ty, &gen_probe);
+                                    if !at.is_empty() {
+                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                            eprintln!("R476GEN {}.{}", s.ident, name); // §E1 HIT COUNTER
+                                        }
+                                        trait_fields
+                                            .entry(s.ident.to_string())
+                                            .or_default()
+                                            .insert(crate::model::tf_gen_field_key(&name.to_string()), at);
+                                    }
                                 }
                                 // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
                                 // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
@@ -2910,6 +2974,33 @@ pub(crate) fn collect_decls(
                 let impl_key_ty = self_ty
                     .clone()
                     .filter(|t| !impl_generic_params.contains(t));
+                // SOUNDNESS R476 — the OTHER half of the impl-bound join: for `impl<B: Backend>
+                // Terminal<B>`, record that generic POSITION 0 of `Terminal` is bounded by `Backend`.
+                // Every impl block counts, inherent or trait: inside either, `self.backend` really is
+                // `B: Backend` and the method really does compile, which is the only question. The
+                // trait leaf is part of the KEY so that two files bounding one position union rather
+                // than the later file's entry winning (`merge_decls` inserts per key), and because a
+                // repeated bound is then idempotent rather than order-dependent.
+                if let (Some(sty), syn::Type::Path(sp)) = (&self_ty, &*im.self_ty) {
+                    let impl_bounds = generic_bounds_of_generics(&im.generics);
+                    if !impl_bounds.is_empty() {
+                        if let Some(syn::PathArguments::AngleBracketed(args)) =
+                            sp.path.segments.last().map(|seg| &seg.arguments)
+                        {
+                            for (i, a) in args.args.iter().enumerate() {
+                                let syn::GenericArgument::Type(syn::Type::Path(ap)) = a else { continue };
+                                let Some(id) = ap.path.get_ident() else { continue };
+                                let Some(bounds) = impl_bounds.get(&id.to_string()) else { continue };
+                                for tr in bounds {
+                                    trait_fields
+                                        .entry(sty.clone())
+                                        .or_default()
+                                        .insert(crate::model::tf_impl_bound_key(i, tr), vec![tr.clone()]);
+                                }
+                            }
+                        }
+                    }
+                }
                 // BLANKET impl (`impl<T> Trait for T` / `impl<T: Bound> Trait for T`): the self type IS one of
                 // the impl's own generic type params, so the impl provides `Trait`'s methods for EVERY type
                 // (bounded → every type meeting the bound). A `x.method()` that resolves to no CONCRETE
@@ -3021,4 +3112,102 @@ pub(crate) fn collect_decls(
             _ => {}
         }
     }
+}
+
+/// SOUNDNESS R476 — THE CRATE-WIDE JOIN, and the reason it cannot happen in `collect_decls`: Pass A
+/// walks ONE file and is cached by that file's content hash, while a struct and the `impl` block that
+/// bounds its generic params are routinely in different files. So the struct records which generic
+/// POSITIONS each of its fields dispatches on (`TF_GEN_FIELD`), every impl block records which
+/// positions it BOUNDS and with what (`TF_IMPL_BOUND`), and this runs once over the merged index to
+/// turn the pairs into ordinary `trait_fields` entries — after which both reserved key spaces are
+/// GONE, so every consumer reads exactly the index shape it always did.
+///
+/// ADDITIVE, and that is load-bearing rather than defensive (the R177/R238 rule one row on): a field
+/// that already has leaves — from the struct's own bound, or from R238's synthetic `"Fn"` — is left
+/// exactly as it was. This may only supply a leaf where there was none.
+///
+/// The union is SORTED because it is assembled from `HashMap` iteration order, and a report whose row
+/// order depends on a hash seed is not reproducible.
+pub(crate) fn resolve_impl_bound_fields(
+    tf: &mut crate::model::TraitFieldIndex,
+    fields: &mut crate::model::FieldIndex,
+) {
+    for (ty_leaf, m) in tf.iter_mut() {
+        if !m.keys().any(|k| crate::model::split_tf_gen_field_key(k).is_some()) {
+            // No pending field for this type — but its reserved impl-bound keys still must go.
+            m.retain(|k, _| crate::model::split_tf_impl_bound_key(k).is_none());
+            continue;
+        }
+        let mut by_pos: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut pending: Vec<(String, Vec<String>)> = Vec::new();
+        for (k, v) in m.iter() {
+            if let Some((pos, tr)) = crate::model::split_tf_impl_bound_key(k) {
+                by_pos.entry(pos).or_default().push(tr.to_string());
+            } else if let Some(field) = crate::model::split_tf_gen_field_key(k) {
+                pending.push((field.to_string(), v.clone()));
+            }
+        }
+        m.retain(|k, _| {
+            crate::model::split_tf_impl_bound_key(k).is_none()
+                && crate::model::split_tf_gen_field_key(k).is_none()
+        });
+        for (field, positions) in pending {
+            if m.contains_key(&field) {
+                continue; // never displace a leaf the struct's own bound (or R238) already supplied
+            }
+            // Each pending entry is `<position>\u{1f}<param name>` — see the probe in `collect_decls`.
+            let split: Vec<(usize, &str)> = positions
+                .iter()
+                .filter_map(|p| p.split_once('\u{1f}'))
+                .filter_map(|(i, n)| i.parse::<usize>().ok().map(|i| (i, n)))
+                .collect();
+            let mut leaves: Vec<String> = split
+                .iter()
+                .filter_map(|(i, _)| by_pos.get(i))
+                .flatten()
+                .cloned()
+                .collect();
+            if leaves.is_empty() {
+                continue; // an UNBOUNDED generic field stays exactly as silent as it was — R217's
+                          // +1,697-row over-charge shape is not what this row buys
+            }
+            leaves.sort();
+            leaves.dedup();
+            // DISPATCH-TYPING FIRST — the same mutual exclusion the struct-bound spelling gets for
+            // free from the `else if` in the `Fields::Named` arm, and WITHOUT IT THIS FIX IS INERT.
+            // Measured: with the bound on the impl block `trait_leaves` returns empty, so the field
+            // ALSO lands in `fields` as the literal, useless string `"B"` — and `resolve_recv_type_for`
+            // is consulted BEFORE the CHA route (`if let Some(ty) = … { … } else { /* dispatch */ }`),
+            // so a concrete "type" named after a generic parameter shadowed the dispatch entirely. The
+            // join fired, `trait_fields` held `["Backend"]`, and the row was still ABSENT.
+            //
+            // AND THE REMOVAL IS NARROWED TO EXACTLY THAT ENTRY — the first cut removed whatever was
+            // there, and the 1,608-crate A/B's REMOVED column is what caught it: 12 rows lost, in the
+            // cardinal-sin direction. `trait_leaves` PEELS a wrapper, so a field written `value:
+            // RwLock<T>` also answers the probe — but its `fields` entry is `loom::sync::RwLock`, a
+            // REAL type whose `read()` was resolving. Removing it took tokio's
+            // `watch::Receiver::borrow`, `borrow_and_update` and `Sender::borrow` from a disclosed
+            // `Unknown` to ABSENT, on a bound (`impl<T: Debug> … Shared<T>`) that dispatches nothing at
+            // all. So: remove ONLY where the entry is the parameter's own name, which is useless by
+            // construction and is the only spelling that can shadow this route. Same reason the
+            // wrapper case still WORKS: `Box<B>`/`Option<B>` record `fields` as `"B"` too, because
+            // `type_path` peels the same pointers.
+            let param_named = fields
+                .get(ty_leaf)
+                .and_then(|f| f.get(&field))
+                .is_some_and(|v| split.iter().any(|(_, n)| *n == v.as_str()));
+            let displaced = param_named
+                .then(|| fields.get_mut(ty_leaf).and_then(|f| f.remove(&field)))
+                .flatten();
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                // §E1 HIT COUNTER, on the CHANGED branch — and it prints what was DISPLACED, because
+                // that is the only thing this change can take away from a report.
+                eprintln!("R476JOIN {ty_leaf}.{field} {leaves:?} displaced={displaced:?}");
+            }
+            m.insert(field, leaves);
+        }
+    }
+    // A type whose ONLY entries were reserved would otherwise leave an empty inner map behind, which
+    // flips `resolve_recv_traits`' `trait_fields.is_empty()` hot-path guard open for nothing.
+    tf.retain(|_, m| !m.is_empty());
 }

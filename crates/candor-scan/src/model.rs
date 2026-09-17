@@ -485,6 +485,50 @@ pub(crate) type TraitImplIndex = HashMap<String, Vec<String>>;
 /// Store>`) — the DI pattern `self.store.save()`, which `FieldIndex` can't carry (no concrete type).
 pub(crate) type TraitFieldIndex = HashMap<String, HashMap<String, Vec<String>>>;
 
+/// SOUNDNESS R476 — TWO RESERVED KEY SPACES INSIDE `TraitFieldIndex`, and the R77 struct-variant
+/// precedent is the reason they are keys rather than a new `MergedDecls` field: a Rust field name is an
+/// identifier (or a tuple index), so nothing a struct can declare contains `\u{1f}`, and the existing
+/// merge / digest / `--incremental` cache plumbing carries them for free.
+///
+/// They exist because the two halves of *"is this generic FIELD dispatch-typed?"* are written in
+/// DIFFERENT FILES in the general case — the struct knows which of its params a field's type dispatches
+/// on, and only an `impl<B: Backend> Terminal<B>` block knows that param is bounded. Pass A is per-file
+/// and cached per-file, so neither half may be resolved against the other until the crate-wide merge.
+/// `decls::resolve_impl_bound_fields` performs that join and REMOVES both key spaces, so no consumer of
+/// `TraitFieldIndex` ever sees one.
+///
+///   * `<impl-bound>` — `\u{1f}ib\u{1f}<generic POSITION>\u{1f}<trait leaf>`, written by every
+///     `impl<..> Type<..>` block whose self-type argument at that position is one of the impl's own
+///     bounded generic params. The trait leaf is in the KEY, not only the value, so two files each
+///     bounding the same position UNION instead of the later one winning (`merge_decls` inserts
+///     per key).
+///   * `<gen-field>` — `\u{1f}gf\u{1f}<field>`, written by the struct, valued with the generic
+///     POSITIONS that field's type would dispatch on were they bounded. The positions are computed by
+///     `lang::trait_leaves` itself against a probe map, never by a second copy of its wrapper-peeling
+///     rules (`Box<B>`, `Option<B>`, `&B`, … must answer identically or the two halves drift).
+pub(crate) const TF_IMPL_BOUND: &str = "\u{1f}ib\u{1f}";
+pub(crate) const TF_GEN_FIELD: &str = "\u{1f}gf\u{1f}";
+
+pub(crate) fn tf_impl_bound_key(pos: usize, trait_leaf: &str) -> String {
+    format!("{TF_IMPL_BOUND}{pos}\u{1f}{trait_leaf}")
+}
+
+/// `(position, trait leaf)` for an `<impl-bound>` key, `None` for anything else.
+pub(crate) fn split_tf_impl_bound_key(key: &str) -> Option<(usize, &str)> {
+    let rest = key.strip_prefix(TF_IMPL_BOUND)?;
+    let (pos, tr) = rest.split_once('\u{1f}')?;
+    Some((pos.parse().ok()?, tr))
+}
+
+pub(crate) fn tf_gen_field_key(field: &str) -> String {
+    format!("{TF_GEN_FIELD}{field}")
+}
+
+/// The field name behind a `<gen-field>` key, `None` for anything else.
+pub(crate) fn split_tf_gen_field_key(key: &str) -> Option<&str> {
+    key.strip_prefix(TF_GEN_FIELD)
+}
+
 /// A locally-declared trait: how many declarations share the leaf (ambiguity check) and which
 /// method names the declaration itself carries — CHA resolves ONLY calls to a declared method of
 /// an unambiguous local trait (review found the wider rule fabricating: `impl Iterator for

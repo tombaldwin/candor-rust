@@ -10,6 +10,42 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **R476 — a trait bound on the `impl` BLOCK is now a bound, not a blind spot: a generic FIELD
+  receiver dispatches exactly as it does when the bound sits on the STRUCT.** `struct Terminal<B>` +
+  `impl<B: Backend> Terminal<B> { fn dims(&self) { self.backend.size() } }` was ABSENT from
+  `functions[]` at EVERY implementor count — 0, 1 and 2 — while the identical program written
+  `struct Terminal<B: Backend>` hedged `Unknown` at 0 and charged `['Fs']` at 2. **The ZERO cell is
+  what makes this a resolution gap rather than a bounded-CHA decision**: `dispatch_calls_for_trait_method`
+  hedges on an empty candidate set by design and SPEC §4 requires it, so reaching `[]` with no
+  `Unknown` means the dispatch machinery was never ENTERED. `[[R101]]`/`[[R475]]`'s open-world
+  question — what a NON-empty candidate set licenses — is untouched: this only makes two spellings of
+  one program give one answer.
+- **The two halves of the join live in different FILES, so it cannot happen in Pass A.** The struct
+  knows which generic POSITIONS a field's type dispatches on; only an `impl` block knows that position
+  is bounded. Pass A walks one file and is cached per file, so both halves are recorded into
+  `trait_fields` under two reserved key spaces and joined once, after the crate-wide merge, by
+  `decls::resolve_impl_bound_fields` — which then removes them, so no consumer sees the shape change.
+  Following R77's struct-variant precedent (a composite key in an existing map) means the merge,
+  digest and `--incremental` plumbing carry it for free. Positions are indices into ALL generic
+  params, lifetimes included, because that is what an impl's self-type argument list is positional
+  against; the two properties it rests on — a lifetime cannot be elided in an impl header (E0726)
+  and a defaulted param may only be omitted from the END — were checked with `rustc`, not assumed.
+- **The fix was INERT until the shadowing concrete entry went too, and the first measurement said so.**
+  With the bound on the impl block the field ALSO lands in `fields` as the literal, useless string
+  `"B"`, and `resolve_recv_type_for` is consulted BEFORE the dispatch route — so the join fired,
+  `trait_fields` held `["Backend"]`, and the row stayed ABSENT. The join therefore also removes that
+  entry, which is the mutual exclusion the struct-bound spelling already gets from an `else if`.
+- **And the REMOVED column of the first 1,608-crate A/B is what bounded that removal.** Removing
+  whatever the field's `fields` entry happened to be cost 12 rows in the cardinal-sin direction:
+  `trait_leaves` PEELS a wrapper, so `value: RwLock<T>` answers the probe while its `fields` entry
+  names a REAL type — deleting it took tokio's `watch::Receiver::borrow`, `borrow_and_update` and
+  `Sender::borrow` from a disclosed `Unknown` to ABSENT, over an `impl<T: Debug>` bound that dispatches
+  nothing. The removal is now confined to an entry that is the PARAMETER'S OWN NAME, useless by
+  construction and the only spelling that can shadow this route.
+- Cache schema **rev30 → rev31**: a rev30 entry was written by a binary that recorded neither key
+  space. Reproduced rather than argued — a binary carrying the fix but NOT the bump reads a pre-fix
+  warm cache and reports the pre-fix 3 rows where its own cold scan reports 7.
+
 - ⚠ **R459 — a `#[cfg(test)]` file module is no longer scanned as production because of its FILENAME.**
   The mirror of R457, and a FABRICATION rather than a silence, which is why it ranks higher. R457 made
   the `mod` site decide for files whose stem already looked like a test; the same heuristic fails the

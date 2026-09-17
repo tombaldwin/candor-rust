@@ -1432,6 +1432,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R476 — the crate-wide half of the impl-bound-generic-field join, run BEFORE the digest
+    // so the hash is taken over the index resolution actually reads (it is a pure function of the
+    // merged map either way, but hashing the pre-image would be hashing something no consumer sees).
+    // Must come after the R99 second merge above, which rebuilds `merged` from scratch.
+    crate::decls::resolve_impl_bound_fields(&mut merged.trait_fields, &mut merged.fields);
     let decl_index_hash = decl_index_digest(&merged);
     // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
     let returns: ReturnIndex =

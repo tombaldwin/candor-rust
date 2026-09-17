@@ -3133,6 +3133,194 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
         }
     }
 
+
+    /// SOUNDNESS R476 — WHERE THE TRAIT BOUND IS WRITTEN DECIDED WHETHER THE DISPATCH MACHINERY RAN AT
+    /// ALL. With the bound on the STRUCT (`struct Terminal<B: Backend>`) a generic field receiver
+    /// resolves or hedges exactly as SPEC §4's bounded-CHA discipline says it must. With the identical
+    /// program's bound on the IMPL BLOCK (`impl<B: Backend> Terminal<B>`) the row was ABSENT at EVERY
+    /// implementor count — including ZERO, where `dispatch_calls_for_trait_method` hedges `Unknown` by
+    /// design and the spec's "a local abstraction with no visible implementor … is disclosed
+    /// indeterminacy, never silent purity" is unconditional.
+    ///
+    /// THE ZERO CELL IS WHY THIS IS A RESOLUTION GAP AND NOT A CHA-BOUND DECISION, and it is the
+    /// discriminator this test is built around: reaching `[]` with no `Unknown` on an empty candidate
+    /// set means the machinery was never ENTERED. [[R101]]/[[R475]]'s open-world question — what a
+    /// NON-empty candidate set licenses — is a different argument and is deliberately untouched here;
+    /// this only makes the two spellings of one program produce one answer.
+    ///
+    /// The matrix is the evidence: six cells (two spellings × 0, 1, 2 implementors), asserted CELL BY
+    /// CELL against each other rather than against a remembered expectation, so the test cannot pass by
+    /// both spellings becoming equally wrong. All six programs COMPILE as written (§E3: an
+    /// absence-shaped control over an uncompilable fixture is no evidence at all), verified with
+    /// `cargo build` on each before this test was written. Pre-fix, the three `impl` cells were ABSENT
+    /// and the three `struct` cells were `Unknown` / absent / `['Fs']`.
+    #[test]
+    fn a_trait_bound_on_the_impl_block_dispatches_exactly_as_one_on_the_struct_does() {
+        let run = |files: &[(&str, String)]| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r476-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r476\"\n").unwrap();
+            for (name, src) in files {
+                std::fs::write(d.join("src").join(name), src).unwrap();
+            }
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // `None` = ABSENT from `functions[]` (this engine's spelling of "provably pure"); `Some([..])`
+        // = present with those effects. The distinction is the whole subject of this row, so the lookup
+        // is keyed on the EXACT qual — a suffix match would conflate two rows that share a tail.
+        let row = |v: &serde_json::Value, q: &str| -> Option<Vec<String>> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(q))
+                .map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect())
+        };
+
+        // ---- the 6-cell matrix ------------------------------------------------------------------
+        let cell = |on_impl: bool, impls: usize| -> serde_json::Value {
+            let decl = if on_impl {
+                "pub struct Terminal<B> { pub backend: B }"
+            } else {
+                "pub struct Terminal<B: Backend> { pub backend: B }"
+            };
+            let mut src = format!(
+                "pub trait Backend {{ fn size(&self) -> usize; }}\n\
+                 {decl}\n\
+                 impl<B: Backend> Terminal<B> {{\n\
+                 \x20   pub fn dims(&self) -> usize {{ self.backend.size() }}\n\
+                 }}\n\
+                 // OVER-CHARGE CONTROL: a generic field HELD but never invoked.\n\
+                 pub struct HolderT<B> {{ pub backend: B }}\n\
+                 impl<B: Backend> HolderT<B> {{ pub fn held(&self) -> &B {{ &self.backend }} }}\n\
+                 // OVER-CHARGE CONTROL: an EXTERNAL bound on the impl block. `Clone` names no local\n\
+                 // trait, so the join must supply leaves that resolve to nothing — never `Unknown`.\n\
+                 pub struct Plain<T> {{ pub v: T }}\n\
+                 impl<T: Clone> Plain<T> {{ pub fn dup(&self) -> T {{ self.v.clone() }} }}\n");
+            if impls >= 1 {
+                src.push_str(
+                    "pub struct MemBackend;\n\
+                     impl Backend for MemBackend { fn size(&self) -> usize { 7 } }\n\
+                     // OVER-CHARGE CONTROL: a CONCRETE receiver through the same field/method site.\n\
+                     pub struct ConcTerminal { pub backend: MemBackend }\n\
+                     impl ConcTerminal { pub fn cdims(&self) -> usize { self.backend.size() } }\n");
+            }
+            if impls >= 2 {
+                src.push_str(
+                    "pub struct FileBackend;\n\
+                     impl Backend for FileBackend {\n\
+                     \x20   fn size(&self) -> usize { std::fs::read(\"/tmp/r476.txt\").map(|v| v.len()).unwrap_or(0) }\n\
+                     }\n");
+            }
+            run(&[("lib.rs", src)])
+        };
+        let unknown = Some(vec!["Unknown".to_string()]);
+        let fs = Some(vec!["Fs".to_string()]);
+        for n in [0usize, 1, 2] {
+            let on_impl = cell(true, n);
+            let on_struct = cell(false, n);
+            let (a, b) = (row(&on_impl, "Terminal::dims"), row(&on_struct, "Terminal::dims"));
+            assert_eq!(a, b,
+                "R476: the bound moved from the struct to the impl block and NOTHING else did; at {n} \
+                 implementor(s) the two spellings of one program must give one answer — impl-bound \
+                 {a:?} vs struct-bound {b:?}\n{on_impl}");
+            // And pin the VALUE, so the equality above cannot be satisfied by both going silent.
+            let want = match n { 0 => unknown.clone(), 1 => None, _ => fs.clone() };
+            assert_eq!(a, want,
+                "R476 at {n} implementor(s): {a:?} != {want:?}. Zero candidates MUST hedge (SPEC §4: \
+                 never silent purity); one PURE candidate is legitimately absent; two candidates, one \
+                 of which reads a file, is `Fs`.\n{on_impl}");
+            // OVER-CHARGE CONTROLS, in every cell of both spellings.
+            for v in [&on_impl, &on_struct] {
+                for f in ["HolderT::held", "Plain::dup", "ConcTerminal::cdims"] {
+                    let got = row(v, f);
+                    assert!(got.as_ref().is_none_or(|e| e.is_empty()),
+                        "R476 OVER-CHARGE at {n} implementor(s): {f} performs nothing this scan cannot \
+                         see and must gain nothing — got {got:?}\n{v}");
+                }
+            }
+        }
+
+        // ---- the struct and the impl block IN DIFFERENT FILES ------------------------------------
+        // Pass A is per-file AND cached per file, so this is the case a within-file pre-pass would
+        // silently miss; the join it needs can only happen after the crate-wide merge. A concrete
+        // receiver whose method really IS effectful rides along as the over-charge control that a
+        // pure one cannot be (`ConcFile::cfdims` must read `Fs` before AND after).
+        let ty = "pub trait Backend { fn size(&self) -> usize; }\n\
+                  pub struct FileBackend;\n\
+                  impl Backend for FileBackend {\n\
+                  \x20   fn size(&self) -> usize { std::fs::read(\"/tmp/r476.txt\").map(|v| v.len()).unwrap_or(0) }\n\
+                  }\n\
+                  pub struct XTerm<B> { pub backend: B }\n\
+                  pub struct BoxTerm<B> { pub backend: Box<B> }\n\
+                  pub struct ConcFile { pub backend: FileBackend }\n\
+                  impl ConcFile { pub fn cfdims(&self) -> usize { self.backend.size() } }\n";
+        let imp = "use crate::ty::{Backend, BoxTerm, XTerm};\n\
+                   impl<B: Backend> XTerm<B> { pub fn dims(&self) -> usize { self.backend.size() } }\n\
+                   impl<B: Backend> BoxTerm<B> { pub fn dims(&self) -> usize { self.backend.size() } }\n";
+        // POSITION, not name: the bound sits on the SECOND generic param in one impl block and on the
+        // FIRST in another, and a struct whose params are mapped by anything but position would put
+        // `Noisy`'s implementors behind `second` and `Backend`'s behind `first`. A LIFETIME leads the
+        // param list in `LT` for the same reason — an impl's self-type argument list is positional
+        // against ALL params, lifetimes included, and enumerating only the type params would slide
+        // every index by one and resolve nothing.
+        let pos = "use crate::ty::Backend;\n\
+                   pub struct Pair<A, B> { pub first: A, pub second: B }\n\
+                   impl<B: Backend> Pair<u8, B> { pub fn second_dims(&self) -> usize { self.second.size() } }\n\
+                   pub trait Noisy { fn shout(&self) -> usize; }\n\
+                   pub struct Loud;\n\
+                   impl Noisy for Loud { fn shout(&self) -> usize { std::fs::read(\"/tmp/r476b.txt\").map(|v| v.len()).unwrap_or(0) } }\n\
+                   impl<A: Noisy> Pair<A, u8> { pub fn first_shout(&self) -> usize { self.first.shout() } }\n\
+                   pub struct LT<'a, B> { pub tag: &'a str, pub backend: B }\n\
+                   impl<'a, B: Backend> LT<'a, B> { pub fn dims(&self) -> usize { self.backend.size() } }\n";
+        let v = run(&[
+            ("lib.rs", "pub mod ty;\npub mod imp;\npub mod pos;\n".to_string()),
+            ("ty.rs", ty.to_string()),
+            ("imp.rs", imp.to_string()),
+            ("pos.rs", pos.to_string()),
+        ]);
+        for f in ["imp::XTerm::dims", "imp::BoxTerm::dims", "pos::Pair::second_dims",
+                  "pos::Pair::first_shout", "pos::LT::dims"] {
+            assert_eq!(row(&v, f), fs,
+                "R476: {f} dispatches on a generic field bounded by a LOCAL trait whose one \
+                 implementor reads a file — got {:?}\n{v}", row(&v, f));
+        }
+        assert_eq!(row(&v, "ty::ConcFile::cfdims"), fs,
+            "R476 OVER-CHARGE: a CONCRETE receiver resolving correctly today must still resolve — \
+             this is the direction the fix did not intend, and it removes a `fields` entry to work\n{v}");
+
+        // ---- THE REMOVAL'S OWN BOUND, and the 1,608-crate A/B is where it came from ---------------
+        // The join removes the `fields` entry that shadows the dispatch route. Removing whatever was
+        // there cost 12 rows in the cardinal-sin direction, because `trait_leaves` PEELS a wrapper: a
+        // field written `value: Mutex<T>` answers the position probe while its `fields` entry names a
+        // REAL type whose method was resolving. Executed instance — tokio 1.53.1's
+        // `loom::sync::RwLock` inside `watch::Shared<T>`, with `impl<T: Debug> … Shared<T>` as the only
+        // bound in sight: `Receiver::borrow`, `Receiver::borrow_and_update` and `Sender::borrow` went
+        // from a disclosed `Unknown` to ABSENT. This is that shape in miniature, and it fails on the
+        // broad removal and passes on the narrow one (both were built and run).
+        let lock = "use std::fmt::Debug;\n\
+                    pub struct Mutex<T> { pub inner: T }\n\
+                    impl<T> Mutex<T> {\n\
+                    \x20   pub fn read(&self) -> usize { std::fs::read(\"/tmp/r476.txt\").map(|v| v.len()).unwrap_or(0) }\n\
+                    }\n\
+                    pub struct Shared<T> { pub value: Mutex<T> }\n\
+                    impl<T: Debug> Shared<T> { pub fn go(&self) -> usize { self.value.read() } }\n";
+        let v = run(&[("lib.rs", lock.to_string())]);
+        assert_eq!(row(&v, "Shared::go"), fs,
+            "R476 REGRESSION CONTROL: a MARKER bound on an unrelated impl block dispatches nothing, and \
+             must not cost the `fields` entry that resolves `self.value.read()` to a local `Mutex::read` \
+             that reads a file — got {:?}\n{v}", row(&v, "Shared::go"));
+    }
+
     /// The R238 fixture. Held out of the test body only because it is long; every item in it is
     /// exercised by `callback_held_in_a_struct_field_and_handed_to_an_invoker_is_unknown` above, and
     /// the whole of it COMPILES AND RUNS as written (an absence-shaped control over an uncompilable
@@ -13327,6 +13515,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev30 -> rev31 a change to what an EXISTING field RECORDS (R476): `trait_fields` carries two
+    ///                 reserved key spaces whose crate-wide join gives a generic FIELD bounded on an
+    ///                 `impl` block its dispatch leaves, and removes the `fields` entry that shadowed
+    ///                 them. A rev30 entry has neither, so a warm re-scan replays the silent
+    ///                 under-report the row closes — a `Terminal<B>` whose `Backend` reads a file,
+    ///                 ABSENT from `functions[]` at every implementor count including zero.
     ///   rev26 -> rev27 a change to what an EXISTING field RECORDS (R451): `rets` now also carries the
     ///                 IMPL-QUALIFIED return keys (`<implret>Cfg\x1fget -> Calm`). The field is
     ///                 unchanged, so serde reads a rev26 entry happily and hands back a map a binary
@@ -13375,11 +13569,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -13390,7 +13584,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev30/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev31/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
