@@ -221,6 +221,16 @@ pub(crate) fn callers_via_callgraph_frontier(
         if confirmed.contains(e.func.as_str()) {
             continue;
         }
+        // ⟨0.39⟩: a synthetic `interfaceUnion` entry is the UNION OVER IMPLEMENTORS of an abstraction
+        // member, not a function with a body — so it cannot CALL anything and has no business in
+        // `possibleViaUnknownDispatch`. Un-gating ⟨0.23⟩ made these entries default rather than opt-in,
+        // and this arm then reported the bodiless DECLARATION beside the dispatcher as a possible caller.
+        // Same ruling `Policy` already applies one verb over: a caller of a body-less local declaration is
+        // not certified pure, and a body-less declaration is not a caller. Found by the four-way frontier
+        // differential on (producer=java, consumer=rust) the moment java shipped ⟨0.39⟩.
+        if e.interface_union {
+            continue;
+        }
         let mut hits: BTreeSet<&str> = BTreeSet::new();
         for w in &e.unknown_why {
             if let Some(key) = w.strip_prefix("dispatch:") {
