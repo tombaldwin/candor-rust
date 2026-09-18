@@ -398,7 +398,8 @@ jobs:
       # consumer `I` is an unresolved `Param`, so candor reported it pure for itself AND lost the effect at
       # the call site (the silent-pure generic-iterator hole). candor must recover the call-site substs
       # (`I=Gi`) and resolve the consumer's internal `<I as Iterator>::next` to the LOCAL impl — the
-      # CALLING fn gets the precise effect, the generic consumer an honest report-only `Unknown`. A pure
+      # CALLING fn gets the precise effect, the generic consumer an honest report-only `Unknown`
+      # (`callback:` since SOUNDNESS R490; it was the off-vocabulary `generic-iter:` before). A pure
       # std/custom iterator must NOT gain an effect (no fabrication). Teeth-verified: reverting fails.
       - name: Soundness fuzzer (generic iterator)
         run: CANDOR_FUZZ_FORMS="generic_iter" bash soundness/run.sh 40

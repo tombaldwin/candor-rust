@@ -10,6 +10,44 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **SOUNDNESS R501 — chaining a dependency WITHDREW a §4 reason the same scan gives unchained.**
+  `dep_join_hit` sat unqualified in the disclosure gate, so a call that also met R452's
+  `ambiguous:same-name local methods` condition kept `Unknown` and `unresolved: true` and SHED the
+  reason the moment a sibling report covered the crate. No effect moved and no unscoped gate changed,
+  which is why it survived — but `ambiguous:` classes `dispatch` under §6.2 and an unreasoned `Unknown`
+  classes `unresolved`, so `deny E Unknown[dispatch]` stopped firing on a row `deny E Unknown` still
+  caught. Reproduced on bson-2.15.0 with serde chained: `de::serde::Bson::deserialize` and
+  `de::serde::BsonVisitor::visit_some`, same binary, same crate, the dependency reports the only
+  variable; both are named by `deny Unknown[dispatch]` scanned alone and by neither scanned chained.
+  A join is now treated as having handled the call only when its OWN answer was not itself `Unknown`.
+  A/B over 1,603 registry crates, each chained against its own declared dependencies' reports:
+  **ADDED 0 · REMOVED 0 · CHANGED 46**, `inferred` CHANGED **0**, REACH 156 marks across 18 entries.
+  All 46 audited in full: every one GAINS `ambiguous:same-name local methods` and every other field is
+  byte-identical — 0 reasons lost, 0 lists shrank. Restoring the reason UNCONDITIONALLY was measured and
+  refused: it also charges `Unknown` to 22 rows the join answered concretely (reqwest `Response::status`
+  — `self.res.status()` on a `hyper::Response`, read against source — hyper `ClientTask::poll`,
+  hyper-util `domain_as_uri`, aws-config `AssumeRoleProviderBuilder::build`), which withdraws a
+  determined effect rather than adding disclosure (§4.0). That refusal is pinned by its own test arm.
+
+- **SOUNDNESS R490 — this repo held SPEC §4's reason vocabulary TWICE, and the halves had drifted.**
+  `ReasonClass::classify` has said "the ONLY place this engine holds §4's kind vocabulary" since ⟨0.24⟩;
+  it was true of the reader and false of the writers. The nightly dylint lint is a second producer —
+  it publishes into `.candor/baseline.candor.Cdylib.json` — and a sweep of EVERY reason it writes (the
+  row named two) found **three kinds outside §4's closed five** and **two `dispatch:` details spelled as
+  rust paths**: `generic-iter:<method>` → `callback:`, `iter-combinator:<method>` → `callback:` (§4's
+  `callback:` row names `opaque-iterable` verbatim), `deref:unresolvable overloaded auto-deref` →
+  ⟨0.24⟩'s reserved dot-free `dispatch:` (member dispatch, no function value, no owner formable), and
+  `dispatch:std::io::Write` → `dispatch:Write.write` — the old spelling was DOT-FREE, so §3.1's dispatch
+  frontier, which keys on the dot, could not read it at all. `candor_classify::policy::Kind` is now the
+  one table: every producer spells reasons through it and `ReasonClass::classify` matches on
+  `Kind::ALL` instead of its own copy of the five tokens, so the JVM engine's failure — a correct string
+  classifier beside a typed enum missing a kind — is not reachable. Measured on candor-rust's own
+  self-scan, the only published consumer: 157 rows per arm, **effects moved on 0**, 18 rows changed
+  `unknownWhy`, and the kind census goes `{generic-iter: 17, callback: 2, dispatch: 1}` →
+  `{callback: 19, dispatch: 1}` — every kind now inside §4's five. ⚠ 17 of those rows move class from
+  the `unresolved` catch-all to `indirect`; `Unknown[*]` and `Unknown[dynamic]` are unaffected.
+  `candor-scan/tests/source_hygiene.rs` now asserts the lint spells no §4 reason of its own.
+
 - ⚠ **SPEC §4 ⟨0.39⟩ — the chained-dispatch union (SOUNDNESS R475). candor-rust is the FIRST engine to
   port it.** The defect is a toggle running the wrong way: a library whose public abstraction has ZERO
   local implementors gave a chained consumer a disclosed `Unknown`; adding ONE PURE implementor to that

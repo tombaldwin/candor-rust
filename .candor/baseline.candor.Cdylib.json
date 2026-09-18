@@ -191,7 +191,7 @@
         "collect_generic_callee_edges"
       ],
       "unknownWhy": [
-        "generic-iter:next"
+        "callback:generic iterable driven by next"
       ],
       "invisible": [
         "rustc_hir",
@@ -213,7 +213,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7d538b7ee5a12b91e",
       "unknownWhy": [
-        "generic-iter:find"
+        "callback:generic iterable driven by find"
       ],
       "invisible": [
         "rustc_lint",
@@ -252,7 +252,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7eccd18e5d3e0b815",
       "unknownWhy": [
-        "generic-iter:next"
+        "callback:generic iterable driven by next"
       ],
       "invisible": [
         "rustc_middle",
@@ -339,7 +339,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7a08e5ba8486b1a8e",
       "unknownWhy": [
-        "generic-iter:find"
+        "callback:generic iterable driven by find"
       ],
       "invisible": [
         "rustc_lint",
@@ -359,7 +359,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7330cbad715781e90",
       "unknownWhy": [
-        "generic-iter:next"
+        "callback:generic iterable driven by next"
       ],
       "invisible": [
         "indexmap",
@@ -381,7 +381,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7d752d80824967dad",
       "unknownWhy": [
-        "generic-iter:cloned"
+        "callback:generic iterable driven by cloned"
       ]
     },
     {
@@ -425,7 +425,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7410d01ec46e28ce5",
       "unknownWhy": [
-        "generic-iter:find"
+        "callback:generic iterable driven by find"
       ],
       "invisible": [
         "rustc_hir",
@@ -446,7 +446,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d74727a08736b4fde1",
       "unknownWhy": [
-        "generic-iter:find"
+        "callback:generic iterable driven by find"
       ],
       "invisible": [
         "rustc_lint",
@@ -481,7 +481,7 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d7cb9bb7c7504ad02a",
       "unknownWhy": [
-        "generic-iter:next"
+        "callback:generic iterable driven by next"
       ],
       "invisible": [
         "rustc_lint",

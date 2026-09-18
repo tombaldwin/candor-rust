@@ -239,7 +239,8 @@ def edge_forms(callee, i=0):
         # the effect at the call site too. The fix recovers the call-site substs (`I=Gi{i}`) and resolves
         # the consumer's internal `<I as Iterator>::next` to the LOCAL `Gi{i}::next` — so the CALLING fn
         # (`f{i}`) gets the PRECISE effect, while the generic consumer carries a report-only honest
-        # `Unknown` (`generic-iter:<method>`). The `i`-derived rotation exercises for_each / map+collect /
+        # `Unknown` (`callback:generic iterable driven by <method>` — the kind was the off-vocabulary
+        # `generic-iter:` until SOUNDNESS R490). The `i`-derived rotation exercises for_each / map+collect /
         # sum / a `for` over a generic-param `Map` adapter. Both the caller AND the consumer must be
         # effect-or-Unknown, never pure. (`Gi{i}::next` performs the effect.) Teeth for the generic fix.
         "generic_iter": (

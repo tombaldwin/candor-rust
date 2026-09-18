@@ -14,6 +14,86 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The honesty marker (SPEC §4). Denyable so `deny Unknown <scope>` forbids the *unverifiable* case.
 pub const UNKNOWN: &str = "Unknown";
 
+/// SPEC §4 ⟨0.7⟩'s CLOSED FIVE-KIND `unknownWhy` VOCABULARY, as a TABLE — and the single place this
+/// engine SPELLS a reason, not merely the single place it reads one.
+///
+/// SOUNDNESS R490. `ReasonClass::classify` below has carried the note "THIS IS THE ONLY PLACE THIS
+/// ENGINE HOLDS SPEC §4's KIND VOCABULARY" since ⟨0.24⟩, and it was true of the READER and false of the
+/// WRITERS: the nightly dylint lint at the repo root is a SECOND PRODUCER publishing into
+/// `.candor/baseline.candor.Cdylib.json`, and it had drifted in three kinds (`generic-iter:`,
+/// `iter-combinator:`, `deref:`) and two details. That is the hazard `classify`'s own comment describes,
+/// one repo over and in the direction it was not looking.
+///
+/// SO THIS TABLE IS WHAT BOTH HALVES READ. `classify` matches on `Kind::token()` rather than on its own
+/// copy of the five strings, so adding, renaming or removing a kind moves the classifier and the
+/// producers in the same edit — the JVM engine's failure (a correct `classify` beside a typed `Kind`
+/// enum missing `ambiguous`, one token with two answers inside one engine) is not reachable from here.
+///
+/// It is NOT a closed set for PARSING. §2 forward-compatibility lets a producer emit a kind this
+/// version has never heard of, and `classify`'s catch-all is what keeps such a kind inside
+/// `Unknown[*]` / `Unknown[dynamic]`. This type constrains what THIS ENGINE WRITES.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    /// invocation chosen at runtime by name/metadata — reflection, `Method.invoke`, `eval`
+    Reflect,
+    /// a boundary to code the engine cannot analyse — native methods, FFI/`extern`, intrinsics
+    Native,
+    /// an unresolved virtual / interface / protocol dispatch with a resolvable owner type + member
+    Dispatch,
+    /// an unresolved higher-order / owner-less invocation over a function/closure VALUE — §4 names the
+    /// shapes: param, field, bound, computed, opaque-iterable
+    Callback,
+    /// ⟨0.24⟩ the analyser's OWN name resolution was ambiguous — two or more separately-written
+    /// definitions competing for one name, so no owner could be formed at all
+    Ambiguous,
+}
+
+impl Kind {
+    /// The §4 `kind` token — the part before the first `:`, and the part every gate reads.
+    pub fn token(self) -> &'static str {
+        match self {
+            Kind::Reflect => "reflect",
+            Kind::Native => "native",
+            Kind::Dispatch => "dispatch",
+            Kind::Callback => "callback",
+            Kind::Ambiguous => "ambiguous",
+        }
+    }
+
+    /// The five, in a form a census can iterate. `classify` and the source-hygiene census both read
+    /// THIS, so neither can hold its own list.
+    pub const ALL: [Kind; 5] = [Kind::Reflect, Kind::Native, Kind::Dispatch, Kind::Callback, Kind::Ambiguous];
+
+    /// SPEC §6.2's projection of this kind onto a policy CLASS. `ambiguous` projects to `dispatch`:
+    /// §6.2's table has named `ambiguous*` since ⟨0.19⟩, and reclassifying it to `indirect` was measured
+    /// to take `deny E Unknown[dispatch]` from 58 of 200 crates to 0 of 200.
+    pub fn class(self) -> ReasonClass {
+        match self {
+            Kind::Reflect => ReasonClass::Reflect,
+            Kind::Native => ReasonClass::Native,
+            Kind::Dispatch | Kind::Ambiguous => ReasonClass::Dispatch,
+            Kind::Callback => ReasonClass::Indirect,
+        }
+    }
+
+    /// Spell a §4 reason: `kind:detail`. The detail is best-effort for every kind EXCEPT `dispatch:`
+    /// with an owner — use [`Kind::dispatch_on`] there, which is the normative shape.
+    ///
+    /// ⟨0.24⟩ A DOT-FREE `dispatch:` detail is not a defect: it is the RESERVED form for "no owner could
+    /// be formed at all", free text, explicitly not conformance-compared. That is why this constructor
+    /// accepts one rather than forcing every caller through `dispatch_on`.
+    pub fn reason(self, detail: &str) -> String {
+        format!("{}:{}", self.token(), detail)
+    }
+
+    /// `dispatch:<owner-type>.<member>` — §4's ONE normative detail, and the shape §3.1's dispatch
+    /// frontier parses (`possibleViaUnknownDispatch` keys on the dot). The owner is passed as the type's
+    /// own name, never as a language path: `Store.put`, not `p::Store::put`.
+    pub fn dispatch_on(owner: &str, member: &str) -> String {
+        format!("{}:{owner}.{member}", Kind::Dispatch.token())
+    }
+}
+
 /// The NORMATIVE projection of a raw `unknown_why` reason onto a fixed, cross-engine reason CLASS
 /// (candor-spec REASON-SCOPED-UNKNOWN-DESIGN.md §1). Reason-scoped policies (`deny E Unknown[class]`)
 /// quantify over these classes, so the mapping MUST be identical in every engine — this mirrors the
@@ -104,16 +184,32 @@ impl ReasonClass {
     /// decided by the CONDITION (two readable defs vs none), never by the name.
     ///
     /// A dedicated §4 kind for this state is a SPEC clause plus a conformance PART before any engine
-    /// emits it, and candor-rust does not own that file — filed, not invented here.
+    /// emits it, and candor-rust does not own that file — filed, not invented here (SOUNDNESS R489).
+    /// And the choice is not free: NONE of the five canonical kinds projects to `unresolved`, so mapping
+    /// `macro:` onto any of them MOVES its class. R270 priced that in both directions and it is the
+    /// measurement that keeps the kind where it is.
+    ///
+    /// ⟨R490⟩ **AND THE PARAGRAPH ABOVE WAS STILL COUNTING ONLY THE SPELLINGS IN THIS CRATE.** The
+    /// nightly dylint lint at the repo root is a SECOND PRODUCER, and it held three more kinds outside
+    /// §4's five (`generic-iter:`, `iter-combinator:`, `deref:`) plus two `dispatch:` details spelled as
+    /// rust PATHS. It now builds every reason through `Kind` above, and
+    /// `candor-scan/tests/source_hygiene.rs` asserts it spells none of its own.
     pub fn classify(why: &str) -> ReasonClass {
         let w = why.trim().to_ascii_lowercase();
-        if w.starts_with("reflect") || w == "dynamicmemberlookup" {
+        // THE FIVE §4 KINDS COME FROM `Kind::ALL`, NOT FROM A SECOND COPY OF THE FIVE STRINGS
+        // (SOUNDNESS R490). Every other arm below is an ALIAS this engine accepts from a sibling
+        // producer — swift's `closure`/`dynamicmemberlookup`, java's `indy`/`task-handoff` migration
+        // kinds, ts's `missing-config`/`no-tsconfig`/`no-node_modules` setup kinds — and each is
+        // deliberately spelled here and nowhere else, because they are things this engine READS and
+        // never WRITES. The canonical five are checked FIRST so an alias can never shadow one.
+        if let Some(k) = Kind::ALL.into_iter().find(|k| w.starts_with(k.token())) {
+            return k.class();
+        }
+        if w == "dynamicmemberlookup" {
             ReasonClass::Reflect
-        } else if w.starts_with("native") {
-            ReasonClass::Native
-        } else if w.starts_with("callback") || w.starts_with("closure") || w.starts_with("task-handoff") {
+        } else if w.starts_with("closure") || w.starts_with("task-handoff") {
             ReasonClass::Indirect
-        } else if w.starts_with("dispatch") || w.starts_with("indy") || w.starts_with("ambiguous") {
+        } else if w.starts_with("indy") {
             ReasonClass::Dispatch
         } else if w.starts_with("missing-config") || w.starts_with("no-tsconfig") || w.starts_with("no-node_modules") {
             ReasonClass::Setup
@@ -1443,11 +1539,13 @@ mod tests {
     /// §2 forward-compatibility requires. Without it, "added a fifth kind" and "stopped checking the kind
     /// set" are the same diff — the classifier is one `_ =>` arm away from either.
     ///
-    /// This engine holds the §4 vocabulary ONCE (the raw `kind:detail` string, read back only through
-    /// `classify`), so there is no typed half here to drift from it. That is why the JVM engine's failure
-    /// — a string classifier correct on `ambiguous` since July while its typed `Kind` enum lacked the kind
-    /// entirely, one token classified two ways inside one engine — is not reproducible here. If a typed
-    /// kind representation is ever added, this test is where its half gets its control.
+    /// SOUNDNESS R490 — THE TYPED HALF NOW EXISTS (`Kind`), AND THIS IS THE CONTROL ITS OWN DOC COMMENT
+    /// SAID TO ADD AT THE SAME COMMIT. The JVM engine's failure was a string classifier correct on
+    /// `ambiguous` since July beside a typed `Kind` enum that lacked the kind entirely — one token
+    /// classified two ways inside one engine, concealed precisely because the string half was right. That
+    /// is unreachable here only while the two halves are the SAME table, so the round-trip below asserts
+    /// it for every kind rather than for the ones someone remembered: `Kind::ALL` is what `classify`
+    /// matches on, and what this loop iterates.
     #[test]
     fn off_vocabulary_kinds_round_trip_and_classify_through_the_catch_all() {
         use ReasonClass::*;
@@ -1474,6 +1572,26 @@ mod tests {
         // pinned so a future prefix arm cannot move them without saying so.
         assert_eq!(ReasonClass::classify("dep:9f2c1a"), Unresolved);
         assert_eq!(ReasonClass::classify("dep-stale:somepkg"), Unresolved);
+
+        // ── SOUNDNESS R490: THE TYPED HALF AND THE STRING HALF ARE ONE TABLE ────────────────────────
+        // Every kind this engine can WRITE must classify to the class it declares, through the same
+        // `classify` a consumer runs — asserted over `Kind::ALL`, so a kind added without a class, or a
+        // class arm changed without the producer, fails here. A hand-listed version of this loop is the
+        // bug it is guarding against.
+        assert_eq!(Kind::ALL.len(), 5, "SPEC §4 ⟨0.7⟩'s kind set is CLOSED at five");
+        for k in Kind::ALL {
+            assert_eq!(ReasonClass::classify(&k.reason("some detail")), k.class(),
+                       "kind {:?} spells a reason its own classifier does not agree with", k);
+            assert!(!k.token().contains(':'), "a kind token cannot contain the `kind:detail` separator");
+        }
+        // The one NORMATIVE detail shape (§4): `dispatch:<owner-type>.<member>`, dotted, which is what
+        // §3.1's dispatch frontier parses. Pinned as a STRING because that is what reaches the report.
+        assert_eq!(Kind::dispatch_on("Store", "put"), "dispatch:Store.put");
+        assert_eq!(ReasonClass::classify(&Kind::dispatch_on("Store", "put")), Dispatch);
+        // …and the reserved DOT-FREE form stays a `dispatch:` (⟨0.24⟩): it is the "no owner could be
+        // formed at all" spelling, free text, not conformance-compared — but still class `dispatch`, so
+        // re-kinding it to `callback:` would silently narrow every `deny E Unknown[dispatch]` in the field.
+        assert_eq!(ReasonClass::classify(&Kind::Dispatch.reason("untyped cross-package receiver")), Dispatch);
     }
 
     #[test]

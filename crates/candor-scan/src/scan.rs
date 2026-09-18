@@ -2865,6 +2865,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // join would fabricate). Joined unambiguous-tail2-first, then unambiguous leaf, like resolve_target.
             // A renamed dep joins under its real package name (`cr_real`, hoisted above).
             let mut dep_join_hit = false;
+            let mut dep_join_unknown = false;
             if classified.is_none() && !resolved_local && !suppress_bare_leaf
                 && c.path.contains("::") && deps_idx.crates.contains(cr_real)
             {
@@ -2877,6 +2878,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
                 if let Some(de) = hit {
                     dep_join_hit = true;
+                    // SOUNDNESS R501 — WHAT THE JOIN ACTUALLY ANSWERED, kept because the disclosure gate
+                    // below needs to tell "this call is now resolved" from "this call is now resolved TO
+                    // AN UNKNOWN". `de.effects` is the joined entry's own answer and nothing else, so
+                    // this flag is a function of the dependency's report, not of accumulation order.
+                    dep_join_unknown = de.effects.contains("Unknown");
                     apply_dep_fn(de, &f.qual, DepSink {
                         direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                         tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
@@ -3218,7 +3224,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // helpers absent from `by_leaf`, and cfg-gated platform fns all read as bare-unresolved, so it
             // charged ~80 pure tokio fns Unknown for ~0 genuine signal beyond this FFI case. See the task
             // report's residual note. The extern case below is the precise, non-flooding subset.)
-            let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf || dep_join_hit;
+            // SOUNDNESS R501 — A DEP JOIN THAT ANSWERED `Unknown` HAS NOT HANDLED THE CALL, AND THE
+            // DISCLOSURES BELOW ARE WHAT SAY WHY. `dep_join_hit` used to sit in this disjunction
+            // unqualified, so a call that ALSO met one of the three §4 disclosure conditions below lost
+            // its `unknownWhy` the moment a sibling report covered the crate — the row kept `Unknown`
+            // and `unresolved: true` and shed the reason, which is a REASON-CLASS withdrawal, not a
+            // silence: `ambiguous:` classes `dispatch` (§6.2) and an unreasoned `Unknown` classes
+            // `unresolved`, so `deny E Unknown[dispatch]` stopped firing on a row `deny E Unknown` still
+            // caught. Measured on bson-2.15.0: `de::serde::Bson::deserialize` and
+            // `de::serde::BsonVisitor::visit_some` carry `ambiguous:same-name local methods` scanned
+            // alone and carry NO reason with serde chained — same binary, same crate, the dependency
+            // reports the only variable.
+            //
+            // THE QUALIFICATION IS WHERE THE WHOLE COST SITS, and it was measured rather than reasoned.
+            // Ungating on `dep_join_hit` outright restores the reason on 130 call sites and ALSO charges
+            // `Unknown` to 22 that the join answered CONCRETELY — reqwest's `Response::status` /
+            // `::headers`, hyper's `ClientTask::poll`, aws-config's `AssumeRoleProviderBuilder::build`.
+            // Those 22 are the direction §4.0 forbids: the join keyed on `crate#tail2`, i.e. on the crate
+            // head that `tail2` threw away and that produced the local "ambiguity" in the first place, so
+            // it is answering on STRICTLY MORE of the written path than the collision that would hedge
+            // it — and `(E, ∅)` and `(∅, {r})` are incomparable, so replacing a determined effect with a
+            // hedge WITHDRAWS `E` rather than adding disclosure. So the join is treated as handling the
+            // call exactly when its own answer was not itself `Unknown`.
+            let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf
+                || (dep_join_hit && !dep_join_unknown);
             // ── §4 HONESTY — SOUNDNESS R452: A TYPED METHOD CALL THAT RESOLVED TO NO UNIT ──────────
             // A receiver-typed `Type::method` call that reached no local definition was dropped with NO
             // edge, NO `Unknown`, NO `unresolved` and NO `unknownWhy` — an affirmative §4 purity claim
@@ -3271,6 +3300,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if std::env::var_os("CANDOR_R452_INSTR").is_some() {
                             eprintln!("R452HIT\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
+                        // SOUNDNESS R501 reach marker — fires only on the population the R501
+                        // qualification newly ADMITS (a dep join whose own answer was `Unknown`).
+                        if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                            eprintln!("R501MARK\tAMBIG\t{}\t{}", f.qual, c.path);
+                        }
                     } else if claimants == 0
                         && merged.macro_hidden_types.contains(&ty)
                         && merged.macro_hidden_fns.contains(&c.leaf)
@@ -3304,12 +3338,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if std::env::var_os("CANDOR_R452_INSTR").is_some() {
                             eprintln!("R452HIT\tMACRO\t{}\t{}", f.qual, c.path);
                         }
+                        if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                            eprintln!("R501MARK\tMACRO\t{}\t{}", f.qual, c.path);
+                        }
                     }
                 }
             }
             if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string()); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
+                if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                    eprintln!("R501MARK\tNATIVE\t{}\t{}", f.qual, c.path);
+                }
             }
             // §4 HONESTY — AMBIGUOUS LOCAL: a BARE leaf naming TWO-OR-MORE local defs (`tail2`/leaf
             // collision: a free `tail2` + a `Type::tail2` method, or two `Type::method`s) defeats
@@ -3572,6 +3612,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // windows-core, lapin and more.
                 unknown_why.entry(f.qual.clone()).or_default()
                     .insert("macro:module items hidden by an unexpanded macro".to_string());
+                if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                    eprintln!("R501MARK\tR128\t{}\t{}", f.qual, c.path);
+                }
                 if std::env::var_os("CANDOR_R128_INSTR").is_some() {
                     eprintln!("R128HIT\t{}\t{}\tt2present={}\tleafty={}\tleaffn={}", f.qual, c.path,
                         tail2(&c.path).is_some_and(|t| by_tail2.contains_key(&t)),

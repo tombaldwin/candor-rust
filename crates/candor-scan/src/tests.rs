@@ -2331,6 +2331,83 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
                 "a by_key miss after a returns HIT read as a purity claim — defect 3:\n{app}");
     }
 
+    /// SOUNDNESS R501 — CHAINING A DEPENDENCY MUST NOT WITHDRAW A REASON THE UNCHAINED SCAN GAVE.
+    ///
+    /// `dep_join_hit` sat in `already_handled` unqualified, so a call that ALSO met R452's
+    /// `ambiguous:same-name local methods` condition lost its `unknownWhy` the moment a sibling report
+    /// covered the crate: the row kept `Unknown` and `unresolved: true` and shed the reason. That is a
+    /// reason-CLASS withdrawal rather than a silence — `ambiguous:` classes `dispatch` under §6.2 and an
+    /// unreasoned `Unknown` classes `unresolved` — so `deny E Unknown[dispatch]` stopped firing on a row
+    /// `deny E Unknown` still caught. Measured live on bson-2.15.0 against a chained serde:
+    /// `de::serde::Bson::deserialize` and `de::serde::BsonVisitor::visit_some`, same binary, same crate,
+    /// the dependency reports the only variable.
+    ///
+    /// THE THREE ARMS ARE THE TEST. Restoring the reason unconditionally was measured and REFUSED: over
+    /// 1,603 registry crates it also charges `Unknown` to 22 rows the join answered CONCRETELY (reqwest's
+    /// `Response::status` — `self.res.status()` on a `hyper::Response`, read against source — hyper's
+    /// `ClientTask::poll`, hyper-util's `domain_as_uri`, aws-config's `AssumeRoleProviderBuilder::build`).
+    /// The join keys on `crate#tail2`, i.e. on the crate head that `tail2` threw away and that produced
+    /// the local collision in the first place, so it answers on strictly more of the written path than
+    /// the collision that would hedge it; under §4.0 `(E, ∅)` and `(∅, {r})` are incomparable, so hedging
+    /// there WITHDRAWS `E` rather than adding disclosure. Arm 2 is what pins that refusal, and a fix that
+    /// ungates on `dep_join_hit` alone reddens it.
+    #[test]
+    fn a_dep_join_that_answered_unknown_keeps_the_ambiguity_reason_a_concrete_one_gains_nothing() {
+        // TWO local `Deser::read` definitions — `resolve_target`'s uniqueness filter refuses the tail,
+        // which is R452's `ambiguous:` condition — reached through a receiver typed into the dep crate,
+        // so the dep join fires on the same call.
+        const SRC: &str = "\
+pub mod a { pub struct Deser; impl Deser { pub fn read(&self) -> u8 { 1 } } }
+pub mod b { pub struct Deser; impl Deser { pub fn read(&self) -> u8 { 2 } } }
+pub fn joined(d: &depx::io::Deser) -> u8 { d.read() }
+";
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let rep = |eff: &str| serde_json::json!({
+            "candor": {"version": me, "toolchain": "stable", "spec": "0.38"},
+            "functions": [{"fn": "io::Deser::read", "inferred": [eff], "hash": "depx#io::Deser::read"}]
+        });
+        let why = |v: &serde_json::Value| -> Vec<String> {
+            ts_entry(v, "joined")
+                .and_then(|e| e["unknownWhy"].as_array().cloned())
+                .unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        const AMBIG: &str = "ambiguous:same-name local methods";
+        const MANIFEST: &str = "\n[dependencies]\ndepx = \"1\"\n";
+
+        // ARM 1 — UNCHAINED. The baseline the other two arms are read against: the disclosure exists.
+        let alone = scan_crate_chained("r501alone", "cons", MANIFEST, SRC, &DepIndex::default());
+        assert_eq!(effects_of(&alone, "joined"), vec!["Unknown".to_string()],
+                   "the fixture stopped producing the R452 hedge at all — arms 2 and 3 would then be \
+                    measuring nothing:\n{alone}");
+        assert!(why(&alone).iter().any(|w| w == AMBIG),
+                "the unchained scan no longer discloses the local ambiguity, so this test can no longer \
+                 see the withdrawal it exists for:\n{alone}");
+
+        // ARM 2 — THE JOIN ANSWERED CONCRETELY. It resolved on the crate-qualified key; the hedge must
+        // NOT come back, and no reason is owed. This is the 22-row refusal, pinned.
+        let (idx_net, dir_net) = chain("r501net", "depx", &rep("Net"));
+        let concrete = scan_crate_chained("r501net", "cons", MANIFEST, SRC, &idx_net);
+        let _ = std::fs::remove_dir_all(&dir_net);
+        assert_eq!(effects_of(&concrete, "joined"), vec!["Net".to_string()],
+                   "a join that answered concretely was hedged back to `Unknown` — that WITHDRAWS a \
+                    determined effect (§4.0), it does not add disclosure:\n{concrete}");
+        assert!(why(&concrete).is_empty(),
+                "an `ambiguous:` reason was attached to a call the join RESOLVED:\n{concrete}");
+
+        // ARM 3 — THE JOIN ANSWERED `Unknown`. The row carries `Unknown` either way, so the reason costs
+        // no effect and §4 owes it. This is the arm R501 filed.
+        let (idx_unk, dir_unk) = chain("r501unk", "depx", &rep("Unknown"));
+        let joined = scan_crate_chained("r501unk", "cons", MANIFEST, SRC, &idx_unk);
+        let _ = std::fs::remove_dir_all(&dir_unk);
+        assert_eq!(effects_of(&joined, "joined"), vec!["Unknown".to_string()],
+                   "the joined row stopped carrying `Unknown`:\n{joined}");
+        assert!(why(&joined).iter().any(|w| w == AMBIG),
+                "SOUNDNESS R501: chaining a dependency WITHDREW the `ambiguous:` reason the same scan \
+                 gives unchained — the row keeps `Unknown` and `unresolved` and sheds the class, so \
+                 `deny E Unknown[dispatch]` stops firing while `deny E Unknown` still does:\n{joined}");
+    }
+
     #[test]
     fn dep_join_does_not_fabricate_onto_a_local_shadow() {
         // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named

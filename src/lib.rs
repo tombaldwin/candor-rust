@@ -1551,7 +1551,12 @@ fn iter_combinator_local_edges<'tcx>(
     // `next` impl, be honest (`Unknown`) rather than silently pure. A wholly-std receiver (`vec.iter()`,
     // `0..n`) contributed no local ADT — correctly pure, no Unknown.
     if saw_local_iter {
-        return Some(CallbackEdges::Unknown(format!("iter-combinator:{method}")));
+        // SOUNDNESS R490 — `iter-combinator:` was a SIXTH kind. §4's `callback:` row names the shapes it
+        // covers and `opaque-iterable` is one of them verbatim: a std combinator takes a function VALUE,
+        // and the local iterator whose `next` could not be pinned is exactly the opaque iterable. Class
+        // moves from the `unresolved` catch-all to `indirect`.
+        return Some(CallbackEdges::Unknown(
+            candor_classify::policy::Kind::Callback.reason(&format!("opaque iterable behind combinator {method}"))));
     }
     None
 }
@@ -1899,10 +1904,13 @@ fn fmt_trait_local_cha(cx: &LateContext<'_>, trait_did: DefId) -> Option<Callbac
         return None;
     }
     if edges.len() > 12 {
-        // `dispatch:` prefix so `ReasonClass::classify` files it under `dispatch` (spec 0.19
-        // reason-scoped Unknown) — this IS a dispatch indeterminacy, not a callback or a bare unresolved.
+        // `dispatch:` because this IS a dispatch indeterminacy, not a callback and not a bare unresolved.
+        // SOUNDNESS R490: the detail was `stringify:<Trait>` — a canonical KIND with a dot-free detail,
+        // i.e. ⟨0.24⟩'s reserved "no owner could be formed" form, over a call whose owner (the fmt trait)
+        // and member (`fmt`) are both in hand. Spelled through the one authority now, which is also
+        // candor-scan's spelling for its own >12-impl frontier.
         let t = cx.tcx.item_name(trait_did);
-        return Some(CallbackEdges::Unknown(format!("dispatch:stringify:{t}")));
+        return Some(CallbackEdges::Unknown(candor_classify::policy::Kind::dispatch_on(t.as_str(), "fmt")));
     }
     Some(CallbackEdges::Local(edges))
 }
@@ -2787,10 +2795,19 @@ impl Candor {
                     // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
                     DerefStep::Unresolved => {
                         self.direct.entry(caller).or_default().insert(UNKNOWN);
+                        // SOUNDNESS R490 — `deref:` was a SIXTH kind, outside §4's closed five, found by
+                        // sweeping every reason this lint writes rather than the two the row named. An
+                        // overloaded `Deref::deref` is member dispatch and no function VALUE is involved,
+                        // so §4's dividing line makes it `dispatch:`; no owner type could be formed, so
+                        // the detail takes ⟨0.24⟩'s reserved DOT-FREE form — the same shape candor-scan
+                        // uses for `dispatch:untyped cross-package receiver`. Class moves from the
+                        // `unresolved` catch-all to `dispatch`, which is where §6.2 puts an unresolved
+                        // member dispatch.
                         self.unknown_why
                             .entry(caller)
                             .or_default()
-                            .insert("deref:unresolvable overloaded auto-deref".to_string());
+                            .insert(candor_classify::policy::Kind::Dispatch
+                                .reason("unresolvable overloaded auto-deref"));
                         if self.explain.is_some() {
                             let loc =
                                 cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
@@ -2893,10 +2910,34 @@ impl Candor {
             let effectful_dispatch = is_effectful_std_trait(tk, ti);
             if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
-                self.unknown_why
-                    .entry(caller)
-                    .or_default()
-                    .insert(format!("dispatch:{}", cx.tcx.def_path_str(td)));
+                // SOUNDNESS R490 — §4's ONE NORMATIVE DETAIL, SPELLED THROUGH THE ONE AUTHORITY.
+                // This read `format!("dispatch:{}", def_path_str(td))`, i.e. `dispatch:std::io::Write`:
+                // a RUST PATH, naming the trait and no member, and DOT-FREE — which ⟨0.24⟩ reserves for
+                // "no owner could be formed at all". An owner was formed here; it is `td`. §3.1's
+                // dispatch frontier keys on the dot, so the old spelling took this engine's most common
+                // lint-side dispatch reason out of `possibleViaUnknownDispatch` entirely. `owner.member`
+                // from the trait LEAF and the callee leaf is candor-scan's spelling for the same state
+                // (`dispatch:{tr}.{leaf}`), which is the point: one vocabulary, two producers.
+                // The MEMBER comes from the call expression rather than from a ninth parameter:
+                // `.m()` carries it in the method segment and a UFCS `<T as Tr>::m(x)` in the path's
+                // last segment. A shape with neither keeps ⟨0.24⟩'s reserved DOT-FREE form, which is
+                // legal and honest — "no owner could be formed" — rather than half a dotted detail.
+                let member = match expr.kind {
+                    ExprKind::MethodCall(seg, ..) => Some(seg.ident.name),
+                    ExprKind::Call(f, _) => match f.kind {
+                        ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) =>
+                            p.segments.last().map(|s| s.ident.name),
+                        ExprKind::Path(rustc_hir::QPath::TypeRelative(_, seg)) => Some(seg.ident.name),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let owner = cx.tcx.item_name(td);
+                self.unknown_why.entry(caller).or_default().insert(match member {
+                    Some(m) => candor_classify::policy::Kind::dispatch_on(owner.as_str(), m.as_str()),
+                    None => candor_classify::policy::Kind::Dispatch
+                        .reason(&format!("unresolvable dispatch over {owner}")),
+                });
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                     let via = format!("unresolvable dispatch over `{}`", cx.tcx.def_path_str(td));
@@ -3202,7 +3243,7 @@ impl Candor {
                             // guard.
                             self.direct.entry(*caller).or_default().insert(UNKNOWN);
                             self.unknown_why.entry(*caller).or_default().insert(
-                                "callback:callback target resolved to no analyzable body".to_string(),
+                                candor_classify::policy::Kind::Callback.reason("callback target resolved to no analyzable body"),
                             );
                         } else {
                             self.calls.entry(*caller).or_default().extend(locals);
@@ -3219,7 +3260,7 @@ impl Candor {
                         self.unknown_why
                             .entry(*caller)
                             .or_default()
-                            .insert("callback:unresolvable callback passed".to_string());
+                            .insert(candor_classify::policy::Kind::Callback.reason("unresolvable callback passed"));
                     }
                 }
                 // The HOF itself: ALWAYS honest `Unknown` for the invocation (it invokes an opaque
@@ -3228,7 +3269,7 @@ impl Candor {
                 self.unknown_why
                     .entry(*hof)
                     .or_default()
-                    .insert("callback:invoked param (opaque from the HOF's own standpoint)".to_string());
+                    .insert(candor_classify::policy::Kind::Callback.reason("invoked param (opaque from the HOF's own standpoint)"));
             }
         }
         hof_param_unknown
@@ -3552,7 +3593,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 self.unknown_why
                     .entry(caller)
                     .or_default()
-                    .insert("callback:fn-pointer / closure".to_string());
+                    .insert(candor_classify::policy::Kind::Callback.reason("fn-pointer / closure"));
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                     self.sites.entry(caller).or_default().push(EffectSite {
@@ -3589,7 +3630,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // disclosure above already short-circuits.
         if def_id.is_local() && cx.tcx.is_foreign_item(def_id) {
             self.direct.entry(caller).or_default().insert(UNKNOWN);
-            self.unknown_why.entry(caller).or_default().insert("native:extern fn".to_string());
+            self.unknown_why.entry(caller).or_default().insert(candor_classify::policy::Kind::Native.reason("extern fn"));
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite {
@@ -3704,7 +3745,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                                 let method = cx.tcx.item_name(def_id);
                                 self.generic_iter_unknown
                                     .entry(caller)
-                                    .or_insert_with(|| format!("generic-iter:{method}"));
+                                    // SOUNDNESS R490 — `generic-iter:` was outside §4's five. The
+                                    // receiver is a type PARAMETER, so no owner type exists to form a
+                                    // `dispatch:` detail from, and §4's `callback:` row names both
+                                    // shapes in play — `bound` and `opaque-iterable`. Class moves from
+                                    // the `unresolved` catch-all to `indirect`.
+                                    .or_insert_with(|| candor_classify::policy::Kind::Callback
+                                        .reason(&format!("generic iterable driven by {method}")));
                             }
                         }
                 }
