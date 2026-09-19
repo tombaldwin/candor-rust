@@ -6852,3 +6852,217 @@ fn unverified_reads_reason_classes_by_unit_key_not_by_name() {
     let (_, mnamed) = unverified_names(&f.prefix, &miss, None);
     assert_eq!(mnamed, vec!["domain::price".to_string()]);
 }
+
+// ── SOUNDNESS R507 — `path`/`impact` answered ABOUT A FUNCTION NOBODY ASKED FOR ────────────────────
+//
+// rust's half of R497 (fixed in candor-java `92994fd`). Both verbs resolved `<fn>` as
+// `find(func == q).or_else(find(func.contains(q)))` — NOT segment-anchored, and no refusal when several
+// functions matched. MEASURED PRE-FIX on a candor-scan report of the fixture this module rebuilds by
+// hand (same names, same effects):
+//
+//     path   Provider::resolve_credentials Exec
+//       -> creds::InstanceProvider::resolve_credentials does not perform Exec (inferred: ["Clock"])  exit 0
+//     impact Provider::resolve_credentials
+//       -> `creds::InstanceProvider…` … 0 effectful functions transitively call it                   exit 0
+//
+// `creds::Provider::resolve_credentials` performs Exec and has 2 transitive callers, so BOTH answers
+// were false negatives on the real question. `show` and `callers`, given the IDENTICAL selector on the
+// IDENTICAL report, answered about the right function — the verb was the only thing that differed, and
+// those two are the CONTROLS below.
+
+/// The R507 report: `Provider::resolve_credentials` is a proper suffix of
+/// `InstanceProvider::resolve_credentials` but NOT at a `::` boundary, both are in one report, and the
+/// SHORTER (the one actually asked about) is the one carrying the real effect.
+fn write_r507_report(f: &Fixture) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.7" },
+  "package": "rpt",
+  "functions": [
+    { "fn": "creds::InstanceProvider::resolve_credentials", "loc": "src/creds.rs:16:5", "inferred": ["Clock"], "direct": ["Clock"], "hash": "rpt#inst", "paths": ["/x"] },
+    { "fn": "creds::Provider::resolve_credentials", "loc": "src/creds.rs:4:5", "inferred": ["Env","Exec"], "direct": ["Env","Exec"], "hash": "rpt#prov", "paths": ["/x"] },
+    { "fn": "app_boot", "loc": "src/lib.rs:4:1", "inferred": ["Env","Exec"], "hash": "rpt#boot", "paths": ["/x"], "calls": ["creds::Provider::resolve_credentials"] },
+    { "fn": "app_start", "loc": "src/lib.rs:9:1", "inferred": ["Env","Exec"], "hash": "rpt#start", "paths": ["/x"], "calls": ["app_boot"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    std::fs::write(
+        format!("{}.rpt.scan.callgraph.json", f.prefix),
+        r#"{"creds::InstanceProvider::resolve_credentials":[],"creds::Provider::resolve_credentials":[],"app_boot":["creds::Provider::resolve_credentials"],"app_start":["app_boot"]}"#,
+    )
+    .unwrap();
+}
+
+fn run(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(bin()).args(args).output().expect("run candor-query");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// HALF 1 — the match must be SEGMENT-ANCHORED, so a selector that is a bare suffix of a longer
+/// identifier resolves to the function actually named. Goes RED against the pre-fix `contains` chain.
+#[test]
+fn r507_path_resolves_the_segment_anchored_function_not_the_longer_identifier() {
+    let f = Fixture::new("r507patha");
+    write_r507_report(&f);
+    let (code, out, err) =
+        run(&["path", "Provider::resolve_credentials", "Exec", "--report", &f.report_path()]);
+    assert_eq!(code, 0, "one anchored candidate is an ANSWERABLE question — stderr:\n{err}");
+    assert!(
+        out.contains("creds::Provider::resolve_credentials"),
+        "must answer about the function asked for:\n{out}"
+    );
+    // THE FABRICATED SENTENCE ITSELF, named rather than approximated: a determined negative about a
+    // function the user did not ask about, which is what made this a cardinal-sin-direction defect.
+    assert!(
+        !out.contains("InstanceProvider"),
+        "answered about the LONGER identifier — the R507 substitution:\n{out}"
+    );
+    assert!(!out.contains("does not perform"), "a FALSE NEGATIVE on the real question:\n{out}");
+}
+
+#[test]
+fn r507_impact_resolves_the_segment_anchored_function_not_the_longer_identifier() {
+    let f = Fixture::new("r507impacta");
+    write_r507_report(&f);
+    let (code, out, err) =
+        run(&["impact", "Provider::resolve_credentials", "--report", &f.report_path(), "--json"]);
+    assert_eq!(code, 0, "one anchored candidate is answerable — stderr:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["fn"], serde_json::json!("creds::Provider::resolve_credentials"), "{v:#}");
+    // Pre-fix this said 0 — `affectedCount: 0` is this verb's "safe to edit" claim, made about the
+    // wrong function. The real subject has two transitive callers.
+    assert_eq!(v["affectedCount"], serde_json::json!(2), "{v:#}");
+}
+
+/// HALF 2 — ANCHORING ALONE IS NOT THE FIX. `resolve_credentials` is a segment-anchored (tier-2) match
+/// on BOTH functions, so an anchored-but-still-picking implementation answers the identical false
+/// negative. These two go RED against the pre-fix chain AND against anchor-only.
+#[test]
+fn r507_path_refuses_an_ambiguous_selector_and_names_the_candidates() {
+    let f = Fixture::new("r507pathmany");
+    write_r507_report(&f);
+    let (code, out, err) = run(&["path", "resolve_credentials", "Exec", "--report", &f.report_path()]);
+    assert_eq!(code, 2, "MANY must REFUSE, not pick — stdout:\n{out}\nstderr:\n{err}");
+    assert!(err.contains("AMBIGUOUS"), "the refusal must say why:\n{err}");
+    for n in ["creds::Provider::resolve_credentials", "creds::InstanceProvider::resolve_credentials"] {
+        assert!(err.contains(n), "the candidates must be NAMED (missing {n}):\n{err}");
+    }
+    assert!(
+        !out.contains("does not perform"),
+        "a refusal must not also emit the answer it refused to give:\n{out}"
+    );
+}
+
+#[test]
+fn r507_impact_refuses_an_ambiguous_selector_and_names_the_candidates() {
+    let f = Fixture::new("r507impactmany");
+    write_r507_report(&f);
+    let (code, out, err) = run(&["impact", "resolve_credentials", "--report", &f.report_path()]);
+    assert_eq!(code, 2, "MANY must REFUSE, not pick — stdout:\n{out}\nstderr:\n{err}");
+    assert!(err.contains("AMBIGUOUS"), "{err}");
+    for n in ["creds::Provider::resolve_credentials", "creds::InstanceProvider::resolve_credentials"] {
+        assert!(err.contains(n), "the candidates must be NAMED (missing {n}):\n{err}");
+    }
+    assert!(!out.contains("transitively call it"), "a refusal must not also answer:\n{out}");
+}
+
+/// CONTROL — the ZERO-match arm is UNCHANGED. It already exited 2 before R507; the asymmetry that let
+/// the defect survive was that only MANY was answered silently, and a fix that disturbed this arm would
+/// be changing the half that was already right.
+#[test]
+fn r507_control_zero_matches_still_exits_2_with_the_unchanged_message() {
+    let f = Fixture::new("r507zero");
+    write_r507_report(&f);
+    let rpt = f.report_path();
+    for (verb, args) in [
+        ("path", vec!["path", "zzzNoSuchFn", "Exec"]),
+        ("impact", vec!["impact", "zzzNoSuchFn"]),
+    ] {
+        let (code, _, err) = run(&[&args[..], &["--report", rpt.as_str()][..]].concat());
+        assert_eq!(code, 2, "{verb}: a nonexistent function is a LOUD error — stderr:\n{err}");
+        assert!(
+            err.contains(&format!("candor-query {verb}: no function matching 'zzzNoSuchFn'")),
+            "{verb}: the pre-existing wording must survive:\n{err}"
+        );
+    }
+}
+
+/// CONTROL — an EXACT full name is never ambiguous, even though it is also a tier-2 suffix of nothing
+/// and a substring of nothing: exact wins outright.
+#[test]
+fn r507_control_an_exact_name_still_answers() {
+    let f = Fixture::new("r507exact");
+    write_r507_report(&f);
+    let (code, out, err) = run(&[
+        "impact",
+        "creds::InstanceProvider::resolve_credentials",
+        "--report",
+        &f.report_path(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["fn"], serde_json::json!("creds::InstanceProvider::resolve_credentials"), "{v:#}");
+}
+
+/// CONTROL — AMBIGUITY IS COUNTED OVER DISTINCT NAMES, NOT ROWS. A report SET unions siblings, so the
+/// same qual arrives more than once; a row count would refuse a question that has exactly one answer.
+#[test]
+fn r507_control_a_duplicated_row_across_a_report_set_does_not_manufacture_ambiguity() {
+    let f = Fixture::new("r507dup");
+    let one = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.7" },
+  "package": "PKG",
+  "functions": [
+    { "fn": "creds::Provider::resolve_credentials", "loc": "src/creds.rs:4:5", "inferred": ["Exec"], "direct": ["Exec"], "hash": "PKG#prov", "paths": ["/x"] }
+  ]
+}"#;
+    for pkg in ["a", "b"] {
+        std::fs::write(format!("{}.{pkg}.scan.json", f.prefix), one.replace("PKG", pkg)).unwrap();
+    }
+    let (code, out, err) =
+        run(&["path", "Provider::resolve_credentials", "Exec", "--report", &f.prefix, "--json"]);
+    assert_eq!(code, 0, "one DISTINCT name across two reports is answerable — stderr:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["fn"], serde_json::json!("creds::Provider::resolve_credentials"), "{v:#}");
+}
+
+/// CONTROL — THE VERB-SWEEP BOUNDARY, pinned so a later "consistency" change cannot quietly extend the
+/// refusal to the verbs that are already correct. `show` and `callers` answer over the WHOLE best-tier
+/// set: many matches WIDEN their answer rather than substituting its subject, so they must keep
+/// answering at exit 0 for the very selector `path`/`impact` now refuse.
+#[test]
+fn r507_control_show_and_callers_widen_on_the_selector_that_path_refuses() {
+    let f = Fixture::new("r507boundary");
+    write_r507_report(&f);
+    let (scode, sout, serr) = run(&["show", "resolve_credentials", "--report", &f.report_path()]);
+    assert_eq!(scode, 0, "`show` answers over the whole set — stderr:\n{serr}");
+    for n in ["creds::Provider::resolve_credentials", "creds::InstanceProvider::resolve_credentials"] {
+        assert!(sout.contains(n), "`show` must list BOTH (missing {n}):\n{sout}");
+    }
+    let (ccode, cout, cerr) = run(&["callers", "resolve_credentials", "--report", &f.prefix]);
+    assert_eq!(ccode, 0, "`callers` answers over the whole set — stderr:\n{cerr}");
+    assert!(cout.contains("app_boot"), "`callers` must still answer the union:\n{cout}");
+}
+
+/// The refusal must stay READABLE over a big report — an unreadable refusal is one people work around.
+/// Capped at 12 with a counted tail.
+#[test]
+fn r507_the_ambiguous_refusal_caps_the_candidate_list() {
+    let f = Fixture::new("r507cap");
+    let fns: Vec<String> = (0..20)
+        .map(|i| format!(r#"{{ "fn": "m{i}::Thing::resolve_credentials", "loc": "src/m{i}.rs:1:1", "inferred": ["Clock"], "direct": ["Clock"], "hash": "rpt#f{i}", "paths": ["/x"] }}"#))
+        .collect();
+    let report = format!(
+        r#"{{ "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.7" }}, "package": "rpt", "functions": [{}] }}"#,
+        fns.join(",")
+    );
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    let (code, _, err) = run(&["impact", "resolve_credentials", "--report", &f.report_path()]);
+    assert_eq!(code, 2, "stderr:\n{err}");
+    assert!(err.contains("20 functions match"), "the FULL count must be stated:\n{err}");
+    assert!(err.contains("and 8 more"), "the list must be capped with a counted tail:\n{err}");
+}

@@ -10,6 +10,46 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### ⚠ SOUNDNESS R507 — `path` / `impact` answered ABOUT A FUNCTION NOBODY ASKED FOR
+
+- **Both verbs resolved their `<fn>` argument as `func == q` else the FIRST `func.contains(q)`** — not
+  segment-anchored, and no refusal when several functions matched. This is rust's half of SOUNDNESS
+  R497 (closed in candor-java `92994fd`); swift and ts carry the same row. MEASURED on this engine
+  before the fix, on a two-type crate scanned by `candor-scan`:
+  `candor-query path Provider::resolve_credentials Exec` printed
+  *"creds::InstanceProvider::resolve_credentials does not perform Exec (inferred: [\"Clock\"])"* at
+  **exit 0**, and `impact Provider::resolve_credentials` reported *"0 effectful functions transitively
+  call it"* about the same substituted name. The function actually asked about performs `Exec` and has
+  two transitive callers, so both were **false negatives on the real question**, not merely answers
+  about the wrong subject — and §3.1 makes a negative a claim, so a negative about a substituted
+  subject is a fabricated one. `show` and `callers`, given the IDENTICAL selector on the IDENTICAL
+  report, answered about the right function: the verb was the only thing that differed.
+- **Found in the wild, not only in a fixture.** Over 159 crates.io crates scanned with this engine,
+  `candor-query path handshake Clock` on `mongodb-3.8.2` printed
+  *"`<lazy>::cmap::establish::handshake::BASE_CLIENT_METADATA` does not perform Clock (inferred: [])"*
+  at exit 0; the segment-anchored subject, `cmap::establish::handshake::Handshaker::handshake`, does
+  perform it. 5,948 of 37,046 realistic selectors over that corpus (16.1%) resolved differently before
+  and after; 121 of them were determined negatives about a substituted subject, of which a 60-case
+  sample was confirmed one at a time against the pre-fix binary.
+- **The fix is both halves, and neither alone is right.** Resolution now goes through the engine's own
+  `match_tier` ladder (exact > segment-suffix at a `::`/`.` boundary > substring), which
+  `show`/`callers`/`whatif`/`fix` have always used and these two never did; and when more than one
+  DISTINCT name survives at the best tier, the verb **refuses at exit 2 and names the candidates**.
+  Anchoring alone leaves genuine ambiguity silent — `path resolve_credentials Exec` is a tier-2 match on
+  both functions in the fixture above, so an anchored-but-still-picking build answers the identical
+  false negative. Refusing alone would reject a question that has exactly one right answer. Ambiguity is
+  counted over DISTINCT NAMES, so a report SET unioning siblings cannot manufacture it.
+- The asymmetry that let this survive: both verbs **already** refused at exit 2 on ZERO matches — only
+  MANY was answered silently. `path` also already refuses a typo'd EFFECT argument; R507 is that guard
+  on argument 1.
+- **Verb-sweep boundary, stated:** `show`, `callers`/`callers_via_callgraph` and `whatif` answer over the
+  WHOLE best-tier set, so many matches WIDEN an answer rather than substituting its subject, and a
+  regression test now pins that they keep answering the selector `path`/`impact` refuse. `fix` is
+  anchored and picks, but PREFERS a tier match that performs the effect, so it cannot emit "nothing to
+  hoist" while a sibling performs it — left alone deliberately, and it must stay byte-aligned with
+  java/ts/swift. Every other verb takes no function selector. `path` and `impact` were the only two call
+  sites of an unanchored `.func.contains(<selector>)` in `candor-query`.
+
 - **⚠ SOUNDNESS R504 — the MIDDLE-PACKAGE hole: a package dispatching over its OWN dependency's trait
   named nothing, and the ⟨0.39⟩ chain broke one hop short.** `dispatch_sites` recorded LOCAL-trait
   dispatch only (`trait_declares_method` over `trait_decls`), so obligation 1 was scoped to abstractions

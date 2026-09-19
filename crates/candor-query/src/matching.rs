@@ -204,3 +204,93 @@ pub(crate) fn sorted(v: &[String]) -> Vec<String> {
 pub(crate) fn q_or(s: &str) -> &str {
     if s.is_empty() { "?" } else { s }
 }
+
+/// SOUNDNESS R507 (rust's half of [[R497]], fixed in candor-java `92994fd`) — resolve a ONE-FUNCTION
+/// selector for a verb that ANSWERS ABOUT THE FUNCTION IT PICKED, and REFUSE rather than substitute a
+/// subject. `Ok(entry)` is the single function the question is about; `Err(2)` means the verb must
+/// return 2 having already said why.
+///
+/// MEASURED PRE-FIX on this engine (a two-type fixture scanned by candor-scan, both functions in one
+/// report, `show` and `callers` given the IDENTICAL selector on the IDENTICAL report answering
+/// correctly — the verb is the only thing that differed):
+///
+/// ```text
+///   path   Provider::resolve_credentials Exec
+///     -> creds::InstanceProvider::resolve_credentials does not perform Exec (inferred: ["Clock"])   exit 0
+///   impact Provider::resolve_credentials
+///     -> `creds::InstanceProvider::resolve_credentials` … 0 effectful functions transitively call it  exit 0
+/// ```
+///
+/// `creds::Provider::resolve_credentials` performs `Exec` and has 2 transitive callers. Both answers
+/// were therefore FALSE NEGATIVES ON THE REAL QUESTION, not merely answers about the wrong subject —
+/// and a negative is a claim in this contract (§3.1), so a negative about a substituted subject is a
+/// FABRICATED claim.
+///
+/// TWO STACKED DEFECTS, and neither half alone is the fix:
+///
+/// 1. **The match was not SEGMENT-ANCHORED.** The old resolution in both verbs was
+///    `find(func == q).or_else(find(func.contains(q)))` — so `Provider::resolve_credentials` matched
+///    INSIDE the longer identifier `InstanceProvider::resolve_credentials`. [`match_tier`] has encoded
+///    this engine's anchored ladder since the speed-eval red-team, and `show`/`callers`/`whatif`/`fix`
+///    all route through it; `path` and `impact` never did. **The helper existing is not the same as the
+///    call site using it** — that was the premise this row's brief got wrong, and it is the reason the
+///    class survived a cross-engine review that cited this very file.
+/// 2. **With several candidates it PICKED instead of refusing.** Anchoring alone leaves genuine
+///    ambiguity silent: on the same fixture `path resolve_credentials Exec` is a segment-anchored
+///    (tier-2) match on BOTH functions, and pre-fix answered the same confident negative about the one
+///    that sorts first. Refusing alone would reject a question that has exactly one right answer.
+///
+/// THE ASYMMETRY THAT LET IT SURVIVE: both verbs ALREADY refused at exit 2 when ZERO functions matched.
+/// Only MANY was answered silently. The family has also already ruled this class one ARGUMENT over —
+/// candor-swift grew a guard for `path`'s EFFECT argument after `path caller Fsz` printed "caller does
+/// not perform Fsz" at exit 0, and this engine carries that guard too (see `cmd_path`'s KNOWN_EFFECTS
+/// check). The guard was built for argument 2 and never for argument 1.
+///
+/// AMBIGUITY IS COUNTED OVER DISTINCT NAMES, not over rows: a report SET unions siblings, so the same
+/// qual can arrive more than once and a row count would refuse a question that has one answer.
+///
+/// VERB-SWEEP BOUNDARY (audited by grepping every selector-taking verb in this crate, not drawn around
+/// the verb the row was filed against): `show` (`show.rs`), `callers`/`callers_via_callgraph`
+/// (`callers.rs`) and `whatif` (`policy.rs`) answer over the WHOLE best-tier set, so many matches WIDEN
+/// an answer rather than substituting its subject; `fix` (`fix.rs`) is anchored and picks, but PREFERS a
+/// tier match that performs the effect, so it cannot emit "nothing to hoist" while a sibling match
+/// performs it — deliberately left alone, and it must stay byte-aligned with java/ts/swift. `reachable`,
+/// `rewire`, `gains`, `receipt`, `diff`, `containment`, `blindspots`, `map`, `tour`, `gate`, `fix-gate`
+/// and `unverified` take no function selector at all. `path` and `impact` were the only two call sites
+/// of an unanchored `.func.contains(<selector>)` in this crate, and the only two that both pick
+/// arbitrarily AND phrase their answer as a determined negative about the picked name.
+pub(crate) fn select_one<'a>(entries: &'a [ReportEntry], q: &str, verb: &str) -> Result<&'a ReportEntry, i32> {
+    let tier = best_tier(entries.iter().map(|e| e.func.as_str()), q);
+    if tier == 0 {
+        // UNCHANGED WORDING: this arm already existed in both verbs and is pinned by the suite.
+        eprintln!("candor-query {verb}: no function matching '{q}'");
+        return Err(2);
+    }
+    let mut hits: Vec<&ReportEntry> = Vec::new();
+    for e in entries {
+        if q_match(&e.func, q, tier) && !hits.iter().any(|h| h.func == e.func) {
+            hits.push(e);
+        }
+    }
+    if let [only] = hits[..] {
+        return Ok(only);
+    }
+    // REFUSE, and NAME THE CANDIDATES: the remedy is that the user's next command is one of these lines
+    // pasted back. Capped, because a one-segment selector over a large report can match hundreds and an
+    // unreadable refusal is a refusal people work around.
+    let mut names: Vec<&str> = hits.iter().map(|e| e.func.as_str()).collect();
+    names.sort_unstable();
+    eprintln!(
+        "candor-query {verb}: `{q}` is AMBIGUOUS — {} functions match it equally well. This verb answers \
+         ABOUT ONE function, so picking one would state a fact about a function you did not ask about. \
+         Re-run with one of:",
+        names.len()
+    );
+    for n in names.iter().take(12) {
+        eprintln!("    {n}");
+    }
+    if names.len() > 12 {
+        eprintln!("    … and {} more (`candor-query show {q}` lists them all)", names.len() - 12);
+    }
+    Err(2)
+}

@@ -453,13 +453,12 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
     };
     let by_name: HashMap<&str, &ReportEntry> =
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
-    let target = entries
-        .iter()
-        .find(|e| e.func == *fn_arg)
-        .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
-    let Some(target) = target else {
-        eprintln!("candor-query impact: no function matching '{fn_arg}'");
-        return 2;
+    // SOUNDNESS R507 — anchored resolution, and a REFUSAL on many. `affectedCount: 0` is this verb's
+    // strongest claim (*nothing downstream, safe to edit*); pre-fix it made that claim about whichever
+    // longer identifier happened to CONTAIN the selector. See [`crate::matching::select_one`].
+    let target = match select_one(&entries, fn_arg, "impact") {
+        Ok(t) => t,
+        Err(code) => return code,
     };
     // Reverse the effect-relevant call graph, then BFS backward from the target.
     let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -617,13 +616,14 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
     }
     let by_name: HashMap<&str, &ReportEntry> =
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
-    let start = entries
-        .iter()
-        .find(|e| e.func == *fn_arg)
-        .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
-    let Some(start) = start else {
-        eprintln!("candor-query path: no function matching '{fn_arg}'");
-        return 2;
+    // SOUNDNESS R507 — anchored resolution, and a REFUSAL on many. ALL THREE of this verb's emit sites
+    // phrase a fact ABOUT `start`, and two of them are determined negatives (*does not perform E*, *not
+    // statically traceable*), so a substituted subject here is a fabricated claim rather than an
+    // unhelpful one. Note this verb ALREADY refuses a typo'd EFFECT argument immediately above — R507 is
+    // that same guard on argument 1. See [`crate::matching::select_one`].
+    let start = match select_one(&entries, fn_arg, "path") {
+        Ok(s) => s,
+        Err(code) => return code,
     };
     // ⟨0.32⟩ THE COMPLETENESS READER THIS VERB DID NOT HAVE, read ONCE for all three emit sites below —
     // two of which answer `path: []`, this verb's determined negative (*<fn> does not reach that effect*).
