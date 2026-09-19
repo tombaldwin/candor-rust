@@ -3668,9 +3668,11 @@ fn a_foreign_effectful_implementor_reaches_a_chained_consumer_and_a_pure_only_on
          row vanished precisely because the one implementor the library could see was pure");
     assert_eq!(term["inferred"].as_array().map(Vec::len).unwrap_or(0), 0,
         "…and it is emitted while still PURE — the row is the disclosure, not a new effect: {term}");
-    assert_eq!(term["dispatchesOn"], serde_json::json!(["Backend::size"]),
-        "…naming the dispatched member in this package's own namespace, so the consumer forms \
-         `iface#Backend::size` with no second spelling rule: {term}");
+    assert_eq!(term["dispatchesOn"], serde_json::json!(["iface#Backend::size"]),
+        "…naming the dispatched member in the OWNING package's entry-key spelling (SOUNDNESS R503), so \
+         the consumer joins the value AS GIVEN and prefixes nothing. `Backend` sits at this fixture's \
+         crate root, so only the `iface#` prefix distinguishes the two spellings here; the module-path \
+         fixture below is the one that discriminates the rest: {term}");
 
     // ── OBLIGATION 2: the FOREIGN implementor publishes under the OWNING package's key ─────────────
     let eff_rep = scan(&effimpl, &[]);
@@ -3718,12 +3720,12 @@ fn a_foreign_effectful_implementor_reaches_a_chained_consumer_and_a_pure_only_on
 /// contributor; this one covers the consumer that supplies the effectful implementor ITSELF — and it
 /// puts the dependency's abstraction in a MODULE, which is what distinguishes the two key spellings.
 ///
-/// `dispatchesOn` carries the trait LEAF (`Backend::size`, the spelling `dispatch_sites` records) while
-/// obligation 2's wire key is fully QUALIFIED in the owning package (`iface#backend::Backend::size`, the
-/// ⟨0.23⟩ rule). The chained half needs no reconciliation — `load_dep_reports` publishes every entry
-/// under its 2-segment tail as well — but the LOCAL half has no such index. Written with the abstraction
-/// at the dependency's crate ROOT, this arm passes whether or not that is handled, which is precisely the
-/// shape a fixture is flattered by: `ratatui_core::backend::Backend` is in a module, and so is this.
+/// AND IT IS THE R503 PIN. `dispatchesOn` and obligation 2's key are now ONE spelling — fully qualified
+/// in the owning package's namespace, the ⟨0.23⟩ rule — because they were two: the value carried the
+/// trait LEAF while the foreign union entry carried `iface#backend::Backend::size`, so one member had two
+/// names in one report and a consumer could join only one of them without a per-engine rule. Written with
+/// the abstraction at the dependency's crate ROOT this arm cannot tell those apart, which is precisely
+/// the shape a fixture is flattered by: `ratatui_core::backend::Backend` is in a module, and so is this.
 #[test]
 fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_through_a_module_path() {
     let d = std::env::temp_dir().join(format!("candor-scan-cli-r475own-{}", std::process::id()));
@@ -3770,9 +3772,13 @@ fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_thro
     };
 
     let iface_rep = scan(&iface, &[]);
-    // The member is named by its LEAF here — the spelling the local dispatch machinery records.
+    // R503 — THE DISCRIMINATING ASSERTION. The leaf spelling (`Backend::size`) and the pre-R503
+    // crate-prefixed one (`iface#Backend::size`) are both WRONG here and both would have passed the
+    // root-level fixture above. The member must be spelled as the owning package's own entry hashes
+    // spell it, which is the same key `collect_foreign_trait_impls` writes for the same abstraction.
     assert_eq!(row(&iface_rep, "term_size").expect("the dispatching row is emitted")["dispatchesOn"],
-        serde_json::json!(["Backend::size"]), "{iface_rep}");
+        serde_json::json!(["iface#backend::Backend::size"]),
+        "⟨0.39⟩/R503: ONE spelling for one abstraction — the owning package's entry key: {iface_rep}");
     let iface_p = d.join("iface.json");
     std::fs::write(&iface_p, serde_json::to_string(&iface_rep).unwrap()).unwrap();
 
@@ -3785,10 +3791,124 @@ fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_thro
     let chained = scan(&app, &[&iface_p]);
     let app_size = row(&chained, "app_size").expect("app_size dispatches into the dependency");
     assert!(app_size["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
-        "⟨0.39⟩ obligation 3 names the consumer's OWN visible implementors FIRST. The member arrives \
-         leaf-spelled (`Backend::size`) and the local index is keyed qualified \
-         (`iface#backend::Backend::size`); asking only one spelling silently drops this leg for every \
-         abstraction that is not at its crate's root — which is every real one: {app_size}");
+        "⟨0.39⟩ obligation 3 names the consumer's OWN visible implementors FIRST, and after R503 the \
+         member arrives in exactly the spelling `foreign_impls` is keyed by, so the two halves meet \
+         without reconciliation. Before it they met only for an abstraction at its crate's ROOT — which \
+         no real one is: {app_size}");
+}
+
+/// SOUNDNESS R504 / ⟨0.39⟩ obligation 1 — THE MIDDLE PACKAGE, on a FOUR-package chain.
+///
+/// `dispatch_sites` recorded LOCAL-trait dispatch only (`trait_declares_method` over `trait_decls`), so a
+/// package that depends on the abstraction's owner and dispatches over it — owning neither the trait nor
+/// any implementor of it — named NOTHING, and the ⟨0.39⟩ chain broke one hop short. Found by candor-java's
+/// port reading this engine's source, and measured silent here before it was closed: `iface::backend::
+/// Backend` · `mid::term_size(&dyn Backend)` · `effimpl::Crossterm` (effectful) · an app chained onto all
+/// three. The app's `app_size` was ABSENT, which under ⟨0.21⟩ is a positive claim of purity — `deny Net`
+/// over it exited 0.
+///
+/// WHY THE THREE-PACKAGE ARMS ABOVE CANNOT SEE IT. In those, the dispatching package IS the owner, so the
+/// local route answers and the hole never opens. The defect needs a dispatcher that owns nothing, which
+/// takes a fourth package — the same lesson every audit-boundary row in SOUNDNESS records: the fixture
+/// that closes one defect is the boundary of the next.
+///
+/// TWO ASSERTIONS, ONE PACKAGE APART, because the fix has two halves: `mid` must NAME the member
+/// (effect-free — it names, it does not hedge), and the app must then reach `effimpl`'s union THROUGH it.
+///
+/// WHERE THE COMPILE PROOF IS. These fixtures are scanned, not built — like every other arm in this file.
+/// The COMPILING twin of this exact program is conformance PART 92's `c6_middle_package`, which renders
+/// the same four packages and `cargo build`s the consumer (pulling all three dependencies in) before any
+/// engine sees them. That matters most for the pure-only control below, because an absence asserted over
+/// a program that cannot exist is not weak evidence but none.
+#[test]
+fn a_middle_package_dispatching_over_its_dependencys_abstraction_names_the_member_too() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r504-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    // The OWNER of the abstraction. In a module, not at the root — the `ratatui_core` shape, and the one
+    // that distinguishes the wire spellings (R503).
+    let iface = pkg("iface", "",
+        "pub mod backend {\n\
+         \x20   pub trait Backend { fn size(&self) -> usize; }\n\
+         \x20   pub struct TestBackend;\n\
+         \x20   impl Backend for TestBackend { fn size(&self) -> usize { 7 } }\n\
+         }\n");
+    // THE MIDDLE PACKAGE: it dispatches over its own dependency's trait and owns nothing.
+    let mid = pkg("mid", "iface = \"1\"\n",
+        "use iface::backend::Backend;\n\
+         pub fn term_size(b: &dyn Backend) -> usize { b.size() }\n");
+    // The THIRD package: the effectful implementor of the same foreign abstraction.
+    let effimpl = pkg("effimpl", "iface = \"1\"\n",
+        "pub struct Crossterm;\n\
+         impl iface::backend::Backend for Crossterm {\n\
+             fn size(&self) -> usize { let _ = std::net::TcpStream::connect(\"h:1\"); 0 }\n\
+         }\n");
+    // The consumer, which spells no dispatch of its own.
+    let app = pkg("app", "iface = \"1\"\nmid = \"1\"\neffimpl = \"1\"\n",
+        "pub fn app_size(b: &dyn iface::backend::Backend) -> usize { mid::term_size(b) }\n\
+         pub fn app_run() -> usize { app_size(&effimpl::Crossterm) }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG");
+        if deps.is_empty() { c.env_remove("CANDOR_DEPS"); }
+        else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+    let row = |v: &serde_json::Value, name: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == name).cloned()
+    };
+    let write = |v: &serde_json::Value, file: &str| -> std::path::PathBuf {
+        let p = d.join(file);
+        std::fs::write(&p, serde_json::to_string(v).unwrap()).unwrap();
+        p
+    };
+
+    let iface_p = write(&scan(&iface, &[]), "iface.json");
+
+    // ── HALF 1: the middle package NAMES the member, under the owner's key ─────────────────────────
+    let mid_rep = scan(&mid, &[&iface_p]);
+    let term = row(&mid_rep, "term_size").expect(
+        "R504: the MIDDLE package must name the dependency's member it dispatches on, even though it \
+         owns neither the abstraction nor any implementor of it — the key is the dependency's and is \
+         already fully qualified, so naming it invents nothing. Absence here is the purity claim");
+    assert_eq!(term["dispatchesOn"], serde_json::json!(["iface#backend::Backend::size"]),
+        "…keyed under the OWNING crate, which is why the value has to carry the `#` itself: prefixing \
+         the DISPATCHING crate would name the wrong owner entirely: {term}");
+    assert_eq!(term["inferred"].as_array().map(Vec::len).unwrap_or(0), 0,
+        "…and effect-free: it names, it does not hedge. A middle package that started charging `Unknown` \
+         on `a dispatch occurred` would bill every consumer of every dispatching library: {term}");
+
+    // ── HALF 2: the app reaches the THIRD package's implementor THROUGH it ─────────────────────────
+    let mid_p = write(&mid_rep, "mid.json");
+    let eff_p = write(&scan(&effimpl, &[&iface_p]), "effimpl.json");
+    let chained = scan(&app, &[&iface_p, &mid_p, &eff_p]);
+    let app_size = row(&chained, "app_size").expect(
+        "…and the consumer reaches the third package's implementor through it. Absence here is R475's \
+         purity claim, four packages out");
+    assert!(app_size["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
+        "the foreign implementor's effect must REACH the consumer across the middle package: {app_size}");
+
+    // ── CONTROL (the fabrication guard, one package further out than PART 92's c3_pure_only): with
+    //    the effectful implementor NOT in the chain, the same consumer source must gain nothing. A
+    //    middle package that names a member is a disclosure; unioning on the name alone is a charge.
+    let pure_only = scan(&app, &[&iface_p, &mid_p]);
+    assert!(row(&pure_only, "app_size").is_none_or(|e| !e["inferred"].as_array()
+                .is_some_and(|a| a.iter().any(|x| x == "Net"))),
+        "a consumer over a chain whose only implementor ANYWHERE is pure must gain no effect — a miss \
+         adds nothing, which is what keeps this a disclosure rather than a hedge: {pure_only}");
 }
 
 /// ⟨0.39⟩ THE REPORT MUST BE BYTE-STABLE, and obligation 2 is what stopped it being so.

@@ -100,6 +100,13 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // reason; the reason is worth stating once more because it is the cheap half of a lesson whose
     // expensive half was learned three separate times this week: a fix that is correct but not REACHED
     // is byte-identical, from the outside, to a fix that does not work.
+    // rev35: `FileDecls` gained `trait_quals` and `FnInfo` gained `foreign_dispatch` (SOUNDNESS R503 +
+    // R504 — the WIRE spelling of a dispatched abstraction, and the middle-package dispatch site). A
+    // rev34 entry has neither, so `#[serde(default)]` reads both EMPTY: every local interface-union
+    // entry falls back to the leaf key §4 ⟨0.39⟩ forbids, and a package dispatching over its OWN
+    // dependency's trait publishes no `dispatchesOn` at all — which is byte-for-byte the pre-fix report
+    // in both cases. Same trap as rev34/rev33/rev25: a fix served from a stale cache is
+    // indistinguishable, from the outside, from a fix that does not work.
     // rev34: `FileDecls` gained `foreign_impls` (SPEC §4 ⟨0.39⟩ obligation 2 — the abstractions a file
     // implements that it does NOT own). A rev33 entry has no such field, so `#[serde(default)]` reads an
     // EMPTY map and the crate publishes NO foreign interface-union entry — which is byte-for-byte the
@@ -212,7 +219,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev34/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev35/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -345,6 +352,13 @@ pub(crate) struct FileDecls {
     /// which republishes precisely the silence the rung closes — hence the rev bump in `cache_schema`.
     #[serde(default)]
     pub(crate) foreign_impls: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R503 — `trait leaf -> the MODULE-QUALIFIED path(s) this file declares it at`
+    /// (`Backend -> {backend::Backend}`). See `lang::collect_trait_decl_quals`. Absent from a pre-rev35
+    /// entry, which is why that rev exists: an empty map makes every local interface-union entry and
+    /// every `dispatchesOn` value fall back to the LEAF spelling — the one §4 ⟨0.39⟩ names as the
+    /// second spelling it forbids — served invisibly from a warm cache.
+    #[serde(default)]
+    pub(crate) trait_quals: HashMap<String, Vec<String>>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -403,6 +417,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // file's assembled `use` map, which is what `collect_decls` has just finished producing.
     let mut foreign_impls = HashMap::new();
     crate::lang::collect_foreign_trait_impls(items, include_tests, &uses, &mut foreign_impls);
+    // R503 — the MODULE-QUALIFIED path of every trait this file DECLARES. Walked here beside the
+    // foreign-impl walk because it answers the same question from the other side: that one records what
+    // an `impl` calls somebody else's abstraction, this one records what the OWNER calls its own. It
+    // needs `modpath`, which `collect_decls` does not carry, so it is a separate walk.
+    let mut trait_quals: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    crate::lang::collect_trait_decl_quals(items, modpath, include_tests, &mut trait_quals);
     FileDecls {
         fields,
         field_elem,
@@ -466,6 +486,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
             }
             m
         },
+        // R503 — a `BTreeSet` in, a sorted `Vec` out: same determinism requirement, same reason.
+        trait_quals: trait_quals.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
     }
 }
 
@@ -520,6 +542,10 @@ pub(crate) struct MergedDecls {
     /// implementing the same foreign member for DIFFERENT types both contribute — the union over them is
     /// what the entry publishes, which is §4's bounded-CHA over-approximation, not a choice between them.
     pub(crate) foreign_impls: HashMap<String, Vec<String>>,
+    /// R503 — every file's TRAIT DECLARATION QUALS, unioned. See `FileDecls::trait_quals`. A leaf with
+    /// TWO quals is ambiguous and every consumer refuses it, exactly as `LocalTrait::count > 1` already
+    /// refuses the same leaf one field over.
+    pub(crate) trait_quals: HashMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -801,6 +827,14 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
             }
         }
     }
+    for (k, v) in &fd.trait_quals {
+        // R503 — set union, so a leaf declared in two modules carries BOTH quals and is refused rather
+        // than resolved to whichever file was merged last.
+        let e = acc.trait_quals.entry(k.clone()).or_default();
+        for q in v {
+            e.insert(q.clone());
+        }
+    }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
     }
@@ -1044,6 +1078,20 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         let mut v: Vec<&String> = m.foreign_impls[k].iter().collect();
         v.sort();
         for q in v {
+            s.push(',');
+            s.push_str(q);
+        }
+    }
+    s.push('\n');
+    // trait_quals — R503. Decides the WIRE spelling of every local interface-union entry key and of
+    // `dispatchesOn`, so a file that moves a trait between modules changes what consumers can join.
+    s.push_str("trait_quals");
+    let mut tqk: Vec<&String> = m.trait_quals.keys().collect();
+    tqk.sort();
+    for k in tqk {
+        s.push('|');
+        s.push_str(k);
+        for q in &m.trait_quals[k] {
             s.push(',');
             s.push_str(q);
         }

@@ -156,6 +156,13 @@ pub(crate) struct FnInfo {
     /// Pass-B result (`cache_schema` rev bump on this field's addition).
     #[serde(rename = "ds", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) dispatch: Vec<(String, String)>,
+    /// SOUNDNESS R504 / SPEC §4 ⟨0.39⟩ obligation 1 — the FOREIGN abstraction members this fn dispatches
+    /// on, already in the ⟨0.23⟩ wire spelling (`iface#backend::Backend::size`). See
+    /// `CallCollector::foreign_dispatch_sites` for why this is a separate field from `dispatch` and for
+    /// the four-package chain it was measured on. Cached like any other Pass-B result (`cache_schema`
+    /// rev35).
+    #[serde(rename = "fd", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) foreign_dispatch: Vec<String>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.

@@ -339,6 +339,23 @@ pub(crate) struct CallCollector<'a> {
     /// implements), entirely after both recursion halves have already run. See the module doc at the
     /// `out_of_scope` block in `scan.rs` for the full mechanism and its soundness argument.
     pub(crate) dispatch_sites: std::collections::BTreeSet<(String, String)>,
+    /// SOUNDNESS R504 — the FOREIGN abstraction members this body dispatches on, ALREADY IN WIRE FORM
+    /// (`iface#backend::Backend::size`, the ⟨0.23⟩ key in the OWNING crate's namespace).
+    ///
+    /// WHY A SECOND SET AND NOT A WIDER `dispatch_sites`. That one is `(trait leaf, method leaf)` and its
+    /// first reader is the ⟨0.29⟩ peek, which asks a purely LOCAL question — which in-scope functions
+    /// could reach an excluded declaration — and has no use for a crate qualifier. This one is a wire
+    /// key and cannot be spelled by leaf at all, because the crate that dispatches is not the crate that
+    /// owns the abstraction. Keeping them apart is what stops obligation 1's spelling rule from leaking
+    /// into the peek's index.
+    ///
+    /// WHAT IT CLOSES. `dispatch_calls_for_trait_method` records a site only for a LOCAL trait, so a
+    /// MIDDLE package — one that depends on the abstraction's owner and dispatches over it, owning
+    /// neither the trait nor any implementor — named nothing, and a consumer chained onto it never
+    /// learned the member to union on. Measured four packages deep: `iface::backend::Backend` ·
+    /// `mid::term_size(&dyn Backend)` · `effimpl::Crossterm` (effectful) · an app chained onto all
+    /// three. The app's caller was ABSENT, which under ⟨0.21⟩ is a positive claim of purity.
+    pub(crate) foreign_dispatch_sites: std::collections::BTreeSet<String>,
     /// DROP-GLUE: the local type leaves whose construction is worth marking — every type with a local
     /// `impl Drop`, plus every type that transitively OWNS one through a field (`owned_drops`' keys).
     /// The gate is here, not at consumption, purely so the marker stream stays tiny: without it every
@@ -3211,6 +3228,38 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }).unwrap_or(tr.as_str());
                     let full = crate::lang::expand(written, &self.uses);
                     let root = full.split("::").next().unwrap_or("");
+                    // SOUNDNESS R504 — SPEC §4 ⟨0.39⟩ obligation 1, for an abstraction THIS CRATE DOES
+                    // NOT OWN. The emission below already forms the crate-qualified CALL, which answers
+                    // "what does the owner's own report say about this member". It does not answer the
+                    // other half: a package one hop further out has to be TOLD that this body dispatches
+                    // there, or it can never union a THIRD package's implementor onto it. Recorded from
+                    // the same `full` the call is built from, so the two can never disagree about which
+                    // abstraction was meant.
+                    //
+                    // THE GATE IS PROVENANCE, and it is the same one obligation 2's key uses
+                    // (`collect_foreign_trait_impls`): the path must root at a genuine dependency crate,
+                    // never std/`crate`/`self`/`super`. A local module spelled like a crate survives it
+                    // here and is filtered against the manifest at emission, where the dependency set is
+                    // known — exactly as the foreign-impl key is.
+                    //
+                    // DELIBERATELY NOT GATED ON `dyn_sig_traits`. That erasure carve-out exists because
+                    // CHA-ing a crate's own impls onto a MONOMORPHIZED generic fabricates EDGES (R4's
+                    // serde_json measurement). Naming the member fabricates nothing: it adds a string the
+                    // consumer may join, and a join that misses adds nothing at all (PART 92's
+                    // `c3_pure_only`). Charging on "a dispatch occurred" is the fabrication direction; this
+                    // is the disclosure direction, and §4 asks for it on every dispatch it can see.
+                    if crate::lang::is_dependency_crate_root(root) {
+                        if let Some((owner, rest)) = full.split_once("::") {
+                            // REACH PROBE, the `CANDOR_ALIAS_DEBUG` channel `R485HIT`/`R446DYN` already
+                            // use: a corpus A/B counts hits on the CHANGED branch rather than inferring
+                            // reach from a byte-identical diff. "CHANGED 0 is not evidence until REACH is
+                            // measured" — 17,944 units once read inert while the code never ran.
+                            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                eprintln!("R504HIT {owner}");
+                            }
+                            self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
+                        }
+                    }
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
                         self.calls.push(Call { argc: 0, entropy_arg: false,
                             path: format!("{full}::{leaf}"),

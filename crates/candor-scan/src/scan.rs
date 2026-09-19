@@ -1872,9 +1872,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // output; consulted only by the ⟨0.29⟩ peek's out-of-scope block, far below, to test a policy's scope
     // against every in-scope function that could REACH a peeked declaration via dynamic dispatch — not
     // only the peeked declaration's own name.
-    // ⟨0.39⟩ `foreign_impls` under the 2-SEGMENT TAIL of the member, so the consumer half of the union
-    // can be asked in the spelling `dispatchesOn` uses (the trait LEAF) as well as the qualified one the
-    // wire key requires. Built once; see the lookup for why both are needed. A tail two keys share is
+    // ⟨0.39⟩ `foreign_impls` under the 2-SEGMENT TAIL of the member. Since R503 the wire value and this
+    // index agree on spelling, so the tail is no longer the reconciliation it was built as — it is the
+    // fallback for the two cases the exact key cannot cover: an owner that RE-EXPORTS its abstraction
+    // from a module other than the one declaring it, and a dependency report written by a pre-R503
+    // producer, which spelled the member by LEAF. Built once. A tail two keys share is
     // MERGED rather than dropped — the value is a list of implementor quals and the union over them is
     // what the rung publishes, which is §4 bounded CHA, not a choice between two traits.
     let foreign_impls_by_tail2: HashMap<String, Vec<String>> = {
@@ -2914,8 +2916,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let mut seen_members: std::collections::HashSet<String> =
                         pending.iter().cloned().collect();
                     while let Some(member) = pending.pop() {
-                        let ukey = format!("{cr_real}#{member}");
-                        if let Some(ude) = deps_idx.by_key.get(&ukey) {
+                        // R503/R504 — THE VALUE IS THE KEY. ⟨0.39⟩ pins `dispatchesOn` to the owning
+                        // package's entry-key spelling, so a conforming producer hands over something
+                        // that is already joinable and the consumer prefixes NOTHING. That is not a
+                        // nicety: under R504 a MIDDLE package names a member owned by ITS dependency, so
+                        // prefixing the dispatching crate would form a key naming the wrong owner.
+                        //
+                        // A value with no `#` is a pre-⟨0.39⟩-spelling producer (candor-scan ≤0.38.4
+                        // published the trait LEAF), and it is read the way that producer meant it —
+                        // under the dispatching crate. Kept because a consumer is chained onto whatever
+                        // reports are on disk, and dropping those values would convert an older
+                        // dependency's disclosure into silence at the exact moment this engine upgrades.
+                        let ukey = if member.contains('#') {
+                            member.clone()
+                        } else {
+                            format!("{cr_real}#{member}")
+                        };
+                        // …and the 2-SEGMENT TAIL of whatever that came to, for the one case a fully
+                        // qualified key cannot reach on its own: an abstraction the owner RE-EXPORTS from
+                        // a different module than it declares it in, where the implementor's `use` path
+                        // and the owner's declaration path disagree. `load_dep_reports` publishes every
+                        // entry under its tail2 as well, so this is asking an index that already exists;
+                        // it can only ADD a contributor, never withdraw one.
+                        let (ukey_owner, ukey_member) =
+                            ukey.split_once('#').unwrap_or((cr_real, &ukey));
+                        let ukey_t2 = tail2(ukey_member)
+                            .map(|t2| format!("{ukey_owner}#{t2}"))
+                            .unwrap_or_else(|| ukey.clone());
+                        if let Some(ude) =
+                            deps_idx.by_key.get(&ukey).or_else(|| deps_idx.by_key.get(&ukey_t2))
+                        {
                             apply_dep_fn(ude, &f.qual, DepSink {
                                 direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                                 tables: &mut tables, incomplete: &mut incomplete,
@@ -2935,21 +2965,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // implement the dependency's abstraction itself, and that body is LOCAL — so it
                         // joins as an ordinary call EDGE and its effects flow through the same fixpoint
                         // every other local call uses, rather than being re-derived here.
-                        // TWO SPELLINGS OF ONE KEY, and the difference is not cosmetic. `dispatchesOn`
-                        // carries the trait LEAF (`Backend::size`, which is what `dispatch_sites`
-                        // records), while `foreign_impls` is keyed by the trait's QUALIFIED path in the
-                        // owning crate (`backend::Backend::size`) — the ⟨0.23⟩ spelling obligation 2
-                        // requires. The chained half needs no reconciliation because `load_dep_reports`
-                        // already publishes every entry under its 2-segment tail as well; the LOCAL half
-                        // has no such index, so it is asked for both. Without this, a consumer that
-                        // implements the dependency's abstraction ITSELF is only found when the trait
-                        // happens to be declared at the owner's crate root — true of a fixture, false of
-                        // `ratatui_core::backend::Backend`.
-                        let tail2_key = tail2(&member)
-                            .map(|t2| format!("{cr_real}#{t2}"))
-                            .unwrap_or_else(|| ukey.clone());
+                        // ONE SPELLING, since R503 — `dispatchesOn` and `foreign_impls` are now keyed
+                        // the same way (the ⟨0.23⟩ qualified path in the OWNING crate), so `ukey` asks
+                        // the local index in exactly the spelling it is built with. This used to be TWO
+                        // spellings reconciled here, and the reconciliation held only because
+                        // `load_dep_reports` publishes a tail2 key for every entry; the LOCAL index has
+                        // no such fallback, so a consumer implementing the dependency's abstraction
+                        // ITSELF was found only when the trait sat at the owner's crate ROOT — true of a
+                        // fixture, false of `ratatui_core::backend::Backend`. `ukey_t2` stays as the
+                        // re-export / older-producer fallback, and it can only ADD a contributor.
                         if let Some(impl_quals) = merged.foreign_impls.get(&ukey)
-                            .or_else(|| foreign_impls_by_tail2.get(&tail2_key))
+                            .or_else(|| foreign_impls_by_tail2.get(&ukey_t2))
                         {
                             for cand in impl_quals {
                                 if let Some(ts) = by_tail2.get(cand) {
@@ -3654,6 +3680,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let tablesacc = propagate_str(&tables, &calls, &all);
     let incompleteacc = propagate(&incomplete, &calls, &all); // transitive masking-incompleteness
     let blind_acc = propagate_str(&blind_direct, &calls, &all); // transitive per-fn blind reach
+    // SOUNDNESS R503 — ONE SPELLING FOR ONE ABSTRACTION, on the wire.
+    //
+    // SPEC §4 ⟨0.39⟩ pins BOTH obligation 2's key and `dispatchesOn`'s value to the ⟨0.23⟩ rule: fully
+    // qualified in the OWNING package's namespace, the namespace that package's entry hashes use — and it
+    // names `ratatui_core#Backend::size` explicitly as the under-qualified spelling it forbids. This
+    // engine had produced BOTH: the FOREIGN union entry is keyed `{owner}#{backend::Backend}::{size}`
+    // (from the implementing file's `use` map) while the LOCAL union entry and every `dispatchesOn` value
+    // were keyed by trait LEAF, because every trait index in this engine is leaf-keyed. So one member had
+    // two names in one report and a consumer could join only one of them without a per-engine rule.
+    //
+    // `trait_quals` (R503, Pass A) is the missing source. A leaf declared TWICE carries two quals and this
+    // returns `None`: the ambiguous leaf is refused, exactly as `LocalTrait::count > 1` refuses it for CHA
+    // — never a guess between two traits. A leaf with NO recorded qual (a trait this crate does not
+    // declare, reached through a leaf-keyed index) also returns `None` rather than inventing an owner.
+    fn union_member_key(
+        trait_quals: &HashMap<String, std::collections::BTreeSet<String>>,
+        crate_name: &str,
+        trait_leaf: &str,
+        method: &str,
+    ) -> Option<String> {
+        let quals = trait_quals.get(trait_leaf)?;
+        let mut it = quals.iter();
+        let one = it.next()?;
+        if it.next().is_some() {
+            return None; // two declarations share this leaf — refuse, never pick
+        }
+        // REACH PROBE — same channel and same reason as `R504HIT`. This one fires wherever the wire
+        // spelling is DECIDED, which is the branch R503 changed.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R503HIT {one}");
+        }
+        Some(format!("{crate_name}#{one}::{method}"))
+    }
+
     // ⟨0.39⟩ SPEC §4 obligation 1 — `dispatchesOn`, TRANSITIVELY. The raw material is `FnInfo::dispatch`
     // (`CallCollector::dispatch_sites`), which records the (trait leaf, method leaf) pairs a body dispatches
     // on through a LOCAL bounded-CHA-eligible receiver, regardless of how many implementors are visible.
@@ -3662,15 +3722,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // through a dispatching callee, since in the measured instance (R475) the consumer calls
     // `iface::term_size` and never spells the dispatch itself.
     //
-    // The member is spelled in THIS package's namespace (`Backend::size`), which is the suffix of the
-    // interface-union entry hash `{crate}#{Backend::size}` — so a consumer forms the key by prefixing the
-    // row's own package and needs no second spelling rule (§4 ⟨0.39⟩ obligation 2's "MUST NOT invent a
-    // second spelling"). Propagated with the same fixpoint every other transitive fact uses.
+    // R503 — THE VALUE IS A WHOLE ENTRY KEY (`iface#backend::Backend::size`), not a suffix a consumer
+    // prefixes. This paragraph said the opposite until R503, and the opposite was wrong twice over: the
+    // leaf is the under-qualified spelling §4 ⟨0.39⟩ explicitly forbids, and prefixing the ROW's own
+    // package is only correct while the dispatching package is also the OWNING one — which R504 is
+    // precisely the case where it is not. Propagated with the same fixpoint every other transitive fact
+    // uses.
     let dispatch_direct: HashMap<String, BTreeSet<String>> = {
         let mut m: HashMap<String, BTreeSet<String>> = HashMap::new();
         for f in &fns {
             for (tr, meth) in &f.dispatch {
-                m.entry(f.qual.clone()).or_default().insert(format!("{tr}::{meth}"));
+                if let Some(member) = union_member_key(&merged.trait_quals, &crate_name, tr, meth) {
+                    m.entry(f.qual.clone()).or_default().insert(member);
+                }
+            }
+            // R504 — a FOREIGN abstraction's member is already in wire form and already keyed under the
+            // crate that OWNS it, which is the whole point: the dispatching crate is not the owner, so
+            // no amount of prefixing here could produce the right key.
+            //
+            // PROVENANCE IS CHECKED AGAINST THE MANIFEST HERE, exactly as obligation 2's key is, and for
+            // the same reason: the collector's gate is `is_dependency_crate_root`, which admits anything
+            // that is not std/`crate`/`self`/`super` — a LOCAL module spelled like a crate passes it, and
+            // so does a `use std::io::{self, Write}` whose `io::Write` never expands. Measured on the
+            // 1,599-crate corpus BEFORE this filter existed: nine rows published `io#Write::write_all`,
+            // naming a package that does not exist. `deps` is Cargo.toml's real dependency set and is
+            // only known here. A key no consumer could ever join is not harmless — it is a name collision
+            // waiting for a real crate called `io`.
+            for member in &f.foreign_dispatch {
+                if member.split_once('#').is_some_and(|(owner, _)| deps.contains(owner)) {
+                    m.entry(f.qual.clone()).or_default().insert(member.clone());
+                }
             }
         }
         m
@@ -4074,12 +4155,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if inf_u.is_empty() && blind_u.is_empty() {
                     continue; // pure across all impls — silence = purity
                 }
-                let hash = format!("{crate_name}#{trait_leaf}::{method}");
+                // R503 — the ⟨0.23⟩ spelling, not the leaf. A trait declared at `backend::Backend`
+                // publishes `iface#backend::Backend::size`, which is the SAME key the foreign half of
+                // this rung emits for the same member (`collect_foreign_trait_impls`) and the same one
+                // `dispatchesOn` now carries. Before this the local half said `iface#Backend::size` and
+                // the foreign half said `iface#backend::Backend::size` — two names for one abstraction,
+                // inside one engine, which is the ⟨0.34⟩ drift shape the clause exists to forbid.
+                // A leaf with no unambiguous declaration qual is SKIPPED rather than published under a
+                // guessed key: `trait_impls`/`trait_decls` are leaf-keyed, so an entry minted from a leaf
+                // alone could name a different crate's trait to a consumer.
+                let Some(hash) = union_member_key(&merged.trait_quals, &crate_name, trait_leaf, method)
+                else {
+                    continue;
+                };
                 if existing.contains(&hash) {
                     continue; // a real entry already claims this hash
                 }
                 entries.push(ReportEntry {
-                    func: format!("{trait_leaf}::{method}"),
+                    func: hash.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
                     inferred: inf_u.iter().map(|s| s.to_string()).collect(),
                     unresolved: inf_u.contains("Unknown"),
                     hash,

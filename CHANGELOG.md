@@ -10,6 +10,55 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R504 — the MIDDLE-PACKAGE hole: a package dispatching over its OWN dependency's trait
+  named nothing, and the ⟨0.39⟩ chain broke one hop short.** `dispatch_sites` recorded LOCAL-trait
+  dispatch only (`trait_declares_method` over `trait_decls`), so obligation 1 was scoped to abstractions
+  this crate DECLARES. A package that depends on the abstraction's owner and dispatches over it — owning
+  neither the trait nor any implementor — published no `dispatchesOn`, so a consumer chained onto it
+  never learned the member to union on. Found by candor-java's port reading this engine's source, and
+  measured here on a four-package chain before it was closed: `iface::backend::Backend` ·
+  `mid::term_size(&dyn Backend)` · `effimpl::Crossterm` (effectful) · an app chained onto all three —
+  the app's `app_size` was **ABSENT**, which under ⟨0.21⟩ is a positive claim of purity. The imported-
+  trait CHA site now records the member in wire form (`iface#backend::Backend::size`), gated on the same
+  manifest provenance obligation 2's key uses. Conformance PART 92 gained `c6_middle_package`, a genuine
+  four-package arm: java PASSES it, rust FAILED it on the pre-fix binary, ts and swift xfail it.
+
+- **⚠ SOUNDNESS R503 — `dispatchesOn` published the trait LEAF while obligation 2's key published the
+  qualified path: two wire names for one abstraction.** SPEC §4 ⟨0.39⟩ pins BOTH to the ⟨0.23⟩ rule —
+  fully qualified in the OWNING package's namespace, the namespace that package's entry hashes use — and
+  names the leaf-abbreviated form (`ratatui_core#Backend::size`) as the second spelling it forbids. This
+  engine produced both: the FOREIGN union entry was keyed `iface#backend::Backend::size` (from the
+  implementing file's `use` map) while the LOCAL union entry and every `dispatchesOn` value were keyed by
+  trait leaf, because every trait index here is leaf-keyed. A consumer could join only one of them
+  without a per-engine rule, and prefixing the ROW's own package — which is what the value required — is
+  wrong the moment the dispatching package is not the owning one, which is R504 exactly. A new Pass-A
+  walk (`collect_trait_decl_quals`) records each locally-declared trait's MODULE-QUALIFIED path; the
+  local union entry hash and `dispatchesOn` both take it, and the consumer join now uses the value AS
+  GIVEN. An ambiguous leaf (two declarations) is refused rather than guessed, the same refusal
+  `LocalTrait::count > 1` already makes. Cache schema **rev35** (a stale entry would republish the old
+  spelling invisibly). A value with no `#` is still read the old way, so a chain onto a ≤0.38.4
+  dependency report keeps its disclosure.
+
+  **A/B, 1,599 registry crates, 317,431 rows, PRE = `5e89962` release binary.** `inferred` **CHANGED 0**
+  — not one existing row's effect set moved. Wide: **ADDED 284 · REMOVED 347 · CHANGED 76,174**. REACH
+  (proving the corpus reaches both branches, not inferred from a diff): R503 40,685 hits / 592 entries,
+  R504 90,073 hits / 439 entries. Every removal audited in FULL, two mechanisms: **270** pure
+  dispatch-only rows whose only named members were std FORMATTING traits (`Display::fmt` 260,
+  `ToString::to_string` 52, `Debug::fmt` 18, `Binary`/`LowerHex`/`Octal`/`UpperHex` 2 each) — the pre-fix
+  wire spelled those `crate#Display::fmt`, naming an owner (`core`) the crate does not have, a key no
+  consumer could join, and §4 permits excluding formatting; none carried an effect. **53** local union
+  entries whose hash became module-qualified, of which 42 reappear under the qualified key and **11**
+  (both `generic-array` versions) collided with a REAL entry at the new key and were correctly skipped —
+  checked one by one: each has a real row at the identical hash carrying the same `["Unknown"]` plus
+  `loc`/`unknownWhy`, so the disclosure is strictly richer and one duplicate row fewer. Of the 284
+  additions, 42 are those renames and **234 are new pure dispatching rows** naming abstractions in 12
+  real dependency crates — `rand_core` 114, `sqlx_core` 110, `tokio` 61, `aws_smithy_runtime_api` 42,
+  `aws_smithy_async` 40, `rand` 18, `chrono` 12, `log` 8, `diesel` 6 — which is precisely the population
+  ⟨0.39⟩'s cost note calls "the abstractions an effect hides behind". **Zero added rows carry an effect.**
+  A first cut had no manifest filter on the new value and published nine `io#Write::write_all` rows
+  naming a package that does not exist; that is what the `deps` check above is for, and it was found by
+  auditing the additions rather than by reasoning about the gate.
+
 - **SOUNDNESS R501 — chaining a dependency WITHDREW a §4 reason the same scan gives unchained.**
   `dep_join_hit` sat unqualified in the disclosure gate, so a call that also met R452's
   `ambiguous:same-name local methods` condition kept `Unknown` and `unresolved: true` and SHED the

@@ -2048,6 +2048,7 @@ pub(crate) fn fninfo(
         local_uses: std::collections::HashMap::new(),
         bound_names: bound_idents(sig, block),
         dispatch_sites: std::collections::BTreeSet::new(),
+        foreign_dispatch_sites: std::collections::BTreeSet::new(),
         unresolved_why: std::collections::BTreeSet::new(),
         drop_relevant,
         // Computed ONCE per body, before the walk, because the answer is a property of the whole
@@ -2107,6 +2108,7 @@ pub(crate) fn fninfo(
         ret_bound_type,
         refusals: c.refusals.into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
+        foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
     }
 }
 

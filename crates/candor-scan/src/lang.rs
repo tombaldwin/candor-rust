@@ -2923,6 +2923,55 @@ pub(crate) fn collect_item_uses(
 /// the module — only `ident: None` items, which is exactly `collect_decls`'s own skip condition. Reading
 /// the same syn shape from the same predicate is deliberate: the index must mark precisely the modules
 /// whose items were skipped, so a future arm that starts EXPANDING one of these shapes narrows both.
+/// SOUNDNESS R503 — the MODULE-QUALIFIED path of every trait this file DECLARES (`backend` +
+/// `Backend` → `backend::Backend`), keyed by leaf.
+///
+/// WHY IT EXISTS. `trait_decls`/`trait_impls` are keyed by trait LEAF throughout this engine, which is
+/// fine for CHA (the ambiguity count guards the collision) and is NOT fine for a WIRE key. SPEC §4
+/// ⟨0.39⟩ pins both obligation 2's key and `dispatchesOn`'s value to the ⟨0.23⟩ rule — *fully qualified
+/// in the OWNING package's namespace, the namespace that package's entry hashes use* — and names the
+/// leaf-abbreviated spelling (`ratatui_core#Backend::size`) as the second spelling the clause forbids.
+/// The FOREIGN half of that key comes free from the implementing file's `use` map
+/// (`collect_foreign_trait_impls`); the LOCAL half has no such source, because a crate does not `use`
+/// its own trait by its full path. This walk is that source.
+///
+/// A leaf declared twice (two modules, one name) records BOTH quals. Every consumer already refuses an
+/// ambiguous leaf (`LocalTrait::count > 1`), and a set with two members is the same refusal one field
+/// over — never a guess between two traits.
+pub(crate) fn collect_trait_decl_quals(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    out: &mut HashMap<String, std::collections::BTreeSet<String>>,
+) {
+    for it in items {
+        match it {
+            // NO `#[cfg(test)]` FILTER ON THE TRAIT ITSELF, and that is not an oversight: `collect_decls`
+            // records EVERY `Item::Trait` into `trait_decls` and filters only the enclosing MODULE. A
+            // filter here that the index does not share would leave a leaf present in `trait_decls` with
+            // no qual beside it, and `union_member_key` refuses such a leaf — so a `#[cfg(test)]` trait
+            // would silently DELETE its crate's interface-union entry. Two walks answering one question
+            // must admit the same items; this comment is the reason they do.
+            syn::Item::Trait(t) => {
+                let leaf = t.ident.to_string();
+                let qual = if modpath.is_empty() { leaf.clone() } else { format!("{modpath}::{leaf}") };
+                out.entry(leaf).or_default().insert(qual);
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let sub = if modpath.is_empty() {
+                        m.ident.to_string()
+                    } else {
+                        format!("{modpath}::{}", m.ident)
+                    };
+                    collect_trait_decl_quals(inner, &sub, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn collect_macro_modules(
     items: &[syn::Item],
     modpath: &str,
