@@ -10,6 +10,42 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### ⚠ SOUNDNESS R513 — a trait+impl NESTED IN A MODULE published no `interfaceUnion` row
+
+- **The module form is the NORMAL case in real crates, and it was the silent one.** ⟨0.39⟩ obligation
+  2's LOCAL leg published the union entry only when the trait and its implementors sat at the crate
+  ROOT. MEASURED on two dependency crates byte-identical but for a `pub mod backend { … }` wrapper,
+  each chained into a consumer: at the root the row `deproot#Backend::size` is published, the
+  consumer's `go` carries `["Net"]` and `deny Net` exits **1**; nested in a module NO row is
+  published, `go` carries `[]` with **no `invisible`**, and `deny Net` exits **0**. SPEC §2 chaining
+  rule 3 makes that absence a purity CLAIM, so this is a silent under-report over a dependency whose
+  sole implementor opens a `TcpStream`.
+
+- **Cause: the leg looked its implementors up under a name the analysed units never have.**
+  `trait_impls` holds each self type AS WRITTEN (`Net1`, never `backend::Net1`), while `inferred` is
+  keyed by the unit's full qual, so both candidate keys missed and the member was scored "pure across
+  all impls" — silence, not a hedge. The FOREIGN leg of the same rung already resolved its implementor
+  tails through the `by_tail2` index; the local leg did not, and that asymmetry was the whole defect.
+  Fixed by giving the local leg the same fallback, with the same refusal: a tail claimed by two units
+  is never guessed between.
+
+- **Key spelling unchanged (SOUNDNESS R503): `depmod#backend::Backend::size`** — fully qualified in
+  the owning package's namespace, the one spelling `69dd565` unified. A row published under the leaf
+  would satisfy "an entry exists" while reintroducing a fourth name for one abstraction, so the
+  regression test asserts the KEY, not only the effect.
+
+- **A/B over 1,599 registry crates / 317,368 rows pre, 320,645 post: ADDED 3,277 · REMOVED 0 ·
+  CHANGED 12**, reach 62,906 fallback resolutions across 670 crates. Every addition is an
+  `interfaceUnion` row keyed under the crate that was scanned, 3,157 of them naming a module-qualified
+  trait path; 400 carry a concrete effect across 138 crates, five ground-truthed against source
+  (x11rb `rust_connection::stream::Stream::read` → `rustix::net::recvmsg`; ureq
+  `unversioned::transport::Transport::is_open` → `TcpStream::read`; notify `PathsMut::add` →
+  `Path::exists`/`canonicalize`; criterion `measurement::Measurement::start` → `Instant::now`;
+  sea-orm `database::connection::ConnectionTrait::execute_unprepared` → `Db`). All 12 CHANGED rows are
+  strictly additive — nothing lost an effect, a reason, an `invisible` crate or a disclosure flag.
+  Gate-level over the 486 affected crates, `deny Unknown` and `deny Net` both moved **0 verdicts** in
+  either direction, oracle calibrated to a real spread first.
+
 ### ⚠ SOUNDNESS R507 — `path` / `impact` answered ABOUT A FUNCTION NOBODY ASKED FOR
 
 - **Both verbs resolved their `<fn>` argument as `func == q` else the FIRST `func.contains(q)`** — not

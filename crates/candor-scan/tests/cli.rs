@@ -3820,6 +3820,95 @@ fn a_consumers_own_implementor_of_a_dependencys_abstraction_joins_the_union_thro
 /// the same four packages and `cargo build`s the consumer (pulling all three dependencies in) before any
 /// engine sees them. That matters most for the pure-only control below, because an absence asserted over
 /// a program that cannot exist is not weak evidence but none.
+/// ⟨0.39⟩ obligation 2, the LOCAL leg, and the spelling that is the NORMAL case: `pub mod backend`.
+///
+/// SOUNDNESS R513. A crate declaring a trait AND implementing it locally publishes the union entry only
+/// when BOTH sit at the crate ROOT. Nest the identical code in a module and the entry vanished, so a
+/// chained consumer read `inferred: []` with NO `invisible` — §2 chaining rule 3 makes that a purity
+/// CLAIM, and `deny Net` exited 0 over a dependency whose sole implementor opens a `TcpStream`.
+///
+/// MECHANISM, because the arms below are otherwise indistinguishable from a passing test: `trait_impls`
+/// holds the self type AS WRITTEN (`Net1`, never `backend::Net1` — `decls.rs`), while `inferred` is keyed
+/// by the unit's full qual, so both of the local leg's candidate keys missed and the member was scored
+/// "pure across all impls". The FOREIGN leg of the same rung already resolved its implementor tails
+/// through `by_tail2`; the local leg did not, and that asymmetry WAS the bug.
+///
+/// TWO ARMS, BYTE-IDENTICAL BUT FOR THE MODULE WRAPPER, because a one-arm version of this test passes on
+/// the engine that has the defect: the crate-root arm is the control that says the leg worked at all.
+/// Asserted on the KEY as well as the effect — `depmod#backend::Backend::size`, fully qualified in the
+/// owning package's namespace (R503) — since a row published under the leaf would satisfy "a row exists"
+/// while reintroducing the fourth spelling `69dd565` removed.
+#[test]
+fn a_trait_and_impl_nested_in_a_module_publish_the_same_union_entry_as_at_the_crate_root() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r513-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"), format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"))
+            .unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    const BODY: &str = "pub trait Backend { fn size(&self) -> usize; }\n\
+         pub struct Net1;\n\
+         impl Backend for Net1 {\n\
+             fn size(&self) -> usize { let _ = std::net::TcpStream::connect(\"h:1\"); 0 }\n\
+         }\n";
+    let deproot = pkg("deproot", "", BODY);
+    let depmod = pkg("depmod", "", &format!("pub mod backend {{\n{BODY}}}\n"));
+    let approot = pkg("approot", "deproot = \"1\"\n",
+        "pub fn go(b: &dyn deproot::Backend) -> usize { b.size() }\n");
+    let appmod = pkg("appmod", "depmod = \"1\"\n",
+        "pub fn go(b: &dyn depmod::backend::Backend) -> usize { b.size() }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG");
+        if deps.is_empty() {
+            c.env_remove("CANDOR_DEPS");
+        } else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+    let by_hash = |v: &serde_json::Value, h: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|e| e["hash"] == h).cloned()
+    };
+    let write = |v: &serde_json::Value, file: &str| -> std::path::PathBuf {
+        let p = d.join(file);
+        std::fs::write(&p, serde_json::to_string(v).unwrap()).unwrap();
+        p
+    };
+
+    for (dep, app, key) in [
+        (&deproot, &approot, "deproot#Backend::size"),
+        (&depmod, &appmod, "depmod#backend::Backend::size"),
+    ] {
+        let rep = scan(dep, &[]);
+        let union = by_hash(&rep, key).unwrap_or_else(|| panic!(
+            "⟨0.39⟩ obligation 2: the local union entry must be published under `{key}` — R513 measured \
+             it ABSENT for the module-nested spelling while the byte-identical crate-root one published \
+             it, and the consumer below then read the silence as purity: {rep}"));
+        assert_eq!(union["interfaceUnion"], serde_json::json!(true), "{union}");
+        assert_eq!(union["inferred"], serde_json::json!(["Net"]),
+            "…carrying the implementor's REAL effect, not an `Unknown` hedge: {union}");
+
+        let dep_p = write(&rep, &format!("{}.json", dep.file_name().unwrap().to_string_lossy()));
+        let chained = scan(app, &[&dep_p]);
+        let go = by_hash(&chained, &format!("{}#go", app.file_name().unwrap().to_string_lossy()))
+            .unwrap_or_else(|| panic!(
+                "the chained consumer's `go` must carry the dispatched effect; ABSENT is the cardinal \
+                 sin R513 filed — no row, no `invisible`, and `deny Net` at exit 0: {chained}"));
+        assert!(go["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
+            "the dep's implementor effect must reach the consumer through the union entry: {go}");
+    }
+}
+
 #[test]
 fn a_middle_package_dispatching_over_its_dependencys_abstraction_names_the_member_too() {
     let d = std::env::temp_dir().join(format!("candor-scan-cli-r504-{}", std::process::id()));

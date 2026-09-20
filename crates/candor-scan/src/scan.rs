@@ -4150,6 +4150,37 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 blind_u.insert(c.clone());
                             }
                         }
+                        // SOUNDNESS R513 — THE IMPL'S UNIT IS MODULE-QUALIFIED AND `trait_impls` IS NOT.
+                        // `decls.rs` pushes the self type AS WRITTEN (`Net1`), never `backend::Net1`, so a
+                        // trait+impl nested in `pub mod backend` makes both candidates above `Net1::size`
+                        // while the analysed unit is `backend::Net1::size`. The lookup came back empty, no
+                        // effect entered the union, and the entry was skipped as "pure across all impls" —
+                        // so a chained consumer read `inferred: []` with NO `invisible`, which §2 makes a
+                        // PURITY CLAIM: `deny Net` exit 0 over a dep whose sole implementor opens a
+                        // TcpStream. The module form is the ORDINARY shape in real crates, so the leg was
+                        // working only for the crate-root spelling.
+                        //
+                        // THE FOREIGN LEG OF THIS SAME RUNG ALREADY DOES THIS (the `foreign_impls` loop
+                        // below resolves its 2-segment implementor tails through `by_tail2` for exactly
+                        // this reason); the asymmetry was the bug. Same index, same refusal: ONLY when the
+                        // tail is unambiguous — two units under one tail is `resolve_target`'s never-guess
+                        // case, and picking one would charge a different type's effects to this trait.
+                        if let Some(ts) = by_tail2.get(&cand) {
+                            if ts.len() == 1 && ts[0] != cand {
+                                // REACH PROBE — same channel and reason as `R503HIT`: fires only where
+                                // this fallback resolves an implementor the exact-key lookups could not,
+                                // so `CHANGED 0` and "the branch never ran" stay distinguishable.
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R513HIT {}", ts[0]);
+                                }
+                                if let Some(s) = inferred.get(&ts[0]) {
+                                    inf_u.extend(s.iter().copied());
+                                }
+                                if let Some(s) = blind_acc.get(&ts[0]) {
+                                    blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                                }
+                            }
+                        }
                     }
                 }
                 if inf_u.is_empty() && blind_u.is_empty() {
