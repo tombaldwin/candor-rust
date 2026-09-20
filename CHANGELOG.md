@@ -10,6 +10,47 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### SOUNDNESS R520 — a USAGE ERROR built a directory tree in the operator's CWD, named after the typo
+
+- **`candor-scan nonexistent-target /also-bogus` exits 2 correctly and left
+  `./nonexistent-target/.candor/report.refused.json` behind.** The ⟨0.32⟩ refusal marker's
+  `create_dir_all` MADE the path; a deeper typo made a deeper tree
+  (`nope/deeper/still/.candor/`). FOUND AS LITTER IN THIS FAMILY'S OWN REPO, not by any gate — an
+  agent mistyped a scan invocation from the umbrella and left a `gate/` directory nothing expects.
+  Measured four-way in a clean temp dir at the time: **rust and ts created it, java and swift created
+  nothing, and all four exit 2** — the refusal was never in question and only the filesystem effect
+  differed, so no SPEC clause changes and the correct behaviour was already shipped in half the
+  family.
+
+- **Why it is wrong and not merely untidy: the marker's charter is to SHADOW a stale report.** It
+  exists so a previous run's document cannot be read as current. The default prefix is derived FROM
+  the target, so when the target does not exist neither can any report under it — the write has
+  nothing to fail closed over. ⟨0.28⟩'s own review found that rung DESTROYING USER FILES four-way, so
+  what a refusal writes is precisely the surface this project has been burned on.
+
+- **The fix is one guard on the declaration/convention line the code already drew, and the boundary is
+  deliberate.** `--out <pfx>` is a path the operator NAMED, independent of the target: a previous run
+  over a different, existing target may have left reports there, so a typo in today's target must
+  still shadow them — that arm is untouched. `<target>/.candor/report` is a convention computed from
+  the target, and an absent target has nothing to protect. The existence check further down already
+  refused an absent target without a marker, so no refusal loses one it used to have.
+
+- Pinned by `a_refusal_over_an_absent_target_writes_nothing_while_an_existing_one_still_gets_the_marker`
+  (`tests/cli.rs`), TWO ARMS that discriminate in opposite directions — verified by mutation, not by
+  reasoning: reverting the guard turns the absent-target arm RED, and silencing the default-prefix
+  latch outright turns the existing-target arm RED (`gate --report` would then answer off the previous
+  run's bytes, the stale green ⟨0.32⟩ exists to close).
+
+- **Evidence.** 9-row pre/post argv matrix: only the absent-target default-prefix rows changed; the
+  `--out sub/pfx`, `. --scope src` and existing-target rows are byte-identical, and all nine exit 2
+  before and after. Corpus A/B (`bin/corpus-ab.py`, 6 rust entries — clap, hyper, regex, ripgrep,
+  serde, tokio; 4,824 rows per arm, wide value, `--key unit`): **ADDED 0 REMOVED 0 CHANGED 0** on
+  every key. **ZERO-REACH, not inert**: the changed arm fires only on a target that is absent, which
+  no corpus entry can be, so that A/B is SAFETY-ONLY by construction and the fixtures are the
+  evidence. Reach on the branch itself was measured separately on `--out`-free copies of the same six
+  entries — guard evaluated 6/6, suppression arm 0/6 — with all 82 default-prefix report and sidecar
+  files byte-identical between the arms.
+
 ## [0.39.0] — 2026-09-20
 
 ### ⚠ SOUNDNESS R513 — a trait+impl NESTED IN A MODULE published no `interfaceUnion` row

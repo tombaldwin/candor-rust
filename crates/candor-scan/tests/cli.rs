@@ -506,6 +506,105 @@ fn two_positionals_mark_the_first_which_is_the_one_the_refusal_names() {
     );
 }
 
+#[test]
+fn a_refusal_over_an_absent_target_writes_nothing_while_an_existing_one_still_gets_the_marker() {
+    // SOUNDNESS R520 — TWO ARMS, AND THE SECOND IS THE ONE THAT MATTERS MORE.
+    //
+    // ARM A (the defect): `candor-scan nonexistent-target /also-bogus` exits 2 correctly and used to
+    // leave `./nonexistent-target/.candor/report.refused.json` behind — the refusal marker's
+    // `create_dir_all` MADE a directory tree in the operator's CWD, named after a mistyped argument.
+    // Found as litter in this family's own repo: an agent mistyped a scan invocation and left a
+    // `gate/` directory nothing in the umbrella expects. Measured four-way at the time: rust and ts
+    // created it, java and swift created nothing, all four exit 2 — only the filesystem effect
+    // differed, which is why no clause changed. Both of the everyday refusal spellings are driven
+    // here (a second positional, and an unknown flag), because they refuse at different sites.
+    //
+    // ARM B (the control, and the expensive direction to get wrong): a target that EXISTS and holds a
+    // previous run's report must STILL be shadowed by the marker. That is the whole of ⟨0.32⟩ — scan
+    // a tree green, refuse for any reason, and without the marker `gate --report` answers `policy ✓`
+    // off the previous run's bytes. A fix that silenced this sink would be far worse than the litter,
+    // so the arm asserts the CONSUMER resolves the marker, not merely that a file exists.
+    //
+    // The two arms differ in exactly one thing: whether the target directory is on disk.
+
+    // ── ARM A: nothing on disk, nothing written ──────────────────────────────────────────────────
+    let cwd = std::env::temp_dir().join(format!("candor-r520-cwd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).unwrap();
+    for argv in [
+        vec!["nonexistent-target", "/also-bogus"],
+        vec!["nonexistent-target", "--zzz-not-a-flag"],
+        vec!["nope/deeper/still", "/also-bogus"],
+    ] {
+        let out = Command::new(bin())
+            .current_dir(&cwd)
+            .args(&argv)
+            .output()
+            .expect("run candor-scan");
+        assert_eq!(out.status.code(), Some(2), "{argv:?}: a usage error still refuses at exit 2");
+        let left: Vec<String> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{argv:?}: a refusal over a target that is not there created {left:?} in the operator's \
+             CWD — the marker shadows a previous run's report, and an absent target cannot have one"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&cwd);
+
+    // ── ARM B: the target exists and holds a report — the marker MUST still land ──────────────────
+    let d = make_crate("r520present", "pub fn go() {}");
+    let prefix = format!("{}/.candor/report", d.to_string_lossy());
+
+    // A real previous run, so there is something for a stale read to find.
+    let first = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(first.status.code(), Some(0), "the seeding scan must complete");
+    let reports: Vec<PathBuf> = std::fs::read_dir(d.join(".candor"))
+        .expect("the completing run wrote no .candor/ — arm B would prove nothing")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.starts_with("report.") && n.ends_with(".json") && n != "report.refused.json"
+        }))
+        .collect();
+    assert!(!reports.is_empty(), "no previous report to shadow: arm B is asserting about nothing");
+    let before: Vec<Vec<u8>> = reports.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    assert!(
+        candor_report::refusal_marker_for(&prefix).is_none(),
+        "a completing run left a marker behind"
+    );
+
+    // …now refuse, by the same everyday spelling arm A drove.
+    let out = Command::new(bin())
+        .args([d.to_string_lossy().as_ref(), "--zzz-not-a-flag"])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "an unknown flag still refuses");
+    assert!(
+        d.join(".candor").join("report.refused.json").exists(),
+        "the fail-closed marker did NOT land beside a real report set — a `gate --report` here now \
+         answers off the previous run's bytes, which is the stale green ⟨0.32⟩ exists to close"
+    );
+    let m = candor_report::refusal_marker_for(&prefix)
+        .expect("the CONSUMER does not see the marker: the sink is silenced in substance");
+    assert!(
+        m.reason.contains("zzz-not-a-flag"),
+        "the marker must name the cause that stopped the run: {m:?}"
+    );
+    // …and it SHADOWS the reports rather than destroying them (⟨0.28⟩'s own review found this rung
+    // destroying user files four-way; the marker's charter is that it overwrites nothing).
+    for (p, was) in reports.iter().zip(before.iter()) {
+        assert_eq!(&std::fs::read(p).unwrap(), was,
+                   "the refusal rewrote {} — the marker destroys nothing", p.display());
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 // ── adversarial inputs: no panic, clean handling ──────────────────────────────────────────────────
 
 #[test]

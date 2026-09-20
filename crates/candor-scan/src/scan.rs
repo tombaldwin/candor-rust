@@ -672,7 +672,32 @@ pub(crate) fn scan_main() {
         // Arming could not be moved this early — that is the measured data loss, a run that died in
         // parsing replacing a committed report. Writing a marker BESIDE the reports can be, because it
         // destroys nothing: the earliest safe moment and the earliest useful moment are the same moment.
-        crate::gate::note_report_prefix(&format!("{t}/.candor/report"));
+        //
+        // SOUNDNESS R520 — …BUT ONLY IF THE TARGET IS THERE. `candor-scan nonexistent-target /bogus`
+        // exits 2 correctly and used to leave `./nonexistent-target/.candor/report.refused.json`
+        // behind: the marker's `create_dir_all` MADE a directory tree in the operator's CWD, named
+        // after a mistyped argument (`nope/deeper/still/.candor/` on a deeper typo). Measured
+        // four-way: rust and ts created it, java and swift created nothing, all four exit 2 — so the
+        // refusal was never in question and only the filesystem effect differed. FOUND AS LITTER IN
+        // THIS FAMILY'S OWN REPO, not by any gate.
+        //
+        // The reason it is wrong and not merely untidy is the marker's own charter. It exists so a
+        // STALE report cannot be read as current — it SHADOWS a previous run's document. The default
+        // prefix is derived FROM the target, so when the target does not exist neither can any report
+        // under it: there was nothing to shadow, and the write has nothing to fail closed over.
+        //
+        // The boundary is the declaration/convention line this comment already draws, and it is why
+        // the guard sits on this arm and not inside `write_refusal_marker`:
+        //   • `--out <pfx>` (the arm above) is a path the operator NAMED, independent of the target.
+        //     A previous run over a DIFFERENT, existing target may have left reports there, so a typo
+        //     in today's target must still shadow them. That arm is untouched, deliberately.
+        //   • `<target>/.candor/report` is a convention computed from the target. An absent target
+        //     cannot have reports, so there is nothing for the convention to protect.
+        // The existence check ~200 lines below refuses an absent target at exit 2 without a marker
+        // already, so no refusal reachable with an absent target loses one it used to have.
+        if std::path::Path::new(t).exists() {
+            crate::gate::note_report_prefix(&format!("{t}/.candor/report"));
+        }
     }
     let mut it = args.iter();
     while let Some(a) = it.next() {
