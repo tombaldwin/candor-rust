@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.39.0] — 2026-09-20
+
 ### ⚠ SOUNDNESS R513 — a trait+impl NESTED IN A MODULE published no `interfaceUnion` row
 
 - **The module form is the NORMAL case in real crates, and it was the silent one.** ⟨0.39⟩ obligation

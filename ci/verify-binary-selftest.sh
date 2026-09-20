@@ -27,7 +27,7 @@ mkstub() {  # $1 = dir, $2 = version string, $3 = functions JSON, $4 = analyzed 
 #!/bin/sh
 case "\$1" in --version) echo "$2"; exit 0;; esac
 out=""; while [ \$# -gt 0 ]; do [ "\$1" = "--out" ] && out="\$2"; shift; done
-printf '%s\n' '{"candor":{"version":"x","toolchain":"y","spec":"0.38"},"functions":$3,"analyzed":{"count":$4}}' > "\$out"
+printf '%s\n' '{"candor":{"version":"x","toolchain":"y","spec":"7.7"},"functions":$3,"analyzed":{"count":$4}}' > "\$out"
 exit 0
 EOF
   # candor-query answers anything containing Fs, so only the arm that targets IT can fail on it.
@@ -57,25 +57,32 @@ check() {  # $1 = label, $2 = dir, $3 = expected rc (0 pass / 1 refuse), $4 = ve
 
 echo "verify-binary-selftest: the gate must PASS a sound binary and REFUSE each defect it exists for"
 
+# THE FIXTURE UNIVERSE IS 7.7.7/7.7 — A VERSION THAT CAN NEVER BE A LIVE FLOOR, and the reason is
+# written twenty lines below for arm 4: a fixture pinned to a real floor IMPERSONATES the exact string
+# a bump-miss produces. Arm 4 learned that at 0.37 and was de-pinned; these arms were left on the live
+# floor and tripped `release-preflight [2]` at the very next cut, 0.38 -> 0.39. The rule applies to the
+# WHOLE file, not the one arm that taught it. Nothing here asserts a spec — `verify-binary.sh` only
+# checks the version string CONTAINS the expected value — so the numbers are free.
+#
 # THE POSITIVE ARM FIRST. A checker that only ever refuses is as useless as one that only ever passes,
 # and it is the arm that catches a threshold raised past what a real engine produces.
-mkstub "$WORK/good" "candor-scan 0.38.0 (spec 0.38)" "$GOOD_FNS" 12
-check "a sound binary PASSES" "$WORK/good" 0 0.38.0
+mkstub "$WORK/good" "candor-scan 7.7.7 (spec 7.7)" "$GOOD_FNS" 12
+check "a sound binary PASSES" "$WORK/good" 0 7.7.7
 
 # 1. THE v0.32.0 DEFECT: runs, exits 0, finds nothing.
-mkstub "$WORK/empty" "candor-scan 0.38.0 (spec 0.38)" '[]' 0
-check "an EMPTY report is refused" "$WORK/empty" 1 0.38.0
+mkstub "$WORK/empty" "candor-scan 7.7.7 (spec 7.7)" '[]' 0
+check "an EMPTY report is refused" "$WORK/empty" 1 7.7.7
 
 # 2. Analysed something, but far less than the fixture demonstrably contains — the partial version of
 #    the same defect, which a "did it produce a report at all" check would wave through.
-mkstub "$WORK/thin" "candor-scan 0.38.0 (spec 0.38)" '[{"fn":"a","inferred":["Fs"]}]' 2
-check "an UNDER-REPORTING binary is refused" "$WORK/thin" 1 0.38.0
+mkstub "$WORK/thin" "candor-scan 7.7.7 (spec 7.7)" '[{"fn":"a","inferred":["Fs"]}]' 2
+check "an UNDER-REPORTING binary is refused" "$WORK/thin" 1 7.7.7
 
 # 3. Right counts, missing an effect CLASS. Catches a build that lost a classifier table rather than
 #    the whole scan — invisible to any count-only threshold.
 MISSING_EXEC="$(printf '%s' "$GOOD_FNS" | sed 's/"Exec"/"Fs"/')"
-mkstub "$WORK/noexec" "candor-scan 0.38.0 (spec 0.38)" "$MISSING_EXEC" 12
-check "a MISSING EFFECT CLASS is refused" "$WORK/noexec" 1 0.38.0
+mkstub "$WORK/noexec" "candor-scan 7.7.7 (spec 7.7)" "$MISSING_EXEC" 12
+check "a MISSING EFFECT CLASS is refused" "$WORK/noexec" 1 7.7.7
 
 # 4. Sound report, wrong build. The only arm that can catch a binary built from the wrong ref — and the
 #    one that caught a stale 0.37.0 target/release on this checker's first real run.
@@ -85,22 +92,22 @@ check "a MISSING EFFECT CLASS is refused" "$WORK/noexec" 1 0.38.0
 # colliding with a floor again. (Same rule as historical prose: do not pin a fixture to a value that
 # has to move.)
 mkstub "$WORK/oldver" "candor-scan 0.1.0 (spec 0.1)" "$GOOD_FNS" 12
-check "a WRONG VERSION is refused" "$WORK/oldver" 1 0.38.0
+check "a WRONG VERSION is refused" "$WORK/oldver" 1 7.7.7
 
 # 4b. THE TAG FORM. Callers pass `github.ref_name` — `v0.38.1`, not `0.38.1` — and that mismatch made
 #     the gate refuse two good binaries on the first real release run. The check was right and the
 #     argument was wrong; this arm is why that cannot recur silently.
-check "a TAG-shaped version (v-prefixed) is accepted" "$WORK/good" 0 v0.38.0
+check "a TAG-shaped version (v-prefixed) is accepted" "$WORK/good" 0 v7.7.7
 
 # 5. …and with no expected version passed, that same binary must PASS — otherwise the version check is
 #    firing on something other than the version, and arm 4 proves nothing.
 check "…and passes when no version is demanded" "$WORK/oldver" 0 ""
 
 # 6. The QUERY half. A working scanner beside a broken query is the asymmetry that started all this.
-mkstub "$WORK/badq" "candor-scan 0.38.0 (spec 0.38)" "$GOOD_FNS" 12
-printf '#!/bin/sh\ncase "$1" in --version) echo "candor-query 0.38.0 (spec 0.38)"; exit 0;; esac\nexit 3\n' \
+mkstub "$WORK/badq" "candor-scan 7.7.7 (spec 7.7)" "$GOOD_FNS" 12
+printf '#!/bin/sh\ncase "$1" in --version) echo "candor-query 7.7.7 (spec 7.7)"; exit 0;; esac\nexit 3\n' \
   > "$WORK/badq/candor-query"; chmod +x "$WORK/badq/candor-query"
-check "a BROKEN candor-query is refused" "$WORK/badq" 1 0.38.0
+check "a BROKEN candor-query is refused" "$WORK/badq" 1 7.7.7
 
 echo
 if [ "$fails" -eq 0 ]; then
