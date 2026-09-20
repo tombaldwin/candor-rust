@@ -162,7 +162,7 @@ it's using the syntactic path. The wrapper's enforcement commands (`guard`/`poli
 still require the lint — blocking a PR needs the soundness guarantee — while the scanner offers its own
 **syntactic floor** for both gates (`--policy`, and the AS-EFF-005 baseline guard below). One caveat on the
 lint, recorded as SOUNDNESS R456: it is sound on the effect lattice but its report is **not spec-current**
-— it stamps `spec: 0.38` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so
+— it stamps `spec: 0.39` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so
 `candor-query gate` answers its output with *"re-scan with a current engine"*. Treat it as the soundness
 ORACLE it is used as (`soundness/run.sh`, `realworld/run_deep.sh`), not as a drop-in replacement for the
 scanner's report.
@@ -283,7 +283,7 @@ JSON, from the *same* check that sets the exit code, for CI annotations / the PR
 ```sh
 cargo candor policy .candor/policy --gate-json verdict.json    # deep engine (also: guard --gate-json)
 candor-scan . --policy .candor/policy --gate-json verdict.json # stable scanner — identical shape
-# → { "spec": "0.38", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
+# → { "spec": "0.39", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
 ```
 
 `-` streams it to stdout. Exit semantics are pinned: violation → 1; a gate that could not run to
@@ -592,7 +592,7 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Beta — the candor family's **deep Rust engine**, declaring **spec 0.38** (the same contract the
+Beta — the candor family's **deep Rust engine**, declaring **spec 0.39** (the same contract the
 reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
 cross-engine conformance suite pins the agreement). The stable scanner is
 [calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library
