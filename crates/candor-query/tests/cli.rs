@@ -7066,3 +7066,117 @@ fn r507_the_ambiguous_refusal_caps_the_candidate_list() {
     assert!(err.contains("20 functions match"), "the FULL count must be stated:\n{err}");
     assert!(err.contains("and 8 more"), "the list must be capped with a counted tail:\n{err}");
 }
+
+// ── SOUNDNESS R511 — the report entries that are NOT units ──────────────────────────────────────
+//
+// ⟨0.39⟩ un-gated ⟨0.23⟩, so every report now carries synthetic `interfaceUnion` rows: the UNION over
+// an abstraction member's implementors, published for a CHAINED CONSUMER to join on. They are bodiless
+// and location-less, and this binary has no reader for which they are the payload — every verb here
+// turns an entry into a claim about a unit. The class is structural (it follows from the rung, not from
+// any engine): candor-java already had the guard, candor-swift found FOUR readers by sweeping its own
+// engine, candor-ts hit it in a fifth. These pin the two rust readers whose answers are VERDICTS.
+
+/// The report shape the fixtures share: one real effectful unit, plus the synthetic union row the
+/// producer emits for the trait it implements. Byte-for-byte the shape candor-scan writes — measured
+/// off `candor-scan <crate> --json` on a crate with `trait Backend { fn size(…) }` and one Net-performing
+/// impl, which is the SMALLEST input that produces one.
+fn write_r511_report(f: &Fixture) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.7" },
+  "package": "rpt",
+  "analyzed": { "count": 2, "digest": "deadbeefdeadbeef" },
+  "functions": [
+    { "fn": "Backend::size", "inferred": ["Net"], "hash": "rpt#Backend::size", "interfaceUnion": true },
+    { "fn": "Net1::size", "loc": "src/lib.rs:4:5", "inferred": ["Net"], "direct": ["Net"], "hash": "rpt#Net1::size", "netClass": ["unknown-host"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+}
+
+/// **THE VERDICT-AFFECTING ONE.** A policy rule scoped to the ABSTRACTION's name matches the synthetic
+/// row's `fn` and no real unit's, so `gate --report` exited 1 on a report where nothing violates — the
+/// FABRICATION direction, the same one candor-ts measured in its own gate. The control below holds the
+/// tree constant and changes only the scope token.
+#[test]
+fn r511_gate_report_does_not_name_a_synthetic_union_row_as_a_violation() {
+    let f = Fixture::new("r511gate");
+    write_r511_report(&f);
+    let pol = f.dir.join("p").to_string_lossy().into_owned();
+    std::fs::write(&pol, "deny Net Backend\n").unwrap();
+    let (code, out, err) = run(&["gate", "--report", &f.report_path(), "--policy", &pol]);
+    assert!(
+        !out.contains("Backend::size") && !err.contains("[AS-EFF-006] `Backend::size`"),
+        "an `interfaceUnion` row is the union over an abstraction member's implementors, not a unit \
+         with a body — it must not be a violation subject.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert_eq!(
+        code, 0,
+        "the ONLY row this scope matches is the synthetic one, so the verdict must be green. \
+         candor-scan's in-process gate over the same tree and the same policy exits 0 and says the \
+         rule matched no function; §6.2 requires the two routes to apply the SAME rule.\n\
+         stdout:\n{out}\nstderr:\n{err}"
+    );
+}
+
+/// …and the union row must not INFLATE the count either, which is how the same defect shows up under an
+/// unscoped rule: two violations where candor-scan's own gate reports one, over one report.
+#[test]
+fn r511_gate_report_counts_only_the_real_unit_under_an_unscoped_rule() {
+    let f = Fixture::new("r511count");
+    write_r511_report(&f);
+    let pol = f.dir.join("p").to_string_lossy().into_owned();
+    std::fs::write(&pol, "deny Net\n").unwrap();
+    let (code, out, err) = run(&["gate", "--report", &f.report_path(), "--policy", &pol]);
+    assert_eq!(code, 1, "the REAL unit still violates — the filter must not withdraw a finding.\n{err}");
+    assert!(
+        out.contains("Net1::size") || err.contains("Net1::size"),
+        "the implementor that actually performs Net must still be named:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        (out.contains("1 policy violation") || err.contains("1 policy violation")),
+        "ONE violation, not two: the union row's effect comes FROM `Net1::size`, which is already \
+         charged. candor-scan's in-process gate reports 1 over the same tree.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+}
+
+/// The informational verbs are the same class one step down: they print counts and lists of UNITS.
+/// `where`/`map` reported two functions and invented a module named after the trait.
+#[test]
+fn r511_the_counting_verbs_do_not_count_a_synthetic_union_row() {
+    let f = Fixture::new("r511count2");
+    write_r511_report(&f);
+    let (wcode, wout, werr) = run(&["where", "Net", "--report", &f.report_path()]);
+    assert_eq!(wcode, 0, "{werr}");
+    assert!(wout.contains("1 function(s) perform Net"), "one unit performs Net, not two:\n{wout}");
+    assert!(!wout.contains("Backend::size"), "a bodiless row is not a function that performs Net:\n{wout}");
+    let (mcode, mout, merr) = run(&["map", "--report", &f.report_path()]);
+    assert_eq!(mcode, 0, "{merr}");
+    assert!(
+        mout.contains("1 effectful functions across 1 module(s)"),
+        "`map` bucketed the trait name as a MODULE and counted the union row as its function:\n{mout}"
+    );
+}
+
+/// CONTROL — the filter keys on `interfaceUnion`, never on "has no `loc`". A hand-authored report (which
+/// §3.1 says this verb serves) may omit `loc` for a perfectly real unit, and dropping THAT would be a
+/// silent under-report: the mirror defect, and the one an over-eager fix introduces.
+#[test]
+fn r511_control_a_locless_entry_without_the_marker_is_still_gated() {
+    let f = Fixture::new("r511control");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.7" },
+  "package": "rpt",
+  "functions": [
+    { "fn": "Backend::size", "inferred": ["Net"], "hash": "rpt#Backend::size" }
+  ]
+}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    let pol = f.dir.join("p").to_string_lossy().into_owned();
+    std::fs::write(&pol, "deny Net\n").unwrap();
+    let (code, out, err) = run(&["gate", "--report", &f.report_path(), "--policy", &pol]);
+    assert_eq!(
+        code, 1,
+        "NO `interfaceUnion` marker ⇒ an ordinary unit that merely carries no location. Gating it is \
+         mandatory; the R511 filter must not widen into a `loc`-based heuristic.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+}

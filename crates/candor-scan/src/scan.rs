@@ -4457,6 +4457,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             let mut out = Vec::new();
             for f in v["functions"].as_array().into_iter().flatten() {
+                // SOUNDNESS R511 — THE PEEK READS A REPORT, AND A REPORT NOW CARRIES ROWS THAT ARE NOT
+                // UNITS. ⟨0.39⟩ un-gated ⟨0.23⟩, so the recursion's own body contains synthetic
+                // `interfaceUnion` rows: the union over an abstraction member's implementors, with no
+                // body and `loc: ""`. Everything below treats `f` as a judged declaration — it
+                // scope-matches `f["fn"]`, and it derives the finding's `path` and its exclusion CLASS
+                // from `f["loc"]`. A union row has no `loc`, so `path` came out EMPTY, `class` fell back
+                // to the literal "excluded" (a class that appears nowhere in the `excluded` array this
+                // same run publishes), and the finding's own reason spoke of "candor's ANALYSIS of that
+                // file" while naming no file.
+                //
+                // VERDICT-AFFECTING, in the fail-closed direction — the same defect candor-swift
+                // measured and fixed first. MEASURED here on a package whose EXCLUDED `examples/` tree
+                // implements a dependency's trait: under `deny Net Backend` (a rule scoped to the trait
+                // name, which the real implementor `examples::ex::Crossterm::size` does not match) the
+                // ONLY `outOfScope` finding was the synthetic row, and ⟨0.30⟩ turns a non-empty
+                // `outOfScope` into INCOMPLETE — exit 2. The control, byte-identical but for the scope
+                // token (`deny Net Zzz`), exits 0. A green gate was turned red by a row with no body.
+                //
+                // The implementors the row unions over are in the peek's own `functions` array with
+                // their real `loc`, so every effect this drops is still disclosed by the entry that
+                // actually performs it: the unscoped arm published the union row BESIDE
+                // `examples::ex::Crossterm::size`, not instead of it.
+                if f["interfaceUnion"].as_bool().unwrap_or(false) {
+                    continue;
+                }
                 let inferred: Vec<&str> = f["inferred"]
                     .as_array()
                     .into_iter()
@@ -4734,13 +4759,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let cgfile = format!("{prefix}.{crate_name}.scan.callgraph.json");
         let _ = candor_report::write_atomic(Path::new(&cgfile), serde_json::to_string(&cg).unwrap_or_default().as_bytes());
         if !quiet {
+            // SOUNDNESS R511 — the count and the breakdown are about FUNCTIONS, so they count the rows
+            // that are functions. ⟨0.39⟩'s synthetic `interfaceUnion` rows are the union over an
+            // abstraction member's implementors; each is published BESIDE the implementors it unions,
+            // so counting it both invents a unit and double-counts that unit's effect. Measured before
+            // this filter on a crate with one trait and one effectful impl: "wrote 2 effectful
+            // functions … Net 2" over a crate with one. The rows stay in the report — a chained
+            // consumer joins on them — they are simply not units to tally.
+            let units: Vec<&ReportEntry> = entries.iter().filter(|e| !e.interface_union).collect();
             eprintln!(
                 "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
-                entries.len()
+                units.len()
             );
             // Effect breakdown — make the result visible at a glance, not just a count + a file path.
             let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-            for e in &entries {
+            for e in &units {
                 for x in &e.inferred {
                     *counts.entry(x.as_str()).or_insert(0) += 1;
                 }

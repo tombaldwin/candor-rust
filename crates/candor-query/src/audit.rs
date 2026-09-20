@@ -86,6 +86,14 @@ pub(crate) fn cmd_audit(args: &[String]) -> i32 {
                 Vec::new()
             }
         };
+        // SOUNDNESS R511 — `audit` reads report files DIRECTLY rather than through
+        // `load::load_entries_inner`, so it needs the same filter that loader carries: ⟨0.39⟩'s
+        // synthetic `interfaceUnion` rows are the union over an abstraction member's implementors, not
+        // functions, and this verb prints nothing BUT unit claims — a total, a per-crate count, and a
+        // "broadest effect surface" ranking a bodiless row can win a slot in. Measured before this
+        // filter on the three-package chained fixture: "5 effectful functions" over four, and "4 Net"
+        // over three, because the union row was counted beside the implementor it unions.
+        let es: Vec<ReportEntry> = es.into_iter().filter(|e| !e.interface_union).collect();
         percrate.push((label, es.len()));
         fns.extend(es);
     }

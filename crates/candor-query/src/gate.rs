@@ -170,7 +170,29 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
                     );
                     hard_fail = true;
                 }
-                out.entries.extend(es);
+                // SOUNDNESS R511 — A SYNTHETIC UNION ROW IS NOT A GATE UNIT, and this route is the one
+                // where believing otherwise changes a VERDICT. ⟨0.39⟩ un-gated ⟨0.23⟩; the rows it now
+                // emits by default are the union over an abstraction member's implementors, bodiless and
+                // location-less. MEASURED on `lt2` (one trait, one effectful impl) before this filter:
+                // `gate --report … --policy 'deny Net'` reported TWO violations where candor-scan's own
+                // in-process gate over the same tree and the same policy reported ONE, and under `deny
+                // Net Backend` — a rule scoped to the trait, which no real unit's name matches — this
+                // route exited 1 on a single fabricated row while the scan exited 0 saying "rule matched
+                // NO function". §6.2's "THE GATE AND THE DISCLOSURE MUST APPLY THE SAME RULE" and §3.1's
+                // byte-equality between the two routes were both broken by that one row: the scan gates
+                // `all`, the list of quals its ANALYSIS produced, which never contained it.
+                //
+                // NOTHING REAL IS WITHHELD. The union's effects are the union over implementors, and
+                // every implementor that contributed one carries its own ordinary entry in this same
+                // report — `inf_u` is built from `inferred`, so a contributing impl is by construction a
+                // judged unit. Dropping the row removes a duplicate, never a reach.
+                //
+                // Filtered HERE rather than inside `report_signature`, so `hole_upgrades` and every
+                // other reader of `GateReport::entries` sees the same set the signature does — a private
+                // copy of this decision is how `unverified` and the gate came to disagree once already
+                // (see `entry_key`). Same placement rule as `load::load_entries_inner`: after the
+                // corruption test, so `hard_fail` stays a fact about what PARSED.
+                out.entries.extend(es.into_iter().filter(|e| !e.interface_union));
             }
             None => {
                 eprintln!(

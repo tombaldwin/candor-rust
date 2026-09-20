@@ -53,7 +53,26 @@ pub(crate) fn load_entries_inner(prefix: &str) -> (Vec<ReportEntry>, bool) {
                         hard_fail = true;
                     }
                 }
-                out.extend(es);
+                // SOUNDNESS R511 — THE REPORT ENTRIES THAT ARE NOT UNITS. ⟨0.39⟩ un-gated ⟨0.23⟩, so
+                // every report now carries synthetic `interfaceUnion` rows: the UNION over an
+                // abstraction member's implementors, with no body, no `loc`, no `calls`. They exist for
+                // a CHAINED CONSUMER to join on (candor-scan `deps.rs`), and this crate is not that
+                // consumer — every verb here turns an entry into a claim about a UNIT (a violation row,
+                // a hoist remedy, a count, a source location, a selector target) and a union row makes
+                // every one of those false. MEASURED on this engine before the filter: `where Net`
+                // reported 2 functions where 1 exists, `map` invented a module named after the trait,
+                // `audit`/`receipt` counted 5 units where 4 exist, `diff` announced `Backend::size
+                // (new fn, top-level)`, and `fix-gate` planned a hoist for a body that does not exist.
+                //
+                // FILTERED AT THE INGRESS, not at 30 call sites, because there is no candor-query verb
+                // for which a union row is the payload — the readers that need one live in another
+                // crate (`deps.rs`'s chained join, obligation 3; `build_type_surface`, the producer half
+                // of that same join) and neither reaches this loader.
+                //
+                // AFTER the `dropped`/`es.is_empty()` corruption test above, deliberately: `hard_fail`
+                // must stay a fact about what PARSED, or a report whose only rows are union rows would
+                // read as a corrupt one and `load_entries_loud` would refuse it at exit 2.
+                out.extend(es.into_iter().filter(|e| !e.interface_union));
             }
             None => {
                 eprintln!(

@@ -3959,3 +3959,101 @@ fn two_owners_of_one_member_name_do_not_make_the_report_order_depend_on_hash_ite
              `foreign_impls`' hash iteration and no consumer can diff two scans of one tree.");
     }
 }
+
+/// SOUNDNESS R511 — **THE ⟨0.29⟩ PEEK READ A REPORT ROW THAT IS NOT A UNIT, AND IT COST A VERDICT.**
+///
+/// ⟨0.39⟩ un-gated ⟨0.23⟩, so the peek's own recursion now returns synthetic `interfaceUnion` rows: the
+/// union over an abstraction member's implementors, with no body and no `loc`. The attribution loop
+/// scope-matched the row's `fn` and derived the finding's `path` and exclusion `class` from its absent
+/// `loc`, so it published an `outOfScope` finding with an EMPTY PATH and the fabricated class
+/// `"excluded"` — and under ⟨0.30⟩ a non-empty `outOfScope` is INCOMPLETE at **exit 2**.
+///
+/// THE FIXTURE IS A CROSS: one tree, two policies differing ONLY in the scope token. `deny Net Backend`
+/// names the TRAIT, which the real implementor `examples::ex::Crossterm::size` does not match and the
+/// synthetic row does — so before the fix the defect arm exited 2 with one path-less finding while the
+/// control exited 0, and the entire difference was a row with no body. candor-swift measured and fixed
+/// the same reader first; candor-ts hit the class in its gate instead.
+///
+/// The FOREIGN half of the rung is what makes an excluded file produce one at all: `examples/` is
+/// excluded as `non-library-target`, and a file there implementing a DEPENDENCY's trait emits the
+/// obligation-2 union keyed under the owning package.
+#[test]
+fn r511_a_synthetic_union_row_in_the_peek_does_not_publish_a_pathless_out_of_scope_finding() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r511-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::create_dir_all(d.join("examples")).unwrap();
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"peekpkg\"\nversion = \"0.1.0\"\n\n[dependencies]\niface = \"1\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), "pub fn lib_entry() -> usize { 1 }\n").unwrap();
+    // EXCLUDED (`non-library-target`), and it implements the DEPENDENCY's abstraction effectfully — the
+    // obligation-2 shape, which is the one that emits a union row from a file the primary scan skips.
+    std::fs::write(d.join("examples/ex.rs"),
+        "pub struct Crossterm;\n\
+         impl iface::Backend for Crossterm {\n\
+             fn size(&self) -> usize { let _ = std::net::TcpStream::connect(\"h:1\"); 0 }\n\
+         }\n\
+         fn main() { let c = Crossterm; let _ = c.size(); }\n").unwrap();
+
+    let scan = |policy: &str| -> (i32, serde_json::Value) {
+        let p = d.join("policy");
+        std::fs::write(&p, policy).unwrap();
+        let out = Command::new(bin())
+            .arg(d.to_string_lossy().as_ref()).arg("--json")
+            .env("CANDOR_POLICY", &p)
+            .env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+            .output().expect("run candor-scan");
+        let v = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim())
+            .expect("pure JSON report");
+        (out.status.code().unwrap_or(-1), v)
+    };
+
+    // PROVE THE FIXTURE REACHES THE CODE: the scan of the excluded tree must actually mint a union row,
+    // or this test passes for the wrong reason (it is the same shape that made the coordinator's first
+    // probe come back empty — a crate whose trait sits in a MODULE emits none).
+    let inc = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json").arg("--include-tests")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let iv: serde_json::Value =
+        serde_json::from_str(String::from_utf8(inc.stdout).unwrap().trim()).expect("pure JSON report");
+    assert!(
+        iv["functions"].as_array().unwrap().iter().any(|e| e["interfaceUnion"] == serde_json::json!(true)),
+        "the fixture must PRODUCE a union row over the excluded file set, or this test cannot fail: {iv}"
+    );
+
+    // ── THE DEFECT ARM: a rule scoped to the ABSTRACTION's name ────────────────────────────────────
+    let (code, v) = scan("deny Net Backend\n");
+    let oos = v["outOfScope"].as_array().cloned().unwrap_or_default();
+    assert!(
+        oos.is_empty(),
+        "no REAL unit's name matches the scope `Backend` — the only row that did was the synthetic \
+         union, which has no body to have performed anything. It published `path: \"\"` and the class \
+         `excluded`, a class this run's own `excluded` array does not contain: {v}"
+    );
+    assert_eq!(
+        code, 0,
+        "⟨0.30⟩ makes a non-empty `outOfScope` INCOMPLETE at exit 2, so a bodiless row turned a green \
+         gate red. The control below is the same tree under `deny Net Zzz`: {v}"
+    );
+
+    // ── CONTROL: the same tree, the same rule shape, a scope nothing matches ───────────────────────
+    let (ccode, cv) = scan("deny Net Zzz\n");
+    assert_eq!(ccode, 0, "control must be green — the arms differ only in the scope token: {cv}");
+
+    // ── AND THE REAL FINDINGS ARE UNTOUCHED: an unscoped rule must still disclose the implementor ──
+    let (ucode, uv) = scan("deny Net\n");
+    let uoos = uv["outOfScope"].as_array().cloned().unwrap_or_default();
+    assert!(
+        uoos.iter().any(|f| f["fn"] == serde_json::json!("examples::ex::Crossterm::size")),
+        "the excluded implementor that actually performs Net must STILL be disclosed — the filter \
+         removes a duplicate of it, never the finding: {uv}"
+    );
+    assert!(
+        uoos.iter().all(|f| !f["path"].as_str().unwrap_or("").is_empty()),
+        "every `outOfScope` finding names the file it was read from; an empty path is the tell: {uv}"
+    );
+    assert_eq!(ucode, 2, "…and an excluded file holding a denied effect is still INCOMPLETE: {uv}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
