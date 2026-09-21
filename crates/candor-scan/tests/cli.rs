@@ -4245,3 +4245,127 @@ fn r511_a_synthetic_union_row_in_the_peek_does_not_publish_a_pathless_out_of_sco
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SOUNDNESS **R525** — A CARDINAL SIN: adding an UNRELATED rule that uses a `.candor/config`
+/// `unknown-alias` turned a red verdict GREEN and erased the ⟨0.30⟩ disclosure that made it red.
+///
+/// MEASURED against the published `candor-scan 0.39.0 (spec 0.39)`, over a crate whose `build.rs` opens a
+/// `TcpStream` (so the ⟨0.29⟩/⟨0.30⟩ PEEK has something real to find) with `unknown-alias corp = reflect`
+/// in the `.candor/config` beside the policy:
+///
+/// | policy                            | exit | `outOfScope` | `scannedUnder` | `excluded[].peeked` |
+/// |-----------------------------------|------|--------------|----------------|---------------------|
+/// | `deny Net`                        | 2    | names it     | present        | true                |
+/// | `deny Net` + `deny Unknown[corp]` | **0, "policy ✓"** | **ABSENT** | **ABSENT** | **false**  |
+/// | `deny Net` + `deny Unknown[reflect]` | 2 | names it     | present        | true                |
+///
+/// MECHANISM: the peek parsed the policy through the alias-LESS `parse_policy` while the gate used
+/// `parse_policy_with_aliases`. With an empty vocabulary `Unknown[corp]` is an unrecognised reason-class,
+/// which is FATAL, so the peek's §3.1 refusal arm returned `None` and the fail-closed verdict never armed
+/// — one file read through two vocabularies, which is the divergence ⟨0.24⟩ closed between the scan route
+/// and `gate --report` and which had reopened one level down.
+///
+/// **THE THIRD ROW IS WHY THIS IS A FINDING AND NOT A GUESS.** `deny Unknown[reflect]` is the SAME
+/// policy shape — two rules, the second an `Unknown[…]` filter the tree does not satisfy — differing from
+/// the second row in exactly one thing: whether the token is a BUILTIN reason-class or a config-defined
+/// alias. It stayed red throughout, so "a second rule suppresses the peek" is ruled out by measurement
+/// rather than by argument.
+///
+/// **THE FOURTH ROW IS THE DIRECTION GUARD**, and it is the row that must not be sacrificed to fix the
+/// others: `deny Unknown[nosuchtok]`, with no such alias defined, is a policy that CANNOT BE HONOURED AS
+/// WRITTEN. It must still refuse — exit 2, `refused: true`, no `outOfScope`/`scannedUnder` in the report.
+/// Making the peek tolerant enough to swallow row 2 by accepting everything would trade a silent
+/// under-report for a silent over-acceptance, which is the shape this register has recorded four times.
+#[test]
+fn r525_a_config_alias_in_an_unrelated_rule_does_not_erase_the_out_of_scope_disclosure() {
+    let d = make_crate("r525alias", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
+    // The crate's own surface is pure. EVERY effect in this fixture lives in the EXCLUDED build script,
+    // so each row below is a statement about the peek and nothing else — if the peek does not run, there
+    // is no other route by which `Net` can reach the verdict.
+    std::fs::write(d.join("build.rs"),
+        "fn grab() { let _ = std::net::TcpStream::connect(\"example.com:80\"); }\nfn main() { grab(); }\n")
+        .unwrap();
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "unknown-alias corp = reflect\n").unwrap();
+
+    let run = |pol: &str, tag: &str| -> (Option<i32>, serde_json::Value, serde_json::Value) {
+        let pp = d.join(format!("{tag}.policy"));
+        std::fs::write(&pp, pol).unwrap();
+        let gate = d.join(format!("{tag}.verdict.json"));
+        let _ = std::fs::remove_file(&gate);
+        let out = Command::new(bin())
+            .args([d.to_string_lossy().as_ref(),
+                   "--out", d.join(format!("rep-{tag}")).to_string_lossy().as_ref(),
+                   "--policy", pp.to_string_lossy().as_ref(),
+                   "--gate-json", gate.to_string_lossy().as_ref()])
+            .output().expect("run candor-scan");
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&gate).unwrap_or_else(|e| panic!(
+                "no --gate-json document at {}: {e}; stderr: {}",
+                gate.display(), String::from_utf8_lossy(&out.stderr))))
+            .expect("the verdict is JSON");
+        let rep: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(d.join(format!("rep-{tag}.r525alias.scan.json")))
+                .expect("a scan report")).expect("the report is JSON");
+        (out.status.code(), v, rep)
+    };
+
+    // THE BASELINE, and the calibration: without it every row below is a claim about an instrument that
+    // was never shown able to fail. `deny Net` alone must find the build script's `Net` and refuse to
+    // certify the tree.
+    let (base_code, base_v, base_rep) = run("deny Net\n", "base");
+    assert_eq!(base_code, Some(2), "calibration: the peek must find build.rs's Net under `deny Net`: {base_v}");
+    assert_eq!(base_v["ok"], serde_json::json!(false), "{base_v}");
+    assert_eq!(base_v["incomplete"], serde_json::json!(true), "{base_v}");
+    assert!(base_rep["outOfScope"].as_array().is_some_and(|a| a.iter().any(|f| f["fn"] == "build::grab")),
+        "the disclosure must NAME the function, or the rows below cannot tell an erased one from an empty one: {base_rep}");
+    assert!(base_rep.get("scannedUnder").is_some(), "{base_rep}");
+    assert_eq!(base_rep["excluded"][0]["peeked"], serde_json::json!(true), "{base_rep}");
+
+    // THE DEFECT. `deny Unknown[corp]` says nothing whatever about `Net`, and the gate route resolves the
+    // alias perfectly. Adding it must not change ONE field of the answer the row above gave.
+    let (code, v, rep) = run("deny Net\ndeny Unknown[corp]\n", "alias");
+    assert_eq!(code, Some(2),
+        "R525: an unrelated `deny Unknown[<config alias>]` turned `deny Net` from exit 2 into exit 0 \
+         `policy ✓` — the peek parsed the policy with an EMPTY alias vocabulary, called the alias a fatal \
+         reason-class error, and withheld the disclosure the gate had no trouble with: {v}");
+    assert_eq!(v["ok"], serde_json::json!(false), "{v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert!(rep["outOfScope"].as_array().is_some_and(|a| a.iter().any(|f| f["fn"] == "build::grab")),
+        "R525: the ⟨0.30⟩ `outOfScope` disclosure vanished — ABSENCE is the sin's signature, and here it \
+         is byte-identical to a tree with no excluded effect at all: {rep}");
+    assert_eq!(rep["excluded"][0]["peeked"], serde_json::json!(true),
+        "R525: `peeked: false` here means the peek NEVER OPENED the build script under this policy — and \
+         `peeked` is an OUTCOME, so a reader is told the file went unread when the only thing that went \
+         wrong was the vocabulary the policy was parsed with: {rep}");
+    // …and `scannedUnder` records the rule in its ⟨0.33⟩ CANONICAL EXPANDED form, so the alias resolved
+    // rather than merely being tolerated: `Unknown[corp]` must come back out as `Unknown[reflect]`.
+    assert_eq!(rep["scannedUnder"]["deny"],
+        serde_json::json!(["deny Net", "deny Unknown[reflect]"]),
+        "R525: the peek must record the deny set THE MATCHER USED, with the config alias EXPANDED — a \
+         peek that recorded `Unknown[corp]` would be one that never resolved it: {rep}");
+
+    // THE CONTROL that makes the row above evidence: same shape, builtin class instead of an alias. It
+    // was red before the fix and must stay red, so "a second rule suppresses the peek" is excluded.
+    let (ccode, cv, crep) = run("deny Net\ndeny Unknown[reflect]\n", "builtin");
+    assert_eq!(ccode, Some(2), "the builtin-class control must be unaffected: {cv}");
+    assert_eq!(crep["scannedUnder"], rep["scannedUnder"],
+        "the alias arm and the builtin arm must produce the SAME deny set — that is what `corp = reflect` \
+         means, and it is the only way to show the alias was resolved and not merely ignored:\n{crep}\n{rep}");
+    assert_eq!(crep["outOfScope"], rep["outOfScope"], "…and the same disclosure:\n{crep}\n{rep}");
+
+    // THE DIRECTION GUARD. An UNDEFINED token is still a policy that cannot be honoured as written, and
+    // must still be REFUSED. This is the row a fix that widened the peek into "accept everything" would
+    // break, and it is the more dangerous failure of the two: a refused policy that runs anyway gates on
+    // a rule the operator did not write.
+    let (bcode, bv, brep) = run("deny Net\ndeny Unknown[nosuchtok]\n", "bogus");
+    assert_eq!(bcode, Some(2), "an unhonourable policy is refused: {bv}");
+    assert_eq!(bv["refused"], serde_json::json!(true),
+        "R525's fix must not buy the rows above by making the peek accept a policy the gate refuses: {bv}");
+    assert!(bv.get("violations").is_none(), "a refusal claims nothing about violations: {bv}");
+    assert!(brep.get("outOfScope").is_none(),
+        "§3.1: a producer that refused the policy must not publish a look it took under it: {brep}");
+    assert!(brep.get("scannedUnder").is_none(), "{brep}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}

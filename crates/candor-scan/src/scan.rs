@@ -4422,11 +4422,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             rev_calls.entry(callee.as_str()).or_default().push(caller.as_str());
         }
     }
+    // SOUNDNESS R525 — THE POLICY'S OWN VOCABULARY, DISCOVERED **ONCE** FOR EVERY CONSUMER IN THIS
+    // FUNCTION. It used to be discovered only at the gate arm ~700 lines below, so the ⟨0.29⟩/⟨0.30⟩ PEEK
+    // directly beneath this line parsed the same policy through the alias-LESS `parse_policy` — an empty
+    // vocabulary. `deny Unknown[<a config alias>]` is then an unrecognised reason-class, which is FATAL,
+    // so `fatal_messages()` came back non-empty, the peek's refusal arm returned `None`, and the ⟨0.30⟩
+    // fail-closed verdict never armed. MEASURED on 0.39.0 over a crate whose `build.rs` opens a
+    // `TcpStream`, with `unknown-alias corp = reflect` in the `.candor/config`:
+    //
+    //     deny Net                      → exit 2, `outOfScope` names build::grab, `peeked: true`
+    //     deny Net + deny Unknown[corp] → exit 0 "policy ✓", `outOfScope` ABSENT, `peeked: false`
+    //     deny Net + deny Unknown[reflect] (a BUILTIN class — the control) → exit 2, as the first
+    //
+    // So an UNRELATED extra rule, one the gate route honoured perfectly, silently erased the disclosure
+    // the first policy made and turned a red verdict green. The control is what rules out "a second rule"
+    // as the cause and pins it on the config-defined alias: the peek and the gate were reading one file
+    // through two different vocabularies.
+    //
+    // ONE CALL, NOT TWO. The gate arm below now reads these bindings instead of re-discovering, because
+    // this is the ⟨0.24⟩ "peek's parse IS the matcher" rule one level out — two `discover_config` calls
+    // are two chances to anchor differently, which is the precise defect ⟨0.24⟩ closed between the scan
+    // route and `gate --report`.
+    //
+    // ANCHORED AT THE POLICY FILE (SPEC §3.1) and GATED ON THE POLICY BEING READABLE — both deliberate.
+    // The anchor is ⟨0.24⟩'s ruling, carried from the gate arm's comment below. The readability filter
+    // keeps the PRECONDITION byte-identical to the one the gate arm already had: an unreadable policy
+    // still refuses through its own arm below, with its own message, rather than being pre-empted by a
+    // config refusal raised on behalf of a policy that was never going to be honoured.
+    let policy_cfg_vocab: Option<(std::path::PathBuf, String)> = policy_path
+        .as_ref()
+        .filter(|pp| std::fs::read_to_string(pp).is_ok())
+        .and_then(|pp| candor_classify::policy::discover_config(std::path::Path::new(pp)));
+    let policy_unknown_aliases = policy_cfg_vocab
+        .as_ref()
+        .map(|(_, t)| candor_classify::policy::parse_unknown_aliases(t))
+        .unwrap_or_default();
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
         .and_then(|text| {
-            let parsed = candor_classify::policy::parse_policy(&text);
+            // R525: `..._with_aliases`, never bare `parse_policy`. NOT `parse_policy_silent`: the `warn`
+            // flag is left exactly as it was, so this change moves the VOCABULARY and nothing else — a
+            // quieted parse here would be a second, invisible behaviour delta riding a soundness fix.
+            let parsed =
+                candor_classify::policy::parse_policy_with_aliases(&text, &policy_unknown_aliases);
             // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). `and_then`, not `map`, because the
             // distinction this returns is present-vs-absent and `map` cannot express it. The peek is a
             // producer reading the policy, so §3.1 binds it exactly as it binds the gate: over a policy
@@ -5097,11 +5136,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // `net-partner` and the scan settings above still anchor at `dir`, because they describe the
         // thing being scanned rather than the language the rules are written in. Byte-equality now holds
         // by construction instead of by the two routes happening to be pointed at the same directory.
-        let cfg_vocab = candor_classify::policy::discover_config(std::path::Path::new(&pp));
-        let unknown_aliases = cfg_vocab
-            .as_ref()
-            .map(|(_, t)| candor_classify::policy::parse_unknown_aliases(t))
-            .unwrap_or_default();
+        //
+        // SOUNDNESS R525 — AND IT IS DISCOVERED ONCE, ABOVE, WHERE THE PEEK CAN SEE IT TOO. This block
+        // used to own the only `discover_config(&pp)` call in the function, which is why the peek had no
+        // vocabulary to parse with and lost a ⟨0.30⟩ disclosure to an alias the gate resolved fine. The
+        // binding moved; the ANCHOR did not, and everything the paragraphs above say about it still holds
+        // verbatim. Reaching this arm means `pp` read successfully, which is exactly the filter the
+        // hoisted binding applies — so the two are the same discovery, not two that happen to agree.
+        let cfg_vocab = &policy_cfg_vocab;
+        let unknown_aliases = &policy_unknown_aliases;
         // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the same UNREADABLE-POLICY
         // posture as the branch above, and deliberately at the same place in the flow, so this route and
         // `candor-query gate --report` refuse the same policy identically (exit 2, no verdict document).
@@ -5113,7 +5156,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // Unknown`, while the same line claimed the rule was being ignored. One of those is a false
         // disclosure and the other is fail-open; the fail-open one is the common case, because a typo
         // lands beside correct tokens far more often than alone.
-        let (perrs, used_aliases, pignored) = crate::gate::policy_precheck(&text, &unknown_aliases);
+        let (perrs, used_aliases, pignored) = crate::gate::policy_precheck(&text, unknown_aliases);
         // ⟨0.28⟩ SPEC §6.2: the dropped lines ride the VERDICT as `ignored` — recorded here, written
         // once by `write_gate_json` beside the violations and `zeroMatch`. The per-line stderr
         // warnings are unchanged; this is their machine half. (On the fatal/zero-rule refusal arms
@@ -5216,7 +5259,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // `masking_fs_path_and_db_table_gate_fails_closed`, which gates on `allow Fs /var/app` and went
         // from exit 1 to exit 2. A zero-rule test that reads a subset of the rule kinds is the same
         // false-refusal shape this rung exists to prevent, pointed the other way.
-        let parsed_zr = candor_classify::policy::parse_policy_silent(&text, &unknown_aliases);
+        let parsed_zr = candor_classify::policy::parse_policy_silent(&text, unknown_aliases);
         if parsed_zr.rules.is_empty() && parsed_zr.allow_rules.is_empty() && parsed_zr.layer_rules.is_empty()
             && parsed_zr.only_rules.is_empty() {
             let why = format!(
@@ -5242,7 +5285,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
-        let outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        let outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, unknown_aliases, &net_partners);
         // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
         // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES,
         // so a function calling into a dep has an EMPTY adjacency and the crossing is invisible to them.
@@ -5260,7 +5303,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // was designed to escape. The ⟨0.29⟩ `outOfScope` posture: say what was not judged, leave the exit
         // code alone.
         if !deps_idx.crates.is_empty() {
-            let np = candor_classify::policy::parse_policy(&text);
+            // SOUNDNESS R525 — the THIRD `parse_policy` in this function, converted with the other two.
+            // Its VERDICT does not move: it counts `forbid`/`only` rules, and alias resolution touches
+            // only the `Unknown[…]` filter inside a `deny`, so the count is identical either way. It is
+            // converted anyway because an alias-blind parse of a policy the rest of the run reads
+            // alias-aware is a divergence waiting for its first consumer, and because leaving one of
+            // three siblings unconverted is exactly how R525 was created — `parse_policy_silent` had
+            // already landed two lines' worth of sibling above while these two stayed bare.
+            let np = candor_classify::policy::parse_policy_with_aliases(&text, unknown_aliases);
             let named = np.layer_rules.len() + np.only_rules.len();
             if named > 0 {
                 eprintln!(
@@ -5456,7 +5506,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             &inferred,
             &reason_class_acc,
             &hole_nets,
-            &unknown_aliases,
+            unknown_aliases,
         );
         // R443 THE LINES COME FROM THE SHARED RENDERER NOW — `candor-query gate --report` prints the
         // identical note from the identical function, so the two routes can no longer disagree about the

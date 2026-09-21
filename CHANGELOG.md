@@ -10,6 +10,50 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### SOUNDNESS R525 — ⚠ a `.candor/config` ALIAS IN AN UNRELATED RULE TURNED A RED VERDICT GREEN
+
+- **Adding `deny Unknown[<a config-defined alias>]` beside `deny Net` made `candor-scan` exit 0
+  `policy ✓` where `deny Net` alone exited 2, and ERASED the ⟨0.30⟩ disclosure that made it red.**
+  `outOfScope` went ABSENT, `scannedUnder` went ABSENT, and every `excluded[].peeked` flipped to
+  `false` — so the document claimed the excluded files had gone unread, when the only thing that had
+  gone wrong was the vocabulary the policy was parsed with. A silent under-report, live in the
+  published 0.39.0 crates.
+
+- **MECHANISM: one policy file read through two vocabularies.** The ⟨0.29⟩/⟨0.30⟩ PEEK parsed it with
+  the alias-LESS `parse_policy`, while the gate used `parse_policy_with_aliases`. With an empty
+  vocabulary `Unknown[corp]` is an unrecognised reason-class, which is FATAL, so the peek's §3.1
+  refusal arm returned `None` and the fail-closed verdict never armed. This is the ⟨0.24⟩
+  anchoring divergence between the scan route and `gate --report`, reopened one level down — and it
+  was a HALF-CONVERTED call site, not an oversight of the idea: `parse_policy_silent` had already
+  landed at the zero-rule check a few lines away while its two siblings stayed bare.
+
+- **THE CONTROL IS WHAT MAKES IT A FINDING.** `deny Net` + `deny Unknown[reflect]` — the same policy
+  shape with a BUILTIN reason-class instead of a config alias — stayed red throughout, so "a second
+  rule suppresses the peek" is excluded by measurement rather than by argument. And the alias arm now
+  records `scannedUnder.deny = ["deny Net", "deny Unknown[reflect]"]`, byte-identical to the control:
+  the ⟨0.33⟩ canonical form proves the alias RESOLVED, not merely that it stopped being fatal.
+
+- **MEASURED on 1,593 crates.io registry crates**, pre-built published-0.39.0 binary vs this one, one
+  policy (`deny Net` + `deny Unknown[corp]`, `unknown-alias corp = reflect` beside it). `bin/corpus-ab.py`
+  over 320,281 function rows per arm: **ADDED 0 REMOVED 0 CHANGED 0** on all five keys — function
+  rows do not move, which is the over-charge control. The peek's own keys, which that A/B does not
+  compare, moved strictly one way: **`outOfScope` ABSENT→present 1593 / present→ABSENT 0;
+  `scannedUnder` ABSENT→present 1593 / 0; `peeked` false→true 1059 / true→false 0; 108 packages gained
+  a NON-EMPTY `outOfScope`, of which 56 flipped exit 0 → exit 2** — `serde_json`, `rustls`, `h2`,
+  `syn`, `tokio-util`, `native-tls`, `quinn-proto` among them. Ground-truthed from source:
+  serde_json's `tests/test.rs` really does `TcpListener::bind("localhost:20000")`.
+  REACH: 1593/1593 entries hit the changed branch with the alias resolved.
+
+- **THE OVER-CHARGE CONTROL for the refactor itself**: the same two binaries over the same 1,593
+  crates under a plain `deny Net` with no alias anywhere — **0 packages moved**, on any key. The
+  discovery hoist is inert wherever no alias is involved.
+
+- **DIRECTION: this fix fails CLOSED.** It only ever gives the peek the vocabulary the gate already
+  had, so a policy the gate refuses is still refused by the peek. `deny Unknown[nosuchtok]`, with no
+  such alias defined, still exits 2 with `refused: true` and publishes no `outOfScope`/`scannedUnder`
+  — pinned as the fourth row of the new test, because buying the first three by making the peek
+  accept everything would trade a silent under-report for a silent over-acceptance.
+
 ### SOUNDNESS R520 — a USAGE ERROR built a directory tree in the operator's CWD, named after the typo
 
 - **`candor-scan nonexistent-target /also-bogus` exits 2 correctly and left
