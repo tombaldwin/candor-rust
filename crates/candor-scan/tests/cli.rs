@@ -1195,6 +1195,57 @@ fn r529_a_dispatch_with_a_block_nested_implementor_discloses_instead_of_certifyi
     assert!(other["unresolved"].is_null(), "{other:#}");
 }
 
+/// SOUNDNESS R529b — A BLOCK-NESTED `extern "C"` BLOCK LOSES THE FFI DISCLOSURE.
+///
+/// Same mechanism as R529, a different index: `collect_decls`'s `Item::ForeignMod` arm is item-level
+/// like every other, so `fn wrap() { extern "C" { fn ffi(); } unsafe { ffi(); } }` records no name in
+/// `extern_fns`, the bare leaf matches no local def and no classifier rule, and the caller falls through
+/// to silent-pure. The MODULE-LEVEL spelling of the identical program discloses
+/// `Unknown` + `native:extern fn`, so the two arms differ in exactly one thing: where the `extern` block
+/// is written. That control is the whole evidence — without it, "absent" and "pure" are the same bytes.
+#[test]
+fn r529b_a_block_nested_extern_block_discloses_the_ffi_boundary() {
+    let d = make_crate(
+        "r529extern",
+        r#"
+        extern "C" { pub fn mod_ffi(x: i32) -> i32; }
+        pub fn mod_wrapper() { unsafe { mod_ffi(1); } }
+
+        pub fn body_wrapper() {
+            extern "C" { fn body_ffi(x: i32) -> i32; }
+            unsafe { body_ffi(1); }
+        }
+
+        // CONTROL: an ordinary local fn called the ordinary way must stay pure — the hedge is keyed on
+        // a declared FFI name, not on being called from an `unsafe` block.
+        fn plain(x: i32) -> i32 { x }
+        pub fn plain_wrapper() { unsafe { plain(1); } }
+        "#,
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let row = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name).cloned();
+
+    for arm in ["mod_wrapper", "body_wrapper"] {
+        let r = row(arm).unwrap_or_else(|| panic!(
+            "R529b: `{arm}` is ABSENT, which is an affirmative purity claim over a call into a body \
+             that is not in this language at all: {v:#}"));
+        assert!(r["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "{r:#}");
+        assert!(r["unknownWhy"].as_array()
+                    .map(|a| a.iter().any(|w| w == "native:extern fn")).unwrap_or(false),
+            "R529b: §4's canonical `native:` kind — the boundary is a foreign one: {r:#}");
+    }
+    assert!(row("plain_wrapper").is_none(),
+        "R529b control: a plain local call inside `unsafe` must stay pure — the disclosure is keyed on \
+         the declared FFI NAME, not on the `unsafe` block: {v:#}");
+}
+
 /// SOUNDNESS R529 — A MODULE DECLARED INSIDE A BODY IS WIDENED BY ITS OWN `use` MAP.
 ///
 /// The LEAF is the same on both sides here (`Backend`), and only the `use` map distinguishes them: the

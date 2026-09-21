@@ -3194,6 +3194,7 @@ pub(crate) fn collect_block_nested_trait_impls(
     uses: &HashMap<String, String>,
     local: &mut std::collections::BTreeSet<String>,
     foreign: &mut std::collections::BTreeSet<String>,
+    externs: &mut std::collections::BTreeSet<String>,
 ) {
     for it in items {
         if let syn::Item::Mod(m) = it {
@@ -3206,11 +3207,11 @@ pub(crate) fn collect_block_nested_trait_impls(
                 let mut sub = uses.clone();
                 let mut alts = HashMap::new();
                 collect_item_uses(inner, include_tests, &mut sub, &mut alts);
-                collect_block_nested_trait_impls(inner, include_tests, &sub, local, foreign);
+                collect_block_nested_trait_impls(inner, include_tests, &sub, local, foreign, externs);
             }
             continue;
         }
-        let mut v = NestedImplWalk { include_tests, uses, local, foreign, depth: 0 };
+        let mut v = NestedImplWalk { include_tests, uses, local, foreign, externs, depth: 0 };
         syn::visit::Visit::visit_item(&mut v, it);
     }
 }
@@ -3223,6 +3224,13 @@ struct NestedImplWalk<'a> {
     uses: &'a HashMap<String, String>,
     local: &'a mut std::collections::BTreeSet<String>,
     foreign: &'a mut std::collections::BTreeSet<String>,
+    /// SOUNDNESS R529b — the THIRD fact this one walk answers: the `extern "C" { fn … }` names declared
+    /// inside a block. `collect_decls`'s `Item::ForeignMod` arm is item-level like every other, so
+    /// `fn wrap() { extern "C" { fn ffi(); } unsafe { ffi(); } }` records NO name and the call falls
+    /// through to silent-pure — while the module-level spelling of the SAME program discloses
+    /// `Unknown` + `native:extern fn`. One walk, three facts, computed from the same items so they
+    /// cannot drift apart (the R128+R452 pattern).
+    externs: &'a mut std::collections::BTreeSet<String>,
     depth: usize,
 }
 
@@ -3279,6 +3287,7 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
             uses: &sub,
             local: &mut *self.local,
             foreign: &mut *self.foreign,
+            externs: &mut *self.externs,
             depth: self.depth,
         };
         for it in inner {
@@ -3290,6 +3299,26 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
             self.record(im);
         }
         syn::visit::visit_item_impl(self, im);
+    }
+    /// R529b — a block-nested `extern "C" { fn … }`. The recorded NAME joins the crate-wide
+    /// `extern_fns` leaf set the ordinary arm feeds, so the safe wrapper around it discloses `Unknown`
+    /// plus `native:extern fn` exactly as the module-level spelling already does.
+    ///
+    /// Direction: over-disclosure on a leaf collision (a local `fn ffi` elsewhere sharing the name),
+    /// which is the same residual the item-level arm has carried since it was written.
+    fn visit_item_foreign_mod(&mut self, fm: &'ast syn::ItemForeignMod) {
+        if self.depth > 0 && (self.include_tests || !is_cfg_test(&fm.attrs)) {
+            for fi in &fm.items {
+                if let syn::ForeignItem::Fn(f) = fi {
+                    // §E1 REACH PROBE — a byte-identical A/B is not evidence the branch ran.
+                    if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                        eprintln!("R529HIT\tEXTERN\t{}", f.sig.ident); // §E1 REACH PROBE
+                    }
+                    self.externs.insert(f.sig.ident.to_string());
+                }
+            }
+        }
+        syn::visit::visit_item_foreign_mod(self, fm);
     }
 }
 

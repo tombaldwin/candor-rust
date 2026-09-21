@@ -10,6 +10,48 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### SOUNDNESS R529b — ⚠ A BLOCK-NESTED `extern "C"` BLOCK LOST THE FFI DISCLOSURE
+
+- **`fn wrap() { extern "C" { fn ffi(); } unsafe { ffi(); } }` read PURE and was ABSENT from
+  `functions[]`, while the module-level spelling of the identical program discloses
+  `Unknown` + `native:extern fn`.** Same mechanism as R529, a different index: `collect_decls`'s
+  `Item::ForeignMod` arm is item-level like every other walk, so the declared name never reaches
+  `extern_fns`, the bare leaf matches no local def and no classifier rule, and the call falls through
+  to silent purity — over a body that is not in this language at all.
+
+- **The `extern` collection now rides the SAME block-depth walk R529 added**, and the names go straight
+  into `extern_fns` rather than into a second index: there is ONE question here ("is this leaf an FFI
+  declaration in this crate") and it must have one answer, not a parallel list a future reader could
+  consult instead.
+
+- **MEASURED on 1,595 registry crates** (`bin/corpus-ab.py`, wide key, pre = `5f00463`, 321,084 rows
+  pre / 321,493 post): **ADDED 409, REMOVED 0, CHANGED 111** (keyed on `inferred`: ADDED 409 /
+  REMOVED 0 / CHANGED 83). The 409 ADDED are functions that were ABSENT — a purity claim — and are now
+  disclosed. **REACH 4,284 hits across 73 of the 1,595 entries** (`CANDOR_R529_INSTR=1`, marker
+  `R529HIT\tEXTERN`). Gate-level over those 73 affected crates: **`deny Unknown` 69 → 73,
+  `deny Unknown[native]` 47 → 73.** (Over the first 200 crates alphabetically the movement is 0 — the
+  affected population is `objc2-*` and `wasi*`, so that slice is the wrong denominator and is reported
+  rather than quoted as reassurance.)
+
+- **Ground-truthed from SOURCE.** `wasi-0.14.2+wasi-0.2.4/src/bindings.rs:184` — `pub fn get_stdin()`
+  declares `extern "C" { #[link_name = "get-stdin"] fn wit_import0() -> i32; }` inside its own body and
+  then calls it. That is the wit-bindgen shape, and it is most of the population: `wit_import0..7`
+  (1,000+ hits), `objc2-core-foundation` / `objc2-core-graphics` / `objc2-system-configuration`, and
+  `__cxa_atexit`.
+
+- **Pinned by `r529b_a_block_nested_extern_block_discloses_the_ffi_boundary`, RUN against the pre-fix
+  binary and RED there.** It carries the module-level arm as its control — the two differ in exactly
+  one thing, where the `extern` block is written — plus an over-charge control proving the hedge is
+  keyed on the declared FFI NAME and not on being called from an `unsafe` block.
+
+- **The residual, stated: this is a crate-wide LEAF set**, so a crate declaring `extern "C" { fn drop(…) }`
+  inside a body hedges every bare `drop(…)` in that crate (25 hits each in the `wasi*` family). That is
+  over-disclosure, and it is the SAME residual the item-level arm has carried since it was written —
+  not a new class.
+
+- **Cache schema rev36 → rev37.** The FIELD is unchanged and its CONTENT is wider, which is the rev31
+  shape; a rev36 entry replays the narrower set, i.e. the silent-pure FFI call this row closes.
+
 ### SOUNDNESS R529 — ⚠ AN IMPLEMENTOR WRITTEN INSIDE A BLOCK IS IN NO INDEX, SO THE DISPATCH CERTIFIED PURITY
 
 - **A `dyn Trait` dispatch whose only OTHER visible implementor is pure read `inferred: []` with no

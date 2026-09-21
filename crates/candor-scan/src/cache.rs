@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev37: `extern_fns` now also carries the `extern "C" { fn … }` names declared INSIDE A BLOCK
+    // (SOUNDNESS R529b). The FIELD is unchanged, its CONTENT is wider — which is precisely the rev31
+    // shape ("a change to what an EXISTING field RECORDS"), and a rev36 entry replays the narrower set,
+    // i.e. the silent-pure FFI call the row closes.
     // rev36: `FileDecls` gained `nested_impl_members` + `nested_impl_foreign` (SOUNDNESS R529 — the trait
     // impls written inside a BLOCK, which no other Pass A walk reaches). A rev35 entry has neither, so
     // `#[serde(default)]` reads both EMPTY — and an empty hedge set is byte-for-byte the pre-fix report:
@@ -224,7 +228,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev36/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev37/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -444,8 +448,14 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // its effects to the enclosing fn. Needs the file's assembled `use` map, like the foreign walk.
     let mut nested_local: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut nested_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // R529b — the same walk also answers "which `extern "C"` names are declared inside a block". They
+    // go straight into `extern_fns`, the crate-wide leaf set the item-level `Item::ForeignMod` arm
+    // already feeds: there is ONE question here ("is this leaf an FFI declaration in this crate") and it
+    // must have one answer, not a second index a future reader could consult instead of this one.
+    let mut nested_externs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_block_nested_trait_impls(
-        items, include_tests, &uses, &mut nested_local, &mut nested_foreign);
+        items, include_tests, &uses, &mut nested_local, &mut nested_foreign, &mut nested_externs);
+    extern_fns.extend(nested_externs);
     FileDecls {
         fields,
         field_elem,
