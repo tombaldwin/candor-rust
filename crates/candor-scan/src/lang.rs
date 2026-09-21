@@ -3109,6 +3109,31 @@ pub(crate) fn collect_macro_hidden_decls(
 /// (`impl mymod::Tr for X`) survives that test and is filtered at emission against the manifest's real
 /// dependency set, where the answer is known — a bogus key here is inert wire noise, but it is cheaper to
 /// refuse it than to explain it.
+/// SOUNDNESS R529 / SPEC §4 ⟨0.39⟩ obligation 2 — THE ONE PLACE A FOREIGN ABSTRACTION'S WIRE KEY IS
+/// FORMED. `(owning crate, trait qual)` for an `impl <path> for T`, or `None` when the path does not
+/// root at a genuine dependency crate (std/`crate`/`self`/`super` are ours, and a single-segment path
+/// names no crate at all).
+///
+/// TWO WALKS ASK THIS: `collect_foreign_trait_impls` (item level) and `collect_block_nested_trait_impls`
+/// (block depth >= 1). They ask ONE function rather than each running `expand` + `split_once` +
+/// `is_dependency_crate_root` themselves, because a key spelled two ways inside one engine is the
+/// ⟨0.34⟩ drift the clause exists to forbid — and the two spellings would have to MATCH for the
+/// R529 hedge to find the entry obligation 2 published. Two paths computing one fact are free to
+/// disagree; this is the one path.
+pub(crate) fn foreign_trait_owner_qual(
+    tr: &syn::Path,
+    uses: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    // The trait as WRITTEN, then expanded through this scope's `use` map — both spellings
+    // (`use iface::Backend; impl Backend for X` and `impl iface::Backend for X`) must form the same
+    // key, which is R6's lesson on the receiver side.
+    let written: String =
+        tr.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+    let full = expand(&written, uses);
+    let (root, qual) = full.split_once("::")?;
+    is_dependency_crate_root(root).then(|| (root.to_string(), qual.to_string()))
+}
+
 pub(crate) fn collect_foreign_trait_impls(
     items: &[syn::Item],
     include_tests: bool,
@@ -3120,16 +3145,8 @@ pub(crate) fn collect_foreign_trait_impls(
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
                 let Some((None, tr, _)) = &im.trait_ else { continue };  // `impl !Tr for X` is not an impl
                 let Some(ty) = impl_type_name(&im.self_ty) else { continue };
-                // The trait as WRITTEN, then expanded through this scope's `use` map — both spellings
-                // (`use iface::Backend; impl Backend for X` and `impl iface::Backend for X`) must form
-                // the same key, which is R6's lesson on the receiver side.
-                let written: String =
-                    tr.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
-                let full = expand(&written, uses);
-                let Some((root, qual)) = full.split_once("::") else { continue };
-                if !is_dependency_crate_root(root) {
-                    continue;
-                }
+                // ONE AUTHORITY for the key — see `foreign_trait_owner_qual`.
+                let Some((root, qual)) = foreign_trait_owner_qual(tr, uses) else { continue };
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
                         let method = m.sig.ident.to_string();
@@ -3238,20 +3255,16 @@ impl NestedImplWalk<'_> {
     fn record(&mut self, im: &syn::ItemImpl) {
         let Some((None, tr, _)) = &im.trait_ else { return }; // `impl !Tr for X` is not an impl
         let Some(leaf) = tr.segments.last().map(|s| s.ident.to_string()) else { return };
-        // The trait as WRITTEN, then expanded through this scope's `use` map — the same two spellings
-        // `collect_foreign_trait_impls` reconciles, reconciled the same way.
-        let written: String =
-            tr.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
-        let full = expand(&written, self.uses);
-        if let Some((root, qual)) = full.split_once("::") {
-            if is_dependency_crate_root(root) {
-                for ii in &im.items {
-                    if let syn::ImplItem::Fn(m) = ii {
-                        self.foreign.insert(format!("{root}#{qual}::{}", m.sig.ident));
-                    }
+        // ONE AUTHORITY for the key, shared with `collect_foreign_trait_impls` — and not merely for
+        // tidiness: the hedge below only finds the entry obligation 2 published if the two walks agree
+        // on the spelling, so a second copy here is a silent-purity bug waiting on one of them moving.
+        if let Some((root, qual)) = foreign_trait_owner_qual(tr, self.uses) {
+            for ii in &im.items {
+                if let syn::ImplItem::Fn(m) = ii {
+                    self.foreign.insert(format!("{root}#{qual}::{}", m.sig.ident));
                 }
-                return; // a foreign abstraction is not also a local trait leaf
             }
+            return; // a foreign abstraction is not also a local trait leaf
         }
         for ii in &im.items {
             if let syn::ImplItem::Fn(m) = ii {
