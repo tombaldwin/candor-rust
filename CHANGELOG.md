@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.39.1] — 2026-09-21
+
 ### SOUNDNESS R525 — ⚠ a `.candor/config` ALIAS IN AN UNRELATED RULE TURNED A RED VERDICT GREEN
 
 - **Adding `deny Unknown[<a config-defined alias>]` beside `deny Net` made `candor-scan` exit 0
