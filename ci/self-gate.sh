@@ -56,6 +56,15 @@ for c in candor-report candor-classify candor-scan candor-query; do
 import json, os, sys
 denied = set(os.environ["DENIED"].split())
 d = json.load(open(sys.argv[1])); fns = d["functions"] if isinstance(d, dict) else d
+# ⟨0.39⟩ A SYNTHETIC `interfaceUnion` ROW IS NOT A UNIT OF THIS CRATE, so it cannot be an AS-EFF-006
+# subject. It is the UNION over an abstraction member's implementors — no body, no `loc`, and its
+# effects are already charged to the real implementor row beside it. Naming it here would print an
+# `AS-EFF-006 Backend::size` for a function that does not exist, which is the FABRICATION direction of
+# exactly the defect R511 fixed in `gate --report`, `audit`, the peek and the scan's own summary. This
+# gate was missed by that sweep because it reads the JSON itself instead of going through
+# `candor-query`. It also matters one line UP: `fns` feeds the `analyzed.count == 0 and not fns`
+# vacuity test, where a synthetic row would suppress the "judged nothing" refusal.
+fns = [e for e in fns if not e.get("interfaceUnion")]
 # ⟨0.21⟩ COMPLETENESS FIRST, and this was the whole defect. Checking `functions` against the denylist
 # asks "did anything we analyzed reach a denied effect" — over a crate whose sources did not parse, the
 # answer is no, and this gate printed OK. The engine DID disclose it (`analyzed.count: 0`, a non-empty

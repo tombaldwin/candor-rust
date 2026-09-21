@@ -82,6 +82,14 @@ python3 - "$REPORT" <<'PY' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 fns = d.get("functions", [])
+# ⟨0.39⟩ A SYNTHETIC `interfaceUnion` ROW IS NOT A FUNCTION, so it must not count toward a floor whose
+# whole job is to catch a binary that found NOTHING. It is the union over an abstraction member's
+# implementors: no body, no `loc`, and its effects are already on the real implementor row. Counting it
+# is the FAIL-OPEN direction — synthetic rows padding the tally the v0.32.0 defect is detected by — and
+# it is the same defect R511 fixed in `gate --report`, `audit` and the scan's own summary. `analyzed`
+# is unaffected: the engine never puts a union qual in it, which is also why the two numbers must be
+# filtered differently rather than trusted to agree.
+fns = [f for f in fns if not f.get("interfaceUnion")]
 analyzed = (d.get("analyzed") or {}).get("count", 0)
 effects = {e for f in fns for e in f.get("inferred", [])}
 # Floors, measured on 0.38.0 (12 / 10). A packaged binary that finds LESS than the fixture demonstrably

@@ -10,6 +10,45 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### R511's SWEEP MISSED TWO GATES THAT READ THE REPORT JSON DIRECTLY
+
+- **`ci/self-gate.sh` named a synthetic `interfaceUnion` row as an `AS-EFF-006` violation**, and
+  **`ci/verify-binary.sh` counted synthetic rows toward the "did this binary find anything at all"
+  floor.** Both are the ⟨0.39⟩ union row treated as a unit — the defect `5afcef4` (R511) fixed in
+  `gate --report`, `audit`, the ⟨0.29⟩ peek and the scan's own summary. These two were missed because
+  they parse the report document themselves instead of going through `candor-query`, so no grep for
+  the marker in Rust source could have found them. **An audit's boundary must not be drawn around the
+  language it was written in.**
+
+- **The two fail in OPPOSITE directions, which is why both are worth naming.** self-gate FABRICATES:
+  it prints `AS-EFF-006 Backend::size` for a row with no body and exits 1, over effects already
+  charged to the real implementor beside it. verify-binary FAILS OPEN: a binary that found nine
+  functions plus three synthetic rows clears a floor that exists to catch one that found nothing.
+
+- **CALIBRATED, both, and the RED line is the evidence.** Driving `self-gate`'s verdict block
+  directly (it reads one JSON document and one env var — §M): against the PRE-fix block a report
+  whose only denied effect is on an `interfaceUnion` row gives
+  `AS-EFF-006  Backend::size  performs ['Net'], forbidden by 'deny Db Exec Ipc Net'`, exit 1; after
+  the filter, exit 0 — **while a report with a REAL `Net` row still prints
+  `AS-EFF-006  real_fetch …` and still exits 1**, which is the control that matters, since a filter
+  is also how you disarm a gate. For verify-binary, `verify-binary-selftest.sh` gains an eighth arm
+  (nine real rows + three union rows, `analyzed 12`): against the pre-fix gate it is the ONLY arm
+  that fails, and it fails printing `✔ sample/ → 12 analyzed, 12 functions`.
+
+- **A near-miss, reported because an audit that hides one has told you nothing.** That new arm first
+  reported `ok` against the pre-fix gate — for the wrong reason: the scratch copy resolved `$HERE`
+  one directory up, `sample/` was missing, and `verify-binary.sh` correctly refused with "this check
+  cannot run, which is not a pass". Expected-rc=1 matched a refusal that had nothing to do with the
+  floor. The arm is only calibrated because the PASS was read for its reason and not for its verdict.
+
+- The other readers found by the same sweep and NOT fixed here are recorded as open work, not closed:
+  `eval/calibration/{query_properties,blackout_screen,sweep,widesweep}.py`,
+  `eval/coverage-gate/generate.py`, `eval/token-cost/measure.py`,
+  `integrations/claude-code/candor-run.sh`'s `grep -c '"fn"'` fallback, the per-leaf soundness oracles
+  (`soundness/check.py`, `oracle_pf_check.py`, `pf/run_pf.sh`, `confirmatory/run_frozen.sh`,
+  `recall/recall_check.py`, `fabrication_probe.py` — all latent while the generators stay trait-free),
+  and the shell completions.
+
 ### SOUNDNESS R529b — ⚠ A BLOCK-NESTED `extern "C"` BLOCK LOST THE FFI DISCLOSURE
 
 - **`fn wrap() { extern "C" { fn ffi(); } unsafe { ffi(); } }` read PURE and was ABSENT from

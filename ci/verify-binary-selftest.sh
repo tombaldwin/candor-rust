@@ -103,6 +103,14 @@ check "a TAG-shaped version (v-prefixed) is accepted" "$WORK/good" 0 v7.7.7
 #    firing on something other than the version, and arm 4 proves nothing.
 check "…and passes when no version is demanded" "$WORK/oldver" 0 ""
 
+# 5b. SYNTHETIC ROWS MUST NOT PAD THE FLOOR. Nine real rows plus three `interfaceUnion` rows is
+#     twelve `functions` entries and NINE functions, and the floor exists to catch a binary that found
+#     nothing — so counting the synthetic three is the fail-open direction. Before the ⟨0.39⟩ filter
+#     this arm PASSED at `functions 12 >= 10`.
+mkstub "$WORK/padded" "candor-scan 7.7.7 (spec 7.7)" \
+  '[{"fn":"a","inferred":["Fs"]},{"fn":"b","inferred":["Env"]},{"fn":"c","inferred":["Exec"]},{"fn":"d","inferred":["Clock"]},{"fn":"e","inferred":["Fs"]},{"fn":"f","inferred":["Fs"]},{"fn":"g","inferred":["Fs"]},{"fn":"h","inferred":["Fs"]},{"fn":"i","inferred":["Fs"]},{"fn":"T::x","inferred":["Fs"],"interfaceUnion":true},{"fn":"T::y","inferred":["Fs"],"interfaceUnion":true},{"fn":"T::z","inferred":["Fs"],"interfaceUnion":true}]' 12
+check "synthetic interfaceUnion rows do NOT pad the function floor" "$WORK/padded" 1 7.7.7
+
 # 6. The QUERY half. A working scanner beside a broken query is the asymmetry that started all this.
 mkstub "$WORK/badq" "candor-scan 7.7.7 (spec 7.7)" "$GOOD_FNS" 12
 printf '#!/bin/sh\ncase "$1" in --version) echo "candor-query 7.7.7 (spec 7.7)"; exit 0;; esac\nexit 3\n' \
