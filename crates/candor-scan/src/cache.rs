@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev36: `FileDecls` gained `nested_impl_members` + `nested_impl_foreign` (SOUNDNESS R529 — the trait
+    // impls written inside a BLOCK, which no other Pass A walk reaches). A rev35 entry has neither, so
+    // `#[serde(default)]` reads both EMPTY — and an empty hedge set is byte-for-byte the pre-fix report:
+    // the dispatch resolves to whatever visible implementor there is and certifies purity. Same trap as
+    // rev35/rev34/rev33/rev25, and the reason this rev exists rather than riding the version alone.
     // rev32: the SAME class as rev31, three indexes wider (SOUNDNESS R478/R479/R482). `field_elem_trait`
     // now carries the `\u{1f}gf\u{1f}…` pending key space too (the ELEMENT half of the impl-bound join);
     // `trait_fields` gains a general `Fields::Unnamed` arm, so a tuple position records dispatch leaves a
@@ -219,7 +224,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev35/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev36/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -359,6 +364,16 @@ pub(crate) struct FileDecls {
     /// second spelling it forbids — served invisibly from a warm cache.
     #[serde(default)]
     pub(crate) trait_quals: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R529 — the `"{trait leaf}::{method}"` pairs this file implements INSIDE A BLOCK, which
+    /// no other Pass A index can see. See `lang::collect_block_nested_trait_impls`. A pre-rev36 entry
+    /// deserializes EMPTY, which re-serves exactly the silent purity claim the row closes — hence the
+    /// rev bump.
+    #[serde(default)]
+    pub(crate) nested_impl_members: Vec<String>,
+    /// SOUNDNESS R529 — the same fact for an abstraction this file does NOT own, in
+    /// `collect_foreign_trait_impls`'s own `"{owner}#{trait qual}::{method}"` key spelling.
+    #[serde(default)]
+    pub(crate) nested_impl_foreign: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -423,6 +438,14 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // needs `modpath`, which `collect_decls` does not carry, so it is a separate walk.
     let mut trait_quals: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     crate::lang::collect_trait_decl_quals(items, modpath, include_tests, &mut trait_quals);
+    // R529 — the trait impls written inside a BLOCK. Walked beside the two above because it answers the
+    // question they cannot: both of those recurse through `Item::Mod` and nothing else, so an
+    // `impl Trait for Type` in a fn body reaches neither, while Pass B walks into that body and charges
+    // its effects to the enclosing fn. Needs the file's assembled `use` map, like the foreign walk.
+    let mut nested_local: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut nested_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    crate::lang::collect_block_nested_trait_impls(
+        items, include_tests, &uses, &mut nested_local, &mut nested_foreign);
     FileDecls {
         fields,
         field_elem,
@@ -488,6 +511,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         },
         // R503 — a `BTreeSet` in, a sorted `Vec` out: same determinism requirement, same reason.
         trait_quals: trait_quals.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
+        // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
+        nested_impl_members: nested_local.into_iter().collect(),
+        nested_impl_foreign: nested_foreign.into_iter().collect(),
     }
 }
 
@@ -546,6 +572,13 @@ pub(crate) struct MergedDecls {
     /// TWO quals is ambiguous and every consumer refuses it, exactly as `LocalTrait::count > 1` already
     /// refuses the same leaf one field over.
     pub(crate) trait_quals: HashMap<String, std::collections::BTreeSet<String>>,
+    /// R529 — every file's BLOCK-NESTED trait-impl members, unioned. See
+    /// `FileDecls::nested_impl_members`. Read as a HEDGE (a dispatch on one of these members cannot be
+    /// certified from the visible implementors alone), never as an implementor set — the body-local
+    /// method has no unit to edge to.
+    pub(crate) nested_impl_members: std::collections::HashSet<String>,
+    /// R529 — the same, keyed under the OWNING crate for an abstraction this crate does not own.
+    pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -816,6 +849,12 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.macro_hidden_fns {
         acc.macro_hidden_fns.insert(n.clone()); // set union — order-independent (R452)
     }
+    for n in &fd.nested_impl_members {
+        acc.nested_impl_members.insert(n.clone()); // set union — order-independent (R529)
+    }
+    for n in &fd.nested_impl_foreign {
+        acc.nested_impl_foreign.insert(n.clone()); // set union — order-independent (R529)
+    }
     for (k, v) in &fd.foreign_impls {
         // ⟨0.39⟩ UNION, never last-writer-wins: two files may implement the same foreign member for
         // different types and the entry publishes the union over both (§4 bounded CHA). Picking one would
@@ -1066,6 +1105,22 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(a);
     }
     s.push('\n');
+    // nested_impl_members / nested_impl_foreign — R529. Both decide whether a dispatch is certified or
+    // hedged, so a file that gains or loses a body-local impl changes the verdict for its whole crate
+    // AND for every chained consumer of the owning one.
+    for (label, set) in [
+        ("nested_impl_members", &m.nested_impl_members),
+        ("nested_impl_foreign", &m.nested_impl_foreign),
+    ] {
+        s.push_str(label);
+        let mut v: Vec<&String> = set.iter().collect();
+        v.sort();
+        for a in v {
+            s.push('|');
+            s.push_str(a);
+        }
+        s.push('\n');
+    }
     // foreign_impls — ⟨0.39⟩, the abstractions this crate implements but does not own. Read at BOTH ends
     // of the rung (the published foreign union entry, and the consumer-side edge to its own implementors),
     // so a file that gains or loses such an impl changes what every consumer of the owning crate sees.

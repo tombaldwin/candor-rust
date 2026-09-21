@@ -3155,6 +3155,144 @@ pub(crate) fn collect_foreign_trait_impls(
     }
 }
 
+/// SOUNDNESS R529 — THE TRAIT IMPLS THAT LIVE INSIDE A BLOCK, which every Pass A decl walk is blind to.
+///
+/// `collect_decls`, `collect_foreign_trait_impls` and `collect_trait_decl_quals` all walk `items` and
+/// recurse through `Item::Mod` and NOTHING ELSE. An `impl Trait for Type` written inside a function body
+/// — `fn register() -> Box<dyn Backend> { struct L; impl Backend for L { fn size(&self) { …net… } } … }`
+/// — is a `Stmt::Item`, so it reaches none of those indexes. Pass B is the opposite: `rebind_self`
+/// (R175) exists precisely because the COLLECTOR does walk into bodies, so the impl's effects are charged
+/// to the ENCLOSING function by syntactic containment and the implementor's own `Type::method` is never
+/// minted as a unit. The two halves disagree, and the disagreement is silent in the certifying direction:
+/// the CHA universe contains every implementor except the one it cannot name, so a dispatch over a trait
+/// whose only OTHER visible implementor is pure resolves to that pure body and the row claims purity.
+/// Measured: a `dyn Backend` dispatch with one module-level pure impl and one body-local `Net` impl
+/// reports `inferred: []` with no `Unknown` and no `invisible`, and `deny Net` exits 0 — and it does so
+/// with a chained dep report too, which is the ⟨0.39⟩ rung's own toggle reached one spelling over.
+///
+/// THIS INDEX IS A HEDGE, NOT AN IMPLEMENTOR SET. The body-local method has no unit, so adding it to
+/// `trait_impls` would add an edge to nothing (R452's "typed call that resolved to NO UNIT", which that
+/// row deliberately does NOT hedge in general) and would also move the ≤12 bound and the ambiguity count.
+/// What is recorded is the narrowest fact that licenses a disclosure: the `(trait, member)` pairs this
+/// crate implements in a position Pass A cannot read. Same shape as R452's `macro_hidden_types` /
+/// `macro_hidden_fns` gate — a named fact about THIS crate, never a blanket hedge on every dispatch.
+///
+/// TWO OUTPUTS because the two consumers differ: `local` is `"{trait leaf}::{method}"` (the leaf is what
+/// `trait_impls`/`local_traits` are keyed by), `foreign` is `collect_foreign_trait_impls`'s own
+/// `"{owner}#{trait qual}::{method}"` key, so both the ⟨0.39⟩ union emission and the consumer-side join
+/// ask in the spelling they already use.
+///
+/// THE BOUNDARY, STATED. Per-MEMBER, so a trait method the body-local impl does not override (a default
+/// body, which IS visible) is untouched. The set is keyed by trait LEAF for the local half, which is the
+/// granularity every trait index in this engine already uses — so two distinct local traits sharing a
+/// leaf hedge each other's dispatches. That is over-disclosure, in the same direction and for the same
+/// reason `LocalTrait::count > 1` refuses to choose between them. An impl the walk cannot READ at all —
+/// one inside an unexpanded macro — is NOT here and stays R128/R452's subject, not this one.
+pub(crate) fn collect_block_nested_trait_impls(
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    local: &mut std::collections::BTreeSet<String>,
+    foreign: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        if let syn::Item::Mod(m) = it {
+            if !include_tests && is_cfg_test(&m.attrs) {
+                continue;
+            }
+            if let Some((_, inner)) = &m.content {
+                // The inner module's OWN imports on top of this scope's — the same widening
+                // `collect_foreign_trait_impls` does, so one `impl` keys identically from both walks.
+                let mut sub = uses.clone();
+                let mut alts = HashMap::new();
+                collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                collect_block_nested_trait_impls(inner, include_tests, &sub, local, foreign);
+            }
+            continue;
+        }
+        let mut v = NestedImplWalk { include_tests, uses, local, foreign, depth: 0 };
+        syn::visit::Visit::visit_item(&mut v, it);
+    }
+}
+
+/// The block-depth walk behind `collect_block_nested_trait_impls`. An `ItemImpl` seen at depth 0 is one
+/// Pass A already indexed; one seen at depth ≥ 1 is inside SOME block — a fn body, an impl method, a
+/// trait default, a `const`/`static` initializer, a bare `let x = { … }` — and is exactly what is missing.
+struct NestedImplWalk<'a> {
+    include_tests: bool,
+    uses: &'a HashMap<String, String>,
+    local: &'a mut std::collections::BTreeSet<String>,
+    foreign: &'a mut std::collections::BTreeSet<String>,
+    depth: usize,
+}
+
+impl NestedImplWalk<'_> {
+    fn record(&mut self, im: &syn::ItemImpl) {
+        let Some((None, tr, _)) = &im.trait_ else { return }; // `impl !Tr for X` is not an impl
+        let Some(leaf) = tr.segments.last().map(|s| s.ident.to_string()) else { return };
+        // The trait as WRITTEN, then expanded through this scope's `use` map — the same two spellings
+        // `collect_foreign_trait_impls` reconciles, reconciled the same way.
+        let written: String =
+            tr.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+        let full = expand(&written, self.uses);
+        if let Some((root, qual)) = full.split_once("::") {
+            if is_dependency_crate_root(root) {
+                for ii in &im.items {
+                    if let syn::ImplItem::Fn(m) = ii {
+                        self.foreign.insert(format!("{root}#{qual}::{}", m.sig.ident));
+                    }
+                }
+                return; // a foreign abstraction is not also a local trait leaf
+            }
+        }
+        for ii in &im.items {
+            if let syn::ImplItem::Fn(m) = ii {
+                self.local.insert(format!("{leaf}::{}", m.sig.ident));
+            }
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        self.depth += 1;
+        syn::visit::visit_block(self, b);
+        self.depth -= 1;
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        // A module at depth 0 is the CALLER's job (it widens the `use` map first). One inside a BODY is
+        // walked here — and it gets the same widening, rather than the enclosing scope's map. That is
+        // not a nicety: a body-local `mod m { use other::Trait; impl Trait for X { … } }` under an outer
+        // `use somedep::Trait` would otherwise expand through the OUTER binding and record a key naming
+        // the wrong owner. The failure would be over-disclosure rather than silence, which is the safe
+        // direction — but it would be a WRONG name, and this file's own R6/R503 lessons are that two
+        // spellings of one abstraction is the expensive kind of wrong.
+        if self.depth == 0 || (!self.include_tests && is_cfg_test(&m.attrs)) {
+            return;
+        }
+        let Some((_, inner)) = &m.content else { return };
+        let mut sub = self.uses.clone();
+        let mut alts = HashMap::new();
+        collect_item_uses(inner, self.include_tests, &mut sub, &mut alts);
+        let mut v = NestedImplWalk {
+            include_tests: self.include_tests,
+            uses: &sub,
+            local: &mut *self.local,
+            foreign: &mut *self.foreign,
+            depth: self.depth,
+        };
+        for it in inner {
+            syn::visit::Visit::visit_item(&mut v, it);
+        }
+    }
+    fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
+        if self.depth > 0 && (self.include_tests || !is_cfg_test(&im.attrs)) {
+            self.record(im);
+        }
+        syn::visit::visit_item_impl(self, im);
+    }
+}
+
 /// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
 /// glob under `crate::` + `GLOB_KEY`). A `use crate::net` / `crate::net::foo` in the file then resolves
 /// through the root re-export via `expand`, while a bare `net::foo` — which never keys on `crate::…` —

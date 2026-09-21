@@ -10,6 +10,76 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### SOUNDNESS R529 — ⚠ AN IMPLEMENTOR WRITTEN INSIDE A BLOCK IS IN NO INDEX, SO THE DISPATCH CERTIFIED PURITY
+
+- **A `dyn Trait` dispatch whose only OTHER visible implementor is pure read `inferred: []` with no
+  `Unknown` and no `invisible`, over an implementor that opens a `TcpStream`.** `impl Backend for
+  NetBackend` written inside `fn register`'s body is a `Stmt::Item`; `collect_decls`,
+  `collect_foreign_trait_impls` and `collect_trait_decl_quals` all recurse through `Item::Mod` and
+  NOTHING else, so it reaches no Pass A index. Pass B is the opposite — `rebind_self` (R175) exists
+  precisely because the COLLECTOR walks into bodies — so its `Net` is charged to `register` by
+  syntactic containment and `NetBackend::size` is never minted as a unit. The CHA universe then holds
+  every implementor except the one it cannot name.
+
+- **IT IS ⟨0.39⟩'s OWN TOGGLE, ONE SPELLING OVER.** The zero-implementor case is not the subject: that
+  already reads `Unknown`. What makes this silent is ADDING a module-level PURE implementor — §4
+  ⟨0.39⟩'s "adding a pure implementation to a library REMOVES a disclosure", reached by an implementor
+  the engine cannot NAME rather than one it cannot SEE. Both halves of the rung miss it: obligation 2
+  publishes no `interfaceUnion` entry (`foreign_impls` has no key for it) and obligation 3's
+  consumer-side join finds no contributor, so a chained consumer supplying the implementor itself is
+  told nothing by any report in the chain. GATE-LEVEL, measured on a compiling three-package fixture
+  with a scoped policy so the co-located containment charge cannot answer for it: `deny Net Unknown
+  handler` **exit 0 → exit 1**.
+
+- **THE FIX IS A HEDGE, NOT AN IMPLEMENTOR SET.** The body-local method has no unit, so adding it to
+  `trait_impls` would edge to nothing (R452's "typed call that resolved to NO UNIT", which that row
+  deliberately does not hedge in general) and would move the ≤12 bound and the ambiguity count.
+  `lang::collect_block_nested_trait_impls` records the narrowest fact that licenses a disclosure — the
+  `(trait, member)` pairs this crate implements at block depth ≥ 1 — in two spellings, the local trait
+  leaf and `collect_foreign_trait_impls`'s own `{owner}#{qual}::{method}` key. Four readers: the
+  per-fn dispatch hedge, its foreign twin, the ⟨0.39⟩ consumer-side dep join, and both union
+  emissions. Same evidence shape as R452's `macro_hidden_types`/`macro_hidden_fns` gate — a named fact
+  about THIS crate, never a blanket hedge on dispatching.
+
+- **MEASURED on 1,595 crates.io registry crates** (`bin/corpus-ab.py`, wide key, pre = `5e6843e`,
+  320,292 rows pre / 321,084 post): **ADDED 792, REMOVED 0, CHANGED 1,046** (keyed on `inferred`:
+  ADDED 792 / REMOVED 0 / CHANGED 927). **REMOVED 0 is the claim under test and it holds — no row
+  lost an effect.** 787 of the 792 ADDED are new `interfaceUnion` entries carrying `Unknown`; the
+  other 5 are functions that were ABSENT (a purity claim) and are now disclosed. **REACH 1,901 hits
+  across 174 of the 1,595 entries** (`CANDOR_R529_INSTR=1`, marker `R529HIT`) — an unchanged row is
+  not evidence the code ran. Gate-level over 200 crates: `deny Unknown` 149 → 150 crates,
+  `deny Unknown[dispatch]` 99 → 105, `deny Net Unknown` 151 → 152.
+
+- **Ground-truthed from SOURCE, not from candor's own report.** serde-1.0.228 `src/core/de/impls.rs:136`
+  declares `struct PrimitiveVisitor;` + `impl<'de> Visitor<'de> for PrimitiveVisitor` inside
+  `fn deserialize`'s body (37 such impls in that crate alone); compact_str-0.9.1 `src/lib.rs:2207`
+  declares `struct StringError` + `impl fmt::Display for StringError` inside `fn from`'s body, which
+  is what puts `dispatch:Display.fmt` on `unwrap_with_msg_fail`. The corpus population is dominated by
+  the serde `Visitor` idiom, rayon's `ProducerCallback::callback` and `quote#ToTokens::to_tokens` —
+  all genuinely unreadable bodies, most of them in fact pure, so the cost is over-DISCLOSURE and the
+  direction is fail-closed.
+
+- **Pinned by two CLI fixtures that were RUN against the pre-fix binary and FAILED there**
+  (`r529_a_dispatch_with_a_block_nested_implementor_discloses_instead_of_certifying`,
+  `r529_a_chained_consumers_block_nested_implementor_is_disclosed_not_dropped`), each carrying an
+  over-charge control: a second trait dispatched the same way with no block-nested impl must stay
+  DETERMINED. The control is "present and determined", not "absent" — ⟨0.39⟩ obligation 1 publishes a
+  pure dispatching row, so an absence-shaped control would have passed for the wrong reason (§E3).
+
+- **A body-local `mod` is widened by its OWN `use` map, and that branch is SAFETY-ONLY on this corpus —
+  written down here rather than discovered later (§E1).** Expanding a body-local impl through the
+  ENCLOSING scope would file `mod inner { use dep::Backend; impl Backend for X }` under the crate's own
+  same-leaf `Backend` — a key naming the wrong owner, R6/R503's "two spellings for one abstraction" in
+  the index that decides a disclosure. Re-running the identical 1,595-crate A/B after adding it gives
+  **byte-identical figures** (ADDED 792 / REMOVED 0 / CHANGED 1,046, REACH 1,901 across 174), so no
+  registry crate exercises it; it is pinned by `r529_a_body_local_module_is_keyed_through_its_own_use_map`
+  instead, which asserts BOTH halves — the foreign key is published AND the same-leaf local dispatch
+  stays determined.
+
+- **Cache schema rev35 → rev36.** A rev35 entry deserializes both new `FileDecls` fields EMPTY, and an
+  empty hedge set is byte-for-byte the pre-fix report — the fix would be correct and served silently
+  stale, which is the rev34/rev33/rev25 trap.
+
 ## [0.39.1] — 2026-09-21
 
 ### SOUNDNESS R525 — ⚠ a `.candor/config` ALIAS IN AN UNRELATED RULE TURNED A RED VERDICT GREEN

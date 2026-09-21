@@ -12347,6 +12347,12 @@ trait G {
             // trait between modules changes what a consumer can join against — a cached FnInfo written
             // before the move would republish the old key.
             trait_quals => |m| { m.trait_quals.entry("Tr".into()).or_default().insert("m::Tr".into()); },
+            // R529: the trait members this crate implements INSIDE A BLOCK, which no other Pass A index
+            // holds. It is read as a HEDGE — a dispatch on one of these members cannot be certified from
+            // the visible implementors alone — so a cached FnInfo written before the body-local `impl`
+            // appeared would replay the silent purity claim the row closes.
+            nested_impl_members => |m| { m.nested_impl_members.insert("Backend::size".into()); },
+            nested_impl_foreign => |m| { m.nested_impl_foreign.insert("iface#backend::Backend::size".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -13943,7 +13949,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev35/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev36/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

@@ -1103,6 +1103,232 @@ fn cross_crate_drop_glue_charges_every_construction_spelling() {
         "SOME-path (not EVERY-path) escape must still CHARGE — the R69 shape, cross-crate edition: {v:#}");
 }
 
+/// SOUNDNESS R529 — A DISPATCH WHOSE IMPLEMENTOR IS WRITTEN INSIDE A BLOCK.
+///
+/// Every Pass A decl walk recurses through `Item::Mod` and nothing else, so `impl Backend for L`
+/// written inside `fn register`'s body is in NO index. Pass B is the opposite (`rebind_self`/R175
+/// exists because the collector DOES walk into bodies), so its `Net` is charged to `register` by
+/// syntactic containment and `L::size` is never minted as a unit. The CHA universe therefore holds
+/// every implementor except the one it cannot name — and with a module-level PURE implementor beside
+/// it the dispatch resolves to that pure body and `term_size` claims purity outright.
+///
+/// PRE-FIX (candor-scan 0.39.1, `5e6843e`): `term_size` reads `inferred: []`, no `Unknown`, no
+/// `invisible`. The ZERO-implementor case is not the subject — that already reads `Unknown`; what makes
+/// this the ⟨0.39⟩ toggle one spelling over is that ADDING the pure `PureBackend` is what removes the
+/// disclosure.
+#[test]
+fn r529_a_dispatch_with_a_block_nested_implementor_discloses_instead_of_certifying() {
+    let d = make_crate(
+        "r529local",
+        r#"
+        pub trait Backend { fn size(&self); }
+
+        // the implementor the engine CAN name, and it is pure — this is what makes the silence silent
+        pub struct PureBackend;
+        impl Backend for PureBackend { fn size(&self) {} }
+
+        pub fn register() -> Box<dyn Backend> {
+            struct NetBackend;
+            impl Backend for NetBackend {
+                fn size(&self) { let _ = std::net::TcpStream::connect("example.com:80"); }
+            }
+            Box::new(NetBackend)
+        }
+
+        pub fn term_size(b: &dyn Backend) { b.size() }
+
+        // OVER-CHARGE CONTROL — a SECOND trait, dispatched the same way, with no block-nested impl
+        // anywhere. It must stay absent (pure), or the hedge is a blanket flood on every dispatch
+        // rather than the named-fact narrowing it claims to be.
+        pub trait Other { fn ping(&self); }
+        pub struct OnlyImpl;
+        impl Other for OnlyImpl { fn ping(&self) {} }
+        pub fn other_dispatch(o: &dyn Other) { o.ping() }
+        "#,
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let row = |name: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name).cloned()
+    };
+
+    let ts = row("term_size").unwrap_or_else(|| panic!(
+        "R529: `term_size` is ABSENT, which §2 rule 3 makes an affirmative PURITY CLAIM over a \
+         dispatch whose implementor opens a TcpStream: {v:#}"));
+    let inferred: Vec<&str> =
+        ts["inferred"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
+    assert!(inferred.contains(&"Unknown"),
+        "R529: `term_size` must DISCLOSE — the engine cannot read the body-local implementor: {ts:#}");
+    let why: Vec<&str> =
+        ts["unknownWhy"].as_array().map(|a| a.iter().map(|e| e.as_str().unwrap()).collect())
+            .unwrap_or_default();
+    assert!(why.contains(&"dispatch:Backend.size"),
+        "R529: §4's normative dotted `dispatch:<owner>.<member>` — the owner IS resolvable (the \
+         trait), only the body is not. got {why:?}: {ts:#}");
+
+    // The PUBLISHED union entry carries it too, so a CHAINED consumer is not told the union is complete.
+    let u = v["functions"].as_array().unwrap().iter()
+        .find(|f| f["hash"] == "r529local#Backend::size")
+        .unwrap_or_else(|| panic!("R529: no interface-union entry for `Backend::size`: {v:#}"));
+    assert_eq!(u["interfaceUnion"], serde_json::Value::Bool(true), "{u:#}");
+    assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"),
+        "R529: the union is taken over the implementors this engine could NAME, so publishing it as \
+         complete is the same purity claim one hop out: {u:#}");
+
+    // …AND THE CONTROL STAYS CLEAN. Note the shape: `other_dispatch` is PRESENT, because ⟨0.39⟩
+    // obligation 1 publishes a pure function that DISPATCHES. So the control is not "absent" — it is
+    // "present, determined, and carrying no disclosure", which is the stronger assertion anyway: an
+    // absence-shaped control here would have passed for the wrong reason (§E3).
+    let other = row("other_dispatch").unwrap_or_else(|| panic!(
+        "R529 control: ⟨0.39⟩ obligation 1 publishes a pure DISPATCHING row — its absence would mean \
+         the control is measuring something else: {v:#}"));
+    assert_eq!(other["inferred"].as_array().unwrap().len(), 0,
+        "R529 over-charge control: a dispatch with NO block-nested implementor must stay DETERMINED \
+         — the hedge is gated on a named fact, not on dispatching at all: {other:#}");
+    assert!(other["unknownWhy"].is_null(), "{other:#}");
+    assert!(other["unresolved"].is_null(), "{other:#}");
+}
+
+/// SOUNDNESS R529 — A MODULE DECLARED INSIDE A BODY IS WIDENED BY ITS OWN `use` MAP.
+///
+/// The LEAF is the same on both sides here (`Backend`), and only the `use` map distinguishes them: the
+/// crate declares its own `Backend` at the root, and the body-local `mod inner` imports a DEPENDENCY's
+/// `Backend` and implements that one. Expanding the body-local impl through the ENCLOSING scope's map
+/// would file it under the local leaf and hedge `local_dispatch` — a key naming the wrong owner, which
+/// is R6/R503's "two spellings for one abstraction" in the index that decides a disclosure.
+///
+/// So this is BOTH halves of one control: the foreign key is formed correctly, AND the local dispatch
+/// that shares its leaf stays DETERMINED.
+#[test]
+fn r529_a_body_local_module_is_keyed_through_its_own_use_map() {
+    let d = make_crate(
+        "r529modscope",
+        r#"
+        pub trait Backend { fn size(&self); }
+        pub struct Pure;
+        impl Backend for Pure { fn size(&self) {} }
+
+        pub fn register() {
+            mod inner {
+                use iface::backend::Backend;
+                pub struct NetB;
+                impl Backend for NetB {
+                    fn size(&self) { let _ = std::net::TcpStream::connect("example.com:80"); }
+                }
+            }
+            let _ = inner::NetB;
+        }
+
+        pub fn local_dispatch(b: &dyn Backend) { b.size() }
+        "#,
+    );
+    std::fs::write(
+        d.join("Cargo.toml"),
+        "[package]\nname = \"r529modscope\"\n\n[dependencies]\niface = \"1\"\n",
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+
+    let u = v["functions"].as_array().unwrap().iter()
+        .find(|f| f["hash"] == "iface#backend::Backend::size")
+        .unwrap_or_else(|| panic!(
+            "R529: the body-local `mod inner`'s OWN `use` names the dependency's abstraction, so the \
+             union entry must be published under `iface`: {v:#}"));
+    assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "{u:#}");
+
+    let ld = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "local_dispatch")
+        .unwrap_or_else(|| panic!("⟨0.39⟩ obligation 1 publishes a pure dispatching row: {v:#}"));
+    assert_eq!(ld["inferred"].as_array().unwrap().len(), 0,
+        "R529: the crate's OWN `Backend` shares the leaf and has no block-nested impl — expanding the \
+         body-local one through the enclosing scope would hedge this and name the wrong owner: {ld:#}");
+    assert!(ld["unresolved"].is_null(), "{ld:#}");
+}
+
+/// SOUNDNESS R529, THE CHAINED HALF — SPEC §4 ⟨0.39⟩ obligation 3 with an implementor the consumer
+/// supplies from inside a fn body.
+///
+/// The dependency declares the abstraction, dispatches on it, and is HONESTLY pure (its only visible
+/// implementor is). The consumer's implementor is body-local, so `foreign_impls` holds no key for it
+/// and the consumer-side join finds no contributor — the exact silence ⟨0.39⟩ closes for a module-level
+/// implementor, reached by one the engine cannot NAME rather than one it cannot SEE. Pre-fix the
+/// consumer's `app_size` is ABSENT from `functions[]` entirely.
+#[test]
+fn r529_a_chained_consumers_block_nested_implementor_is_disclosed_not_dropped() {
+    let d = make_crate(
+        "r529chain",
+        r#"
+        use iface::backend::Backend;
+        pub fn register() -> Box<dyn Backend> {
+            struct NetBackend;
+            impl Backend for NetBackend {
+                fn size(&self) { let _ = std::net::TcpStream::connect("example.com:80"); }
+            }
+            Box::new(NetBackend)
+        }
+        // never calls `register` — the containment charge on `register` is NOT what is under test
+        pub fn app_size(b: &dyn Backend) { iface::term_size(b) }
+        "#,
+    );
+    std::fs::write(
+        d.join("Cargo.toml"),
+        "[package]\nname = \"r529chain\"\n\n[dependencies]\niface = \"1\"\n",
+    )
+    .unwrap();
+    // The dependency's own report: `term_size` is PURE and says it DISPATCHES (⟨0.39⟩ obligation 1).
+    // Nothing here is wrong — the dependency really cannot see the consumer's implementor.
+    let dep_report = d.join("iface.json");
+    std::fs::write(&dep_report, format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.39"}},
+        "package": "iface",
+        "analyzed": {{"count": 2, "digest": "0"}},
+        "functions": [
+            {{"fn": "term_size", "inferred": [], "hash": "iface#term_size",
+              "dispatchesOn": ["iface#backend::Backend::size"]}}
+        ]}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .env("CANDOR_DEPS", dep_report.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+
+    let app = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "app_size")
+        .unwrap_or_else(|| panic!(
+            "R529 chained: `app_size` is ABSENT — a purity claim over a chained dispatch whose \
+             implementor this very crate supplies: {v:#}"));
+    assert!(app["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"),
+        "R529 chained: the consumer must DISCLOSE what it supplied and could not read: {app:#}");
+    assert!(app["unknownWhy"].as_array().map(|a| a.iter().any(|w| w == "dispatch:backend::Backend.size"))
+            .unwrap_or(false),
+        "R529 chained: the reason names the OWNING package's spelling of the member: {app:#}");
+
+    // …and it REPUBLISHES the obligation-2 entry under the owner's key, so a package one hop further
+    // out is told as well. `foreign_impls` has no key for a body-local impl, so pre-fix this entry did
+    // not exist at all.
+    let u = v["functions"].as_array().unwrap().iter()
+        .find(|f| f["hash"] == "iface#backend::Backend::size")
+        .unwrap_or_else(|| panic!("R529 chained: no foreign interface-union entry published: {v:#}"));
+    assert_eq!(u["interfaceUnion"], serde_json::Value::Bool(true), "{u:#}");
+    assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "{u:#}");
+}
+
 /// A crate whose whole body is `calls` qualified calls spread over two DECLARED-but-unvendored
 /// dependencies — the κ ledger's raw material, at an exact call VOLUME. Split over two deps so the
 /// fixture also proves the trigger is the SUM, not the dependency count (2 either side of the line).

@@ -2999,6 +2999,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // ITSELF was found only when the trait sat at the owner's crate ROOT — true of a
                         // fixture, false of `ratatui_core::backend::Backend`. `ukey_t2` stays as the
                         // re-export / older-producer fallback, and it can only ADD a contributor.
+                        // SOUNDNESS R529 — …AND AN IMPLEMENTOR THIS CRATE SUPPLIES FROM INSIDE A
+                        // BLOCK, which `foreign_impls` cannot hold. Pass A never walks into a fn body,
+                        // so `fn register() -> Box<dyn dep::Backend> { struct L; impl dep::Backend for L
+                        // { fn size(&self) { …net… } } … }` contributes NO key here and the join below
+                        // adds nothing — while the dependency's own row is honestly pure (its only
+                        // visible implementor is). The consumer then reads `inferred: []` with no
+                        // `Unknown` and no `invisible`: the ⟨0.39⟩ toggle this rung exists to close,
+                        // reached by an implementor the engine cannot name rather than by one it cannot
+                        // see. There is no unit to edge to, so the honest answer is the disclosure.
+                        if merged.nested_impl_foreign.contains(&ukey)
+                            || merged.nested_impl_foreign.contains(&ukey_t2)
+                        {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
+                            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                                eprintln!("R529HIT\tCHAIN\t{}\t{ukey}", f.qual); // §E1 REACH PROBE
+                            }
+                        }
                         if let Some(impl_quals) = merged.foreign_impls.get(&ukey)
                             .or_else(|| foreign_impls_by_tail2.get(&ukey_t2))
                         {
@@ -3686,6 +3704,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
         }
+        // ── §4 HONESTY — SOUNDNESS R529: A DISPATCH WHOSE IMPLEMENTOR LIVES INSIDE A BLOCK ─────────
+        // Pass A's decl walks recurse through `Item::Mod` and nothing else, so an `impl Trait for Type`
+        // written inside a fn body is in NO index: not `trait_impls`, not `foreign_impls`, not
+        // `trait_quals`. Pass B is the opposite — `rebind_self` (R175) exists because the COLLECTOR does
+        // walk into bodies — so the impl's effects are charged to the ENCLOSING function by syntactic
+        // containment and its own `Type::method` is never minted as a unit.
+        //
+        // THE TWO HALVES DISAGREE IN THE CERTIFYING DIRECTION. The CHA universe holds every implementor
+        // except the one it cannot name, so a `dyn Trait` dispatch whose other visible implementor is
+        // PURE resolves to that pure body and the row claims purity — `inferred: []`, no `Unknown`, no
+        // `invisible`, `deny Net` exit 0 over a body-local implementor that opens a TcpStream. It is
+        // ⟨0.39⟩'s own toggle ("adding a pure implementation REMOVES a disclosure") reached one spelling
+        // over, and the ZERO-implementor case is not affected at all: that already reads `Unknown` here.
+        //
+        // A HEDGE, NOT AN IMPLEMENTOR. The body-local method has no unit, so putting it in `trait_impls`
+        // would edge to nothing (R452's "typed call that resolved to NO UNIT", which that row
+        // deliberately does not hedge in general) and would also move the ≤12 bound and the ambiguity
+        // count. What licenses the disclosure is the narrow, named fact that THIS crate implements THIS
+        // member in a position Pass A cannot read — the same evidence shape as R452's
+        // `macro_hidden_types`/`macro_hidden_fns` gate, not a blanket hedge on every dispatch.
+        for (tr, meth) in &f.dispatch {
+            if merged.nested_impl_members.contains(&format!("{tr}::{meth}")) {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                // §4's normative `dispatch:<owner>.<member>` — the owner type IS resolvable (it is the
+                // trait), only the concrete body is not, which is verbatim the state this kind names.
+                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{meth}"));
+                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                    eprintln!("R529HIT\tLOCAL\t{}\t{tr}::{meth}", f.qual); // §E1 REACH PROBE
+                }
+            }
+        }
+        // …and the same for an abstraction this crate does NOT own but DOES implement body-locally,
+        // where the dispatch is spelled in this crate (`fn go(b: &dyn dep::Backend) { b.size() }`). The
+        // chained spelling of this — where the dispatch lives in the DEPENDENCY and reaches here only
+        // through `dispatchesOn` — is handled at the dep join above, not here.
+        for member in &f.foreign_dispatch {
+            if merged.nested_impl_foreign.contains(member) {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
+                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                    eprintln!("R529HIT\tFOREIGN\t{}\t{member}", f.qual); // §E1 REACH PROBE
+                }
+            }
+        }
     }
 
     // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
@@ -3719,6 +3781,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // returns `None`: the ambiguous leaf is refused, exactly as `LocalTrait::count > 1` refuses it for CHA
     // — never a guess between two traits. A leaf with NO recorded qual (a trait this crate does not
     // declare, reached through a leaf-keyed index) also returns `None` rather than inventing an owner.
+    /// SOUNDNESS R529 — `"{owner}#{trait qual}::{method}"` -> §4's normative dotted
+    /// `dispatch:<owner>.<member>` detail. One spelling, one place: the three sites that hedge a
+    /// block-nested foreign implementor must not each form it (SPEC §4 ⟨0.24⟩'s "an engine holds this
+    /// vocabulary twice" is the failure this avoids, and R490 is this family's own instance of it).
+    fn r529_reason(member: &str) -> String {
+        let detail = member.split_once('#').map(|(_, m)| m).unwrap_or(member);
+        match detail.rsplit_once("::") {
+            Some((owner, meth)) => format!("dispatch:{owner}.{meth}"),
+            // A member with no `::` cannot form the NORMATIVE dotted detail PART 10 requires, so it does
+            // not claim the kind: `ambiguous:` is what §4 names for "no owner could be formed at all".
+            None => format!("ambiguous:block-nested implementor of `{detail}`"),
+        }
+    }
+
     fn union_member_key(
         trait_quals: &HashMap<String, std::collections::BTreeSet<String>>,
         crate_name: &str,
@@ -4208,6 +4284,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                     }
                 }
+                // SOUNDNESS R529 — an implementor written inside a BLOCK is in no Pass A index, so the
+                // union above is taken over the implementors this engine could NAME, not over the ones
+                // this crate has. Publishing that union as a complete answer is the silent-purity claim
+                // one spelling over from the one ⟨0.39⟩ closes; `Unknown` is what the union honestly is.
+                if merged.nested_impl_members.contains(&format!("{trait_leaf}::{method}")) {
+                    inf_u.insert("Unknown");
+                    if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                        eprintln!("R529HIT\tUNION-LOCAL\t{trait_leaf}::{method}"); // §E1 REACH PROBE
+                    }
+                }
                 if inf_u.is_empty() && blind_u.is_empty() {
                     continue; // pure across all impls — silence = purity
                 }
@@ -4255,7 +4341,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // PROVENANCE IS CHECKED AGAINST THE MANIFEST, not against the spelling: `collect_foreign_trait_impls`
         // admits anything that is not std/`crate`/`self`/`super`, which a local module spelled like a crate
         // also passes. `deps` is Cargo.toml's real dependency set and is only known here.
-        for (key, impl_quals) in merged.foreign_impls.iter() {
+        // SOUNDNESS R529 — the key set is `foreign_impls` UNION `nested_impl_foreign`. A crate whose
+        // ONLY implementor of a dependency's abstraction is written inside a block has no `foreign_impls`
+        // entry at all, so iterating that map alone publishes nothing and every chained consumer reads
+        // the dependency's own (honest, and incomplete) purity. The two sets overlap where a member is
+        // implemented both ways, and the loop is keyed so that case emits ONE entry carrying both.
+        let mut union_keys: Vec<&String> = merged.foreign_impls.keys()
+            .chain(merged.nested_impl_foreign.iter())
+            .collect();
+        union_keys.sort();
+        union_keys.dedup();
+        static NO_IMPLS: Vec<String> = Vec::new();
+        for key in union_keys {
+            let impl_quals = merged.foreign_impls.get(key).unwrap_or(&NO_IMPLS);
             let Some((owner, _)) = key.split_once('#') else { continue };
             if owner == crate_name || !deps.contains(owner) {
                 continue;
@@ -4265,6 +4363,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
             let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            if merged.nested_impl_foreign.contains(key) {
+                inf_u.insert("Unknown");
+                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                    eprintln!("R529HIT\tUNION-FOREIGN\t{key}"); // §E1 REACH PROBE
+                }
+            }
             for cand in impl_quals {
                 if let Some(s) = inferred.get(cand) {
                     inf_u.extend(s.iter().copied());
