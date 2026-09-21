@@ -3194,10 +3194,13 @@ pub(crate) fn collect_foreign_trait_impls(
 /// crate implements in a position Pass A cannot read. Same shape as R452's `macro_hidden_types` /
 /// `macro_hidden_fns` gate — a named fact about THIS crate, never a blanket hedge on every dispatch.
 ///
-/// TWO OUTPUTS because the two consumers differ: `local` is `"{trait leaf}::{method}"` (the leaf is what
+/// THREE OUTPUTS, because the consumers differ: `local` is `"{trait leaf}::{method}"` (the leaf is what
 /// `trait_impls`/`local_traits` are keyed by), `foreign` is `collect_foreign_trait_impls`'s own
-/// `"{owner}#{trait qual}::{method}"` key, so both the ⟨0.39⟩ union emission and the consumer-side join
-/// ask in the spelling they already use.
+/// `"{owner}#{trait qual}::{method}"` key — so the ⟨0.39⟩ union emission and the consumer-side join both
+/// ask in the spelling they already use — and `externs` is R529b's `extern "C" { fn … }` names, which
+/// join the crate-wide `extern_fns` leaf set rather than forming an index of their own.
+/// (This sentence said TWO until R529b added the third output in the same walk. A doc comment that goes
+/// stale reads as CONSIDERED, which is what stops it being checked — see `feedback-documented-limitation`.)
 ///
 /// THE BOUNDARY, STATED. Per-MEMBER, so a trait method the body-local impl does not override (a default
 /// body, which IS visible) is untouched. The set is keyed by trait LEAF for the local half, which is the
