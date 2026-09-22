@@ -10,6 +10,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.39.2] — 2026-09-22
+
 ### ⚠ R535/R538/R540/R541: THE RECEIVER-POSITION FAMILY, SWEPT ONCE
 
 Six rows, one question — **what type does the engine think a receiver has?** Each was a caller that
