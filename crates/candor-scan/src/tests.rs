@@ -9463,6 +9463,46 @@ pub fn fab_other_zip_side(c: &Vec<Box<dyn Calmer>>, v: &Vec<Box<dyn Sink>>) { fo
     }
 
     #[test]
+    fn an_explicit_deref_resolves_a_dispatch_receiver_like_its_concrete_twin() {
+        // SOUNDNESS R541 — `resolve_recv_type_for` has had a `Unary`/deref arm for as long as it has
+        // collapsed a smart pointer to its pointee; `resolve_recv_traits` never did. So `(*b).emit()`
+        // over a `Box<dyn Sink>` read ABSENT — a §4 purity claim — while `(*b).go()` over a `Box<G>`
+        // charged, and so did the un-dereferenced `b.emit()` over the same box.
+        //
+        // FOUND BY DIFFING THE TWO RESOLVERS' ARM SETS, not by meeting the bug — the sweep R538's
+        // shape asks for ("does the CONCRETE route have an arm the DISPATCH route lacks, anywhere
+        // else?"). That diff showed four asymmetries; this is the one for which a COMPILING fixture
+        // splits `dyn` from concrete. The other three: `Expr::Struct` (a struct literal is concrete
+        // by construction, no counterpart is possible), `Expr::Cast` (dispatch-only on purpose, see
+        // `is_unsizing_cast_target`), and `Expr::Call` in the ELEMENT pair — which is real and is the
+        // MIRROR direction (the dispatch side has it, the concrete side does not), filed rather than
+        // fixed here because the concrete side has no return-element sentinel to decode.
+        let src = "\
+use std::process::Command;\n\
+pub trait Sink { fn emit(&self); }\n\
+pub struct Real;\n\
+impl Sink for Real { fn emit(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct G;\n\
+impl G { pub fn go(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct P;\n\
+impl P { pub fn go(&self) {} }\n\
+pub fn ctl_box_dyn(b: Box<dyn Sink>) { b.emit() }\n\
+pub fn ctl_deref_conc(b: Box<G>) { (*b).go() }\n\
+pub fn deref_dyn(b: Box<dyn Sink>) { (*b).emit() }\n\
+pub fn deref_dyn_twice(b: &Box<dyn Sink>) { (**b).emit() }\n\
+pub fn fab_deref_pure(b: Box<P>) { (*b).go() }\n\
+";
+        let v = scan_fixture("r541deref", src);
+        for f in ["ctl_box_dyn", "ctl_deref_conc", "deref_dyn", "deref_dyn_twice"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches Real::emit — a `*` before the receiver must not decide whether \
+                        the dispatch resolves:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "fab_deref_pure").is_empty(),
+                "fab_deref_pure must stay pure — a deref resolves a RECEIVER, it does not charge:\n{v:#}");
+    }
+
+    #[test]
     fn the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read() {
         // SOUNDNESS R540 — `resolve_recv_traits` opens with a hot-path guard that returns EMPTY when
         // `trait_vars`, `trait_fields` and `has_dyn_return` are all empty. Its arms read three MORE

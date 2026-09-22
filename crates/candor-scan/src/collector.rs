@@ -1985,6 +1985,22 @@ impl<'a> CallCollector<'a> {
             // missing while both siblings had it, so `self.handlers[0].go()` (a `Vec<Box<dyn Doer>>`
             // field) resolved neither a concrete type nor a dispatch leaf and dropped silent-pure.
             syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
+            // SOUNDNESS R541 — AN EXPLICIT DEREFERENCE, the dispatch twin of the `Unary` arm
+            // `resolve_recv_type_for` has carried all along. Found by DIFFING THE TWO RESOLVERS' ARM
+            // SETS rather than by meeting the bug: of the four asymmetries that diff showed, this is
+            // the one with a compiling fixture that SPLITS on `dyn` vs concrete —
+            // `(*b).emit()` over a `Box<dyn Sink>` was ABSENT while `(*b).go()` over a `Box<G>`
+            // charged and the un-dereferenced `b.emit()` charged. Same three-row shape as R538: a
+            // concrete route with no dispatch counterpart. Transparent by the same reasoning the
+            // concrete arm states — candor collapses a smart pointer to its POINTEE, so `*b` resolves
+            // exactly as `b` does.
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                let leaves = self.resolve_recv_traits(&u.expr);
+                if !leaves.is_empty() && std::env::var_os("CANDOR_R541_INSTR").is_some() {
+                    eprintln!("R541DEREF");
+                }
+                leaves
+            }
             // SOUNDNESS R535, dispatch half. Same authority as the concrete resolver's merge arm; the
             // COMBINE RULE differs and that is deliberate — leaves UNION across the branches, because a
             // larger bounded-CHA candidate set can only over-approximate, which is the safe direction.
