@@ -452,7 +452,7 @@ pub(crate) struct BoundNameState {
     fn_typed_vars: bool,
 }
 
-fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
+pub(crate) fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
     if t == RET_FN_TYPED {
         return Some(vec!["Fn".to_string()]);
     }
@@ -1895,6 +1895,12 @@ impl<'a> CallCollector<'a> {
             && self.elem_trait_of.is_empty()
             && self.field_elem_trait.is_empty()
             && self.callable_statics.is_empty();
+        // `has_dyn_return` is the `returns`-index half of this condition and covers all four dispatch
+        // sentinels (R540b) — the arms gated here read `returns` only through `ret_dyn_leaves` /
+        // `ret_dispatch_leaves`, so a crate with none of them can answer nothing from it.
+        // `generic_bounds`, the sixth table these arms read, is answered ABOVE this guard by the cast
+        // arm. That enumeration is mechanical and is the only thing keeping this condition honest:
+        //     grep 'self\.' the bodies of resolve_recv_traits_walk and resolve_elem_trait_leaves.
         if no_dispatch_source {
             return Vec::new();
         }

@@ -9374,6 +9374,10 @@ pub fn fab_pure_match_dyn(a: &'static Calm, b: &'static Calm, c: bool) { (match 
 pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
 pub fn match_none_arm_conc(o: Option<&G>, b: &G) { (match o { Some(x) => x, None => b }).go() }\n\
 pub fn fab_match_binder_shadow(a: &G, o: Option<&P>) { let _ = a; (match o { Some(a) => a, None => &P }).go() }\n\
+pub fn fab_numeric_cast(x: f32, m: f32) -> u32 where u32: Doubler { ((x * m) as u32).twice() }\n\
+pub trait Doubler { fn twice(&self) -> u32; }\n\
+impl Doubler for G { fn twice(&self) -> u32 { let _ = Command::new(\"sh\").status(); 0 } }\n\
+impl Doubler for u32 { fn twice(&self) -> u32 { self * 2 } }\n\
 ";
         let v = scan_fixture("r535merge", src);
         // THE CONTROLS ARE THE FIRST TWO ROWS, not an afterthought: the same two bodies with a BARE
@@ -9397,7 +9401,16 @@ pub fn fab_match_binder_shadow(a: &G, o: Option<&P>) { let _ = a; (match o { Som
         // is the ordinary spelling of an optional receiver and must resolve from its `None` arm, while
         // `(match o { Some(a) => a, None => &P }).go()` under an OUTER `a: &G` must NOT resolve the
         // outer `a` and charge `Exec` over a `P` that does nothing.
-        for f in ["fab_pure_if", "fab_pure_match_dyn", "fab_stmt_block", "fab_match_binder_shadow"] {
+        // `fab_numeric_cast` is the CAST gate's own calibration, and it is here because the gate was
+        // written FROM a measurement rather than from caution: the first draft called `trait_leaves`
+        // on any cast type, `trait_leaves` answers for a bare ident out of `generic_bounds`, and a
+        // WHERE-CLAUSE can bind a concrete one. moxcms-0.8.1 declares `where u32: AsPrimitive<T>`, so
+        // `(… as u32).min(…)` resolved to `num_traits#AsPrimitive::min` — a method that trait does
+        // not have. Here the same shape would reach `G::twice`, which spawns, over an expression
+        // whose type is `u32`. `is_unsizing_cast_target` is what refuses it; without that gate this
+        // row charges `Exec`.
+        for f in ["fab_pure_if", "fab_pure_match_dyn", "fab_stmt_block", "fab_match_binder_shadow",
+                  "fab_numeric_cast"] {
             assert!(fixture_effects(&v, f).is_empty(),
                     "{f} must stay pure — a merged receiver resolves a TYPE, it does not charge:\n{v:#}");
         }
@@ -9536,6 +9549,28 @@ pub fn ctl_for(v: &Vec<Box<dyn Sink>>) { for g in v.iter() { g.emit() } }\n\
             assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
                        "{f} reaches Real::emit — an UNRELATED dyn parameter elsewhere in the \
                         signature must not decide whether the receiver resolves:\n{v:#}");
+        }
+        // SOUNDNESS R540b — THE SAME GUARD, THE TABLE R540 ITSELF MISSED. `has_dyn_return` is the
+        // `returns`-index half of the condition and it asked `ret_dyn_leaves` — ONE of the four
+        // dispatch sentinels the gated arms decode through `ret_dispatch_leaves`. So a crate whose
+        // only dispatch source is a factory returning a COLLECTION of trait objects (`<elemdyn>`)
+        // failed the guard. This fixture has NO dyn parameter, NO dyn field and NO `-> Box<dyn>`
+        // factory, so it is the case the first fixture above cannot express — R540's own audit drew
+        // its boundary around its trigger (§9), and this is the row that says so.
+        let src2 = "\
+use std::process::Command;\n\
+pub trait Sink { fn emit(&self); }\n\
+pub struct Real;\n\
+impl Sink for Real { fn emit(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub fn mk() -> Vec<Box<dyn Sink>> { vec![Box::new(Real)] }\n\
+pub fn idx_of_factory() { mk()[0].emit() }\n\
+pub fn for_of_factory() { for g in mk() { g.emit() } }\n\
+";
+        let v2 = scan_fixture("r540bguard", src2);
+        for f in ["for_of_factory", "idx_of_factory"] {
+            assert_eq!(fixture_effects(&v2, f), vec!["Exec".to_string()],
+                       "{f} reaches Real::emit through a `<elemdyn>` factory — the hot-path guard \
+                        must recognise EVERY dispatch sentinel the arms it gates can decode:\n{v2:#}");
         }
     }
 

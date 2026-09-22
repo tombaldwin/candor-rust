@@ -2011,9 +2011,25 @@ pub(crate) fn fninfo(
         trait_impls: traits.impls,
         local_traits: traits.decls,
         returns,
-        // Crate-wide: does any factory return a `<dyn>` dispatch object? Cheap `any` — keeps the
+        // Crate-wide: does any factory return a DISPATCH-typed value? Cheap `any` — keeps the
         // `resolve_recv_traits` hot-path guard closed on the overwhelming majority of crates.
-        has_dyn_return: returns.values().any(|t| ret_dyn_leaves(t).is_some()),
+        //
+        // SOUNDNESS R540b — IT ASKED `ret_dyn_leaves`, AND THE ARMS IT GATES ASK
+        // `ret_dispatch_leaves`, WHICH IS FOUR SENTINELS. `<elemdyn>` (a factory returning a
+        // COLLECTION of trait objects), `<tupledyn>` and `RET_FN_TYPED` were all invisible to this
+        // `any`, so a crate whose only dispatch source was such a factory failed the guard and every
+        // receiver-position reach through it read ABSENT. MEASURED with one variable, an unused
+        // parameter, in a crate with no other dyn anything:
+        //
+        //     pub fn mk() -> Vec<Box<dyn Sink>> { vec![Box::new(Real)] }
+        //     pub fn idx_of_factory()                    { mk()[0].emit() }   -> ABSENT
+        //     pub fn idx_with_dynvar(a: &dyn Sink)       { let _ = a; mk()[0].emit() }  -> ['Exec']
+        //
+        // R540 widened this guard from three tables to six and MISSED THIS ONE, which is §9 exactly:
+        // the audit drew its boundary around its own trigger (a dyn COLLECTION reached by name) and
+        // did not ask what else the gated arms read. The answer was in the arms' own source and took
+        // one `grep` for `self\.` to produce.
+        has_dyn_return: returns.values().any(|t| crate::collector::ret_dispatch_leaves(t).is_some()),
         field_elem: elems.field_elem,
         field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,
