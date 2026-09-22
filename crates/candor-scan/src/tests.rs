@@ -9372,6 +9372,8 @@ pub fn cast_dyn(a: &'static Real) { (a as &dyn Sink).emit() }\n\
 pub fn fab_pure_if(a: &P, b: &P, c: bool) { (if c { a } else { b }).go() }\n\
 pub fn fab_pure_match_dyn(a: &'static Calm, b: &'static Calm, c: bool) { (match c { true => a, false => b }).emit() }\n\
 pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
+pub fn match_none_arm_conc(o: Option<&G>, b: &G) { (match o { Some(x) => x, None => b }).go() }\n\
+pub fn fab_match_binder_shadow(a: &G, o: Option<&P>) { let _ = a; (match o { Some(a) => a, None => &P }).go() }\n\
 ";
         let v = scan_fixture("r535merge", src);
         // THE CONTROLS ARE THE FIRST TWO ROWS, not an afterthought: the same two bodies with a BARE
@@ -9379,7 +9381,7 @@ pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
         // separates them from every row after them, all of which read ABSENT before this fix.
         for f in ["ctl_dyn", "ctl_conc", "if_dyn", "if_conc", "if_chain_conc", "match_dyn",
                   "match_conc", "block_dyn", "block_conc", "unsafe_conc", "one_sided_conc",
-                  "cast_dyn"] {
+                  "cast_dyn", "match_none_arm_conc"] {
             assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
                        "{f} reaches an effectful body through a merged receiver — HOW the receiver \
                         is spelled must not decide whether the effect is seen:\n{v:#}");
@@ -9389,7 +9391,13 @@ pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
         // not charge); and a block that COMPUTES is not the thing it ends with — `({ let a = P; a })`
         // must not inherit the outer `a`'s type, which is what the single-expression restriction
         // (R101's rule, reused here through one authority) refuses.
-        for f in ["fab_pure_if", "fab_pure_match_dyn", "fab_stmt_block"] {
+        // `match_none_arm_conc` and `fab_match_binder_shadow` are a PAIR and the second is the reason
+        // the first is safe. syn parses a bare `None` as `Pat::Ident`, so the arm-binding refusal must
+        // distinguish a unit VARIANT from a real binding — `(match o { Some(x) => x, None => b }).go()`
+        // is the ordinary spelling of an optional receiver and must resolve from its `None` arm, while
+        // `(match o { Some(a) => a, None => &P }).go()` under an OUTER `a: &G` must NOT resolve the
+        // outer `a` and charge `Exec` over a `P` that does nothing.
+        for f in ["fab_pure_if", "fab_pure_match_dyn", "fab_stmt_block", "fab_match_binder_shadow"] {
             assert!(fixture_effects(&v, f).is_empty(),
                     "{f} must stay pure — a merged receiver resolves a TYPE, it does not charge:\n{v:#}");
         }

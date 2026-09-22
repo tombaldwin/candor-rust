@@ -1888,10 +1888,25 @@ fn block_tail_value(b: &syn::Block) -> Option<&syn::Expr> {
 /// Does this pattern bind ANY identifier? The shadow test `merge_value_exprs` uses on a `match` arm.
 /// Deliberately coarse — a pattern that binds a name it does not use still disqualifies the arm — and
 /// coarse in the direction that declines rather than resolves.
+///
+/// EXCEPT FOR ONE SHAPE, AND IT IS THE COMMON ONE. **syn parses a bare `None` as `Pat::Ident`**, not as
+/// `Pat::Path` — measured, not assumed — so a first draft that answered `true` for every `Pat::Ident`
+/// disqualified the `None` arm of `(match o { Some(x) => x, None => b }).go()` and left that receiver
+/// resolving to nothing, which is the single most ordinary spelling of an optional receiver in Rust.
+/// An UPPER-INITIAL ident with no subpattern and no `ref`/`mut` is a unit variant or a const, never a
+/// binding (a binding spelled that way is `non_snake_case` and warns), so it cannot shadow anything.
+/// This is the same Upper-initial convention `resolve_recv_type`'s unit-struct arm already uses. A
+/// SCREAMING_SNAKE const is still treated as a binding here, which only declines.
 fn pat_binds_ident(pat: &syn::Pat) -> bool {
     use syn::Pat;
     match pat {
-        Pat::Ident(_) => true,
+        Pat::Ident(id) => {
+            let unit_variant_or_const = id.subpat.is_none()
+                && id.by_ref.is_none()
+                && id.mutability.is_none()
+                && id.ident.to_string().chars().next().is_some_and(|c| c.is_uppercase());
+            !unit_variant_or_const
+        }
         Pat::Reference(r) => pat_binds_ident(&r.pat),
         Pat::Paren(p) => pat_binds_ident(&p.pat),
         Pat::Type(t) => pat_binds_ident(&t.pat),
