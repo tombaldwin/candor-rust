@@ -8716,6 +8716,220 @@ pub fn fab_weak(w: &Weak<dyn Quiet>) { if let Some(s) = w.upgrade() { s.go(); } 
     }
 
     #[test]
+    fn a_whole_element_yielding_accessor_family_resolves_not_five_names_of_it() {
+        // SOUNDNESS R536. [[R446]] put FIVE names on `is_element_yielding_accessor` —
+        // `get`/`get_mut`/`first`/`last`/`upgrade` — and they were simply the names R346 and R401 had
+        // already put on `is_element_preserving_adapter` for a different reason. The family is about
+        // twenty-five. Measured over `Vec<Box<dyn Sink>>` / `VecDeque` / `BinaryHeap` / `HashMap` /
+        // `BTreeSet` / `Option` / `Result`, with `first()`, `last()`, `get(0)`, `v[0]` and
+        // `Option::take()` charging as the calibration, **38 of 52 arms were ABSENT** — no row, no
+        // `Unknown`, no `invisible`: a §4 purity claim, decided by which accessor the caller reached
+        // for. 35 are closed here; the three that remain are named in this row's CHANGELOG entry.
+        //
+        // THE REAL INSTANCE, ground-truthed from source rather than from candor's own report:
+        // `sea-orm-2.0.2`'s `SchemaBuilder::apply` is
+        // `for t in self.sorted_tables() { if let Some(entity) = self.entities.iter().find(..) {
+        // entity.apply(db, ..).await? } }`, and `EntitySchemaInfo::apply` runs `db.execute(stmt)` three
+        // times. It reported `[]` — a purity claim over a function whose own doc says it "creates all
+        // registered tables". `[] -> ['Db', 'Unknown']`.
+        //
+        // This fixture is the WHOLE family in one place, which is the allowlist-chain rule R185 ->
+        // R345 -> R346 -> R401 -> R446 exists to stop paying for: each of those rows' own fixture became
+        // the next defect's boundary.
+        let src = "\
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};\n\
+pub trait Sink { fn emit(&self); }\n\
+pub struct S;\n\
+impl Sink for S { fn emit(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub trait Calm { fn rest(&self); }\n\
+pub struct C;\n\
+impl Calm for C { fn rest(&self) {} }\n\
+pub struct G;\n\
+impl G { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+#[derive(PartialEq, Eq, PartialOrd, Ord)] pub struct O1;\n\
+impl O1 { pub fn run(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub fn make_sink() -> Box<dyn Sink> { Box::new(S) }\n\
+pub fn cal_first(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.first() { g.emit() } }\n\
+pub fn cal_get(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.get(0) { g.emit() } }\n\
+pub fn cal_index(v: &Vec<Box<dyn Sink>>) { v[0].emit() }\n\
+pub fn cal_for(v: &Vec<Box<dyn Sink>>) { for g in v.iter() { g.emit() } }\n\
+pub fn a_next(v: Vec<Box<dyn Sink>>) { if let Some(g) = v.into_iter().next() { g.emit() } }\n\
+pub fn a_next_ref(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().next() { g.emit() } }\n\
+pub fn a_next_back(v: Vec<Box<dyn Sink>>) { if let Some(g) = v.into_iter().next_back() { g.emit() } }\n\
+pub fn a_nth(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().nth(0) { g.emit() } }\n\
+pub fn a_find(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().find(|_| true) { g.emit() } }\n\
+pub fn a_min_by_key(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().min_by_key(|_| 0) { g.emit() } }\n\
+pub fn a_max_by_key(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().max_by_key(|_| 0) { g.emit() } }\n\
+pub fn a_pop(v: &mut Vec<Box<dyn Sink>>) { if let Some(g) = v.pop() { g.emit() } }\n\
+pub fn a_first_mut(v: &mut Vec<Box<dyn Sink>>) { if let Some(g) = v.first_mut() { g.emit() } }\n\
+pub fn a_last_mut(v: &mut Vec<Box<dyn Sink>>) { if let Some(g) = v.last_mut() { g.emit() } }\n\
+pub fn a_pop_front(d: &mut VecDeque<Box<dyn Sink>>) { if let Some(g) = d.pop_front() { g.emit() } }\n\
+pub fn a_pop_back(d: &mut VecDeque<Box<dyn Sink>>) { if let Some(g) = d.pop_back() { g.emit() } }\n\
+pub fn a_front(d: &VecDeque<Box<dyn Sink>>) { if let Some(g) = d.front() { g.emit() } }\n\
+pub fn a_back(d: &VecDeque<Box<dyn Sink>>) { if let Some(g) = d.back() { g.emit() } }\n\
+pub fn a_front_mut(d: &mut VecDeque<Box<dyn Sink>>) { if let Some(g) = d.front_mut() { g.emit() } }\n\
+pub fn a_heap_pop(h: &mut BinaryHeap<O1>) { if let Some(g) = h.pop() { g.run() } }\n\
+pub fn a_heap_peek(h: &BinaryHeap<O1>) { if let Some(g) = h.peek() { g.run() } }\n\
+pub fn a_map_remove(m: &mut HashMap<String, Box<dyn Sink>>) { if let Some(g) = m.remove(\"k\") { g.emit() } }\n\
+pub fn a_btree_remove(m: &mut BTreeMap<String, Box<dyn Sink>>) { if let Some(g) = m.remove(\"k\") { g.emit() } }\n\
+pub fn a_values_next(m: &HashMap<String, Box<dyn Sink>>) { if let Some(g) = m.values().next() { g.emit() } }\n\
+pub fn a_set_pop_first(s: &mut BTreeSet<O1>) { if let Some(g) = s.pop_first() { g.run() } }\n\
+pub fn a_opt_replace(o: &mut Option<Box<dyn Sink>>, n: Box<dyn Sink>) { if let Some(g) = o.replace(n) { g.emit() } }\n\
+pub fn a_res_ok(r: Result<Box<dyn Sink>, ()>) { if let Some(g) = r.ok() { g.emit() } }\n\
+pub fn r_pop_unwrap(v: &mut Vec<Box<dyn Sink>>) { v.pop().unwrap().emit() }\n\
+pub fn r_remove(v: &mut Vec<Box<dyn Sink>>) { v.remove(0).emit() }\n\
+pub fn r_swap_remove(v: &mut Vec<Box<dyn Sink>>) { v.swap_remove(0).emit() }\n\
+pub fn r_next_unwrap(v: Vec<Box<dyn Sink>>) { v.into_iter().next().unwrap().emit() }\n\
+pub fn r_find_unwrap(v: &Vec<Box<dyn Sink>>) { v.iter().find(|_| true).unwrap().emit() }\n\
+pub fn r_map_remove_unwrap(m: &mut HashMap<String, Box<dyn Sink>>) { m.remove(\"k\").unwrap().emit() }\n\
+pub fn r_deque_pop_unwrap(d: &mut VecDeque<Box<dyn Sink>>) { d.pop_front().unwrap().emit() }\n\
+pub fn c_pop(v: &mut Vec<G>) { if let Some(g) = v.pop() { g.run() } }\n\
+pub fn c_next(v: &Vec<G>) { if let Some(g) = v.iter().next() { g.run() } }\n\
+pub fn c_remove(v: &mut Vec<G>) { v.remove(0).run() }\n\
+pub fn c_pop_unwrap(v: &mut Vec<G>) { v.pop().unwrap().run() }\n\
+pub fn fab_calm_pop(v: &mut Vec<Box<dyn Calm>>) { if let Some(g) = v.pop() { g.rest() } }\n\
+pub fn fab_position(v: &Vec<Box<dyn Sink>>) -> usize { v.iter().position(|_| true).unwrap() }\n\
+pub fn fab_count(v: &Vec<Box<dyn Sink>>) -> usize { v.iter().count() }\n\
+pub struct Bld;\n\
+impl Bld { pub fn pop(&self) -> Bld { Bld } pub fn remove(&self, _k: &str) -> Bld { Bld } pub fn next(&self) -> Bld { Bld } pub fn go(&self) {} }\n\
+pub fn fab_builder(b: &Bld) { b.pop().go(); b.remove(\"k\").go(); b.next().go(); }\n";
+        let v = scan_fixture("r536family", src);
+        // CALIBRATION FIRST — a fixture whose controls fail is not evidence in either direction.
+        for f in ["cal_first", "cal_get", "cal_index", "cal_for"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "CALIBRATION {f} must charge:\n{v:#}");
+        }
+        for f in ["a_next", "a_next_ref", "a_next_back", "a_nth", "a_find", "a_min_by_key",
+                  "a_max_by_key", "a_pop", "a_first_mut", "a_last_mut", "a_pop_front", "a_pop_back",
+                  "a_front", "a_back", "a_front_mut", "a_heap_pop", "a_heap_peek", "a_map_remove",
+                  "a_btree_remove", "a_values_next", "a_set_pop_first", "a_opt_replace", "a_res_ok",
+                  "r_pop_unwrap", "r_remove", "r_swap_remove", "r_next_unwrap", "r_find_unwrap",
+                  "r_map_remove_unwrap", "r_deque_pop_unwrap",
+                  "c_pop", "c_next", "c_remove", "c_pop_unwrap"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches a body that spawns — WHICH accessor the caller reaches for must \
+                        not decide whether the effect is seen:\n{v:#}");
+        }
+        // THE PRICE. Widening either list is a TYPING change, so the direction it did NOT intend needs
+        // its own arms: a container of a PURE element gains nothing, `position`/`count` are a `usize`
+        // and not the element, and a BUILDER whose `pop`/`remove`/`next` are fluent steps returning
+        // `Self` must not have its result typed as an element it does not have.
+        for f in ["fab_calm_pop", "fab_position", "fab_count", "fab_builder"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — these lists TYPE an element, they do not charge one:\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn a_let_bound_iterator_keeps_its_dispatch_element_the_way_it_keeps_a_concrete_one() {
+        // SOUNDNESS R536, SECOND HALF — found by this row's own fixture rather than handed to it, and
+        // it is a THIRD copy of the element question (brief §F1-3). The UNANNOTATED `let` arm of
+        // `visit_local` carries a CONCRETE element through an element-preserving rebind (`elem_of`,
+        // since R100) and never asked the DISPATCH question at all, though the ANNOTATED arm and the
+        // PARAMETER and FIELD positions all answer it.
+        //
+        // Held constant — the same container, the same body, the same crate; the only variable is
+        // whether the chain passes through a `let`:
+        //     for g in v.iter() { g.emit() }                          -> ['Exec']
+        //     let it = v.iter(); for g in it { g.emit() }             -> ABSENT
+        //     v.iter().peekable().peek()                              -> ['Exec']
+        //     let mut it = v.iter().peekable(); it.peek()             -> ABSENT
+        //
+        // INSERT-ONLY, and the clear was written first and measured out: mirroring `elem_of`'s
+        // `remove`-then-insert cost TEN rows in `image-0.25.10` their
+        // `dispatchesOn: moxcms#TransformExecutor::transform` and one its `invisible: ["moxcms"]`,
+        // because `let trs = trs.map(Option::unwrap);` shadows a PARAMETER with an init this resolver
+        // cannot answer for. An absent answer is not a positive answer; see the site's own comment.
+        let src = "\
+pub trait Sink { fn emit(&self); }\n\
+pub struct S;\n\
+impl Sink for S { fn emit(&self) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub trait Calm { fn rest(&self); }\n\
+pub struct C;\n\
+impl Calm for C { fn rest(&self) {} }\n\
+pub fn make_sink() -> Box<dyn Sink> { Box::new(S) }\n\
+pub fn cal_for(v: &Vec<Box<dyn Sink>>) { for g in v.iter() { g.emit() } }\n\
+pub fn cal_chain_peek(v: &Vec<Box<dyn Sink>>) { if let Some(g) = v.iter().peekable().peek() { g.emit() } }\n\
+pub fn a_let_for(v: &Vec<Box<dyn Sink>>) { let it = v.iter(); for g in it { g.emit() } }\n\
+pub fn a_let_next(v: &Vec<Box<dyn Sink>>) { let mut it = v.iter(); if let Some(g) = it.next() { g.emit() } }\n\
+pub fn a_let_peek(v: &Vec<Box<dyn Sink>>) { let mut it = v.iter().peekable(); if let Some(g) = it.peek() { g.emit() } }\n\
+pub fn a_let_clone(v: &Vec<Box<dyn Sink>>) { let xs = v.as_slice(); for g in xs { g.emit() } }\n\
+pub fn fab_let_calm(v: &Vec<Box<dyn Calm>>) { let it = v.iter(); for g in it { g.rest() } }\n\
+pub fn fab_let_rebind(s: &Vec<Box<dyn Sink>>, v: &Vec<Box<dyn Calm>>) { let mut x = s.iter(); let _ = x.next(); let x = v.iter(); for g in x { g.rest() } }\n";
+        let v = scan_fixture("r536let", src);
+        for f in ["cal_for", "cal_chain_peek"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "CALIBRATION {f} must charge:\n{v:#}");
+        }
+        for f in ["a_let_for", "a_let_next", "a_let_peek", "a_let_clone"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f}: naming an iterator before consuming it must not decide whether the \
+                        element resolves:\n{v:#}");
+        }
+        for f in ["fab_let_calm", "fab_let_rebind"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — a let-bound element is TYPED, not charged:\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn typing_a_receiver_better_never_empties_a_candidate_set() {
+        // SOUNDNESS R536, asked of rust because candor-swift's R537 measured it as a CARDINAL SIN in
+        // SHIPPED code: typing a receiver better handed swift's OVERLOAD matcher a concrete argument
+        // type where it previously had none, `arg_type != param_type` with no subtype entry was read
+        // as a PROVEN mismatch, the candidate set went to zero and the edge was dropped — so a
+        // function went from charged to ABSENT. That is impossible to prove when the parameter is
+        // `Self`, an associated type or a bare generic, and swift-nio's `EventLoopPromise.succeed()`
+        // was the real instance.
+        //
+        // R536 improves receiver typing, so it can trip exactly that shape if rust has one.
+        //
+        // **IT DOES NOT, AND THE REASON IS STRUCTURAL: Rust HAS NO OVERLOADING.** A method is
+        // identified by receiver type + name, so no step anywhere in this engine narrows a candidate
+        // set by ARGUMENT TYPE. The nearest things all fail the other way: `resolve_target` and
+        // `arm_exact_target` REFUSE a tail two definitions claim (they return None and leave the
+        // pre-existing answer standing, never a filtered-to-zero set); the bounded-CHA dispatch in
+        // `scan.rs` BUILDS `hits` as a union and declines at `hits.len() > 12` into the next
+        // fallback; and the one arity-keyed refinement (R330's `password_hash_explicit_salt`) is
+        // documented, correctly, as able only to remove a fabricated `Rand`.
+        //
+        // A structural argument is a hypothesis, so this is the fixture for it — every parameter
+        // shape that cannot be compared against a concrete argument, reached through a receiver that
+        // only R536 types. `c_*` are the same shapes reached through the five accessors R446 already
+        // shipped, so if a filter existed they would have been dark long before this row.
+        let src = "\
+pub trait Sink { type Out; fn emit_assoc(&self, o: Self::Out); }\n\
+pub struct S;\n\
+impl Sink for S { type Out = u8; fn emit_assoc(&self, _o: u8) { let _ = std::process::Command::new(\"true\").status(); } }\n\
+pub fn make_sink() -> Box<dyn Sink<Out = u8>> { Box::new(S) }\n\
+pub struct G;\n\
+impl G {\n\
+  pub fn run_self(&self, _o: &G) { let _ = std::process::Command::new(\"true\").status(); }\n\
+  pub fn run_generic<T>(&self, _t: T) { let _ = std::process::Command::new(\"true\").status(); }\n\
+  pub fn run_opt(&self, _t: Option<Box<G>>) { let _ = std::process::Command::new(\"true\").status(); }\n\
+  pub fn run_unit(&self) { let _ = std::process::Command::new(\"true\").status(); }\n\
+}\n\
+pub fn c_self(v: &Vec<G>, o: &G) { if let Some(g) = v.first() { g.run_self(o) } }\n\
+pub fn c_gen(v: &Vec<G>) { if let Some(g) = v.first() { g.run_generic(1u8) } }\n\
+pub fn c_dyn_assoc(v: &Vec<Box<dyn Sink<Out = u8>>>) { if let Some(g) = v.first() { g.emit_assoc(1) } }\n\
+pub fn n_self(v: &mut Vec<G>, o: &G) { if let Some(g) = v.pop() { g.run_self(o) } }\n\
+pub fn n_gen(v: &mut Vec<G>) { if let Some(g) = v.pop() { g.run_generic(1u8) } }\n\
+pub fn n_gen_unit(v: &mut Vec<G>) { if let Some(g) = v.pop() { g.run_generic(()) } }\n\
+pub fn n_opt(v: &mut Vec<G>) { if let Some(g) = v.pop() { g.run_opt(None) } }\n\
+pub fn n_unit(v: &mut Vec<G>) { if let Some(g) = v.pop() { g.run_unit() } }\n\
+pub fn n_recv_self(v: &mut Vec<G>, o: &G) { v.remove(0).run_self(o) }\n\
+pub fn n_dyn_assoc(v: &mut Vec<Box<dyn Sink<Out = u8>>>) { if let Some(g) = v.pop() { g.emit_assoc(1) } }\n";
+        let v = scan_fixture("r536empty", src);
+        for f in ["c_self", "c_gen", "c_dyn_assoc", "n_self", "n_gen", "n_gen_unit", "n_opt",
+                  "n_unit", "n_recv_self", "n_dyn_assoc"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f}: a parameter that cannot be matched against a concrete argument type \
+                        (`Self`, an associated type, a bare generic) must not cost the edge — \
+                        candor-swift R537's cardinal sin, asked of rust:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn a_chain_step_the_crate_declares_a_return_for_is_not_attributed_to_the_base_type() {
         // SOUNDNESS R447 (the fabrication) and R451 (its UNDER-REPORT half, which is the bigger one and
         // was not in R447's framing). `resolve_recv_type` walks a method CHAIN to the BASE receiver's
@@ -14360,12 +14574,21 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// R88 UPDATE: `(c)`, the FACTORY-return case (`use_ret_dyn`), is CLOSED — the bare unannotated
     /// `let` now routes through `resolve_recv_traits`, which already had a `Call` arm decoding a
     /// factory's `<dyn>` return sentinel (it was simply never reached from this binder). Moved to its
-    /// own closed-set assertion below, per this test's own instruction. `(a)` (tuple INDEX access,
-    /// `t.0.go()` — a `Field`/`Unnamed`-member access on a raw tuple VALUE, unrelated to `Expr::Index`)
-    /// and `(b)` (an unannotated rebind of a COLLECTION dropping the source's ELEMENT dispatch leaves,
-    /// `elem_trait_of` — a different table from the one this fix populates) are UNCHANGED residuals:
-    /// R88 only fixed the bare `let` binding a SCALAR dispatch-typed expression to `trait_vars`, not
-    /// these two — left unexamined this round, not closed.
+    /// own closed-set assertion below, per this test's own instruction.
+    ///
+    /// R536 UPDATE — `(b)` IS NOW CLOSED TOO, AND THIS PIN IS HOW IT WAS NOTICED. `(b)` was "an
+    /// unannotated rebind of a COLLECTION dropping the source's ELEMENT dispatch leaves,
+    /// `elem_trait_of` — a different table from the one R88 populates", and R536's second half
+    /// populates exactly that table at exactly that binder. Re-measured with the `dyn` control the
+    /// note asks for, both arms move ABSENT -> `['Fs']`: `rebind_dyn` (a `Vec<Box<dyn Doer>>`) AND
+    /// `rebind_bound` (a `Vec<T>` under `T: Doer`, which resolves through the generic-bound route).
+    /// They are asserted in the CLOSED set below. **This test did its job — it was written so a
+    /// residual could not be mistaken for closed, and it is what turned an unrelated gate run RED and
+    /// said which note had gone stale.**
+    ///
+    /// `(a)` (tuple INDEX access, `t.0.go()` — a `Field`/`Unnamed`-member access on a raw tuple
+    /// VALUE, unrelated to `Expr::Index`) is UNCHANGED and stays pinned: `tuple_trait_of` is consumed
+    /// only by a destructure pattern, and both its bound and `dyn` arms are still silent.
     #[test]
     fn the_dispatch_positions_still_silent_are_silent_for_dyn_too() {
         let v = scan_src_to_json("letresid", concat!(
@@ -14384,11 +14607,21 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         ));
         let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
             .filter_map(|f| f["fn"].as_str()).collect();
-        for f in ["idx_bound", "idx_dyn", "rebind_bound", "rebind_dyn"] {
+        for f in ["idx_bound", "idx_dyn"] {
             assert!(
                 !present.contains(&f),
                 "{f} now resolves — good news, but this residual note is stale: re-measure the \
                  position's `dyn` control and move the row into the closed set:\n{v:#}"
+            );
+        }
+        // R536 — `(b)`, CLOSED. Both arms, because the note asks for the `dyn` control to be
+        // re-measured alongside the bound one before a row moves out of the residual set.
+        for f in ["rebind_bound", "rebind_dyn"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                "R536: an unannotated rebind of a COLLECTION must carry the source's ELEMENT \
+                 dispatch leaves — `let v = xs; for d in v {{ d.go() }}` reads the same as \
+                 `for d in xs {{ d.go() }}`:\n{v:#}"
             );
         }
         assert!(

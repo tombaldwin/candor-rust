@@ -10,6 +10,139 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### ⚠ R536: THE ELEMENT-YIELDING ACCESSOR LIST WAS FIVE NAMES OF A FAMILY OF TWENTY-FIVE
+
+- **`if let Some(g) = v.pop()` read silent-pure while `if let Some(g) = v.first()` one line above it
+  charged.** `is_element_yielding_accessor` held `get`/`get_mut`/`first`/`last`/`upgrade` — and those
+  five were simply the names R346 and R401 had already put on `is_element_preserving_adapter` for a
+  different reason. Measured over `Vec<Box<dyn Sink>>` / `VecDeque` / `BinaryHeap` / `HashMap` /
+  `BTreeSet` / `Option` / `Result` with `first()`, `last()`, `get(0)`, `v[0]` and `Option::take()`
+  charging as the calibration: **38 of 52 arms ABSENT** — no row, no `Unknown`, no `invisible`.
+  `pop`, `pop_front`, `front`, `back`, `next`, `next_back`, `nth`, `find`, `min_by_key`,
+  `max_by_key`, `remove`, `swap_remove`, `Result::ok`, `Option::replace`, `BinaryHeap::peek`, and the
+  receiver-position `.unwrap()` spelling of each. This is the fifth link in the
+  R185 → R345 → R346 → R401 → R446 chain, and each of those rows' own fixture was the next defect's
+  boundary — so the whole family is now ONE fixture.
+
+- **The real instance, ground-truthed from source and not from candor's own report.**
+  `sea-orm-2.0.2`/`2.0.3` `SchemaBuilder::apply` is
+  `for t in self.sorted_tables() { if let Some(entity) = self.entities.iter().find(..) { entity.apply(db, ..).await? } }`,
+  and `EntitySchemaInfo::apply` runs `db.execute(stmt)` three times. It reported `[]` — a §4 purity
+  claim over a function whose own doc says it "creates all registered tables, columns, unique keys
+  and foreign keys". `[] → ['Db', 'Unknown']`. `sync` and `_assert_sync_future_is_send` gain `Log`
+  through the same edge.
+
+- **TWO LISTS, NOT ONE, AND THE DIFFERENCE DECIDES MEMBERSHIP.**
+  `is_element_preserving_adapter` asks *does the result CONTAIN the same element* — so `take(2)`,
+  `rev()`, `filter(..)` belong there and are deliberately absent from the other list, because
+  `v.take(2)` is still a container and typing it as the element would fabricate one level in.
+  `is_element_yielding_accessor` asks *is the result the element itself*. The `Option`-returning
+  accessors are on both, because at a receiver position they are always spelled through an
+  `.unwrap()`/`.expect()`, and those two walk to their own receiver rather than needing an entry.
+  Exclusions are stated at the list: `keys`/`into_keys` (the KEY, not the value),
+  `position`/`rposition`/`count` (a `usize`), `find_map`/`filter_map` (they CHANGE the element),
+  `split_first`/`first_key_value` (a TUPLE — R346's `windows`/`chunks` residual one level over).
+
+- **SECOND HALF, found by this row's own fixture: a `let`-bound iterator lost its DISPATCH element.**
+  `visit_local`'s unannotated arm has carried a CONCRETE element through an element-preserving rebind
+  since R100 and never asked the trait-object question, though the ANNOTATED arm and the PARAMETER
+  and FIELD positions all answer it. Held constant — same container, same body, same crate, the only
+  variable being whether the chain passes through a `let`: `for g in v.iter() { g.emit() }` charges
+  `['Exec']` and `let it = v.iter(); for g in it { g.emit() }` read **ABSENT**. Same for
+  `let mut it = v.iter().peekable(); it.peek()` against a charging `v.iter().peekable().peek()`.
+
+- **THE CLEAR WAS WRITTEN FIRST AND MEASURED OUT, and that is the most useful line here.** Mirroring
+  `elem_of`'s `remove`-then-insert hygiene cost TEN rows in `image-0.25.10` their
+  `dispatchesOn: moxcms#TransformExecutor::transform` and one its `invisible: ["moxcms"]`, because
+  `let trs = trs.map(Option::unwrap);` shadows a PARAMETER with an init the resolver cannot answer
+  for (`map` CHANGES the element and is correctly off the adapter list). **An annotation that is not
+  a dispatch container is a positive answer; an init that resolves to nothing is the ABSENCE of an
+  answer, and the two must not be treated alike.** Insert-only, with the residual staleness named.
+
+- **BOTH COMMENT ASSERTIONS IN THE AREA WERE TESTED (brief §K). One holds, one is FALSE.**
+  `is_iter_consumer`'s *"`next`/`next_back` are also absent — an explicit `.next()` already resolves
+  as an ordinary method call on the receiver type"* is TRUE on its own subject (a local
+  `impl Iterator` whose `next` spawns charges through `.next()`, `.next_back()` and
+  `.take(2).next()`) — but it was read as a ruling on element typing, which it never addressed; it is
+  scoped now. `is_element_preserving_adapter`'s *"`unwrap` … both resolvers then find no element and
+  return nothing. Harmless in that direction"* is **FALSE in both halves**: `elem_type` has had an
+  `Option`/`Result` arm since R185 and answers with the payload, and the shape FABRICATES —
+  `for y in o.unwrap() { y.go() }` over an `Option<Holder>` whose `IntoIterator::Item`'s `go` is pure
+  is charged `['Exec']`, while the identical loop over a bare `Holder` correctly reads ABSENT. The
+  entry stays (removing it costs R347's guard chain) but is now recorded as a known over-charge with
+  a reproduction rather than as a safe entry.
+
+- **A/B, 1,595 registry crates, pre = `2571225`, 321,493 → 321,544 rows, via `bin/corpus-ab.py`
+  (`--key unit`, wide value): ADDED 51 · REMOVED 0 · CHANGED 227 (12 on `inferred`).** Audited in
+  FULL, not sampled: **every changed field is a strict gain — zero losses in `inferred`, `calls`,
+  `dispatchesOn`, `invisible`, `incomplete`, `unresolved`, `unknownWhy` or `direct`.** Gains counted
+  apart: of the 51 ADDED, 25 are `['Unknown']` and 22 are `[]` rows carrying new
+  `calls`/`dispatchesOn`/`invisible` — **none gains a concrete effect**. Of the 12 `inferred` moves,
+  6 are effect gains (sea-orm `Db` ×2, `Log` ×4, one crate) and 6 are `Unknown` gains (image ×4,
+  redis ×2). **REACH** (instrumented, `CANDOR_R536_INSTR=1`): 6,550 hits — accessor arm 760/207
+  entries (concrete) + 873/159 (dispatch), preserving peel 1,065/267 + 454/178, `let` rebind
+  3,398/519. Four ground-truthed from source: quinn-proto `DatagramBuffer::can_send_1rtt`
+  (`self.queue.front().is_some_and(|x| x.size(..))`), h2 `Table::reserve`
+  (`self.entries.pop_back()`), reqwest `RequestBuilder::try_clone`
+  (`self.request.as_ref().ok().and_then(..)`, correctly hedged `ambiguous:same-name local methods`),
+  sea-orm above.
+
+- **Gate level, four policy forms.** On the family fixture, scoped `deny Exec f_pop`, scoped
+  `deny Exec Unknown f_pop` and `pure f_pop` / `pure p_local_for` all move **exit 0 → exit 1**;
+  blanket `deny Exec` catches in both arms, incidentally, because the callee is independently
+  reported — which is why generalising from a blanket policy is how a sin gets called a limitation.
+  On a real crate: `deny Unknown hpack::decoder::Table::reserve` over `h2-0.4.19` is **exit 0 → 1**.
+  Over-charge controls unmoved in every form: a container of a PURE `dyn` trait, `position`/`count`
+  (a `usize`, not the element), and a BUILDER whose `pop`/`remove`/`next` are fluent steps returning
+  `Self`.
+
+- **A PRE-EXISTING PIN TURNED THE GATE RUN RED AND WAS RIGHT TO.**
+  `the_dispatch_positions_still_silent_are_silent_for_dyn_too` records R88's residual `(b)` — *"an
+  unannotated rebind of a COLLECTION dropping the source's ELEMENT dispatch leaves, `elem_trait_of`"*
+  — and asserts it is STILL silent, so that a residual cannot quietly be mistaken for closed. R536's
+  second half closes exactly that, so the pin failed with its own instruction: *"now resolves — good
+  news, but this residual note is stale: re-measure the position's `dyn` control and move the row
+  into the closed set."* Both arms re-measured (`rebind_dyn` over a `Vec<Box<dyn Doer>>` and
+  `rebind_bound` over a `Vec<T>` under `T: Doer`, ABSENT → `['Fs']`) and moved. Residual `(a)`, tuple
+  INDEX access, is unchanged and stays pinned.
+
+- **TWO QUESTIONS RELAYED FROM candor-swift's R537, BOTH MEASURED HERE, ONE A NEGATIVE.**
+
+  **(1) "Is the list COMPLETE and ORPHANED rather than short?"** Swift's `ELEMENT_ACCESSORS` had
+  named all eight spellings since R192 and had ONE consumer — a "is this a closure?" test — so
+  grepping it for missing names would have found 1 of 33 silent arms. **Rust is not orphaned at the
+  list level, and the census is printed rather than asserted:** `is_element_yielding_accessor`'s two
+  consumers are `resolve_recv_type_for` and `resolve_recv_traits` — i.e. BOTH type resolvers, which
+  is the wiring swift lacked — and `is_element_preserving_adapter` is wired to all three element
+  resolvers (`resolve_elem_type`, `resolve_elem_trait_leaves`, `resolve_elem_tuple`). **But rust had
+  the same defect one level down, and it is this row's second half:** every binder site
+  (`visit_expr_for_loop`/`_if`/`_while`/`_match`/`_method_call`) asked both the concrete and the
+  dispatch resolver, and `visit_local`'s unannotated arm asked only the concrete one. Swept
+  empirically as well as by grep: `if let` / `while let` / `match` / `let`-else / `?` / `for g in` /
+  `.map(|g| ..)` and a FIELD receiver — eight binding sites × one accessor — were ALL silent before
+  and all resolve now, so the binding site is not a hidden variable. `m.entry(k).or_insert_with(f)`
+  is the one that still is.
+
+  **(2) "Can your impl/overload matching return an EMPTY candidate set and drop the edge?"** In
+  swift this was a cardinal sin in shipped code (`EventLoopPromise.succeed()` ABSENT), found in the
+  CHANGED column of a run whose headline read `ADDED 0 REMOVED 0`. **The answer for rust is NO, and
+  the reason is structural: Rust has no overloading**, so no step in this engine narrows a candidate
+  set by ARGUMENT TYPE. The near-misses all fail the other way: `resolve_target`/`arm_exact_target`
+  REFUSE a tail two definitions claim and leave the pre-existing answer standing; the bounded-CHA
+  dispatch BUILDS `hits` as a union and declines at `> 12` into the next fallback; and R330's
+  arity-keyed refinement is documented as able only to remove a fabricated `Rand`. A structural
+  argument is still a hypothesis, so `typing_a_receiver_better_never_empties_a_candidate_set` is the
+  fixture: every parameter shape no concrete argument can be matched against — `Self`, an associated
+  type, a bare generic (including instantiated at `()`), `Option<Box<T>>` — reached through a
+  receiver only R536 types, all charge. And the A/B's CHANGED column was audited for LOSSES field by
+  field, not just for its headline: **zero, in all eight fields that moved.**
+
+- **Still open, measured rather than assumed.** `m.entry(k).or_insert_with(f)` stays absent — the
+  `Entry` route binds through `let`-typing from a receiver expression, which is different machinery.
+  `r.unwrap().emit()` / `r.expect("").emit()` over a `Result<Box<dyn Sink>, ()>` stay absent because
+  `trait_leaves` deliberately excludes `Result` (R380's stated, measured decision) — the `Option`
+  twin charges. And the `unwrap` over-charge above.
+
 ### R511's SWEEP MISSED TWO GATES THAT READ THE REPORT JSON DIRECTLY
 
 - **`ci/self-gate.sh` named a synthetic `interfaceUnion` row as an `AS-EFF-006` violation**, and

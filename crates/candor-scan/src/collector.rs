@@ -887,6 +887,12 @@ impl<'a> CallCollector<'a> {
                     // register ranks worst, so the narrowing is filed as its own finding rather than
                     // smuggled in beside a fix that only adds.
                     if let Some(e) = self.resolve_elem_type(&m.receiver) {
+                        // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
+                        if crate::lang::is_r536_added_name(&m.method.to_string())
+                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                        {
+                            eprintln!("R536ACC\t{}", m.method);
+                        }
                         return Some(e);
                     }
                 }
@@ -1013,7 +1019,15 @@ impl<'a> CallCollector<'a> {
                 // see `lang::is_element_preserving_adapter` for what each divergence cost.
                 let adapter = crate::lang::is_element_preserving_adapter(&m.method.to_string());
                 if adapter {
-                    self.resolve_elem_type(&m.receiver)
+                    let r = self.resolve_elem_type(&m.receiver);
+                    // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
+                    if r.is_some()
+                        && crate::lang::is_r536_added_name(&m.method.to_string())
+                        && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                    {
+                        eprintln!("R536PRESCON\t{}", m.method);
+                    }
+                    r
                 } else {
                     None
                 }
@@ -1175,6 +1189,12 @@ impl<'a> CallCollector<'a> {
                 if adapter {
                     let by_recv = self.resolve_elem_trait_leaves(&m.receiver);
                     if !by_recv.is_empty() {
+                        // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
+                        if crate::lang::is_r536_added_name(&m.method.to_string())
+                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                        {
+                            eprintln!("R536PRESDYN\t{}", m.method);
+                        }
                         return by_recv;
                     }
                     if receiver_only {
@@ -1773,6 +1793,12 @@ impl<'a> CallCollector<'a> {
                         // §E1 REACH COUNTER, on the CHANGED branch.
                         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                             eprintln!("R446DYN");
+                        }
+                        // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
+                        if crate::lang::is_r536_added_name(&m.method.to_string())
+                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                        {
+                            eprintln!("R536DYN\t{}", m.method);
                         }
                         return e;
                     }
@@ -4636,6 +4662,53 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.elem_of.remove(&id.ident.to_string());
                     if let Some(e) = self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr)) {
                         self.elem_of.insert(id.ident.to_string(), e);
+                    }
+                    // SOUNDNESS R536 (SECOND HALF) — …AND THE DISPATCH COUNTERPART, WHICH THIS SITE
+                    // NEVER ASKED FOR. The line above carries a CONCRETE element through an
+                    // element-preserving rebind and has since R100; `elem_trait_of` — the trait-object
+                    // twin the ANNOTATED `let` arm got at line ~4322 and the parameter and field
+                    // positions have had since R37/R40 — was simply absent here. So one `let` decided
+                    // whether a dispatch element survived a rebind, and the two questions drifted at the
+                    // one binder that asks only one of them (brief §F1-3).
+                    //
+                    // MEASURED, with the un-bound spelling as the control and nothing else changed:
+                    // over `Vec<Box<dyn Sink>>`, `for g in v.iter() { g.emit() }` charges `['Exec']`
+                    // while `let it = v.iter(); for g in it { g.emit() }` read **ABSENT** — no row, no
+                    // `Unknown`, no `invisible`. Same for `let mut it = v.iter(); if let Some(g) =
+                    // it.next()` and the `.peekable()` spelling, against a charging
+                    // `v.iter().peekable().peek()` one `let` away. Naming an iterator before consuming
+                    // it is not an unusual way to write Rust.
+                    //
+                    // INSERT-ONLY, AND THE CLEAR WAS WRITTEN FIRST AND MEASURED OUT. The `elem_of`
+                    // line above clears before it writes, and mirroring that here — the obvious move,
+                    // and what the ANNOTATED arm at line ~4322 correctly does — cost a real disclosure
+                    // on the 1,595-crate A/B: `image-0.25.10`'s
+                    // `trs: [Option<Arc<dyn moxcms::TransformExecutor<P>>>; 4]` is a PARAMETER, and the
+                    // shadowing `let trs = trs.map(Option::unwrap);` has an init this resolver cannot
+                    // answer for (`map` CHANGES the element and is deliberately off the adapter list,
+                    // R346). Clearing on that non-answer unbound the parameter, and the closure param
+                    // of the very next `trs.clone().map(|tr| tr.transform(..))` stopped resolving:
+                    // TEN rows lost `dispatchesOn: moxcms#TransformExecutor::transform` and one lost
+                    // `invisible: ["moxcms"]` — a disclosure traded away, which is the direction this
+                    // register ranks worst.
+                    //
+                    // The asymmetry with the annotated arm is not an oversight: an ANNOTATION that is
+                    // not a dispatch container is a POSITIVE answer ("this name is now something
+                    // else"), while an init expression that resolves to nothing is an ABSENCE of an
+                    // answer, and the two must not be treated alike. So the residual staleness is
+                    // accepted and named — it is the pre-existing exposure at this site, not one this
+                    // change introduces, since before this the site wrote and cleared NOTHING — and
+                    // the bounded-CHA and local-trait gates downstream are what keep it from
+                    // fabricating (the R46 argument recorded in `resolve_elem_trait_leaves`).
+                    let r536_leaves = self
+                        .with_pre_bindings(&pre_bindings, |s| s.resolve_elem_trait_leaves(&init.expr));
+                    if !r536_leaves.is_empty() {
+                        // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch, and keyed apart from
+                        // the LIST half so the A/B can price the two mechanisms separately.
+                        if std::env::var_os("CANDOR_R536_INSTR").is_some() {
+                            eprintln!("R536LET");
+                        }
+                        self.elem_trait_of.insert(id.ident.to_string(), r536_leaves);
                     }
                     // GAP C / SOUNDNESS: `let pair = (cb, 1);` (an UNANNOTATED plain `let` whose init is
                     // an inline tuple LITERAL) previously recorded NO tuple shape for `pair` at all —

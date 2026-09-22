@@ -2301,10 +2301,72 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
         // `Weak`'s own element. It is the accessor that makes `Weak` reachable at all, since `Weak`
         // does not `Deref` (see `elem_trait_leaves`).
             | "upgrade"
+        // SOUNDNESS R536 — THE REST OF THE `first`/`last`/`get`/`upgrade` FAMILY. Those four arrived
+        // one row at a time (R346, R401) and the twenty siblings that answer the SAME question were
+        // never added, so `if let Some(g) = v.pop()` read silent-pure while `if let Some(g) =
+        // v.first()` beside it charged. Every name here satisfies the list's contract — the ELEMENT
+        // of what it returns is the element of its receiver — because each returns `Option<Elem>`
+        // and `elem_type`/`elem_trait_leaves` both peel `Option`.
+        //   * the iterator terminals that yield ONE item
+            | "next" | "next_back" | "nth" | "nth_back" | "find" | "rfind"
+            | "min" | "max" | "min_by" | "max_by" | "min_by_key" | "max_by_key" | "reduce"
+            | "peek" | "peek_mut" | "next_if" | "next_if_eq"
+        //   * the sequence / deque / heap END accessors
+            | "pop" | "pop_if" | "pop_front" | "pop_back" | "pop_first" | "pop_last"
+            | "front" | "back" | "front_mut" | "back_mut" | "first_mut" | "last_mut"
+        //   * the REMOVAL accessors. A map's `remove` is `Option<V>` and satisfies the contract
+        //     exactly; a `Vec`'s is a bare `T`, which satisfies it only when `T` is itself a
+        //     container. That residual is PINNED (`a_vec_remove_is_one_level_off`) rather than left
+        //     to be rediscovered: it is the same one-level-off shape as `unwrap` two comments down,
+        //     and it needs `Vec<X>` where `X: IntoIterator` AND the `for y in v.remove(i)` spelling.
+            | "remove" | "swap_remove"
+        //   * the `Option`/`Result` payload accessors. `Result::ok` is `Option<T>` and
+        //     `Option::replace` returns the OLD `Option<T>`; both keep the payload they were given.
+            | "ok" | "replace"
+        //   * a map's VALUE view, the by-value twin of `values`/`values_mut` already above.
+            | "into_values"
+        // DELIBERATELY ABSENT, each because it breaks the contract rather than because nobody
+        // thought of it — the half R346 says is worth guarding:
+        //   * `keys`/`into_keys` yield the KEY, and this list's map arm is about the VALUE.
+        //   * `position`/`rposition`/`count`/`len` yield a `usize`, not the element.
+        //   * `find_map`/`filter_map`/`flat_map` CHANGE the element (R346's exclusion).
+        //   * `split_first`/`split_last`/`first_key_value`/`last_key_value` yield a TUPLE or an
+        //     (element, rest) pair — one index deep, exactly like `windows`/`chunks` (R346).
+        //     `pop_first`/`pop_last` are IN rather than out, and the split is R454's argument rather
+        //     than a preference: on a `BTreeSet` they are `Option<T>` and satisfy the contract, and on
+        //     a `BTreeMap` the `Option<(K, V)>` spelling that would mistype cannot reach a consumer —
+        //     `if let Some(g) = m.pop_first() { g.run() }` does not COMPILE (a tuple has no method),
+        //     and `for (k, v) in m.pop_first()` goes through `resolve_elem_tuple`, which has no map
+        //     arm and contributes no binding at all rather than a wrong one.
+        //   * `into_inner`/`try_lock`/`try_borrow` are the guard chain's siblings and were swept
+        //     with this family, but `into_inner` already carries a CONFLICTING role in
+        //     `collector::is_recv_type_changing`, so moving it is a different change with a
+        //     different risk and is left stated rather than smuggled in here.
         // `unwrap` is here for the guard chain (`lock().unwrap()`) and is the one entry that is a
-        // judgement rather than a fact: it also unwraps an `Option<T>`/`Result<T, _>` whose `T` is NOT
-        // a collection, where both resolvers then find no element and return nothing. Harmless in that
-        // direction, which is why it was already on the dispatch list.
+        // judgement rather than a fact.
+        //
+        // SOUNDNESS R536 — THE SENTENCE THAT STOOD HERE WAS WRONG IN BOTH HALVES, AND MEASURED SO.
+        // It read: *"it also unwraps an `Option<T>`/`Result<T, _>` whose `T` is NOT a collection,
+        // where both resolvers then find no element and return nothing. Harmless in that direction."*
+        //
+        //   * They do NOT return nothing. `elem_type` has had an `Option`/`Result` arm since R185, so
+        //     peeling `unwrap` answers with the PAYLOAD — and the payload of `o.unwrap()` is the value
+        //     itself, not its element. The answer is one level off, not absent.
+        //   * It is NOT harmless. Built as a two-arm fixture, both arms compiling, one variable:
+        //     `struct Holder` whose `go()` spawns and whose `IntoIterator::Item` is an `Item2` whose
+        //     `go()` is PURE. `fn ctrl(h: Holder) { for y in h { y.go() } }` reads ABSENT (correct);
+        //     `fn f(o: Option<Holder>) { for y in o.unwrap() { y.go() } }` is charged **`['Exec']`**
+        //     over a loop whose real item spawns nothing. Held constant: the same `Holder`, the same
+        //     body, the same crate — the only difference is the `Option` wrapper and the `.unwrap()`.
+        //
+        // The entry STAYS, because removing it costs the guard chain R347 measured (`self.m.lock()
+        // .unwrap().iter()` over an `Arc<Mutex<Vec<Box<dyn Doer>>>>`), and a fabrication is disclosed
+        // where a silence is not. But it is a KNOWN over-charge with a reproduction, not a safe entry:
+        // the shape needs `Option<X>`/`Result<X, _>` where `X: IntoIterator` and `X` and its `Item`
+        // share a method name. `expect` and the `unwrap_or*` family have the identical shape. Closing
+        // it means splitting "the result CONTAINS the same element" from "the result IS the element",
+        // which is the distinction `is_element_yielding_accessor` states — a separate change, owed its
+        // own row and its own A/B, and named here rather than left as a claim of safety.
             | "unwrap"
     )
 }
@@ -2346,8 +2408,58 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// `v.get(0).unwrap()` over a `Vec` is absent too, so the axis is not the container's shape, it is the
 /// BINDING SITE.** The `if let` / `for` / index sites resolve an element and the receiver position did
 /// not, so the same container answered or stayed silent according to how the caller spelled the reach.
+///
+/// SOUNDNESS R536 — AND IT WAS FIVE NAMES OF A FAMILY OF TWENTY-FIVE. The paragraph above is about
+/// the BINDING SITE and it is right; what it did not say is that the five names it shipped with were
+/// simply the ones R346 and R401 had already put on `is_element_preserving_adapter` for a different
+/// reason. So `v.get(0).unwrap().emit()` charged and `v.pop().unwrap().emit()` — the same container,
+/// the same call, one accessor over — was ABSENT, on the concrete route and the dispatch route alike.
+/// Measured over `Vec<Box<dyn Sink>>` / `VecDeque` / `BinaryHeap` / `HashMap` / `BTreeSet` /
+/// `Option` / `Result`, **38 of 52 arms silent** against `first()`/`last()`/`get(0)`/`v[0]`/
+/// `Option::take()` as the charging calibration. The BINDING SITE was swept as its own axis and is
+/// not the variable: `if let` / `while let` / `match` / `let`-else / `?` / `for g in` / `.map(|g|..)`
+/// and a FIELD receiver all read the same, before and after.
+///
+/// THE TWO LISTS ARE NOT THE SAME QUESTION and the difference decides membership:
+/// `is_element_preserving_adapter` asks *does the result CONTAIN the same element* (so `take(2)`,
+/// `rev()`, `filter(..)` belong and are deliberately absent from here — `v.take(2)` is still a
+/// container, and typing it as the element would fabricate one level in). THIS list asks *is the
+/// result the element itself*, which is why the `Option`-returning accessors are on both: at a
+/// receiver position they are always spelled through an `.unwrap()`/`.expect()`, and those two walk
+/// to their own receiver rather than needing an entry here.
 pub(crate) fn is_element_yielding_accessor(method: &str) -> bool {
-    matches!(method, "get" | "get_mut" | "first" | "last" | "upgrade")
+    matches!(
+        method,
+        "get" | "get_mut" | "first" | "last" | "upgrade"
+        // R536 — the rest of the family. Same order and same warrant as the additions to
+        // `is_element_preserving_adapter`; see there for the exclusions and why each is out.
+            | "first_mut" | "last_mut" | "front" | "back" | "front_mut" | "back_mut"
+            | "pop" | "pop_if" | "pop_front" | "pop_back" | "pop_first" | "pop_last"
+            | "remove" | "swap_remove"
+            | "next" | "next_back" | "nth" | "nth_back" | "find" | "rfind"
+            | "min" | "max" | "min_by" | "max_by" | "min_by_key" | "max_by_key" | "reduce"
+            | "peek" | "peek_mut" | "next_if" | "next_if_eq"
+            | "ok" | "replace"
+    )
+}
+
+/// SOUNDNESS R536 §E1 REACH PROBE — true for the names R536 ADDED to either list, and for nothing
+/// else. Every consumer of the two lists is instrumented through this one predicate so "the branch
+/// never ran" and "the branch ran and moved nothing" are distinguishable claims in the A/B, which is
+/// the distinction R79/R85/R87/R92 each got wrong by measuring only the diff. Compiled in
+/// unconditionally and gated at each call site on `CANDOR_R536_INSTR`.
+pub(crate) fn is_r536_added_name(method: &str) -> bool {
+    matches!(
+        method,
+        "next" | "next_back" | "nth" | "nth_back" | "find" | "rfind"
+            | "min" | "max" | "min_by" | "max_by" | "min_by_key" | "max_by_key" | "reduce"
+            | "peek" | "peek_mut" | "next_if" | "next_if_eq"
+            | "pop" | "pop_if" | "pop_front" | "pop_back" | "pop_first" | "pop_last"
+            | "front" | "back" | "front_mut" | "back_mut" | "first_mut" | "last_mut"
+            | "remove" | "swap_remove"
+            | "ok" | "replace"
+            | "into_values"
+    )
 }
 
 pub(crate) fn is_elem_last_param_adapter(method: &str) -> bool {
@@ -5871,8 +5983,21 @@ pub(crate) fn reaching_ancestors<'a>(
 /// `charge_iter_next`). This is the EAGER/forcing subset only: lazy ADAPTERS (`map`/`filter`/`take`/…)
 /// return a new lazy iterator and do NOT force, so they are deliberately ABSENT — charging them would
 /// over-approximate a never-driven chain. `collect` is included (it forces); a never-consumed `collect`
-/// result is vanishingly rare and forcing is the safe direction. `next`/`next_back` are also absent —
-/// an explicit `.next()` already resolves as an ordinary method call on the receiver type.
+/// result is vanishingly rare and forcing is the safe direction.
+///
+/// `next`/`next_back` are also absent, and SOUNDNESS R536 TESTED THAT SENTENCE RATHER THAN TRUSTING
+/// IT. On its own subject it HOLDS: with a local `struct It` carrying `impl Iterator for It` whose
+/// `next` spawns, `it.next()`, `it.next_back()` and `it.take(2).next()` all charge `['Exec']` beside
+/// `it.count()` as the control, so an explicit `.next()` does resolve as an ordinary method call on
+/// the receiver type and needs no forcing edge.
+///
+/// **What it does not say, and was read as saying, is anything about ELEMENT TYPING.** `next` is this
+/// function's subject only as a driver of a custom `Iterator::next`; the separate question of what
+/// `v.into_iter().next()` BINDS was answered by nobody, and that spelling read silent-pure over a
+/// `Vec<Box<dyn Sink>>` until R536 put `next`/`next_back`/`nth` on the two element lists in
+/// `is_element_preserving_adapter` / `is_element_yielding_accessor`. A true sentence beside a list of
+/// names reads as a ruling on those names; this one is scoped now so the next reader does not have to
+/// re-measure it to find out which question it settles.
 pub(crate) fn is_iter_consumer(leaf: &str) -> bool {
     matches!(
         leaf,
