@@ -9326,6 +9326,43 @@ impl H {\n\
                      accumulator, its index slot, or the other side of a zip:\n{v:#}");
         }
     }
+    #[test]
+    fn the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read() {
+        // SOUNDNESS R540 — `resolve_recv_traits` opens with a hot-path guard that returns EMPTY when
+        // `trait_vars`, `trait_fields` and `has_dyn_return` are all empty. Its arms read three MORE
+        // dispatch tables — `elem_trait_of`, `field_elem_trait` and `callable_statics`, all reached
+        // through `resolve_elem_trait_leaves` — so a function whose only dispatch source is a
+        // COLLECTION never got past the guard and read ABSENT.
+        //
+        // THE MEASUREMENT IS THE PAIR, and the single variable is an UNUSED `a: &dyn Sink` parameter:
+        // `v[0].emit()` over a `Vec<Box<dyn Sink>>` was ABSENT without it and charged `['Exec']` with
+        // it — same expression, same collection, same crate, same run. A purity claim that flips on an
+        // unrelated parameter is not a precision limit; it is a guard answering a question it was only
+        // meant to skip. Every row compiles (§E3).
+        let src = "\
+use std::process::Command;\n\
+pub trait Sink { fn emit(&self); }\n\
+pub struct Real;\n\
+impl Sink for Real { fn emit(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct Reg { pub hs: Vec<Box<dyn Sink>> }\n\
+pub fn idx_alone(v: &Vec<Box<dyn Sink>>) { v[0].emit() }\n\
+pub fn idx_with_dynvar(v: &Vec<Box<dyn Sink>>, a: &dyn Sink) { let _ = a; v[0].emit() }\n\
+pub fn acc_alone(v: &Vec<Box<dyn Sink>>) { v.get(0).unwrap().emit() }\n\
+impl Reg {\n\
+  pub fn field_idx_alone(&self) { self.hs[0].emit() }\n\
+  pub fn field_idx_with_dynvar(&self, a: &dyn Sink) { let _ = a; self.hs[0].emit() }\n\
+}\n\
+pub fn ctl_for(v: &Vec<Box<dyn Sink>>) { for g in v.iter() { g.emit() } }\n\
+";
+        let v = scan_fixture("r540guard", src);
+        for f in ["ctl_for", "idx_with_dynvar", "Reg::field_idx_with_dynvar",
+                  "idx_alone", "acc_alone", "Reg::field_idx_alone"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches Real::emit — an UNRELATED dyn parameter elsewhere in the \
+                        signature must not decide whether the receiver resolves:\n{v:#}");
+        }
+    }
+
 
     #[test]
     fn as_ref_is_element_preserving_like_iter_and_clone_beside_it() {

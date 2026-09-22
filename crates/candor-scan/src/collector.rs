@@ -1726,12 +1726,47 @@ impl<'a> CallCollector<'a> {
         lt.methods.contains(leaf)
             || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
     }
+    /// SOUNDNESS R540 §E1 REACH COUNTER. `resolve_recv_traits` is the walk plus this wrapper, and the
+    /// wrapper exists only to make the fix MEASURABLE: it fires exactly when the OLD three-table guard
+    /// would have short-circuited and the walk nevertheless produced an answer — i.e. on the rows this
+    /// change can move and on no others. Counts HITS, not distinct sites: the walk recurses through
+    /// this wrapper, so one nested resolution counts at each level it answers at.
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
-        // Hot-path guard: with no dispatch-typed vars or fields in scope AND no dispatch-object-returning
-        // factory recorded (the overwhelmingly common case), every lookup below is a guaranteed miss —
-        // skip the recursive walk. The Call arm depends on `returns`, not on the vars/fields, so it is
-        // kept live whenever any factory return is a `<dyn>` sentinel.
-        if self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return {
+        let old_guard_would_skip =
+            self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return;
+        let out = self.resolve_recv_traits_walk(expr);
+        if old_guard_would_skip && !out.is_empty() && std::env::var_os("CANDOR_R540_INSTR").is_some() {
+            eprintln!("R540REACH");
+        }
+        out
+    }
+
+    fn resolve_recv_traits_walk(&self, expr: &syn::Expr) -> Vec<String> {
+        // Hot-path guard: with NO dispatch source this function could answer from, every lookup below
+        // is a guaranteed miss — skip the recursive walk.
+        //
+        // SOUNDNESS R540 — THE GUARD MUST NAME EVERY TABLE THE ARMS READ, AND IT NAMED THREE OF SIX. The
+        // condition was `trait_vars.is_empty() && trait_fields.is_empty() && !has_dyn_return`, while
+        // the `Index` and element-accessor arms answer out of `elem_trait_of`, `field_elem_trait` and
+        // `callable_statics`, all reached through `resolve_elem_trait_leaves`. So a function whose ONLY
+        // dispatch source was a COLLECTION never got past here: `v[0].emit()` over a
+        // `Vec<Box<dyn Sink>>` read ABSENT — a §4 purity claim — and the byte-identical body with one
+        // UNUSED `a: &dyn Sink` parameter added charged `['Exec']`. Same expression, same collection,
+        // same crate, same run; the parameter is the single variable. A guard meant only to SKIP work
+        // was deciding the answer.
+        //
+        // This is §H one level in — the detector worked and something upstream of it discarded the
+        // detection — and it is why the condition is now derived from the ARMS rather than from the
+        // three tables the guard's author had in mind. A new dispatch table added to this struct must
+        // be added here too; `the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read` fails
+        // on the two shapes that were silent, which is what makes that a gate rather than a note.
+        let no_dispatch_source = self.trait_vars.is_empty()
+            && self.trait_fields.is_empty()
+            && !self.has_dyn_return
+            && self.elem_trait_of.is_empty()
+            && self.field_elem_trait.is_empty()
+            && self.callable_statics.is_empty();
+        if no_dispatch_source {
             return Vec::new();
         }
         match expr {
