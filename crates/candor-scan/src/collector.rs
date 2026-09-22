@@ -968,6 +968,35 @@ impl<'a> CallCollector<'a> {
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            // SOUNDNESS R535 — A CONTROL-FLOW MERGE AT THE RECEIVER. `(if c { a } else { b }).go()`,
+            // `(match c { .. }).go()`, `{ a }.go()` and `unsafe { a }.go()` matched no arm here and
+            // fell to `_ => None`, so the caller read ABSENT — a §4 purity claim decided by how the
+            // receiver is SPELLED. The value positions come from the one authority
+            // `resolve_recv_traits`/`resolve_elem_type`/`resolve_elem_trait_leaves` also use, so the
+            // four cannot drift on which branches count (R347/R380's finding, three sites on).
+            //
+            // THE CONCRETE RULE: in well-typed Rust every branch has ONE type, so any branch that
+            // answers gives the whole expression's type — and two branches answering DIFFERENTLY means
+            // this resolver is wrong about at least one, so it declines rather than picking. Declining
+            // is exactly the pre-R535 behaviour, so the disagreement case cannot be a regression.
+            syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
+                let branches = crate::lang::merge_value_exprs(expr)?;
+                let mut found: Option<String> = None;
+                for b in branches {
+                    let Some(t) = self.resolve_recv_type_for(b, outer) else { continue };
+                    match &found {
+                        None => found = Some(t),
+                        Some(prev) if *prev == t => {}
+                        Some(_) => return None,
+                    }
+                }
+                // SOUNDNESS R535 §E1 REACH COUNTER, on the CHANGED branch only — an unchanged row is
+                // not evidence the new code ran.
+                if found.is_some() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                    eprintln!("R535CONC");
+                }
+                found
+            }
             _ => None,
         }
     }
@@ -1034,6 +1063,27 @@ impl<'a> CallCollector<'a> {
             }
             // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            // SOUNDNESS R535 — the same control-flow merge, one question over: `for x in (if c { a }
+            // else { b })` asks what the MERGE evaluates to, and the answer is the agreed element of
+            // its branches. Added here rather than left to the receiver resolvers so the boundary is
+            // not drawn around R535's own trigger (§9): four resolvers ask this question and a merge
+            // that resolves in two of them and not the other two is the next drift.
+            syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
+                let branches = crate::lang::merge_value_exprs(expr)?;
+                let mut found: Option<String> = None;
+                for b in branches {
+                    let Some(t) = self.resolve_elem_type(b) else { continue };
+                    match &found {
+                        None => found = Some(t),
+                        Some(prev) if *prev == t => {}
+                        Some(_) => return None,
+                    }
+                }
+                if found.is_some() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                    eprintln!("R535ELEM");
+                }
+                found
+            }
             _ => None,
         }
     }
@@ -1098,12 +1148,30 @@ impl<'a> CallCollector<'a> {
             // SAFETY-ONLY on its first pass: the single real instance in a 1489-crate registry is
             // proptest's `static mut DEFAULT_HOOK: Option<Box<dyn Fn(&PanicInfo) + Send + Sync>>`, invoked
             // as `if let Some(hook) = unsafe { DEFAULT_HOOK.as_ref() } { (hook)(info) }`, and the scrutinee
-            // never got past this match. Only a block whose value IS one expression (no statements) is
-            // peeled — a block that computes is not the thing it ends with.
-            syn::Expr::Unsafe(u) => match (u.block.stmts.len(), u.block.stmts.first()) {
-                (1, Some(syn::Stmt::Expr(e, None))) => self.resolve_elem_trait_leaves(e),
-                _ => Vec::new(),
-            },
+            // never got past this match.
+            //
+            // SOUNDNESS R535 — this arm USED to be a private copy of "what does a block evaluate to",
+            // written `(1, Some(Stmt::Expr(e, None)))`, and is now the shared `merge_value_exprs`
+            // authority that the two receiver resolvers and `resolve_elem_type` also use. R101's case
+            // is inside it unchanged (a one-expression `unsafe` block still peels); what it adds is the
+            // `if`/`match`/plain-block spellings, and a block with non-`let` statements before the
+            // tail. Folding rather than adding beside it is the point: leaving a narrower second copy
+            // of one question is how R347, R380 and R446 each happened.
+            syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
+                let Some(branches) = crate::lang::merge_value_exprs(expr) else { return Vec::new() };
+                let mut out: Vec<String> = Vec::new();
+                for b in branches {
+                    for l in self.resolve_elem_trait_leaves(b) {
+                        if !out.contains(&l) {
+                            out.push(l);
+                        }
+                    }
+                }
+                if !out.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                    eprintln!("R535ELEMDYN");
+                }
+                out
+            }
             // R101 — a module-level `static`/`const` holding a callable, named here as the thing being
             // unwrapped. Checked BEFORE the local tables so the qualified spelling (`cfg::CB`) is reachable
             // at all (`get_ident` is None for it), and gated on `locally_bound` so a same-named local wins
@@ -1745,21 +1813,52 @@ impl<'a> CallCollector<'a> {
         // Hot-path guard: with NO dispatch source this function could answer from, every lookup below
         // is a guaranteed miss — skip the recursive walk.
         //
+        // SOUNDNESS R535 — AN EXPLICIT UNSIZING CAST NAMES THE RECEIVER'S TRAIT OUTRIGHT:
+        // `(a as &dyn Sink).emit()` was ABSENT while `fn f(a: &dyn Sink) { a.emit() }` charged. The
+        // cast's own TYPE is the authority (not the operand's), read through `trait_leaves` — the same
+        // decoder every `dyn` parameter, field and tuple element already goes through, so a cast to a
+        // non-trait type yields no leaves and adds nothing. The CONCRETE counterpart is deliberately
+        // NOT added: `(x as u64).go()` would form a type name off a primitive cast for no measured gain.
+        //
         // SOUNDNESS R540 — THE GUARD MUST NAME EVERY TABLE THE ARMS READ, AND IT NAMED THREE OF SIX. The
         // condition was `trait_vars.is_empty() && trait_fields.is_empty() && !has_dyn_return`, while
         // the `Index` and element-accessor arms answer out of `elem_trait_of`, `field_elem_trait` and
-        // `callable_statics`, all reached through `resolve_elem_trait_leaves`. So a function whose ONLY
-        // dispatch source was a COLLECTION never got past here: `v[0].emit()` over a
-        // `Vec<Box<dyn Sink>>` read ABSENT — a §4 purity claim — and the byte-identical body with one
-        // UNUSED `a: &dyn Sink` parameter added charged `['Exec']`. Same expression, same collection,
-        // same crate, same run; the parameter is the single variable. A guard meant only to SKIP work
-        // was deciding the answer.
+        // `callable_statics` (all through `resolve_elem_trait_leaves`) and the R535 `Cast` arm answers
+        // out of the cast's own type. So a function whose ONLY dispatch source was a collection never
+        // got past here: `v[0].emit()` over a `Vec<Box<dyn Sink>>` read ABSENT — a §4 purity claim —
+        // and the byte-identical body with one UNUSED `a: &dyn Sink` parameter added charged
+        // `['Exec']`. Same expression, same collection, same crate, same run; the parameter is the
+        // single variable. A guard meant only to SKIP work was deciding the answer.
         //
         // This is §H one level in — the detector worked and something upstream of it discarded the
-        // detection — and it is why the condition is now derived from the ARMS rather than from the
-        // three tables the guard's author had in mind. A new dispatch table added to this struct must
+        // detection — and it is why the condition is now derived from the arms rather than from the
+        // three tables the guard's author had in mind. A NEW dispatch table added to this struct must
         // be added here too; `the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read` fails
         // on the two shapes that were silent, which is what makes that a gate rather than a note.
+        //
+        // THE CAST ARM IS ANSWERED ABOVE THE GUARD, not exempted inside it, and the difference was
+        // MEASURED: `(a as &dyn Sink).emit()` reaches here as an `Expr::Paren` wrapping the cast, so a
+        // `!matches!(expr, Expr::Cast(_))` exemption tested the WRAPPER and let the guard fire anyway.
+        // That first draft passed on a fixture that happened to contain an unrelated `Vec<Box<dyn
+        // Sink>>` FIELD — which makes the crate-wide `field_elem_trait` non-empty and so makes every
+        // function in it pass the guard — and failed the moment the fixture did not. Adjacency again,
+        // in the fix for an adjacency bug.
+        // Peeled, because the cast arrives WRAPPED: `(a as &dyn Sink).emit()` is an `Expr::Paren`
+        // around the cast, and testing the wrapper is how the first two drafts of this let the guard
+        // fire anyway. `peel_recv` is the same transparent-wrapper authority the arms below use.
+        if let syn::Expr::Cast(c) = peel_recv(expr) {
+            // Only an UNSIZING cast — see `is_unsizing_cast_target` for the moxcms `where u32:
+            // AsPrimitive<T>` row that made this gate a measurement rather than a precaution.
+            let leaves = if crate::lang::is_unsizing_cast_target(&c.ty) {
+                crate::lang::trait_leaves(&c.ty, &self.generic_bounds)
+            } else {
+                Vec::new()
+            };
+            if !leaves.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                eprintln!("R535CAST");
+            }
+            return leaves;
+        }
         let no_dispatch_source = self.trait_vars.is_empty()
             && self.trait_fields.is_empty()
             && !self.has_dyn_return
@@ -1856,6 +1955,24 @@ impl<'a> CallCollector<'a> {
             // missing while both siblings had it, so `self.handlers[0].go()` (a `Vec<Box<dyn Doer>>`
             // field) resolved neither a concrete type nor a dispatch leaf and dropped silent-pure.
             syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
+            // SOUNDNESS R535, dispatch half. Same authority as the concrete resolver's merge arm; the
+            // COMBINE RULE differs and that is deliberate — leaves UNION across the branches, because a
+            // larger bounded-CHA candidate set can only over-approximate, which is the safe direction.
+            syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
+                let Some(branches) = crate::lang::merge_value_exprs(expr) else { return Vec::new() };
+                let mut out: Vec<String> = Vec::new();
+                for b in branches {
+                    for l in self.resolve_recv_traits(b) {
+                        if !out.contains(&l) {
+                            out.push(l);
+                        }
+                    }
+                }
+                if !out.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                    eprintln!("R535DYN");
+                }
+                out
+            }
             _ => Vec::new(),
         }
     }

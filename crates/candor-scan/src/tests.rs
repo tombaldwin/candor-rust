@@ -9327,6 +9327,75 @@ impl H {\n\
         }
     }
     #[test]
+    fn a_control_flow_merge_at_the_receiver_is_typed_from_its_branches() {
+        // SOUNDNESS R535 — a receiver spelled as an `if`, a `match` or a BLOCK matched no arm in
+        // EITHER receiver resolver (`resolve_recv_type_for` and `resolve_recv_traits` both ended
+        // `_ => None` / `_ => Vec::new()`), so `(if c { a } else { b }).emit()` was ABSENT from
+        // `functions[]` — an affirmative §4 purity claim over a body that spawns a process. No
+        // `Option` and no container is involved: `deny Net` exited 0 and `pure` exited 0 on the
+        // minimal case, and swift, java and ts all charge the ternary/switch/block receiver.
+        //
+        // §F1 question 1 at the receiver position: the decision was read from syntactic adjacency
+        // (a `match` over expression SHAPES) where the question is a CONTROL-FLOW MERGE.
+        //
+        // WHY THIS DOES NOT GUESS. In well-typed Rust every branch of an `if`/`match` has ONE type,
+        // so any branch that resolves gives the type of the whole expression — which is why
+        // `one_sided_conc` (`else { panic!() }`) resolves from the arm that does. Two branches
+        // resolving DIFFERENTLY means this resolver is wrong about at least one of them, so the
+        // concrete side declines rather than picking one. The dispatch side UNIONS the branches'
+        // leaves, the direction bounded CHA already over-approximates in.
+        //
+        // EVERY ROW BELOW COMPILES (§E3) — `cargo build` on the whole fixture, warnings only.
+        let src = "\
+use std::process::Command;\n\
+pub trait Sink { fn emit(&self); }\n\
+pub struct Real;\n\
+impl Sink for Real { fn emit(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct Calm;\n\
+impl Sink for Calm { fn emit(&self) {} }\n\
+pub struct G;\n\
+impl G { pub fn go(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct P;\n\
+impl P { pub fn go(&self) {} }\n\
+pub fn ctl_dyn(a: &dyn Sink) { a.emit() }\n\
+pub fn ctl_conc(g: &G) { g.go() }\n\
+pub fn if_dyn(a: &'static dyn Sink, b: &'static dyn Sink, c: bool) { (if c { a } else { b }).emit() }\n\
+pub fn if_conc(a: &G, b: &G, c: bool) { (if c { a } else { b }).go() }\n\
+pub fn if_chain_conc(a: &G, b: &G, d: &G, c: bool) { (if c { a } else if c { b } else { d }).go() }\n\
+pub fn match_dyn(a: &'static dyn Sink, b: &'static dyn Sink, c: bool) { (match c { true => a, false => b }).emit() }\n\
+pub fn match_conc(a: &G, b: &G, c: bool) { (match c { true => a, false => b }).go() }\n\
+pub fn block_dyn(a: &dyn Sink) { { a }.emit() }\n\
+pub fn block_conc(a: &G) { { a }.go() }\n\
+pub fn unsafe_conc(a: &G) { unsafe { a }.go() }\n\
+pub fn one_sided_conc(a: &G) { (if true { a } else { panic!() }).go() }\n\
+pub fn cast_dyn(a: &'static Real) { (a as &dyn Sink).emit() }\n\
+pub fn fab_pure_if(a: &P, b: &P, c: bool) { (if c { a } else { b }).go() }\n\
+pub fn fab_pure_match_dyn(a: &'static Calm, b: &'static Calm, c: bool) { (match c { true => a, false => b }).emit() }\n\
+pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
+";
+        let v = scan_fixture("r535merge", src);
+        // THE CONTROLS ARE THE FIRST TWO ROWS, not an afterthought: the same two bodies with a BARE
+        // receiver charged all along, so exactly one variable — how the receiver is spelled —
+        // separates them from every row after them, all of which read ABSENT before this fix.
+        for f in ["ctl_dyn", "ctl_conc", "if_dyn", "if_conc", "if_chain_conc", "match_dyn",
+                  "match_conc", "block_dyn", "block_conc", "unsafe_conc", "one_sided_conc",
+                  "cast_dyn"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches an effectful body through a merged receiver — HOW the receiver \
+                        is spelled must not decide whether the effect is seen:\n{v:#}");
+        }
+        // THE OVER-CHARGE HALF, each claim its own row, because a typing change buys its reach with
+        // fabrication risk: the same merges over a PURE type stay pure (this resolves a TYPE, it does
+        // not charge); and a block that COMPUTES is not the thing it ends with — `({ let a = P; a })`
+        // must not inherit the outer `a`'s type, which is what the single-expression restriction
+        // (R101's rule, reused here through one authority) refuses.
+        for f in ["fab_pure_if", "fab_pure_match_dyn", "fab_stmt_block"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — a merged receiver resolves a TYPE, it does not charge:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read() {
         // SOUNDNESS R540 — `resolve_recv_traits` opens with a hot-path guard that returns EMPTY when
         // `trait_vars`, `trait_fields` and `has_dyn_return` are all empty. Its arms read three MORE

@@ -287,6 +287,42 @@ pub(crate) fn bound_leaves(bounds: &syn::punctuated::Punctuated<syn::TypeParamBo
         .collect()
 }
 
+/// SOUNDNESS R535 — is this cast target an UNSIZING cast, i.e. does it name a trait object or an
+/// opaque `impl Trait` (bare, behind a reference, or inside one wrapper)?
+///
+/// MEASURED, and the measurement is why this exists rather than calling `trait_leaves` directly on the
+/// cast type. `trait_leaves` answers for a BARE IDENT out of `generic_bounds`, and a where-clause can
+/// bind a CONCRETE type: moxcms-0.8.1 declares `where u32: AsPrimitive<T>`, so
+/// `((src * max).round() as u32).min(max as u32)` resolved `min` to `num_traits#AsPrimitive::min` — a
+/// trait that has no `min`. The effect set stayed `[]`, but the row gained a `dispatchesOn` edge to a
+/// method that does not exist and an `invisible: ["num_traits"]` beside it. A numeric cast does not
+/// change what a receiver dispatches to; only an unsizing cast does, and that is the whole of the case
+/// R535 was written for (`(subscriber as &dyn Subscriber).is::<..>()`, which is real and is now
+/// disclosed). Narrowing a widening of my OWN is not the denylist rule — there is no sound
+/// over-approximation here to preserve, there is a fabricated dispatch target to not introduce.
+pub(crate) fn is_unsizing_cast_target(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::TraitObject(_) | syn::Type::ImplTrait(_) => true,
+        syn::Type::Reference(r) => is_unsizing_cast_target(&r.elem),
+        syn::Type::Paren(p) => is_unsizing_cast_target(&p.elem),
+        syn::Type::Group(g) => is_unsizing_cast_target(&g.elem),
+        // `Box::new(x) as Box<dyn T>` / `Arc<dyn T>` — one wrapper level, the same wrapper question
+        // `trait_leaves` answers below; this only decides WHETHER to ask it.
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .and_then(|seg| match &seg.arguments {
+                syn::PathArguments::AngleBracketed(a) => Some(a),
+                _ => None,
+            })
+            .is_some_and(|a| {
+                a.args.iter().any(|g| matches!(g, syn::GenericArgument::Type(t) if is_unsizing_cast_target(t)))
+            }),
+        _ => false,
+    }
+}
+
 /// The trait bound leaves of a DISPATCH-typed `syn::Type`: `&dyn T`, `impl T`, `Box<dyn T>` (and the
 /// other single-arg smart pointers), or a bare generic param `X` declared `X: T`. Returns empty for
 /// a concrete type — `type_path` owns those.
@@ -1774,6 +1810,98 @@ pub(crate) fn literal_head_host(fmt: &str) -> Option<String> {
     let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
     let host = host.split_once(':').map(|(h, _)| h).unwrap_or(host);
     (!host.trim().is_empty()).then(|| host.to_string())
+}
+
+/// SOUNDNESS R535 — THE VALUE POSITIONS OF A CONTROL-FLOW MERGE, as ONE authority for every resolver
+/// that asks what an expression evaluates to.
+///
+/// A receiver spelled `(if c { a } else { b })`, `(match c { .. })`, `{ a }` or `unsafe { a }` matched
+/// no arm in EITHER receiver resolver, so it resolved to nothing and its caller read ABSENT from
+/// `functions[]` — a §4 purity claim over a body that spawns a process, with `deny Net` and `pure` both
+/// exiting 0 on the minimal case. That is §F1 question 1 at the receiver position: the answer was read
+/// from syntactic ADJACENCY (a `match` over expression shapes) where the question is a control-flow
+/// MERGE. It lives here, not inside one resolver, because four resolvers ask this same question about
+/// the same expression and this family's bugs recur wherever one question has two implementations
+/// (R347, R380, R446, §G).
+///
+/// WHAT THE CALLER DOES WITH THE LIST IS THE CALLER'S RULE, and the two differ on purpose: in
+/// well-typed Rust every branch of an `if`/`match` has ONE type, so a CONCRETE resolver may take any
+/// branch that answers and must DECLINE when two answer differently (its resolver is then wrong about
+/// at least one of them); a DISPATCH resolver unions the branches' leaves, the direction bounded CHA
+/// already over-approximates in.
+///
+/// TWO REFUSALS, both about NAME SHADOWING, because the resolvers read `vars`/`trait_vars` by BARE NAME
+/// and a branch can rebind one:
+///   · a block containing a `let` contributes nothing — `({ let a = P; a }).go()` must not resolve the
+///     OUTER `a`. (R101's arm in `resolve_elem_trait_leaves` refused any block with statements at all
+///     for this reason; this is the same refusal keyed on the statement that can actually shadow.)
+///   · a `match` arm whose pattern BINDS a name contributes nothing, and an `if let`'s then-branch
+///     likewise — its `else` still counts, which is what makes `(if let Some(x) = o { x } else { b })`
+///     resolve from `b` rather than guess.
+/// `None` for everything else, including a LABELLED block and a `loop { break v }` — their value can
+/// arrive at a `break`, which this does not walk. Measured ABSENT and left so, deliberately.
+pub(crate) fn merge_value_exprs(expr: &syn::Expr) -> Option<Vec<&syn::Expr>> {
+    match expr {
+        syn::Expr::If(i) => {
+            let mut out: Vec<&syn::Expr> = Vec::new();
+            if !matches!(&*i.cond, syn::Expr::Let(_)) {
+                if let Some(e) = block_tail_value(&i.then_branch) {
+                    out.push(e);
+                }
+            }
+            // The `else` is itself an expression — a block, or the next `if` of a chain. Handed back
+            // whole, so the caller's own recursion walks it through THIS function again.
+            if let Some((_, e)) = &i.else_branch {
+                out.push(e);
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        syn::Expr::Match(m) => {
+            let out: Vec<&syn::Expr> = m
+                .arms
+                .iter()
+                .filter(|a| !pat_binds_ident(&a.pat))
+                .map(|a| &*a.body)
+                .collect();
+            (!out.is_empty()).then_some(out)
+        }
+        // A LABELLED block is excluded: `'l: { break 'l v; }` carries its value to the `break`.
+        syn::Expr::Block(b) if b.label.is_none() => block_tail_value(&b.block).map(|e| vec![e]),
+        syn::Expr::Unsafe(u) => block_tail_value(&u.block).map(|e| vec![e]),
+        _ => None,
+    }
+}
+
+/// The expression a BLOCK evaluates to — its trailing expression with no semicolon — but only when no
+/// statement in it is a `let`. See `merge_value_exprs` for why the `let` is the disqualifier: the
+/// resolvers key on bare names, so a block-local binding would be read through as the outer one.
+fn block_tail_value(b: &syn::Block) -> Option<&syn::Expr> {
+    if b.stmts.iter().any(|s| matches!(s, syn::Stmt::Local(_))) {
+        return None;
+    }
+    match b.stmts.last() {
+        Some(syn::Stmt::Expr(e, None)) => Some(e),
+        _ => None,
+    }
+}
+
+/// Does this pattern bind ANY identifier? The shadow test `merge_value_exprs` uses on a `match` arm.
+/// Deliberately coarse — a pattern that binds a name it does not use still disqualifies the arm — and
+/// coarse in the direction that declines rather than resolves.
+fn pat_binds_ident(pat: &syn::Pat) -> bool {
+    use syn::Pat;
+    match pat {
+        Pat::Ident(_) => true,
+        Pat::Reference(r) => pat_binds_ident(&r.pat),
+        Pat::Paren(p) => pat_binds_ident(&p.pat),
+        Pat::Type(t) => pat_binds_ident(&t.pat),
+        Pat::Or(o) => o.cases.iter().any(pat_binds_ident),
+        Pat::Tuple(t) => t.elems.iter().any(pat_binds_ident),
+        Pat::TupleStruct(t) => t.elems.iter().any(pat_binds_ident),
+        Pat::Slice(s) => s.elems.iter().any(pat_binds_ident),
+        Pat::Struct(s) => !s.fields.is_empty(),
+        _ => false,
+    }
 }
 
 /// The bound identifier of a simple binding pattern: `c` / `mut c` / `&c` / `(c)` -> "c". `None` for a
