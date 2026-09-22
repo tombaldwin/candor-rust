@@ -10,6 +10,50 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+### ⚠ R535/R538/R540/R541: THE RECEIVER-POSITION FAMILY, SWEPT ONCE
+
+Six rows, one question — **what type does the engine think a receiver has?** Each was a caller that
+read ABSENT from `functions[]` (a §4 purity claim) while the byte-identical body one spelling over
+charged. A `deny` gate that passed over one of these shapes can now fail; that is the point.
+
+- **R535 — a receiver that is an `if`, a `match` or a BLOCK resolved to nothing.**
+  `(if c { a } else { b }).emit()`, `(match c { .. }).emit()`, `{ a }.emit()` and
+  `unsafe { a }.emit()` matched no arm in EITHER receiver resolver. `deny Net` exited 0 and `pure`
+  exited 0 over a body that opens a socket, with the bare-receiver control charging in the same scan.
+  swift, java and ts all charge the ternary/switch/block receiver. `lang::merge_value_exprs` is now
+  the ONE authority for a merge's value positions, used by all four resolvers; the concrete side
+  takes any branch that answers and declines when two disagree, the dispatch side unions the leaves.
+  A block containing a `let`, a `match` arm that BINDS a name, a labelled block and `loop { break v }`
+  are deliberately not covered — stated rather than silent. An unsizing CAST receiver
+  (`(s as &dyn Subscriber).is()`) resolves too, gated to trait-object/`impl` targets so a numeric cast
+  cannot answer from a where-clause bound.
+- **R535b — syn parses a bare `None` as `Pat::Ident`**, so R535's arm-binding refusal swallowed
+  `(match o { Some(x) => x, None => b }).go()`, the ordinary spelling of an optional receiver. An
+  Upper-initial ident with no subpattern is a unit variant, not a binding.
+- **R538 — the tuple binder had a concrete route and no dispatch counterpart.** R349 built
+  `resolve_elem_tuple` for `for (g, _) in v.iter().zip(..)` / `for (_, g) in v.iter().enumerate()` /
+  the `for_each(|(g, _)| ..)` closure, and built only the concrete half: over a `Vec<G>` the loop
+  charged, over a `Vec<Box<dyn Sink>>` it read ABSENT. Every other binder in the engine tries the
+  dispatch route first. Slots now carry a `Bound`.
+- **R540 — the dispatch hot-path guard named three of the six tables its arms read**, so a function
+  whose only dispatch source was a COLLECTION never got past it: `v[0].emit()` over a
+  `Vec<Box<dyn Sink>>` was ABSENT, and the same body with one UNUSED `a: &dyn Sink` parameter charged.
+- **R540b — and the widened guard still named one sentinel of four.** `has_dyn_return` asked
+  `ret_dyn_leaves` where the arms decode `ret_dispatch_leaves`, so a crate whose only dispatch source
+  was a factory returning `Vec<Box<dyn T>>` failed the guard: `mk()[0].emit()` ABSENT,
+  `mk()[0].emit()` beside an unused dyn parameter `['Exec']`.
+- **R541 — `(*b).emit()` over a `Box<dyn Sink>` was silent.** The concrete resolver has had a deref
+  arm for as long as candor has collapsed a smart pointer to its pointee; the dispatch resolver never
+  did. Found by DIFFING the two resolvers' arm sets, which is the sweep R538's shape asks for.
+  Real instances: `(*self.0).resolve_auth_scheme_options(params)` in aws-smithy-runtime-api's public
+  forwarding API, and anyhow's `Chain::next`.
+
+**KNOWN, MEASURED, NOT FIXED.** `for g in mk_conc() { g.go() }` over a `fn mk_conc() -> Vec<G>` reads
+ABSENT while the `dyn` twin charges: `resolve_elem_trait_leaves` decodes an `<elemdyn>` return
+sentinel and `resolve_elem_type` has no concrete element sentinel to decode. It is the same
+half-a-resolver shape as R538, in the mirror direction, and closing it needs a new `ReturnIndex`
+encoding rather than an arm.
+
 ### ⚠ R536: THE ELEMENT-YIELDING ACCESSOR LIST WAS FIVE NAMES OF A FAMILY OF TWENTY-FIVE
 
 - **`if let Some(g) = v.pop()` read silent-pure while `if let Some(g) = v.first()` one line above it
