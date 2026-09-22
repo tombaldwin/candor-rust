@@ -2622,10 +2622,15 @@ pub(crate) fn is_elem_pair_adapter(method: &str) -> bool {
 /// cleared, and a pattern whose arity disagrees with the answer contributes NOTHING — an arity mismatch
 /// means the shape is not what the resolver thinks it is, and binding positionally through it would
 /// mistype every slot after the disagreement.
+///
+/// SOUNDNESS R538 — the slot carries a `Bound`, not a type STRING. R349 wrote it as a `String` and that
+/// is the whole of R538: a `Vec<Box<dyn Sink>>` element has no concrete type to put in one, so the
+/// dispatch half of the question could not be carried through this function even after the resolver
+/// answered it. The pattern side is unchanged.
 pub(crate) fn tuple_pat_elem_binds(
     pat: &syn::Pat,
-    slots: Option<&[Option<String>]>,
-) -> Vec<(String, String)> {
+    slots: Option<&[Option<crate::collector::Bound>]>,
+) -> Vec<(String, crate::collector::Bound)> {
     let slots = match slots {
         Some(s) => s,
         None => return Vec::new(),

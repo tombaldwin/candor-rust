@@ -9396,6 +9396,65 @@ pub fn fab_stmt_block(a: &G) { let _ = a; ({ let a = P; a }).go() }\n\
     }
 
     #[test]
+    fn a_tuple_slot_resolves_a_dispatch_element_like_every_other_binder() {
+        // SOUNDNESS R538 — `resolve_elem_tuple`, built by R349 for exactly this shape, resolved its
+        // `enumerate`/`zip` slots through `resolve_elem_type` ONLY, and `tuple_pat_elem_binds` carried
+        // concrete type STRINGS. So R349 built one half of its own question: over a `Vec<G>` the loop
+        // charged, and over a `Vec<Box<dyn Sink>>` — the same four spellings, the same body — the
+        // caller read ABSENT. Every OTHER binder in this file (if-let / while-let / match payload /
+        // let-else / `?` / for / `.map(|g|)` / field) tries the dispatch route FIRST; the tuple binder
+        // was the one that did not. §F1 question 3: separate implementations of one question that
+        // drift.
+        //
+        // THE CONCRETE ROWS ARE THE CONTROL, in this fixture, on this run: `Vec<G>` against
+        // `Vec<Box<dyn Sink>>` is the single variable. Every row compiles (§E3).
+        let src = "\
+use std::process::Command;\n\
+pub trait Sink { fn emit(&self); }\n\
+pub trait Calmer { fn calm(&self); }\n\
+pub struct Real;\n\
+impl Sink for Real { fn emit(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct Calm;\n\
+impl Sink for Calm { fn emit(&self) {} }\n\
+impl Calmer for Calm { fn calm(&self) {} }\n\
+pub struct G;\n\
+impl G { pub fn go(&self) { let _ = Command::new(\"sh\").status(); } }\n\
+pub struct Reg { pub hs: Vec<Box<dyn Sink>> }\n\
+pub fn ctl_zip_conc(v: &Vec<G>, n: &Vec<u8>) { for (g, _) in v.iter().zip(n.iter()) { g.go() } }\n\
+pub fn ctl_enum_conc(v: &Vec<G>) { for (_, g) in v.iter().enumerate() { g.go() } }\n\
+pub fn ctl_for_dyn(v: &Vec<Box<dyn Sink>>) { for g in v.iter() { g.emit() } }\n\
+pub fn zip_dyn(v: &Vec<Box<dyn Sink>>, n: &Vec<u8>) { for (g, _) in v.iter().zip(n.iter()) { g.emit() } }\n\
+pub fn zip_dyn_slot1(n: &Vec<u8>, v: &Vec<Box<dyn Sink>>) { for (_, g) in n.iter().zip(v.iter()) { g.emit() } }\n\
+pub fn enum_dyn(v: &Vec<Box<dyn Sink>>) { for (_, g) in v.iter().enumerate() { g.emit() } }\n\
+pub fn enum_skip_dyn(v: &Vec<Box<dyn Sink>>) { for (_, g) in v.iter().enumerate().skip(1) { g.emit() } }\n\
+pub fn foreach_zip_dyn(v: &Vec<Box<dyn Sink>>, n: &Vec<u8>) { v.iter().zip(n.iter()).for_each(|(g, _)| g.emit()) }\n\
+pub fn foreach_enum_dyn(v: &Vec<Box<dyn Sink>>) { v.iter().enumerate().for_each(|(_, g)| g.emit()) }\n\
+pub fn field_enum_dyn(r: &Reg) { for (_, g) in r.hs.iter().enumerate() { g.emit() } }\n\
+pub fn fab_pure_enum_dyn(v: &Vec<Box<dyn Calmer>>) { for (_, g) in v.iter().enumerate() { g.calm() } }\n\
+pub fn fab_other_zip_side(c: &Vec<Box<dyn Calmer>>, v: &Vec<Box<dyn Sink>>) { for (a, _b) in c.iter().zip(v.iter()) { a.calm() } }\n\
+";
+        let v = scan_fixture("r538tuple", src);
+        for f in ["ctl_zip_conc", "ctl_enum_conc", "ctl_for_dyn", "zip_dyn", "zip_dyn_slot1",
+                  "enum_dyn", "enum_skip_dyn", "foreach_zip_dyn", "foreach_enum_dyn",
+                  "field_enum_dyn"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "{f} reaches Real::emit through a tuple slot — whether the element is \
+                        CONCRETE or a trait object must not decide whether the effect is seen:\n{v:#}");
+        }
+        // THE OVER-CHARGE HALF. `fab_pure_enum_dyn`: a dispatch element whose whole bounded-CHA
+        // candidate set is pure stays pure — the slot types a BINDER, it does not charge.
+        // `fab_other_zip_side`: the OTHER side of a `zip` is resolved from its own collection, so
+        // binding slot 0 must not reach slot 1's `Sink` leaves. Both were pure before this fix too —
+        // for the uninformative reason that NOTHING resolved — so they are only evidence AFTER it,
+        // which is exactly when they are being asked.
+        for f in ["fab_pure_enum_dyn", "fab_other_zip_side"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f} must stay pure — a dispatch tuple slot types a BINDER, it does not \
+                     charge, and it does not reach across slots:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read() {
         // SOUNDNESS R540 — `resolve_recv_traits` opens with a hot-path guard that returns EMPTY when
         // `trait_vars`, `trait_fields` and `has_dyn_return` are all empty. Its arms read three MORE

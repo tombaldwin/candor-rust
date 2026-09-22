@@ -87,6 +87,7 @@ pub(crate) fn charge_at_construction() -> bool {
 /// What a binder knows about the name it introduces — the argument to `scoped_binding`.
 /// `Unknown` is a real case, not a fallback: a loop variable over an untypable iterator still BINDS the
 /// name, and it is precisely that case where a stale side-table entry is not masked by a fresh one.
+#[derive(Clone)]
 pub(crate) enum Bound {
     /// A concrete type path (`vars`).
     Concrete(String),
@@ -1101,7 +1102,7 @@ impl<'a> CallCollector<'a> {
     /// The element-preserving adapters are peeled through the ONE authority the other two resolvers use,
     /// because it is the same question one level up: `.rev()`/`.skip(1)`/`.filter(..)` preserve whatever
     /// the item is, and here the item is the tuple.
-    fn resolve_elem_tuple(&self, expr: &syn::Expr) -> Option<Vec<Option<String>>> {
+    fn resolve_elem_tuple(&self, expr: &syn::Expr) -> Option<Vec<Option<Bound>>> {
         match expr {
             syn::Expr::Reference(r) => self.resolve_elem_tuple(&r.expr),
             syn::Expr::Paren(p) => self.resolve_elem_tuple(&p.expr),
@@ -1112,14 +1113,14 @@ impl<'a> CallCollector<'a> {
                     // `xs.iter().enumerate()` yields `(usize, Item)` — slot 0 is the index and has no
                     // element type by construction, which is why the slots are individually optional.
                     "enumerate" => self
-                        .resolve_elem_type(&m.receiver)
+                        .elem_slot_bound(&m.receiver)
                         .map(|t| vec![None, Some(t)]),
                     // `a.zip(b)` yields `(A::Item, B::Item)` — two INDEPENDENT collections, so each slot
                     // is resolved from its own side. Answering with one side resolved is the point:
                     // `for (g, _) in v.iter().zip(0..)` is the common spelling.
                     "zip" => {
-                        let a = self.resolve_elem_type(&m.receiver);
-                        let b = m.args.first().and_then(|x| self.resolve_elem_type(x));
+                        let a = self.elem_slot_bound(&m.receiver);
+                        let b = m.args.first().and_then(|x| self.elem_slot_bound(x));
                         (a.is_some() || b.is_some()).then(|| vec![a, b])
                     }
                     _ if crate::lang::is_element_preserving_adapter(&leaf) => {
@@ -1130,6 +1131,35 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// SOUNDNESS R538 — WHAT ONE TUPLE SLOT BINDS: the dispatch element if there is one, else the
+    /// concrete element. R349 built `resolve_elem_tuple` for the tuple-destructuring shape and built
+    /// only the CONCRETE half — it asked `resolve_elem_type` per slot and `tuple_pat_elem_binds`
+    /// carried type STRINGS — so `for (g, _) in v.iter().zip(n.iter())` charged over a `Vec<G>` and
+    /// read ABSENT over a `Vec<Box<dyn Sink>>`. Every other binder in this file (if-let / while-let /
+    /// match payload / let-else / `?` / for / `.map(|g|)` / field) tries the dispatch route FIRST; the
+    /// tuple binder was the one that did not, which is §F1 question 3.
+    ///
+    /// THE PRECEDENCE IS THE FILE'S EXISTING ONE — "the DISPATCH element WINS" (`resolve_recv_type`'s
+    /// R446 arm states it) — with R177's exception reproduced rather than re-decided: a SYNTHETIC
+    /// callable hedge (`["Fn"]` alone) does not DISPLACE a concrete element type, because binding the
+    /// hedge over a resolvable concrete type would WITHDRAW that type's charge. A typing change that
+    /// empties a candidate set is how this family turns a fix into a silent under-report, and the
+    /// single-slot answer here cannot install both the way the for-loop binder does — so the concrete
+    /// type wins that case and the slot keeps exactly its pre-R538 binding.
+    fn elem_slot_bound(&self, e: &syn::Expr) -> Option<Bound> {
+        let leaves = self.resolve_elem_trait_leaves(e);
+        let elem = self.resolve_elem_type(e);
+        if !leaves.is_empty() && !(Self::callable_hedge_only(&leaves) && elem.is_some()) {
+            // SOUNDNESS R538 §E1 REACH COUNTER, on the CHANGED branch only — the branch that binds a
+            // DISPATCH slot where the old code could only bind a concrete one.
+            if std::env::var_os("CANDOR_R538_INSTR").is_some() {
+                eprintln!("R538DYN");
+            }
+            return Some(Bound::Traits(leaves));
+        }
+        elem.map(Bound::Concrete)
     }
 
     /// The DISPATCH-trait leaves of an expression evaluating to a COLLECTION OF TRAIT OBJECTS — the
@@ -2250,13 +2280,25 @@ impl<'a> CallCollector<'a> {
     /// run `body` inside all of them. Recursive for the same reason
     /// `bind_enum_struct_variant_fields` is: `scoped_binding` restores on the way out, so nesting is the
     /// only spelling that both scopes every name and restores every name.
-    fn bind_elem_slots(&mut self, binds: &[(String, String)], body: Box<dyn FnOnce(&mut Self) + '_>) {
-        let Some(((name, ty), rest)) = binds.split_first() else {
+    /// SOUNDNESS R538 — installs each tuple slot's binding under `scoped_binding`, so a DISPATCH slot
+    /// lands in `trait_vars` exactly as the single-name `for` binder's does. It took `String` (a
+    /// concrete type) before, which is the whole of R538: the plumbing could not carry the answer even
+    /// once the resolver had it.
+    fn bind_elem_slots(&mut self, binds: &[(String, Bound)], body: Box<dyn FnOnce(&mut Self) + '_>) {
+        let Some(((name, bound), rest)) = binds.split_first() else {
             body(self);
             return;
         };
-        let (name, ty) = (name.clone(), ty.clone());
-        self.scoped_var(&name, Some(ty), move |s| s.bind_elem_slots(rest, body));
+        let (name, bound) = (name.clone(), bound.clone());
+        // The callable hedge, mirrored from the single-name `for` binder rather than re-decided: a
+        // slot bound to `Box<dyn Fn()>` leaves is CALLED, not method-dispatched, so `f()` inside the
+        // body must hedge to `Unknown` instead of resolving to nothing.
+        if let Bound::Traits(leaves) = &bound {
+            if Self::leaves_are_callable(leaves) {
+                self.fn_typed_vars.insert(name.clone());
+            }
+        }
+        self.scoped_binding(&name, bound, move |s| s.bind_elem_slots(rest, body));
     }
     /// The DISPATCH leaves of a single element inside an inline tuple LITERAL (`(x, 1)`) — a cast
     /// (`x as Box<dyn Doer>`), or a bare local PATH already known dispatch-typed via `fn_typed_vars`
@@ -3581,7 +3623,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // principled rule for a binder position (see `scoped_binding`) but it is a SECOND change in the
         // opposite direction — it can only ever remove a charge — and this register's most-measured way
         // to get a silent under-report is a fix for a silent under-report.
-        let elem_binds: Option<(usize, Vec<(String, String)>)> = if elem_hof && closure_param.is_none()
+        let elem_binds: Option<(usize, Vec<(String, Bound)>)> = if elem_hof && closure_param.is_none()
         {
             let want = if elem_adapter && !elem_last && !elem_pair { 1 } else { 2 };
             let elem_tuple = self.resolve_elem_tuple(&node.receiver);
@@ -3601,13 +3643,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 } else {
                     vec![0]
                 };
-                let mut binds: Vec<(String, String)> = Vec::new();
+                let mut binds: Vec<(String, Bound)> = Vec::new();
                 for pos in positions {
                     let pat = &cl.inputs[pos];
                     match single_pat_ident(pat) {
                         Some(name) => {
                             if let Some(t) = &elem_ty {
-                                binds.push((name, t.clone()));
+                                binds.push((name, Bound::Concrete(t.clone())));
                             }
                         }
                         None => binds.extend(tuple_pat_elem_binds(pat, elem_tuple.as_deref())),
