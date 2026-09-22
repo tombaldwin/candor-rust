@@ -8792,7 +8792,9 @@ pub fn fab_position(v: &Vec<Box<dyn Sink>>) -> usize { v.iter().position(|_| tru
 pub fn fab_count(v: &Vec<Box<dyn Sink>>) -> usize { v.iter().count() }\n\
 pub struct Bld;\n\
 impl Bld { pub fn pop(&self) -> Bld { Bld } pub fn remove(&self, _k: &str) -> Bld { Bld } pub fn next(&self) -> Bld { Bld } pub fn go(&self) {} }\n\
-pub fn fab_builder(b: &Bld) { b.pop().go(); b.remove(\"k\").go(); b.next().go(); }\n";
+pub fn fab_builder(b: &Bld) { b.pop().go(); b.remove(\"k\").go(); b.next().go(); }\n\
+pub fn pin_map_pop_tuple(m: &mut BTreeMap<String, Box<dyn Sink>>) { for (_k, v) in m.pop_first() { v.emit() } }\n\
+pub fn pin_map_pop_tuple_calm(m: &mut BTreeMap<String, Box<dyn Calm>>) { for (_k, v) in m.pop_first() { v.rest() } }\n";
         let v = scan_fixture("r536family", src);
         // CALIBRATION FIRST — a fixture whose controls fail is not evidence in either direction.
         for f in ["cal_first", "cal_get", "cal_index", "cal_for"] {
@@ -8817,6 +8819,22 @@ pub fn fab_builder(b: &Bld) { b.pop().go(); b.remove(\"k\").go(); b.next().go();
         for f in ["fab_calm_pop", "fab_position", "fab_count", "fab_builder"] {
             assert!(fixture_effects(&v, f).is_empty(),
                     "{f} must stay pure — these lists TYPE an element, they do not charge one:\n{v:#}");
+        }
+        // THE `pop_first` CLAIM, WITH THE CONTROL IT ASSERTS. `is_element_preserving_adapter` says
+        // `pop_first`/`pop_last` are safe on a MAP because the mistyping spelling cannot reach a
+        // consumer: `if let Some(g) = m.pop_first() { g.run() }` does not COMPILE (a tuple has no
+        // method), and the spelling that DOES compile — `for (_k, v) in m.pop_first()` — goes through
+        // `resolve_elem_tuple`, which has no map arm and so contributes NOTHING rather than a wrong
+        // binding. That is an assertion of safety, so here is the arm that would fail were it false:
+        // both callers stay pure, INCLUDING the one whose map value is effectful — if a slot were
+        // ever typed from the map's VALUE, `pin_map_pop_tuple` would charge `Exec` and this would go
+        // red. It is a STATED UNDER-REPORT, pinned rather than commented: the day the tuple resolver
+        // learns about maps, this arm says so instead of quietly starting to pass.
+        for f in ["pin_map_pop_tuple", "pin_map_pop_tuple_calm"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "{f}: the map TUPLE spelling of `pop_first` must contribute nothing — if it now \
+                     resolves, `is_element_preserving_adapter`'s `pop_first` note is stale and the \
+                     under-report it states is closed:\n{v:#}");
         }
     }
 
