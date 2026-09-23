@@ -10,6 +10,53 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A `dyn` RECEIVER BOUND BY A LOCAL `let` DID NOT COUNT AS ERASED, so a consumer's own effectful
+  implementor of a DEPENDENCY's abstraction read SILENT-PURE (SOUNDNESS R556).**
+
+      pub struct LocalB;
+      impl dep::Backend for LocalB { fn size(&self) -> usize { /* Net */ 0 } }
+      pub fn app_size() -> usize { let b: &dyn dep::Backend = &LocalB; b.size() }
+
+  `app_size` reported `inferred: []` — neither the effect nor a disclosed `Unknown` — while the
+  byte-identical implementor reached through a SIGNATURE PARAMETER resolved. Gate-visible both ways:
+  `deny Fs app_size` and `pure app_size` each went **exit 0 -> exit 1** with this change.
+
+  The imported-trait CHA (R4) is gated on ERASURE — a `dyn` receiver is erased and the crate's local
+  impls are its candidate witnesses, where a `T: Trait` bound or `impl Trait` is monomorphized by the
+  CALLER and must not be CHA'd (the measured serde_json flood). That gate read `dyn_sig_traits`, built
+  by `lang::dyn_sig_trait_leaves`, which iterates `sig.inputs` and nothing else — its own doc says
+  *"a signature's PARAMETERS"*. So the fact was only ever collected from one of the two positions a
+  body can spell `dyn` in its own lexical scope.
+
+  **The gate is named by measurement, not by reading:** adding an entirely UNUSED `_x: &dyn Backend`
+  parameter to the failing function flipped it from `inferred: []` to `inferred: ['Fs']`. Nothing else
+  in the body changed.
+
+  Fixed with a NEW additive index, `dyn_local_traits`, written at exactly one site (the annotated-`let`
+  arm) through the same `collect_dyn_trait_leaves` the signature uses, and read by exactly one
+  predicate (the R4 erasure carve-out). Not a widening of `dyn_sig_traits` and not of `trait_vars` —
+  `trait_vars` is read by every receiver resolver, and this fact is wanted by one. Scoped across a
+  nested `fn`/`impl` exactly as `dyn_sig_traits` is, for the value-bag reason: a nested
+  `impl Serializer` whose `serialize_some<T: Serialize>` receiver is caller-monomorphized must not
+  inherit an outer body's erasure.
+
+  Pinned four-way as conformance PART 92 arm `c11_local_impl_via_binding`, where java, swift and ts all
+  carried the effect and rust alone read nothing.
+
+  **THE BOUNDARY IS STATED RATHER THAN DRAWN AROUND THE TRIGGER.** Seven receiver spellings were
+  measured against a LOCAL-trait control that resolves all of them; the foreign-trait arm resolved only
+  the signature parameter. This change closes `let`, `let`-Box and `let`-annotated collection element.
+  It does NOT close the FIELD (`self.inner` where `inner: Box<dyn T>`) or RETURN (`mk().roll()`)
+  positions, which are silent in the same way and are reported open: those carry their erasure in
+  CRATE-WIDE indexes, where a leaf-keyed union would let one struct field's `dyn Serializer` license
+  CHA on every `T: Serializer` receiver in the crate — R4's measured fabrication arriving by a third
+  door. Two further spellings (a `static` typed `&dyn T`, a closure parameter typed `&dyn T`) resolve
+  no trait at all in EITHER arm, so they are a different mechanism and not this class.
+
+  A/B for the direction this change runs in — it ADDS resolution, so the risk is FABRICATION, not loss
+  — with `bin/corpus-ab.py` (never a fresh `ab.py`), wide key, multiset: see the commit message for the
+  corpora, the REMOVED column and the reach counts.
+
 - **An EXTENSION TRAIT's method was published under the BASE trait the receiver happened to carry
   (SOUNDNESS R551; R549 mechanism A).** `inner.map_future(..)` where `inner: S, S: tower_service::Service<R>`
   published `tower_service#Service::map_future`. `tower_service::Service` declares exactly `call` and

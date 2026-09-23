@@ -121,6 +121,32 @@ pub(crate) struct CallCollector<'a> {
     /// monomorphizes. The IMPORTED-trait CHA (R4) fires only on these; see `lang::dyn_sig_trait_leaves`
     /// for why, and for the serde_json measurement that forced the distinction.
     pub(crate) dyn_sig_traits: std::collections::HashSet<String>,
+    /// SOUNDNESS R556 — the SAME erasure fact, from the one position in a body's own lexical scope
+    /// that `dyn_sig_traits` cannot see: a LOCAL `let`'s type annotation. `dyn_sig_trait_leaves`
+    /// iterates `sig.inputs` and nothing else (its own doc says *"a signature's PARAMETERS"*), so
+    /// `let b: &dyn dep::Backend = &LocalB; b.size()` failed the erasure gate at the imported-trait
+    /// CHA below and read SILENT-PURE — while the byte-identical implementor reached through a
+    /// signature parameter resolves. Measured: adding an entirely UNUSED `_x: &dyn Handlers`
+    /// parameter to that very function flips it from `inferred: []` to `inferred: ['Fs']`, which is
+    /// the gate and nothing else.
+    ///
+    /// A SEPARATE SET, NOT A WIDENING OF `dyn_sig_traits`, and not a widening of `trait_vars`:
+    /// `trait_vars` is read by every receiver resolver, and `dyn_sig_traits` is restored verbatim by
+    /// the nested-item scoping below. This one is read by EXACTLY ONE predicate (the R4 erasure
+    /// carve-out) and written at EXACTLY ONE site (the annotated-`let` arm of `visit_local`).
+    ///
+    /// SCOPED WITH `dyn_sig_traits`, for the value-bag reason spelled out at `visit_item_fn`: a
+    /// nested `impl Serializer` whose `serialize_some<T: Serialize>` receiver is a caller-
+    /// monomorphized generic must not inherit an outer body's erasure.
+    ///
+    /// THE BOUNDARY, STATED. This closes the `let`-position spellings and NOT the FIELD
+    /// (`self.inner` where `inner: Box<dyn T>`) or RETURN (`mk().roll()`) positions, which are
+    /// silent in the same way and are measured so in the commit that adds this. Those carry their
+    /// erasure in CRATE-WIDE indexes (`trait_fields`, `rets`), where a leaf-keyed union would let
+    /// one struct field's `dyn Serializer` license CHA on every `T: Serializer` receiver in the
+    /// crate — R4's measured fabrication, arriving by a third door. Closing them needs the erasure
+    /// fact carried in the SAME key space as the resolution, which is a different change.
+    pub(crate) dyn_local_traits: std::collections::HashSet<String>,
     /// This signature's generic parameter -> its trait bounds (`<T: Doer>` → `T -> ["Doer"]`), i.e.
     /// `lang::generic_bounds_of(sig)`. Pass A already threads exactly this into every PARAMETER, FIELD
     /// and RETURN position; the collector needs its own copy because a LOCAL `let` can name a generic
@@ -2895,6 +2921,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// `an_outer_bound_does_not_reach_a_nested_item_that_never_declared_it`.
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        // R556 — the `let`-position half of the same erasure fact, scoped for the same reason.
+        let outer_l = std::mem::take(&mut self.dyn_local_traits);
         let outer_g = std::mem::replace(
             &mut self.generic_bounds,
             crate::lang::generic_bounds_of(&node.sig),
@@ -2906,6 +2934,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_fn(self, node);
         self.dyn_sig_traits = outer;
+        self.dyn_local_traits = outer_l;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -2919,6 +2948,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// a residual test); when it is closed, this is the second half to close with it.
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        // R556 — the `let`-position half of the same erasure fact, scoped for the same reason.
+        let outer_l = std::mem::take(&mut self.dyn_local_traits);
         // The impl BLOCK's own generics (`impl<T: Doer> Wrap<T>`) are the outer scope for every method
         // in it; `visit_impl_item_fn` layers each method's own on top.
         let outer_g = std::mem::replace(
@@ -2933,6 +2964,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         syn::visit::visit_item_impl(self, node);
         self.restore_self(outer_self);
         self.dyn_sig_traits = outer;
+        self.dyn_local_traits = outer_l;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -3683,10 +3715,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // stays the documented miss it already was rather than flooding Unknown over every
                         // externally-typed receiver. The call ALSO keeps its crate-qualified shape above,
                         // so a chained dep report still contributes its own impls via `interfaceUnion`.
+                        // SOUNDNESS R556 — the erasure gate reads BOTH positions a body can spell
+                        // `dyn` in its own lexical scope: the signature (`dyn_sig_traits`) and a local
+                        // `let`'s annotation (`dyn_local_traits`). It read only the first, so
+                        // `let b: &dyn dep::Backend = &LocalB; b.size()` was silent-pure while the same
+                        // implementor reached through a parameter resolved — one variable, how the
+                        // receiver is bound. The carve-out itself is UNCHANGED: what must be true is
+                        // still "the receiver is erased", and `impl Trait` / `T: Trait` are still out.
+                        // §E1 REACH PROBE, on the CHANGED branch ONLY — the `CANDOR_ALIAS_DEBUG`
+                        // channel `R504HIT`/`R549HIT`/`R551HIT` already use. Fires only where the
+                        // `let`-position set is what OPENED the gate (the signature set did not),
+                        // because "CHANGED 0 is not evidence until REACH is measured": a byte-identical
+                        // A/B over a corpus that never reaches this branch is the most flattering
+                        // number available and the least informative.
+                        let via_local = !self.dyn_sig_traits.contains(&tr)
+                            && self.dyn_local_traits.contains(&tr);
                         if let Some(impls) = self.trait_impls.get(&tr).filter(|_| {
                             crate::lang::is_dependency_crate_root(root)
-                                && self.dyn_sig_traits.contains(&tr)
+                                && (self.dyn_sig_traits.contains(&tr) || via_local)
                         }) {
+                            if via_local && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                eprintln!("R556HIT {full}::{leaf} impls={}", impls.len());
+                            }
                             if impls.len() <= 12 {
                                 for ty in impls {
                                     self.calls.push(Call { argc: 0, entropy_arg: false,
@@ -4672,6 +4722,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // Measured with a `dyn` control — `let d: Box<dyn Doer> = x` already resolved here — so
                 // the position was live and only the bound question was never asked.
                 let leaves = trait_leaves(&pt.ty, &self.generic_bounds);
+                // SOUNDNESS R556 — …and, from the SAME annotation, whether the bound was spelled `dyn`.
+                // `trait_leaves` collapses `&dyn T`, `impl T` and `X: T` into one list on purpose (every
+                // receiver resolver wants all three); the imported-trait CHA is the one consumer that
+                // must tell them apart, and until now it could only ask the SIGNATURE. Recorded from the
+                // annotation itself through the same helper `dyn_sig_trait_leaves` uses, so the two
+                // sources of one fact cannot disagree about what counts as erased. ADDITIVE: nothing is
+                // removed on a rebind, because the set is read as "this body erased that trait
+                // somewhere", exactly as the signature-position set already is for a fn with both a
+                // `&dyn T` and a `T: T` receiver.
+                crate::lang::collect_dyn_trait_leaves(&pt.ty, &mut self.dyn_local_traits);
                 if !leaves.is_empty() {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);

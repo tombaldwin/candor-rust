@@ -239,6 +239,7 @@
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_local_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
@@ -291,6 +292,7 @@
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_local_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
@@ -619,6 +621,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            dyn_local_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -2925,6 +2928,117 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                 "CARVE-OUT 3 (crate-local): a `self::`-rooted re-export is NOT a dependency (the value-bag flood):\n{body}");
         assert!(effs("nested").is_empty(),
                 "CARVE-OUT 4 (nested item): an inner fn's own generic must not inherit the outer signature's `dyn`-ness:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_let_position_dyn_receiver_of_an_imported_trait_dispatches_r556() {
+        // SOUNDNESS R556 — the R4 rung above, one BINDING POSITION over, and silent there.
+        // `dyn_sig_trait_leaves` iterates `sig.inputs` and nothing else (its own doc says "a
+        // signature's PARAMETERS"), so the erasure gate on the imported-trait CHA could only ever
+        // see a parameter. `let h: &dyn deplib::Handler = &MyH; h.go()` therefore read SILENT-PURE
+        // while the byte-identical implementor reached through a parameter resolved — `deny Fs` and
+        // `pure` over that function both went exit 1 -> exit 0.
+        //
+        // THE MEASUREMENT THAT NAMES THE GATE RATHER THAN GUESSING AT IT: adding an entirely UNUSED
+        // `_x: &dyn Handler` parameter to the failing function flipped it from `inferred: []` to
+        // `inferred: ["Fs"]`. Nothing else in the body changed, so nothing else can explain it. That
+        // is the `sig_only` control below, and it is the reason this test asserts a PAIR.
+        //
+        // Pinned four-way as PART 92 arm `c11_local_impl_via_binding` (java, swift and ts all carry
+        // the effect on the identical fixture; rust alone read nothing).
+        //
+        // THE CARVE-OUTS ARE RE-ASSERTED HERE, NOT INHERITED. A second source for one fact is where
+        // this family's fixes go wrong (§A.2): the erasure rule is unchanged — `impl Trait` and
+        // `T: Trait` are still monomorphized by the CALLER and must still not CHA — but it now has
+        // two writers, so the controls must run against the NEW one too.
+        let d = std::env::temp_dir().join(format!("candor-r556-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r556\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use deplib::Handler;
+
+            pub struct MyH;
+            impl Handler for MyH { fn go(&self) { let _ = std::fs::read_to_string("/etc/hosts"); } }
+
+            // POSITIVE: the `let`-position `dyn` — the shape PART 92 c11 pins.
+            pub fn let_dyn() { let h: &dyn Handler = &MyH; h.go(); }
+            // POSITIVE: the same through a Box, and through a collection element, because the
+            // annotation's leaves are collected by the SAME `collect_dyn_trait_leaves` the signature
+            // uses — which recurses through references, smart pointers and generic args.
+            pub fn let_boxed() { let h: Box<dyn Handler> = Box::new(MyH); h.go(); }
+            pub fn let_vec() { let v: Vec<Box<dyn Handler>> = vec![Box::new(MyH)]; for h in &v { h.go(); } }
+            // CONTROL, the one-variable pair: the SAME implementor, the SAME trait, reached through a
+            // SIGNATURE PARAMETER. This resolved before the fix and must still resolve after it.
+            pub fn sig_only(h: &dyn Handler) { h.go(); }
+
+            // CARVE-OUT (erasure), against the NEW writer: a `let` that names a caller-monomorphized
+            // GENERIC must not CHA local impls. This is the serde_json flood's shape in `let`
+            // position — `trait_leaves` resolves `T` through `generic_bounds` and types the binding,
+            // but the binding is NOT erased and `collect_dyn_trait_leaves` records nothing for it.
+            pub fn let_generic<T: Handler>(t: T) { let b: T = t; b.go(); }
+
+            // CARVE-OUT (provenance/std), against the NEW writer: a `let`-bound `&dyn std::io::Write`
+            // must not CHA a local `impl Write`.
+            pub mod stdw {
+                use std::io::Write;
+                pub struct LoudWriter;
+                impl Write for LoudWriter {
+                    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { let _ = std::net::TcpStream::connect("h:1"); Ok(b.len()) }
+                    fn flush(&mut self) -> std::io::Result<()> { let _ = std::net::TcpStream::connect("h:1"); Ok(()) }
+                }
+                pub fn let_std_write() { let mut w: Box<dyn Write> = Box::new(LoudWriter); let _ = w.flush(); }
+            }
+
+            // CARVE-OUT (nested item), against the NEW writer — the value-bag shape, in `let`
+            // position. The OUTER body erases `Handler`; an inner `fn` whose receiver is its own
+            // caller-monomorphized generic must not inherit that erasure across the nested walk.
+            pub fn nested_let() -> u8 {
+                let _h: &dyn Handler = &MyH;
+                fn inner<T: Handler>(t: T) { t.go(); }
+                let _ = inner::<MyH>;
+                0
+            }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("sig_only").contains(&"Fs".to_string()),
+                "R556 CONTROL: the signature-parameter spelling must keep resolving — if this fails the \
+                 pair below measures nothing:\n{body}");
+        assert!(effs("let_dyn").contains(&"Fs".to_string()),
+                "R556: a `let`-position `dyn` receiver of an IMPORTED trait must dispatch to the LOCAL \
+                 impl exactly as the signature-parameter spelling does:\n{body}");
+        assert!(effs("let_boxed").contains(&"Fs".to_string()),
+                "R556: the `let h: Box<dyn …>` spelling takes the same route:\n{body}");
+        assert!(effs("let_vec").contains(&"Fs".to_string()),
+                "R556: a `let`-annotated COLLECTION of trait objects erases its element too:\n{body}");
+        assert!(effs("let_generic").is_empty(),
+                "R556 CARVE-OUT (erasure): a `let` naming a caller-monomorphized generic must NOT CHA \
+                 local impls — the serde_json flood in `let` position:\n{body}");
+        assert!(effs("stdw::let_std_write").is_empty(),
+                "R556 CARVE-OUT (provenance/std): a `let`-bound `&dyn std::io::Write` must NOT CHA a \
+                 local `impl Write`:\n{body}");
+        assert!(effs("nested_let").is_empty(),
+                "R556 CARVE-OUT (nested item): an inner fn's own generic must not inherit the outer \
+                 body's `let`-position erasure (the value-bag shape):\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -6554,6 +6668,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                dyn_local_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf,
@@ -6609,7 +6724,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -6635,7 +6750,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -6671,6 +6786,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_local_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
@@ -6709,6 +6825,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+                dyn_local_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf,
@@ -18660,6 +18777,7 @@ pub fn go() {{ imp::doit(); }}
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            dyn_local_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
