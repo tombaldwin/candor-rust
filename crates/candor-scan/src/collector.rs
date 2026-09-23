@@ -268,6 +268,9 @@ pub(crate) struct CallCollector<'a> {
     /// it (`if let Some(f) = CB.get()`, the let-else/while-let/match twins) hedged nothing — `f()` then
     /// resolved as a phantom free-fn and the enclosing fn vanished from the report entirely.
     pub(crate) callable_statics: &'a std::collections::HashSet<String>,
+    /// SOUNDNESS R557 — crate-wide `static`/`const` NAME → declared type path (`None` = refused). See
+    /// `ElemIndexes::static_types`; read in exactly ONE place, `resolve_recv_type_for`'s `Expr::Path` arm.
+    pub(crate) static_types: &'a std::collections::HashMap<String, Option<String>>,
     /// R161 — the crate-wide `type NAME = <callable>` alias leaves; see `ElemIndexes::callable_aliases`.
     pub(crate) callable_aliases: &'a std::collections::HashSet<String>,
     /// SOUNDNESS R182 — fn leaf -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew;
@@ -953,7 +956,49 @@ impl<'a> CallCollector<'a> {
                 Some(base)
             }
             syn::Expr::Path(p) => {
-                let name = p.path.get_ident()?.to_string();
+                // SOUNDNESS R557 — A MODULE-LEVEL `static`/`const` USED AS A RECEIVER. Nothing typed one:
+                // `vars` is written by `visit_local`, the signature seeding and the closure/loop/match
+                // binders, and an ITEM passes through none of them. So `C1.fetch()` arrived here with
+                // `vars` empty for `C1`, fell to the unit-struct fallback below (`C1` is Upper-initial with
+                // no underscore, so it reads as a `struct C1;` literal) and formed an edge to a type no
+                // crate declares. The caller was ABSENT from `functions[]` — a §2 rule 3 purity claim over
+                // a body that writes, with `deny Fs` exit 0 — while `let c = Client{..}; c.fetch()` on the
+                // identical body reads `['Fs']`. Placed BEFORE the fallback because that fallback is what
+                // was answering (wrongly), and AFTER `vars` because a same-named local must shadow.
+                //
+                // `locally_bound` is the ONE authority on that shadowing question — the same one R101's
+                // `callable_statics` arm and the lazy-static forcing edge use, rather than a fourth
+                // hand-rolled copy (§F1.3). It covers `bound_names`, every ident in a binding position
+                // anywhere in this body, so a dispatch-typed PARAMETER named `C1` (which lives in
+                // `trait_vars`, not `vars`) cannot have this index shadow its bounded-CHA route.
+                //
+                // The LAST SEGMENT, not `get_ident()`: the qualified spelling (`cfg::CLIENT.fetch()`) is
+                // the same declaration reached through a module path, and `get_ident()` is `None` for it.
+                // Same reasoning, and the same authority, as R101's arm one screen up. `qself` excluded —
+                // a `<T as Tr>::C` is an associated item, not this index's subject.
+                let via_static = p
+                    .qself
+                    .is_none()
+                    .then(|| p.path.segments.last())
+                    .flatten()
+                    .map(|s| s.ident.to_string())
+                    .filter(|n| !self.locally_bound(n))
+                    .and_then(|n| self.static_types.get(&n).cloned())
+                    .flatten();
+                // §E1 REACH COUNTERS, on the CHANGED branches themselves — an unchanged row is not
+                // evidence the new code ran, and a byte-identical A/B over a corpus that cannot reach
+                // these arms is the most flattering measurement available.
+                let probe = |tag: &str| {
+                    if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                        eprintln!("{tag}");
+                    }
+                };
+                let Some(name) = p.path.get_ident().map(|i| i.to_string()) else {
+                    if via_static.is_some() {
+                        probe("R557HITQ"); // the QUALIFIED spelling, which had no route at all before
+                    }
+                    return via_static;
+                };
                 // A local binding/param/`self` wins. Failing that, a bare UPPER-INITIAL path used AS A
                 // VALUE is a UNIT-STRUCT (or unit enum variant) LITERAL receiver — `T0.run()` where
                 // `struct T0;`: its type IS the path itself. Without this a direct `T0.run()` typed to
@@ -964,9 +1009,39 @@ impl<'a> CallCollector<'a> {
                 // while still excluding a SCREAMING_SNAKE const (`MAX_SIZE`). Fabrication-safe: the
                 // downstream `local_types` gate in scan.rs confines the resulting `Type::method` link to
                 // genuinely-LOCAL types, so a non-local Upper-initial value never mis-links.
-                let upper_no_underscore = name.chars().next().is_some_and(|c| c.is_uppercase())
+                //
+                // SOUNDNESS R564 — …AND IT MUST NOT FIRE FOR A NAME THIS BODY BINDS, which it did.
+                // "Not in `vars`" is not the same test as "not a binding": a DISPATCH-typed binding lives
+                // in `trait_vars` and is REMOVED from `vars` by every binder that writes it. So an
+                // Upper-initial parameter of a trait-object type fell straight through to this fallback,
+                // typed to a phantom struct named after the PARAMETER, and shadowed its own bounded-CHA
+                // route — the caller was ABSENT from `functions[]` with `deny Net` exit 0. Measured on
+                // three byte-identical bodies differing only in the binding's NAME:
+                //     fn p_upper(Z: &dyn Q)     { Z.fetch() }    -> ABSENT    exit 0
+                //     fn p_upper_us(Z_A: &dyn Q){ Z_A.fetch() }  -> ['Net']   exit 1
+                //     fn p_lower(z: &dyn Q)     { z.fetch() }    -> ['Net']   exit 1
+                // — the underscore arm passes only because this fallback excludes an underscore, which
+                // is the tell that the NAME and nothing else decided a purity claim. The `let` spelling
+                // (`let Z: &dyn Q = &Impl1; Z.fetch()`) was silent the same way.
+                //
+                // `locally_bound` is the same one authority the R557 arm above and R101's use: a name in
+                // any binding position in this body refers to that binding, never to a unit struct, and
+                // Rust guarantees it (a `let`/param pattern naming a unit struct or const IN SCOPE is
+                // E0530, not a shadow). A same-leaf type in ANOTHER module is the only way the two can
+                // coexist, and there the binding is what the path means anyway.
+                let looks_like_a_type = name.chars().next().is_some_and(|c| c.is_uppercase())
                     && !name.contains('_');
-                self.vars.get(&name).cloned().or_else(|| {
+                let bound_here = self.locally_bound(&name);
+                let upper_no_underscore = looks_like_a_type && !bound_here;
+                let concrete = self.vars.get(&name).cloned();
+                if concrete.is_none() {
+                    if via_static.is_some() {
+                        probe("R557HIT");
+                    } else if looks_like_a_type && bound_here {
+                        probe("R564HIT"); // the fallback would have answered here, wrongly
+                    }
+                }
+                concrete.or(via_static).or_else(|| {
                     upper_no_underscore.then(|| expand(&name, &self.uses))
                 })
             }
@@ -4513,6 +4588,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dropped. Scoped like the `vars` bindings just below: saved/restored so it can't leak past
         // this closure into a later same-named local.
         let mut saved_fn_typed: Vec<(String, bool)> = Vec::new();
+        // SOUNDNESS R561 — …AND THE DISPATCH BINDING, WHICH THIS BINDER NEVER ASKED FOR. A closure's own
+        // parameter list is a DECLARATION SITE like a signature or an annotated `let`, and it was the one
+        // that never consulted `trait_leaves`: `|h: &dyn Handlers| h.roll()` bound `h` into no table at
+        // all (`type_path` declines a trait object, `is_callable_type` is false for a non-`Fn` trait), so
+        // `h.roll()` resolved to nothing and the ENCLOSING fn was ABSENT from `functions[]` — `deny Fs`
+        // exit 0 over a body that reads a file. Three controls on the same fixture resolve: a
+        // CONCRETE-typed closure param (`|h: &H| h.inh()`), the SIGNATURE spelling
+        // (`fn f(h: &dyn Handlers)`), and the annotated-`let` spelling (`let h: &dyn Handlers = …`,
+        // which R556 closed). Only the closure parameter did not — §F1.3, separate implementations of one
+        // question that drift, at the eighth binder.
+        //
+        // The leaves come from `trait_leaves` with `self.generic_bounds`, the SAME call the annotated-`let`
+        // arm of `visit_local` makes, so the two positions cannot disagree about what a `dyn`/`impl`/bounded
+        // generic annotation means. Scoped exactly like the `vars` bindings beside it — saved and restored
+        // around the body walk — because a closure parameter's scope IS the closure.
+        let mut saved_traits: Vec<(String, Option<Vec<String>>)> = Vec::new();
         for input in &node.inputs {
             if let syn::Pat::Type(pt) = input {
                 if let Some(name) = single_pat_ident(&pt.pat) {
@@ -4526,6 +4617,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         saved_fn_typed.push((name, was));
                     }
                 }
+                // Dispatch-typing FIRST, for the reason `visit_local`'s annotated arm states: a
+                // `|s: Box<dyn Store>|` otherwise reads as the concrete wrapper `Box` and resolves
+                // nothing. A non-empty answer takes the `trait_vars` route and the name is removed from
+                // `vars`, so the two tables cannot both answer for it (`vars` wins at the call site).
+                if let Some(name) = single_pat_ident(&pt.pat) {
+                    let leaves = trait_leaves(&pt.ty, &self.generic_bounds);
+                    if !leaves.is_empty() {
+                        // SOUNDNESS R556's fact, recorded at this declaration site too: whether the bound
+                        // was spelled `dyn`. `trait_leaves` collapses `dyn T`, `impl T` and `X: T` into
+                        // one list on purpose; the imported-trait CHA carve-out is the one consumer that
+                        // must tell them apart, and it could previously ask only the signature and the
+                        // annotated `let`. Same helper as both of those, ADDITIVE like both of those.
+                        // §E1 REACH COUNTER, on the CHANGED branch.
+                        if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                            eprintln!("R561HIT");
+                        }
+                        crate::lang::collect_dyn_trait_leaves(&pt.ty, &mut self.dyn_local_traits);
+                        // R71 — a `Fn`/`FnMut`/`FnOnce` leaf means the name is only ever reached with
+                        // CALL syntax; hedge alongside the dispatch binding exactly as every other binder
+                        // that can yield a callable leaf does, or `f()` resolves as a phantom free fn.
+                        if Self::leaves_are_callable(&leaves) {
+                            let was = self.fn_typed_vars.contains(&name);
+                            self.fn_typed_vars.insert(name.clone());
+                            saved_fn_typed.push((name.clone(), was));
+                        }
+                        saved.push((name.clone(), self.vars.remove(&name)));
+                        saved_traits.push((name.clone(), self.trait_vars.insert(name, leaves)));
+                        continue;
+                    }
+                }
                 if let (Some(name), Some(ty)) = (single_pat_ident(&pt.pat), type_path(&pt.ty, &self.uses)) {
                     let prev = self.vars.insert(name.clone(), ty);
                     saved.push((name, prev));
@@ -4537,6 +4658,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             match prev {
                 Some(v) => { self.vars.insert(name, v); }
                 None => { self.vars.remove(&name); }
+            }
+        }
+        for (name, prev) in saved_traits {
+            match prev {
+                Some(v) => { self.trait_vars.insert(name, v); }
+                None => { self.trait_vars.remove(&name); }
             }
         }
         for (name, was) in saved_fn_typed {

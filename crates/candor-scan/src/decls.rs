@@ -1440,6 +1440,77 @@ fn cfg_gated_use_alias_counts(
     n
 }
 
+/// SOUNDNESS R557 — the DECLARED TYPE of every module-level `static`/`const` item, keyed by NAME.
+///
+/// A `static`/`const` has no BINDING SITE, so nothing in the collector ever typed one: `vars` is
+/// written by `visit_local`, the signature seeding and the closure/loop/match binders, and a
+/// module-level item passes through none of them. `C1.fetch()` therefore reached
+/// `resolve_recv_type_for`'s `Expr::Path` arm with `vars` empty for `C1`, fell to the UNIT-STRUCT
+/// fallback (an Upper-initial ident with no underscore *is* a unit-struct literal — `T0.run()`), and
+/// resolved to a type literally named `C1`, which no crate declares. The `Type::method` edge it formed
+/// resolved to nothing, so the CALLER was ABSENT from `functions[]` — a SPEC §2 rule 3 purity claim
+/// over a body that writes (`deny Fs via_static` exit 0). The `let` control on the identical body
+/// (`let c = Client{..}; c.fetch()`) reads `['Fs']`.
+///
+/// AMBIGUITY IS REFUSED, NOT RESOLVED (R503's rule, and R4's reason). The key is a LEAF, so two modules
+/// declaring the same name with different types would otherwise let whichever file merged last decide
+/// a receiver type — and a wrong receiver type is a POSITIVE claim about the wrong body, which this
+/// register ranks worse than the silence it replaces. `None` marks a refused name and is sticky.
+///
+/// `None` is also what a type this cannot name yields — a `dyn` static (`static S: Box<dyn Sink + Sync>`,
+/// where `type_path` declines a trait object) and a generic cell (`OnceLock<Client>`, which peels no
+/// further than `OnceLock`). Those stay exactly as silent as they are now, and the `OnceLock` arm of the
+/// row is NOT closed here and NOT static-specific: measured, the `let` twin (`let c: OnceLock<Client> =
+/// …; c.get_or_init(..).fetch()`) is equally absent.
+pub(crate) fn collect_static_types(
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    out: &mut HashMap<String, Option<String>>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Const(_) | syn::Item::Static(_) => {
+                let (attrs, ident, ty) = match it {
+                    syn::Item::Const(c) => (&c.attrs, &c.ident, &c.ty),
+                    syn::Item::Static(s) => (&s.attrs, &s.ident, &s.ty),
+                    _ => unreachable!(),
+                };
+                if !include_tests && is_cfg_test(attrs) {
+                    continue;
+                }
+                let name = ident.to_string();
+                let ty = crate::lang::type_path(ty, uses);
+                match out.get(&name) {
+                    // First sighting — record it, INCLUDING a `None` for a type we cannot name, so a
+                    // later same-named declaration we CAN name does not get to answer for both.
+                    None => {
+                        out.insert(name, ty);
+                    }
+                    // The same answer twice (the `#[cfg]`-split platform arms of one static) — keep it.
+                    Some(prev) if prev == &ty => {}
+                    // Two different answers for one leaf — refuse the name permanently.
+                    Some(_) => {
+                        out.insert(name, None);
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    // The inline module's OWN `use` map, exactly as `collect_reexports` takes it — a
+                    // submodule that imports a different `Client` must type its statics through that one.
+                    let subuses = submodule_uses(uses, inner, include_tests);
+                    collect_static_types(inner, include_tests, &subuses, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
@@ -2052,6 +2123,7 @@ pub(crate) fn fninfo(
         enum_variant_traits: elems.enum_variant_traits,
         ambiguous_enum_leaves: elems.ambiguous_enum_leaves,
         callable_statics: elems.callable_statics,
+        static_types: elems.static_types,
         callable_aliases: elems.callable_aliases,
         ambiguous_return_leaves: elems.ambiguous_return_leaves,
         macro_twins: elems.macro_twins,

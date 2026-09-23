@@ -609,6 +609,16 @@ pub(crate) struct ElemIndexes<'a> {
     /// one if its consuming arm is reached for a name that is a dispatch-typed LOCAL here — see
     /// `lang::static_holds_callable`, which states that condition and the guard-deletion measurement.
     pub(crate) callable_statics: &'a HashSet<String>,
+    /// SOUNDNESS R557 — crate-wide `static`/`const` NAME → its DECLARED type path; `None` = the leaf is
+    /// REFUSED (two modules disagreed, or the type is one `type_path` declines to name). The CONCRETE
+    /// peer of `callable_statics`: that one answers "does this static hold a callback", this one answers
+    /// "what TYPE is this static" — which is what `C1.fetch()` needed and had no source for, a static
+    /// being typed by no binding site. `resolve_recv_type_for` therefore fell to the UNIT-STRUCT fallback
+    /// and formed `C1::fetch`, an edge to a type no crate declares, and the CALLER went ABSENT from
+    /// `functions[]`. Unlike `callable_statics` this index CAN name a concrete effect, which is why its
+    /// ambiguity rule is a refusal and why `scan.rs`'s `local_types` gate still confines every edge it
+    /// produces to a genuinely LOCAL type.
+    pub(crate) static_types: &'a HashMap<String, Option<String>>,
     /// SOUNDNESS R161 — the LEAF names of crate-wide `type NAME = <callable>` aliases (`pub type
     /// AutoExtension = fn(Connection) -> Result<()>`, `type Cb = Box<dyn Fn()>`). A nominal alias is a
     /// `Type::Path` like any other, so `is_callable_type` answered FALSE for it in every position at

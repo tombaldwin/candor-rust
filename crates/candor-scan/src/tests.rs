@@ -248,7 +248,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -301,7 +301,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -627,7 +627,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, foreign_impls: &std::collections::HashMap::new(), returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
-            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
@@ -3039,6 +3039,350 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         assert!(effs("nested_let").is_empty(),
                 "R556 CARVE-OUT (nested item): an inner fn's own generic must not inherit the outer \
                  body's `let`-position erasure (the value-bag shape):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_static_or_const_item_used_as_a_method_receiver_resolves_r557() {
+        // SOUNDNESS R557 — and this one is NOT about which ABSTRACTION a receiver names (R549/R551/
+        // R556/R561), it loses the RECEIVER ITSELF, on a plain CONCRETE type with no `dyn` anywhere.
+        //
+        // A `static`/`const` is an ITEM, so it passes through no binding site: `vars` is written by
+        // `visit_local`, the signature seeding and the closure/loop/match binders, and none of them ever
+        // sees one. `C1.fetch()` therefore reached `resolve_recv_type_for`'s `Expr::Path` arm with `vars`
+        // empty and fell to the UNIT-STRUCT fallback — `C1` is Upper-initial with no underscore, so it
+        // reads as a `struct C1;` literal — forming an edge to a type no crate declares. The caller was
+        // ABSENT from `functions[]`, a SPEC §2 rule 3 purity claim over a body that writes, with
+        // `deny Fs via_static` and `pure via_static` both exit 0. The `let` control on the identical
+        // body reads `['Fs']`; that pair is the whole finding and it is asserted as a pair below.
+        //
+        // WHAT THIS ROW CLAIMED AND DOES NOT CLOSE, measured rather than assumed. Two of the filed arms
+        // are NOT static-specific: `C3.get_or_init(..).fetch()` over a `static C3: OnceLock<Client>` and
+        // `let s = &C1; s.fetch()` are both still silent — and so are their `let` twins
+        // (`let c: OnceLock<Client> = …; c.get_or_init(..).fetch()`, `let c = Client{..}; let r = &c;
+        // r.fetch()`). Whatever they are, they are not this, and pinning them here would attribute a
+        // different gap to a fix that does not touch it.
+        let d = std::env::temp_dir().join(format!("candor-r557-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r557\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            pub struct Client { pub n: u32 }
+            impl Client { pub fn fetch(&self) -> u32 { let _ = std::fs::read_to_string("/etc/hosts"); self.n } }
+
+            // POSITIVE: a `static` item as the receiver.
+            pub static C1: Client = Client { n: 1 };
+            pub fn via_static() -> u32 { C1.fetch() }
+            // POSITIVE: the `const` twin — same item kind for this question, different keyword.
+            pub const C2: Client = Client { n: 2 };
+            pub fn via_const() -> u32 { C2.fetch() }
+            // POSITIVE: the SCREAMING_SNAKE spelling, which the unit-struct fallback never admitted at
+            // all (it excludes an underscore), so this arm reached NO route rather than a wrong one.
+            pub static MY_CLIENT: Client = Client { n: 3 };
+            pub fn via_snake() -> u32 { MY_CLIENT.fetch() }
+            // POSITIVE: a `&T` static — `type_path` peels the reference like any other position.
+            pub static CREF: &Client = &C1;
+            pub fn via_ref_ty() -> u32 { CREF.fetch() }
+            // CONTROL, the one-variable pair: the SAME body reached through a LOCAL, which resolved
+            // before this change and must still resolve after it.
+            pub fn via_local() -> u32 { let c = Client { n: 4 }; c.fetch() }
+
+            // CARVE-OUT (shadowing), and it is the one that discriminates: a same-named DISPATCH-TYPED
+            // parameter lives in `trait_vars`, NOT `vars`, so a static index consulted without
+            // `locally_bound` would answer `Client` for it and shadow the bounded-CHA route with a
+            // concrete effect from an unrelated body. `P.fetch()` must stay the CHA answer (`Net`) and
+            // must NOT pick up the static's `Fs`.
+            //
+            // THE SHADOW MUST BE WRITTEN ACROSS A MODULE BOUNDARY, and that is a language fact rather
+            // than a fixture preference: a `let`/parameter pattern naming a `static` or `const` IN SCOPE
+            // is E0530, not a shadow, so the same-module version of this control DOES NOT COMPILE and
+            // would be asserting about nothing (§E3 — the exact near-miss this row was filed with).
+            pub trait Q { fn fetch(&self) -> u32; }
+            pub struct Impl1;
+            impl Q for Impl1 { fn fetch(&self) -> u32 { let _ = std::net::TcpStream::connect("h:1"); 0 } }
+            pub mod holder { pub static P: crate::Client = crate::Client { n: 5 }; }
+            pub mod user {
+                use crate::Q;
+                #[allow(non_snake_case)]
+                pub fn param_shadow(P: &dyn Q) -> u32 { P.fetch() }
+            }
+            pub fn via_submodule_static() -> u32 { holder::P.fetch() }
+
+            // CARVE-OUT (ambiguity): the index is LEAF-keyed, so two modules declaring one name with
+            // different types must resolve to NEITHER. `amb1::AMB` is the PURE one and is walked first,
+            // so a last-writer-wins merge would hand it `crate::Client` and fabricate `Fs` over a body
+            // that does nothing — R4's fabrication reached through a module boundary.
+            pub mod amb1 {
+                pub struct Quiet;
+                impl Quiet { pub fn fetch(&self) -> u32 { 0 } }
+                pub static AMB: Quiet = Quiet;
+            }
+            pub mod amb2 {
+                pub static AMB: crate::Client = crate::Client { n: 6 };
+            }
+            pub fn via_ambiguous() -> u32 { amb1::AMB.fetch() }
+
+            // CARVE-OUT (ambiguity, CROSS-FILE): the refusal has TWO writers — the within-file collect
+            // above and the merge in `cache.rs` — and a guard with two writers needs the fixture for
+            // both (§A.2). `other::AMBX` is the PURE one; the ROOT file is merged LAST, so a
+            // last-writer-wins MERGE hands it the root's `crate::Client` and fabricates `Fs` over a body
+            // that does nothing. (Which file wins was MEASURED by falsifying the merge, not assumed —
+            // the first spelling of this arm put them the other way round and could not fail.)
+            pub mod other;
+            pub mod amb3 {
+                pub static AMBX: crate::Client = crate::Client { n: 7 };
+            }
+            pub fn via_ambiguous_xfile() -> u32 { other::AMBX.fetch() }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("src/other.rs"),
+            "pub struct Quiet2;\nimpl Quiet2 { pub fn fetch(&self) -> u32 { 0 } }\npub static AMBX: Quiet2 = Quiet2;\n",
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("via_local").contains(&"Fs".to_string()),
+                "R557 CONTROL: the LOCAL spelling must keep resolving — if this fails the pairs below \
+                 measure nothing:\n{body}");
+        assert!(effs("via_static").contains(&"Fs".to_string()),
+                "R557: a `static` item used as a method receiver must resolve exactly as the `let` \
+                 spelling of the identical body does:\n{body}");
+        assert!(effs("via_const").contains(&"Fs".to_string()),
+                "R557: the `const` twin takes the same route:\n{body}");
+        assert!(effs("via_snake").contains(&"Fs".to_string()),
+                "R557: a SCREAMING_SNAKE static reached no route at all before this — the unit-struct \
+                 fallback excludes an underscore:\n{body}");
+        assert!(effs("via_ref_ty").contains(&"Fs".to_string()),
+                "R557: a `static CREF: &Client` peels its reference like every other typed position:\n{body}");
+        assert!(effs("via_submodule_static").contains(&"Fs".to_string()),
+                "R557: the QUALIFIED spelling (`holder::P.fetch()`) is the same declaration reached \
+                 through a module path — `get_ident()` is None for it, so it needs the last-segment \
+                 route:\n{body}");
+        assert!(effs("user::param_shadow").contains(&"Net".to_string()),
+                "R557 CARVE-OUT (shadowing): a same-named DISPATCH-TYPED parameter must keep its \
+                 bounded-CHA answer — it lives in `trait_vars`, not `vars`, so only `locally_bound` \
+                 stops the static answering for it:\n{body}");
+        assert!(!effs("user::param_shadow").contains(&"Fs".to_string()),
+                "R557 CARVE-OUT (shadowing): …and must NOT pick up the static's effect, which is a \
+                 POSITIVE claim about an unrelated body:\n{body}");
+        assert!(effs("via_ambiguous").is_empty(),
+                "R557 CARVE-OUT (ambiguity): a leaf two modules declare with different types must \
+                 resolve to NEITHER — last-writer-wins would charge `Fs` to a body that does nothing:\n{body}");
+        assert!(effs("via_ambiguous_xfile").is_empty(),
+                "R557 CARVE-OUT (ambiguity, CROSS-FILE): the same rule at the MERGE — a last-writer-wins \
+                 union would charge the other file's `Client` to this pure body:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_upper_initial_binding_name_does_not_read_as_a_unit_struct_r564() {
+        // SOUNDNESS R564 — A PURITY CLAIM DECIDED BY THE SPELLING OF A PARAMETER'S NAME. Found while
+        // building [[R557]]'s shadowing carve-out, and PRE-EXISTING: it reproduces identically on the
+        // pre-R557 binary, so it is not that fix's doing.
+        //
+        // `resolve_recv_type_for`'s `Expr::Path` arm treats a bare Upper-initial ident with no underscore
+        // as a UNIT-STRUCT LITERAL receiver (`T0.run()` where `struct T0;`), gated on the name not being
+        // in `vars`. That is not the same test as "not a binding": every binder that types a name into
+        // `trait_vars` REMOVES it from `vars`, so a DISPATCH-typed binding whose name happens to look
+        // like a type fell straight through to the fallback, resolved to a phantom struct named after
+        // itself, and shadowed its own bounded-CHA route. The caller then carried nothing at all and was
+        // ABSENT from `functions[]` — `deny Net` exit 0 over a body that opens a socket.
+        //
+        // THREE BODIES, ONE VARIABLE, AND THE VARIABLE IS THE NAME. The underscore arm passes only
+        // because the fallback excludes an underscore; that is what identifies the fallback as the cause
+        // rather than anything about `&dyn Q`.
+        let d = std::env::temp_dir().join(format!("candor-r564-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r564\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            pub trait Q { fn fetch(&self) -> u32; }
+            pub struct Impl1;
+            impl Q for Impl1 { fn fetch(&self) -> u32 { let _ = std::net::TcpStream::connect("h:1"); 0 } }
+
+            // POSITIVE: Upper-initial, NO underscore — the arm the fallback claimed.
+            #[allow(non_snake_case)]
+            pub fn p_upper(Z: &dyn Q) -> u32 { Z.fetch() }
+            // CONTROL: Upper-initial WITH an underscore — the fallback declines it, so this resolved.
+            #[allow(non_snake_case)]
+            pub fn p_upper_us(Z_A: &dyn Q) -> u32 { Z_A.fetch() }
+            // CONTROL: the lowercase spelling of the identical body.
+            pub fn p_lower(z: &dyn Q) -> u32 { z.fetch() }
+            // POSITIVE: the `let` spelling was silent the same way.
+            #[allow(non_snake_case)]
+            pub fn l_upper() -> u32 { let Z: &dyn Q = &Impl1; Z.fetch() }
+
+            // CONTROL, the direction this narrowing could have broken: a genuine UNIT-STRUCT literal
+            // receiver, which this body does NOT bind, must keep resolving.
+            pub struct T0;
+            impl T0 { pub fn run(&self) { let _ = std::fs::read_to_string("/etc/hosts"); } }
+            pub fn unit_struct_literal() { T0.run(); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("p_lower").contains(&"Net".to_string())
+                && effs("p_upper_us").contains(&"Net".to_string()),
+                "R564 CONTROLS: the lowercase and underscored spellings must resolve — if either fails \
+                 the pair below measures nothing:\n{body}");
+        assert!(effs("p_upper").contains(&"Net".to_string()),
+                "R564: an Upper-initial DISPATCH-typed parameter must dispatch, not read as a unit-struct \
+                 literal named after itself — a purity claim decided by the binding's SPELLING:\n{body}");
+        assert!(effs("l_upper").contains(&"Net".to_string()),
+                "R564: the `let` spelling takes the same route:\n{body}");
+        assert!(effs("unit_struct_literal").contains(&"Fs".to_string()),
+                "R564 CARVE-OUT: the narrowing must not withdraw a GENUINE unit-struct literal receiver \
+                 — a name this body does not bind is still the type it spells:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_closure_parameter_annotated_dyn_resolves_its_trait_r561() {
+        // SOUNDNESS R561 — the FOURTH declaration site in the R556 family, and the point is that it is a
+        // family: `dyn_sig_traits` covers signature parameters, `dyn_local_traits` covers annotated
+        // `let`s (R556), and a CLOSURE's own parameter list is a third site that nothing indexed. Worse
+        // than the erasure gate here — the closure binder never asked `trait_leaves` AT ALL, so even a
+        // LOCAL trait went unresolved: `|h: &dyn Handlers| h.roll()` bound `h` into no table
+        // (`type_path` declines a trait object, `is_callable_type` is false for a non-`Fn` trait) and
+        // the ENCLOSING fn was ABSENT from `functions[]`, `deny Fs` exit 0 over a body that reads a file.
+        //
+        // THREE CONTROLS, ONE VARIABLE: a CONCRETE-typed closure param, the SIGNATURE spelling and the
+        // annotated-`let` spelling all resolve the same implementor on this same fixture. Only the
+        // closure parameter did not — §F1.3, separate implementations of one question that drift.
+        //
+        // THE CARVE-OUTS ARE RE-ASSERTED, NOT INHERITED (§A.2), because this adds a THIRD writer to the
+        // erasure fact: the rule is unchanged — a caller-monomorphized `T: Trait` must not CHA — but a
+        // rule with three writers must be measured against the new one.
+        let d = std::env::temp_dir().join(format!("candor-r561-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r561\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use deplib::Handler;
+
+            pub struct MyH;
+            impl Handler for MyH { fn go(&self) { let _ = std::fs::read_to_string("/etc/hosts"); } }
+
+            // POSITIVE: the closure-parameter spelling of a DEPENDENCY-declared abstraction.
+            pub fn clo_dyn() { let f = |h: &dyn Handler| h.go(); f(&MyH); }
+            // POSITIVE: the same through a Box, because the leaves come from the same
+            // `trait_leaves`/`collect_dyn_trait_leaves` pair the other two sites use.
+            pub fn clo_boxed() { let f = |h: Box<dyn Handler>| h.go(); f(Box::new(MyH)); }
+            // CONTROLS, one variable each: the SIGNATURE and `let` spellings of the identical receiver.
+            pub fn sig_only(h: &dyn Handler) { h.go(); }
+            pub fn let_dyn() { let h: &dyn Handler = &MyH; h.go(); }
+            // CONTROL: a CONCRETE-typed closure param, which has resolved since sweep [29].
+            pub fn clo_concrete() { let f = |h: &MyH| h.go(); f(&MyH); }
+
+            // CARVE-OUT (erasure), against the NEW writer: a closure param naming a
+            // caller-monomorphized GENERIC must NOT CHA local impls — the serde_json flood's shape in
+            // closure-parameter position. `trait_leaves` types the binding through `generic_bounds`, and
+            // `collect_dyn_trait_leaves` deliberately records nothing for it.
+            pub fn clo_generic<T: Handler>(t: T) { let f = |x: T| x.go(); f(t); }
+
+            // CARVE-OUT (scope): a closure parameter's scope IS the closure. `h` is a concrete local
+            // whose `go` opens a socket; the closure shadows the name with a `dyn Handler` whose local
+            // impl reads a file. Both effects must appear — `Fs` from inside the closure and `Net` from
+            // the statement after it. A binding that leaked would re-dispatch the trailing `h.go()` to
+            // `MyH` and the `Net` would vanish.
+            pub struct Netty { pub n: u32 }
+            impl Netty { pub fn go(&self) { let _ = std::net::TcpStream::connect("h:1"); } }
+            pub fn clo_scope() {
+                let h = Netty { n: 0 };
+                let f = |h: &dyn Handler| h.go();
+                f(&MyH);
+                h.go();
+            }
+
+            // CARVE-OUT (scope), the DISPATCH half — and it is a separate arm because the concrete one
+            // above CANNOT fail for it: `vars` wins over `trait_vars` at the call site, so restoring
+            // `vars` alone already answers there and a leaked `trait_vars` entry is invisible. Here the
+            // outer binding is itself dispatch-typed, so only the `trait_vars` restore can produce the
+            // right answer for the trailing call.
+            pub trait Other { fn go(&self); }
+            pub struct MyO;
+            impl Other for MyO { fn go(&self) { let _ = std::process::Command::new("ls").status(); } }
+            pub fn clo_scope_dispatch(h: &dyn Other) {
+                let f = |h: &dyn Handler| h.go();
+                f(&MyH);
+                h.go();
+            }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("sig_only").contains(&"Fs".to_string()) && effs("let_dyn").contains(&"Fs".to_string()),
+                "R561 CONTROLS: the signature and `let` spellings must keep resolving — if either fails \
+                 the pair below measures nothing:\n{body}");
+        assert!(effs("clo_concrete").contains(&"Fs".to_string()),
+                "R561 CONTROL: a CONCRETE-typed closure parameter resolves, which is what made the `dyn` \
+                 one a one-variable comparison:\n{body}");
+        assert!(effs("clo_dyn").contains(&"Fs".to_string()),
+                "R561: a closure parameter annotated `&dyn T` must dispatch to the LOCAL implementor \
+                 exactly as the signature and `let` spellings of the identical receiver do:\n{body}");
+        assert!(effs("clo_boxed").contains(&"Fs".to_string()),
+                "R561: the `Box<dyn T>` closure-parameter spelling takes the same route:\n{body}");
+        assert!(effs("clo_generic").is_empty(),
+                "R561 CARVE-OUT (erasure): a closure parameter naming a caller-monomorphized generic \
+                 must NOT CHA local impls — the serde_json flood in closure-parameter position:\n{body}");
+        assert!(effs("clo_scope").contains(&"Net".to_string()),
+                "R561 CARVE-OUT (scope): a closure parameter's binding must not leak past the closure — \
+                 the trailing `h.go()` is the OUTER concrete local's:\n{body}");
+        assert!(effs("clo_scope").contains(&"Fs".to_string()),
+                "R561 CARVE-OUT (scope): …and the closure's own dispatch must still be charged:\n{body}");
+        assert!(effs("clo_scope_dispatch").contains(&"Exec".to_string()),
+                "R561 CARVE-OUT (scope, DISPATCH half): the trailing `h.go()` is the OUTER `&dyn Other` \
+                 parameter's — only the `trait_vars` restore can answer that, because `vars` wins at the \
+                 call site and so the concrete arm above cannot fail for it:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -6677,7 +7021,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -6727,7 +7071,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
-                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
@@ -6753,7 +7097,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
@@ -6795,7 +7139,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -6834,7 +7178,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -10859,7 +11203,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, foreign_impls: &std::collections::HashMap::new() };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -10894,7 +11238,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, foreign_impls: &std::collections::HashMap::new() };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -10927,7 +11271,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, foreign_impls: &std::collections::HashMap::new() };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -12914,6 +13258,7 @@ trait G {
             deref_target => |m| { m.deref_target.insert("W".into(), "Inner".into()); },
             lazy_statics => |m| { m.lazy_statics.insert("CONFIG".into()); },
             callable_statics => |m| { m.callable_statics.insert("CB".into()); },
+            static_types => |m| { m.static_types.insert("C1".into(), Some("Client".into())); },
             // SOUNDNESS R161: `pub type AutoExtension = fn(Connection) -> Result<()>` — read at every
             // PARAMETER/annotation position, so a file gaining or losing one changes whether another
             // file's `fn init(ax: AutoExtension)` discloses the callback boundary at all.
@@ -14554,7 +14899,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev37/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev38/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14661,7 +15006,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, foreign_impls: &std::collections::HashMap::new() },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -14712,7 +15057,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, foreign_impls: &std::collections::HashMap::new() },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -18783,7 +19128,7 @@ pub fn go() {{ imp::doit(); }}
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, foreign_impls: &std::collections::HashMap::new(), returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
-            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),

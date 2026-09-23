@@ -44,6 +44,12 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev38: `FileDecls` gained `static_types` (SOUNDNESS R557 — the declared type of every module-level
+    // `static`/`const`, so one used as a METHOD RECEIVER resolves). A rev37 entry has no such field, so
+    // `#[serde(default)]` reads an EMPTY map: "this file declares no typed static", for a file that does
+    // — and `C1.fetch()` then falls back to the unit-struct fallback and vanishes from `functions[]`
+    // exactly as it did pre-fix. Same trap as rev35/rev34/rev33/rev25: a fix served from a stale cache is
+    // indistinguishable, from the outside, from a fix that does not work.
     // rev37: `extern_fns` now also carries the `extern "C" { fn … }` names declared INSIDE A BLOCK
     // (SOUNDNESS R529b). The FIELD is unchanged, its CONTENT is wider — which is precisely the rev31
     // shape ("a change to what an EXISTING field RECORDS"), and a rev36 entry replays the narrower set,
@@ -228,7 +234,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev37/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev38/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -286,6 +292,11 @@ pub(crate) struct FileDecls {
     /// a body this scan cannot see, so the binder must hedge `Unknown` instead of dropping it silently.
     #[serde(default)]
     pub(crate) callable_statics: Vec<String>,
+    /// SOUNDNESS R557 — `static`/`const` NAME → its DECLARED type path, for this file. `None` is a
+    /// REFUSED name: either two declarations of the leaf disagreed, or the type is one `type_path`
+    /// declines to name (a trait object, a generic cell). See `decls::collect_static_types`.
+    #[serde(default)]
+    pub(crate) static_types: HashMap<String, Option<String>>,
     /// R161 — type-alias NAMES in this file whose RHS is an INVOKABLE callback (`type AutoExtension =
     /// fn(Connection) -> Result<()>`, `type Cb = Box<dyn Fn()>`). A parameter/annotation of such a name
     /// is a callback boundary, and nothing resolved the alias, so it read silently pure.
@@ -436,6 +447,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // file's assembled `use` map, which is what `collect_decls` has just finished producing.
     let mut foreign_impls = HashMap::new();
     crate::lang::collect_foreign_trait_impls(items, include_tests, &uses, &mut foreign_impls);
+    // SOUNDNESS R557 — the declared TYPE of every module-level `static`/`const`. Walked here, beside the
+    // two walks above and for their reason: it resolves the annotation through `type_path`, which needs
+    // the file's ASSEMBLED `use` map (`static C: Client` where `use dep::Client;` is written below it).
+    // `collect_decls` visits the const/static arm mid-walk, before that map is complete.
+    let mut static_types = HashMap::new();
+    crate::decls::collect_static_types(items, include_tests, &uses, &mut static_types);
     // R503 — the MODULE-QUALIFIED path of every trait this file DECLARES. Walked here beside the
     // foreign-impl walk because it answers the same question from the other side: that one records what
     // an `impl` calls somebody else's abstraction, this one records what the OWNER calls its own. It
@@ -475,6 +492,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
         callable_statics: callable_statics.into_iter().collect(),
+        static_types,
         callable_aliases: callable_aliases.into_iter().collect(),
         const_strings,
         local_macros,
@@ -547,6 +565,11 @@ pub(crate) struct MergedDecls {
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
     pub(crate) callable_statics: std::collections::HashSet<String>,
+    /// SOUNDNESS R557 — crate-wide `static`/`const` NAME → declared type path, `None` = REFUSED. The
+    /// refusal is STICKY across the merge for the same reason it is within a file: a leaf two modules
+    /// spell differently must resolve to neither, because a wrong receiver type is a positive claim
+    /// about somebody else's body (the R4 fabrication, reached through a module boundary).
+    pub(crate) static_types: HashMap<String, Option<String>>,
     pub(crate) callable_aliases: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
     pub(crate) local_macros: HashMap<String, String>,
@@ -896,6 +919,21 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.callable_statics {
         acc.callable_statics.insert(n.clone()); // set union — order-independent
     }
+    // SOUNDNESS R557 — the cross-FILE half of `collect_static_types`' within-file rule, and the same
+    // rule: agreement keeps the type, disagreement refuses the NAME, and a refusal is sticky. Written as
+    // a match rather than `insert` so the merge is ORDER-INDEPENDENT — whichever file lands first, two
+    // differing declarations end at `None`.
+    for (k, v) in &fd.static_types {
+        match acc.static_types.get(k) {
+            None => {
+                acc.static_types.insert(k.clone(), v.clone());
+            }
+            Some(prev) if prev == v => {}
+            Some(_) => {
+                acc.static_types.insert(k.clone(), None);
+            }
+        }
+    }
     for n in &fd.callable_aliases {
         acc.callable_aliases.insert(n.clone()); // set union — order-independent
     }
@@ -1201,6 +1239,20 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for a in cak {
         s.push('|');
         s.push_str(a);
+    }
+    s.push('\n');
+    // SOUNDNESS R557 — static_types: sorted NAME=type (or NAME=<refused>) pairs. A change here changes
+    // which RECEIVERS resolve, so it must invalidate cached FnInfos exactly like `callable_statics`. The
+    // refusal is written explicitly rather than omitted: "this leaf is ambiguous" and "this file declares
+    // no such static" are different inputs and must not hash the same.
+    s.push_str("static_types");
+    let mut stk: Vec<&String> = m.static_types.keys().collect();
+    stk.sort();
+    for k in stk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(m.static_types[k].as_deref().unwrap_or("<refused>"));
     }
     s.push('\n');
     // callable_aliases — sorted set of `type NAME = <callable>` alias names (R161). A change here changes

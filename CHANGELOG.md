@@ -10,6 +10,79 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A `static` OR `const` ITEM USED AS A METHOD RECEIVER RESOLVED NOTHING AT ALL — the caller was
+  ABSENT from `functions[]` and `pure` exited 0 over a body that writes (SOUNDNESS R557).**
+
+      pub static C1: Client = Client { n: 1 };
+      pub fn via_static() -> u32 { C1.fetch() }        // ABSENT   deny Fs exit 0
+      pub fn via_local()  -> u32 { let c = Client { n: 4 }; c.fetch() }   // ['Fs']  exit 1
+
+  NOT about dispatch and not `dyn`-specific: it loses the RECEIVER ITSELF, on a plain concrete type.
+  A `static`/`const` is an ITEM, so it passes through no binding site — `vars` is written by
+  `visit_local`, the signature seeding and the closure/loop/match binders, and none of them ever sees
+  one. `C1.fetch()` therefore reached `resolve_recv_type_for`'s `Expr::Path` arm with `vars` empty and
+  fell to the UNIT-STRUCT fallback (`C1` is Upper-initial with no underscore, so it reads as a
+  `struct C1;` literal), forming an edge to a type no crate declares. The SCREAMING_SNAKE spelling
+  (`MY_CLIENT`) reached no route at all, because that fallback excludes an underscore.
+
+  Fixed with a new crate-wide index, `static_types` (NAME -> declared type path), collected by
+  `decls::collect_static_types` beside the re-export and foreign-impl walks — it resolves the
+  annotation through `type_path`, which needs the file's ASSEMBLED `use` map — and read in exactly one
+  place, that `Expr::Path` arm. Gated on `locally_bound`, the same one authority R101's
+  `callable_statics` arm uses, so a same-named local wins; the qualified spelling (`holder::P.fetch()`)
+  goes by the path's LAST SEGMENT, as R101's arm already does.
+
+  **AMBIGUITY IS REFUSED, NOT RESOLVED**, in the collect AND in the merge: the key is a LEAF, so two
+  modules declaring one name with different types resolve to NEITHER — a wrong receiver type is a
+  POSITIVE claim about somebody else's body (R4's fabrication reached through a module boundary).
+  `None` is also what a type `type_path` declines to name yields, so a `dyn` static and a generic cell
+  (`OnceLock<Client>`) stay exactly as silent as before.
+
+  **TWO ARMS OF THE FILED ROW ARE NOT CLOSED AND ARE NOT STATIC-SPECIFIC — measured, not assumed.**
+  `C3.get_or_init(..).fetch()` over a `static C3: OnceLock<Client>` and `let s = &C1; s.fetch()` are
+  both still silent, and so are their `let` twins on the same fixture (`let c: OnceLock<Client> = …;
+  c.get_or_init(..).fetch()` and `let c = Client{..}; let r = &c; r.fetch()`). Whatever they are, they
+  are not this.
+
+  REAL CODE, ground-truthed from source rather than from candor's own report:
+  `find-msvc-tools`' `const LOCAL_MACHINE: RegistryKey` -> `LOCAL_MACHINE.open(..)` -> `RegOpenKeyExW`
+  (a Windows registry read through FFI) was silently dropped; `jiff`'s
+  `static DEFAULT_DATETIME_PARSER: DateTimeParser` -> `.parse_date(string)` likewise.
+
+- **⚠ A CLOSURE PARAMETER ANNOTATED `&dyn T` RESOLVED NO TRAIT — the enclosing fn was ABSENT and
+  `deny Fs` exited 0 (SOUNDNESS R561).** `|h: &dyn Handlers| h.roll(n)` bound `h` into no table at all,
+  while the CONCRETE-typed closure param, the SIGNATURE spelling and the annotated-`let` spelling (R556)
+  all resolve the same implementor on the same fixture. §F1.3 — separate implementations of one
+  question that drift — at the eighth binder: `visit_expr_closure` handled callable types and
+  `type_path`, and never asked `trait_leaves` at all.
+
+  The closure parameter is the FOURTH declaration site in the R556 family (`dyn_sig_traits` covers
+  signature parameters, `dyn_local_traits` annotated `let`s). Fixed at that one site, through the same
+  `trait_leaves` + `collect_dyn_trait_leaves` pair the other two use, scoped save/restore around the
+  body walk because a closure parameter's scope IS the closure. The erasure carve-out is re-asserted
+  against the new writer rather than inherited: a caller-monomorphized `T: Trait` closure parameter is
+  DISCLOSED as `Unknown`, never CHA'd — `nom`'s `move |i: Input| i.slice_index(c)` is the real instance.
+
+- **⚠ AN UPPER-INITIAL BINDING NAME READ AS A UNIT-STRUCT LITERAL, so a purity claim was decided by the
+  SPELLING of a parameter (SOUNDNESS R564).** Found while building R557's shadowing carve-out and
+  PRE-EXISTING — it reproduces identically on the pre-R557 binary. Three byte-identical bodies:
+
+      fn p_upper(Z: &dyn Q)      { Z.fetch() }     -> ABSENT   deny Net exit 0
+      fn p_upper_us(Z_A: &dyn Q) { Z_A.fetch() }   -> ['Net']  exit 1
+      fn p_lower(z: &dyn Q)      { z.fetch() }     -> ['Net']  exit 1
+
+  The fallback that types a bare Upper-initial ident as a unit-struct literal was gated on the name not
+  being in `vars` — which is not the same test as "not a binding", because every binder that types a
+  name into `trait_vars` REMOVES it from `vars`. So a dispatch-typed binding whose name looks like a
+  type resolved to a phantom struct named after itself and shadowed its own bounded-CHA route. Now
+  gated on `locally_bound`; a genuine unit-struct literal receiver (a name the body does not bind) is
+  unchanged, and Rust guarantees the two cannot collide in one scope (E0530).
+
+  The same narrowing retires a FABRICATION: `termwiz`'s `pub const CSI: &str = "\x1b["` was typed as
+  the unrelated `pub enum CSI` in `escape/csi.rs` (which `impl Display`), so `write!(buf, "{}", CSI)`
+  charged `escape::csi::CSI::fmt` and `KeyCode::encode` carried a fabricated `['Unknown']`. It now
+  types as `str` and the phantom edge is gone.
+
 - **⚠ A `dyn` RECEIVER BOUND BY A LOCAL `let` DID NOT COUNT AS ERASED, so a consumer's own effectful
   implementor of a DEPENDENCY's abstraction read SILENT-PURE (SOUNDNESS R556).**
 
