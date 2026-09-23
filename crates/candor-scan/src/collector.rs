@@ -1028,9 +1028,15 @@ impl<'a> CallCollector<'a> {
                 //
                 // `locally_bound` is the same one authority the R557 arm above and R101's use: a name in
                 // any binding position in this body refers to that binding, never to a unit struct, and
-                // Rust guarantees it (a `let`/param pattern naming a unit struct or const IN SCOPE is
-                // E0530, not a shadow). A same-leaf type in ANOTHER module is the only way the two can
-                // coexist, and there the binding is what the path means anyway.
+                // Rust guarantees it — a binding-position name that resolves to an in-scope unit struct,
+                // `const` or `static` is a PATTERN, not a shadow. FALSIFIED RATHER THAN ASSERTED, because
+                // the first spelling of this sentence cited one error code for all three and was wrong for
+                // two of them: `let BAZ = 7u32;` beside `static BAZ` is **E0530** ("let bindings cannot
+                // shadow statics"), `let BAR = 7u32;` beside `const BAR` is **E0005** (refutable pattern),
+                // and `let Foo = 1u32;` beside `struct Foo;` is **E0308** — a type mismatch, because the
+                // name matched the struct. Different codes, one guarantee. A same-leaf type in ANOTHER
+                // module is the only way a binding and a unit struct of one name can coexist, and there
+                // the binding is what the path means anyway.
                 let looks_like_a_type = name.chars().next().is_some_and(|c| c.is_uppercase())
                     && !name.contains('_');
                 let bound_here = self.locally_bound(&name);

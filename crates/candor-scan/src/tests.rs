@@ -3096,9 +3096,10 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             // must NOT pick up the static's `Fs`.
             //
             // THE SHADOW MUST BE WRITTEN ACROSS A MODULE BOUNDARY, and that is a language fact rather
-            // than a fixture preference: a `let`/parameter pattern naming a `static` or `const` IN SCOPE
-            // is E0530, not a shadow, so the same-module version of this control DOES NOT COMPILE and
-            // would be asserting about nothing (§E3 — the exact near-miss this row was filed with).
+            // than a fixture preference: a `let`/parameter name that resolves to a `static` IN SCOPE is
+            // a PATTERN (E0530, "let bindings cannot shadow statics"; the `const` spelling is E0005), so
+            // the same-module version of this control DOES NOT COMPILE and would be asserting about
+            // nothing (§E3 — the exact near-miss this row was filed with).
             pub trait Q { fn fetch(&self) -> u32; }
             pub struct Impl1;
             impl Q for Impl1 { fn fetch(&self) -> u32 { let _ = std::net::TcpStream::connect("h:1"); 0 } }
