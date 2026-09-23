@@ -1489,7 +1489,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits =
-        TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields,
+        TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;

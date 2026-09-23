@@ -2094,6 +2094,7 @@ pub(crate) fn fninfo(
         trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),
         fields,
         trait_fields: traits.fields,
+        dyn_trait_fields: traits.dyn_fields,
         trait_impls: traits.impls,
         local_traits: traits.decls,
         foreign_impls: traits.foreign_impls,
@@ -2542,6 +2543,8 @@ pub(crate) fn collect_decls(
     trait_impls: &mut TraitImplIndex,
     local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
+    // SOUNDNESS R562 — the `dyn`-only twin of `trait_fields`, same key space. See the write site.
+    dyn_trait_fields: &mut TraitFieldIndex,
     prim_aliases: &mut std::collections::HashSet<String>,
     extern_fns: &mut std::collections::HashSet<String>,
     drop_types: &mut std::collections::HashSet<String>,
@@ -2739,6 +2742,25 @@ pub(crate) fn collect_decls(
                                 let leaves = trait_leaves(&f.ty, &struct_bounds);
                                 let had_trait_leaves = !leaves.is_empty();
                                 if !leaves.is_empty() {
+                                    // SOUNDNESS R562 — …AND, FROM THE SAME DECLARATION, WHETHER THE
+                                    // BOUND WAS SPELLED `dyn`. `trait_leaves` collapses `dyn T`,
+                                    // `impl T` and `T: Bound` into one list on purpose (every receiver
+                                    // resolver wants all three); the imported-trait CHA is the one
+                                    // consumer that must tell them apart. A SEPARATE index, keyed the
+                                    // SAME WAY as `trait_fields` — (struct leaf, field name) — so the
+                                    // erasure fact lives in the same key space as the resolution and
+                                    // one struct's `dyn Serializer` field can NEVER license CHA on an
+                                    // unrelated `T: Serializer` receiver. That is the R4 fabrication
+                                    // door a crate-wide leaf-keyed union would have opened, and it is
+                                    // the reason this is a twin index rather than a union into
+                                    // `dyn_local_traits`.
+                                    let dynl = crate::lang::dyn_trait_leaves_of(&f.ty);
+                                    if !dynl.is_empty() {
+                                        dyn_trait_fields
+                                            .entry(s.ident.to_string())
+                                            .or_default()
+                                            .insert(name.to_string(), dynl);
+                                    }
                                     trait_fields
                                         .entry(s.ident.to_string())
                                         .or_default()
@@ -3305,7 +3327,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, dyn_trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases);
                 }
             }
             _ => {}

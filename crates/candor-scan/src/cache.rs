@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev39: `FileDecls` gained `dyn_trait_fields` (SOUNDNESS R562 — whether a dispatch-typed FIELD was
+    // spelled `dyn`, which is what the imported-trait CHA erasure carve-out must ask). A rev38 entry has
+    // no such field, so `#[serde(default)]` reads an EMPTY map: "no field in this file is erased", for a
+    // file whose `Box<dyn dep::Handler>` field is — and `self.inner.roll()` then reads `inferred: []`
+    // exactly as it did pre-fix. Same trap as rev38/rev35/rev34/rev25.
     // rev38: `FileDecls` gained `static_types` (SOUNDNESS R557 — the declared type of every module-level
     // `static`/`const`, so one used as a METHOD RECEIVER resolves). A rev37 entry has no such field, so
     // `#[serde(default)]` reads an EMPTY map: "this file declares no typed static", for a file that does
@@ -234,7 +239,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev38/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev39/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -273,6 +278,13 @@ pub(crate) struct FileDecls {
     /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
     pub(crate) trait_decls: HashMap<String, (usize, Vec<String>, Vec<String>)>,
     pub(crate) trait_fields: TraitFieldIndex,
+    /// SOUNDNESS R562 — the `dyn`-ONLY twin of `trait_fields`, keyed identically (struct leaf ->
+    /// field name -> trait leaves). `trait_fields` collapses `dyn T`, `impl T` and `T: Bound`; the
+    /// imported-trait CHA erasure carve-out is the one consumer that must tell them apart, and it must
+    /// ask PER RECEIVER — a crate-wide union would let one struct's `dyn Serializer` field license CHA
+    /// on every unrelated `T: Serializer` receiver in the crate (R4's measured flood).
+    #[serde(default)]
+    pub(crate) dyn_trait_fields: TraitFieldIndex,
     /// names aliased to a non-nominal type (`type Inner = [u8; N]`) — resolution skips local `Inner::assoc`.
     pub(crate) prim_aliases: Vec<String>,
     /// fn names declared in an `extern` block — a call to one is an FFI boundary → DISCLOSE Unknown.
@@ -409,6 +421,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut trait_impls = HashMap::new();
     let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields = HashMap::new();
+    let mut dyn_trait_fields = HashMap::new();
     let mut prim_aliases = std::collections::HashSet::new();
     let mut extern_fns = std::collections::HashSet::new();
     let mut drop_types = std::collections::HashSet::new();
@@ -424,7 +437,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // `seed_callable_aliases` for why it is a separate pass and why its boundary is one file.
     crate::decls::seed_callable_aliases(items, include_tests, &mut callable_aliases);
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                  &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
+                  &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut dyn_trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
@@ -486,6 +499,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
             .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect(), v.supertraits)))
             .collect(),
         trait_fields,
+        dyn_trait_fields,
         prim_aliases: prim_aliases.into_iter().collect(),
         extern_fns: extern_fns.into_iter().collect(),
         drop_types: drop_types.into_iter().collect(),
@@ -559,6 +573,8 @@ pub(crate) struct MergedDecls {
     pub(crate) trait_impls: TraitImplIndex,
     pub(crate) trait_decls: HashMap<String, LocalTrait>,
     pub(crate) trait_fields: TraitFieldIndex,
+    /// SOUNDNESS R562 — see `FileDecls::dyn_trait_fields`.
+    pub(crate) dyn_trait_fields: TraitFieldIndex,
     pub(crate) prim_aliases: std::collections::HashSet<String>,
     pub(crate) extern_fns: std::collections::HashSet<String>,
     pub(crate) drop_types: std::collections::HashSet<String>,
@@ -867,6 +883,12 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
             e.insert(k.clone(), v.clone());
         }
     }
+    for (s, fmap) in &fd.dyn_trait_fields {
+        let e = acc.dyn_trait_fields.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.insert(k.clone(), v.clone());
+        }
+    }
     for a in &fd.prim_aliases {
         acc.prim_aliases.insert(a.clone()); // set union — order-independent
     }
@@ -1103,6 +1125,9 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     }
     s.push('\n');
     nested_tf(&mut s, &m.trait_fields);
+    // SOUNDNESS R562 — the dyn-only twin changes which receivers CHA, so it must invalidate too.
+    s.push_str("dyn_trait_fields");
+    nested_tf(&mut s, &m.dyn_trait_fields);
     // prim_aliases — sorted set of non-nominal alias names (resolution skips local `Alias::assoc`).
     s.push_str("prim_aliases");
     let mut pak: Vec<&String> = m.prim_aliases.iter().collect();

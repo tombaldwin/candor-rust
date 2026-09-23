@@ -577,6 +577,10 @@ pub(crate) struct TraitIndexes<'a> {
     pub(crate) impls: &'a TraitImplIndex,
     pub(crate) decls: &'a HashMap<String, LocalTrait>,
     pub(crate) fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R562 — the `dyn`-ONLY twin of `fields`, keyed identically. Read by exactly one
+    /// predicate, the imported-trait CHA erasure carve-out, and asked PER RECEIVER (base type leaf +
+    /// field name) so a crate-wide union can never license CHA on an unrelated monomorphized receiver.
+    pub(crate) dyn_fields: &'a TraitFieldIndex,
     /// ⟨0.39⟩ obligation 2's key set — `<owner>#<qualified trait>::<member>` → the local implementor
     /// quals. SOUNDNESS R551 reads it as EVIDENCE ABOUT THE FOREIGN TRAIT: a member this crate is seen
     /// IMPLEMENTING for a foreign trait is a member that trait really declares. That is the one fact

@@ -10,6 +10,41 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A `dyn` FIELD and a `dyn` RETURN DID NOT COUNT AS ERASED, so a consumer's own implementor of a
+  DEPENDENCY's abstraction read SILENT-PURE through either (SOUNDNESS R562).**
+
+      pub struct Reg { pub inner: Box<dyn dep::Handlers> }
+      impl Reg { pub fn go(&self, n: u32) -> u32 { self.inner.roll(n) } }   // eff=∅, deny Fs exit 0
+      pub fn mk() -> Box<dyn dep::Handlers> { Box::new(H) }
+      pub fn via_ret(n: u32) -> u32 { mk().roll(n) }                        // eff=∅, deny Fs exit 0
+
+  The LOCAL-trait control resolves both. The imported-trait CHA's erasure carve-out asks "is the
+  receiver spelled `dyn`", and for these two positions the answer is not in the body's lexical scope at
+  all — the `dyn` is written on the STRUCT and on the CALLEE — so neither `dyn_sig_traits` (signature)
+  nor `dyn_local_traits` (annotated `let`, R556) could ever hold it.
+
+  **THE ROW FILED THIS AS BLOCKED AND THE BLOCKER DOES NOT APPLY TO THIS KEYING.** The hazard it names
+  is real: a CRATE-WIDE leaf-keyed union of these facts would let ONE struct field's `dyn Serializer`
+  license CHA on EVERY `T: Serializer` receiver in the crate — R4's measured serde_json flood, reached
+  by a third door. But the erasure can be asked OF THE RECEIVER EXPRESSION rather than of the body: the
+  field arm keys on (base type leaf, field name) and the return arm on the callee leaf, which are the
+  same keys the resolution that produced the trait already used. No union, no crate-wide set. The
+  fixture carries a `dyn Handler` field, a `dyn Handler` return, AND `T: Handler` / `impl Handler` /
+  `Gen<T: Handler>` receivers IN ONE CRATE — the only arrangement that can tell a per-receiver rule
+  from a union — and the monomorphized three stay `eff=∅`.
+
+  `dyn_trait_fields` is a `dyn`-ONLY TWIN of `trait_fields`, not a reuse: `trait_fields` collapses
+  `dyn T` with `impl T` and `T: Bound`, and a `struct Gen<T: Handler> { inner: T }` field IS
+  caller-monomorphized. The return arm needs no new index — the `<dyn>` sentinel already marks a
+  dispatch-object return. An opaque `-> impl Trait` rides that sentinel and is CORRECT here for a
+  reason that does not hold in parameter position: the concrete type behind an opaque RETURN is chosen
+  by the CALLEE, so the crate's own impls are its candidate witnesses.
+
+  Real instances, ground-truthed from source: `aws-smithy-http-client`'s
+  `struct Connector { adapter: Box<dyn HttpConnector> }` with `fn call(&self, r) { self.adapter.call(r) }`
+  (`HttpConnector` is declared by `aws_smithy_runtime_api`), and `aws-smithy-http`'s
+  `MessageStreamAdapter { marshaller: Box<dyn MarshallMessage<..>> }`.
+
 - **⚠ A `static` OR `const` ITEM USED AS A METHOD RECEIVER RESOLVED NOTHING AT ALL — the caller was
   ABSENT from `functions[]` and `pure` exited 0 over a body that writes (SOUNDNESS R557).**
 

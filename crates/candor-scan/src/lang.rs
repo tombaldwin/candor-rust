@@ -53,6 +53,17 @@ pub(crate) fn is_dependency_crate_root(root: &str) -> bool {
 /// point and put **32 fresh `Unknown`s** on serde_json — `to_string`, `to_vec`, `to_writer` — inherited
 /// through edges to witnesses a caller's own `Serializer` would never run. serde_json spells
 /// `dyn Serializer` nowhere, so requiring erasure takes that to zero and leaves R4's `&dyn` shape intact.
+/// SOUNDNESS R562 — `collect_dyn_trait_leaves` as a VALUE, for the two positions whose erasure fact is
+/// keyed per-DECLARATION rather than per-body (a struct field, a fn return). Deterministic order, so a
+/// cached index and a fresh one hash the same.
+pub(crate) fn dyn_trait_leaves_of(ty: &syn::Type) -> Vec<String> {
+    let mut set = std::collections::HashSet::new();
+    collect_dyn_trait_leaves(ty, &mut set);
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
 pub(crate) fn collect_dyn_trait_leaves(ty: &syn::Type, out: &mut std::collections::HashSet<String>) {
     match ty {
         syn::Type::TraitObject(t) => out.extend(bound_leaves(&t.bounds)),

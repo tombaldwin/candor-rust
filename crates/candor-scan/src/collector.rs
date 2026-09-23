@@ -167,6 +167,8 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R562 — see `TraitIndexes::dyn_fields`.
+    pub(crate) dyn_trait_fields: &'a TraitFieldIndex,
     /// SOUNDNESS R551 — ⟨0.39⟩ obligation 2's key set (`<owner>#<qualified trait>::<member>` → local
     /// implementor quals), read ONLY as a predicate by the extension-trait rewrite below.
     pub(crate) foreign_impls: &'a HashMap<String, Vec<String>>,
@@ -2357,6 +2359,67 @@ impl<'a> CallCollector<'a> {
     /// ident in a binding POSITION anywhere in this body, so the test does not depend on type inference
     /// having succeeded for the shadow; the typed side-tables above it are kept because they also hold
     /// SIGNATURE bindings, which `bound_names` covers too but redundantly rather than instead.
+    /// SOUNDNESS R562 — is THIS RECEIVER EXPRESSION erased with respect to trait `tr`?
+    ///
+    /// The erasure carve-out on the imported-trait CHA asks "is the receiver spelled `dyn`". For a
+    /// binding that question is answered in the body's own lexical scope (`dyn_sig_traits`,
+    /// `dyn_local_traits`). For a FIELD and for a RETURN it is not: the `dyn` is written on the struct
+    /// and on the callee. Asked here, of the expression, so the answer lives in the SAME KEY SPACE as
+    /// the resolution that produced `tr` — never in a crate-wide set, which is the fabrication door.
+    ///
+    /// Peeled through the same transparent wrappers every other receiver resolver peels.
+    ///
+    /// * FIELD: `dyn_trait_fields` is the `dyn`-ONLY twin of `trait_fields`, written at the same site
+    ///   from the same declaration. `trait_fields` collapses `dyn T` with `impl T` and `T: Bound`, and
+    ///   a `struct Reg<T: Handlers> { inner: T }` IS caller-monomorphized — which is exactly why the
+    ///   twin exists rather than a reuse.
+    /// * RETURN: the `<dyn>` sentinel (`ret_dyn_leaves`), which `record_return` writes only for a
+    ///   dispatch-object return. `-> impl Trait` rides that sentinel too and is CORRECT here for a
+    ///   reason that does not hold in parameter position: the concrete type behind an opaque RETURN is
+    ///   chosen by the CALLEE, so the crate's own impls are its candidate witnesses — where an
+    ///   `impl Trait` PARAMETER is chosen by the caller and must not be CHA'd.
+    fn receiver_is_erased(&self, expr: &syn::Expr, tr: &str) -> bool {
+        match expr {
+            syn::Expr::Reference(r) => self.receiver_is_erased(&r.expr, tr),
+            syn::Expr::Paren(p) => self.receiver_is_erased(&p.expr, tr),
+            syn::Expr::Group(g) => self.receiver_is_erased(&g.expr, tr),
+            syn::Expr::Try(t) => self.receiver_is_erased(&t.expr, tr),
+            syn::Expr::Await(a) => self.receiver_is_erased(&a.base, tr),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                self.receiver_is_erased(&u.expr, tr)
+            }
+            syn::Expr::Field(f) => {
+                let key = match &f.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(i) => i.index.to_string(),
+                };
+                let Some(base) = self.resolve_recv_type(&f.base) else { return false };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.dyn_trait_fields
+                    .get(base_leaf)
+                    .and_then(|m| m.get(&key))
+                    .is_some_and(|l| l.iter().any(|x| x == tr))
+            }
+            // A FACTORY CALL whose declared return is the `<dyn>` sentinel. Keyed on the callee leaf,
+            // which is the same key `resolve_recv_traits` used to produce `tr` for this receiver — so
+            // the two cannot disagree about which declaration is being read.
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return false };
+                let full = crate::lang::path_to_string(&p.path);
+                let leaf = full.rsplit("::").next().unwrap_or(&full);
+                self.returns
+                    .get(leaf)
+                    .and_then(|t| crate::model::ret_dyn_leaves(t))
+                    .is_some_and(|l| l.iter().any(|x| x == tr))
+            }
+            syn::Expr::MethodCall(m) => self
+                .returns
+                .get(&m.method.to_string())
+                .and_then(|t| crate::model::ret_dyn_leaves(t))
+                .is_some_and(|l| l.iter().any(|x| x == tr)),
+            _ => false,
+        }
+    }
     fn locally_bound(&self, name: &str) -> bool {
         self.vars.contains_key(name)
             || self.closure_vars.contains(name)
@@ -3805,10 +3868,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // number available and the least informative.
                         let via_local = !self.dyn_sig_traits.contains(&tr)
                             && self.dyn_local_traits.contains(&tr);
+                        // SOUNDNESS R562 — THE TWO POSITIONS WHOSE ERASURE IS NOT IN THIS BODY'S LEXICAL
+                        // SCOPE AT ALL. `self.inner.roll()` where `inner: Box<dyn dep::Handlers>`, and
+                        // `mk().roll()` where `mk() -> Box<dyn dep::Handlers>`, both read `inferred: []`
+                        // while the LOCAL-trait control resolved both — the erasure is declared on the
+                        // STRUCT and on the CALLEE, and this body spells no `dyn` anywhere, so neither
+                        // `dyn_sig_traits` nor `dyn_local_traits` could ever hold it.
+                        //
+                        // THE ROW FILED THIS AS BLOCKED, AND THE BLOCKER DOES NOT APPLY TO THIS SHAPE.
+                        // What it warns about is real: a CRATE-WIDE leaf-keyed union of these facts would
+                        // let ONE struct field's `dyn Serializer` license CHA on EVERY `T: Serializer`
+                        // receiver in the crate — R4's measured serde_json flood, reached by a third
+                        // door. But the erasure here is asked OF THE RECEIVER EXPRESSION, not of the
+                        // body: the field arm keys on (base type leaf, field name), exactly as the
+                        // resolution that produced `tr` does, and the return arm keys on the callee leaf.
+                        // No union, no crate-wide set, so a `T: Serializer` parameter receiver matches
+                        // neither and is unreachable from here.
+                        let via_recv = !self.dyn_sig_traits.contains(&tr)
+                            && !self.dyn_local_traits.contains(&tr)
+                            && self.receiver_is_erased(&node.receiver, &tr);
                         if let Some(impls) = self.trait_impls.get(&tr).filter(|_| {
                             crate::lang::is_dependency_crate_root(root)
-                                && (self.dyn_sig_traits.contains(&tr) || via_local)
+                                && (self.dyn_sig_traits.contains(&tr) || via_local || via_recv)
                         }) {
+                            if via_recv && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                                eprintln!("R562HIT {full}::{leaf} impls={}", impls.len());
+                            }
                             if via_local && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                 eprintln!("R556HIT {full}::{leaf} impls={}", impls.len());
                             }
