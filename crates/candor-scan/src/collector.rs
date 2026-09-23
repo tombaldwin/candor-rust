@@ -141,6 +141,9 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R551 — ⟨0.39⟩ obligation 2's key set (`<owner>#<qualified trait>::<member>` → local
+    /// implementor quals), read ONLY as a predicate by the extension-trait rewrite below.
+    pub(crate) foreign_impls: &'a HashMap<String, Vec<String>>,
     /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
     pub(crate) trait_impls: &'a TraitImplIndex,
     /// leaf -> the local trait declaration(s) sharing it: ambiguity count + declared method names.
@@ -1827,6 +1830,49 @@ impl<'a> CallCollector<'a> {
         lt.methods.contains(leaf)
             || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
     }
+
+    /// Does LOCAL trait `l` carry `tr` among its (transitively local) SUPERTRAIT leaves?
+    /// `trait ServiceExt<R>: tower_service::Service<R>` → `trait_has_supertrait("ServiceExt", "Service")`.
+    /// `supertraits` holds LEAVES (`bound_leaves` takes the last path segment), which is the same
+    /// spelling `resolve_recv_traits` returns for a receiver, so the two sides compare like for like.
+    fn trait_has_supertrait(&self, l: &str, tr: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(l) else { return false };
+        lt.supertraits.iter().any(|s| s == tr || self.trait_has_supertrait(s, tr, depth + 1))
+    }
+
+    /// SOUNDNESS R551 — WHICH LOCALLY-DECLARED EXTENSION TRAIT REALLY DECLARES `leaf`, when the RECEIVER
+    /// carries foreign trait `tr`?
+    ///
+    /// THIS IS EVIDENCE, NOT A PROOF, and the distinction is measured rather than hedged. This comment
+    /// once claimed a proof: that if `L: tr` declares `leaf`, then `tr` cannot, because `x.leaf()` with
+    /// both traits in scope would be `E0034`. **That is false.** `futures-lite` declares
+    /// `trait StreamExt: Stream { fn poll_next(&mut self) … }` beside `Stream::poll_next(self: Pin<&mut
+    /// Self>)`; the receiver TYPES differ, so the call resolves without ambiguity and both names exist.
+    /// Acting on the false proof rewrote 11 rows' real `futures_core#stream::Stream::poll_next` onto the
+    /// extension trait — the under-report direction, caught by the A/B's own changed column.
+    ///
+    /// So this function answers only "which LOCAL trait could declare `leaf` here"; the CALLER carries
+    /// the evidence about `tr` itself (`foreign_impls` — a member this crate implements for `tr` is a
+    /// member `tr` has) and refuses the rewrite when that evidence exists.
+    ///
+    /// REFUSES rather than picks when two local traits qualify, and when the trait NAME is itself declared
+    /// twice in this crate (`count > 1`) — the same "never guess between traits" rule
+    /// `dispatch_calls_for_trait_method` applies to an ambiguous local leaf.
+    fn ext_trait_declaring(&self, tr: &str, leaf: &str) -> Option<String> {
+        let mut found: Option<&String> = None;
+        for (name, lt) in self.local_traits.iter() {
+            if lt.count == 1 && lt.methods.contains(leaf) && self.trait_has_supertrait(name, tr, 0) {
+                if found.is_some() {
+                    return None; // two candidates — refuse, never pick
+                }
+                found = Some(name);
+            }
+        }
+        found.cloned()
+    }
     /// SOUNDNESS R540 §E1 REACH COUNTER. `resolve_recv_traits` is the walk plus this wrapper, and the
     /// wrapper exists only to make the fix MEASURABLE: it fires exactly when the OLD three-table guard
     /// would have short-circuited and the walk nevertheless produced an answer — i.e. on the rows this
@@ -3493,7 +3539,84 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // consumer may join, and a join that misses adds nothing at all (PART 92's
                     // `c3_pure_only`). Charging on "a dispatch occurred" is the fabrication direction; this
                     // is the disclosure direction, and §4 asks for it on every dispatch it can see.
-                    if crate::lang::is_dependency_crate_root(root) {
+                    // SOUNDNESS R551 (R549 mechanism A) — AN EXTENSION TRAIT'S METHOD, ATTRIBUTED TO
+                    // THE BASE TRAIT THE RECEIVER HAPPENS TO CARRY. `inner.map_future(..)` where
+                    // `inner: S, S: tower_service::Service<R>` published
+                    // `tower_service#Service::map_future`; `Service` declares exactly `call` and
+                    // `poll_ready`, and `map_future` is a member of `ServiceExt`, a trait TOWER DECLARES
+                    // LOCALLY. The key names a member of nothing, so ⟨0.39⟩ obligation 3's join can never
+                    // find it — and the real key, `tower#util::ServiceExt::map_future`, was never
+                    // published at all. That second half is the loss, and it is the same shape as the
+                    // fn-ref half fixed in `186e854`: absence is the sin's signature.
+                    //
+                    // GATED ON A DIRECT RECEIVER. A receiver reached through a METHOD CHAIN
+                    // (`self.inner.poll_ready(cx).map_err(..)`) carries `tr` only because
+                    // `resolve_recv_traits_walk` passes through the link, and the outer call is really on
+                    // the INNER call's return type — R549 mechanism B's still-open drift half. Rewriting
+                    // those would name `ServiceExt::map_err` for a `Result::map_err`, which is a
+                    // FABRICATED dispatch a consumer would then union implementors onto. Measured on the
+                    // six chained pairs: 22 of the 53 malformed keys are chain-drift and 31 are direct
+                    // receivers; this rule is for the 31 and deliberately not for the 22.
+                    //
+                    // GATED ON EXACTLY THE CONDITION THAT PUBLISHES THE FOREIGN KEY — dependency
+                    // provenance AND a crate-qualified spelling — so this is a REWRITE and never an
+                    // ADDITION. The gate is not a precaution; the first draft omitted the
+                    // `contains("::")` half and the A/B's own ADDED column found what that costs. A
+                    // PRELUDE or MARKER bound expands to a bare leaf (`Send`, `Sized`, `Default`,
+                    // `Iterator`), which publishes no foreign key today, and `ext_trait_declaring` will
+                    // happily match it: `rayon`'s `trait Producer: Send + Sized` then claimed
+                    // `OptionProducer::into_iter` dispatches on `Producer::into_iter` when the call is
+                    // `Option::into_iter` — a FABRICATED dispatch a consumer would union implementors
+                    // onto. Ground-truthed from rayon's source, not from the report. ADDED must be 0.
+                    let ext = match peel_recv(&node.receiver) {
+                        _ if !crate::lang::is_dependency_crate_root(root) || !full.contains("::") => None,
+                        syn::Expr::MethodCall(_) => None,
+                        // THE BASE TRAIT MAY DECLARE THE MEMBER TOO, AND A SUPERTRAIT RELATION DOES NOT
+                        // FORBID IT. This rule's first draft asserted it did — two traits declaring one
+                        // name would make `x.m()` `E0034` — and REAL CODE BROKE IT on the very first
+                        // corpus that reached the branch: `futures-lite`'s `trait StreamExt: Stream`
+                        // declares `poll_next(&mut self)` beside `Stream::poll_next(self: Pin<&mut
+                        // Self>)`, and the call resolves by RECEIVER TYPE, not by ambiguity. The draft
+                        // rewrote 11 rows' `futures_core#stream::Stream::poll_next` — a REAL, joinable
+                        // key — onto the extension trait. That is the under-report direction.
+                        //
+                        // So the rewrite asks the crate's OWN obligation-2 index instead of asserting:
+                        // a member this crate is seen IMPLEMENTING for that foreign trait is a member
+                        // the trait really has, and the key stays. futures-lite publishes
+                        // `futures_core#stream::Stream::poll_next` and `::size_hint` there and nothing
+                        // else, so `next`/`all`/`any`/`fold`/… rewrite and `poll_next` does not;
+                        // `futures_io#AsyncWrite::poll_write`/`poll_flush`/`poll_close` are published
+                        // and `write`/`flush` are not. Two indexes answering one question, made to
+                        // disagree — which is the family rule, not a new idea.
+                        //
+                        // THE RESIDUAL, stated as the assumption it is: absence here is not proof. A
+                        // crate that declares `L: F`, calls `.m()`, and never implements `F::m` anywhere
+                        // leaves this rule with no evidence, and it rewrites. What bounds that is the
+                        // shape itself — a crate carrying an extension trait over `F` implements `F`.
+                        _ if self.foreign_impls.contains_key(&format!("{full}::{leaf}")
+                            .replacen("::", "#", 1)) => None,
+                        _ => self.ext_trait_declaring(&tr, &leaf),
+                    };
+                    if let Some(ext) = ext {
+                        // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG` channel
+                        // `R485HIT`/`R446DYN`/`R549HIT` already use. A byte-identical A/B is not evidence
+                        // until reach is counted.
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R551HIT {ext}::{leaf} (was {full}::{leaf})");
+                        }
+                        // The reachability fact, keyed on the trait that ACTUALLY declares the member.
+                        // `scan.rs`'s `union_member_key` turns it into `<thiscrate>#<modpath>::<L>::<leaf>`.
+                        //
+                        // NO BOUNDED-CHA FAN-OUT, deliberately, and this is the one place the fix stops
+                        // short of `dispatch_calls_for_trait_method`. An extension trait's impl is a
+                        // BLANKET one (`impl<T: ?Sized, R> ServiceExt<R> for T where T: Service<R>`), so
+                        // `trait_impls` holds the blanket's own type parameter, not a witness; and the
+                        // receiver is a MONOMORPHIZED bound, not an erased `dyn`, which is exactly the
+                        // R4 erasure carve-out that keeps CHA off `impl Trait`/`T: Trait` receivers.
+                        // Edges here would fabricate. The DISCLOSURE costs nothing and is what §4 asks
+                        // for; the missing edge stays the documented residual it already was.
+                        self.dispatch_sites.insert((ext, leaf.clone()));
+                    } else if crate::lang::is_dependency_crate_root(root) {
                         if let Some((owner, rest)) = full.split_once("::") {
                             // REACH PROBE, the `CANDOR_ALIAS_DEBUG` channel `R485HIT`/`R446DYN` already
                             // use: a corpus A/B counts hits on the CHANGED branch rather than inferring

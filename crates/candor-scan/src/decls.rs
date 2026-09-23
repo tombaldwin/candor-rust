@@ -2024,6 +2024,7 @@ pub(crate) fn fninfo(
         trait_fields: traits.fields,
         trait_impls: traits.impls,
         local_traits: traits.decls,
+        foreign_impls: traits.foreign_impls,
         returns,
         // Crate-wide: does any factory return a DISPATCH-typed value? Cheap `any` — keeps the
         // `resolve_recv_traits` hot-path guard closed on the overwhelming majority of crates.

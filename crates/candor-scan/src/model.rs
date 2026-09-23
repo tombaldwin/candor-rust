@@ -577,6 +577,12 @@ pub(crate) struct TraitIndexes<'a> {
     pub(crate) impls: &'a TraitImplIndex,
     pub(crate) decls: &'a HashMap<String, LocalTrait>,
     pub(crate) fields: &'a TraitFieldIndex,
+    /// ⟨0.39⟩ obligation 2's key set — `<owner>#<qualified trait>::<member>` → the local implementor
+    /// quals. SOUNDNESS R551 reads it as EVIDENCE ABOUT THE FOREIGN TRAIT: a member this crate is seen
+    /// IMPLEMENTING for a foreign trait is a member that trait really declares. That is the one fact
+    /// about a foreign abstraction a producer-side scan can establish without the dep, and it is what
+    /// keeps the extension-trait rewrite off a member the base trait genuinely has.
+    pub(crate) foreign_impls: &'a HashMap<String, Vec<String>>,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

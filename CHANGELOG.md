@@ -10,6 +10,47 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **An EXTENSION TRAIT's method was published under the BASE trait the receiver happened to carry
+  (SOUNDNESS R551; R549 mechanism A).** `inner.map_future(..)` where `inner: S, S: tower_service::Service<R>`
+  published `tower_service#Service::map_future`. `tower_service::Service` declares exactly `call` and
+  `poll_ready`; `map_future` belongs to `ServiceExt`, a trait **tower declares locally**. So the key named
+  a member of nothing — ⟨0.39⟩ obligation 3's join can never find it — and the key that IS joinable,
+  `tower#util::ServiceExt::map_future`, was never published at all. Absence is the sin's signature, and
+  that second half is the same loss shape as the fn-ref half fixed the same day.
+
+  The rewrite fires only where a malformed key would otherwise have been published (dependency
+  provenance **and** a crate-qualified spelling), and only on a DIRECT receiver — a receiver reached
+  through a method chain carries its trait only because the walk passes through the link, which is
+  R549's still-open drift half.
+
+  **The discriminator is the crate's own ⟨0.39⟩ obligation-2 index, not an argument.** The first draft
+  asserted that a supertrait and its extension cannot declare one name — `x.m()` would be `E0034` — and
+  real code broke it on the first corpus that reached the branch: `futures-lite`'s `trait StreamExt:
+  Stream` declares `poll_next(&mut self)` beside `Stream::poll_next(self: Pin<&mut Self>)`, and the call
+  resolves by RECEIVER TYPE. The draft rewrote 11 rows' real, joinable `futures_core#stream::Stream::poll_next`
+  onto the extension trait — the under-report direction. So the rule now asks `foreign_impls`: a member
+  this crate is seen IMPLEMENTING for that foreign trait is a member the trait really has, and the key
+  stays. futures-lite publishes `Stream::poll_next` and `::size_hint` there and nothing else, so
+  `next`/`all`/`any`/`fold`/… rewrite and `poll_next` does not.
+
+  Said exactly: in a genuine COLLISION the engine still cannot tell which trait the receiver type
+  selects — it does not model receiver types — and keeping the base-trait key is a deliberate
+  conservative choice, not a claim about resolution. That key is joinable and reaches the implementors
+  that carry effects; the extension trait's key reaches a defaulted body one hop away. The rewrite is
+  reserved for the case where the base trait shows no sign of having the member at all.
+
+  A/B, `bin/corpus-ab.py`, wide key, multiset — two corpora, three arms:
+
+  | corpus | ADDED | REMOVED | CHANGED | `inferred` | reach |
+  |---|---|---|---|---|---|
+  | 6 chained crate pairs (tower, http-body-util, tower-http, futures-util, tracing, http-body) | 0 | 0 | 13 | 0 | 10 |
+  | 20 crates carrying the shape (futures-lite, tracing-subscriber, axum, rustls, …) | 0 | 0 | 30 | 0 | 21 |
+  | 39 packages without it (clap, hyper, regex, ripgrep, serde, tokio) | 0 | 0 | 0 | 0 | 0 |
+
+  Every one of the 43 changed rows is one malformed key swapped for one real one and **no other field
+  moved**; each target was ground-truthed against the declaring trait's source, never against candor's
+  own report. R549's census over the six pairs goes **26 of 78 malformed → 20 of 78**.
+
 - **A trait method named as a FUNCTION REFERENCE is a dispatch, and the key for it was never published
   (SOUNDNESS R549, mechanism B).** `xs.front().map(Buf::chunk)` spells the dispatch as a value, so
   `visit_expr_method_call` never saw it. Measured on http-body-util: `bytes#Buf::chunk` appeared NOWHERE

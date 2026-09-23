@@ -4743,3 +4743,160 @@ fn r549_a_trait_method_named_as_a_function_reference_publishes_the_same_key_as_a
          declare — while the member it really dispatches on appeared nowhere in the report: {:?}",
         keys("BufList::via_fnref"));
 }
+
+/// SOUNDNESS R551 (R549 mechanism A) — AN EXTENSION TRAIT'S METHOD, PUBLISHED UNDER THE BASE TRAIT THE
+/// RECEIVER HAPPENS TO CARRY.
+///
+/// `inner.map_future(..)` where `inner: S, S: tower_service::Service<R>` published
+/// `tower_service#Service::map_future`. `tower_service::Service` declares exactly `call` and
+/// `poll_ready`; `map_future` is a member of `ServiceExt`, a trait TOWER DECLARES LOCALLY. So the key
+/// named a member of nothing — ⟨0.39⟩ obligation 3's join can never find it — and the key that IS
+/// joinable, `tower#util::ServiceExt::map_future`, was never published at all. Absence is the sin's
+/// signature, and that second half is the same loss shape as the fn-ref half fixed in `186e854`.
+///
+/// THE CONTROL IS THE POINT. `via_base` calls a method the DEP's trait really declares, through the same
+/// receiver, the same bound and the same dep — one variable, WHICH METHOD — and must still publish
+/// `depcrate#Sink::emit`. Without it this test would pass just as well for a fix that silenced every
+/// foreign key, which is the cardinal-sin direction.
+///
+/// THE FIXTURE COMPILES — verified with a path dependency before any assertion was read (§E3: a control
+/// that asserts an absence must compile and run, or no correct engine could pass it differently). That
+/// matters most for `via_collision`: `s.poll_emit()` building at all is the proof that a supertrait and
+/// its extension MAY declare one name, resolved by receiver type rather than by ambiguity.
+///
+/// WHAT THIS FIXTURE DOES NOT PIN, said plainly: `depcrate` here never implements `Sink::emit_twice`,
+/// which is what licenses the rewrite. The rule's OTHER half — a crate that DOES implement the member
+/// for the base trait keeps the base-trait key — is not exercisable from this two-crate shape and is
+/// pinned by the corpus measurement instead (futures-lite's `StreamExt::poll_next` beside
+/// `Stream::poll_next`, recorded in CHANGELOG.md). Stated rather than implied, because a supertrait
+/// relation does NOT forbid the base trait from declaring the same name: the receiver types differ and
+/// the call resolves without ambiguity. An earlier draft of this fix asserted that it did.
+#[test]
+fn r551_an_extension_traits_method_is_keyed_to_the_trait_that_declares_it_not_the_base_trait() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r551-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    // A defaulted method and a real impl so the dep report is not HOLLOW — a trait of nothing but
+    // bodiless members analyses to `count: 0`, and every downstream number would be read off nothing.
+    let dep = pkg("depcrate", "",
+        "use std::pin::Pin;\n\
+         pub trait Sink {\n\
+         \x20   fn emit(&self) -> usize;\n\
+         \x20   fn poll_emit(self: Pin<&mut Self>) -> usize;\n\
+         \x20   fn describe(&self) -> usize { self.emit() }\n\
+         }\n\
+         pub struct Real;\n\
+         impl Sink for Real {\n\
+         \x20   fn emit(&self) -> usize { 1 }\n\
+         \x20   fn poll_emit(self: Pin<&mut Self>) -> usize { 2 }\n\
+         }\n");
+    // `SinkExt: Sink` is the shape: an extension trait declared HERE over an abstraction declared THERE,
+    // with the blanket impl that makes it callable on any `Sink`.
+    let app = pkg("appcrate", "depcrate = \"1\"\n",
+        "use depcrate::Sink;\n\
+         use std::pin::Pin;\n\
+         pub trait SinkExt: Sink {\n\
+         \x20   fn emit_twice(&self) -> usize { self.emit() + self.emit() }\n\
+         \x20   fn poll_emit(&mut self) -> usize where Self: Unpin + Sized {\n\
+         \x20       Sink::poll_emit(Pin::new(self))\n\
+         \x20   }\n\
+         }\n\
+         impl<T: Sink + ?Sized> SinkExt for T {}\n\
+         pub struct Mine;\n\
+         impl Sink for Mine {\n\
+         \x20   fn emit(&self) -> usize { 3 }\n\
+         \x20   fn poll_emit(self: Pin<&mut Self>) -> usize { 4 }\n\
+         }\n\
+         pub fn via_collision<T: Sink + Unpin>(s: &mut T) -> usize { s.poll_emit() }\n\
+         pub trait CountExt: Iterator {\n\
+         \x20   fn tally(&mut self) -> usize { 0 }\n\
+         }\n\
+         impl<T: Iterator + ?Sized> CountExt for T {}\n\
+         pub fn via_ext<T: Sink>(s: &T) -> usize { s.emit_twice() }\n\
+         pub fn via_base<T: Sink>(s: &T) -> usize { s.emit() }\n\
+         pub fn via_prelude<I: Iterator<Item = u8>>(mut it: I) -> usize { it.tally() }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json");
+        if deps.is_empty() {
+            c.env_remove("CANDOR_DEPS");
+        } else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+
+    let dep_rep = scan(&dep, &[]);
+    assert_ne!(dep_rep["analyzed"]["count"].as_u64().unwrap_or(0), 0,
+        "the dep report must not be HOLLOW — `analyzed.count: 0` makes every downstream figure a \
+         reading off nothing (SOUNDNESS R242)");
+    let dep_path = d.join("dep.json");
+    std::fs::write(&dep_path, serde_json::to_string(&dep_rep).unwrap()).unwrap();
+
+    let app_rep = scan(&app, &[&dep_path]);
+    let keys = |name: &str| -> Vec<String> {
+        app_rep["functions"].as_array().unwrap().iter()
+            .find(|e| e["fn"] == name)
+            .unwrap_or_else(|| panic!("{name} must be emitted; report: {app_rep}"))
+            ["dispatchesOn"].as_array().cloned().unwrap_or_default()
+            .iter().filter_map(|k| k.as_str().map(str::to_string)).collect()
+    };
+
+    // THE CONTROL — a member the DEP's own trait really declares still keys to the dep. Same receiver,
+    // same bound, same dep; the method is the only variable.
+    assert!(keys("via_base").iter().any(|k| k == "depcrate#Sink::emit"),
+        "CONTROL: a genuine base-trait member must still be keyed to the base trait: {:?}",
+        keys("via_base"));
+
+    // THE ROW THIS TEST EXISTS FOR.
+    let ext = keys("via_ext");
+    assert!(ext.iter().any(|k| k == "appcrate#SinkExt::emit_twice"),
+        "SOUNDNESS R551: `emit_twice` is declared by the LOCAL extension trait `SinkExt`, so the \
+         published key must name `SinkExt` — that is the key a consumer can join under ⟨0.39⟩ \
+         obligation 3: {ext:?}");
+    assert!(!ext.iter().any(|k| k == "depcrate#Sink::emit_twice"),
+        "SOUNDNESS R551: `depcrate#Sink::emit_twice` names a member `Sink` does not declare, so no \
+         consumer could ever join it — it must not be published: {ext:?}");
+
+    // THE SECOND CONTROL — THE REWRITE IS A REWRITE, NEVER AN ADDITION. `CountExt: Iterator` is the
+    // same extension-trait shape over a PRELUDE bound, which publishes no key today because the name
+    // expands to a bare leaf with no owner. A draft that omitted that gate minted keys here, and on
+    // rayon (`trait Producer: Send + Sized`) it claimed `OptionProducer::into_iter` dispatches on
+    // `Producer::into_iter` where the call is `Option::into_iter` — a FABRICATED dispatch a consumer
+    // would union implementors onto. Found by auditing the A/B's ADDED column, which is why this
+    // control exists at all.
+    let prelude: Vec<String> = app_rep["functions"].as_array().unwrap().iter()
+        .find(|e| e["fn"] == "via_prelude")
+        .map(|r| r["dispatchesOn"].as_array().cloned().unwrap_or_default()
+            .iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(prelude.is_empty(),
+        "SOUNDNESS R551: a prelude-rooted bound publishes no key today, so the rewrite must add \
+         none — it fires only where a MALFORMED key would otherwise have been published: {prelude:?}");
+
+    // THE THIRD CONTROL — A NAME COLLISION, WHICH IS NOT A MALFORMED KEY. `SinkExt::poll_emit(&mut
+    // self)` sits beside `Sink::poll_emit(self: Pin<&mut Self>)`: legal, unambiguous, and resolved by
+    // the RECEIVER TYPE, which this engine does not model. It is the real shape — futures-lite's
+    // `StreamExt::poll_next` beside `Stream::poll_next` — and it is why the supertrait relation is
+    // EVIDENCE and not a proof. `appcrate` implements `Sink::poll_emit` for `Mine`, so obligation 2's
+    // index says the base trait really has the member, and the base-trait key STAYS. That is the
+    // conservative choice on purpose: `depcrate#Sink::poll_emit` is joinable and reaches the
+    // implementors that carry effects, while the extension trait's key reaches a defaulted body one hop
+    // away. Without this guard the fix rewrote 11 real `futures_core#stream::Stream::poll_next` rows.
+    let coll = keys("via_collision");
+    assert!(coll.iter().any(|k| k == "depcrate#Sink::poll_emit"),
+        "SOUNDNESS R551: `appcrate` implements `Sink::poll_emit`, so the base trait demonstrably HAS \
+         the member and its key must survive the extension-trait rewrite: {coll:?}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
