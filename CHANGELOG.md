@@ -10,6 +10,13 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **coverage-gate manifests refreshed** — `coverage-gate-refresh` has been red since 2026-09-23 on pure
+  crates.io drift: REGRESSED 0, ORACLE-DROPPED 0, GROWN 47. No coverage was lost; 47 public entry points
+  appeared in newer crate versions. Regenerated against a fresh fetch and verified the diff is growth
+  only: the two `etcetera::Windows` rows that changed gained `Unknown` in the SELF-SCAN column while
+  their classify() column stayed `Env` (still covered), and the four removals are entries that no longer
+  exist upstream. Re-diffing fresh against the committed files now reports 0/0/0.
+
 - **⚠ A `dyn` FIELD and a `dyn` RETURN DID NOT COUNT AS ERASED, so a consumer's own implementor of a
   DEPENDENCY's abstraction read SILENT-PURE through either (SOUNDNESS R562).**
 

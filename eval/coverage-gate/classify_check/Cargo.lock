@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "candor-classify"
-version = "0.38.3"
+version = "0.39.2"
 dependencies = [
  "candor-report",
 ]
 
 [[package]]
 name = "candor-report"
-version = "0.38.3"
+version = "0.39.2"
 dependencies = [
  "serde",
  "serde_json",
