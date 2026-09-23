@@ -10,6 +10,25 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **A trait method named as a FUNCTION REFERENCE is a dispatch, and the key for it was never published
+  (SOUNDNESS R549, mechanism B).** `xs.front().map(Buf::chunk)` spells the dispatch as a value, so
+  `visit_expr_method_call` never saw it. Measured on http-body-util: `bytes#Buf::chunk` appeared NOWHERE
+  in the report while the same function published `bytes#Buf::map` and `bytes#Buf::unwrap_or_default` —
+  neither a `Buf` member. ⟨0.39⟩ obligation 3 tells a consumer to JOIN on the key; there was no key.
+
+  The fix needed a new predicate, not the existing one. `trait_quals` answers *what is this trait's
+  crate-qualified spelling* and deliberately drops a BARE-LEAF bound (`T: Buf`) because `expand` + the
+  file's `use` map owns qualification — so it cannot answer *is this name a trait*, which is what
+  distinguishes `Buf::chunk` from `SomeStruct::new`. And it is built from a FUNCTION SIGNATURE's
+  generics only, so a bound on the IMPL BLOCK (`impl<T: Buf> BufList<T>` — the shape the real code uses)
+  was invisible. `bound_trait_leaves` is a new additive index: bare leaves included, impl generics
+  merged in, read by nothing but this predicate, so it cannot move any inferred effect.
+
+  A/B over six chained crate pairs: **0 effect rows changed, 12 dispatch keys added, 0 lost** — every one
+  a real trait method (`TryStream::try_poll_next`, `Buf::chunk`, `Future::poll`, `Stream::size_hint`,
+  `AsyncWrite::poll_flush`/`shutdown`). Disclosure, not fabrication. Three-row regression test with the
+  method-call spelling as its control; calibrated to FAIL with the fix disabled.
+
 ## [0.39.2] — 2026-09-22
 
 ### ⚠ R535/R538/R540/R541: THE RECEIVER-POSITION FAMILY, SWEPT ONCE

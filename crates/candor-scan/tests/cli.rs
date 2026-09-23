@@ -4646,3 +4646,100 @@ fn r525_a_config_alias_in_an_unrelated_rule_does_not_erase_the_out_of_scope_disc
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SOUNDNESS R549 (mechanism B) — A TRAIT METHOD NAMED AS A FUNCTION REFERENCE IS A DISPATCH, AND THE
+/// KEY FOR IT WAS NEVER PUBLISHED.
+///
+/// `xs.front().map(Buffy::chunk)` spells the dispatch as a VALUE, never as a method call, so
+/// `visit_expr_method_call` never saw it. Measured on http-body-util at HEAD: `bytes#Buf::chunk` appeared
+/// NOWHERE in the report, while the same function published `bytes#Buf::map` and
+/// `bytes#Buf::unwrap_or_default` — neither of which `Buf` declares. ⟨0.39⟩ obligation 3 tells a consumer
+/// to JOIN on the key; there was no key to join, so the dispatch read as purity.
+///
+/// THE CONTROL IS THE POINT AND IT IS WHY THIS IS A THREE-ROW TEST: `via_method` writes the SAME dispatch
+/// on the SAME trait through the SAME dep as an ordinary method call and always resolved. One variable —
+/// how the dispatch is spelled — and only one spelling was reported.
+///
+/// The bound is written on the IMPL BLOCK (`impl<T: Buffy>`), deliberately: that is the shape the real
+/// code uses, and `sig_trait_quals` reads a FUNCTION SIGNATURE's generics only, so the trait-name index
+/// could not see it. `bound_trait_leaves` is the additive index that answers "is this name a trait" —
+/// including a BARE-LEAF bound, which `quals_from_bounds` drops on purpose because it carries no crate
+/// identity. Qualification still comes from `expand` + the file's `use` map.
+#[test]
+fn r549_a_trait_method_named_as_a_function_reference_publishes_the_same_key_as_a_method_call() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r549-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let pkg = |name: &str, deps: &str, src: &str| {
+        let p = d.join(name);
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(p.join("src/lib.rs"), src).unwrap();
+        p
+    };
+    // A defaulted method and a real impl so the dep report is not HOLLOW — a trait of nothing but
+    // bodiless members analyses to `count: 0`, which every downstream number would then be read off.
+    let dep = pkg("depcrate", "",
+        "pub trait Buffy {\n\
+         \x20   fn chunk(&self) -> &[u8];\n\
+         \x20   fn describe(&self) -> usize { self.chunk().len() }\n\
+         }\n\
+         pub struct Real;\n\
+         impl Buffy for Real { fn chunk(&self) -> &[u8] { b\"x\" } }\n");
+    let app = pkg("appcrate", "depcrate = \"1\"\n",
+        "use depcrate::Buffy;\n\
+         use std::collections::VecDeque;\n\
+         pub struct BufList<T> { pub bufs: VecDeque<T> }\n\
+         impl<T: Buffy> BufList<T> {\n\
+         \x20   pub fn via_fnref(&self) -> &[u8] {\n\
+         \x20       self.bufs.front().map(Buffy::chunk).unwrap_or_default()\n\
+         \x20   }\n\
+         \x20   pub fn via_method(&self) -> &[u8] {\n\
+         \x20       match self.bufs.front() { Some(b) => b.chunk(), None => &[] }\n\
+         \x20   }\n\
+         }\n");
+
+    let scan = |dir: &std::path::Path, deps: &[&std::path::Path]| -> serde_json::Value {
+        let mut c = Command::new(bin());
+        c.arg(dir.to_string_lossy().as_ref()).arg("--json");
+        if deps.is_empty() {
+            c.env_remove("CANDOR_DEPS");
+        } else {
+            c.env("CANDOR_DEPS", deps.iter().map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join(" "));
+        }
+        let out = c.output().expect("run candor-scan");
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+    let row = |v: &serde_json::Value, name: &str| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == name).cloned()
+    };
+
+    let dep_rep = scan(&dep, &[]);
+    assert_ne!(dep_rep["analyzed"]["count"].as_u64().unwrap_or(0), 0,
+        "the dep report must not be HOLLOW — `analyzed.count: 0` makes every downstream figure a \
+         reading off nothing (SOUNDNESS R242)");
+    let dep_path = d.join("dep.json");
+    std::fs::write(&dep_path, serde_json::to_string(&dep_rep).unwrap()).unwrap();
+
+    let app_rep = scan(&app, &[&dep_path]);
+    let keys = |name: &str| -> Vec<String> {
+        row(&app_rep, name)
+            .unwrap_or_else(|| panic!("{name} must be emitted"))
+            ["dispatchesOn"].as_array().cloned().unwrap_or_default()
+            .iter().filter_map(|k| k.as_str().map(str::to_string)).collect()
+    };
+
+    // THE CONTROL — the ordinary spelling, which has always worked.
+    assert!(keys("BufList::via_method").iter().any(|k| k == "depcrate#Buffy::chunk"),
+        "CONTROL: a dispatch written as a method call names the member: {:?}",
+        keys("BufList::via_method"));
+
+    // THE ROW THIS TEST EXISTS FOR — the same dispatch, named as a function reference.
+    assert!(keys("BufList::via_fnref").iter().any(|k| k == "depcrate#Buffy::chunk"),
+        "SOUNDNESS R549: `map(Buffy::chunk)` IS a dispatch on `Buffy::chunk`, and the key must be \
+         published so a consumer can join it under ⟨0.39⟩ obligation 3. Before the fix this row \
+         carried ONLY `Buffy::map` and `Buffy::unwrap_or_default` — two members `Buffy` does not \
+         declare — while the member it really dispatches on appeared nowhere in the report: {:?}",
+        keys("BufList::via_fnref"));
+}

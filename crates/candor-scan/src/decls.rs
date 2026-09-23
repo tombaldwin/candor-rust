@@ -95,7 +95,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -134,7 +134,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -187,7 +187,9 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
-                            Some(&tname), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                            Some(&tname),
+                            None, // R549 impl_generics — a trait-DEFAULT body has no impl block
+                            include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm
@@ -208,7 +210,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -1853,6 +1855,10 @@ pub(crate) fn fninfo(
     sig: &syn::Signature,
     block: &syn::Block,
     self_ty: Option<&str>,
+    // SOUNDNESS R549 — the ENCLOSING `impl` block's generics, so `impl<T: Buf> BufList<T>` is visible
+    // to `bound_trait_leaves`. `sig` alone cannot see it, which is why the trait-name index missed the
+    // commonest way a bound is written. `None` for a free fn or a trait-default body.
+    impl_generics: Option<&syn::Generics>,
     // SOUNDNESS R373 — threaded so the two BODY-LOCAL `use` sites can ask `use_item_applies` the
     // question every module-level site already asks. `collect_root_reexports` was once "the one site
     // of the five that could not even express the question"; these were the sixth and seventh, and
@@ -2005,6 +2011,14 @@ pub(crate) fn fninfo(
         generic_bounds: crate::lang::generic_bounds_of(sig),
         // The crate-qualified spelling of any bound written in full (`&dyn deplib::Handler`) — R6.
         trait_quals: crate::lang::sig_trait_quals(sig),
+        bound_trait_leaves: {
+            let mut v = std::collections::HashSet::new();
+            crate::lang::bound_trait_leaves(&sig.generics, &mut v);
+            if let Some(g) = impl_generics {
+                crate::lang::bound_trait_leaves(g, &mut v);
+            }
+            v
+        },
         trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),
         fields,
         trait_fields: traits.fields,

@@ -239,6 +239,7 @@
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+ bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -290,6 +291,7 @@
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+ bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -618,6 +620,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
+ bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
@@ -6551,6 +6554,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+ bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -6606,6 +6610,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+ bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -6631,6 +6636,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+ bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -6665,6 +6671,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+ bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -6702,6 +6709,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+ bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -18653,6 +18661,7 @@ pub fn go() {{ imp::doit(); }}
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
+ bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,

@@ -167,6 +167,45 @@ fn plain_type_ident(ty: &syn::Type) -> Option<String> {
     }
 }
 
+/// SOUNDNESS R549 — THE NAMES THIS SCOPE BINDS AS TRAITS, bare leaves included.
+///
+/// `quals_from_bounds` deliberately SKIPS a bare-leaf bound (`T: Buffy`) because it carries no crate
+/// identity and `expand` + the file's `use` map owns the qualification. That is right for building a
+/// QUALIFIER map and wrong for answering a different question: *is this name a trait at all?* Without an
+/// answer, `Buffy::chunk` in value position is indistinguishable from `SomeStruct::new`, and R549's
+/// fn-ref dispatch cannot be recorded without also minting keys for inherent associated functions.
+///
+/// So this collects the LAST segment of every trait bound, qualified or not, and is consulted ONLY as a
+/// predicate. It is additive: no existing resolver reads it, so it cannot change any effect already
+/// inferred. Caller merges the enclosing `impl<T: Trait>` block's generics with the method's own —
+/// `sig_trait_quals` sees only the signature, which is why `impl<T: Buf> BufList<T>` was invisible.
+pub(crate) fn bound_trait_leaves(generics: &syn::Generics, out: &mut std::collections::HashSet<String>) {
+    fn eat(
+        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for b in bounds {
+            if let syn::TypeParamBound::Trait(t) = b {
+                if let Some(last) = t.path.segments.last() {
+                    out.insert(last.ident.to_string());
+                }
+            }
+        }
+    }
+    for p in &generics.params {
+        if let syn::GenericParam::Type(tp) = p {
+            eat(&tp.bounds, out);
+        }
+    }
+    if let Some(w) = &generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                eat(&pt.bounds, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for arg in &sig.inputs {

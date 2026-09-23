@@ -136,6 +136,9 @@ pub(crate) struct CallCollector<'a> {
     /// resolves each receiver to its OWN crate instead of collapsing both onto one leaf.
     pub(crate) trait_quals_by_param: HashMap<String, HashMap<String, String>>,
     pub(crate) trait_quals: HashMap<String, String>,
+    /// SOUNDNESS R549 — names bound as TRAITS in this scope (impl block + signature, bare leaves
+    /// included). Consulted ONLY as a predicate by `visit_expr_path`; no resolver reads it.
+    pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
     /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
@@ -4142,6 +4145,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
     }
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        // SOUNDNESS R549 (mechanism B) — A TRAIT METHOD NAMED AS A FUNCTION REFERENCE IS A DISPATCH.
+        // `xs.front().map(Buf::chunk)` never spells `Buf::chunk` as a method CALL, so
+        // `visit_expr_method_call` never sees it and no key was formed. Measured on http-body-util at
+        // HEAD: `bytes#Buf::chunk` appears NOWHERE in the report while the same fn publishes
+        // `bytes#Buf::map` and `bytes#Buf::unwrap_or_default`, neither a `Buf` member. A consumer told by
+        // ⟨0.39⟩ obligation 3 to join on the key had no key to join.
+        //
+        // THE PREDICATE IS `bound_trait_leaves`, NOT `trait_quals`, and that distinction is the whole fix.
+        // `trait_quals` answers "what is this trait's crate-qualified spelling" and deliberately drops a
+        // BARE-LEAF bound (`T: Buf`) because `expand` + `uses` owns the qualification — so it cannot
+        // answer "is this name a trait", which is the question here. Without that, `deplib::Thing::new`
+        // (an inherent associated fn, not a dispatch) would mint a key, which is the very defect R549 is.
+        // Qualification still comes from `expand`, exactly as the method-call route does it.
+        if node.qself.is_none() && node.path.segments.len() >= 2 {
+            let segs: Vec<String> = node.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let leaf = segs[segs.len() - 1].clone();
+            let tr = segs[segs.len() - 2].clone();
+            if self.bound_trait_leaves.contains(&tr) && self.local_traits.get(&tr).is_none() {
+                let full = crate::lang::expand(&tr, &self.uses);
+                let root = full.split("::").next().unwrap_or("");
+                if crate::lang::is_dependency_crate_root(root) {
+                    if let Some((owner, rest)) = full.split_once("::") {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R549HIT {owner}#{rest}::{leaf}"); // §E1 REACH PROBE
+                        }
+                        self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
+                    }
+                }
+            }
+        }
         // FORCING a lazy/deferred static: any mention of the static's NAME (deref `*X`, `X.method()`,
         // `Lazy::force(&X)`, `X.with(..)`, or a bare path `X`) runs its deferred init on first use. Edge
         // to the static's synthetic init unit (`<lazy>::NAME`) so the init's effect propagates here. We
