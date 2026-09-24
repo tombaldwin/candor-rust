@@ -10,6 +10,49 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A TRAIT MEMBER WITH A DEFAULT BODY PUBLISHED THE DEFAULT BODY INSTEAD OF THE IMPLEMENTOR UNION,
+  BECAUSE THE UNION WAS DISCARDED WHENEVER A REAL ROW ALREADY CLAIMED ITS HASH (SOUNDNESS R597).**
+
+      pub trait Sink { fn emit(&self) { let _ = std::fs::read("/tmp/a"); } }   // DEFAULT BODY
+      pub struct Loud;
+      impl Sink for Loud { fn emit(&self) { let _ = TcpStream::connect("h:1"); } }
+
+  `sinkpkg#Sink::emit` published `["Fs"]` — the default body — and nothing else. That is the one key
+  ⟨0.39⟩ §4 obligation 3 tells a chained consumer to join a `&dyn Sink` dispatch on, so a consumer
+  doing `s.emit()` read `Fs` and `deny Net` exited **0** over a dependency whose only override opens a
+  socket. Executed both ways on one tree with one consumer binary: the ONLY variable is whether the
+  dependency's report carries the union row, and the gate goes 0 -> 1.
+
+  The interface-union entry was emitted only where no real row claimed its hash. The two rows answer
+  DIFFERENT questions and neither set contains the other: the real row is the DEFAULT BODY, the union
+  is over the IMPLEMENTORS' OVERRIDES. A second route reaches the same suppression with no default
+  body anywhere — an implementor TYPE whose leaf equals the trait's, which is `portable_pty`'s
+  `impl Child for std::process::Child` claiming `portable_pty#Child::wait`.
+
+  MEASURED over 1,626 cargo-registry crates before the change (`CANDOR_R590_INSTR`, kept): **244
+  suppressions reached, 233 where the union added nothing, 11 where IT KNEW MORE.** Five of those
+  eleven published `inferred: []` with no disclosure at all — a §2 purity claim — while this engine
+  had computed `Unknown` for the dispatch targets and thrown it away: `combine#parser::Parser::
+  parse_mode_impl`, three `sea_query` builder members, `tracing_subscriber#fmt::writer::MakeWriter::
+  make_writer_for`. One dropped a CONCRETE effect: `portable_pty#Child::wait`, union `{Exec, Log}`
+  against the published `[Exec]`, the `Log` traced to `SerialChild::wait` (src/serial.rs:153).
+
+  **THE UNION GOES BESIDE THE REAL ROW, NOT INTO IT.** Merging is the charging direction and it
+  fabricates — the real row carries a `loc` and is a concrete body, so folding a sibling implementor's
+  `Log` into it charges an effect to a line that does not perform it. Two entries under one key are
+  UNIONED BY THE CONSUMER, ruled family-wide in candor-spec/ENTRY-COLLISION-DECISION.md (four-way
+  2026-08-02, conformance PART 26) and implemented in `deps.rs`; `candor-query` filters
+  `interfaceUnion` rows at its ingress, so no local verb sees a second unit and `analyzed.count` and
+  its digest are unchanged. Emitted only where the union knows something the real row does not, or the
+  other 233 become duplicate informationless rows.
+
+  A/B, 1,626 crates, pre-image = `e50a18e`: **ADDED 0 keys, REMOVED 0 keys, 67 keys CHANGED** (rows
+  327,762 -> 327,829). Every one of the 67: PRE lost nothing and POST gained exactly one
+  `interfaceUnion` row — **no published row changed a byte anywhere in the corpus.** 11 from the
+  effects leg, 63 from the coverage (`invisible`) leg, 7 in both. REACH measured, not inferred: 11
+  hits across 7 entries. The FOREIGN leg of the same suppression has **zero reach** over this corpus
+  and is safety-only, recorded here rather than discovered later.
+
 - **⚠ WHETHER A DISPATCH WAS SEEN DEPENDED ON WHETHER THE FILE HAPPENED TO `use` THE TRAIT
   (SOUNDNESS R577). A FIELD, a RETURN and a CLOSURE PARAMETER went silent; the SIGNATURE and
   annotated-`let` spellings of the identical receiver resolved.**

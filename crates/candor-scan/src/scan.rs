@@ -3870,6 +3870,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         Some(format!("{crate_name}#{one}::{method}"))
     }
 
+    /// SOUNDNESS R597/R598 — DOES THE SUPPRESSED UNION KNOW ANYTHING THE ROW ALREADY AT `hash` DOES NOT?
+    ///
+    /// A union entry used to be emitted *only* where no real row claimed its hash, so the union was
+    /// DISCARDED wherever a body row existed. Two different facts want that one key and neither contains
+    /// the other, which is why the discard loses:
+    ///
+    ///   · the trait member has a DEFAULT BODY, so `crate#Trait::m` is already an analysed unit — the
+    ///     default body — while this union is over the IMPLEMENTORS' OVERRIDES (R597);
+    ///   · or an implementor TYPE's leaf equals the trait's, so `impl Child for std::process::Child`
+    ///     publishes `pty#Child::wait` and collides with the trait member key of the same name (R598).
+    ///
+    /// Returns `(effects_add, invisible_add)`. `Unknown` on the existing row COVERS any effect, so it is
+    /// not a loss; `invisible` is checked separately because §2 makes `inferred: []` WITH a non-empty
+    /// `invisible` explicitly not a purity claim, and without it the two channels mask each other.
+    fn union_adds_over_row(
+        entries: &[ReportEntry],
+        hash: &str,
+        inf_u: &std::collections::BTreeSet<&'static str>,
+        blind_u: &std::collections::BTreeSet<String>,
+    ) -> (bool, bool) {
+        // No row at this hash cannot happen — `existing` is built from `entries` and `entries` only
+        // grows — but the safe answer if it ever did is EMIT, never withhold.
+        let Some(real) = entries.iter().find(|e| e.hash == hash) else { return (true, true) };
+        let covered = real.inferred.iter().any(|e| e == "Unknown");
+        (
+            !covered && inf_u.iter().any(|e| !real.inferred.iter().any(|r| r == e)),
+            blind_u.iter().any(|c| !real.invisible.iter().any(|r| r == c)),
+        )
+    }
+
     // ⟨0.39⟩ SPEC §4 obligation 1 — `dispatchesOn`, TRANSITIVELY. The raw material is `FnInfo::dispatch`
     // (`CallCollector::dispatch_sites`), which records the (trait leaf, method leaf) pairs a body dispatches
     // on through a LOCAL bounded-CHA-eligible receiver, regardless of how many implementors are visible.
@@ -4365,31 +4395,64 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 else {
                     continue;
                 };
+                // SOUNDNESS R597 — A REAL ROW AT THIS HASH NO LONGER DISCARDS THE UNION; IT SITS BESIDE IT.
+                //
+                // This used to be `if existing.contains(&hash) { continue }` — "a real entry already
+                // claims this hash". It does, and it is answering a DIFFERENT QUESTION. The real row is
+                // the trait member's DEFAULT BODY (`crate#Trait::m` is an analysed unit the moment the
+                // method has one); this union is over the IMPLEMENTORS' OVERRIDES. Neither set contains
+                // the other, so the discard published the default body alone under the one key ⟨0.39⟩
+                // §4 obligation 3 tells a consumer to join a dyn dispatch on — R576(a) seen from the
+                // consumer side, one cause, two rows.
+                //
+                // MEASURED before the change, over the 1,626-crate cargo-registry corpus (the
+                // `CANDOR_R590_INSTR` probe below, which is why it is still here): 244 suppressions
+                // reached, 233 where the union adds nothing, and 11 where IT KNEW MORE — five of them a
+                // published key reading `inferred: []` with no disclosure at all (a §2 purity claim)
+                // while this engine had computed `Unknown` for the dispatch target set and thrown it
+                // away: `combine#parser::Parser::parse_mode_impl`, three `sea_query` builder members,
+                // `tracing_subscriber#fmt::writer::MakeWriter::make_writer_for`.
+                //
+                // BESIDE, NOT MERGED INTO. Merging is the CHARGING direction and it fabricates: the real
+                // row carries a `loc` and is a concrete body, so folding a sibling implementor's `Log`
+                // into it charges an effect to a function at a line that does not perform it — which is
+                // exactly what R598's `portable_pty#Child::wait` would have suffered. Two entries under
+                // one key are UNIONED BY THE CONSUMER, ruled family-wide in
+                // candor-spec/ENTRY-COLLISION-DECISION.md (shipped four-way 2026-08-02, pinned by
+                // conformance PART 26) and implemented here in `deps.rs` — `idx.by_key.entry(k)
+                // .or_default().union_with(&de)`, whose own comment says "TWO ENTRIES UNDER ONE KEY ARE
+                // UNIONED — never withdrawn, never picked between", and whose item 2 names the
+                // WITHIN-report collision as the same defect. So this emits no new resolution rule: it
+                // supplies a contributor to one that already exists, and every published row keeps its
+                // bytes. `candor-query` filters `interfaceUnion` rows at its ingress (`load.rs`, R511),
+                // so no local verb sees a second unit.
+                //
+                // ONLY WHEN IT ADDS SOMETHING, or the other 233 become duplicate rows carrying nothing.
+                // The narrowing fails in the withholding direction if it is ever wrong, so it is exact
+                // set arithmetic on the published fields rather than a heuristic — and `Unknown` on the
+                // real row covers any effect, which is why those cases are not losses.
                 if existing.contains(&hash) {
-                    // SOUNDNESS R590 — MEASUREMENT ONLY, changes no report. A union row is emitted
-                    // *only* where no real row claims the hash, so the union is SUPPRESSED wherever a
-                    // body row exists. The open question is whether the suppressed union ever knew
-                    // something the body row does not: the real row is the DEFAULT BODY's analysis,
-                    // while this loop looked up `{ty}::{method}` per implementor — i.e. the OVERRIDES.
-                    // Neither contains the other, so a chained consumer keying on `crate#Trait::m`
-                    // could be getting the default body only. That is [[R576]](a) seen from the
-                    // consumer side, and it was surfaced by R576(b)'s A/B rather than reasoned about.
-                    // `Unknown` on the real row COVERS anything, so it is not a loss.
-                    if std::env::var_os("CANDOR_R590_INSTR").is_some() && !inf_u.is_empty() {
+                    let (eff_adds, blind_adds) = union_adds_over_row(&entries, &hash, &inf_u, &blind_u);
+                    // §E1 REACH PROBE, and the population counter the pre-fix measurement was taken
+                    // with — same line shapes, so 244/233/11 stays re-countable rather than re-argued.
+                    if std::env::var_os("CANDOR_R590_INSTR").is_some() {
                         if let Some(real) = entries.iter().find(|e| e.hash == hash) {
-                            let covered = real.inferred.iter().any(|e| e == "Unknown");
-                            let lost: Vec<&&str> = inf_u
-                                .iter()
-                                .filter(|e| !covered && !real.inferred.iter().any(|r| r == *e))
-                                .collect();
-                            if !lost.is_empty() {
-                                eprintln!("R590LOST {hash} union={inf_u:?} real={:?}", real.inferred);
-                            } else {
-                                eprintln!("R590OK {hash}");
+                            if !inf_u.is_empty() {
+                                if eff_adds {
+                                    eprintln!("R590LOST {hash} union={inf_u:?} real={:?}", real.inferred);
+                                } else {
+                                    eprintln!("R590OK {hash}");
+                                }
+                            }
+                            if blind_adds {
+                                eprintln!(
+                                    "R590BLIND {hash} union={blind_u:?} real={:?}", real.invisible);
                             }
                         }
                     }
-                    continue; // a real entry already claims this hash
+                    if !eff_adds && !blind_adds {
+                        continue; // the real entry at this hash already carries everything the union knows
+                    }
                 }
                 entries.push(ReportEntry {
                     func: hash.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
@@ -4436,9 +4499,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if owner == crate_name || !deps.contains(owner) {
                 continue;
             }
-            if existing.contains(key) {
-                continue; // a real entry already claims this hash
-            }
             let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
             let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             if merged.nested_impl_foreign.contains(key) {
@@ -4472,6 +4532,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if inf_u.is_empty() && blind_u.is_empty() {
                 continue; // pure across every implementor this crate supplies — silence = purity
             }
+            // SOUNDNESS R597, the FOREIGN leg — the same suppression, and the audit boundary is not
+            // drawn around the local loop that triggered it. The check moved BELOW the union
+            // computation (it read `existing.contains(key)` above it and returned before there was
+            // anything to compare), so a real row at this hash now withholds the entry only when it
+            // already carries everything the union knows. A foreign key is `{owner}#…` with
+            // `owner != crate_name`, so a collision needs a row published under another package's
+            // namespace — obligation 2 is exactly the mechanism that mints those, and this leg emits
+            // one per (owner, member) pair.
+            if existing.contains(key) {
+                let (eff_adds, blind_adds) = union_adds_over_row(&entries, key, &inf_u, &blind_u);
+                if std::env::var_os("CANDOR_R590_INSTR").is_some() {
+                    eprintln!("R590FOREIGN {key} adds_eff={eff_adds} adds_blind={blind_adds}");
+                }
+                if !eff_adds && !blind_adds {
+                    continue; // the real entry at this hash already carries everything the union knows
+                }
+            }
             entries.push(ReportEntry {
                 func: key.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
                 inferred: inf_u.iter().map(|s| s.to_string()).collect(),
@@ -4490,7 +4567,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // happened to produce — so two runs of ONE binary over ONE crate gave different bytes with an
     // identical row multiset. Measured live on reqwest-0.13.5. `hash` is `crate#qual` and equals `func`'s
     // own qualification for every ordinary row, so this can only break ties, never reorder.
-    entries.sort_by(|a, b| a.func.cmp(&b.func).then_with(|| a.hash.cmp(&b.hash)));
+    //
+    // SOUNDNESS R597 — AND ON `interfaceUnion` AFTER THAT, because a union entry may now sit BESIDE the
+    // real row that claims its hash, so `func` AND `hash` both tie. Insertion order happens to settle it
+    // (the real row is pushed in an earlier phase and the sort is stable), but that is a property of two
+    // distant code paths rather than of this comparator — and `trait_decls` is a HashMap, so "happens to"
+    // is the word the reqwest instance above was also true of until it wasn't. `false < true` puts the
+    // analysed unit first, which is the order a reader expects.
+    entries.sort_by(|a, b| {
+        a.func
+            .cmp(&b.func)
+            .then_with(|| a.hash.cmp(&b.hash))
+            .then_with(|| a.interface_union.cmp(&b.interface_union))
+    });
 
     let meta = candor_report::ReportMeta {
         version: format!("scan-{}", env!("CARGO_PKG_VERSION")),

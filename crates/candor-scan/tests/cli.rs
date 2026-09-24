@@ -4900,3 +4900,248 @@ fn r551_an_extension_traits_method_is_keyed_to_the_trait_that_declares_it_not_th
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SOUNDNESS R597 — **A REAL ROW AT THE MEMBER KEY USED TO DISCARD THE IMPLEMENTOR UNION, AND THE TWO
+/// ANSWER DIFFERENT QUESTIONS.**
+///
+/// The interface-union entry was emitted *only* where no real row claimed its hash. A trait method with a
+/// DEFAULT BODY is itself an analysed unit at exactly that hash, so the union over the IMPLEMENTORS'
+/// OVERRIDES was thrown away and `crate#Trait::m` published the default body alone — under the one key
+/// ⟨0.39⟩ §4 obligation 3 tells a chained consumer to join a dyn dispatch on. Neither set contains the
+/// other: the default body is what a non-overriding implementor runs, the overrides are what everybody
+/// else runs.
+///
+/// Measured over 1,626 cargo-registry crates before the fix: 244 suppressions reached, 233 where the
+/// union added nothing, **11 where it knew more** — five of them a published key reading `inferred: []`
+/// with no disclosure at all, which §2 makes a purity claim, while this engine had computed `Unknown` for
+/// the dispatch targets and discarded it.
+///
+/// **THE OVER-CHARGE CONTROL IS THE FIRST TWO ASSERTIONS, AND THEY ARE THE POINT.** The repair that
+/// suggests itself — merge the union INTO the real row — is the CHARGING direction and it fabricates: the
+/// real row carries a `loc` and is a concrete body, and `calls_the_default` statically binds to it. Both
+/// must keep `["Fs"]` and neither may gain `Net`. The union goes BESIDE the row instead, which two
+/// entries under one key already mean family-wide (candor-spec/ENTRY-COLLISION-DECISION.md, conformance
+/// PART 26) — `deps.rs` unions them at the consumer.
+#[test]
+fn r597_a_default_bodys_row_no_longer_discards_the_implementor_union() {
+    let d = make_crate(
+        "r597default",
+        "pub trait Sink {\n\
+         \x20   fn emit(&self) { let _ = std::fs::read(\"/tmp/a\"); }\n\
+         }\n\
+         pub struct Silent;\n\
+         impl Sink for Silent {}\n\
+         pub struct Loud;\n\
+         impl Sink for Loud { fn emit(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); } }\n\
+         pub fn calls_the_default() { let s = Silent; s.emit(); }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    let eff = |e: &serde_json::Value| -> Vec<String> {
+        e["inferred"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+
+    // ── OVER-CHARGE CONTROL 1: the ANALYSED UNIT at that hash keeps its own bytes ──────────────────
+    let real: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r597default#Sink::emit" && e["interfaceUnion"] != serde_json::json!(true))
+        .collect();
+    assert_eq!(real.len(), 1, "exactly one ANALYSED unit at the member hash: {v}");
+    assert_eq!(eff(real[0]), vec!["Fs".to_string()],
+        "THE DEFAULT BODY IS A CONCRETE BODY AT A CONCRETE `loc`, and it reads a file — it does not open \
+         a socket. Merging the implementor union into this row would charge `Net` to `src/lib.rs:2`, \
+         which is the fabrication direction this fix exists to avoid taking: {v}");
+    assert!(real[0]["loc"].is_string(), "the analysed unit must keep its location: {v}");
+
+    // ── OVER-CHARGE CONTROL 2: a caller that can only ever reach the default body ──────────────────
+    let caller = fns.iter().find(|e| e["fn"] == "calls_the_default").expect(&format!("{v}"));
+    assert_eq!(eff(caller), vec!["Fs".to_string()],
+        "`Silent` does not override `emit`, so this call runs the default body and nothing else. A merge \
+         would have charged it `Net` from a SIBLING implementor it cannot reach: {v}");
+
+    // ── THE FIX: the union sits BESIDE the real row, carrying what the overrides do ────────────────
+    let union: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r597default#Sink::emit" && e["interfaceUnion"] == serde_json::json!(true))
+        .collect();
+    assert_eq!(union.len(), 1,
+        "the union over `Sink`'s implementors must be PUBLISHED, not discarded because the member \
+         happens to have a default body. Without it `r597default#Sink::emit` answers a chained \
+         consumer's dyn dispatch with the default body alone: {v}");
+    assert_eq!(eff(union[0]), vec!["Net".to_string()],
+        "`Loud::emit` opens a TcpStream and it is the only override: {v}");
+    assert!(union[0]["loc"].is_null(), "a synthetic union row has no body and must carry no `loc`: {v}");
+}
+
+/// SOUNDNESS R597, THE SECOND ROUTE INTO THE SAME SUPPRESSION — **AN IMPLEMENTOR TYPE WHOSE LEAF EQUALS
+/// THE TRAIT'S.** Found by tracing the one corpus case that dropped a CONCRETE effect rather than an
+/// `Unknown`, and the mechanism is NOT the default body: `portable_pty`'s `Child` trait has no default
+/// body at all. `impl Child for std::process::Child` is keyed by the self type's LEAF, which is also
+/// `Child`, so the implementor's own unit claims `portable_pty#Child::wait` — the trait member key — and
+/// the union over all three implementors was dropped. `SerialChild::wait` (src/serial.rs:153) contains
+/// `log::error!("Error reading carrier detect: {:#}", err)`, and that `Log` was the effect the published
+/// key stopped carrying.
+///
+/// The over-charge control has MORE teeth here than in the default-body case: the row at that hash is a
+/// concrete implementor's method for a FOREIGN type, so merging would charge one implementor's `Log` to
+/// another implementor's body.
+#[test]
+fn r597_an_implementor_leaf_equal_to_the_traits_does_not_discard_the_union() {
+    let d = make_crate(
+        "r597leaf",
+        "pub trait Child { fn wait(&self); }\n\
+         impl Child for std::process::Child {\n\
+         \x20   fn wait(&self) { let _ = std::process::Command::new(\"true\").status(); }\n\
+         }\n\
+         pub struct SerialChild;\n\
+         impl Child for SerialChild { fn wait(&self) { log::error!(\"carrier detect\"); } }\n",
+    );
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"r597leaf\"\n\n[dependencies]\nlog = \"0.4\"\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    let eff = |e: &serde_json::Value| -> Vec<String> {
+        e["inferred"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+
+    // ── OVER-CHARGE CONTROL: `std::process::Child::wait` spawns nothing that LOGS ──────────────────
+    let real: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r597leaf#Child::wait" && e["interfaceUnion"] != serde_json::json!(true))
+        .collect();
+    assert_eq!(real.len(), 1, "exactly one ANALYSED unit at that hash: {v}");
+    assert_eq!(eff(real[0]), vec!["Exec".to_string()],
+        "this row IS `impl Child for std::process::Child`'s `wait`, at its own `loc`. `Log` belongs to a \
+         DIFFERENT implementor; charging it here would attribute one type's body to another's: {v}");
+
+    // ── THE FIX ───────────────────────────────────────────────────────────────────────────────────
+    let union: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r597leaf#Child::wait" && e["interfaceUnion"] == serde_json::json!(true))
+        .collect();
+    assert_eq!(union.len(), 1, "the trait member key must still publish the union: {v}");
+    assert_eq!(eff(union[0]), vec!["Exec".to_string(), "Log".to_string()],
+        "both implementors, and the `Log` is the one the suppression dropped on portable-pty: {v}");
+}
+
+/// SOUNDNESS R597 — **THE CONSUMER SIDE, WHICH IS THE ONLY PLACE THE DEFECT WAS EVER VISIBLE.**
+///
+/// One tree, one consumer binary, one dep tree; the ONLY variable is whether the dependency's report
+/// carries the beside-union row. The consumer dispatches on `&dyn Sink`, which is the shape ⟨0.39⟩ §4
+/// obligation 3 exists for. Before the fix `deny Net` over `app::run` exits 0 while the dependency's only
+/// effectful implementor opens a socket — the ⟨0.39⟩ toggle one spelling over, reached through a member
+/// that happens to have a default body.
+///
+/// The PRE image is constructed by DELETING the union row from a report this binary produced, rather than
+/// hand-authoring one: a hand-authored report proves the consumer joins SOMETHING, not that the producer
+/// emits it.
+#[test]
+fn r597_a_chained_consumer_gains_the_implementor_effect_through_the_member_key() {
+    let dep = make_crate(
+        "r597dep",
+        "pub trait Sink {\n\
+         \x20   fn emit(&self) { let _ = std::fs::read(\"/tmp/a\"); }\n\
+         }\n\
+         pub struct Loud;\n\
+         impl Sink for Loud { fn emit(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); } }\n",
+    );
+    let outdir = dep.join("rep");
+    std::fs::create_dir_all(&outdir).unwrap();
+    let st = Command::new(bin())
+        .arg(dep.to_string_lossy().as_ref())
+        .arg("--out").arg(outdir.join("r").to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    assert!(st.status.success(), "producing the dep report must succeed: {}",
+        String::from_utf8_lossy(&st.stderr));
+    let rep_path = outdir.join("r.r597dep.scan.json");
+    let post: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&rep_path).unwrap()).unwrap();
+
+    // The PRE image: the same report with the beside-union row removed — exactly what the suppression
+    // produced. Assert it was THERE, or this test's two arms are the same document.
+    let mut pre = post.clone();
+    let before = pre["functions"].as_array().unwrap().len();
+    pre["functions"] = serde_json::Value::Array(
+        pre["functions"].as_array().unwrap().iter()
+            .filter(|e| !(e["hash"] == "r597dep#Sink::emit"
+                          && e["interfaceUnion"] == serde_json::json!(true)))
+            .cloned().collect());
+    assert_eq!(pre["functions"].as_array().unwrap().len() + 1, before,
+        "the producer must have emitted exactly one beside-union row, or the arms do not differ: {post}");
+    let pre_path = outdir.join("pre.r597dep.scan.json");
+    std::fs::write(&pre_path, serde_json::to_string(&pre).unwrap()).unwrap();
+
+    let app = make_crate("r597app", "pub fn run(s: &dyn r597dep::Sink) { s.emit(); }\n");
+    std::fs::write(app.join("Cargo.toml"),
+        "[package]\nname = \"r597app\"\n\n[dependencies]\nr597dep = \"0.1\"\n").unwrap();
+    let policy = app.join("candor.policy");
+    std::fs::write(&policy, "deny Net\n").unwrap();
+
+    let run = |deps: &std::path::Path| -> i32 {
+        Command::new(bin())
+            .arg(app.to_string_lossy().as_ref()).arg("--json")
+            .env("CANDOR_DEPS", deps.to_string_lossy().as_ref())
+            .env("CANDOR_POLICY", policy.to_string_lossy().as_ref())
+            .env_remove("CANDOR_CONFIG")
+            .output().expect("run candor-scan").status.code().unwrap_or(-1)
+    };
+    let pre_code = run(&pre_path);
+    let post_code = run(&rep_path);
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+
+    assert_eq!(pre_code, 0,
+        "CALIBRATION — without the beside-union row the consumer reads `Sink::emit` as the default body \
+         alone and `deny Net` passes. If this ever fails, the arms no longer differ in the one thing \
+         under test and the assertion below proves nothing.");
+    assert_eq!(post_code, 1,
+        "`deny Net` MUST fail: the consumer supplies `&dyn Sink`, the dependency's only override opens a \
+         TcpStream, and obligation 3 says the member key carries every implementor the producer can see.");
+}
+
+/// SOUNDNESS R597, THE SILENCE CONTROL — **233 OF THE 244 SUPPRESSIONS WERE CORRECT AND MUST STAY
+/// SILENT.** The fix emits a beside-union only where the union knows something the real row does not; a
+/// blanket "always emit" would put a duplicate, informationless row on every trait member with a body.
+/// The narrowing fails in the WITHHOLDING direction if it is ever wrong, which is why it is exact set
+/// arithmetic on the published fields rather than a heuristic — and this is the arm that pins it.
+#[test]
+fn r597_a_union_that_adds_nothing_emits_no_second_row() {
+    // The override and the default body do the SAME thing, so the union is a subset of the real row.
+    let d = make_crate(
+        "r597quiet",
+        "pub trait Sink {\n\
+         \x20   fn emit(&self) { let _ = std::fs::read(\"/tmp/a\"); }\n\
+         }\n\
+         pub struct Same;\n\
+         impl Sink for Same { fn emit(&self) { let _ = std::fs::read(\"/tmp/b\"); } }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    // PROVE THE FIXTURE REACHES THE BRANCH: a real row must exist at the member hash, or this test is
+    // asserting the absence of something that was never a candidate.
+    assert!(fns.iter().any(|e| e["hash"] == "r597quiet#Sink::emit"
+                             && e["interfaceUnion"] != serde_json::json!(true)),
+        "the default body must be an analysed unit at the member hash, or there is no suppression to \
+         control: {v}");
+    assert!(!fns.iter().any(|e| e["hash"] == "r597quiet#Sink::emit"
+                              && e["interfaceUnion"] == serde_json::json!(true)),
+        "`Same::emit` performs `Fs` and so does the default body — the union adds nothing and must \
+         publish nothing: {v}");
+}
