@@ -4960,7 +4960,7 @@ fn r597_a_default_bodys_row_no_longer_discards_the_implementor_union() {
     assert!(real[0]["loc"].is_string(), "the analysed unit must keep its location: {v}");
 
     // ── OVER-CHARGE CONTROL 2: a caller that can only ever reach the default body ──────────────────
-    let caller = fns.iter().find(|e| e["fn"] == "calls_the_default").expect(&format!("{v}"));
+    let caller = fns.iter().find(|e| e["fn"] == "calls_the_default").unwrap_or_else(|| panic!("{v}"));
     assert_eq!(eff(caller), vec!["Fs".to_string()],
         "`Silent` does not override `emit`, so this call runs the default body and nothing else. A merge \
          would have charged it `Net` from a SIBLING implementor it cannot reach: {v}");
@@ -5189,7 +5189,7 @@ fn r597_the_coverage_leg_is_not_emitted_while_r598_is_open() {
     // PROVE THE FIXTURE REACHES THE BRANCH, in BOTH of the two ways it has to.
     // 1. the override must genuinely be the coverage-only case: same effect as the default body, plus an
     //    uncovered package the default body does not touch.
-    let over = fns.iter().find(|e| e["fn"] == "Loud::emit").expect(&format!("{v}"));
+    let over = fns.iter().find(|e| e["fn"] == "Loud::emit").unwrap_or_else(|| panic!("{v}"));
     assert_eq!(over["invisible"], serde_json::json!(["uncov"]),
         "the override must call into an UNCOVERED package, or there is no coverage leg to gate: {v}");
     assert_eq!(over["inferred"], serde_json::json!(["Fs"]),
