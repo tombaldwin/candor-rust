@@ -642,7 +642,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());
         c.trait_vars.insert(n.into(), vec!["Store".into()]);
-        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R582
+        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R571
         c.dep_bound_vars.insert(n.into(), "deplib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
         c.elem_of.insert(n.into(), "Elem".into());
@@ -659,7 +659,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             let mut leaked: Vec<&str> = Vec::new();
             if s.vars.contains_key(n) { leaked.push("vars"); }
             if s.trait_vars.contains_key(n) { leaked.push("trait_vars"); }
-            // R582 — a stale "caller-monomorphized" claim on a shadow SUBTRACTS that receiver
+            // R571 — a stale "caller-monomorphized" claim on a shadow SUBTRACTS that receiver
             // from the imported-trait CHA: the UNDER-report direction, and the one thing the
             // fix that added this table must not buy.
             if s.mono_recv_traits.contains_key(n) { leaked.push("mono_recv_traits"); }
@@ -3049,8 +3049,8 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
     }
 
     #[test]
-    fn a_dyn_binding_elsewhere_in_the_body_does_not_cha_a_monomorphized_receiver_r582() {
-        // SOUNDNESS R582 — THE R556/R561/R4 ERASURE GATE WAS BODY-WIDE AND THE CARVE-OUT IS
+    fn a_dyn_binding_elsewhere_in_the_body_does_not_cha_a_monomorphized_receiver_r571() {
+        // SOUNDNESS R571 — THE R556/R561/R4 ERASURE GATE WAS BODY-WIDE AND THE CARVE-OUT IS
         // PER-RECEIVER. `dyn_sig_traits` and `dyn_local_traits` are ADDITIVE SETS: they say *"this body
         // erased that trait somewhere"*. The imported-trait CHA read them as *"this receiver is
         // erased"*, so ONE `dyn` binding anywhere in a body licensed CHA on EVERY other receiver in it
@@ -3081,10 +3081,10 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         // spelling is asserted to keep charging — and, separately, the three SHADOW shapes, where a
         // monomorphized parameter's name is rebound to an erased value. A stale suppression there is a
         // silent under-report, which is not a trade this fix is allowed to make.
-        let d = std::env::temp_dir().join(format!("candor-r582-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("candor-r571-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
-        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r582\"\n").unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r571\"\n").unwrap();
         std::fs::write(
             d.join("src/lib.rs"),
             r#"
@@ -3153,7 +3153,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             ("ctl_vec",     "a `let`-annotated Vec of trait objects, indexed"),
         ] {
             assert!(effs(name).contains(&fs),
-                    "R582 CONTROL LOST A REAL EFFECT — {why} is genuinely erased and must still CHA the \
+                    "R571 CONTROL LOST A REAL EFFECT — {why} is genuinely erased and must still CHA the \
                      local impl. Narrowing past the fabrication into silence converts an over-report \
                      into the cardinal sin, which is never the trade here:\n{body}");
         }
@@ -3163,14 +3163,14 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             ("shadow_closure", "a `dyn` closure parameter of the same name (the closure arm clears it)"),
         ] {
             assert!(effs(name).contains(&fs),
-                    "R582 SHADOW CONTROL LOST A REAL EFFECT — a monomorphized parameter's name was \
+                    "R571 SHADOW CONTROL LOST A REAL EFFECT — a monomorphized parameter's name was \
                      rebound to {why}, and the stale suppression deleted the shadow's real dispatch. \
                      This is the under-report direction the denylist exists to be incapable of:\n{body}");
         }
 
         // …and only now the fabrications.
         assert!(effs("mono_ctl").is_empty(),
-                "R582 BASELINE: a caller-monomorphized receiver in a body with no erasure at all was \
+                "R571 BASELINE: a caller-monomorphized receiver in a body with no erasure at all was \
                  already correct and must stay so:\n{body}");
         for (name, why) in [
             ("mono_after_let",     "an annotated `let` (R556) elsewhere in the body"),
@@ -3182,7 +3182,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                                     (tower-0.5.3 `BoxService::new`)"),
         ] {
             assert!(effs(name).is_empty(),
-                    "R582: {why} licensed CHA on a receiver the CALLER monomorphizes. The crate's own \
+                    "R571: {why} licensed CHA on a receiver the CALLER monomorphizes. The crate's own \
                      impls are one sample of an open set, so this charges an effect the program may \
                      never perform and makes a scoped `deny` exit 1 on it:\n{body}");
         }
@@ -19381,7 +19381,7 @@ pub fn go() {{ imp::doit(); }}
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());
         c.trait_vars.insert(n.into(), vec!["Store".into()]);
-        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R582
+        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R571
         c.dep_bound_vars.insert(n.into(), "deplib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
         c.elem_of.insert(n.into(), "Elem".into());
@@ -19398,7 +19398,7 @@ pub fn go() {{ imp::doit(); }}
         // this statement's own RHS must not see.
         c.vars.insert(n.into(), "Inner".into());
         c.trait_vars.insert(n.into(), vec!["Other".into()]);
-        c.mono_recv_traits.insert(n.into(), vec!["Other".into()]); // R582
+        c.mono_recv_traits.insert(n.into(), vec!["Other".into()]); // R571
         c.dep_bound_vars.insert(n.into(), "otherlib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::new());
         c.elem_of.insert(n.into(), "OtherElem".into());

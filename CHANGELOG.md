@@ -11,7 +11,7 @@ after upgrading; review policies and regenerate baselines with the new build.
 ## Unreleased
 
 - **⚠ A `dyn` BINDING ANYWHERE IN A BODY LICENSED CHA ON EVERY OTHER RECEIVER IN IT — including the
-  caller-monomorphized ones the R4 carve-out exists to protect (SOUNDNESS R582). This REMOVES charges.**
+  caller-monomorphized ones the R4 carve-out exists to protect (SOUNDNESS R571). This REMOVES charges.**
 
       pub fn mono_ctl(t: &impl Handler, n: u32) -> u32 { t.roll(n) }           // eff=∅   correct
       pub fn mono_after_let(t: &impl Handler, n: u32) -> u32 {

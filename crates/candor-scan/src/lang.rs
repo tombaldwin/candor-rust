@@ -91,7 +91,7 @@ pub(crate) fn collect_dyn_trait_leaves(ty: &syn::Type, out: &mut std::collection
     }
 }
 
-/// SOUNDNESS R582 — the COMPLEMENT of `dyn_trait_leaves_of` within `trait_leaves`: the trait leaves
+/// SOUNDNESS R571 — the COMPLEMENT of `dyn_trait_leaves_of` within `trait_leaves`: the trait leaves
 /// this ONE declaration spells in a position the CALLER monomorphizes (`impl T`, `T` under `T: Bound`),
 /// as opposed to a `dyn` position the callee erases.
 ///

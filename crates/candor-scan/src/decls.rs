@@ -1903,7 +1903,7 @@ pub(crate) fn seed_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<Strin
     seed_trait_vars_by(sig, trait_leaves)
 }
 
-/// SOUNDNESS R582 — the same seed, per parameter, through `mono_trait_leaves` instead: the leaves this
+/// SOUNDNESS R571 — the same seed, per parameter, through `mono_trait_leaves` instead: the leaves this
 /// parameter spelled in a CALLER-MONOMORPHIZED position. `dyn_sig_trait_leaves` answers the erasure
 /// question for the whole SIGNATURE at once (a set, no names in it), which is correct for what it gates
 /// and is exactly why the imported-trait CHA could not tell `mono_ctl(t: &impl Handler)`'s receiver from
@@ -2097,7 +2097,7 @@ pub(crate) fn fninfo(
         // only on these, never on a caller-monomorphized generic bound / `impl Trait`.
         dyn_sig_traits: crate::lang::dyn_sig_trait_leaves(sig),
         dyn_local_traits: Default::default(),
-        // R582 — …and the PER-NAME complement of the two sets above, which is what tells a
+        // R571 — …and the PER-NAME complement of the two sets above, which is what tells a
         // caller-monomorphized receiver apart from an erased one when the BODY contains both.
         mono_recv_traits: seed_mono_trait_vars(sig),
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
