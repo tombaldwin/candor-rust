@@ -10462,6 +10462,72 @@ pub fn fab_deref_pure(b: Box<P>) { (*b).go() }\n\
     }
 
     #[test]
+    fn a_wide_implementor_set_discloses_instead_of_leaving_the_function_out_of_the_report() {
+        // SOUNDNESS R576(b) — Pass B's bounded-CHA arm was `if !hits.is_empty() && hits.len() <= 12`
+        // WITH NO `else`, so a trait whose implementor set is wider than the cross-engine bound
+        // produced no edge AND no reason, and the enclosing fn left `functions[]` ALTOGETHER. Absence
+        // is an affirmative purity claim (SPEC §2 rule 3), so this was a cardinal sin, not a precision
+        // limit.
+        //
+        // THE MEASUREMENT IS THE PAIR AND THE SINGLE VARIABLE IS THE IMPLEMENTOR COUNT — same trait,
+        // same call, same `self.sink()` inside the same trait DEFAULT method, 3 impls vs 15. That
+        // matters because [[R570]] ruled this shape out on a control measured at FEW implementors with
+        // the callee not overridden, and that control does not generalise: the easy case resolves.
+        //
+        // The reason string is Pass A's, verbatim — `dispatch_calls_for_trait_method` ends
+        // `_ => mark_unresolved(format!("dispatch:{tr}.{leaf}"))` for ">12, or no impl visible". §G:
+        // two passes answering one question must answer it the same way.
+        fn src(n: usize) -> String {
+            let mut s = String::from(
+                "pub trait Sink {\n  fn sink(&self);\n  fn drive(&self) { self.sink(); }\n}\n",
+            );
+            for i in 1..=n {
+                s.push_str(&format!("pub struct V{i};\n"));
+                if i == 1 {
+                    s.push_str(
+                        "impl Sink for V1 { fn sink(&self) {                          let _ = std::fs::write(\"/tmp/r576\", b\"x\"); } }\n",
+                    );
+                } else {
+                    s.push_str(&format!("impl Sink for V{i} {{ fn sink(&self) {{ let _ = {i}; }} }}\n"));
+                }
+            }
+            s
+        }
+
+        // CONTROL — at or under the bound it resolves to every implementor, and must keep doing so.
+        // A "fix" that disclosed here instead would be trading precision for nothing.
+        let small = scan_fixture("r576small", &src(3));
+        assert_eq!(
+            fixture_effects(&small, "Sink::drive"),
+            vec!["Fs".to_string()],
+            "at 3 impls the default method must still RESOLVE to the implementors:\n{small:#}"
+        );
+
+        // THE DEFECT — above the bound. Present, not absent; Unknown, not silent.
+        let wide = scan_fixture("r576wide", &src(15));
+        assert!(
+            fixture_present(&wide, "Sink::drive"),
+            "at 15 impls `Sink::drive` LEFT functions[] entirely — absence is a purity claim over a \
+             body that really dispatches:\n{wide:#}"
+        );
+        assert_eq!(
+            fixture_effects(&wide, "Sink::drive"),
+            vec!["Unknown".to_string()],
+            "a fan-out wider than the bound is an honest miss, and an honest miss is `Unknown`:\n{wide:#}"
+        );
+        let why = wide["functions"]
+            .as_array()
+            .and_then(|fs| fs.iter().find(|f| f["fn"] == "Sink::drive"))
+            .and_then(|f| f["unknownWhy"].as_array().cloned())
+            .unwrap_or_default();
+        assert!(
+            why.iter().any(|w| w == "dispatch:Sink.sink"),
+            "the reason must be §4's dotted `dispatch:<owner>.<member>` — the same string Pass A \
+             writes for this condition, so `deny E Unknown[dispatch]` scopes to it:\n{why:?}"
+        );
+    }
+
+    #[test]
     fn the_dispatch_hot_path_guard_covers_every_table_its_own_arms_read() {
         // SOUNDNESS R540 — `resolve_recv_traits` opens with a hot-path guard that returns EMPTY when
         // `trait_vars`, `trait_fields` and `has_dyn_return` are all empty. Its arms read three MORE

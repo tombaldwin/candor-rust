@@ -2807,6 +2807,59 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
                                         }
                                     }
+                                } else if hits.len() > 12 {
+                                    // SOUNDNESS R576(b) — THE WIDE ARM MUST DISCLOSE, NOT FALL SILENT.
+                                    // This `if` had no `else`, so a trait whose implementor set is wider
+                                    // than the cross-engine bound produced no edge AND no reason, and the
+                                    // enclosing fn left `functions[]` ALTOGETHER — an affirmative purity
+                                    // claim under SPEC §2 rule 3 over a body that really dispatches.
+                                    // Measured: a `self.sink()` inside a trait DEFAULT method resolves to
+                                    // every implementor at 3 impls and vanishes at 15.
+                                    //
+                                    // §G — ASK THE AUTHORITY, and the authority already exists: Pass A's
+                                    // `dispatch_calls_for_trait_method` ends `_ => mark_unresolved(
+                                    // format!("dispatch:{tr}.{leaf}"))` with the comment ">12, or no impl
+                                    // visible: honest indeterminacy". Same reason string here so the two
+                                    // passes answer one question one way; §4's normative dotted detail,
+                                    // so `deny E Unknown[dispatch]` scopes to it as it does in candor-java.
+                                    // The comment this site DID carry — "a wider open-world fan-out is an
+                                    // honest miss, never a guess" — is §K exactly: an honest miss is
+                                    // `Unknown`, and what it actually produced was silence.
+                                    //
+                                    // `resolved_local` is deliberately NOT set. Pass A's sibling returns
+                                    // `true` ("do nothing further"), but here that would suppress the
+                                    // auto-deref fallback below, which can still resolve this call
+                                    // precisely — losing an edge to buy a disclosure is the wrong
+                                    // direction. Disclosing alongside a later resolution over-reports at
+                                    // worst; ⟨0.35⟩ permits completing OR disclosing, never silence.
+                                    //
+                                    // NOT extended to `hits.is_empty()`, the OTHER half of the sibling's
+                                    // `_` arm — and that is a MEASUREMENT, not the flood argument. The
+                                    // `R576EMPTY` probe below counts it: over 400 registry crates it fires
+                                    // **0 times** against `R576WIDE`'s 27, because this site is reached only
+                                    // when the trait is in `trait_decls` AND declares the leaf, by which
+                                    // point an impl set with no matching method in `by_tail2` is not a shape
+                                    // real code produces. So widening here would buy nothing; the probe stays
+                                    // so the next person re-measures instead of re-arguing.
+                                    if std::env::var_os("CANDOR_R576_INSTR").is_some() {
+                                        eprintln!("R576WIDE");
+                                    }
+                                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                    unknown_why
+                                        .entry(f.qual.clone())
+                                        .or_default()
+                                        .insert(format!("dispatch:{t_type}.{}", c.leaf));
+                                } else if hits.is_empty()
+                                    && std::env::var_os("CANDOR_R576_INSTR").is_some()
+                                {
+                                    // MEASUREMENT ONLY — this arm changes no report. It counts the other
+                                    // half of Pass A's `_` arm ("no impl visible") so the decision to
+                                    // widen or not is made on a corpus number rather than on the flood
+                                    // argument alone. Behind the same env var as the wide arm so one
+                                    // corpus pass prices both. "CHANGED 0 is not evidence until REACH is
+                                    // measured" — and the converse: a widening is not safe until the
+                                    // thing it would widen INTO has been counted.
+                                    eprintln!("R576EMPTY");
                                 }
                             }
                         }
