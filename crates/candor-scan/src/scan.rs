@@ -4366,6 +4366,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     continue;
                 };
                 if existing.contains(&hash) {
+                    // SOUNDNESS R590 — MEASUREMENT ONLY, changes no report. A union row is emitted
+                    // *only* where no real row claims the hash, so the union is SUPPRESSED wherever a
+                    // body row exists. The open question is whether the suppressed union ever knew
+                    // something the body row does not: the real row is the DEFAULT BODY's analysis,
+                    // while this loop looked up `{ty}::{method}` per implementor — i.e. the OVERRIDES.
+                    // Neither contains the other, so a chained consumer keying on `crate#Trait::m`
+                    // could be getting the default body only. That is [[R576]](a) seen from the
+                    // consumer side, and it was surfaced by R576(b)'s A/B rather than reasoned about.
+                    // `Unknown` on the real row COVERS anything, so it is not a loss.
+                    if std::env::var_os("CANDOR_R590_INSTR").is_some() && !inf_u.is_empty() {
+                        if let Some(real) = entries.iter().find(|e| e.hash == hash) {
+                            let covered = real.inferred.iter().any(|e| e == "Unknown");
+                            let lost: Vec<&&str> = inf_u
+                                .iter()
+                                .filter(|e| !covered && !real.inferred.iter().any(|r| r == *e))
+                                .collect();
+                            if !lost.is_empty() {
+                                eprintln!("R590LOST {hash} union={inf_u:?} real={:?}", real.inferred);
+                            } else {
+                                eprintln!("R590OK {hash}");
+                            }
+                        }
+                    }
                     continue; // a real entry already claims this hash
                 }
                 entries.push(ReportEntry {
