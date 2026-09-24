@@ -198,6 +198,9 @@ pub(crate) struct CallCollector<'a> {
     /// resolves each receiver to its OWN crate instead of collapsing both onto one leaf.
     pub(crate) trait_quals_by_param: HashMap<String, HashMap<String, String>>,
     pub(crate) trait_quals: HashMap<String, String>,
+    /// SOUNDNESS R577 — the crate-wide WRITTEN qualifications, the LAST fallback of the three above.
+    /// See `TraitIndexes::written_quals` and the read site in the foreign-dispatch branch.
+    pub(crate) written_trait_quals: &'a HashMap<String, String>,
     /// SOUNDNESS R549 — names bound as TRAITS in this scope (impl block + signature, bare leaves
     /// included). Consulted ONLY as a predicate by `visit_expr_path`; no resolver reads it.
     pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
@@ -1240,6 +1243,10 @@ impl<'a> CallCollector<'a> {
                 }
                 found
             }
+            // SOUNDNESS R586 — a COLLECTION LITERAL. See `literal_elem_type`.
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) | syn::Expr::Macro(_) => {
+                self.literal_elem_type(expr)
+            }
             _ => None,
         }
     }
@@ -1322,6 +1329,60 @@ impl<'a> CallCollector<'a> {
     /// an `items: Vec<Box<dyn Doer>>` type the loop var into `trait_vars` (bounded-CHA dispatch) instead
     /// of dropping silent-pure. Peels references + the element-preserving iterator adapters, exactly like
     /// `resolve_elem_type`. Empty when the collection's element isn't a trait object (no guess).
+    /// SOUNDNESS R582 — the DISPATCH leaves of a collection LITERAL's element, and R586 its concrete
+    /// twin below. `lang::collection_literal_elems` owns which expressions are the elements; these two
+    /// ask the ONE authority each resolver's own call site already uses for "what type is this value" —
+    /// `resolve_recv_traits` / `resolve_recv_type` — rather than the narrow three-arm
+    /// `tuple_elem_leaves` copy beside them, which is the R88 routing rule.
+    ///
+    /// AGREEMENT OR NOTHING. Rust makes a literal's elements homogeneous, so ONE element that resolves
+    /// answers for all of them and an element this resolver cannot name loses nothing. Two elements
+    /// resolving DIFFERENTLY is a spelling this code cannot adjudicate (`vec![a as Box<dyn A>, b]`), and
+    /// a union there would fan CHA out over a trait the collection may not hold — so it refuses, which
+    /// is today's answer.
+    fn literal_elem_traits(&self, expr: &syn::Expr) -> Vec<String> {
+        let Some(elems) = crate::lang::collection_literal_elems(expr) else { return Vec::new() };
+        let mut answer: Option<Vec<String>> = None;
+        for e in &elems {
+            let mut l = self.resolve_recv_traits(e);
+            if l.is_empty() {
+                continue;
+            }
+            l.sort();
+            l.dedup();
+            match &answer {
+                None => answer = Some(l),
+                Some(prev) if *prev != l => return Vec::new(),
+                Some(_) => {}
+            }
+        }
+        if answer.is_some() && std::env::var_os("CANDOR_R582_INSTR").is_some() {
+            eprintln!("R582DYN"); // §E1 REACH COUNTER, on the CHANGED branch only.
+        }
+        answer.unwrap_or_default()
+    }
+
+    /// SOUNDNESS R586 — the CONCRETE twin of `literal_elem_traits`, and it is a separate row because it
+    /// is a separate finding: the missing arm is not dispatch-specific. `let v = vec![c]; for x in v {
+    /// x.go() }` over a plain nominal `C` whose `go` reads a file was ABSENT on the same measurement
+    /// that produced R582, with `let v: Vec<C> = vec![c]` as the charging control.
+    fn literal_elem_type(&self, expr: &syn::Expr) -> Option<String> {
+        let elems = crate::lang::collection_literal_elems(expr)?;
+        let mut answer: Option<String> = None;
+        for e in &elems {
+            let Some(t) = self.resolve_recv_type(e) else { continue };
+            match &answer {
+                None => answer = Some(t),
+                Some(prev) if *prev != t => return None,
+                Some(_) => {}
+            }
+        }
+        if answer.is_some() && std::env::var_os("CANDOR_R582_INSTR").is_some() {
+            eprintln!("R586CONC"); // §E1 REACH COUNTER, on the CHANGED branch only.
+        }
+        answer
+    }
+
     fn resolve_elem_trait_leaves(&self, expr: &syn::Expr) -> Vec<String> {
         match expr {
             syn::Expr::Reference(r) => self.resolve_elem_trait_leaves(&r.expr),
@@ -1493,6 +1554,10 @@ impl<'a> CallCollector<'a> {
             // separate, still-open gap in the `MethodCall` arm above (not fixed by this arm) — left
             // unexamined this round; see R88's report.
             syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
+            // SOUNDNESS R582 — a COLLECTION LITERAL. See `literal_elem_traits`.
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) | syn::Expr::Macro(_) => {
+                self.literal_elem_traits(expr)
+            }
             _ => Vec::new(),
         }
     }
@@ -3772,7 +3837,45 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     let written = per_param.or_else(|| {
                         self.trait_quals.get(&tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
                     }).unwrap_or(tr.as_str());
-                    let full = crate::lang::expand(written, &self.uses);
+                    let mut full = crate::lang::expand(written, &self.uses);
+                    // SOUNDNESS R577 — …AND WHEN THAT PRODUCES A BARE LEAF, THE CRATE'S OWN WRITTEN
+                    // SPELLING, because three of the four declaration sites cannot carry it themselves.
+                    // `sig_trait_quals` and `visit_local` record the qualification; `trait_fields`, `rets`
+                    // and the closure binder record only the leaf — so `full` stayed `"Q"`, every gate
+                    // below is spelled `contains("::")`, and the site emitted NOTHING: no dep key, no
+                    // `dispatchesOn`, no CHA. MEASURED with the `use` as the single variable, on a program
+                    // that builds: `pub struct H { inner: Box<dyn dep::Q> }` + `h.inner.fetch()` in a file
+                    // with no `use dep::Q` is ABSENT, while the signature and annotated-`let` controls on
+                    // the same trait in the same file both read `['Net']`.
+                    //
+                    // FOUR PROPERTIES, and they are what make a crate-wide leaf-keyed map safe HERE where
+                    // R562 correctly refused one for the ERASURE fact:
+                    //  1. PURELY ADDITIVE. It is consulted only when `full` has no `::`, which is exactly
+                    //     the state in which every branch below already does nothing. It can never change
+                    //     an answer, only supply one where there was none.
+                    //  2. IT CANNOT RE-ROUTE A CHA. The bounded fan-out reads `trait_impls[tr]` — keyed on
+                    //     the LEAF, not on this path — so naming the wrong crate cannot fabricate an edge
+                    //     to a different implementor set. What the path decides is the KEY a consumer
+                    //     joins on, and a key that names nothing joins to nothing (PART 92 `c3_pure_only`).
+                    //  3. IT REFUSES RATHER THAN GUESSES. Two spellings of one leaf anywhere in the crate
+                    //     tombstone it (`merge_trait_qual`), the same rule one signature's own parameters
+                    //     already obey.
+                    //  4. NOT UNDER A GLOB. `use other::*;` can bind this leaf to a crate nothing in the
+                    //     source spells, so there is no collision for the tombstone to see. A scope with a
+                    //     glob keeps today's answer — the status quo, not a new loss.
+                    if !full.contains("::") && !self.uses.contains_key(crate::lang::GLOB_KEY) {
+                        if let Some(q) =
+                            self.written_trait_quals.get(&tr).filter(|q| !q.is_empty())
+                        {
+                            // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG`
+                            // channel `R504HIT`/`R551HIT`/`R562HIT` already use. A byte-identical A/B is
+                            // not evidence until reach is counted.
+                            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                                eprintln!("R577HIT {q}::{leaf}");
+                            }
+                            full = crate::lang::expand(q, &self.uses);
+                        }
+                    }
                     let root = full.split("::").next().unwrap_or("");
                     // SOUNDNESS R504 — SPEC §4 ⟨0.39⟩ obligation 1, for an abstraction THIS CRATE DOES
                     // NOT OWN. The emission below already forms the crate-qualified CALL, which answers
@@ -4806,6 +4909,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // over a `Vec<Box<dyn Handler>>` must not inherit an enclosing `t: &impl Handler`'s claim and
         // have its dispatch subtracted.
         let mut saved_mono: Vec<(String, Option<Vec<String>>)> = Vec::new();
+        // SOUNDNESS R577 — a closure parameter's own CRATE QUALIFICATION, which this binder threw away
+        // exactly as the field and return sites do. `visit_local`'s annotated arm has recorded it since
+        // R6; the closure list is the same kind of declaration and recorded only the bare leaf, so
+        // `|q: &dyn dep::Q| q.fetch()` in a scope with no `use dep::Q` resolved to nothing. Written to
+        // `trait_quals_by_param` (per-NAME, not the leaf-keyed map) for the reason that map exists: a
+        // closure parameter SHADOWS an enclosing parameter of the same name, and may name a different
+        // crate's trait than the signature bound it to. Scoped like every other binding here.
+        let mut saved_qual: Vec<(String, Option<HashMap<String, String>>)> = Vec::new();
         for input in &node.inputs {
             let pat = match input {
                 syn::Pat::Type(pt) => &*pt.pat,
@@ -4834,6 +4945,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // nothing. A non-empty answer takes the `trait_vars` route and the name is removed from
                 // `vars`, so the two tables cannot both answer for it (`vars` wins at the call site).
                 if let Some(name) = single_pat_ident(&pt.pat) {
+                    // R577 — recorded from the ANNOTATION, before the leaves are consulted, so it is
+                    // present whichever route below claims the name. An annotation carrying no qualified
+                    // bound REMOVES any inherited entry rather than leaving the enclosing parameter's
+                    // crate standing for a name this closure has rebound — the stale direction is the one
+                    // that keys a call to the wrong dependency.
+                    {
+                        let mut per = HashMap::new();
+                        crate::lang::collect_trait_quals_pub(&pt.ty, &mut per);
+                        let prev = if per.is_empty() {
+                            self.trait_quals_by_param.remove(&name)
+                        } else {
+                            self.trait_quals_by_param.insert(name.clone(), per)
+                        };
+                        saved_qual.push((name.clone(), prev));
+                    }
                     let leaves = trait_leaves(&pt.ty, &self.generic_bounds);
                     if !leaves.is_empty() {
                         // SOUNDNESS R556's fact, recorded at this declaration site too: whether the bound
@@ -4870,6 +4996,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             match prev {
                 Some(v) => { self.mono_recv_traits.insert(name, v); }
                 None => { self.mono_recv_traits.remove(&name); }
+            }
+        }
+        for (name, prev) in saved_qual {
+            match prev {
+                Some(v) => { self.trait_quals_by_param.insert(name, v); }
+                None => { self.trait_quals_by_param.remove(&name); }
             }
         }
         for (name, prev) in saved {

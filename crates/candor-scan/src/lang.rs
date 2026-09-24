@@ -282,11 +282,67 @@ fn quals_from_bounds(
         // colliding leaf is TOMBSTONED (empty value) and consumers treat it as absent, falling back to
         // the file's `use` map — the same "two candidates are dropped, never picked from" rule the
         // cross-package join already applies.
-        match out.get(&leaf) {
-            Some(prev) if *prev != full => { out.insert(leaf, String::new()); }
-            Some(_) => {}
-            None => { out.insert(leaf, full); }
+        merge_trait_qual(out, leaf, full);
+    }
+}
+
+/// The TOMBSTONE RULE for a leaf-keyed qualification map, in ONE place. Two different qualified paths
+/// for one leaf is not a choice to be made — it is a refusal, recorded as an empty value that every
+/// consumer treats as absent and falls back from. Extracted because SOUNDNESS R586 adds a second
+/// producer (the crate-wide written-qual index below) that must merge under exactly the same rule as
+/// `quals_from_bounds`; two copies of a "never guess which crate" rule is the shape that produces a
+/// guess.
+pub(crate) fn merge_trait_qual(out: &mut HashMap<String, String>, leaf: String, full: String) {
+    match out.get(&leaf) {
+        Some(prev) if *prev != full => { out.insert(leaf, String::new()); }
+        Some(_) => {}
+        None => { out.insert(leaf, full); }
+    }
+}
+
+/// SOUNDNESS R577 — EVERY CRATE-QUALIFIED TRAIT BOUND THIS FILE WRITES, wherever it writes it.
+///
+/// `sig_trait_quals` and `visit_local` record the QUALIFICATION a declaration was written with;
+/// `trait_fields`, `rets` and the closure-parameter binder record only the BARE LEAF, because every
+/// index downstream of them is leaf-keyed. The consumer then expands that leaf through the CONSUMING
+/// FILE's `use` map — so the same field resolved in a scope that imported the trait and vanished in one
+/// that did not. One question, four sites, three answering with less information than the fourth.
+///
+/// This is the shared answer for the three that cannot carry it themselves: a struct field and a fn
+/// return are declared somewhere else entirely, so the fact has to survive to a crate-wide index.
+///
+/// NO ARM SET, DELIBERATELY. It is a `syn::visit` over every `syn::Type` in the file, so it cannot drift
+/// from the declaration sites the way a hand-written field/return walker would (§F1 Q3 is exactly how
+/// this defect was reached). The DERIVATION is `collect_trait_quals` — the same one `sig_trait_quals`
+/// and `visit_local` use — so what counts as a qualification is decided in one place.
+///
+/// ONLY AN EXPLICITLY WRITTEN MULTI-SEGMENT PATH IS RECORDED (`quals_from_bounds` drops a bare leaf and
+/// every `crate`/`self`/`super` spelling). A bare leaf is left to the consuming file's `use` map exactly
+/// as before: this index answers only where that map has no answer at all. Conflicting spellings for one
+/// leaf TOMBSTONE, so a crate binding `Handler` to two dependencies resolves it to neither.
+pub(crate) fn collect_written_trait_quals(
+    items: &[syn::Item],
+    include_tests: bool,
+    out: &mut HashMap<String, String>,
+) {
+    struct V<'a> {
+        out: &'a mut HashMap<String, String>,
+        include_tests: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V<'_> {
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            if self.include_tests || !is_cfg_test(&m.attrs) {
+                syn::visit::visit_item_mod(self, m);
+            }
         }
+        fn visit_type(&mut self, t: &'ast syn::Type) {
+            collect_trait_quals(t, self.out);
+            syn::visit::visit_type(self, t);
+        }
+    }
+    let mut v = V { out, include_tests };
+    for it in items {
+        syn::visit::Visit::visit_item(&mut v, it);
     }
 }
 
@@ -322,6 +378,44 @@ fn collect_trait_quals(ty: &syn::Type, out: &mut HashMap<String, String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// SOUNDNESS R582 — THE ELEMENT EXPRESSIONS OF A COLLECTION LITERAL: `[a, b]`, `[a; n]`, `vec![a, b]`,
+/// `vec![a; n]`. `None` for anything else.
+///
+/// The two element resolvers (`resolve_elem_type` and `resolve_elem_trait_leaves`) between them carry
+/// thirteen arms and NEITHER had one for a collection written out in the source, so
+/// `let v = vec![s]; for x in v { x.emit() }` lost the element entirely — no row, no `Unknown`, no
+/// `invisible`, over a body that reads a file — while the ANNOTATED spelling of the same statement
+/// charged. The defect is not in the `let` binder (it already asks both resolvers); it is that the
+/// collection had no answer to give.
+///
+/// ONE helper for both resolvers, deliberately: they already disagree about arms (§F1 Q3, and R575 is
+/// this codebase's open instance of exactly that), and the question "which expressions are the elements
+/// of this literal" has one answer.
+pub(crate) fn collection_literal_elems(expr: &syn::Expr) -> Option<Vec<syn::Expr>> {
+    match expr {
+        syn::Expr::Array(a) => Some(a.elems.iter().cloned().collect()),
+        // `[x; n]` — every element IS `x`, so one expression answers for the whole collection.
+        syn::Expr::Repeat(r) => Some(vec![(*r.expr).clone()]),
+        syn::Expr::Macro(m) => {
+            if m.mac.path.segments.last()?.ident != "vec" {
+                return None;
+            }
+            // `respan_call_site` is REQUIRED, not hygiene — see `macro_reading`: these tokens were
+            // parsed on another thread and syn's span JOIN aborts the parser without it.
+            let tokens = crate::model::respan_call_site(m.mac.tokens.clone());
+            let comma = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+            if let Ok(exprs) = syn::parse::Parser::parse2(comma, tokens.clone()) {
+                return Some(exprs.into_iter().collect());
+            }
+            // `vec![x; n]`, which the comma parser cannot read. Same rule as `Expr::Repeat`.
+            let semi = syn::punctuated::Punctuated::<syn::Expr, syn::Token![;]>::parse_terminated;
+            let exprs = syn::parse::Parser::parse2(semi, tokens).ok()?;
+            exprs.into_iter().next().map(|e| vec![e])
+        }
+        _ => None,
     }
 }
 

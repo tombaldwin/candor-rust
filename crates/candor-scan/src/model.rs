@@ -587,6 +587,11 @@ pub(crate) struct TraitIndexes<'a> {
     /// about a foreign abstraction a producer-side scan can establish without the dep, and it is what
     /// keeps the extension-trait rewrite off a member the base trait genuinely has.
     pub(crate) foreign_impls: &'a HashMap<String, Vec<String>>,
+    /// SOUNDNESS R577 — the crate-wide WRITTEN trait qualifications (leaf -> `dep::Q`, `""` = refused).
+    /// Read at exactly one place: the LAST fallback in the foreign-dispatch branch's `written` chain,
+    /// where a field / return / closure-parameter receiver has produced a bare leaf that the consuming
+    /// file's `use` map cannot expand. See `lang::collect_written_trait_quals`.
+    pub(crate) written_quals: &'a HashMap<String, String>,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

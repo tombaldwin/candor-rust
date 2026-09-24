@@ -2114,6 +2114,9 @@ pub(crate) fn fninfo(
             v
         },
         trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),
+        // SOUNDNESS R577 — the crate-wide fallback for the three declaration sites that record only a
+        // bare leaf (a FIELD, a RETURN, and a closure parameter in a scope that shadows nothing).
+        written_trait_quals: traits.written_quals,
         fields,
         trait_fields: traits.fields,
         dyn_trait_fields: traits.dyn_fields,

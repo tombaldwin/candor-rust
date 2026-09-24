@@ -10,6 +10,134 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ WHETHER A DISPATCH WAS SEEN DEPENDED ON WHETHER THE FILE HAPPENED TO `use` THE TRAIT
+  (SOUNDNESS R577). A FIELD, a RETURN and a CLOSURE PARAMETER went silent; the SIGNATURE and
+  annotated-`let` spellings of the identical receiver resolved.**
+
+      // in a file with NO `use dep::Q;` — every bound written inline
+      pub struct H { pub inner: Box<dyn dep::Q> }
+      pub fn via_param(q: &dyn dep::Q) -> usize { q.fetch() }      // ['Net']  CONTROL
+      pub fn via_field(h: &H)          -> usize { h.inner.fetch() } // ABSENT  <- the defect
+
+  ABSENT from `functions[]`: no `dispatchesOn`, no crate-qualified call, no CHA — a ⟨0.21⟩ purity claim
+  over a body that opens a socket. `scoped deny Net via_field` and `pure via_field` both exited 0 while
+  the control exited 1; blanket `deny Net` exits 1 only INCIDENTALLY, because the implementor is
+  independently reported.
+
+  The collector derives `written = trait_quals_by_param[recv][tr] ?? trait_quals[tr] ?? tr` and then
+  `full = expand(written, uses)`, and every gate in the foreign-dispatch branch is spelled
+  `full.contains("::")`. `sig_trait_quals` and `visit_local` record the QUALIFICATION a declaration was
+  written with; `trait_fields`, `rets` and the closure binder record only the BARE LEAF, because every
+  index downstream of them is leaf-keyed. So `full` stayed `"Q"` and the site emitted nothing. One
+  question, four declaration sites, three answering with less information than the fourth (§F1 Q3).
+
+  **THE FIX SHARES THE DERIVATION RATHER THAN ADDING A FOURTH COPY.** `lang::collect_written_trait_quals`
+  records every crate-qualified bound a file WRITES, through the same `collect_trait_quals` the other
+  three sites use, and with NO ARM SET of its own — it is a `syn::visit` over every `syn::Type`, so it
+  cannot drift from the declaration sites the way a hand-written field/return walker would. The closure
+  binder additionally records its own PER-PARAMETER qualification exactly as `visit_local` does, which
+  also FIXES A FALSE KEY: a closure param shadowing a signature param inherited the SIGNATURE's crate and
+  published `beta#S::ping` for a body that dispatches only on `alpha::S`.
+
+  **FOUR PROPERTIES MAKE A CRATE-WIDE LEAF-KEYED MAP SAFE HERE, where R562 correctly refused one for the
+  ERASURE fact.** (1) It is consulted ONLY when `expand` yields no `::` — the state in which every branch
+  below already does nothing — so it is purely additive and can never change an answer. (2) It cannot
+  re-route a CHA: the bounded fan-out reads `trait_impls[leaf]`, not this path, so naming the wrong crate
+  cannot fabricate an edge to a different implementor set; what the path decides is the KEY, and a key
+  that names nothing joins to nothing. (3) It REFUSES rather than guesses — two spellings of one leaf
+  anywhere in the crate tombstone it, through `lang::merge_trait_qual`, the rule one signature's own
+  parameters already obey. (4) NOT UNDER A GLOB: `use other::*;` can bind a leaf to a crate nothing
+  spells, so no collision exists for the tombstone to see, and a globbed scope keeps today's answer.
+  Only an explicitly written multi-segment path is recorded; a bare leaf is still the consuming file's
+  `use` map's business. Cache schema rev39 -> rev40.
+
+  **THE ROW'S OWN FIXTURE DOES NOT CARRY THE VARIABLE, and this is the correction that matters more than
+  the fix.** candor-spec PART 93's rust arm writes `use dep::Q;` at the TOP OF THE FILE and puts the
+  inline-qualified field in a `mod noimport` below it — and the `use` map is FILE-scoped, not
+  module-scoped. Measured on PART 93's own text, unmodified, at `736852b`: `noimport::via_field_qualified`
+  reads `['Net']` with `dispatchesOn: ['dep#Q::fetch']`. **Its `via_field_qualified`/rust xfail is a
+  PASSING xfail today, before this change.** The variable is whether the FILE imports the trait.
+
+- **⚠ A COLLECTION LITERAL HAD NO ELEMENT (SOUNDNESS R582, and SOUNDNESS R586 for its concrete twin).**
+
+      ctl(s: Box<dyn Sink>, n)                                      ['Fs']   CONTROL
+      let v: Vec<Box<dyn Sink>> = vec![s]; for x in v { x.emit(n) }  ['Fs']   CONTROL
+      let v = vec![s];                     for x in v { x.emit(n) }  ABSENT   <- the defect
+
+  ABSENT entirely — no row, no `Unknown`, no `invisible` — over a body that reads a file. `pure` and
+  scoped `deny Fs` both exited 0 and now exit 1.
+
+  **THE ROW'S STATED MECHANISM IS NOT THE MECHANISM, and measuring it is what showed that.** R582 was
+  filed as the R569 family — an unannotated `let` typed by `ctor_type` rather than `resolve_recv_type` —
+  reached through a collection. The binder is not the variable: **the INLINE spelling
+  `for x in vec![s]`, which passes through no `let` at all, is equally absent**, and so is the ARRAY
+  spelling `[s]`. `resolve_elem_type` and `resolve_elem_trait_leaves` carry thirteen arms between them
+  and NEITHER had one for a collection written out in the source, so there was no element to lose.
+
+  **AND IT IS NOT DISPATCH-SPECIFIC — R586.** `let v = vec![c]; for x in v { x.go() }` over a plain
+  nominal type whose `go` reads a file was ABSENT on the same measurement, with the annotated spelling as
+  the charging control. Fixed as ONE `lang::collection_literal_elems` helper feeding both resolvers,
+  because they already disagree about arms (R575 is this codebase's open instance) and "which expressions
+  are the elements of this literal" has one answer. Each resolver then asks the ONE authority its own
+  call site already uses — `resolve_recv_traits` / `resolve_recv_type` — rather than the narrow
+  three-arm `tuple_elem_leaves` copy beside it. AGREEMENT OR NOTHING: Rust makes a literal homogeneous,
+  so one element that resolves answers for all, and two that resolve DIFFERENTLY are refused.
+
+  **A/B, `bin/corpus-ab.py`, both fixes together, registry 1,626 crates / 327,581 -> 327,599 rows, wide
+  key `entry+package+fn+hash` over a multiset: ADDED 18 REMOVED 0 CHANGED 133.** On the NARROW
+  `inferred` key the same run reads **ADDED 18 / CHANGED 0**, and every one of the 18 added rows carries
+  `inferred: []` — **no effect set anywhere in the corpus gained or lost a member.** Every CHANGED row
+  moved only on `dispatchesOn` (59), `calls` (44), `calls`+`invisible` (15), `dispatchesOn`+`invisible`
+  (11) or `invisible` (4), all in the ADD direction. All 18 additions traced to source, no sampling,
+  three mechanisms:
+
+    · **hyper-util-0.1.20** `pub(crate) struct Timer(Arc<dyn hyper::rt::Timer + Send + Sync>)` — a tuple
+      field whose `dyn` bound is written inline in a file that imports only `hyper::rt::Sleep`. Its three
+      `impl hyper::rt::Timer` members now publish `dispatchesOn: hyper#rt::Timer::{sleep,sleep_until,now}`
+      and `invisible: ["hyper"]`. R577.
+    · **anstream-1.0.0** `struct WinconStream<S> where S: anstyle_wincon::WinconStream` — same shape via
+      a where-clause bound. `inferred: []` at both revisions, because the receiver is caller-monomorphized
+      and R571's carve-out holds; only the disclosure lands. R577.
+    · **regex-automata 0.3.0/0.4.5/0.4.14/0.4.18** `let mut tmp = [Utf8Range { start: 0, end: 0 }; 4];` —
+      an array-REPEAT literal whose element type belongs to `regex_syntax`, a dependency this scan cannot
+      see, so the row now discloses `invisible: ["regex_syntax"]`. R586.
+
+    Plus, among the CHANGED: **reqwest 0.12.28/0.13.4** `fn body_mut(&mut self) -> Pin<&mut dyn
+    futures_util::io::AsyncRead>` (R577 at the RETURN site) and **redis 0.27.6/1.6.0/1.7.0**
+    `-> impl combine::Parser<..>` (57 rows gaining `combine#Parser::right`, a real member of combine's
+    `Parser` — verified in `combine-4.6.8/src/parser/mod.rs:925`, not from candor's own report).
+
+  **REACH, counted on the changed branches themselves** — an unchanged row is not evidence the code ran.
+  `R577HIT` **825 hits across 52 entries**; `R586CONC` **1,901 hits across 165 entries**; `R582DYN`
+  **13 hits across 12 entries** (object, ssh2, rand_chacha, plotters-backend, itertools, icu_collections,
+  bytemuck, bigdecimal). The dispatch arm is genuinely rare in libraries and is named as such rather than
+  waved at.
+
+  **SOURCE CENSUS over the same 1,626 crates**, so "the corpus is quiet" is priced rather than assumed:
+  **23,244** unannotated `let x = vec![…]` / `[…]` bindings and **2,081** inline `for x in vec![…]`, and
+  **1,152** inline-qualified `dyn <crate>::Trait` bounds across **416** crates. Neither shape is rare;
+  what is rare is the shape reaching an effectful body.
+
+  **CONSUMER CORPUS** (8 entries carrying the shapes, including the four R571 control entries):
+  ADDED 13 REMOVED 0 CHANGED 1, every one traced — 12 are the fixture arms above, the 13th is the
+  R582 arm the R571 lane had added to its own all-erased control, and the CHANGED one is the false
+  closure key corrected from `beta#S::ping` to `alpha#S::ping`. candor's own four crates: **0/0/0 with
+  REACH 0** — safety-only, recorded as such.
+
+  **R571 IS NOT REGRESSED, asserted rather than assumed:** the `mono_qualified` arm (`&impl alpha::Q` in
+  a file with no `use`) stays `inferred: []` with its `dispatchesOn` intact at both revisions, and the
+  four R571 corpus entries are byte-identical.
+
+  **RESIDUAL, stated rather than hidden (§J).** Twenty key OCCURRENCES among the new disclosures name a
+  member the trait does not declare: anstream's `anstyle_wincon#WinconStream::{lock,flush,is_terminal,
+  as_locked_write}` (8), which are members of the OTHER bounds on a multi-bound receiver, and reqwest's
+  `futures_util#io::AsyncRead::{as_mut,expect,is_none}` (12), which is R549 mechanism B's chain drift.
+  Both classes pre-date this change and are open; what this change does is make them SPELLABLE in a
+  place where the branch previously emitted nothing. Every one sits on an `inferred: []` row and joins to
+  nothing (PART 92 `c3_pure_only`). Also residual: a field/return declared with the trait IMPORTED in
+  module A and consumed in module B with no import is NOT covered — only an explicitly written
+  multi-segment path is recorded — and a scope with a glob import keeps today's answer by design.
+
 - **⚠ A `dyn` BINDING ANYWHERE IN A BODY LICENSED CHA ON EVERY OTHER RECEIVER IN IT — including the
   caller-monomorphized ones the R4 carve-out exists to protect (SOUNDNESS R571). This REMOVES charges.**
 

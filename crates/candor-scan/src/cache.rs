@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev40: `FileDecls` gained `written_trait_quals` (SOUNDNESS R577 — the crate-qualified spelling a
+    // FIELD / RETURN / CLOSURE-PARAM declaration wrote, which the leaf-keyed indexes throw away). A rev39
+    // entry has none, so it deserializes EMPTY — i.e. "this file qualifies no trait", which is exactly
+    // the silent-purity the field exists to close, served from a warm cache and invisible.
     // rev39: `FileDecls` gained `dyn_trait_fields` (SOUNDNESS R562 — whether a dispatch-typed FIELD was
     // spelled `dyn`, which is what the imported-trait CHA erasure carve-out must ask). A rev38 entry has
     // no such field, so `#[serde(default)]` reads an EMPTY map: "no field in this file is erased", for a
@@ -239,7 +243,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev39/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev40/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -391,6 +395,12 @@ pub(crate) struct FileDecls {
     /// second spelling it forbids — served invisibly from a warm cache.
     #[serde(default)]
     pub(crate) trait_quals: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R577 — every CRATE-QUALIFIED trait bound this file WRITES (`&dyn dep::Q`,
+    /// `Box<dyn dep::Q>`, `impl dep::Q`), leaf -> path, `""` = two spellings seen, refuse. The
+    /// declaration-site half of the qualification that `trait_fields`/`rets`/the closure binder throw
+    /// away; see `lang::collect_written_trait_quals`.
+    #[serde(default)]
+    pub(crate) written_trait_quals: HashMap<String, String>,
     /// SOUNDNESS R529 — the `"{trait leaf}::{method}"` pairs this file implements INSIDE A BLOCK, which
     /// no other Pass A index can see. See `lang::collect_block_nested_trait_impls`. A pre-rev36 entry
     /// deserializes EMPTY, which re-serves exactly the silent purity claim the row closes — hence the
@@ -472,6 +482,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // needs `modpath`, which `collect_decls` does not carry, so it is a separate walk.
     let mut trait_quals: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     crate::lang::collect_trait_decl_quals(items, modpath, include_tests, &mut trait_quals);
+    // SOUNDNESS R577 — and the other side of the SAME naming question: not the traits this file
+    // DECLARES, but the crate-qualified spellings it WRITES for somebody else's. A separate walk for the
+    // reason the three above are: it needs no `use` map at all (only an explicit multi-segment path is
+    // recorded), and `collect_decls` has no site that could carry the fact to a crate-wide index.
+    let mut written_trait_quals: HashMap<String, String> = HashMap::new();
+    crate::lang::collect_written_trait_quals(items, include_tests, &mut written_trait_quals);
     // R529 — the trait impls written inside a BLOCK. Walked beside the two above because it answers the
     // question they cannot: both of those recurse through `Item::Mod` and nothing else, so an
     // `impl Trait for Type` in a fn body reaches neither, while Pass B walks into that body and charges
@@ -553,6 +569,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         },
         // R503 — a `BTreeSet` in, a sorted `Vec` out: same determinism requirement, same reason.
         trait_quals: trait_quals.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
+        written_trait_quals,
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
@@ -621,6 +638,9 @@ pub(crate) struct MergedDecls {
     /// TWO quals is ambiguous and every consumer refuses it, exactly as `LocalTrait::count > 1` already
     /// refuses the same leaf one field over.
     pub(crate) trait_quals: HashMap<String, std::collections::BTreeSet<String>>,
+    /// SOUNDNESS R577 — every file's WRITTEN trait quals, merged under the same tombstone rule a single
+    /// signature's are (`lang::merge_trait_qual`). See `FileDecls::written_trait_quals`.
+    pub(crate) written_trait_quals: HashMap<String, String>,
     /// R529 — every file's BLOCK-NESTED trait-impl members, unioned. See
     /// `FileDecls::nested_impl_members`. Read as a HEDGE (a dispatch on one of these members cannot be
     /// certified from the visible implementors alone), never as an implementor set — the body-local
@@ -929,6 +949,13 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
             e.insert(q.clone());
         }
     }
+    for (k, v) in &fd.written_trait_quals {
+        // SOUNDNESS R577 — ONE rule for the merge and for a single signature's own collisions: two files
+        // spelling one leaf with two crates tombstones it, exactly as two parameters of one fn do. A
+        // tombstone in EITHER input is sticky, because it already means "this crate binds the leaf two
+        // ways" and a second file agreeing with one of them does not settle it.
+        crate::lang::merge_trait_qual(&mut acc.written_trait_quals, k.clone(), v.clone());
+    }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
     }
@@ -1213,6 +1240,16 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     s.push('\n');
     // trait_quals — R503. Decides the WIRE spelling of every local interface-union entry key and of
     // `dispatchesOn`, so a file that moves a trait between modules changes what consumers can join.
+    s.push_str("written_trait_quals");
+    let mut wtq: Vec<&String> = m.written_trait_quals.keys().collect();
+    wtq.sort();
+    for k in wtq {
+        s.push('|');
+        s.push_str(k);
+        s.push(',');
+        s.push_str(&m.written_trait_quals[k]);
+    }
+    s.push('\n');
     s.push_str("trait_quals");
     let mut tqk: Vec<&String> = m.trait_quals.keys().collect();
     tqk.sort();
