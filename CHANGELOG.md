@@ -46,12 +46,24 @@ after upgrading; review policies and regenerate baselines with the new build.
   its digest are unchanged. Emitted only where the union knows something the real row does not, or the
   other 233 become duplicate informationless rows.
 
-  A/B, 1,626 crates, pre-image = `e50a18e`: **ADDED 0 keys, REMOVED 0 keys, 67 keys CHANGED** (rows
-  327,762 -> 327,829). Every one of the 67: PRE lost nothing and POST gained exactly one
-  `interfaceUnion` row — **no published row changed a byte anywhere in the corpus.** 11 from the
-  effects leg, 63 from the coverage (`invisible`) leg, 7 in both. REACH measured, not inferred: 11
-  hits across 7 entries. The FOREIGN leg of the same suppression has **zero reach** over this corpus
-  and is safety-only, recorded here rather than discovered later.
+  A/B, 1,626 crates, pre-image = `e50a18e`: **ADDED 0 keys, REMOVED 0 keys, 11 keys CHANGED** (rows
+  327,762 -> 327,773). Every one of the 11: PRE lost nothing and POST gained exactly one
+  `interfaceUnion` row — **no published row changed a byte anywhere in the corpus.** REACH measured,
+  not inferred: 11 hits across 7 entries. The FOREIGN leg of the same suppression has **zero reach**
+  over this corpus and is safety-only, recorded here rather than discovered later. The only concrete
+  effects on any new row are `Exec, Log` on `portable_pty#Child::wait`, both traced to bodies; the
+  other nine are `Unknown` only.
+
+  **THE COVERAGE LEG IS MEASURED AND NOT EMITTED, PENDING R598.** The same suppression seen through
+  `invisible` is 63 further rows, and they are withheld. A beside-union row publishes its EFFECTS as
+  well as its `invisible`, and R598 — the union's `{ty}::{method}` lookup cannot tell `impl Trait for
+  Ty` from an inherent `impl Ty` — would put a fabricated `Log` on `hickory_proto#serialize::binary::
+  BinEncodable::to_bytes`, sourced from `RData::to_bytes` (record_data.rs:839), a method that
+  `impl BinEncodable for RData` does not override and no dispatch through that member can reach.
+  `invisible` arms no policy form (⟨0.30⟩'s non-gating ruling), so those 63 disclosures cannot flip a
+  verdict; a fabricated `Log` can, because `deny Log` fires on it. R598 being PRE-EXISTING does not
+  license minting three new instances of it. The leg lands free once R598 is closed, and a test
+  (`r597_the_coverage_leg_is_not_emitted_while_r598_is_open`) goes red the moment it is re-enabled.
 
 - **⚠ WHETHER A DISPATCH WAS SEEN DEPENDED ON WHETHER THE FILE HAPPENED TO `use` THE TRAIT
   (SOUNDNESS R577). A FIELD, a RETURN and a CLOSURE PARAMETER went silent; the SIGNATURE and

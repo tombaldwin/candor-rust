@@ -5145,3 +5145,66 @@ fn r597_a_union_that_adds_nothing_emits_no_second_row() {
         "`Same::emit` performs `Fs` and so does the default body — the union adds nothing and must \
          publish nothing: {v}");
 }
+
+/// SOUNDNESS R597, THE COVERAGE LEG — **MEASURED, GATED OFF, AND WAITING ON R598.**
+///
+/// The same suppression seen through `invisible`: the implementor union names an UNCOVERED external
+/// package the real row does not. 63 further rows over the 1,626-crate corpus, and they are NOT emitted.
+///
+/// The reason is a one-sided trade, not a preference. A beside-union row carries its EFFECTS as well as
+/// its `invisible`, and R598 puts a fabricated effect in that set — the union's `{ty}::{method}` lookup
+/// cannot tell `impl Trait for Ty` from an inherent `impl Ty`, so `hickory_proto`'s
+/// `BinEncodable::to_bytes` would publish a `Log` that comes from `RData::to_bytes`
+/// (record_data.rs:839), an inherent method the trait implementation does not override and no dispatch
+/// through that member can reach. `invisible` arms NO policy form — ⟨0.30⟩'s non-gating ruling — so the
+/// 63 disclosures cannot flip a verdict, while a fabricated `Log` can: `deny Log` fires on it. Buying
+/// non-gating disclosure with gate-flippable fabrication is the wrong direction, and R598 being
+/// PRE-EXISTING does not license minting new instances of it.
+///
+/// **This test is the gate on that decision.** It goes RED the moment the leg is re-enabled, so doing so
+/// is a deliberate act with R598's name on it rather than a condition someone widens in passing.
+#[test]
+fn r597_the_coverage_leg_is_not_emitted_while_r598_is_open() {
+    let d = make_crate(
+        "r597blind",
+        "pub trait Sink {\n\
+         \x20   fn emit(&self) { let _ = std::fs::read(\"/tmp/a\"); }\n\
+         }\n\
+         pub struct Loud;\n\
+         impl Sink for Loud {\n\
+         \x20   fn emit(&self) { let _ = std::fs::read(\"/tmp/b\"); uncov::helper(); }\n\
+         }\n",
+    );
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"r597blind\"\n\n[dependencies]\nuncov = \"1\"\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+
+    // PROVE THE FIXTURE REACHES THE BRANCH, in BOTH of the two ways it has to.
+    // 1. the override must genuinely be the coverage-only case: same effect as the default body, plus an
+    //    uncovered package the default body does not touch.
+    let over = fns.iter().find(|e| e["fn"] == "Loud::emit").expect(&format!("{v}"));
+    assert_eq!(over["invisible"], serde_json::json!(["uncov"]),
+        "the override must call into an UNCOVERED package, or there is no coverage leg to gate: {v}");
+    assert_eq!(over["inferred"], serde_json::json!(["Fs"]),
+        "…and it must add NO effect the default body lacks, or this exercises the effects leg instead \
+         and proves nothing about the coverage one: {v}");
+    // 2. a real row must claim the member hash, or nothing is suppressed in the first place.
+    assert!(fns.iter().any(|e| e["hash"] == "r597blind#Sink::emit"
+                             && e["interfaceUnion"] != serde_json::json!(true)),
+        "the default body must be an analysed unit at the member hash: {v}");
+
+    assert!(!fns.iter().any(|e| e["hash"] == "r597blind#Sink::emit"
+                              && e["interfaceUnion"] == serde_json::json!(true)),
+        "THE COVERAGE LEG MUST STAY OFF WHILE R598 IS OPEN. A beside-union row publishes its EFFECTS as \
+         well as its `invisible`, and R598 can put a fabricated one there (an inherent method of the \
+         implementing type, which no dispatch through the member reaches). `invisible` arms no policy \
+         and cannot flip a verdict; a fabricated effect can. If you are re-enabling this deliberately \
+         because R598 is closed, delete this test and say so in the commit: {v}");
+}

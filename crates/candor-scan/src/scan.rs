@@ -3884,6 +3884,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     /// Returns `(effects_add, invisible_add)`. `Unknown` on the existing row COVERS any effect, so it is
     /// not a loss; `invisible` is checked separately because §2 makes `inferred: []` WITH a non-empty
     /// `invisible` explicitly not a purity claim, and without it the two channels mask each other.
+    ///
+    /// **ONLY THE FIRST ELEMENT DRIVES EMISSION TODAY.** The second is measured and gated off pending
+    /// R598 — see the block at the local call site for why buying a non-gating coverage disclosure with
+    /// a gate-flippable fabricated effect is the wrong direction. Both are returned so re-enabling that
+    /// leg is one condition and not a re-derivation.
     fn union_adds_over_row(
         entries: &[ReportEntry],
         hash: &str,
@@ -4427,10 +4432,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // bytes. `candor-query` filters `interfaceUnion` rows at its ingress (`load.rs`, R511),
                 // so no local verb sees a second unit.
                 //
-                // ONLY WHEN IT ADDS SOMETHING, or the other 233 become duplicate rows carrying nothing.
+                // ONLY WHEN IT ADDS AN EFFECT, or the other 233 become duplicate rows carrying nothing.
                 // The narrowing fails in the withholding direction if it is ever wrong, so it is exact
                 // set arithmetic on the published fields rather than a heuristic — and `Unknown` on the
                 // real row covers any effect, which is why those cases are not losses.
+                //
+                // THE COVERAGE LEG IS MEASURED, DELIBERATELY NOT EMITTED, AND WAITING ON R598.
+                // `blind_adds` below is the same suppression seen through `invisible`: the union names an
+                // UNCOVERED package the real row does not, 63 further rows over the 1,626-crate corpus.
+                // Emitting them is NOT free, because a beside-union row carries its EFFECTS too, and R598
+                // puts a fabricated one in that set — the union's `{ty}::{method}` lookup cannot tell
+                // `impl Trait for Ty` from an inherent `impl Ty`, so `hickory_proto#serialize::binary::
+                // BinEncodable::to_bytes` would publish a `Log` sourced from `RData::to_bytes`
+                // (record_data.rs:839), an inherent method that `impl BinEncodable for RData` does not
+                // override and that no dispatch through that member can reach.
+                //
+                // THE TRADE IS ONE-SIDED, WHICH IS WHY THIS IS A GATE AND NOT A PREFERENCE. `invisible`
+                // arms NO policy form — ⟨0.30⟩'s non-gating ruling, recorded in §2's field note and
+                // leant on by the ⟨0.39⟩ clause itself (SPEC.md ~:4379) — so those 63 disclosures cannot
+                // flip a verdict. A fabricated `Log` can: `deny Log` fires on it. Buying 63 non-gating
+                // disclosures with 3 gate-flippable fabrications is the wrong direction, and it is
+                // exactly `feedback-fabrication-fixes-cause-misses` — a soundness fix introducing a
+                // charge nobody asked for. That R598 is PRE-EXISTING (proven against `e50a18e` on a
+                // fixture where nothing is suppressed) does not license minting three NEW instances.
+                //
+                // The leg lands FREE once R598 is fixed, and R598's row names it as blocked on that. The
+                // probe keeps counting the population, so re-enabling it stays a measurement.
                 if existing.contains(&hash) {
                     let (eff_adds, blind_adds) = union_adds_over_row(&entries, &hash, &inf_u, &blind_u);
                     // §E1 REACH PROBE, and the population counter the pre-fix measurement was taken
@@ -4445,13 +4472,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                             }
                             if blind_adds {
+                                // COUNTED, NOT ACTED ON — the coverage leg, gated off above pending R598.
                                 eprintln!(
                                     "R590BLIND {hash} union={blind_u:?} real={:?}", real.invisible);
                             }
                         }
                     }
-                    if !eff_adds && !blind_adds {
-                        continue; // the real entry at this hash already carries everything the union knows
+                    if !eff_adds {
+                        continue; // the real entry at this hash already carries every EFFECT the union knows
                     }
                 }
                 entries.push(ReportEntry {
@@ -4540,13 +4568,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // `owner != crate_name`, so a collision needs a row published under another package's
             // namespace — obligation 2 is exactly the mechanism that mints those, and this leg emits
             // one per (owner, member) pair.
+            //
+            // EFFECTS ONLY, for the same reason and with the same R598 block as the local loop above:
+            // the coverage (`invisible`) half is counted by the probe and not acted on. This leg has
+            // ZERO REACH over the 1,626-crate corpus, so it is safety-only and says so rather than
+            // borrowing the local leg's evidence.
             if existing.contains(key) {
                 let (eff_adds, blind_adds) = union_adds_over_row(&entries, key, &inf_u, &blind_u);
                 if std::env::var_os("CANDOR_R590_INSTR").is_some() {
                     eprintln!("R590FOREIGN {key} adds_eff={eff_adds} adds_blind={blind_adds}");
                 }
-                if !eff_adds && !blind_adds {
-                    continue; // the real entry at this hash already carries everything the union knows
+                if !eff_adds {
+                    continue; // the real entry at this hash already carries every EFFECT the union knows
                 }
             }
             entries.push(ReportEntry {
