@@ -1900,12 +1900,31 @@ pub(crate) fn seed_elem_of(
 /// The dispatch-typed counterpart of `seed_vars`: params whose type is a trait bound rather than a
 /// concrete path (`t: &dyn Store`, `s: impl Store`, `x: X` under `X: Store`) -> their bound leaves.
 pub(crate) fn seed_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
+    seed_trait_vars_by(sig, trait_leaves)
+}
+
+/// SOUNDNESS R582 — the same seed, per parameter, through `mono_trait_leaves` instead: the leaves this
+/// parameter spelled in a CALLER-MONOMORPHIZED position. `dyn_sig_trait_leaves` answers the erasure
+/// question for the whole SIGNATURE at once (a set, no names in it), which is correct for what it gates
+/// and is exactly why the imported-trait CHA could not tell `mono_ctl(t: &impl Handler)`'s receiver from
+/// the `let b: &dyn Handler` three lines above it.
+///
+/// One loop, two leaf functions, so the mono map and `trait_vars` cannot disagree about which parameters
+/// they have entries for.
+pub(crate) fn seed_mono_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
+    seed_trait_vars_by(sig, crate::lang::mono_trait_leaves)
+}
+
+fn seed_trait_vars_by(
+    sig: &syn::Signature,
+    leaves_of: impl Fn(&syn::Type, &HashMap<String, Vec<String>>) -> Vec<String>,
+) -> HashMap<String, Vec<String>> {
     let gb = generic_bounds_of(sig);
     let mut m = HashMap::new();
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
             if let syn::Pat::Ident(id) = &*pt.pat {
-                let leaves = trait_leaves(&pt.ty, &gb);
+                let leaves = leaves_of(&pt.ty, &gb);
                 if !leaves.is_empty() {
                     m.insert(id.ident.to_string(), leaves);
                 }
@@ -2078,6 +2097,9 @@ pub(crate) fn fninfo(
         // only on these, never on a caller-monomorphized generic bound / `impl Trait`.
         dyn_sig_traits: crate::lang::dyn_sig_trait_leaves(sig),
         dyn_local_traits: Default::default(),
+        // R582 — …and the PER-NAME complement of the two sets above, which is what tells a
+        // caller-monomorphized receiver apart from an erased one when the BODY contains both.
+        mono_recv_traits: seed_mono_trait_vars(sig),
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
         // a LOCAL `let`'s type annotation.
         generic_bounds: crate::lang::generic_bounds_of(sig),

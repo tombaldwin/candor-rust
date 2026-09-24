@@ -239,7 +239,7 @@
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
-            dyn_local_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, dyn_trait_fields: &tf,
@@ -292,7 +292,7 @@
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
-            dyn_local_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, dyn_trait_fields: &tf,
@@ -621,7 +621,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
-            dyn_local_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -642,6 +642,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());
         c.trait_vars.insert(n.into(), vec!["Store".into()]);
+        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R582
         c.dep_bound_vars.insert(n.into(), "deplib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
         c.elem_of.insert(n.into(), "Elem".into());
@@ -658,6 +659,10 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             let mut leaked: Vec<&str> = Vec::new();
             if s.vars.contains_key(n) { leaked.push("vars"); }
             if s.trait_vars.contains_key(n) { leaked.push("trait_vars"); }
+            // R582 — a stale "caller-monomorphized" claim on a shadow SUBTRACTS that receiver
+            // from the imported-trait CHA: the UNDER-report direction, and the one thing the
+            // fix that added this table must not buy.
+            if s.mono_recv_traits.contains_key(n) { leaked.push("mono_recv_traits"); }
             if s.dep_bound_vars.contains_key(n) { leaked.push("dep_bound_vars"); }
             if s.trait_quals_by_param.contains_key(n) { leaked.push("trait_quals_by_param"); }
             if s.elem_of.contains_key(n) { leaked.push("elem_of"); }
@@ -678,6 +683,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         // …and everything is put back, or the shadow silently deletes the outer binding instead.
         assert_eq!(c.vars.get(n).map(String::as_str), Some("Outer"));
         assert_eq!(c.trait_vars.get(n).cloned(), Some(vec!["Store".to_string()]));
+        assert_eq!(c.mono_recv_traits.get(n).cloned(), Some(vec!["Store".to_string()]));
         assert_eq!(c.dep_bound_vars.get(n).map(String::as_str), Some("deplib::build"));
         assert!(c.trait_quals_by_param.contains_key(n));
         assert_eq!(c.elem_of.get(n).map(String::as_str), Some("Elem"));
@@ -3039,6 +3045,147 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         assert!(effs("nested_let").is_empty(),
                 "R556 CARVE-OUT (nested item): an inner fn's own generic must not inherit the outer \
                  body's `let`-position erasure (the value-bag shape):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_dyn_binding_elsewhere_in_the_body_does_not_cha_a_monomorphized_receiver_r582() {
+        // SOUNDNESS R582 — THE R556/R561/R4 ERASURE GATE WAS BODY-WIDE AND THE CARVE-OUT IS
+        // PER-RECEIVER. `dyn_sig_traits` and `dyn_local_traits` are ADDITIVE SETS: they say *"this body
+        // erased that trait somewhere"*. The imported-trait CHA read them as *"this receiver is
+        // erased"*, so ONE `dyn` binding anywhere in a body licensed CHA on EVERY other receiver in it
+        // carrying that leaf — including the caller-monomorphized `impl Trait` / `T: Trait` receivers
+        // the R4 carve-out exists to protect. That is R4's own serde_json fabrication arriving by a
+        // fourth door, and it is an OVER-charge, so the fix must not be paid for with a silence.
+        //
+        // THE ONE-VARIABLE PAIR, and it is the reason this test asserts pairs rather than a list:
+        // `mono_ctl(t: &impl Handler, n)` reads `[]`, correctly. Put `let b: &dyn Handler = &MyH;
+        // b.ping();` — a call to a PURE method, on a DIFFERENT receiver — above the byte-identical
+        // `t.roll(n)` and it read `["Fs"]` with `calls = ["MyH::ping", "MyH::roll"]`; scoped
+        // `deny Fs mono_after_let` exited 1 over an effect the program may never perform. The single
+        // variable is an unrelated statement elsewhere in the body.
+        //
+        // MEASURED IN THE WILD, once in 1,626 registry crates: tower-0.5.3 `BoxService::new`
+        // (src/util/boxed/sync.rs:63-70) is `fn new<S: Service…>(inner: S)` whose body writes
+        // `let inner: Box<dyn Service<…>> = Box::new(inner.map_future(…))` — a monomorphized receiver
+        // called inside the initializer of an annotated `let` that erases the same trait. That row did
+        // not move only because tower has 39 local `impl Service` types and the fan-out is bounded at
+        // 12; `boxnew` below is the same shape with a small enough impl set for the branch to be live.
+        //
+        // THE WHOLE CLASS, NOT ONLY WHAT R556/R561 ADDED. `sig_unused` is the `dyn_sig_traits` half and
+        // it PRE-DATES that wave — it charges at both revisions. Fixing two of the three reads would
+        // leave a denylist that knows the answer and declines to apply it at one call site, which is
+        // §9's audit boundary drawn around its own trigger.
+        //
+        // THE CONTROLS ARE THE CLAIM UNDER TEST. This change REMOVES charges, so every genuinely erased
+        // spelling is asserted to keep charging — and, separately, the three SHADOW shapes, where a
+        // monomorphized parameter's name is rebound to an erased value. A stale suppression there is a
+        // silent under-report, which is not a trade this fix is allowed to make.
+        let d = std::env::temp_dir().join(format!("candor-r582-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r582\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use deplib::Handler;
+
+            pub struct MyH;
+            impl Handler for MyH {
+                fn roll(&self) { let _ = std::fs::read_to_string("/etc/hosts"); }
+                fn ping(&self) {}
+            }
+            pub struct Reg { pub inner: Box<dyn Handler> }
+            pub fn mk() -> Box<dyn Handler> { Box::new(MyH) }
+
+            // ---- POSITIVE (the fabrication): a caller-monomorphized receiver, beside an erased one.
+            pub fn mono_ctl(t: &impl Handler) { t.roll(); }
+            pub fn mono_after_let(t: &impl Handler) { let b: &dyn Handler = &MyH; b.ping(); t.roll(); }
+            pub fn mono_after_closure(t: &impl Handler) { let f = |h: &dyn Handler| h.ping(); f(&MyH); t.roll(); }
+            pub fn sig_unused(t: &impl Handler, _x: &dyn Handler) { t.roll(); }
+            pub fn mono_generic<T: Handler>(t: T) { let b: &dyn Handler = &MyH; b.ping(); t.roll(); }
+            // tower-0.5.3 `BoxService::new` in shape: the monomorphized call sits INSIDE the
+            // initializer of the annotated `let` that erases the same trait.
+            pub fn boxnew<S: Handler>(s: S) -> Reg { let inner: Box<dyn Handler> = Box::new(tap(s)); Reg { inner } }
+            fn tap<S: Handler>(s: S) -> MyH { s.roll(); MyH }
+
+            // ---- CONTROLS: every genuinely ERASED spelling must keep charging. If any of these fails
+            // the positives above measure nothing — a scan that resolves nothing produces them too.
+            pub fn ctl_sig(h: &dyn Handler) { h.roll(); }
+            pub fn ctl_let() { let h: &dyn Handler = &MyH; h.roll(); }
+            pub fn ctl_closure() { let f = |h: &dyn Handler| h.roll(); f(&MyH); }
+            pub fn ctl_field(r: &Reg) { r.inner.roll(); }
+            pub fn ctl_ret() { mk().roll(); }
+            pub fn ctl_vec() { let v: Vec<Box<dyn Handler>> = vec![Box::new(MyH)]; v[0].roll(); }
+
+            // ---- CONTROLS (SHADOW): a monomorphized parameter's NAME rebound to an ERASED value. The
+            // suppression is name-keyed, so a stale entry here would delete a real dispatch.
+            pub fn shadow_let(t: &impl Handler) { let _ = t; let t: &dyn Handler = &MyH; t.roll(); }
+            pub fn shadow_for(t: &impl Handler, v: Vec<Box<dyn Handler>>) { t.ping(); for t in v { t.roll(); } }
+            pub fn shadow_closure(t: &impl Handler) { let _ = t; let f = |t: &dyn Handler| t.roll(); f(&MyH); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        let fs = "Fs".to_string();
+
+        // CONTROLS FIRST — an absence assertion over a scan that resolved nothing is no evidence (§E3).
+        for (name, why) in [
+            ("ctl_sig",     "a `&dyn` SIGNATURE parameter (R4's own base case)"),
+            ("ctl_let",     "an annotated `let` (R556)"),
+            ("ctl_closure", "a `&dyn` CLOSURE parameter (R561)"),
+            ("ctl_field",   "a `Box<dyn T>` FIELD receiver (R562)"),
+            ("ctl_ret",     "a `-> Box<dyn T>` factory's return (R562)"),
+            ("ctl_vec",     "a `let`-annotated Vec of trait objects, indexed"),
+        ] {
+            assert!(effs(name).contains(&fs),
+                    "R582 CONTROL LOST A REAL EFFECT — {why} is genuinely erased and must still CHA the \
+                     local impl. Narrowing past the fabrication into silence converts an over-report \
+                     into the cardinal sin, which is never the trade here:\n{body}");
+        }
+        for (name, why) in [
+            ("shadow_let",     "an annotated `let` of the same name (visit_local clears the claim)"),
+            ("shadow_for",     "a for-loop variable of the same name (`scoped_binding` clears it)"),
+            ("shadow_closure", "a `dyn` closure parameter of the same name (the closure arm clears it)"),
+        ] {
+            assert!(effs(name).contains(&fs),
+                    "R582 SHADOW CONTROL LOST A REAL EFFECT — a monomorphized parameter's name was \
+                     rebound to {why}, and the stale suppression deleted the shadow's real dispatch. \
+                     This is the under-report direction the denylist exists to be incapable of:\n{body}");
+        }
+
+        // …and only now the fabrications.
+        assert!(effs("mono_ctl").is_empty(),
+                "R582 BASELINE: a caller-monomorphized receiver in a body with no erasure at all was \
+                 already correct and must stay so:\n{body}");
+        for (name, why) in [
+            ("mono_after_let",     "an annotated `let` (R556) elsewhere in the body"),
+            ("mono_after_closure", "a `dyn` CLOSURE parameter (R561) elsewhere in the body"),
+            ("sig_unused",         "an entirely UNUSED `&dyn` SIGNATURE parameter — the half that \
+                                    pre-dates the R556/R561 wave"),
+            ("mono_generic",       "an annotated `let`, with the receiver a `T: Handler` generic"),
+            ("boxnew",             "the annotated `let` whose own initializer contains the call \
+                                    (tower-0.5.3 `BoxService::new`)"),
+        ] {
+            assert!(effs(name).is_empty(),
+                    "R582: {why} licensed CHA on a receiver the CALLER monomorphizes. The crate's own \
+                     impls are one sample of an open set, so this charges an effect the program may \
+                     never perform and makes a scoped `deny` exit 1 on it:\n{body}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -7103,7 +7250,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
-                dyn_local_traits: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, dyn_trait_fields: &tf,
@@ -7159,7 +7306,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -7185,7 +7332,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -7221,7 +7368,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
-            dyn_local_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, dyn_trait_fields: &tf,
@@ -7260,7 +7407,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
-                dyn_local_traits: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, dyn_trait_fields: &tf,
@@ -19214,7 +19361,7 @@ pub fn go() {{ imp::doit(); }}
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
-            dyn_local_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -19234,6 +19381,7 @@ pub fn go() {{ imp::doit(); }}
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());
         c.trait_vars.insert(n.into(), vec!["Store".into()]);
+        c.mono_recv_traits.insert(n.into(), vec!["Store".into()]); // R582
         c.dep_bound_vars.insert(n.into(), "deplib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
         c.elem_of.insert(n.into(), "Elem".into());
@@ -19250,6 +19398,7 @@ pub fn go() {{ imp::doit(); }}
         // this statement's own RHS must not see.
         c.vars.insert(n.into(), "Inner".into());
         c.trait_vars.insert(n.into(), vec!["Other".into()]);
+        c.mono_recv_traits.insert(n.into(), vec!["Other".into()]); // R582
         c.dep_bound_vars.insert(n.into(), "otherlib::build".into());
         c.trait_quals_by_param.insert(n.into(), HashMap::new());
         c.elem_of.insert(n.into(), "OtherElem".into());
@@ -19266,6 +19415,7 @@ pub fn go() {{ imp::doit(); }}
         let mut wrong: Vec<&str> = Vec::new();
         if c.vars.get(n).map(String::as_str) != Some("Outer") { wrong.push("vars"); }
         if c.trait_vars.get(n).cloned() != Some(vec!["Store".to_string()]) { wrong.push("trait_vars"); }
+        if c.mono_recv_traits.get(n).cloned() != Some(vec!["Store".to_string()]) { wrong.push("mono_recv_traits"); }
         if c.dep_bound_vars.get(n).map(String::as_str) != Some("deplib::build") { wrong.push("dep_bound_vars"); }
         if c.trait_quals_by_param.get(n).map(|m| m.len()) != Some(1) { wrong.push("trait_quals_by_param"); }
         if c.elem_of.get(n).map(String::as_str) != Some("Elem") { wrong.push("elem_of"); }

@@ -91,6 +91,26 @@ pub(crate) fn collect_dyn_trait_leaves(ty: &syn::Type, out: &mut std::collection
     }
 }
 
+/// SOUNDNESS R582 — the COMPLEMENT of `dyn_trait_leaves_of` within `trait_leaves`: the trait leaves
+/// this ONE declaration spells in a position the CALLER monomorphizes (`impl T`, `T` under `T: Bound`),
+/// as opposed to a `dyn` position the callee erases.
+///
+/// Derived from the two existing authorities rather than by a third walk over `syn::Type`, because that
+/// is precisely the drift §F1 Q3 names: `trait_leaves` and `collect_dyn_trait_leaves` already disagree
+/// deliberately about wrappers (`Vec<Box<dyn T>>` is a `dyn` leaf and NOT a `trait_leaves` answer), and
+/// a hand-written third arm set would have to re-decide every one of those cases. Set difference cannot.
+///
+/// Read as a DENYLIST and nothing else: a leaf here SUBTRACTS a receiver from the imported-trait CHA
+/// (`collector.rs`, R4's erasure carve-out). A declaration shape this misses therefore keeps whatever
+/// the CHA already did — the over-charge direction — and never turns one into a silent under-report.
+pub(crate) fn mono_trait_leaves(
+    ty: &syn::Type,
+    generic_bounds: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let erased = dyn_trait_leaves_of(ty);
+    trait_leaves(ty, generic_bounds).into_iter().filter(|l| !erased.contains(l)).collect()
+}
+
 /// The `dyn`-spelled trait leaves of a signature's PARAMETERS — the erased receivers in scope for the
 /// body being walked. See `collect_dyn_trait_leaves`.
 pub(crate) fn dyn_sig_trait_leaves(sig: &syn::Signature) -> std::collections::HashSet<String> {

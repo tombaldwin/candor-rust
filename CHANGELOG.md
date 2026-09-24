@@ -10,6 +10,61 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A `dyn` BINDING ANYWHERE IN A BODY LICENSED CHA ON EVERY OTHER RECEIVER IN IT — including the
+  caller-monomorphized ones the R4 carve-out exists to protect (SOUNDNESS R582). This REMOVES charges.**
+
+      pub fn mono_ctl(t: &impl Handler, n: u32) -> u32 { t.roll(n) }           // eff=∅   correct
+      pub fn mono_after_let(t: &impl Handler, n: u32) -> u32 {
+          let b: &dyn Handler = &H; b.ping();                                  // a PURE method,
+          t.roll(n)                                                            // a DIFFERENT receiver
+      }                                                                        // eff={Fs}  FABRICATED
+
+  `deny Fs mono_after_let` exited **1** over an effect the program may never perform; it now exits 0,
+  while `deny Fs` on any genuinely `dyn` receiver still exits 1. `dyn_sig_traits` and `dyn_local_traits`
+  are ADDITIVE, BODY-WIDE sets — they say *"this body erased that trait somewhere"* — and the
+  imported-trait CHA read them as *"this receiver is erased"*. One unrelated statement was the whole
+  variable. That is R4's own serde_json fabrication arriving by a fourth door; R556 and R561 widened the
+  door from the signature position to the `let` and closure-parameter ones, and the signature half
+  pre-dates them both.
+
+  **THE WHOLE CLASS, NOT ONLY WHAT R556/R561 ADDED.** The `mono_unused_sig` arm — an entirely unused
+  `_x: &dyn Handler` parameter — charges at both revisions, through `dyn_sig_traits`. Fixing two of the
+  three reads would leave a denylist that knows the answer and declines to apply it at one call site.
+
+  **A DENYLIST, NOT A REPLACEMENT OF THE BODY-WIDE READ, and the direction it fails in is the point.**
+  `mono_recv_traits` records, per BINDING NAME, the trait leaves that binding spelled in a
+  caller-monomorphized position (`impl T`, `T: Bound`), derived as the set difference
+  `trait_leaves \ dyn_trait_leaves_of` so it cannot drift from either authority. An entry can only
+  SUBTRACT a receiver from the CHA, so a binding shape it does not know keeps today's over-charge and no
+  gap in it can produce a silent under-report. The obvious alternative — delete the body-wide read and
+  gate on `receiver_is_erased` — is refused here: that walker has a NARROWER arm set (SOUNDNESS R575, no
+  Index, no element-yielding accessor, no plain chain), so it would trade this over-charge for fresh
+  silences at `self.hs[0].roll()` and `mk_opt().unwrap().roll()`. R575 stays open on its own terms.
+
+  The DISCLOSURE is unaffected: `dispatchesOn` still names the dependency member (§4 obligation 1 is
+  deliberately not gated on erasure), so a consumer still learns the dispatch happened — only the
+  fabricated edge and the effect it carried are gone.
+
+  Name-keyed, so it is cleared and restored by `scoped_binding`, carried through the self-shadow window
+  in `BoundNameState`, cleared for every name a `let` binds before any binder runs, and saved/restored
+  across closure parameters. Three SHADOW controls pin that: a monomorphized parameter's name rebound to
+  a `dyn` `let`, to a for-loop variable over `Vec<Box<dyn T>>`, and to a `dyn` closure parameter all keep
+  charging. Those three regions hold every writer of `trait_vars` today and nothing in the language keeps
+  that true, so a source census pins the writer COUNT — a fourth region arrives as a decision rather than
+  as a silent hole.
+
+  **A/B, `bin/corpus-ab.py`, two corpora.** Registry (1,626 crates, 327,581 rows, wide key
+  `entry+package+fn+hash` over a multiset): **ADDED 0 REMOVED 0 CHANGED 0**, with REACH **1 hit in 1
+  entry** — tower-0.5.3 `BoxService::new` (`src/util/boxed/sync.rs:63-70`), which is the shape exactly:
+  `fn new<S: Service…>(inner: S)` calling `inner.map_future(…)` inside the initializer of a
+  `let inner: Box<dyn Service<…>>`. That row did not move because tower has 39 local `impl Service`
+  types and the bounded-CHA fan-out stops at 12, so no edge was ever pushed there. A consumer-side
+  corpus with a small enough impl set (4 entries, 33 rows) moves: **ADDED 0 REMOVED 0 CHANGED 5**, REACH
+  6 hits in 3 entries. All five were traced to source — four drop a fabricated edge plus the effect it
+  carried on an `impl Trait`/`T: Trait` receiver, and the fifth (`c6_shadow_for`) drops the fabricated
+  half and KEEPS the real one from the shadowing for-loop variable. No function left `functions[]` in
+  either corpus, and an 8-spelling all-erased over-charge control is byte-identical.
+
 - **coverage-gate manifests refreshed** — `coverage-gate-refresh` has been red since 2026-09-23 on pure
   crates.io drift: REGRESSED 0, ORACLE-DROPPED 0, GROWN 47. No coverage was lost; 47 public entry points
   appeared in newer crate versions. Regenerated against a fresh fetch and verified the diff is growth

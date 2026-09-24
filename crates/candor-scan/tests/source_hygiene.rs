@@ -180,3 +180,48 @@ fn the_dylint_lint_spells_no_section_4_reason_of_its_own() {
     assert_eq!(pol.matches("pub const ALL: [Kind; 5]").count(), 1,
         "SPEC §4 ⟨0.7⟩'s kind set is CLOSED at five and must be declared exactly once.");
 }
+
+/// SOUNDNESS R582 — THE MONOMORPHIZATION DENYLIST IS NAME-KEYED, SO EVERY WRITER OF `trait_vars` IS A
+/// SITE THAT CAN GIVE A NAME AN ERASED MEANING AND MUST NOT LEAVE A STALE "caller-monomorphized" CLAIM
+/// STANDING. A stale entry SUBTRACTS a real dispatch from the imported-trait CHA — the under-report
+/// direction, and the one thing that fix was not allowed to buy.
+///
+/// The claim is that the writers live in exactly THREE regions, each of which clears the denylist:
+/// `scoped_binding` (the one binder, for every block-scoped shadow), `visit_expr_closure` (a closure
+/// parameter, saved and restored), and `visit_local` (which clears for every name its statement binds,
+/// before any of its own binders runs). That was true when R582 landed and it is not enforced by
+/// anything in the language — so this census pins the COUNT, which is what makes a NEW writer show up
+/// as a decision rather than as a silent hole. The behavioural half is the three SHADOW controls in
+/// `a_dyn_binding_elsewhere_in_the_body_does_not_cha_a_monomorphized_receiver_r582`; those catch a
+/// missing clear in the three regions that exist, and this catches a FOURTH region being added.
+///
+/// The right response to a red here is to clear `mono_recv_traits` at the new site (or to confirm it is
+/// inside one of the three) and then update the count — not to delete the assertion.
+#[test]
+fn every_trait_vars_writer_is_in_a_region_that_clears_the_r582_denylist() {
+    let src = crate_src("candor-scan/src/collector.rs");
+    // VACUITY FLOOR — the census must be able to find what it is asserting about. A renamed table or a
+    // moved file would otherwise make this pass by counting nothing, which is precisely the shape
+    // `check_soundness_tables.py` failed in (AGENT-CORPUS-BRIEF §1b).
+    assert!(src.contains("mono_recv_traits"),
+            "R582 CENSUS VACUOUS: `mono_recv_traits` is not in collector.rs at all, so every count \
+             below is over a table that no longer exists under that name.");
+    let writers = src.matches("self.trait_vars.insert(").count();
+    assert_eq!(writers, 10,
+               "a `trait_vars` writer was ADDED or REMOVED ({writers} found, 10 expected). Each one \
+                binds a NAME to a dispatch meaning, and if that meaning is ERASED while a stale R582 \
+                `mono_recv_traits` entry survives for the same name, the CHA is subtracted and a real \
+                dispatch is lost with nothing disclosed. Confirm the new site is inside \
+                `scoped_binding`, `visit_expr_closure` or `visit_local` — the three regions that clear \
+                the denylist — or clear it there, then update this count.");
+    // …and the three clears themselves, so removing one is red here as well as in the behavioural test.
+    for (needle, region) in [
+        ("let p_mono = self.mono_recv_traits.remove(name);", "scoped_binding"),
+        ("let prev = self.mono_recv_traits.remove(&name);", "visit_expr_closure"),
+        ("self.mono_recv_traits.remove(n);", "visit_local"),
+    ] {
+        assert!(src.contains(needle),
+                "the R582 denylist is no longer cleared in `{region}`: a shadow there inherits the \
+                 outer binding's caller-monomorphized claim and loses its own dispatch.");
+    }
+}

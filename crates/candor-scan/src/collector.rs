@@ -147,6 +147,42 @@ pub(crate) struct CallCollector<'a> {
     /// crate — R4's measured fabrication, arriving by a third door. Closing them needs the erasure
     /// fact carried in the SAME key space as the resolution, which is a different change.
     pub(crate) dyn_local_traits: std::collections::HashSet<String>,
+    /// SOUNDNESS R582 — BINDING NAME -> the trait leaves THAT binding spelled in a CALLER-MONOMORPHIZED
+    /// position (`impl T`, `T` under `T: Bound`). The DENYLIST that makes the two sets above per-receiver
+    /// without deleting them.
+    ///
+    /// Both of those sets are BODY-WIDE and ADDITIVE — they say *"this body erased that trait
+    /// somewhere"* — and the imported-trait CHA (R4) read them as if they said *"this receiver is
+    /// erased"*. Measured: `pub fn mono_ctl(t: &impl Handler, n: u32) -> u32 { t.roll(n) }` reads
+    /// `inferred: []`, correctly — the caller picks the type. Put `let b: &dyn Handler = &H; b.ping();`
+    /// (a call to a PURE method, on a different receiver) above the SAME `t.roll(n)` and it reads
+    /// `['Fs']` with `calls = ['H::ping', 'H::roll']`, and scoped `deny Fs mono_after_let` exits **1**
+    /// over an effect the program may never perform. One variable: an unrelated statement elsewhere in
+    /// the body. That is R4's own serde_json fabrication reached by a fourth door, and R556/R561 widened
+    /// the door from the signature position to the `let` and closure-parameter ones.
+    ///
+    /// A DENYLIST, DELIBERATELY, and this is the whole safety argument ([[candor-denylist-over-allowlist]]:
+    /// when you narrow a sound over-approximation, say which direction the narrowing fails in first). An
+    /// entry here can only SUBTRACT a receiver from the CHA. A binding shape this map does not know about
+    /// therefore keeps exactly the behaviour it has today — the over-charge — and no gap in it can
+    /// produce a silent under-report. The inverse (an allowlist of "erased receivers") would have the
+    /// opposite failure direction, which is why R575's narrower third walker is NOT the route taken here:
+    /// deleting the body-wide read in favour of `receiver_is_erased` would trade this over-charge for
+    /// fresh silences at `self.hs[0].roll()` and `mk_opt().unwrap().roll()`. R575 stays open on its own
+    /// terms and is a silence, not this.
+    ///
+    /// NAME-KEYED, so it is subject to every shadowing rule the other name-keyed tables are:
+    /// `scoped_binding` clears and restores it, `BoundNameState` carries it through the self-shadow
+    /// window, and `visit_local` clears it for every name the statement binds BEFORE any binder runs —
+    /// the "enumerate the STATE, not the binders" rule that window already states. Clearing is the safe
+    /// direction by construction: a cleared entry suppresses nothing.
+    ///
+    /// THE RESIDUAL, STATED RATHER THAN IMPLIED. Those three regions hold every writer of `trait_vars`
+    /// as of R582, and nothing in the language keeps that true — a FOURTH region would bind a name to an
+    /// erased meaning with a stale claim still standing, and the behavioural shadow controls can only
+    /// see the regions that exist. `every_trait_vars_writer_is_in_a_region_that_clears_the_r582_denylist`
+    /// (tests/source_hygiene.rs) pins the writer COUNT so a new one arrives as a decision.
+    pub(crate) mono_recv_traits: HashMap<String, Vec<String>>,
     /// This signature's generic parameter -> its trait bounds (`<T: Doer>` → `T -> ["Doer"]`), i.e.
     /// `lang::generic_bounds_of(sig)`. Pass A already threads exactly this into every PARAMETER, FIELD
     /// and RETURN position; the collector needs its own copy because a LOCAL `let` can name a generic
@@ -477,6 +513,10 @@ pub(crate) struct BoundNameState {
     name: String,
     vars: Option<String>,
     trait_vars: Option<Vec<String>>,
+    /// R582 — the per-name monomorphization denylist. Registered here because the residual stated above
+    /// is exact: a table added to `CallCollector` and NOT registered in `BoundNameState` is outside this
+    /// window and nothing in this repo will say so.
+    mono_recv_traits: Option<Vec<String>>,
     dep_bound_vars: Option<String>,
     trait_quals_by_param: Option<HashMap<String, String>>,
     elem_of: Option<String>,
@@ -2426,6 +2466,28 @@ impl<'a> CallCollector<'a> {
             _ => false,
         }
     }
+    /// SOUNDNESS R582 — is THIS RECEIVER EXPRESSION a binding the CALLER monomorphizes with respect to
+    /// trait `tr`? The denylist half of the R4 erasure carve-out; see `mono_recv_traits`.
+    ///
+    /// Only a BARE NAME can answer yes. Peeled through the transparent wrappers every other receiver
+    /// resolver peels and NO further: `v[0]`, `self.inner` and `mk().unwrap()` are different receivers
+    /// from `v`, `self` and `mk`, and walking into them would let a monomorphized container suppress its
+    /// own erased elements. Declining to answer is the over-charge direction, which is the one this
+    /// predicate is allowed to fail in.
+    fn receiver_is_caller_monomorphized(&self, expr: &syn::Expr, tr: &str) -> bool {
+        fn bare_name(e: &syn::Expr) -> Option<String> {
+            match e {
+                syn::Expr::Reference(r) => bare_name(&r.expr),
+                syn::Expr::Paren(p) => bare_name(&p.expr),
+                syn::Expr::Group(g) => bare_name(&g.expr),
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => bare_name(&u.expr),
+                syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            }
+        }
+        let Some(name) = bare_name(expr) else { return false };
+        self.mono_recv_traits.get(&name).is_some_and(|ls| ls.iter().any(|x| x == tr))
+    }
     fn locally_bound(&self, name: &str) -> bool {
         self.vars.contains_key(name)
             || self.closure_vars.contains(name)
@@ -2840,6 +2902,12 @@ impl<'a> CallCollector<'a> {
         // Save + clear every RESOLUTION table for this name.
         let p_vars = self.vars.remove(name);
         let p_traits = self.trait_vars.remove(name);
+        // R582 — the per-name monomorphization denylist, in the CLEARED half by the role split above.
+        // A shadow that rebinds `name` to an ERASED value (`for d in v` over a `Vec<Box<dyn Doer>>`,
+        // where `d` also names an `impl Doer` parameter) must not inherit the outer binding's
+        // "caller-monomorphized" claim and have its dispatch suppressed. Clearing is also the direction
+        // that cannot lose an effect: with no entry, nothing is subtracted from the CHA.
+        let p_mono = self.mono_recv_traits.remove(name);
         // DEPENDENCY PROVENANCE. Keyed by bare name like `vars`, so a shadow inherited the OUTER
         // binding's provenance and its member calls were attributed to a dependency they have nothing to
         // do with:  `let client = deplib::build();` then `for client in local_items() { client.go() }`.
@@ -2880,6 +2948,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         restore(&mut self.vars, name, p_vars);
+        restore(&mut self.mono_recv_traits, name, p_mono);
         restore(&mut self.dep_bound_vars, name, p_prov);
         restore(&mut self.fn_alias, name, p_alias);
         restore(&mut self.str_locals, name, p_str);
@@ -2915,6 +2984,7 @@ impl<'a> CallCollector<'a> {
                 name: n.clone(),
                 vars: self.vars.get(n).cloned(),
                 trait_vars: self.trait_vars.get(n).cloned(),
+                mono_recv_traits: self.mono_recv_traits.get(n).cloned(),
                 dep_bound_vars: self.dep_bound_vars.get(n).cloned(),
                 trait_quals_by_param: self.trait_quals_by_param.get(n).cloned(),
                 elem_of: self.elem_of.get(n).cloned(),
@@ -2945,6 +3015,7 @@ impl<'a> CallCollector<'a> {
             let n = b.name.as_str();
             put(&mut self.vars, n, &b.vars);
             put(&mut self.trait_vars, n, &b.trait_vars);
+            put(&mut self.mono_recv_traits, n, &b.mono_recv_traits);
             put(&mut self.dep_bound_vars, n, &b.dep_bound_vars);
             put(&mut self.trait_quals_by_param, n, &b.trait_quals_by_param);
             put(&mut self.elem_of, n, &b.elem_of);
@@ -3067,6 +3138,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
         // R556 — the `let`-position half of the same erasure fact, scoped for the same reason.
         let outer_l = std::mem::take(&mut self.dyn_local_traits);
+        // R582 — and the per-name complement, scoped alongside the two sets it subtracts from: a nested
+        // item's same-named parameter is its own binding, not the enclosing signature's.
+        let outer_m = std::mem::take(&mut self.mono_recv_traits);
         let outer_g = std::mem::replace(
             &mut self.generic_bounds,
             crate::lang::generic_bounds_of(&node.sig),
@@ -3079,6 +3153,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         syn::visit::visit_item_fn(self, node);
         self.dyn_sig_traits = outer;
         self.dyn_local_traits = outer_l;
+        self.mono_recv_traits = outer_m;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -3094,6 +3169,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
         // R556 — the `let`-position half of the same erasure fact, scoped for the same reason.
         let outer_l = std::mem::take(&mut self.dyn_local_traits);
+        // R582 — and the per-name complement, scoped alongside the two sets it subtracts from: a nested
+        // item's same-named parameter is its own binding, not the enclosing signature's.
+        let outer_m = std::mem::take(&mut self.mono_recv_traits);
         // The impl BLOCK's own generics (`impl<T: Doer> Wrap<T>`) are the outer scope for every method
         // in it; `visit_impl_item_fn` layers each method's own on top.
         let outer_g = std::mem::replace(
@@ -3109,6 +3187,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.restore_self(outer_self);
         self.dyn_sig_traits = outer;
         self.dyn_local_traits = outer_l;
+        self.mono_recv_traits = outer_m;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -3872,7 +3951,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // because "CHANGED 0 is not evidence until REACH is measured": a byte-identical
                         // A/B over a corpus that never reaches this branch is the most flattering
                         // number available and the least informative.
-                        let via_local = !self.dyn_sig_traits.contains(&tr)
+                        //
+                        // SOUNDNESS R582 — …AND THAT READ IS BODY-WIDE, WHICH IS NOT WHAT THE CARVE-OUT
+                        // ASKS. `dyn_sig_traits` and `dyn_local_traits` both say *"this body erased that
+                        // trait somewhere"*, and both were read here as *"this receiver is erased"*. With
+                        // a `let b: &dyn Handler = &H;` anywhere above it, `t.roll(n)` on a
+                        // `t: &impl Handler` parameter charged `['Fs']` and scoped `deny Fs` exited 1 —
+                        // R4's monomorphized-receiver fabrication, arriving by a fourth door. The
+                        // per-name denylist subtracts exactly the receivers whose own declaration spelled
+                        // `tr` in a caller-monomorphized position; it is NOT a replacement of the
+                        // body-wide read, because `receiver_is_erased` (R575) does not yet cover the
+                        // Index / element-accessor / plain-chain receivers that read licenses.
+                        let mono = self.receiver_is_caller_monomorphized(&node.receiver, &tr);
+                        // §E1 REACH COUNTER, on the CHANGED branch and nowhere else: fires exactly
+                        // where a receiver was subtracted from a CHA the body-wide read would have
+                        // licensed. "CHANGED 0 is not evidence until REACH is measured" — a corpus that
+                        // never reaches this line prices the change at zero for free.
+                        if mono
+                            && (self.dyn_sig_traits.contains(&tr) || self.dyn_local_traits.contains(&tr))
+                            && crate::lang::is_dependency_crate_root(root)
+                            && self.trait_impls.contains_key(&tr)
+                            && std::env::var_os("CANDOR_R582_INSTR").is_some()
+                        {
+                            eprintln!("R582SUPPRESS {full}::{leaf}");
+                        }
+                        let via_local = !mono
+                            && !self.dyn_sig_traits.contains(&tr)
                             && self.dyn_local_traits.contains(&tr);
                         // SOUNDNESS R562 — THE TWO POSITIONS WHOSE ERASURE IS NOT IN THIS BODY'S LEXICAL
                         // SCOPE AT ALL. `self.inner.roll()` where `inner: Box<dyn dep::Handlers>`, and
@@ -3895,7 +3999,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             && self.receiver_is_erased(&node.receiver, &tr);
                         if let Some(impls) = self.trait_impls.get(&tr).filter(|_| {
                             crate::lang::is_dependency_crate_root(root)
-                                && (self.dyn_sig_traits.contains(&tr) || via_local || via_recv)
+                                && ((!mono && self.dyn_sig_traits.contains(&tr)) || via_local || via_recv)
                         }) {
                             if via_recv && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
                                 eprintln!("R562HIT {full}::{leaf} impls={}", impls.len());
@@ -4695,6 +4799,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // generic annotation means. Scoped exactly like the `vars` bindings beside it — saved and restored
         // around the body walk — because a closure parameter's scope IS the closure.
         let mut saved_traits: Vec<(String, Option<Vec<String>>)> = Vec::new();
+        // SOUNDNESS R582 — a closure PARAMETER shadows an enclosing name for the closure's body, so the
+        // per-name monomorphization denylist has to be cleared for it and restored after, exactly as
+        // `scoped_binding` does for the block-scoped binders. Cleared for EVERY input pattern — typed or
+        // not, dispatch-typed or not — because the stale direction is the dangerous one: a `|t| t.roll()`
+        // over a `Vec<Box<dyn Handler>>` must not inherit an enclosing `t: &impl Handler`'s claim and
+        // have its dispatch subtracted.
+        let mut saved_mono: Vec<(String, Option<Vec<String>>)> = Vec::new();
+        for input in &node.inputs {
+            let pat = match input {
+                syn::Pat::Type(pt) => &*pt.pat,
+                other => other,
+            };
+            if let Some(name) = single_pat_ident(pat) {
+                let prev = self.mono_recv_traits.remove(&name);
+                saved_mono.push((name, prev));
+            }
+        }
         for input in &node.inputs {
             if let syn::Pat::Type(pt) = input {
                 if let Some(name) = single_pat_ident(&pt.pat) {
@@ -4745,6 +4866,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         syn::visit::visit_expr_closure(self, node);
+        for (name, prev) in saved_mono {
+            match prev {
+                Some(v) => { self.mono_recv_traits.insert(name, v); }
+                None => { self.mono_recv_traits.remove(&name); }
+            }
+        }
         for (name, prev) in saved {
             match prev {
                 Some(v) => { self.vars.insert(name, v); }
@@ -4801,6 +4928,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // rather than argued about, because the argument is the thing that has been wrong three times.
         let bound_names = crate::decls::pat_bound_idents(&node.pat);
         let pre_bindings = self.capture_bindings(&bound_names);
+        // SOUNDNESS R582 — CLEAR the per-name monomorphization denylist for every name this statement
+        // binds, BEFORE any of the ~10 `trait_vars` binders below runs. Enumerating the STATE rather than
+        // the binders, for the reason `BoundNameState` gives one screen up: `visit_local` rebinds a name
+        // from a let-else payload, a tuple destructure, an unannotated dispatch RHS and an annotated
+        // type, and any of those can give the name an ERASED meaning. A stale "caller-monomorphized"
+        // entry surviving such a rebind would SUBTRACT a real dispatch — the under-report direction, and
+        // the one thing this fix must not buy. The annotated arm below re-inserts its own answer; every
+        // other binder leaves the name with no entry, i.e. with today's behaviour.
+        for n in &bound_names {
+            self.mono_recv_traits.remove(n);
+        }
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
         // `trait_vars` (fn-wide, like any top-level let) → `d.go()` dispatches. Only a `Some`/`Ok` pattern
@@ -4950,6 +5088,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // somewhere", exactly as the signature-position set already is for a fn with both a
                 // `&dyn T` and a `T: T` receiver.
                 crate::lang::collect_dyn_trait_leaves(&pt.ty, &mut self.dyn_local_traits);
+                // SOUNDNESS R582 — …and, from the SAME annotation, the COMPLEMENT: the leaves this
+                // binding spelled in a caller-monomorphized position. The line above is ADDITIVE and
+                // body-wide on purpose; this one is per-NAME, and it is what lets the CHA tell
+                // `let m: impl-bounded T` apart from the `let b: &dyn T` beside it. Cleared above with
+                // the rest of this statement's bound names, so an annotation that is NOT monomorphized
+                // cannot leave a previous binding's claim standing.
+                let mono = crate::lang::mono_trait_leaves(&pt.ty, &self.generic_bounds);
+                if !mono.is_empty() {
+                    self.mono_recv_traits.insert(id.ident.to_string(), mono);
+                }
                 if !leaves.is_empty() {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
