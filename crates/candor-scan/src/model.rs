@@ -555,6 +555,52 @@ pub(crate) fn split_tf_gen_field_key(key: &str) -> Option<&str> {
     key.strip_prefix(TF_GEN_FIELD)
 }
 
+/// SOUNDNESS R598 — THE THREE KEY SHAPES OF `impl_members`, the index that says WHICH MEMBERS AN
+/// `impl Trait for Ty` BLOCK ACTUALLY WRITES.
+///
+/// `trait_impls` records `(trait leaf -> implementing type leaf)` and nothing about the block's
+/// contents, so every consumer that wants "this type's implementation of this member" has to spell it
+/// `{ty}::{method}` — which is also the qual of an INHERENT `impl Ty { fn method }`. The two are
+/// indistinguishable at that key, and the interface-union charged the inherent one's effects to the
+/// trait member (live on hickory-proto: `BinEncodable::to_bytes` published a `Log` sourced from the
+/// private inherent `RData::to_bytes`, which no dispatch through that member can reach).
+///
+/// ONE SET, THREE KEY SHAPES, because the question is not "does this member exist" but "do we KNOW
+/// that it does not" — a narrowing over an incomplete index fails in the SILENT direction:
+///   * `<tr>\u{1f}<ty>`            — an `impl <tr> for <ty>` block was SEEN by the item walk.
+///   * `<tr>\u{1f}<ty>\u{1f}<m>`   — …and it declares member `m`.
+///   * `<tr>\u{1f}<ty>\u{1f}*`     — …and it holds an item this engine cannot read (a macro that may
+///     expand to members), so its member list is NOT evidence of absence. `*` is not a valid Rust
+///     identifier, so it can never collide with a real member name.
+///
+/// A caller may narrow only on `seen && !opaque && !member`; every other combination is "no evidence",
+/// which leaves the sound over-approximation exactly as it was.
+pub(crate) fn impl_seen_key(trait_leaf: &str, ty: &str) -> String {
+    format!("{trait_leaf}\u{1f}{ty}")
+}
+
+pub(crate) fn impl_member_key(trait_leaf: &str, ty: &str, method: &str) -> String {
+    format!("{trait_leaf}\u{1f}{ty}\u{1f}{method}")
+}
+
+pub(crate) fn impl_opaque_key(trait_leaf: &str, ty: &str) -> String {
+    format!("{trait_leaf}\u{1f}{ty}\u{1f}*")
+}
+
+/// SOUNDNESS R598 — the ONE predicate every consumer of `impl_members` asks, so a second reader cannot
+/// spell the three-way test a fourth way (§G). True ⇒ `{ty}::{method}` is NOT `<trait_leaf>`'s
+/// implementation for `<ty>` and must not be read as one; false ⇒ it is, or we do not know.
+pub(crate) fn impl_does_not_declare(
+    idx: &std::collections::HashSet<String>,
+    trait_leaf: &str,
+    ty: &str,
+    method: &str,
+) -> bool {
+    idx.contains(&impl_seen_key(trait_leaf, ty))
+        && !idx.contains(&impl_opaque_key(trait_leaf, ty))
+        && !idx.contains(&impl_member_key(trait_leaf, ty, method))
+}
+
 /// A locally-declared trait: how many declarations share the leaf (ambiguity check) and which
 /// method names the declaration itself carries — CHA resolves ONLY calls to a declared method of
 /// an unambiguous local trait (review found the wider rule fabricating: `impl Iterator for

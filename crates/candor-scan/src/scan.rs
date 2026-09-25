@@ -3885,10 +3885,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     /// not a loss; `invisible` is checked separately because §2 makes `inferred: []` WITH a non-empty
     /// `invisible` explicitly not a purity claim, and without it the two channels mask each other.
     ///
-    /// **ONLY THE FIRST ELEMENT DRIVES EMISSION TODAY.** The second is measured and gated off pending
-    /// R598 — see the block at the local call site for why buying a non-gating coverage disclosure with
-    /// a gate-flippable fabricated effect is the wrong direction. Both are returned so re-enabling that
-    /// leg is one condition and not a re-derivation.
+    /// **BOTH ELEMENTS DRIVE EMISSION.** The second one used to be measured and gated off pending R598
+    /// (a beside-union row carries its effects too, and R598 could put a FABRICATED one there); R598 is
+    /// closed, so the coverage leg emits — see the block at the local call site.
     fn union_adds_over_row(
         entries: &[ReportEntry],
         hash: &str,
@@ -4312,6 +4311,34 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // toggle survived in default scans, which is the one thing a default scan must not let happen.
     {
         let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
+        // SOUNDNESS R598, THE DELEGATION HEDGE — **A TRAIT MEMBER WHOSE DEFAULT BODY CALLS SOMETHING OF
+        // ITS OWN NAME MAY REALLY REACH THE IMPLEMENTING TYPE'S SAME-NAMED METHOD, SO THE NARROWING
+        // BELOW MUST NOT FIRE ON IT.**
+        //
+        // Measured, on the full audit of the 14 keys the first form of the R598 narrowing removed over
+        // the 1,626-crate corpus. Nine of them are this shape, and in every one the effect IS reachable:
+        //
+        //   `snapbox#data::IntoData::is`  — default body `self.into_data().is(format)` reaches the
+        //                                   INHERENT `Data::is` (`data/mod.rs:576`).
+        //   `diesel#query_dsl::QueryDsl::{limit,offset,having,find}` — default body
+        //                                   `methods::LimitDsl::limit(self, limit)` reaches
+        //                                   `CombinationClause::limit`, a member of a DIFFERENT trait.
+        //
+        // The engine did not resolve either call (a UFCS call to a trait requirement; a method call on a
+        // returned value), so the default body's OWN row is pure and publishes nothing — which means
+        // withholding the union's copy leaves the key silent, and that is the cardinal sin traded for a
+        // fabrication. The hedge keys on the ONE fact both shapes share: a call of the member's own name
+        // in the member's own default body. A deeper delegation (`self.helper()` → `self.m()`) is
+        // charged to the default body transitively by the call graph and published at this same key by
+        // R597's beside-union, so it needs no hedge of its own; this exists precisely for the calls the
+        // resolver DROPS.
+        let delegating_members: std::collections::HashSet<String> = fns.iter()
+            .filter_map(|f| {
+                let t2 = crate::lang::tail2(&f.qual)?;
+                let leaf = t2.rsplit("::").next()?.to_string();
+                f.calls.iter().any(|c| c.leaf == leaf).then_some(t2)
+            })
+            .collect();
         for (trait_leaf, lt) in merged.trait_decls.iter() {
             // AMBIGUOUS same-leaf traits (`mod a { trait T } mod b { trait T }`): `trait_decls`/`trait_impls`
             // are keyed by LEAF, so `lt` merges both traits' methods and `impls` merges both traits' impls —
@@ -4330,9 +4357,81 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 for ty in impls {
                     let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+                    // SOUNDNESS R598 — `{ty}::{method}` IS ALSO THE QUAL OF AN INHERENT `impl Ty`.
+                    //
+                    // `trait_impls` says only that `Ty` implements `Trait`; the lookups below then read
+                    // ANY unit called `Ty::method` as that implementation. An `impl Ty { fn method }`
+                    // beside an `impl Trait for Ty` that does NOT override `method` (because the trait
+                    // supplies a default body) is a DIFFERENT FUNCTION. Live on hickory-proto 0.26.x:
+                    // `BinEncodable::to_bytes` published a `Log` from the private inherent
+                    // `RData::to_bytes` (`rr/record_data.rs:839`) while `impl BinEncodable for RData`
+                    // (`:1133`) declares `emit` alone — a concrete claim about a function that does not
+                    // perform it, and `deny Log` fires on it.
+                    //
+                    // **THE NARROWING WITHHOLDS A CLAIM, NEVER A DISCLOSURE, AND THAT LINE IS DRAWN
+                    // WHERE IT IS BECAUSE OF THE FULL REMOVAL AUDIT — NOT BY TASTE.** The first form of
+                    // this fix dropped the candidate entirely (`continue`). Over the 1,626-crate
+                    // cargo-registry corpus that removed 14 keys, and tracing ALL FOURTEEN to a body
+                    // found NINE where the effect really is reachable through the member — because the
+                    // trait's DEFAULT BODY delegates to a same-named method on the receiver:
+                    //
+                    //   · `snapbox#data::IntoData::is` — the default body is `self.into_data().is(fmt)`
+                    //     (`data/mod.rs:123`), which is the inherent `Data::is` at `:576`. Reachable.
+                    //   · `diesel#query_dsl::QueryDsl::{limit,offset,having,find}` × 2 versions — every
+                    //     `impl QueryDsl for X {}` block is EMPTY, and the default body is
+                    //     `methods::LimitDsl::limit(self, limit)` (`query_dsl/mod.rs:961`), which for a
+                    //     `CombinationClause` receiver IS `CombinationClause::limit`, the unit whose
+                    //     `Unknown` the drop removed.
+                    //
+                    // So the unqualified drop trades a FABRICATION (an over-report) for a SILENCE (the
+                    // cardinal sin), on 9 of 14 keys. The other 5 are true fabrications by two further
+                    // mechanisms, kept for the record because a second cause behind the first is what
+                    // gets missed: `axum#handler::Handler::{layer,with_state}` — `impl Handler for
+                    // MethodRouter` declares `call` alone and the default body constructs a `Layered`,
+                    // so the inherent `MethodRouter::layer` (`routing/method_routing.rs:967`) is
+                    // genuinely unreachable; and `sea_orm#entity::base_entity::EntityName::table_ref` —
+                    // the leaf `Entity` merges TWO unrelated types ([[candor-global-unit-identity]]), and
+                    // the effects came from `dynamic::Entity::table_ref`, which does not implement that
+                    // trait at all.
+                    //
+                    // THE DISCRIMINATION THAT SURVIVES BOTH: `Unknown` and `invisible` are the engine
+                    // saying WHAT IT DOES NOT KNOW; a concrete effect is a claim about what a function
+                    // DOES. Withholding a false claim costs nothing in the sin direction. Withholding a
+                    // disclosure turns "we cannot see this" into "there is nothing here", which is the
+                    // silent purity claim ⟨0.39⟩ exists to close. So a narrowed candidate contributes
+                    // its `Unknown` and its `invisible` unchanged, and its concrete effects not at all.
+                    // Measured consequence: REMOVED 0 over the same corpus, with the hickory `Log` gone.
+                    //
+                    // THE EVIDENCE GATE IS THE OTHER HALF. `impl_members` records "block seen", "member
+                    // declared" and "block not fully readable" separately, and `impl_does_not_declare`
+                    // narrows ONLY on seen && readable && absent — every other state leaves the
+                    // over-approximation exactly as it was, because an allowlist over an index known to
+                    // be incomplete is how a fabrication fix becomes a silent under-report.
+                    //
+                    // `CANDOR_R598_PRE` restores the pre-fix lookup for the A/B's pre arm. Its failure
+                    // direction is OVER-CHARGE, never silence — which is why it is safe to ship.
+                    let narrowed =
+                        crate::model::impl_does_not_declare(&merged.impl_members, trait_leaf, ty, method)
+                            && !delegating_members.contains(&format!("{trait_leaf}::{method}"))
+                            && std::env::var_os("CANDOR_R598_PRE").is_none();
+                    // A CONCRETE effect of a narrowed candidate is withheld; `Unknown` rides through.
+                    let admit = |e: &str| !narrowed || e == "Unknown";
+                    if narrowed {
+                        // §E1 REACH PROBE — fires only where this narrowing actually withholds
+                        // something, so `CHANGED 0` and "the branch never ran" stay distinguishable.
+                        if std::env::var_os("CANDOR_R598_INSTR").is_some() {
+                            let had: Vec<&&str> = inferred.get(&format!("{ty}::{method}"))
+                                .map(|s| s.iter().collect()).unwrap_or_default();
+                            let tail: Vec<&&str> = by_tail2.get(&format!("{ty}::{method}"))
+                                .filter(|ts| ts.len() == 1)
+                                .and_then(|ts| inferred.get(&ts[0]))
+                                .map(|s| s.iter().collect()).unwrap_or_default();
+                            eprintln!("R598HIT\t{trait_leaf}::{method}\t{ty}\tdirect={had:?}\ttail2={tail:?}");
+                        }
+                    }
                     for cand in [format!("{ty}::{method}"), format!("{ty_leaf}::{method}")] {
                         if let Some(s) = inferred.get(&cand) {
-                            for e in s {
+                            for e in s.iter().filter(|e| admit(e)) {
                                 inf_u.insert(e);
                             }
                         }
@@ -4365,7 +4464,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     eprintln!("R513HIT {}", ts[0]);
                                 }
                                 if let Some(s) = inferred.get(&ts[0]) {
-                                    inf_u.extend(s.iter().copied());
+                                    // R598 — the same `admit`: this fallback resolves the SAME
+                                    // `{ty}::{method}` spelling one index over, so a narrowed candidate
+                                    // must not re-enter through it (§F1 Q3, two paths one question).
+                                    inf_u.extend(s.iter().copied().filter(|e| admit(e)));
                                 }
                                 if let Some(s) = blind_acc.get(&ts[0]) {
                                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -4437,27 +4539,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // set arithmetic on the published fields rather than a heuristic — and `Unknown` on the
                 // real row covers any effect, which is why those cases are not losses.
                 //
-                // THE COVERAGE LEG IS MEASURED, DELIBERATELY NOT EMITTED, AND WAITING ON R598.
-                // `blind_adds` below is the same suppression seen through `invisible`: the union names an
-                // UNCOVERED package the real row does not, 63 further rows over the 1,626-crate corpus.
-                // Emitting them is NOT free, because a beside-union row carries its EFFECTS too, and R598
-                // puts a fabricated one in that set — the union's `{ty}::{method}` lookup cannot tell
-                // `impl Trait for Ty` from an inherent `impl Ty`, so `hickory_proto#serialize::binary::
-                // BinEncodable::to_bytes` would publish a `Log` sourced from `RData::to_bytes`
-                // (record_data.rs:839), an inherent method that `impl BinEncodable for RData` does not
-                // override and that no dispatch through that member can reach.
+                // THE COVERAGE LEG IS NOW EMITTED — R598 IS CLOSED, AND IT IS WHAT THIS LEG WAS
+                // WAITING ON. `blind_adds` is the same suppression seen through `invisible`: the union
+                // names an UNCOVERED package the real row does not. It was held back because a
+                // beside-union row carries its EFFECTS too and R598 put a FABRICATED one in that set —
+                // the `{ty}::{method}` lookup could not tell `impl Trait for Ty` from an inherent
+                // `impl Ty`, so `hickory_proto#serialize::binary::BinEncodable::to_bytes` published a
+                // `Log` sourced from the private inherent `RData::to_bytes` (record_data.rs:839). With
+                // the narrowing above in place that lookup no longer reads an inherent method as an
+                // implementation, so the trade this leg was refused on no longer exists: `invisible`
+                // arms NO policy form (⟨0.30⟩'s non-gating ruling, SPEC.md ~:4379) and the effects it
+                // rides beside are now the implementors' own.
                 //
-                // THE TRADE IS ONE-SIDED, WHICH IS WHY THIS IS A GATE AND NOT A PREFERENCE. `invisible`
-                // arms NO policy form — ⟨0.30⟩'s non-gating ruling, recorded in §2's field note and
-                // leant on by the ⟨0.39⟩ clause itself (SPEC.md ~:4379) — so those 63 disclosures cannot
-                // flip a verdict. A fabricated `Log` can: `deny Log` fires on it. Buying 63 non-gating
-                // disclosures with 3 gate-flippable fabrications is the wrong direction, and it is
-                // exactly `feedback-fabrication-fixes-cause-misses` — a soundness fix introducing a
-                // charge nobody asked for. That R598 is PRE-EXISTING (proven against `e50a18e` on a
-                // fixture where nothing is suppressed) does not license minting three NEW instances.
-                //
-                // The leg lands FREE once R598 is fixed, and R598's row names it as blocked on that. The
-                // probe keeps counting the population, so re-enabling it stays a measurement.
+                // MEASURED, not assumed: `bin/corpus-ab.py` over the same 1,626 cargo-registry crates
+                // the decision to hold it was taken on. The numbers are in the commit message.
                 if existing.contains(&hash) {
                     let (eff_adds, blind_adds) = union_adds_over_row(&entries, &hash, &inf_u, &blind_u);
                     // §E1 REACH PROBE, and the population counter the pre-fix measurement was taken
@@ -4472,14 +4567,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                             }
                             if blind_adds {
-                                // COUNTED, NOT ACTED ON — the coverage leg, gated off above pending R598.
                                 eprintln!(
                                     "R590BLIND {hash} union={blind_u:?} real={:?}", real.invisible);
                             }
                         }
                     }
-                    if !eff_adds {
-                        continue; // the real entry at this hash already carries every EFFECT the union knows
+                    if !eff_adds && !blind_adds {
+                        // The real entry at this hash already carries every EFFECT **and** every
+                        // UNCOVERED PACKAGE the union knows, so a second row would be a duplicate
+                        // carrying nothing. 233 of the 244 measured suppressions are this case.
+                        continue;
                     }
                 }
                 entries.push(ReportEntry {
@@ -4569,17 +4666,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // namespace — obligation 2 is exactly the mechanism that mints those, and this leg emits
             // one per (owner, member) pair.
             //
-            // EFFECTS ONLY, for the same reason and with the same R598 block as the local loop above:
-            // the coverage (`invisible`) half is counted by the probe and not acted on. This leg has
-            // ZERO REACH over the 1,626-crate corpus, so it is safety-only and says so rather than
-            // borrowing the local leg's evidence.
+            // EFFECTS **AND** COVERAGE, moved in step with the local loop above now that R598 is
+            // closed. This leg still has ZERO REACH over the 1,626-crate corpus, so it is safety-only
+            // and says so rather than borrowing the local leg's evidence.
+            //
+            // AND R598 CANNOT REACH THIS LEG AT ALL, which is worth stating rather than leaving to be
+            // rediscovered: `foreign_impls` is built by `collect_foreign_trait_impls`, which iterates
+            // `im.items` and keys ONE ENTRY PER DECLARED MEMBER (`{owner}#{qual}::{m} -> {ty}::{m}`).
+            // It never asks "does `Ty` have something called `m`" — the asymmetry between the two
+            // halves of this rung WAS R598, in the same shape as R513.
             if existing.contains(key) {
                 let (eff_adds, blind_adds) = union_adds_over_row(&entries, key, &inf_u, &blind_u);
                 if std::env::var_os("CANDOR_R590_INSTR").is_some() {
                     eprintln!("R590FOREIGN {key} adds_eff={eff_adds} adds_blind={blind_adds}");
                 }
-                if !eff_adds {
-                    continue; // the real entry at this hash already carries every EFFECT the union knows
+                if !eff_adds && !blind_adds {
+                    continue; // the real entry already carries every EFFECT and every package it knows
                 }
             }
             entries.push(ReportEntry {

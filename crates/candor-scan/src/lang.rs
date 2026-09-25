@@ -3596,6 +3596,74 @@ pub(crate) fn collect_foreign_trait_impls(
     }
 }
 
+/// SOUNDNESS R598 — WHICH MEMBERS AN `impl Trait for Ty` BLOCK ACTUALLY DECLARES.
+///
+/// `decls.rs` records the CHA edge (`trait_impls[trait leaf] += ty leaf`) and throws the block's
+/// contents away, so every consumer asking "what does `Ty` do for `Trait::m`" has to spell the unit
+/// `{ty}::{method}` — the SAME qual an inherent `impl Ty { fn m }` produces. The interface-union read
+/// that as the implementation and charged an inherent method's effects to the trait member: on
+/// hickory-proto, `serialize::binary::BinEncodable::to_bytes` publishes a `Log` that comes from the
+/// PRIVATE inherent `RData::to_bytes` (`rr/record_data.rs:839`, a `warn!`), while `impl BinEncodable
+/// for RData` (`:1133`) declares `emit` alone — so no dispatch through that member can reach it.
+///
+/// THE FOREIGN TWIN OF THIS FACT ALREADY EXISTS AND IS ALREADY MEMBER-PRECISE: `collect_foreign_trait_impls`
+/// above iterates `im.items` and keys `{owner}#{qual}::{method} -> {ty}::{method}` per DECLARED member,
+/// so obligation 2's leg cannot take this defect. The asymmetry was the bug — the same shape as R513,
+/// where the local half of this rung was missing the tail resolution the foreign half already had. This
+/// walk is the local half, written against the same `items`, the same `Item::Mod` recursion and the same
+/// `is_cfg_test` guard so the two cannot answer one question two ways (§G).
+///
+/// IT IS DELIBERATELY NOT A MEMBER SET BUT AN EVIDENCE SET — see `model::impl_seen_key` for the three
+/// key shapes and why the `*` (opaque) one exists. Narrowing a sound over-approximation on an index that
+/// can be incomplete is the denylist/allowlist hazard, and the direction it fails in is silence; so the
+/// consumer narrows only where this walk positively saw the block AND could read every item in it.
+///
+/// The one asymmetry with `collect_decls`, stated rather than left to be discovered: that walk does NOT
+/// skip a `#[cfg(test)]` impl, and this one does. It can only make this index SMALLER than the CHA
+/// universe, i.e. withhold a narrowing — never license one.
+pub(crate) fn collect_local_impl_members(
+    items: &[syn::Item],
+    include_tests: bool,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                let Some((None, tr, _)) = &im.trait_ else { continue }; // `impl !Tr for X` is not an impl
+                let Some(ty) = impl_type_name(&im.self_ty) else { continue };
+                let Some(seg) = tr.segments.last() else { continue };
+                // The TRAIT LEAF, which is what `trait_impls`/`trait_decls` are keyed by throughout this
+                // engine and therefore the only spelling a consumer of those indexes can ask with.
+                let tr_leaf = seg.ident.to_string();
+                out.insert(crate::model::impl_seen_key(&tr_leaf, &ty));
+                for ii in &im.items {
+                    match ii {
+                        syn::ImplItem::Fn(m) => {
+                            out.insert(crate::model::impl_member_key(&tr_leaf, &ty, &m.sig.ident.to_string()));
+                        }
+                        // An associated const or type cannot introduce a METHOD, so neither blinds the
+                        // member list.
+                        syn::ImplItem::Const(_) | syn::ImplItem::Type(_) => {}
+                        // A macro item (`impl Tr for T { forward_all!(); }`), a `Verbatim` this syn
+                        // version could not parse, or a variant added to `syn` after this match was
+                        // written: any of them may expand to members, so the block stops being evidence
+                        // of ABSENCE. Charging on is the pre-existing (over-approximating) answer.
+                        _ => {
+                            out.insert(crate::model::impl_opaque_key(&tr_leaf, &ty));
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    collect_local_impl_members(inner, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// SOUNDNESS R529 — THE TRAIT IMPLS THAT LIVE INSIDE A BLOCK, which every Pass A decl walk is blind to.
 ///
 /// `collect_decls`, `collect_foreign_trait_impls` and `collect_trait_decl_quals` all walk `items` and

@@ -13851,6 +13851,10 @@ trait G {
             // appeared would replay the silent purity claim the row closes.
             nested_impl_members => |m| { m.nested_impl_members.insert("Backend::size".into()); },
             nested_impl_foreign => |m| { m.nested_impl_foreign.insert("iface#backend::Backend::size".into()); },
+            // SOUNDNESS R598: WHICH members an `impl Trait for Ty` block declares. It decides whether
+            // `{ty}::{method}` is read as that trait's implementation at all, so a file gaining or
+            // losing an impl member changes what the interface-union publishes for the whole crate.
+            impl_members => |m| { m.impl_members.insert(crate::model::impl_member_key("Enc", "RData", "to_bytes")); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -15447,7 +15451,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev40/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev41/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

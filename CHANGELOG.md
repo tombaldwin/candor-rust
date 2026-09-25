@@ -10,6 +10,70 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ THE INTERFACE-UNION CHARGED AN INHERENT METHOD'S EFFECTS TO THE TRAIT MEMBER, BECAUSE
+  `{ty}::{method}` CANNOT TELL `impl Trait for Ty` FROM `impl Ty` (SOUNDNESS R598).** A FABRICATION,
+  and it was the one thing R597's coverage leg was blocked on.
+
+      pub trait Enc { fn emit(&self); fn to_bytes(&self) -> u8 { 7 } }   // PROVIDED member
+      pub struct RData;
+      impl RData { fn to_bytes(&self) -> u8 { warn!("…"); 9 } }          // INHERENT, private
+      impl Enc for RData { fn emit(&self) {} }                          // does NOT override to_bytes
+
+  `encpkg#Enc::to_bytes` published `["Log"]`. Nothing can reach that `warn!` through that member: the
+  dispatch runs the trait's default body. Live on **hickory-proto 0.26.1/0.26.2/0.26.3**, where
+  `serialize::binary::BinEncodable::to_bytes` carried a `Log` sourced from the private inherent
+  `RData::to_bytes` (`rr/record_data.rs:839`) while `impl BinEncodable for RData` (`:1133`) declares
+  `emit` alone. Executed, one tree, one consumer, one variable: `deny Log` over a `&dyn Enc` dispatch
+  goes exit **1 -> 0**, and the 0 is the true answer.
+
+  `trait_impls` records `(trait leaf -> implementing type)` and discards the impl block's MEMBER names,
+  so a NEW INDEX was needed: `impl_members`, written by `lang::collect_local_impl_members` — the LOCAL
+  twin of `collect_foreign_trait_impls`, which has always been member-precise (one entry per DECLARED
+  member), so obligation 2's foreign leg never had this defect. The asymmetry between the two halves of
+  the rung WAS the bug, in the same shape as R513. Cache schema -> **rev41**; a rev40 entry deserializes
+  the field EMPTY, which reads as "no evidence" and restores the pre-fix over-approximation.
+
+  **THE NARROWING WITHHOLDS A CLAIM AND NEVER A DISCLOSURE, AND THAT LINE COST THE FULL REMOVAL
+  AUDIT.** The obvious form — drop the candidate — removed **14 keys** over 1,626 cargo-registry
+  crates, and tracing ALL FOURTEEN to a body (not a sample) found **NINE where the effect really is
+  reachable**, because the trait's DEFAULT BODY delegates to a same-named method the resolver drops:
+  `snapbox#data::IntoData::is` (`self.into_data().is(fmt)` -> the inherent `Data::is`, `data/mod.rs:576`)
+  and `diesel#query_dsl::QueryDsl::{limit,offset,having,find}` x2 versions (`methods::LimitDsl::limit(
+  self, limit)` -> `CombinationClause::limit`; every `impl QueryDsl for X {}` block is EMPTY). That is a
+  fabrication traded for a SILENCE on nine keys — the cardinal sin. The other five are true
+  fabrications by two further mechanisms, recorded because a second cause behind the first is what gets
+  missed: `axum#handler::Handler::{layer,with_state}` (the default body builds a `Layered`; the
+  inherent `MethodRouter::layer` at `routing/method_routing.rs:967` is genuinely unreachable) and
+  `sea_orm#…::EntityName::table_ref` (the leaf `Entity` merges TWO unrelated types, and the effects
+  came from `dynamic::Entity::table_ref`, which does not implement that trait at all).
+
+  So the narrowing has two guards, each with its own falsified test: a **delegation hedge** (a member
+  whose default body names a call of its own name is not narrowed at all) and a **channel rule** (a
+  narrowed candidate contributes its `Unknown` and its `invisible` unchanged, and its CONCRETE effects
+  not at all — `Unknown` is the engine saying what it does not know, and withholding that turns "we
+  cannot see this" into "there is nothing here"). The evidence gate is the third: `impl_members` records
+  "block seen", "member declared" and "block not readable" separately, and a macro item in the block
+  (`impl Tr for T { gen!(); }`) blocks the narrowing rather than licensing it.
+
+  A/B, `bin/corpus-ab.py`, **1,626 real cargo-registry crates**, both arms carrying the coverage leg so
+  the narrowing is the only variable (`CANDOR_R598_PRE`, kept): **ADDED 0, REMOVED 0, CHANGED 3** — the
+  three hickory-proto rows, each losing exactly the fabricated `Log` and keeping its `invisible`, with
+  the real row at that key still disclosing `Unknown`. Rows 327,829 -> 327,829. **REACH 42,995 hits
+  across 397 of the 1,626 entries**, so `REMOVED 0` is a measured property of a branch that ran, not of
+  a branch nothing reached. `/tmp/candor-corpus` was NOT used — it is hollow (R554), and an A/B over it
+  prints 0/0/0 exactly like an inert change.
+
+  **AND THE COVERAGE LEG R597 WITHHELD LANDS WITH IT, WHICH IS THE ROW'S OWN WRITTEN PREDICTION.**
+  Shipped HEAD -> this build over the same corpus: **ADDED 0, REMOVED 0, CHANGED 56**, rows 327,773 ->
+  327,829. R597 shipped at CHANGED 11; 11 + 56 = **67**, the figure R598's row predicted. All 56
+  audited IN FULL: every one is a GAINED synthetic `interfaceUnion` row, **0 published rows changed a
+  byte, 0 rows lost anywhere, 0 bare purity claims**, 50 carry only `Unknown`/`invisible`, and the 6
+  carrying a concrete effect are traced to DECLARED overrides whose effect set the key already
+  published — `mongodb#operation::BaseOperation::handle_response_async` `["Clock","Unknown"]` (declared
+  at `operation/bulk_write.rs:403`, identical to the row already at that key) and
+  `portable_pty#Child::try_wait` `["Exec"]` (declared at `lib.rs:272`, identical to the real row, the
+  gain being `invisible:["winapi"]` from `WinChild::try_wait`).
+
 - **⚠ A TRAIT MEMBER WITH A DEFAULT BODY PUBLISHED THE DEFAULT BODY INSTEAD OF THE IMPLEMENTOR UNION,
   BECAUSE THE UNION WAS DISCARDED WHENEVER A REAL ROW ALREADY CLAIMED ITS HASH (SOUNDNESS R597).**
 
@@ -54,16 +118,11 @@ after upgrading; review policies and regenerate baselines with the new build.
   effects on any new row are `Exec, Log` on `portable_pty#Child::wait`, both traced to bodies; the
   other nine are `Unknown` only.
 
-  **THE COVERAGE LEG IS MEASURED AND NOT EMITTED, PENDING R598.** The same suppression seen through
-  `invisible` is 63 further rows, and they are withheld. A beside-union row publishes its EFFECTS as
-  well as its `invisible`, and R598 — the union's `{ty}::{method}` lookup cannot tell `impl Trait for
-  Ty` from an inherent `impl Ty` — would put a fabricated `Log` on `hickory_proto#serialize::binary::
-  BinEncodable::to_bytes`, sourced from `RData::to_bytes` (record_data.rs:839), a method that
-  `impl BinEncodable for RData` does not override and no dispatch through that member can reach.
-  `invisible` arms no policy form (⟨0.30⟩'s non-gating ruling), so those 63 disclosures cannot flip a
-  verdict; a fabricated `Log` can, because `deny Log` fires on it. R598 being PRE-EXISTING does not
-  license minting three new instances of it. The leg lands free once R598 is closed, and a test
-  (`r597_the_coverage_leg_is_not_emitted_while_r598_is_open`) goes red the moment it is re-enabled.
+  **THE COVERAGE LEG WAS MEASURED AND WITHHELD PENDING R598; IT IS NOW EMITTED** — see the R598 entry
+  above, which closes the fabrication it was waiting on. The gate that held it
+  (`r597_the_coverage_leg_is_not_emitted_while_r598_is_open`) said in its own failure message that
+  re-enabling the leg deliberately means deleting it, and it has been replaced by
+  `r597_the_coverage_leg_is_emitted_now_that_r598_is_closed`.
 
 - **⚠ WHETHER A DISPATCH WAS SEEN DEPENDED ON WHETHER THE FILE HAPPENED TO `use` THE TRAIT
   (SOUNDNESS R577). A FIELD, a RETURN and a CLOSURE PARAMETER went silent; the SIGNATURE and

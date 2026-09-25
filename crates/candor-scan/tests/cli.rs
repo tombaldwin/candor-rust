@@ -5146,25 +5146,18 @@ fn r597_a_union_that_adds_nothing_emits_no_second_row() {
          publish nothing: {v}");
 }
 
-/// SOUNDNESS R597, THE COVERAGE LEG — **MEASURED, GATED OFF, AND WAITING ON R598.**
+/// SOUNDNESS R597, THE COVERAGE LEG — **EMITTED NOW THAT R598 IS CLOSED.**
 ///
-/// The same suppression seen through `invisible`: the implementor union names an UNCOVERED external
-/// package the real row does not. 63 further rows over the 1,626-crate corpus, and they are NOT emitted.
+/// This test replaces `r597_the_coverage_leg_is_not_emitted_while_r598_is_open`, which was the gate on
+/// that decision and said in its own failure message that re-enabling the leg deliberately means
+/// deleting it. R598 is closed one function up in `scan.rs`, so the trade the leg was refused on no
+/// longer exists: the union can no longer carry a fabricated effect from an inherent method beside its
+/// `invisible`, and `invisible` itself arms no policy form (⟨0.30⟩'s non-gating ruling).
 ///
-/// The reason is a one-sided trade, not a preference. A beside-union row carries its EFFECTS as well as
-/// its `invisible`, and R598 puts a fabricated effect in that set — the union's `{ty}::{method}` lookup
-/// cannot tell `impl Trait for Ty` from an inherent `impl Ty`, so `hickory_proto`'s
-/// `BinEncodable::to_bytes` would publish a `Log` that comes from `RData::to_bytes`
-/// (record_data.rs:839), an inherent method the trait implementation does not override and no dispatch
-/// through that member can reach. `invisible` arms NO policy form — ⟨0.30⟩'s non-gating ruling — so the
-/// 63 disclosures cannot flip a verdict, while a fabricated `Log` can: `deny Log` fires on it. Buying
-/// non-gating disclosure with gate-flippable fabrication is the wrong direction, and R598 being
-/// PRE-EXISTING does not license minting new instances of it.
-///
-/// **This test is the gate on that decision.** It goes RED the moment the leg is re-enabled, so doing so
-/// is a deliberate act with R598's name on it rather than a condition someone widens in passing.
+/// The fixture is the old one unchanged: `Loud::emit` performs the SAME effect as the default body and
+/// adds only an UNCOVERED package, so nothing but the coverage channel can explain the row.
 #[test]
-fn r597_the_coverage_leg_is_not_emitted_while_r598_is_open() {
+fn r597_the_coverage_leg_is_emitted_now_that_r598_is_closed() {
     let d = make_crate(
         "r597blind",
         "pub trait Sink {\n\
@@ -5180,6 +5173,7 @@ fn r597_the_coverage_leg_is_not_emitted_while_r598_is_open() {
     let out = Command::new(bin())
         .arg(d.to_string_lossy().as_ref()).arg("--json")
         .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
         .output().expect("run candor-scan");
     let _ = std::fs::remove_dir_all(&d);
     let v: serde_json::Value =
@@ -5191,20 +5185,440 @@ fn r597_the_coverage_leg_is_not_emitted_while_r598_is_open() {
     //    uncovered package the default body does not touch.
     let over = fns.iter().find(|e| e["fn"] == "Loud::emit").unwrap_or_else(|| panic!("{v}"));
     assert_eq!(over["invisible"], serde_json::json!(["uncov"]),
-        "the override must call into an UNCOVERED package, or there is no coverage leg to gate: {v}");
+        "the override must call into an UNCOVERED package, or there is no coverage leg to exercise: {v}");
     assert_eq!(over["inferred"], serde_json::json!(["Fs"]),
         "…and it must add NO effect the default body lacks, or this exercises the effects leg instead \
          and proves nothing about the coverage one: {v}");
-    // 2. a real row must claim the member hash, or nothing is suppressed in the first place.
+    // 2. a real row must claim the member hash, or nothing was ever suppressed.
     assert!(fns.iter().any(|e| e["hash"] == "r597blind#Sink::emit"
                              && e["interfaceUnion"] != serde_json::json!(true)),
         "the default body must be an analysed unit at the member hash: {v}");
 
-    assert!(!fns.iter().any(|e| e["hash"] == "r597blind#Sink::emit"
-                              && e["interfaceUnion"] == serde_json::json!(true)),
-        "THE COVERAGE LEG MUST STAY OFF WHILE R598 IS OPEN. A beside-union row publishes its EFFECTS as \
-         well as its `invisible`, and R598 can put a fabricated one there (an inherent method of the \
-         implementing type, which no dispatch through the member reaches). `invisible` arms no policy \
-         and cannot flip a verdict; a fabricated effect can. If you are re-enabling this deliberately \
-         because R598 is closed, delete this test and say so in the commit: {v}");
+    let union: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r597blind#Sink::emit"
+                 && e["interfaceUnion"] == serde_json::json!(true))
+        .collect();
+    assert_eq!(union.len(), 1,
+        "THE COVERAGE LEG MUST NOW BE EMITTED. A consumer joining `Sink::emit` is told the implementor \
+         set reaches a package this scan could not read; withholding it publishes the default body's \
+         narrower coverage as if it were the member's: {v}");
+    assert_eq!(union[0]["invisible"], serde_json::json!(["uncov"]),
+        "…and the uncovered package is the whole reason the row exists: {v}");
+    assert_eq!(union[0]["inferred"], serde_json::json!(["Fs"]),
+        "the row carries the implementors' OWN effect and nothing invented — R598 was the reason this \
+         leg was held back, because `{{ty}}::{{method}}` could pick up an inherent method's effects: {v}");
+}
+
+/// SOUNDNESS R598 — **THE UNDER-REPORT CONTROL, AND IT IS THE FIRST THING IN THIS FILE THAT WAS
+/// WRITTEN.** A fabrication fix removes charges, which is where this family introduces silent
+/// under-reports (4 defects in 5 such fixes, 2 of them cardinal sins), so the arm that must NOT move is
+/// the arm to pin first: an implementor that really does DECLARE the member must still carry its effect
+/// into the union, before and after the narrowing.
+///
+/// One fixture, one scan, two types differing in exactly one thing — whether `impl Enc for X` declares
+/// `to_bytes`:
+///   · `Loud`  DECLARES it (`Net`)                        → must contribute, in BOTH arms.
+///   · `Quiet` does NOT, and has an INHERENT twin (`Fs`)   → must contribute in NEITHER, post-fix.
+/// So the same assertion pair distinguishes the fix from a narrowing that went too far: lose `Net` and
+/// the fix is a silent under-report; keep `Fs` and it never fired.
+#[test]
+fn r598_a_declared_override_still_carries_its_effect_into_the_union() {
+    let d = make_crate(
+        "r598decl",
+        "pub trait Enc {\n\
+         \x20   fn emit(&self);\n\
+         \x20   fn to_bytes(&self) -> u8 { 7 }\n\
+         }\n\
+         pub struct Loud;\n\
+         impl Enc for Loud {\n\
+         \x20   fn emit(&self) {}\n\
+         \x20   fn to_bytes(&self) -> u8 { let _ = std::net::TcpStream::connect(\"h:1\"); 1 }\n\
+         }\n\
+         pub struct Quiet;\n\
+         impl Quiet {\n\
+         \x20   fn to_bytes(&self) -> u8 { let _ = std::fs::read(\"/tmp/a\"); 2 }\n\
+         \x20   pub fn local(&self) -> u8 { self.to_bytes() }\n\
+         }\n\
+         impl Enc for Quiet { fn emit(&self) {} }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+
+    // PROVE THE FIXTURE REACHES THE BRANCH: both `{ty}::to_bytes` units must EXIST as analysed rows, or
+    // the union had nothing to pick up and this test cannot tell a fix from a typo.
+    assert!(fns.iter().any(|e| e["hash"] == "r598decl#Loud::to_bytes"),
+        "the DECLARED override must be an analysed unit: {v}");
+    assert!(fns.iter().any(|e| e["hash"] == "r598decl#Quiet::to_bytes"),
+        "the INHERENT twin must be an analysed unit, or there is no fabrication to remove: {v}");
+
+    let union: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r598decl#Enc::to_bytes").collect();
+    assert_eq!(union.len(), 1, "exactly one row at the member key: {v}");
+    // ── THE UNDER-REPORT CONTROL ──────────────────────────────────────────────────────────────────
+    assert!(union[0]["inferred"].as_array().unwrap().iter().any(|e| e == "Net"),
+        "`Loud` DECLARES `to_bytes` and opens a socket — a dispatch through `Enc::to_bytes` really can \
+         reach it. Losing this is the silent under-report a fabrication fix introduces, and it is worse \
+         than the fabrication it removes: {v}");
+    // ── THE FIX ───────────────────────────────────────────────────────────────────────────────────
+    assert_eq!(union[0]["inferred"], serde_json::json!(["Net"]),
+        "`Quiet::to_bytes` is an INHERENT method — `impl Enc for Quiet` does not override `to_bytes`, so \
+         that dispatch runs the trait's default body and NOTHING can reach the `Fs`. Charging it here is \
+         the hickory-proto fabrication: {v}");
+    // …and the inherent method keeps its own row and its own effect. The fix withholds a CANDIDATE from
+    // one union, it does not stop analysing a function.
+    let inherent = fns.iter().find(|e| e["hash"] == "r598decl#Quiet::to_bytes").unwrap();
+    assert_eq!(inherent["inferred"], serde_json::json!(["Fs"]), "{v}");
+    let caller = fns.iter().find(|e| e["fn"] == "Quiet::local").unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(caller["inferred"], serde_json::json!(["Fs"]),
+        "a caller that reaches the inherent method BY NAME is unaffected — this fix is about which \
+         function a TRAIT MEMBER dispatches to, not about what the inherent one does: {v}");
+}
+
+/// SOUNDNESS R598 — **AN IMPL BLOCK THIS ENGINE CANNOT READ IS NOT EVIDENCE OF ABSENCE.**
+///
+/// The narrowing is a DENYLIST over `trait_impls`' sound over-approximation, and the hazard
+/// ([[candor-denylist-over-allowlist]]) is that the index it narrows on is incomplete. The one
+/// incompleteness inside a block that is real is a MACRO ITEM: `impl Enc for Opaque { gen!(); }` can
+/// expand to the member, and `syn` reports it as `ImplItem::Macro` with no names in it.
+///
+/// So `collect_local_impl_members` writes an OPAQUE marker for such a block and `impl_does_not_declare`
+/// refuses to narrow on it — the pre-existing over-approximation stands. **This fixture makes that the
+/// SOUND answer rather than merely the conservative one:** the macro really does generate
+/// `to_bytes`, and it really does read a file, so a dispatch through `Enc::to_bytes` on an `Opaque`
+/// really does perform `Fs`. The engine cannot see that body; it can see the inherent twin's `Fs`, and
+/// charging it is right for the wrong reason, which is what an over-approximation is for.
+///
+/// **Delete the opaque marker and this test goes RED with a silent under-report**, which is the only
+/// thing that makes it a guard rather than a comment.
+#[test]
+fn r598_an_impl_block_this_engine_cannot_read_is_not_narrowed() {
+    let d = make_crate(
+        "r598opaque",
+        "#[macro_export]\n\
+         macro_rules! gen_to_bytes {\n\
+         \x20   () => { fn to_bytes(&self) -> u8 { let _ = std::fs::read(\"/tmp/m\"); 3 } };\n\
+         }\n\
+         pub trait Enc {\n\
+         \x20   fn emit(&self);\n\
+         \x20   fn to_bytes(&self) -> u8 { 7 }\n\
+         }\n\
+         pub struct Opaque;\n\
+         impl Opaque {\n\
+         \x20   fn to_bytes(&self) -> u8 { let _ = std::fs::read(\"/tmp/a\"); 2 }\n\
+         \x20   pub fn local(&self) -> u8 { self.to_bytes() }\n\
+         }\n\
+         impl Enc for Opaque {\n\
+         \x20   fn emit(&self) {}\n\
+         \x20   gen_to_bytes!();\n\
+         }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    let union: Vec<&serde_json::Value> = fns.iter()
+        .filter(|e| e["hash"] == "r598opaque#Enc::to_bytes").collect();
+    assert_eq!(union.len(), 1,
+        "`impl Enc for Opaque` holds a MACRO ITEM, so its member list is not evidence that `to_bytes` \
+         is unimplemented. Narrowing here would withhold the `Fs` that the macro-generated override \
+         really performs — a silent under-report bought with an allowlist over an index known to be \
+         incomplete: {v}");
+    assert_eq!(union[0]["inferred"], serde_json::json!(["Fs"]), "{v}");
+}
+
+/// SOUNDNESS R598 — **THE CONSUMER SIDE, WHERE THE FABRICATION IS GATE-FLIPPABLE.**
+///
+/// One tree, one consumer, one dep report; the ONLY variable is `CANDOR_R598_PRE`, which restores the
+/// pre-fix `{ty}::{method}` lookup in the producer. `deny Log` over a `&dyn Enc` dispatch goes exit
+/// **1 → 0**, and the exit 0 is the correct answer: `impl Enc for Quiet` does not override `to_bytes`,
+/// so the `warn!` inside the private inherent `Quiet::to_bytes` is unreachable through that member.
+///
+/// **THE CALIBRATION IS THE SECOND MEMBER**, and without it this test would pass for a producer that
+/// had simply stopped publishing union rows: `shout` IS overridden, it IS effectful, and `deny Log`
+/// must fire on it in BOTH arms.
+#[test]
+fn r598_a_chained_consumer_stops_reading_an_inherent_methods_effect() {
+    let dep = make_crate(
+        "r598dep",
+        "pub trait Enc {\n\
+         \x20   fn emit(&self);\n\
+         \x20   fn to_bytes(&self) -> u8 { 7 }\n\
+         \x20   fn shout(&self) {}\n\
+         }\n\
+         pub struct Quiet;\n\
+         impl Quiet {\n\
+         \x20   fn to_bytes(&self) -> u8 { log::warn!(\"unreachable through the member\"); 2 }\n\
+         \x20   pub fn local(&self) -> u8 { self.to_bytes() }\n\
+         }\n\
+         impl Enc for Quiet {\n\
+         \x20   fn emit(&self) {}\n\
+         \x20   fn shout(&self) { log::error!(\"reachable through the member\"); }\n\
+         }\n",
+    );
+    std::fs::write(dep.join("Cargo.toml"),
+        "[package]\nname = \"r598dep\"\n\n[dependencies]\nlog = \"0.4\"\n").unwrap();
+    let outdir = dep.join("rep");
+    std::fs::create_dir_all(&outdir).unwrap();
+    let produce = |name: &str, pre: bool| -> std::path::PathBuf {
+        let mut c = Command::new(bin());
+        c.arg(dep.to_string_lossy().as_ref())
+            .arg("--out").arg(outdir.join(name).to_string_lossy().as_ref())
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+            .env_remove("CANDOR_R598_PRE");
+        if pre {
+            c.env("CANDOR_R598_PRE", "1");
+        }
+        let st = c.output().expect("run candor-scan");
+        assert!(st.status.success(), "producing the dep report must succeed: {}",
+            String::from_utf8_lossy(&st.stderr));
+        outdir.join(format!("{name}.r598dep.scan.json"))
+    };
+    let pre_rep = produce("pre", true);
+    let post_rep = produce("post", false);
+
+    // The two reports MUST differ in the one row under test, or the arms below are one document.
+    let member_effects = |p: &std::path::Path, member: &str| -> Vec<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        v["functions"].as_array().unwrap().iter()
+            .filter(|e| e["hash"] == format!("r598dep#Enc::{member}"))
+            .flat_map(|e| e["inferred"].as_array().cloned().unwrap_or_default())
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(member_effects(&pre_rep, "to_bytes"), vec!["Log".to_string()],
+        "CALIBRATION — the PRE arm must publish the fabricated `Log` at the member key, or there is \
+         nothing for the fix to remove and both exits below would agree for the wrong reason");
+    assert!(member_effects(&post_rep, "to_bytes").is_empty(),
+        "the POST arm must not publish it");
+    assert_eq!(member_effects(&post_rep, "shout"), vec!["Log".to_string()],
+        "CALIBRATION — the DECLARED override's `Log` must survive in the POST arm, or the producer has \
+         simply stopped publishing union rows and the exit codes below say nothing about R598");
+
+    let app = make_crate("r598app", "pub fn run(e: &dyn r598dep::Enc) { let _ = e.to_bytes(); }\n");
+    std::fs::write(app.join("Cargo.toml"),
+        "[package]\nname = \"r598app\"\n\n[dependencies]\nr598dep = \"0.1\"\n").unwrap();
+    let shouter = make_crate("r598shout", "pub fn run(e: &dyn r598dep::Enc) { e.shout(); }\n");
+    std::fs::write(shouter.join("Cargo.toml"),
+        "[package]\nname = \"r598shout\"\n\n[dependencies]\nr598dep = \"0.1\"\n").unwrap();
+    let policy = app.join("candor.policy");
+    std::fs::write(&policy, "deny Log\n").unwrap();
+
+    let run = |crate_dir: &std::path::Path, deps: &std::path::Path| -> i32 {
+        Command::new(bin())
+            .arg(crate_dir.to_string_lossy().as_ref()).arg("--json")
+            .env("CANDOR_DEPS", deps.to_string_lossy().as_ref())
+            .env("CANDOR_POLICY", policy.to_string_lossy().as_ref())
+            .env_remove("CANDOR_CONFIG").env_remove("CANDOR_R598_PRE")
+            .output().expect("run candor-scan").status.code().unwrap_or(-1)
+    };
+    let pre_code = run(&app, &pre_rep);
+    let post_code = run(&app, &post_rep);
+    let calib_pre = run(&shouter, &pre_rep);
+    let calib_post = run(&shouter, &post_rep);
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+    let _ = std::fs::remove_dir_all(&shouter);
+
+    assert_eq!(pre_code, 1,
+        "CALIBRATION — the fabricated `Log` really did flip a gate; `invisible` could not have, which \
+         is why this row blocked R597's coverage leg");
+    assert_eq!(post_code, 0,
+        "`impl Enc for Quiet` does not override `to_bytes`, so the dispatch runs the trait's default \
+         body and the `warn!` in the private inherent `Quiet::to_bytes` is unreachable. Exit 0 is the \
+         TRUE answer here, not a suppressed one");
+    assert_eq!((calib_pre, calib_post), (1, 1),
+        "the OVERRIDDEN member's `Log` must still fire in both arms — a producer that published no \
+         union rows at all would pass the assertion above and fail this one");
+}
+
+/// SOUNDNESS R598 — **THE NARROWING WITHHOLDS A CLAIM AND NEVER A DISCLOSURE, AND BOTH HALVES OF THAT
+/// SENTENCE COST A MEASUREMENT.**
+///
+/// The first form of this fix dropped a non-declaring implementor's candidate outright. Over the
+/// 1,626-crate cargo-registry corpus that removed 14 keys, and the FULL audit of all fourteen — not a
+/// sample — found NINE where the effect really is reachable through the member, because the trait's
+/// DEFAULT BODY delegates to a same-named method on the receiver and the resolver drops that call:
+/// `snapbox#data::IntoData::is` (`self.into_data().is(format)` → the inherent `Data::is`) and
+/// `diesel#query_dsl::QueryDsl::{limit,offset,having,find}` (`methods::LimitDsl::limit(self, limit)` →
+/// `CombinationClause::limit`). Nine keys went from a disclosure to silence: a fabrication (an
+/// over-report) traded for the cardinal sin.
+///
+/// So the narrowing gained two guards, and this fixture is three traits differing in EXACTLY ONE THING
+/// each — what the member's default body does — over one implementing type, one scan:
+///
+///   · `IntoData::is`   default body NAMES `is`      → **not narrowed at all** (delegation hedge).
+///   · `Hedged::opaque` default body names nothing    → narrowed, but its `Unknown` RIDES THROUGH.
+///   · `Plain::size`    default body names nothing    → narrowed, and `Fs` alone means no row at all.
+///
+/// The third is the hickory-proto shape and the reason the row exists; the first two are the reason it
+/// is not a `continue`.
+#[test]
+fn r598_the_narrowing_withholds_a_claim_but_never_a_disclosure() {
+    let d = make_crate(
+        "r598three",
+        "pub trait IntoData {\n\
+         \x20   fn into_data(self) -> Data;\n\
+         \x20   fn is(self) -> Data where Self: Sized { self.into_data().is() }\n\
+         }\n\
+         pub trait Hedged {\n\
+         \x20   fn h(&self) -> u8;\n\
+         \x20   fn opaque(&self) -> u8 { 7 }\n\
+         }\n\
+         pub trait Plain {\n\
+         \x20   fn p(&self) -> u8;\n\
+         \x20   fn size(&self) -> u8 { 7 }\n\
+         }\n\
+         pub struct Data { pub cb: fn() -> u8 }\n\
+         impl Data {\n\
+         \x20   pub fn is(self) -> Data { let _ = std::fs::read(\"/tmp/a\"); (self.cb)(); self }\n\
+         \x20   pub fn opaque(&self) -> u8 { let _ = std::fs::read(\"/tmp/b\"); (self.cb)() }\n\
+         \x20   pub fn size(&self) -> u8 { let _ = std::fs::read(\"/tmp/c\"); 1 }\n\
+         }\n\
+         impl IntoData for Data { fn into_data(self) -> Data { self } }\n\
+         impl Hedged for Data { fn h(&self) -> u8 { 0 } }\n\
+         impl Plain for Data { fn p(&self) -> u8 { 0 } }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    let row = |h: &str, union: bool| -> Option<&serde_json::Value> {
+        fns.iter().find(|e| e["hash"] == h
+            && (e["interfaceUnion"] == serde_json::json!(true)) == union)
+    };
+
+    // PROVE THE FIXTURE REACHES THE BRANCH. All three inherent methods must be analysed units with the
+    // effects the arms below reason about, and NONE of the three `impl … for Data` blocks declares the
+    // member — otherwise nothing here is narrowable and every assertion passes vacuously.
+    assert_eq!(row("r598three#Data::is", false).unwrap_or_else(|| panic!("{v}"))["inferred"],
+        serde_json::json!(["Fs", "Unknown"]), "{v}");
+    assert_eq!(row("r598three#Data::opaque", false).unwrap_or_else(|| panic!("{v}"))["inferred"],
+        serde_json::json!(["Fs", "Unknown"]), "{v}");
+    assert_eq!(row("r598three#Data::size", false).unwrap_or_else(|| panic!("{v}"))["inferred"],
+        serde_json::json!(["Fs"]), "{v}");
+
+    // ── 1. THE DELEGATION HEDGE — the snapbox/diesel shape, and the arm that must NOT move ─────────
+    assert_eq!(row("r598three#IntoData::is", true).unwrap_or_else(|| panic!("{v}"))["inferred"],
+        serde_json::json!(["Fs", "Unknown"]),
+        "`IntoData::is`'s default body is `self.into_data().is(…)`, which really does reach the inherent \
+         `Data::is` — the engine does not resolve that call, so withholding the union's copy leaves the \
+         member key SILENT about a file read. Nine of the fourteen keys the unqualified drop removed \
+         were this, on snapbox and diesel: {v}");
+
+    // ── 2. THE CHANNEL RULE — narrowed, and the disclosure still rides ─────────────────────────────
+    assert_eq!(row("r598three#Hedged::opaque", true).unwrap_or_else(|| panic!("{v}"))["inferred"],
+        serde_json::json!(["Unknown"]),
+        "a narrowed candidate's `Unknown` is the engine saying what it does not know, and withholding \
+         THAT converts 'we cannot see this' into 'there is nothing here'. The concrete `Fs` is a claim \
+         about a function no dispatch through this member reaches, and it is the half that goes: {v}");
+
+    // ── 3. THE FABRICATION ITSELF — hickory-proto's shape, nothing left to publish ──────────────────
+    assert!(row("r598three#Plain::size", true).is_none(),
+        "`impl Plain for Data` does not declare `size` and the default body is `{{ 7 }}` — the inherent \
+         `Data::size`'s `Fs` is unreachable through this member and there is no disclosure riding with \
+         it, so the key must publish nothing rather than a concrete claim: {v}");
+}
+
+/// SOUNDNESS R598, THE TWO ASSERTIONS IN THE DIFF THAT `assert-audit.sh` FLAGS — **MADE INTO ARMS
+/// INSTEAD OF SENTENCES.** §E2: a documented guarantee closes the question AND licenses narrowing a
+/// sound over-approximation, so it converts straight into a silent under-report if it is wrong. Both
+/// were true when written; neither had a fixture.
+///
+/// 1. *"An associated const or type cannot introduce a METHOD, so neither blinds the member list."* —
+///    if that arm of `collect_local_impl_members` tainted instead, the narrowing would silently stop
+///    firing for the commonest impl shape in the ecosystem (`type Future = …`), and the A/B that
+///    priced this change would have measured almost nothing.
+/// 2. *"R598 CANNOT REACH [the foreign] LEG AT ALL"* — `collect_foreign_trait_impls` keys ONE ENTRY PER
+///    DECLARED MEMBER, so a member the impl does not write has no candidate and no key. Asserted as an
+///    ABSENCE, which is also what a leg that simply did not run would produce — so the arm that proves
+///    the branch was reached (the DECLARED member's key IS published) comes first.
+#[test]
+fn r598_an_assoc_item_does_not_blind_the_member_list_and_the_foreign_leg_is_immune() {
+    // The local half: an impl block carrying an associated CONST and an associated TYPE beside the one
+    // method it declares must still be readable evidence, so `size` is still narrowed.
+    let d = make_crate(
+        "r598assoc",
+        "pub trait Enc {\n\
+         \x20   type Out;\n\
+         \x20   const TAG: u8;\n\
+         \x20   fn emit(&self) -> Self::Out;\n\
+         \x20   fn size(&self) -> u8 { 7 }\n\
+         }\n\
+         pub struct RData;\n\
+         impl RData {\n\
+         \x20   fn size(&self) -> u8 { let _ = std::fs::read(\"/tmp/a\"); 2 }\n\
+         \x20   pub fn local(&self) -> u8 { self.size() }\n\
+         }\n\
+         impl Enc for RData {\n\
+         \x20   type Out = ();\n\
+         \x20   const TAG: u8 = 3;\n\
+         \x20   fn emit(&self) -> Self::Out {}\n\
+         }\n",
+    );
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    assert!(fns.iter().any(|e| e["hash"] == "r598assoc#RData::size"),
+        "the inherent method must be an analysed unit, or nothing is narrowable here: {v}");
+    assert!(!fns.iter().any(|e| e["hash"] == "r598assoc#Enc::size"),
+        "an associated `type`/`const` beside the declared method must not blind the member list — if it \
+         did, this narrowing would stop firing for the commonest impl shape in the ecosystem: {v}");
+
+    // The FOREIGN half (⟨0.39⟩ obligation 2): the same source shape, but the trait belongs to a
+    // dependency. `collect_foreign_trait_impls` keys one entry per DECLARED member.
+    let f = make_crate(
+        "r598foreign",
+        "pub struct RData;\n\
+         impl RData {\n\
+         \x20   fn to_bytes(&self) -> u8 { let _ = std::fs::read(\"/tmp/a\"); 2 }\n\
+         \x20   pub fn local(&self) -> u8 { self.to_bytes() }\n\
+         }\n\
+         impl iface::Enc for RData {\n\
+         \x20   fn emit(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); }\n\
+         }\n",
+    );
+    std::fs::write(f.join("Cargo.toml"),
+        "[package]\nname = \"r598foreign\"\n\n[dependencies]\niface = \"1\"\n").unwrap();
+    let out = Command::new(bin())
+        .arg(f.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_R598_PRE")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&f);
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let fns = v["functions"].as_array().unwrap();
+    // REACH FIRST: the DECLARED member's foreign key must be published, or the absence below is the
+    // absence of a leg that never ran.
+    let emit = fns.iter().find(|e| e["hash"] == "iface#Enc::emit")
+        .unwrap_or_else(|| panic!("obligation 2's foreign union entry must be published: {v}"));
+    assert_eq!(emit["inferred"], serde_json::json!(["Net"]), "{v}");
+    assert!(!fns.iter().any(|e| e["hash"] == "iface#Enc::to_bytes"),
+        "the foreign leg publishes one entry PER DECLARED MEMBER, so an inherent `RData::to_bytes` can \
+         never be read as `iface::Enc`'s implementation of a member the impl does not write. If this \
+         ever fails, R598 has a second site and the narrowing above must be taught to it: {v}");
 }

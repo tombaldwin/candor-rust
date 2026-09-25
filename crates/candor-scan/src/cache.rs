@@ -44,6 +44,12 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev41: `FileDecls` gained `impl_members` (SOUNDNESS R598 — WHICH members an `impl Trait for Ty`
+    // block declares, the fact `trait_impls` throws away). A rev40 entry has none, so it deserializes
+    // EMPTY = "no evidence about this file's impl blocks", and the interface-union goes back to charging
+    // an inherent `impl Ty { fn m }`'s effects to `Trait::m`. Unlike every rev below it the stale
+    // direction here is a FABRICATION rather than a silence — but a warm scan that publishes a different
+    // document from a cold one on the same tree is its own defect, and the rev is what stops it.
     // rev40: `FileDecls` gained `written_trait_quals` (SOUNDNESS R577 — the crate-qualified spelling a
     // FIELD / RETURN / CLOSURE-PARAM declaration wrote, which the leaf-keyed indexes throw away). A rev39
     // entry has none, so it deserializes EMPTY — i.e. "this file qualifies no trait", which is exactly
@@ -243,7 +249,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev40/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev41/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -411,6 +417,13 @@ pub(crate) struct FileDecls {
     /// `collect_foreign_trait_impls`'s own `"{owner}#{trait qual}::{method}"` key spelling.
     #[serde(default)]
     pub(crate) nested_impl_foreign: Vec<String>,
+    /// SOUNDNESS R598 — the EVIDENCE about which members this file's `impl Trait for Ty` blocks declare
+    /// (`lang::collect_local_impl_members`; three key shapes, `model::impl_seen_key`). A pre-rev41 entry
+    /// deserializes EMPTY, which reads as "no evidence" and restores the pre-fix over-approximation for
+    /// every file served warm: a fabricated effect, not a silence — the safe direction, and a rev bump
+    /// all the same, because a warm scan that disagrees with a cold one is its own defect.
+    #[serde(default)]
+    pub(crate) impl_members: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -502,6 +515,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::lang::collect_block_nested_trait_impls(
         items, include_tests, &uses, &mut nested_local, &mut nested_foreign, &mut nested_externs);
     extern_fns.extend(nested_externs);
+    // R598 — which members each `impl Trait for Ty` block actually declares. Walked beside the two
+    // above for the same reason and over the same `items`: `collect_decls` records the CHA edge and
+    // discards the block's contents, so `{ty}::{method}` cannot be told apart from an inherent
+    // `impl Ty { fn method }`.
+    let mut impl_members: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    crate::lang::collect_local_impl_members(items, include_tests, &mut impl_members);
     FileDecls {
         fields,
         field_elem,
@@ -573,6 +592,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
+        // R598 — same determinism requirement, same reason.
+        impl_members: impl_members.into_iter().collect(),
     }
 }
 
@@ -648,6 +669,11 @@ pub(crate) struct MergedDecls {
     pub(crate) nested_impl_members: std::collections::HashSet<String>,
     /// R529 — the same, keyed under the OWNING crate for an abstraction this crate does not own.
     pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
+    /// SOUNDNESS R598 — every file's IMPL-MEMBER EVIDENCE, unioned. See `FileDecls::impl_members` and
+    /// `model::impl_seen_key`. Union is the right merge in both directions: two files can write two
+    /// `impl Tr for Ty` blocks for two different `Ty`s under one leaf, and a file that cannot read its
+    /// own block contributes the `*` key that stops every other file's evidence from narrowing it.
+    pub(crate) impl_members: std::collections::HashSet<String>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -930,6 +956,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.nested_impl_foreign {
         acc.nested_impl_foreign.insert(n.clone()); // set union — order-independent (R529)
     }
+    for n in &fd.impl_members {
+        acc.impl_members.insert(n.clone()); // set union — order-independent (R598)
+    }
     for (k, v) in &fd.foreign_impls {
         // ⟨0.39⟩ UNION, never last-writer-wins: two files may implement the same foreign member for
         // different types and the entry publishes the union over both (§4 bounded CHA). Picking one would
@@ -1208,9 +1237,13 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // nested_impl_members / nested_impl_foreign — R529. Both decide whether a dispatch is certified or
     // hedged, so a file that gains or loses a body-local impl changes the verdict for its whole crate
     // AND for every chained consumer of the owning one.
+    // impl_members — R598. Decides whether `{ty}::{method}` is read as this trait's implementation at
+    // all, so a file that gains or loses an impl member changes what the interface-union publishes for
+    // the whole crate and for every chained consumer of it.
     for (label, set) in [
         ("nested_impl_members", &m.nested_impl_members),
         ("nested_impl_foreign", &m.nested_impl_foreign),
+        ("impl_members", &m.impl_members),
     ] {
         s.push_str(label);
         let mut v: Vec<&String> = set.iter().collect();
