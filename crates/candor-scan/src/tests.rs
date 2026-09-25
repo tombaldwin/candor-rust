@@ -3203,12 +3203,15 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         // `deny Fs via_static` and `pure via_static` both exit 0. The `let` control on the identical
         // body reads `['Fs']`; that pair is the whole finding and it is asserted as a pair below.
         //
-        // WHAT THIS ROW CLAIMED AND DOES NOT CLOSE, measured rather than assumed. Two of the filed arms
+        // WHAT THIS ROW CLAIMED AND DID NOT CLOSE, measured rather than assumed. Two of the filed arms
         // are NOT static-specific: `C3.get_or_init(..).fetch()` over a `static C3: OnceLock<Client>` and
-        // `let s = &C1; s.fetch()` are both still silent — and so are their `let` twins
-        // (`let c: OnceLock<Client> = …; c.get_or_init(..).fetch()`, `let c = Client{..}; let r = &c;
-        // r.fetch()`). Whatever they are, they are not this, and pinning them here would attribute a
-        // different gap to a fix that does not touch it.
+        // `let s = &C1; s.fetch()` — and their `let` twins with them. Whatever they are, they are not
+        // this, and pinning them here would attribute a different gap to a fix that does not touch it.
+        // **THE REFERENCE-BOUND HALF IS NOW CLOSED AS R569** — see
+        // `an_unannotated_let_bound_to_a_reference_keeps_the_receiver_r569` below, which owns those arms
+        // and their controls. The `OnceLock` half is still open, and this sentence is dated rather than
+        // standing: a limitation written as a comment reads as CONSIDERED, which is what stops it being
+        // re-measured.
         let d = std::env::temp_dir().join(format!("candor-r557-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
@@ -3338,6 +3341,90 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                  union would charge the other file's `Client` to this pure body:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// SOUNDNESS R569 — **AN UNANNOTATED `let` BOUND TO A REFERENCE LOST THE RECEIVER.** Split out of
+    /// [[R557]] by measuring its twin rather than trusting the arm list, and the cheapest member of the
+    /// receiver family to close: the answer already existed in `resolve_recv_type` (whose
+    /// `Expr::Reference` arm recurses into the operand) and this binding site simply never asked it —
+    /// its fallback is `ctor_type`, which types a CONSTRUCTION, and `&expr` is not one. Two routes
+    /// answering "what type is this binding" and only one of them walking a reference.
+    ///
+    /// Four arms, one variable each. The three CONTROLS resolved before this change and must still.
+    /// The OVER-CHARGE controls are the point of the second half: typing a `&x` binding from its
+    /// operand cannot invent a type the ANNOTATED spelling would not give (`&T` has `T`'s methods by
+    /// auto-deref), and this pins that — a same-named method on an unrelated local type must not be
+    /// picked up, and an external operand must type to nothing at all.
+    #[test]
+    fn an_unannotated_let_bound_to_a_reference_keeps_the_receiver_r569() {
+        let d = std::env::temp_dir().join(format!("candor-r569-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r569\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            pub struct Client;
+            impl Client { pub fn fetch(&self) -> u32 { let _ = std::fs::read_to_string("/etc/hosts"); 1 } }
+            pub static C1: Client = Client;
+
+            // CONTROLS — all three resolved before this change.
+            pub fn direct() -> u32 { C1.fetch() }
+            pub fn annotated() -> u32 { let s: &Client = &C1; s.fetch() }
+            pub fn owned_binding() -> u32 { let c = Client; c.fetch() }
+
+            // THE DEFECT, both spellings the row names.
+            pub fn static_ref() -> u32 { let s = &C1; s.fetch() }
+            pub fn local_ref() -> u32 { let c = Client; let r = &c; r.fetch() }
+            // …and `&mut`, which is the spelling every real instance took (cc's `KillOnDrop::drop`,
+            // sqlx-core's `Read::poll`, h2's `Inner::handle_error`, tokio's `Copy::poll`).
+            pub fn mut_ref() -> u32 { let mut c = Client; let r = &mut c; r.fetch() }
+
+            // OVER-CHARGE CONTROL 1: a PURE type with a same-named method must not pick up `Client`'s.
+            pub struct Quiet;
+            impl Quiet { pub fn fetch(&self) -> u32 { 0 } }
+            pub fn ref_to_pure_twin(q: &Quiet) -> u32 { let r = &*q; r.fetch() }
+            // OVER-CHARGE CONTROL 2: an EXTERNAL operand types to nothing, and charges nothing.
+            pub fn ref_to_std() -> usize { let s = &String::new(); s.len() }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        for c in ["direct", "annotated", "owned_binding"] {
+            assert!(effs(c).contains(&"Fs".to_string()),
+                "R569 CONTROL `{c}`: this spelling resolved BEFORE the change; if it fails the arms \
+                 below measure nothing:\n{body}");
+        }
+        for a in ["static_ref", "local_ref", "mut_ref"] {
+            assert!(effs(a).contains(&"Fs".to_string()),
+                "R569 `{a}`: an unannotated `let` bound to a reference must type from its OPERAND, \
+                 exactly as the annotated spelling of the identical body does. ABSENT here is a SPEC §2 \
+                 rule 3 purity claim over a body that reads a file — `pure {a}` exited 0:\n{body}");
+        }
+        assert!(effs("ref_to_pure_twin").is_empty(),
+            "R569 OVER-CHARGE CONTROL: `&*q` types from `q`, so a same-named `fetch` on an unrelated \
+             local type must NOT be charged `Client`'s `Fs` — that would be a positive claim about a \
+             body that does nothing:\n{body}");
+        assert!(effs("ref_to_std").is_empty(),
+            "R569 OVER-CHARGE CONTROL: an EXTERNAL operand resolves to no local type, so the binding \
+             must type to nothing rather than to whatever name is in scope:\n{body}");
+    }
+
 
     #[test]
     fn a_dyn_field_or_dyn_return_receiver_counts_as_erased_r562() {

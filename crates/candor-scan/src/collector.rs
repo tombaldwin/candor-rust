@@ -5534,6 +5534,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     self.vars.insert(id.ident.to_string(), t);
                                 }
                             }
+                        } else if matches!(&*init.expr, syn::Expr::Reference(_)) {
+                            // SOUNDNESS R569 — AN UNANNOTATED `let` BOUND TO A REFERENCE LOST THE
+                            // RECEIVER. `let s = &C1; s.fetch()` and `let c = Client; let r = &c;
+                            // r.fetch()` were both ABSENT from `functions[]` — a ⟨0.21⟩ purity claim over
+                            // a body that reads a file — while `let s: &Client = &C1` (annotated),
+                            // `C1.fetch()` (direct) and `let c = Client; c.fetch()` (owned) all resolve.
+                            //
+                            // §G, AND THE ROW SAID SO BEFORE THIS WAS WRITTEN: the fallback on this path
+                            // is `ctor_type`, which types a CONSTRUCTION, and `&expr` is not one. The
+                            // answer already existed in `resolve_recv_type`, whose `Expr::Reference` arm
+                            // recurses into the operand — the same function every receiver POSITION in
+                            // this file already asks, reached here for the first time. Two routes
+                            // answering "what type is this binding" and only one of them walking a
+                            // reference is R347's shape at another site; this asks the one that does.
+                            //
+                            // IT CANNOT FABRICATE A TYPE THE ANNOTATED FORM WOULD NOT GIVE: `&T` has
+                            // `T`'s methods by auto-deref, so the binding's receiver type IS the
+                            // operand's, which is exactly what `let s: &Client = &C1` already records.
+                            // An operand that resolves to nothing (a std/external value, an opaque
+                            // return) inserts nothing, and `scan.rs`'s `local_types` gate still confines
+                            // any resulting `Type::method` edge to a LOCAL type.
+                            if let Some(t) =
+                                self.with_pre_bindings(&pre_bindings, |s| s.resolve_recv_type(&init.expr))
+                            {
+                                if std::env::var_os("CANDOR_R569_INSTR").is_some() {
+                                    eprintln!("R569HIT\t{}\t{t}", id.ident); // §E1 REACH PROBE
+                                }
+                                self.vars.insert(id.ident.to_string(), t);
+                            }
                         }
                         // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is

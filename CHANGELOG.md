@@ -10,6 +10,42 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ AN UNANNOTATED `let` BOUND TO A REFERENCE LOST THE RECEIVER (SOUNDNESS R569).**
+
+      let child = &mut self.0;  child.kill().ok();          // cc, KillOnDrop::drop — Exec, SILENT
+      let this  = &mut *self;   this.socket.try_read(..);   // sqlx-core, Read::poll — Net,  SILENT
+      let inner = &self.client; inner.simple_query("");     // postgres, is_valid   — Db,   SILENT
+
+  `let s = &C1; s.fetch()` and `let c = Client; let r = &c; r.fetch()` were ABSENT from `functions[]`
+  — a SPEC §2 rule 3 purity claim over a body that reads a file, with `pure` exiting 0 — while the
+  annotated spelling (`let s: &Client = &C1`), the direct receiver (`C1.fetch()`) and the owned binding
+  (`let c = Client; c.fetch()`) all resolved.
+
+  §G, and R569's own row said so before the fix was written: the fallback on this binding site is
+  `ctor_type`, which types a CONSTRUCTION, and `&expr` is not one. The answer already existed in
+  `resolve_recv_type`, whose `Expr::Reference` arm recurses into the operand — the same function every
+  receiver POSITION in the collector already asks, reached from this site for the first time. Two routes
+  answering "what type is this binding" and only one of them walking a reference is R347's shape at
+  another site. It cannot invent a type the annotated spelling would not give: `&T` has `T`'s methods by
+  auto-deref, so the binding's receiver type IS the operand's.
+
+  A/B, `bin/corpus-ab.py`, **1,626 real cargo-registry crates**: **ADDED 91, REMOVED 0, CHANGED 406**
+  (narrow `inferred` key: 33), rows 327,829 -> 327,920. **ZERO effects lost on any row anywhere** — the
+  whole movement is additive, which is the safety property for a receiver-typing fix. REACH 3,829 hits
+  across 490 of the 1,626 entries. Every CONCRETE-effect gain traced to a body, not sampled: cc
+  `KillOnDrop::drop` **Exec** (`parallel/command_runner.rs:18`, a Drop body that kills a child process
+  and read pure), sqlx-core `net::socket::{Read,Write}::poll` **Net** (`net/socket/mod.rs:72,99`),
+  postgres `Client::is_valid` **Db** (`client.rs:550`, a no-op query that was invisible under
+  `deny Db`), jobserver `unix::Client::{acquire,acquire_allow_interrupts,try_acquire}` **Fs**
+  (`unix.rs:218,227,289`), h2 `Inner::{handle_error,recv_go_away}` **Log**, tokio `Copy::poll`
+  **Log+Unknown** (`io/util/copy.rs:298`), mongodb `RawBatchCursor::poll_next` **Clock/Env/Rand**
+  (`cursor/raw_batch.rs:299`), zip `ZipWriter::deep_copy_file*` **Clock**. The 34 added rows with an
+  empty `inferred` all carry an `invisible` disclosure; none is a bare purity claim.
+
+  OVER-CHARGE CONTROLS, in the test and executed: a `&*q` binding to a PURE local type with a same-named
+  method is charged NOTHING (the direction that would be a positive claim about an unrelated body), and
+  an EXTERNAL operand (`let s = &String::new()`) types to nothing at all.
+
 - **⚠ THE INTERFACE-UNION CHARGED AN INHERENT METHOD'S EFFECTS TO THE TRAIT MEMBER, BECAUSE
   `{ty}::{method}` CANNOT TELL `impl Trait for Ty` FROM `impl Ty` (SOUNDNESS R598).** A FABRICATION,
   and it was the one thing R597's coverage leg was blocked on.
