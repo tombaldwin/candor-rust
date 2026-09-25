@@ -1922,6 +1922,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
+    // ⟨0.40⟩ SOUNDNESS R608 — THE TRAIT-PREFIX PROJECTION OF BOTH IMPLEMENTOR INDEXES.
+    //
+    // The consumer rule below asks java's conjunct 4 — `chaTargets(owner, name, desc).isEmpty()`,
+    // i.e. "does this project implement THAT ABSTRACTION at all". java's query is spelled with a
+    // `name`+`desc` off an `INVOKEINTERFACE`, which the JVM verifier guarantees names a member the
+    // interface DECLARES, so asking it per-member and asking it per-interface differ only in
+    // precision. **THIS ENGINE MINTS ITS KEY FROM SOURCE, WHERE NOTHING GUARANTEES THAT** — R549's
+    // class is exactly a member key the owning trait does not declare (`tower_service#Service::map_err`
+    // is a `ServiceExt` method, and `ServiceExt` is tower's own trait) — and a MALFORMED member is BY
+    // CONSTRUCTION never a key in `foreign_impls`, so a member-keyed conjunct 4 cannot fire on it and
+    // the rule charges `Unknown` for a dispatch that does not exist.
+    //
+    // MEASURED AT THIS BASE, six chained pairs, Σ 2,826 analyzed consumer functions, `REMOVED 0` in
+    // every arm: member-keyed moves **39 rows (1.38%) on 35 direct hits**; TRAIT-PREFIX-keyed moves
+    // **6 rows (0.21%) on 3**. **34 of those 35 member-keyed hits are on MALFORMED keys**, and that
+    // is ground-truthed against each trait's own declaration rather than taken from a row:
+    // `tower_service::Service` declares `poll_ready` and `call` (22 hits name `map_err`, `load`,
+    // `make_service`, `err_into`, `then`, `map_ok`, `map`, `is_pending`, `and_then` — all
+    // `ServiceExt`, which is TOWER's trait); `http_body::Body` declares `poll_frame`/`is_end_stream`/
+    // `size_hint` (`as_mut`, `exact` — 3); `bytes::Buf` declares neither `map` nor
+    // `unwrap_or_default` (2); `futures_core`'s `Stream`/`FusedStream`/`TryStream` declare
+    // `poll_next`+`size_hint` / `is_terminated` / `try_poll_next` (7 more). The ONE well-formed hit is
+    // `futures_core#TryStream::try_poll_next`. So the prefix is not a tuning knob picked to fit a
+    // threshold — it is the granularity java's query actually has, and porting it per-member was the
+    // mis-port. (An earlier pricing on `0c0a0fd` measured 45/6 for the same two arms; R569 landed in
+    // between and moved the member-keyed figure to 39. The prefix figure did not move.)
+    //
+    // `{owner}#{trait qual}::{method}` -> `{owner}#{trait qual}::`. `None` for a key with no `::`:
+    // no trait qual can be formed, so there is nothing to compare and the caller falls through.
+    let r533_fi_prefix: HashSet<String> =
+        merged.foreign_impls.keys().filter_map(|k| r533_trait_prefix(k)).collect();
+    let r533_fi_prefix_t2: HashSet<String> =
+        foreign_impls_by_tail2.keys().filter_map(|k| r533_trait_prefix(k)).collect();
     let mut direct_dispatchers: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
     for f in &fns {
         for site in &f.dispatch {
@@ -3803,6 +3836,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
         }
+        // ── ⟨0.40⟩ SOUNDNESS R608 — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION ────────
+        // `fn go(h: &dyn dep::Handler) { h.handle() }` where NOTHING — not the dependency, not this
+        // crate — implements `Handler`. The engine KNOWS this is a dispatch (it publishes
+        // `dispatchesOn` for exactly this key) and then judges the caller PURE: `inferred: []`,
+        // `unresolved: false`, no `unknownWhy`, and `deny Net Unknown` exits 0 over it. That is the
+        // silent purity claim in its barest form — no sibling implementor, no body-local trick, no
+        // lambda, just a dispatch nobody answers — and it is what ⟨0.40⟩ forbids.
+        //
+        // FOUR CONJUNCTS, and each one is the thing that keeps this from being a flood:
+        //   1. the owner is a REAL Cargo.toml dependency (`deps`), checked against the manifest and
+        //      never against the spelling — a local module named like a crate also parses as one;
+        //   2. the owner is CHAINED (`deps_idx.crates`), so this run actually HAS that crate's report
+        //      and "the union is empty" is a reading of a document rather than of an absence. An
+        //      UNCHAINED dependency is the ordinary honest miss and is already disclosed by
+        //      `invisible`/coverage, which is a different channel with a different verdict;
+        //   3. NOTHING on the wire answers the key — neither the fully-qualified member nor its
+        //      2-segment tail is in `deps_idx.by_key`. Since the producer half of this rung publishes
+        //      a PURE-ONLY union entry (the two `silence = purity` drops below are gone), an absent
+        //      key now means "no implementor", not "implementors exist and are all pure"; before that
+        //      change this conjunct conflated the two and PART 92's `c3_pure_only` is the control that
+        //      says the all-pure case must stay pure;
+        //   4. and THIS crate supplies no implementor of that abstraction either — java's conjunct 4,
+        //      at the granularity java's own `chaTargets(owner, name, desc)` query has. See
+        //      `r533_fi_prefix` above for why per-member is the WRONG port and what it measured.
+        // Plus SPEC §4's conventionally-pure leaf set, which `r533_exempt_leaf` documents.
+        //
+        // WHY IT IS AN `Unknown` AND NOT AN `invisible`: the crate IS covered — we read its report —
+        // so nothing here is uncovered. What is unknown is the TARGET BODY, and §4's normative detail
+        // for that is `dispatch:<owner>.<member>`, which `r529_reason` is the single spelling of.
+        for member in &f.foreign_dispatch {
+            let Some((owner, mem)) = member.split_once('#') else { continue };
+            if !deps.contains(owner) { continue }
+            if !deps_idx.crates.contains(owner) { continue }
+            let t2 = tail2(mem).map(|t| format!("{owner}#{t}")).unwrap_or_else(|| member.clone());
+            if deps_idx.by_key.contains_key(member) || deps_idx.by_key.contains_key(&t2) { continue }
+            if r533_exempt_leaf(mem) { continue }
+            if r533_trait_prefix(member).is_some_and(|p| r533_fi_prefix.contains(&p))
+                || r533_trait_prefix(&t2).is_some_and(|p| r533_fi_prefix_t2.contains(&p)) { continue }
+            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+            unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
+            if std::env::var_os("CANDOR_R533_INSTR").is_some() {
+                eprintln!("R533HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
+            }
+        }
     }
 
     // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
@@ -3840,6 +3917,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     /// `dispatch:<owner>.<member>` detail. One spelling, one place: the three sites that hedge a
     /// block-nested foreign implementor must not each form it (SPEC §4 ⟨0.24⟩'s "an engine holds this
     /// vocabulary twice" is the failure this avoids, and R490 is this family's own instance of it).
+    /// ⟨0.40⟩ SOUNDNESS R608 — `"{owner}#{trait qual}::{method}"` -> `"{owner}#{trait qual}::"`, i.e.
+    /// the ABSTRACTION the member belongs to. `None` for a key with no `::`, because no trait qual can
+    /// be formed from it and a comparison against the projection would be a comparison against nothing.
+    fn r533_trait_prefix(key: &str) -> Option<String> {
+        key.rsplit_once("::").map(|(head, _)| format!("{head}::"))
+    }
+
+    /// ⟨0.40⟩ SOUNDNESS R608 — SPEC §4's conventionally-pure leaf set, in rust spelling. java's
+    /// `isObjectProtocolExempt` exempts four Object-protocol members — `toString()`, `hashCode()`,
+    /// `equals(Object)`, `compareTo(Object)`. Rust spells those same four facts across more trait
+    /// methods: `Debug`/`Display` both declare `fmt`; `PartialEq` declares `eq` AND `ne`; `Hash`
+    /// declares `hash`; `Ord` declares `cmp` and `PartialOrd` `partial_cmp`; `to_string` is `Display`'s
+    /// blanket method and the literal `toString` analogue. `clone` is in the set because THIS ENGINE
+    /// ALREADY treats it as conventionally pure at the resolution site (`collector.rs` skips typed
+    /// resolution for `leaf == "clone"`), so leaving it out here would be one fact held in two
+    /// spellings — the ⟨0.34⟩ drift shape.
+    ///
+    /// **DELIBERATELY EXCLUDED: java's function-object arm** (`kotlin FunctionN.invoke`,
+    /// `scala FunctionN.apply`, `groovy Closure.call`). Rust's `Fn`/`FnMut`/`FnOnce` are not spelled by
+    /// member name at a call site, and `call` IS a real, effectful trait method in this ecosystem
+    /// (`tower_service#Service::call`) — exempting that leaf would suppress a genuine dispatch, which
+    /// is the opposite of what a conventionally-pure set is for. Keyed on the LEAF alone, mirroring
+    /// java, whose test is `(name, desc)` and never the owner.
+    ///
+    /// **MEASURED INERT ON THE PRICING CORPUS — it is not credited with any reduction.** With the
+    /// trait-prefix conjunct in place, the six chained pairs' reports are BYTE-IDENTICAL with and
+    /// without this skip (compared file by file, not by a diffstat). It was then calibrated on the arm
+    /// where it CAN fire, because a skip that has never removed anything has not been shown to be a
+    /// skip: on the member-keyed conjunct it removes exactly **7** hits, every one
+    /// `tower_service#Service::clone` (41 -> 34). So this is a guard against a shape the corpus did
+    /// not contain, not a cost reducer — crediting it with any part of the 39 -> 6 would be crediting
+    /// it with the trait-prefix conjunct's work.
+    fn r533_exempt_leaf(mem: &str) -> bool {
+        let leaf = mem.rsplit("::").next().unwrap_or(mem);
+        matches!(leaf, "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp" | "to_string")
+    }
+
     fn r529_reason(member: &str) -> String {
         let detail = member.split_once('#').map(|(_, m)| m).unwrap_or(member);
         match detail.rsplit_once("::") {
@@ -4486,8 +4600,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         eprintln!("R529HIT\tUNION-LOCAL\t{trait_leaf}::{method}"); // §E1 REACH PROBE
                     }
                 }
-                if inf_u.is_empty() && blind_u.is_empty() {
-                    continue; // pure across all impls — silence = purity
+                // ⟨0.40⟩ SOUNDNESS R609 — A PURE-ONLY UNION IS PUBLISHED, NOT DROPPED.
+                //
+                // This used to be `if inf_u.is_empty() && blind_u.is_empty() { continue }` —
+                // "pure across all impls, silence = purity". The entry it dropped and the entry it
+                // never had are the SAME BYTES on the wire, so a chained consumer cannot tell
+                //   (a) this abstraction has implementors and every one of them is pure
+                // from
+                //   (b) this abstraction has no implementor anywhere.
+                // (a) is legitimately pure — PART 92's `c3_pure_only` is the control that says so.
+                // (b) is R608, the dispatch nobody answers. Conflating them is what forced R608's
+                // consumer rule to hedge on WIRE ABSENCE, and it is a producer-side defect in its own
+                // right: obligation 2 exists to publish the implementor union, and "the union is
+                // empty of effects" is a fact about the union, not the absence of one.
+                //
+                // THE ROW IS A CLAIM, AND IT IS ONE THE ENGINE IS ALREADY MAKING. Its `inferred` is
+                // `[]` with no `invisible` and no `Unknown`, which §2 reads as a purity claim — the
+                // same claim the consumer was already deriving from silence, now said out loud where
+                // a reader and a gate can see it. It is emitted ONLY where an implementor was
+                // actually named (`!impls.is_empty()`): an abstraction with no implementor publishes
+                // nothing, which is what keeps R608's conjunct 3 meaning what it says.
+                //
+                // REMOVED-DIRECTION RISK, stated because it is NOT zero by construction. A new key in
+                // a consumer's `deps_idx.by_key` can satisfy the call-join at `scan.rs`'s
+                // `dep_join_hit`, and `already_handled` reads that flag — so a call that previously
+                // fell through to the R452/R190(e)/R128 disclosures could stop doing so. Measured
+                // rather than reasoned: the numbers are in the commit message.
+                // THE ZERO-IMPLEMENTOR CASE IS DELIVERED BY `trait_impls`' OWN MISS ABOVE
+                // (`None => continue`), not by this line: `decls.rs` only ever `push`es into that map,
+                // so no leaf reaches here with an empty vec and `impls.is_empty()` is UNREACHABLE at
+                // HEAD. It is written anyway, and labelled, because R608's conjunct 3 reads WIRE
+                // ABSENCE — publishing a row for an abstraction nobody implements would silence the
+                // rung this half exists to serve — and that property should not rest on a `continue`
+                // three hundred lines up that is there for a different reason. **It is a DEFENSIVE
+                // guard and it is NOT covered by a fixture**, because no source can construct the
+                // state that would fire it; `r609_a_pure_only_union_is_published_and_a_zero_
+                // implementor_one_is_not` pins the PROPERTY, via the mechanism that actually delivers
+                // it today.
+                if inf_u.is_empty() && blind_u.is_empty() && impls.is_empty() {
+                    continue; // no implementor was named at all — there is no union to publish
                 }
                 // R503 — the ⟨0.23⟩ spelling, not the leaf. A trait declared at `backend::Backend`
                 // publishes `iface#backend::Backend::size`, which is the SAME key the foreign half of
@@ -4579,6 +4730,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         continue;
                     }
                 }
+                // §E1 REACH PROBE — fires ONLY on the rows R609 newly publishes (a union with no
+                // effect and no uncovered package), so `CHANGED 0` and "the branch never ran" stay
+                // distinguishable and this half's reach is never borrowed from the local leg's.
+                if inf_u.is_empty() && blind_u.is_empty()
+                    && std::env::var_os("CANDOR_R609_INSTR").is_some()
+                {
+                    eprintln!("R609HIT\tLOCAL\t{hash}");
+                }
                 entries.push(ReportEntry {
                     func: hash.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
                     inferred: inf_u.iter().map(|s| s.to_string()).collect(),
@@ -4654,8 +4813,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                 }
             }
-            if inf_u.is_empty() && blind_u.is_empty() {
-                continue; // pure across every implementor this crate supplies — silence = purity
+            // ⟨0.40⟩ SOUNDNESS R609, the FOREIGN leg — the same publication, and the audit boundary is
+            // not drawn around the local loop that triggered it. `union_keys` is `foreign_impls` ∪
+            // `nested_impl_foreign`, and a key that came ONLY from `nested_impl_foreign` has already
+            // inserted `Unknown` above, so the empty case here is exactly "this crate supplies
+            // implementors of a dependency's abstraction and every one of them is pure" — the (a) case
+            // the local leg's note describes, under the owning crate's namespace.
+            // Same shape, same label: `impl_quals` is empty only for a key that came from
+            // `nested_impl_foreign` alone, and that branch has already inserted `Unknown` above — so
+            // this conjunct is UNREACHABLE at HEAD too, and is a defensive guard rather than a tested
+            // one. See the local leg's note for why it is written out.
+            if inf_u.is_empty() && blind_u.is_empty() && impl_quals.is_empty() {
+                continue; // no implementor was named at all — there is no union to publish
             }
             // SOUNDNESS R597, the FOREIGN leg — the same suppression, and the audit boundary is not
             // drawn around the local loop that triggered it. The check moved BELOW the union
@@ -4683,6 +4852,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if !eff_adds && !blind_adds {
                     continue; // the real entry already carries every EFFECT and every package it knows
                 }
+            }
+            if inf_u.is_empty() && blind_u.is_empty()
+                && std::env::var_os("CANDOR_R609_INSTR").is_some()
+            {
+                eprintln!("R609HIT\tFOREIGN\t{key}"); // §E1 REACH PROBE — see the local leg's note
             }
             entries.push(ReportEntry {
                 func: key.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),

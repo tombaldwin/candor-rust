@@ -10,6 +10,88 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.40⟩ — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
+  PURE-ONLY UNION IS PUBLISHED INSTEAD OF DROPPED (SOUNDNESS R608 + R609).** Two halves of one rung;
+  neither is shippable without the other.
+
+      pub fn run(h: &dyn dep::Handler) { h.handle(); }   // nothing implements Handler, anywhere
+
+  This read `inferred: []`, `unresolved: false`, no `unknownWhy` — with `dispatchesOn` right there on
+  the row saying the engine KNEW a dispatch happened — and `deny Net Unknown` exited **0**. It is the
+  silent purity claim in its barest form: no sibling implementor, no body-local trick, no lambda.
+
+  **The consumer half (R608)** discloses `Unknown` with §4's `dispatch:<owner>.<member>` detail when all
+  four conjuncts hold: the owner is a real Cargo.toml dependency; it is CHAINED (an unchained dep stays
+  the ordinary `invisible` coverage miss); nothing on the wire answers the key or its 2-segment tail;
+  and this crate supplies no implementor of that abstraction. Plus SPEC §4's conventionally-pure leaf
+  set — `clone fmt eq ne hash cmp partial_cmp to_string`, with `call` DELIBERATELY EXCLUDED because in
+  rust it is a real effectful trait method (`tower_service#Service::call`).
+
+  **CONJUNCT 4 IS ASKED OF THE ABSTRACTION, NOT OF THE MEMBER, and that is the whole price.** java's
+  `chaTargets(owner, name, desc)` is member-spelled too, but its `name`+`desc` come off an
+  `INVOKEINTERFACE` and the verifier guarantees the interface declares that member. This engine mints
+  its key from SOURCE, where nothing does — a malformed member (R549's class, e.g.
+  `tower_service#Service::map_err`, a `ServiceExt` method) is by construction never a key in
+  `foreign_impls`, so a member-keyed conjunct 4 cannot fire on it and charges `Unknown` for a dispatch
+  that does not exist. Measured over six chained crate pairs (tower<-tower-service+tower-layer+
+  futures-core, http-body-util<-http-body+http+bytes, tower-http<-tower+http+http-body+bytes,
+  futures-util<-futures-core, tracing<-tracing-core, http-body<-bytes+http), **Sigma 2,826 analyzed**:
+  member-keyed moves **39 rows (1.38%) on 35 direct hits**, trait-prefix-keyed **6 rows (0.21%) on 3**
+  — and **34 of the 35 member-keyed hits are on MALFORMED keys**, ground-truthed against each trait's
+  own declaration in its own source rather than taken from a row. The one well-formed hit is
+  `futures_core#TryStream::try_poll_next`. (An earlier pricing at `0c0a0fd` had 45/6; R569 landed in
+  between and moved the member-keyed figure. The prefix figure did not move.)
+
+  **The producer half (R609)** removes the two `silence = purity` drops. A union with no effect and no
+  uncovered package was thrown away, so "every implementor is pure" and "nothing implements this" were
+  THE SAME BYTES on the wire — which is why the consumer half had to hedge on wire absence, and why on
+  its own it FABRICATES: on a binary carrying the consumer rule alone, PART 92's `c3_pure_only` shape
+  (a library whose only implementor anywhere is pure) exits **1**. With the publication in place it is
+  pure again. An abstraction with NO implementor still publishes nothing — that absence is what
+  conjunct 3 reads.
+
+  **A/B, `bin/corpus-ab.py`, wide key, multiset — never a fresh `ab.py`.**
+
+  · **Six chained pairs, Sigma 2,826 analyzed consumer functions.** Consumer half alone:
+    **ADDED 2, REMOVED 0, CHANGED 4** = 6 rows = **0.21%** (4 of them analysed functions, 0.14%),
+    REACH 3 `R533HIT`. Producer half alone: **ADDED 284, REMOVED 0, CHANGED 0**, REACH 284 `R609HIT`
+    — every added row is a pure-only union entry and no existing row moved. **BOTH: ADDED 284,
+    REMOVED 0, CHANGED 2** — the producer half removes two thirds of the consumer half's cost, and
+    specifically it removes **the only WELL-FORMED hit** (`tower#discover::D::poll_discover` on
+    `futures_core#TryStream::try_poll_next`, tower-0.4.13 `src/discover/mod.rs:92`), because
+    futures-core's blanket `impl TryStream for S` now publishes its pure union. **RESIDUAL, stated
+    rather than buried: both remaining hits are on R549-MALFORMED keys** —
+    `futures_core#stream::TryStream::is_terminated` (that leaf is `FusedStream`'s) and
+    `futures_core#stream::TryStream::map` (`TryStreamExt`'s). On this corpus the rung's own price is
+    0 and what is left is R549 leaking in.
+  · **1,626 cargo-registry crates, 327,920 pre rows.** Both halves: **ADDED 12,704, REMOVED 0,
+    CHANGED 0**, REACH 12,704 `R609HIT` across **850 of 1,626** entries (52%). ADDED == REACH exactly,
+    so every new row is an R609 publication. The consumer half has zero reach there by construction
+    (nothing is chained), and `CHANGED 0` is the measurement of that rather than the assumption.
+  · **The removal direction was measured, not asserted.** A new key in a consumer's `deps_idx.by_key`
+    can satisfy the call-join, and `already_handled` reads `dep_join_hit` — so a call that previously
+    fell through to R452/R190(e)/R128 could stop disclosing. `REMOVED 0` / `CHANGED 0` in both
+    corpora is what says it did not.
+
+  Pure-only share of published union entries: **332 of 394 (84.3%)** across the twelve crates of the
+  chained corpus, which is java's 73.4% figure in the same direction.
+
+  The §4 exempt-leaf skip is **measured INERT** at trait-prefix granularity — the six pairs' reports
+  are byte-identical with and without it — and it is credited with NO part of the reduction. It was
+  calibrated on the arm where it can fire: on the member-keyed conjunct it removes exactly 7 hits,
+  every one `tower_service#Service::clone` (41 -> 34).
+
+  Four new fixtures, and the one that pins the granularity is **calibrated against the mis-port**:
+  built with conjunct 4 spelled member-keyed, `r608_conjunct_4_is_asked_of_the_abstraction_not_of_the_member`
+  goes red with `('r608twoapp#run', ['Unknown'], ['dispatch:Handler.b'])`. PART 92 arms re-derived
+  locally on hand fixtures: `c9_consumer_zero_union` now PASSES for rust (its xfail line is stale and
+  is candor-spec's to retire); `c2_zero_impl`, `c3_pure_only`, `c4_sealed`, `c1_foreign_effectful` and
+  `c10_unchained_direct` are unchanged.
+
+  Two pre-existing R598 assertions moved from "the key publishes nothing" to "the key publishes no
+  CONCRETE effect", because R609 is exactly the change from a dropped row to a `[]` one. The teeth are
+  identical and measured: under `CANDOR_R598_PRE=1` both rows read `["Fs"]`.
+
 - **⚠ AN UNANNOTATED `let` BOUND TO A REFERENCE LOST THE RECEIVER (SOUNDNESS R569).**
 
       let child = &mut self.0;  child.kill().ok();          // cc, KillOnDrop::drop — Exec, SILENT

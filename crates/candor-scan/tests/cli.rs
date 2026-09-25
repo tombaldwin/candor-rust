@@ -5530,11 +5530,23 @@ fn r598_the_narrowing_withholds_a_claim_but_never_a_disclosure() {
          THAT converts 'we cannot see this' into 'there is nothing here'. The concrete `Fs` is a claim \
          about a function no dispatch through this member reaches, and it is the half that goes: {v}");
 
-    // ── 3. THE FABRICATION ITSELF — hickory-proto's shape, nothing left to publish ──────────────────
-    assert!(row("r598three#Plain::size", true).is_none(),
+    // ── 3. THE FABRICATION ITSELF — hickory-proto's shape, no CONCRETE claim left to publish ───────
+    //
+    // ⟨0.40⟩/R609 MOVED THE SPELLING OF THIS ARM, NOT ITS TEETH. It used to read `is_none()`: with
+    // nothing left in the union the producer dropped the row entirely. R609 publishes a pure-only
+    // union instead, because a dropped row and a never-existing one are the same bytes on the wire and
+    // R608's conjunct 3 has to tell them apart. What this arm tests is unchanged and the
+    // discrimination is EXACTLY as sharp — calibrated on this same fixture with `CANDOR_R598_PRE=1`,
+    // which restores the pre-R598 lookup and makes this row read `["Fs"]`.
+    let plain = row("r598three#Plain::size", true).unwrap_or_else(|| panic!(
+        "R609 publishes the union even when it is pure — the row must EXIST, or this arm is asserting \
+         the absence of a leg that never ran: {v}"));
+    assert_eq!(plain["inferred"], serde_json::json!([]),
         "`impl Plain for Data` does not declare `size` and the default body is `{{ 7 }}` — the inherent \
          `Data::size`'s `Fs` is unreachable through this member and there is no disclosure riding with \
-         it, so the key must publish nothing rather than a concrete claim: {v}");
+         it, so the key must publish NO CONCRETE EFFECT. `[]` here is a true statement about the union \
+         (the only implementor runs the trait's pure default); a concrete Fs would be the \
+         fabrication: {v}");
 }
 
 /// SOUNDNESS R598, THE TWO ASSERTIONS IN THE DIFF THAT `assert-audit.sh` FLAGS — **MADE INTO ARMS
@@ -5584,9 +5596,15 @@ fn r598_an_assoc_item_does_not_blind_the_member_list_and_the_foreign_leg_is_immu
     let fns = v["functions"].as_array().unwrap();
     assert!(fns.iter().any(|e| e["hash"] == "r598assoc#RData::size"),
         "the inherent method must be an analysed unit, or nothing is narrowable here: {v}");
-    assert!(!fns.iter().any(|e| e["hash"] == "r598assoc#Enc::size"),
+    // ⟨0.40⟩/R609: the row is now PUBLISHED with an empty union rather than dropped (see the
+    // `r598three#Plain::size` arm for why), so the assertion moved from "no row" to "no concrete
+    // effect". Same calibration, same teeth: under `CANDOR_R598_PRE=1` this row reads `["Fs"]`.
+    let encsize = fns.iter().find(|e| e["hash"] == "r598assoc#Enc::size")
+        .unwrap_or_else(|| panic!("R609 publishes the pure union, so the row must exist: {v}"));
+    assert_eq!(encsize["inferred"], serde_json::json!([]),
         "an associated `type`/`const` beside the declared method must not blind the member list — if it \
-         did, this narrowing would stop firing for the commonest impl shape in the ecosystem: {v}");
+         did, the narrowing would stop firing for the commonest impl shape in the ecosystem and the \
+         inherent `RData::size`'s `Fs` would be published at the trait member key: {v}");
 
     // The FOREIGN half (⟨0.39⟩ obligation 2): the same source shape, but the trait belongs to a
     // dependency. `collect_foreign_trait_impls` keys one entry per DECLARED member.
@@ -5621,4 +5639,241 @@ fn r598_an_assoc_item_does_not_blind_the_member_list_and_the_foreign_leg_is_immu
         "the foreign leg publishes one entry PER DECLARED MEMBER, so an inherent `RData::to_bytes` can \
          never be read as `iface::Enc`'s implementation of a member the impl does not write. If this \
          ever fails, R598 has a second site and the narrowing above must be taught to it: {v}");
+}
+
+// ═══ ⟨0.40⟩ SOUNDNESS R608 / R609 — THE CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION ═══════
+//
+// One helper, because every arm below needs a dep report on disk and a consumer chained onto it, and
+// the ONE thing that may vary between arms is the dependency's source.
+fn r608_dep_report(name: &str, src: &str) -> (PathBuf, PathBuf) {
+    let dep = make_crate(name, src);
+    let out = dep.join("rep");
+    std::fs::create_dir_all(&out).unwrap();
+    let st = Command::new(bin())
+        .arg(dep.to_string_lossy().as_ref())
+        .arg("--out").arg(out.join("r").to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    assert!(st.status.success(), "producing the dep report must succeed: {}",
+        String::from_utf8_lossy(&st.stderr));
+    let rep = out.join(format!("r.{name}.scan.json"));
+    (dep, rep)
+}
+
+fn r608_consumer(name: &str, dep: &str, src: &str, policy: &str) -> (PathBuf, PathBuf) {
+    let app = make_crate(name, src);
+    std::fs::write(app.join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{dep} = \"0.1\"\n")).unwrap();
+    let pol = app.join("candor.policy");
+    std::fs::write(&pol, policy).unwrap();
+    (app, pol)
+}
+
+fn r608_run(app: &std::path::Path, pol: &std::path::Path, deps: Option<&std::path::Path>)
+    -> (i32, serde_json::Value)
+{
+    let mut c = Command::new(bin());
+    c.arg(app.to_string_lossy().as_ref()).arg("--json")
+        .env("CANDOR_POLICY", pol.to_string_lossy().as_ref())
+        .env_remove("CANDOR_CONFIG");
+    match deps {
+        Some(d) => { c.env("CANDOR_DEPS", d.to_string_lossy().as_ref()); }
+        None => { c.env_remove("CANDOR_DEPS"); }
+    }
+    let out = c.output().expect("run candor-scan");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    (out.status.code().unwrap_or(-1), v)
+}
+
+/// ⟨0.40⟩ SOUNDNESS R608 — **A DISPATCH NOBODY IMPLEMENTS MUST NOT READ AS PURE**, and the arm that
+/// makes it a measurement rather than an assertion is the one BESIDE it: PART 92's `c3_pure_only`.
+///
+/// Both arms share a byte-identical consumer (`pub fn run(h: &dyn dep::Handler) { h.handle(); }`), the
+/// same policy and the same chaining. The ONLY variable is whether the dependency declares an
+/// implementor. `zero` must disclose; `pure` must stay pure, because a library whose only implementor
+/// anywhere is pure is LEGITIMATELY pure and hedging it is a fabrication.
+///
+/// **THE `pure` ARM IS WHY BOTH HALVES OF THIS RUNG SHIP TOGETHER.** Measured on a binary carrying the
+/// consumer rule ALONE (R609's producer publication reverted): `apppure` exits **1** with
+/// `inferred: ['Unknown']` — the producer's `silence = purity` drop made "no implementor" and "every
+/// implementor is pure" the same bytes on the wire, so the consumer could not tell them apart and
+/// charged both. With R609's publication in place the dependency emits
+/// `puredep#Handler::handle  inferred: []  interfaceUnion: true` and this arm is pure again.
+#[test]
+fn r608_a_chained_abstraction_with_no_implementor_anywhere_reads_unknown() {
+    let (zdep, zrep) = r608_dep_report("r608zero", "pub trait Handler { fn handle(&self); }\n");
+    let (pdep, prep) = r608_dep_report("r608pure",
+        "pub trait Handler { fn handle(&self); }\n\
+         pub struct P;\n\
+         impl Handler for P { fn handle(&self) { let _ = 1 + 1; } }\n");
+
+    let (zapp, zpol) = r608_consumer("r608zeroapp", "r608zero",
+        "pub fn run(h: &dyn r608zero::Handler) { h.handle(); }\n", "deny Net Unknown\n");
+    let (papp, ppol) = r608_consumer("r608pureapp", "r608pure",
+        "pub fn run(h: &dyn r608pure::Handler) { h.handle(); }\n", "deny Net Unknown\n");
+
+    let (zcode, zv) = r608_run(&zapp, &zpol, Some(&zrep));
+    let (pcode, pv) = r608_run(&papp, &ppol, Some(&prep));
+    for d in [&zdep, &pdep, &zapp, &papp] { let _ = std::fs::remove_dir_all(d); }
+
+    // ── CONTROL FIRST (PART 92 `c3_pure_only`) ────────────────────────────────────────────────────
+    let prun = pv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("the consumer must be judged at all: {pv}"));
+    assert_eq!(prun["inferred"], serde_json::json!([]),
+        "a library whose ONLY implementor anywhere is pure is legitimately pure — hedging it is a \
+         fabrication, and it is the failure mode the consumer rule has on its own: {pv}");
+    assert!(prun["unknownWhy"].is_null(), "{pv}");
+    assert_eq!(pcode, 0, "`deny Net Unknown` must PASS over an all-pure implementor union: {pv}");
+
+    // ── THE ROW ───────────────────────────────────────────────────────────────────────────────────
+    let zrun = zv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{zv}"));
+    assert_eq!(zrun["inferred"], serde_json::json!(["Unknown"]),
+        "NOTHING implements `Handler` — not the dependency, not this crate. The engine publishes \
+         `dispatchesOn` for exactly this key, so it KNOWS a dispatch happened, and reading `[]` here is \
+         the ⟨0.39⟩ purity claim in its barest form: {zv}");
+    assert_eq!(zrun["unknownWhy"], serde_json::json!(["dispatch:Handler.handle"]),
+        "§4's normative detail for an unresolvable dispatch target, so `deny E Unknown[dispatch]` can \
+         class it: {zv}");
+    assert_eq!(zcode, 1,
+        "`deny Net Unknown` MUST fail. Before ⟨0.40⟩ this exited 0 — that is the cardinal sin this rung \
+         closes, and the `pure` arm above is what proves the two are distinguishable: {zv}");
+}
+
+/// ⟨0.40⟩ SOUNDNESS R608 — **CONJUNCT 4 IS ASKED OF THE ABSTRACTION, NEVER OF THE MEMBER**, which is
+/// the single thing the port of java's rule can get wrong.
+///
+/// java's `chaTargets(owner, name, desc).isEmpty()` is also spelled per-member; what makes it behave as
+/// an abstraction query is that its `name`+`desc` come off an `INVOKEINTERFACE`, verifier-guaranteed to
+/// name a member the interface DECLARES. This engine mints its key from SOURCE, where nothing guarantees
+/// that, so a member-keyed conjunct 4 cannot fire on a malformed key and charges `Unknown` for a
+/// dispatch that does not exist ([[R549]]'s class).
+///
+/// The fixture is the smallest well-formed case that separates them: the consumer DOES implement the
+/// dependency's abstraction, but its `impl` block writes only `a`, so `r608two#Handler::b` is not a key
+/// in `foreign_impls` while the prefix `r608two#Handler::` is. The implementor union for `Handler` is
+/// `{Mine}` and `Mine::b` runs the trait's own pure default, so the honest answer is PURE.
+///
+/// **CALIBRATED, not assumed.** Built with conjunct 4 spelled member-keyed (the mis-port), same tree,
+/// same dep report, this arm goes RED exactly here:
+///   `('r608twoapp#run', ['Unknown'], ['dispatch:Handler.b'])` / `R533HIT run r608two#Handler::b`
+/// Measured over six chained crate pairs, Σ 2,826 analysed: member-keyed fires on 45 functions, of
+/// which 38 sit on keys R549 proved malformed; trait-prefix-keyed fires on 6.
+#[test]
+fn r608_conjunct_4_is_asked_of_the_abstraction_not_of_the_member() {
+    let (dep, rep) = r608_dep_report("r608two",
+        "pub trait Handler { fn a(&self); fn b(&self) { let _ = 1 + 1; } }\n");
+    let (app, pol) = r608_consumer("r608twoapp", "r608two",
+        "pub struct Mine;\n\
+         impl r608two::Handler for Mine { fn a(&self) { let _ = 1 + 1; } }\n\
+         pub fn run(h: &dyn r608two::Handler) { h.b(); }\n", "deny Net Unknown\n");
+    let (code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+
+    // REACH: the consumer's own `impl` must have reached `foreign_impls`, or this asserts the absence
+    // of a hedge that conjunct 4 was never consulted about.
+    assert!(v["functions"].as_array().unwrap().iter()
+            .any(|e| e["hash"] == "r608two#Handler::a" && e["interfaceUnion"] == serde_json::json!(true)),
+        "obligation 2 must have published the consumer's foreign implementor under the owning crate's \
+         key, which is the index conjunct 4 reads: {v}");
+
+    let run = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(run["inferred"], serde_json::json!([]),
+        "this crate DOES implement `Handler`; `b` is simply not a member its `impl` block writes. The \
+         abstraction is answered, so there is nothing to hedge — and a member-keyed conjunct 4 hedges \
+         here, which is what makes it the mis-port: {v}");
+    assert_eq!(code, 0, "{v}");
+}
+
+/// ⟨0.40⟩ SOUNDNESS R608, THE TWO NARROWING CONTROLS — an UNCHAINED dependency and a conventionally-pure
+/// leaf. Both are `continue`s in the rule, and a `continue` nothing exercises is a comment.
+#[test]
+fn r608_an_unchained_dep_and_a_conventionally_pure_leaf_are_not_hedged() {
+    // (a) UNCHAINED — conjunct 2. The crate is not covered at all, so the honest channel is coverage
+    //     (`invisible`), which arms no policy form. Reading a dispatch hedge into it would charge every
+    //     consumer of every un-scanned library.
+    let (dep, _rep) = r608_dep_report("r608un", "pub trait Handler { fn handle(&self); }\n");
+    let (app, pol) = r608_consumer("r608unapp", "r608un",
+        "pub fn run(h: &dyn r608un::Handler) { h.handle(); }\n", "deny Net Unknown\n");
+    let (code, v) = r608_run(&app, &pol, None);
+    let run = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(run["inferred"], serde_json::json!([]), "{v}");
+    assert_eq!(run["invisible"], serde_json::json!(["r608un"]),
+        "the unchained answer is the COVERAGE disclosure, unchanged by this rung: {v}");
+    assert_eq!(code, 0, "{v}");
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+
+    // (b) A CONVENTIONALLY-PURE LEAF — SPEC §4's permitted exclusion, here with a zero implementor union
+    //     so that EVERY other conjunct passes and the exempt list is the only thing left deciding.
+    let (fdep, frep) = r608_dep_report("r608fmt", "pub trait Shower { fn fmt(&self); }\n");
+    let (fapp, fpol) = r608_consumer("r608fmtapp", "r608fmt",
+        "pub fn run(s: &dyn r608fmt::Shower) { s.fmt(); }\n", "deny Net Unknown\n");
+    let (fcode, fv) = r608_run(&fapp, &fpol, Some(&frep));
+    let _ = std::fs::remove_dir_all(&fdep);
+    let _ = std::fs::remove_dir_all(&fapp);
+    let frun = fv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{fv}"));
+    assert_eq!(frun["inferred"], serde_json::json!([]),
+        "`fmt` is in the exempt leaf set; `call` deliberately is NOT, because in rust it is a real \
+         effectful trait method (`tower_service#Service::call`): {fv}");
+    assert_eq!(fcode, 0, "{fv}");
+}
+
+/// ⟨0.40⟩ SOUNDNESS R609 — **A PURE-ONLY UNION IS PUBLISHED; A ZERO-IMPLEMENTOR ONE IS NOT.** That
+/// distinction is the whole format half: it is what lets a consumer tell "every implementor is pure"
+/// from "nothing implements this", which `silence = purity` made the same bytes.
+///
+/// The zero arm is not a nicety — R608's conjunct 3 reads WIRE ABSENCE, so if this leg published a row
+/// for an abstraction with no implementor it would silence the rung it exists to serve.
+#[test]
+fn r609_a_pure_only_union_is_published_and_a_zero_implementor_one_is_not() {
+    let run1 = |name: &str, src: &str| -> serde_json::Value {
+        let d = make_crate(name, src);
+        let out = Command::new(bin())
+            .arg(d.to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+            .output().expect("run candor-scan");
+        let _ = std::fs::remove_dir_all(&d);
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+    };
+
+    // (a) PURE-ONLY — published, with `inferred: []` and no `loc` (it is synthetic, not a body).
+    let p = run1("r609pure",
+        "pub trait Handler { fn handle(&self); }\n\
+         pub struct P;\n\
+         impl Handler for P { fn handle(&self) { let _ = 1 + 1; } }\n");
+    let u: Vec<&serde_json::Value> = p["functions"].as_array().unwrap().iter()
+        .filter(|e| e["hash"] == "r609pure#Handler::handle").collect();
+    assert_eq!(u.len(), 1,
+        "the union over `Handler`'s implementors must be PUBLISHED even when every one is pure. \
+         Dropping it is what made absence ambiguous on the wire: {p}");
+    assert_eq!(u[0]["interfaceUnion"], serde_json::json!(true), "{p}");
+    assert_eq!(u[0]["inferred"], serde_json::json!([]), "{p}");
+    assert!(u[0]["loc"].is_null(), "a synthetic union row has no body and must carry no `loc`: {p}");
+
+    // (b) ZERO IMPLEMENTORS — nothing published, because there is no union to publish.
+    let z = run1("r609zero", "pub trait Handler { fn handle(&self); }\n");
+    assert!(!z["functions"].as_array().unwrap().iter()
+             .any(|e| e["hash"] == "r609zero#Handler::handle"),
+        "an abstraction NOBODY implements must publish no union row — R608's conjunct 3 reads exactly \
+         this absence, and a row here would silence the rung: {z}");
+    // WHICH MECHANISM DELIVERS THAT, stated so this arm is not read as coverage of the
+    // `impls.is_empty()` conjunct beside the publication: it is `trait_impls`' own miss
+    // (`None => continue`), because `decls.rs` only ever pushes into that map and no source can
+    // produce a leaf with an empty implementor vec. The conjunct is labelled DEFENSIVE in `scan.rs`
+    // for that reason. This arm pins the PROPERTY, which is what R608 depends on.
+
+    // (c) OVER-CHARGE CONTROL — an effectful implementor's union keeps its own bytes, unchanged.
+    let l = run1("r609loud",
+        "pub trait Handler { fn handle(&self); }\n\
+         pub struct L;\n\
+         impl Handler for L { fn handle(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); } }\n");
+    let lu = l["functions"].as_array().unwrap().iter()
+        .find(|e| e["hash"] == "r609loud#Handler::handle").unwrap_or_else(|| panic!("{l}"));
+    assert_eq!(lu["inferred"], serde_json::json!(["Net"]), "{l}");
 }
