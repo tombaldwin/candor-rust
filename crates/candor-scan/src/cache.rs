@@ -44,6 +44,27 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev43: `FileDecls::impl_members` gained its FOURTH key shape (SOUNDNESS R652 —
+    // `<tr>\u{1f}<ty>\u{1f}!`, "the `impl <tr> for <ty>` block wrote a CRATE-LOCAL trait path"). The
+    // FIELD is unchanged, its CONTENT is wider — the rev31/rev37 shape. A rev42 entry was written by a
+    // binary that recorded no `!` keys at all, so every implementor in it reads as UNCONFIRMED and the
+    // interface-union publishes NOTHING for a trait whose implementors are real. The stale direction is
+    // therefore OVER-DISCLOSURE (a chained consumer charges `Unknown` on a dispatch that is answered),
+    // not silence — but a warm scan that publishes a different document from a cold one on the same tree
+    // is its own defect, exactly as rev41 says, and the rev is what stops it.
+    // rev42: an ANALYSIS change that feeds `fninfos`, not a field (SOUNDNESS R569, whose fix landed in
+    // `cf8782d` WITHOUT this bump — filed as R652). An unannotated `let` bound to a REFERENCE now types
+    // its binding from `resolve_recv_type` (collector.rs, the `Expr::Reference` arm), so `let child =
+    // &mut self.0; child.kill()` records a `Type::method` call it previously dropped. That write lands in
+    // `CallCollector::vars`, which decides Pass B's `calls` list, and `calls` is stored IN the cached
+    // `FnInfo` — so a rev41 entry was written by a binary that resolved none of those receivers, and it
+    // deserializes without complaint. THE STALE DIRECTION IS SILENCE, NOT FABRICATION: a warm re-scan
+    // replays exactly the pre-fix answer — cc's `KillOnDrop::drop` spawning no process, sqlx-core's
+    // `Read::poll` reading no socket, postgres' `Client::is_valid` invisible to `deny Db` — i.e. a fix
+    // that is correct but NOT REACHED, byte-identical from the outside to a fix that does not work.
+    // Same shape as rev24/rev19 (an analysis change, not a field) and rev10, and neither `content_hash`
+    // nor `decl_index_hash` can save it: the fix changes no file's bytes and no file's DECLS, only how an
+    // unchanged body's receivers resolve, so a stale entry agrees with itself on both digests.
     // rev41: `FileDecls` gained `impl_members` (SOUNDNESS R598 — WHICH members an `impl Trait for Ty`
     // block declares, the fact `trait_impls` throws away). A rev40 entry has none, so it deserializes
     // EMPTY = "no evidence about this file's impl blocks", and the interface-union goes back to charging
@@ -249,7 +270,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev41/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev43/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -520,7 +541,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // discards the block's contents, so `{ty}::{method}` cannot be told apart from an inherent
     // `impl Ty { fn method }`.
     let mut impl_members: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    crate::lang::collect_local_impl_members(items, include_tests, &mut impl_members);
+    crate::lang::collect_local_impl_members(items, include_tests, &uses, &mut impl_members);
     FileDecls {
         fields,
         field_elem,

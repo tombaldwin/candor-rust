@@ -587,6 +587,46 @@ pub(crate) fn impl_opaque_key(trait_leaf: &str, ty: &str) -> String {
     format!("{trait_leaf}\u{1f}{ty}\u{1f}*")
 }
 
+/// ⟨0.40⟩ SOUNDNESS R652 — THE FOURTH KEY SHAPE: `<tr>\u{1f}<ty>\u{1f}!<expanded trait path>` — the
+/// `impl <tr> for <ty>` block was seen and THIS is the path it wrote, expanded through its scope's
+/// `use` map. `!` is not a valid Rust identifier, so this can no more collide with a real member name
+/// than `*` can.
+///
+/// **THE PATH IS CARRIED RATHER THAN CLASSIFIED HERE, AND THAT IS THE SECOND DESIGN — THE FIRST ONE WAS
+/// MEASURED WRONG.** Classifying at the walk (`ours` = the expanded root is not std and not a dependency
+/// crate) looked right and removed 456 rows over the 1,626-crate registry corpus, of which the great
+/// majority were REAL local implementors: `lang::expand` STRIPS a `crate::`/`self::`/`super::` prefix, so
+/// `use crate::de::Deserializer; impl Deserializer for X` expands to `de::Deserializer`, whose root `de`
+/// is a local MODULE that reads exactly like a dependency crate name. `foreign_trait_owner_qual` has the
+/// same blind spot and says so — it is saved by a manifest filter downstream. The authority that CAN
+/// decide is the trait's own DECLARATION qual, which is crate-wide (`trait_quals`) and therefore not
+/// available to a per-file Pass A walk. So the walk records the evidence and `scan.rs` adjudicates it.
+///
+/// It exists because `trait_impls` is keyed by trait LEAF with no locality test whatsoever
+/// (`decls.rs`'s `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)`), so a crate that
+/// declares its own `trait Write` and ALSO writes `impl std::io::Write for W` gives the LOCAL trait a
+/// non-empty implementor vector naming a type that does not implement it. Every colliding leaf in the
+/// language is an everyday one — `Write`, `Read`, `Error`, `Display`, `Iterator`, `Default`, `From`,
+/// `Service`, `Handler` — and a crate implementing `tower::Service` beside its own `Service`
+/// abstraction is the ordinary instance, not a corner.
+pub(crate) fn impl_local_trait_key(trait_leaf: &str, ty: &str, trait_path: &str) -> String {
+    // NORMALISED HERE, WHICH IS WHY THE WRITER AND THE READER BOTH GO THROUGH THIS FUNCTION (§G).
+    // `lang::expand` strips a `crate::`/`self::`/`super::` prefix off the path it was GIVEN, but a
+    // path it resolves THROUGH the `use` map comes back carrying the prefix the `use` was written
+    // with: `use crate::de::IntoDeserializer; impl IntoDeserializer for X` expands to
+    // `crate::de::IntoDeserializer`, while the declaration side (`collect_trait_decl_quals`) records
+    // the modpath form `de::IntoDeserializer`. Without this strip the two never meet and serde's own
+    // `Deserializer` implementors read as somebody else's — measured on the registry corpus, not
+    // reasoned. A crate-local root is dropped segment-wise exactly as `expand` drops it, so
+    // `std::io::Write` is untouched.
+    let mut segs: Vec<&str> = trait_path.split("::").collect();
+    while matches!(segs.first().copied(), Some("crate" | "self" | "super")) {
+        segs.remove(0);
+    }
+    let norm = if segs.is_empty() { trait_path.to_string() } else { segs.join("::") };
+    format!("{trait_leaf}\u{1f}{ty}\u{1f}!{norm}")
+}
+
 /// SOUNDNESS R598 — the ONE predicate every consumer of `impl_members` asks, so a second reader cannot
 /// spell the three-way test a fourth way (§G). True ⇒ `{ty}::{method}` is NOT `<trait_leaf>`'s
 /// implementation for `<ty>` and must not be read as one; false ⇒ it is, or we do not know.
@@ -599,6 +639,75 @@ pub(crate) fn impl_does_not_declare(
     idx.contains(&impl_seen_key(trait_leaf, ty))
         && !idx.contains(&impl_opaque_key(trait_leaf, ty))
         && !idx.contains(&impl_member_key(trait_leaf, ty, method))
+}
+
+/// ⟨0.40⟩ SOUNDNESS R652 — DID THIS CRATE WRITE AN `impl <trait_leaf> for <ty>` WHOSE TRAIT PATH IS
+/// THE CRATE'S OWN? The ONE predicate every consumer of the `!` key asks (§G, and the reason
+/// `impl_does_not_declare` sits beside it rather than each caller spelling the set test itself).
+///
+/// **IT IS AN ALLOWLIST, AND THAT IS THE INVERSION OF THIS FILE'S USUAL RULE — STATED BECAUSE IT IS
+/// LOAD-BEARING.** `impl_does_not_declare` above is a DENYLIST because its starting point is a SOUND
+/// over-approximation: `{ty}::{method}` may or may not be the implementation, and withholding a
+/// concrete effect only ever costs an over-report. Here the starting point is UNSOUND in the
+/// certifying direction — a non-empty `trait_impls[leaf]` is read as "this abstraction HAS an
+/// implementor", which manufactures a §2 PURITY CLAIM out of a leaf collision. A claim needs positive
+/// evidence, so absence of evidence must produce NO claim: `false` here means "we did not confirm a
+/// local implementor", the caller publishes no row, and the consumer's ⟨0.40⟩ conjunct 3 reads wire
+/// absence and charges `Unknown`. **So this narrowing fails toward DISCLOSURE, never toward silence** —
+/// a real local impl this walk could not confirm (a `#[cfg(test)]` item-level impl, a glob-imported
+/// trait name) costs an honest `Unknown` on a dispatch, not a false pure.
+pub(crate) fn impl_confirms_local_trait(
+    idx: &std::collections::HashSet<String>,
+    trait_leaf: &str,
+    ty: &str,
+    decl_qual: &str,
+) -> bool {
+    // THE TEST: the path the `impl` wrote must be a SUBSEQUENCE of the declaration qual's segments,
+    // ending at the leaf. Every shape it admits is one MEASURED on the 1,626-crate registry corpus,
+    // not one imagined here — each line below is the spelling and the crate it was found in:
+    //   · the full qual            `de::Deserializer`     `use crate::de::Deserializer`        serde
+    //   · a module-RELATIVE tail   `engine::Provide`      `use self::engine::…` in `mod parser`,
+    //                                                     qual `parser::engine::Provide`       anes
+    //   · a RE-EXPORT path         `read::Object`         `pub use traits::*` in `read/mod.rs`,
+    //                                                     qual `read::traits::Object`          object
+    //   · the bare leaf            `Provide`              no `use` binding for the name at all
+    //
+    // AND IT ADMITS NOTHING WHOSE SEGMENTS ARE NOT THE CRATE'S OWN, which is the entire point:
+    // `std::io::Write` against the qual `Write` contributes `std` and `io`, neither of which the qual
+    // contains, so the colliding std impl is refused. That is R652.
+    //
+    // A SUBSEQUENCE RATHER THAN A SUFFIX because the re-export shape elides an INTERIOR segment
+    // (`read::traits::Object` is re-exported as `read::Object`), and suffix matching refused 10 real
+    // `object` traits on exactly that. Re-export EDGES are indexed (`FileDecls::reexports`) and would
+    // answer it precisely; this does not consult them, because the imprecision left over is a
+    // false-ACCEPT (see below) and resolving re-export chains to decide whether to WITHHOLD a row
+    // would put a much larger mechanism on the safe side of the ledger.
+    //
+    // THE FALSE-ACCEPTS IT ADMITS, STATED RATHER THAN LEFT TO BE FOUND. `lang::expand` strips a
+    // `crate::` prefix, so a genuine DEPENDENCY path can arrive looking like a crate-local one — a
+    // crate actually named `read` makes `use read::Object` expand to `read::Object`, which this reads
+    // as our own `read::traits::Object`. That failure publishes a row the pre-R652 engine published
+    // too: a MISSED FIX, never a new silence. The direction that matters for the cardinal sin is that
+    // a REAL local implementor is never refused, and every shape above is there because one was.
+    let segs: Vec<&str> = decl_qual.split("::").collect();
+    let Some((leaf_seg, prefix)) = segs.split_last() else { return false };
+    if idx.contains(&impl_local_trait_key(trait_leaf, ty, leaf_seg)) {
+        return true;
+    }
+    // 2^prefix.len() candidates. Bounded by hand rather than by faith: a 12-segment module path is
+    // already absurd, and an unbounded enumeration over an adversarial one is a hang, not a bug.
+    if prefix.len() > 12 {
+        return false;
+    }
+    for mask in 1u32..(1u32 << prefix.len()) {
+        let mut cand: Vec<&str> =
+            prefix.iter().enumerate().filter(|(i, _)| mask >> i & 1 == 1).map(|(_, s)| *s).collect();
+        cand.push(leaf_seg);
+        if idx.contains(&impl_local_trait_key(trait_leaf, ty, &cand.join("::"))) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A locally-declared trait: how many declarations share the leaf (ambiguity check) and which

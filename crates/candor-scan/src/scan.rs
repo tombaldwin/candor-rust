@@ -3964,18 +3964,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
     }
 
-    fn union_member_key(
-        trait_quals: &HashMap<String, std::collections::BTreeSet<String>>,
-        crate_name: &str,
+    /// The ⟨0.23⟩ DECLARATION QUAL of an unambiguous local trait leaf — `Backend` declared in
+    /// `pub mod backend` is `backend::Backend`. ONE AUTHORITY, because R652's evidence test compares
+    /// an impl's expanded trait path against exactly this string and `union_member_key` mints the wire
+    /// key from it: two spellings of "where is this trait declared" is the ⟨0.34⟩ drift again.
+    fn union_trait_qual<'q>(
+        trait_quals: &'q HashMap<String, std::collections::BTreeSet<String>>,
         trait_leaf: &str,
-        method: &str,
-    ) -> Option<String> {
+    ) -> Option<&'q String> {
         let quals = trait_quals.get(trait_leaf)?;
         let mut it = quals.iter();
         let one = it.next()?;
         if it.next().is_some() {
             return None; // two declarations share this leaf — refuse, never pick
         }
+        Some(one)
+    }
+
+    fn union_member_key(
+        trait_quals: &HashMap<String, std::collections::BTreeSet<String>>,
+        crate_name: &str,
+        trait_leaf: &str,
+        method: &str,
+    ) -> Option<String> {
+        let one = union_trait_qual(trait_quals, trait_leaf)?;
         // REACH PROBE — same channel and same reason as `R504HIT`. This one fires wherever the wire
         // spelling is DECIDED, which is the branch R503 changed.
         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
@@ -4466,6 +4478,52 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 Some(v) => v,
                 None => continue,
             };
+            // ⟨0.40⟩ SOUNDNESS R652 — `trait_impls` IS KEYED BY LEAF AND RECORDS FOREIGN AND std IMPLS
+            // TOO, SO A NON-EMPTY VECTOR IS NOT EVIDENCE **THIS** TRAIT HAS AN IMPLEMENTOR.
+            //
+            // `decls.rs` is `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)` with no
+            // locality test at all. A crate that declares its own `trait Write { fn emit(&self); }` and
+            // ALSO writes `impl std::io::Write for W` hands the LOCAL trait an `impls` of `["W"]` — and
+            // `lt.count > 1` does not catch it, because `trait_decls` counts only local `Item::Trait`
+            // declarations, so the leaf is UNAMBIGUOUS. Every lookup then resolves nothing (`W::emit`
+            // does not exist), the union comes out empty, and since R609 an empty union PUBLISHES:
+            // `crate#Write::emit  inferred: []  interfaceUnion: true  unresolved: false` — a §2 purity
+            // claim about an abstraction with no implementor at all. Downstream that row lands in a
+            // consumer's `deps_idx.by_key`, so ⟨0.40⟩ conjunct 3 reads the key as ANSWERED and the
+            // `Unknown` R608 exists to charge is never charged.
+            //
+            // MEASURED, BOTH HALVES, on the two-crate fixture in `cli.rs`: `deny Net Unknown` over
+            // `h.emit()` on a `&dyn dep::Write` exits 0 with `inferred: []`, and the SAME pair with the
+            // `impl std::io::Write` line deleted exits 1 with `['Unknown']` / `dispatch:Write.emit`.
+            // One variable. IN THE WILD: serde's `mod std_error { pub trait Error }` — zero
+            // implementors, leaf shared with `de::Error` and `ser::Error`, which have many — published
+            // `serde#std_error::Error::description` as a bare purity claim in 7 of the corpus's crates.
+            //
+            // THE EVIDENCE IS COMPUTED HERE AND CONSUMED AT THE PUBLICATION SITE ONLY, and that
+            // placement is the load-bearing part of this fix rather than a tidiness choice. An earlier
+            // form skipped the whole trait and the A/B priced it: it withheld 29 rows carrying CONCRETE
+            // effects (`Log`, `Clock,Exec`, `Env,Exec,Fs,Ipc`), and a withheld row is read by conjunct 3
+            // as `Unknown` — which under a bare `deny Log` is NOT denied. **That trades a fabrication
+            // for a LOOSENED GATE, i.e. the cardinal direction.** R628 is about a PURITY CLAIM, so the
+            // guard belongs exactly where the purity claim is minted and nowhere else: a union that has
+            // an effect or a coverage gap to disclose keeps publishing it, whoever the implementors
+            // turn out to be.
+            //
+            // THE TEST IS AN ALLOWLIST, WHICH INVERTS THIS FILE'S USUAL DIRECTION — see
+            // `model::impl_confirms_local_trait`. The denylist rule holds where the starting point is a
+            // SOUND over-approximation, and here it is not: a leaf collision MANUFACTURES a claim, so
+            // the claim needs positive evidence and its absence must produce no row. Unconfirmed ⇒
+            // nothing published ⇒ the consumer charges `Unknown`. Over-disclosure, never silence.
+            //
+            // RESIDUAL, STATED: a trait with BOTH a confirmed local implementor and a colliding-leaf
+            // foreign one still unions the foreign one's effects. That is a fabrication, it predates
+            // R609, and it is out of this row's scope; R652 removes the SILENT half.
+            let decl_qual = union_trait_qual(&merged.trait_quals, trait_leaf).cloned();
+            let any_local_impl = decl_qual.as_deref().is_some_and(|q| {
+                impls.iter().any(|ty| {
+                    crate::model::impl_confirms_local_trait(&merged.impl_members, trait_leaf, ty, q)
+                })
+            }) || std::env::var_os("CANDOR_R652_PRE").is_some();
             for method in &lt.methods {
                 let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
                 let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -4626,19 +4684,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `dep_join_hit`, and `already_handled` reads that flag — so a call that previously
                 // fell through to the R452/R190(e)/R128 disclosures could stop doing so. Measured
                 // rather than reasoned: the numbers are in the commit message.
-                // THE ZERO-IMPLEMENTOR CASE IS DELIVERED BY `trait_impls`' OWN MISS ABOVE
-                // (`None => continue`), not by this line: `decls.rs` only ever `push`es into that map,
-                // so no leaf reaches here with an empty vec and `impls.is_empty()` is UNREACHABLE at
-                // HEAD. It is written anyway, and labelled, because R608's conjunct 3 reads WIRE
-                // ABSENCE — publishing a row for an abstraction nobody implements would silence the
-                // rung this half exists to serve — and that property should not rest on a `continue`
-                // three hundred lines up that is there for a different reason. **It is a DEFENSIVE
-                // guard and it is NOT covered by a fixture**, because no source can construct the
-                // state that would fire it; `r609_a_pure_only_union_is_published_and_a_zero_
-                // implementor_one_is_not` pins the PROPERTY, via the mechanism that actually delivers
-                // it today.
-                if inf_u.is_empty() && blind_u.is_empty() && impls.is_empty() {
-                    continue; // no implementor was named at all — there is no union to publish
+                // THE ZERO-IMPLEMENTOR CASE. This paragraph said the conjunct below was DEFENSIVE and
+                // UNREACHABLE — `trait_impls`' own miss (`None => continue`) delivered the property,
+                // `decls.rs` only ever `push`es, so no leaf reached here with an empty vec. **Every
+                // literal statement in that was true and the conclusion was false**, which is R652:
+                // the vector is keyed by trait LEAF and holds impls of FOREIGN and std traits, so a
+                // non-empty vector was never evidence that THIS trait has an implementor. The conjunct
+                // is now `!any_local_impl`, it is REACHABLE, and it is covered by a calibrated fixture
+                // (`r652_…`). `r609_a_pure_only_union_is_published_and_a_zero_implementor_one_is_not`
+                // still pins the property from the other side.
+                if inf_u.is_empty() && blind_u.is_empty() && !any_local_impl {
+                    // ⟨0.40⟩ SOUNDNESS R652 — `impls.is_empty()` USED TO BE THIS CONJUNCT, and it was
+                    // labelled DEFENSIVE/UNCOVERED because `decls.rs` only ever `push`es, so no leaf
+                    // reaches here with an empty vec. That reasoning was right about the VECTOR and
+                    // wrong about the QUESTION: a non-empty vector is not evidence that this trait has
+                    // an implementor, because the vector is keyed by LEAF. `!any_local_impl` is the
+                    // same conjunct asking what it meant to ask, and it is now REACHABLE and COVERED —
+                    // `r652_a_foreign_impl_sharing_a_trait_leaf_is_not_an_implementor_of_the_local_trait`
+                    // drives it, calibration arm included.
+                    //
+                    // §E1 REACH PROBE — fires only where this withholds a row, so `REMOVED 0` and "the
+                    // branch never ran" stay distinguishable. It prints the EVIDENCE (the declaration
+                    // qual the comparison used, and every trait path this crate wrote for each named
+                    // implementor), because a withheld row that turns out to have a real implementor
+                    // has to be diagnosable from the probe line alone.
+                    if std::env::var_os("CANDOR_R652_INSTR").is_some() {
+                        let ev: Vec<String> = impls.iter().map(|ty| {
+                            let pre = format!("{trait_leaf}\u{1f}{ty}\u{1f}!");
+                            let paths: Vec<&str> = merged.impl_members.iter()
+                                .filter_map(|k| k.strip_prefix(&pre)).collect();
+                            format!("{ty}<={paths:?}")
+                        }).collect();
+                        eprintln!("R652HIT\t{trait_leaf}::{method}\tqual={decl_qual:?}\t{ev:?}");
+                    }
+                    continue; // no implementor OF THIS TRAIT was confirmed — there is no union to publish
                 }
                 // R503 — the ⟨0.23⟩ spelling, not the leaf. A trait declared at `backend::Backend`
                 // publishes `iface#backend::Backend::size`, which is the SAME key the foreign half of

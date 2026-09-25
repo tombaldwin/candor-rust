@@ -3621,9 +3621,18 @@ pub(crate) fn collect_foreign_trait_impls(
 /// The one asymmetry with `collect_decls`, stated rather than left to be discovered: that walk does NOT
 /// skip a `#[cfg(test)]` impl, and this one does. It can only make this index SMALLER than the CHA
 /// universe, i.e. withhold a narrowing — never license one.
+///
+/// ⟨0.40⟩ SOUNDNESS R652 — THE SAME WALK ALSO RECORDS **WHICH TRAIT PATH** EACH BLOCK WROTE, as the
+/// fourth key shape (`model::impl_local_trait_key`). One walk, two facts, for the R128/R529 reason:
+/// both are read by the SAME interface-union loop about the SAME `impl` block, and two walks free to
+/// disagree about which blocks exist is how `trait_impls`' leaf collision got published as a purity
+/// claim in the first place. It needs the file's assembled `use` map, which is why this function now
+/// takes one and widens it per module exactly as `collect_foreign_trait_impls` does — `use std::io::Write;
+/// impl Write for W` and `impl std::io::Write for W` must record one string, not two (R6).
 pub(crate) fn collect_local_impl_members(
     items: &[syn::Item],
     include_tests: bool,
+    uses: &HashMap<String, String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
     for it in items {
@@ -3636,6 +3645,25 @@ pub(crate) fn collect_local_impl_members(
                 // engine and therefore the only spelling a consumer of those indexes can ask with.
                 let tr_leaf = seg.ident.to_string();
                 out.insert(crate::model::impl_seen_key(&tr_leaf, &ty));
+                // ⟨0.40⟩ SOUNDNESS R652 — AND WHICH TRAIT PATH THIS BLOCK ACTUALLY WROTE.
+                //
+                // `decls.rs` files the CHA edge under the trait LEAF with no locality test at all
+                // (`trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)`), so a crate that
+                // declares its own `trait Write` and ALSO writes `impl std::io::Write for W` hands the
+                // LOCAL trait an implementor vector naming a type that does not implement it. Recording
+                // the expanded path is what lets `scan.rs` tell the two apart.
+                //
+                // EVIDENCE, NOT A VERDICT — see `model::impl_local_trait_key` for why the classification
+                // is NOT done here. `expand` drops a `crate::` prefix, so a crate-local
+                // `use crate::de::Deserializer` arrives as `de::Deserializer`, indistinguishable BY ROOT
+                // from a dependency called `de`; only the trait's own declaration qual settles it, and
+                // that index is crate-wide. Expansion still happens here because it needs THIS scope's
+                // `use` map: `use std::io::Write; impl Write for W` and `impl std::io::Write for W` must
+                // record the same string (R6).
+                let written: String =
+                    tr.segments.iter().map(|sg| sg.ident.to_string()).collect::<Vec<_>>().join("::");
+                out.insert(crate::model::impl_local_trait_key(
+                    &tr_leaf, &ty, &expand(&written, uses)));
                 for ii in &im.items {
                     match ii {
                         syn::ImplItem::Fn(m) => {
@@ -3656,7 +3684,13 @@ pub(crate) fn collect_local_impl_members(
             }
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
-                    collect_local_impl_members(inner, include_tests, out);
+                    // The inner module's OWN imports on top of this scope's — the same widening
+                    // `collect_foreign_trait_impls` does, and for the same reason: an `impl` written
+                    // beside its own `use` must classify the way it would at file level (R652).
+                    let mut sub = uses.clone();
+                    let mut alts = HashMap::new();
+                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    collect_local_impl_members(inner, include_tests, &sub, out);
                 }
             }
             _ => {}

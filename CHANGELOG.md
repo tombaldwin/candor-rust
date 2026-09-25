@@ -10,6 +10,83 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.40⟩ — A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
+  TRAIT (SOUNDNESS R652).** `trait_impls` is keyed by trait LEAF and records impls of FOREIGN and std
+  traits too — `decls.rs` is `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)` with no
+  locality test at all — so:
+
+      pub trait Write { fn emit(&self) -> String; }   // LOCAL, ZERO implementors
+      pub struct W;
+      impl std::io::Write for W { /* … */ }           // DIFFERENT trait, same LEAF
+
+  gave the local trait an implementor vector of `["W"]`. `LocalTrait::count > 1` does not catch it:
+  `trait_decls` counts only local `Item::Trait` declarations, so the leaf is UNAMBIGUOUS. Every lookup
+  then resolved nothing, the union came out empty, and since R609 an empty union publishes —
+  `crate#Write::emit  inferred: []  interfaceUnion: true  unresolved: false`, a §2 purity claim about
+  an abstraction with no implementor at all. Downstream that row lands in the consumer's
+  `deps_idx.by_key`, so **R608's conjunct 3 read the key as ANSWERED and the `Unknown` was never
+  charged: `deny Net Unknown` over `h.emit()` on a `&dyn dep::Write` exited 0.**
+
+  IN THE WILD, not only in the fixture: serde's `mod std_error { pub trait Error }` has zero
+  implementors and shares its leaf with `de::Error` and `ser::Error`, which have many — `Error::source`
+  published as a bare purity claim in 7 of the corpus's crates.
+
+  **THE EVIDENCE IS A NEW ADDITIVE INDEX, AND THE TEST IS AN ALLOWLIST.** `impl_members` gains a fourth
+  key shape, `<tr>\u{1f}<ty>\u{1f}!<expanded trait path>`; the union publishes a PURE-ONLY row only
+  where some named implementor's written trait path is a segment SUBSEQUENCE of the trait's own
+  declaration qual. That inverts this file's usual denylist rule on purpose: the denylist holds where
+  the starting point is a sound over-approximation, and here a leaf collision MANUFACTURES a claim, so
+  the claim needs positive evidence and its absence must produce no row. **Unconfirmed ⇒ nothing
+  published ⇒ the consumer charges `Unknown` — over-disclosure, never silence.**
+
+  **THE GUARD SITS ON THE PUBLICATION CONJUNCT, NOT ON THE TRAIT, AND THE A/B IS WHY.** An earlier form
+  skipped the whole trait; priced over the corpus it withheld 29 rows carrying CONCRETE effects (`Log`,
+  `Clock,Exec`, `Env,Exec,Fs,Ipc`), and a withheld row reads as `Unknown` to conjunct 3 — which a bare
+  `deny Log` does NOT deny. That trades a fabrication for a LOOSENED GATE. R628 is about a purity
+  claim, so the guard fires only where the purity claim is minted: `inf_u.is_empty() &&
+  blind_u.is_empty() && !any_local_impl`. The old `impls.is_empty()` conjunct there was labelled
+  DEFENSIVE and UNREACHABLE — every literal statement in that label was true and its conclusion was
+  false, for exactly this reason; it is now reachable and covered.
+
+  A/B — `bin/corpus-ab.py`, 1,626 REAL cargo-registry crates, pre-arm `CANDOR_R652_PRE=1` on one binary:
+
+      ADDED 0  REMOVED 42  CHANGED 0   (narrow `inferred` key: identical)  rows 340,624 -> 340,582
+      REACH 44 hits across 26 of 1,626 entries.
+
+  **ALL 42 REMOVALS AUDITED IN FULL, NOT SAMPLED, AND ALL 42 ARE `inferred: []` WITH NO `invisible`,
+  NO `unresolved` AND NO OTHER DISCLOSURE** — bare purity claims, the only shape this can remove. By
+  mechanism, ground-truthed from SOURCE rather than from candor's own report:
+    · **29 CORRECT.** 7 serde/serde_core `std_error::Error::source` (the row's own class); 22 whose only
+      implementor is `#[cfg(test)]`-gated at item level, so its body is outside a default scan and the
+      pre-fix row certified purity from an UNANALYSED implementor — value-bag `visit::Visit::*` (14),
+      memchr `ext::Byte` (4), hyper-timeout `stream::{ReadExt,WriteExt}` (2), sea-orm
+      `util::StreamShim` (2, trait and impl both `#[cfg(all(test, feature = "sync"))]`).
+    · **6 UNKNOWABLE, and honest.** hashbrown `Equivalent` (5) and getopts `UnicodeWidthStr` (1) declare
+      the trait in one `#[cfg(feature)]` arm and `pub use` a dependency's same-named trait in the other;
+      the two arms are mutually exclusive in any real build and this engine sees both.
+    · **7 OVER-DISCLOSURE, named.** diesel `AsChangeset`/`FunctionFragment` (4) and security-framework
+      `*Internals` (3): the first is a derive-macro/trait NAMESPACE collision (`pub use
+      diesel_derives::AsChangeset` beside `pub trait AsChangeset` in one file) that a single `use` map
+      cannot hold; the second is SOUNDNESS R653. Each costs one honest `Unknown` on a chained dispatch.
+
+  Both R609 arms still pass, and R608's conjunct 3 still reads the absence. Cache schema -> **rev43**;
+  a rev42 entry has no `!` keys, so every implementor reads UNCONFIRMED and the union publishes nothing
+  — the stale direction here is OVER-DISCLOSURE, not silence.
+
+- **SOUNDNESS R569's FIX SHIPPED WITHOUT A CACHE-SCHEMA BUMP (SOUNDNESS R652, first half).** `cf8782d`
+  added the `Expr::Reference` arm that types an unannotated `let` bound to a reference. That writes
+  `CallCollector::vars`, which decides Pass B's `calls` list, and `calls` is stored IN the cached
+  `FnInfo` — but `content_hash`, `decl_index_hash` and `cache_schema()` all stayed put, so an
+  `--incremental` re-scan over an unchanged tree served the PRE-FIX answer: cc's `KillOnDrop::drop`
+  spawning no process, sqlx-core's `Read::poll` reading no socket, postgres' `Client::is_valid`
+  invisible to `deny Db`. **The stale direction is SILENCE**, which is the shape rev24/rev19/rev10 all
+  exist for. Schema -> **rev42** (then rev43 above, in the same change).
+
+  **AND THE A/B THAT ROW WAS ACCEPTED ON IS UNAFFECTED**: `--incremental` is strictly opt-in for both
+  READ and WRITE (`scan.rs`: *"a full scan (no flag) never reads the cache"*; the write-back is inside
+  `if incremental`), and `bin/corpus-ab.py` passes no such flag — it runs the argv templates it is
+  given, and `cf8782d`'s were plain `--json` scans. `REACH 3,829` stands as measured.
+
 - **⚠ ⟨0.40⟩ — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
   PURE-ONLY UNION IS PUBLISHED INSTEAD OF DROPPED (SOUNDNESS R608 + R609).** Two halves of one rung;
   neither is shippable without the other.

@@ -5877,3 +5877,132 @@ fn r609_a_pure_only_union_is_published_and_a_zero_implementor_one_is_not() {
         .find(|e| e["hash"] == "r609loud#Handler::handle").unwrap_or_else(|| panic!("{l}"));
     assert_eq!(lu["inferred"], serde_json::json!(["Net"]), "{l}");
 }
+
+/// ⟨0.40⟩ SOUNDNESS R652 — **A LEAF COLLISION IS NOT AN IMPLEMENTOR.** `trait_impls` is keyed by trait
+/// LEAF and records impls of FOREIGN and std traits too (`decls.rs`:
+/// `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)`, no locality test), so a crate that
+/// declares its own `trait Write` and ALSO writes `impl std::io::Write for W` gives the LOCAL trait a
+/// non-empty implementor vector naming a type that does not implement it.
+///
+/// `lt.count > 1` does not catch it: `trait_decls` counts only local `Item::Trait` declarations, so the
+/// leaf is UNAMBIGUOUS and the ambiguity refusal never fires. Every lookup resolves nothing, the union
+/// comes out empty, and since R609 an empty union PUBLISHES — `inferred: []`, `unresolved: false`, a §2
+/// purity claim about an abstraction with no implementor at all. Downstream that row is in the
+/// consumer's `deps_idx.by_key`, so conjunct 3 reads the key as ANSWERED and R608's `Unknown` is never
+/// charged: `deny Net Unknown` over a `&dyn dep::Write` dispatch exited **0**.
+///
+/// The colliding leaf is the everyday case, not a corner — `Write`, `Read`, `Error`, `Display`,
+/// `Iterator`, `Default`, `From`, `Service`, `Handler`. A crate with its own `Service`/`Handler`
+/// abstraction that also implements `tower::Service`/`axum::Handler` is the ordinary instance.
+///
+/// **CALIBRATED: arm (d) runs the same fixture with `CANDOR_R652_PRE=1` (the pre-fix emission) and
+/// asserts the sin REPRODUCES.** Without it this test would pass on a binary that refuses every union
+/// row, and arm (c) is the other side of that: a REAL local implementor must still publish.
+#[test]
+fn r652_a_foreign_impl_sharing_a_trait_leaf_is_not_an_implementor_of_the_local_trait() {
+    // The colliding-leaf dependency. `impl std::io::Write for W` is the only legal spelling of the
+    // collision in one scope — `use std::io::Write;` beside a local `trait Write` is E0255 — and this
+    // source `cargo build`s (§E3), as does every arm below it.
+    const COLLIDE: &str =
+        "pub trait Write { fn emit(&self) -> String; }\n\
+         pub struct W;\n\
+         impl std::io::Write for W {\n\
+             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { Ok(b.len()) }\n\
+             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }\n\
+         }\n\
+         pub fn touch() { let _ = std::fs::read(\"x\"); }\n";
+    // The SAME crate plus a genuine `impl Write for R`. ONE VARIABLE between (a)/(b) and (c).
+    const REAL: &str =
+        "pub trait Write { fn emit(&self) -> String; }\n\
+         pub struct W;\n\
+         impl std::io::Write for W {\n\
+             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { Ok(b.len()) }\n\
+             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }\n\
+         }\n\
+         pub struct R;\n\
+         impl Write for R { fn emit(&self) -> String { String::new() } }\n\
+         pub fn touch() { let _ = std::fs::read(\"x\"); }\n";
+    const CONSUMER: &str = "pub fn run(h: &dyn r652dep::Write) -> String { h.emit() }\n";
+
+    let rows = |v: &serde_json::Value, hash: &str| -> usize {
+        v["functions"].as_array().unwrap().iter().filter(|e| e["hash"] == hash).count()
+    };
+
+    // ── (a) THE PRODUCER MUST PUBLISH NO ROW ───────────────────────────────────────────────────────
+    let (cdep, crep) = r608_dep_report("r652dep", COLLIDE);
+    let cprod: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&crep).unwrap()).unwrap();
+    assert_eq!(rows(&cprod, "r652dep#Write::emit"), 0,
+        "NOTHING implements the local `Write`; the `impls` vector holds `W` only because \
+         `impl std::io::Write for W` shares its LEAF. Publishing a row here is a §2 purity claim about \
+         an abstraction with no implementor: {cprod}");
+    // REACH CONTROL — the rest of the crate is still analysed, so arm (a) is an assertion about a
+    // report that exists rather than about an empty one (§E1: an unanalysed entry judges nothing).
+    assert!(cprod["analyzed"]["count"].as_u64().unwrap_or(0) > 0,
+        "the producer must have judged something: {cprod}");
+    assert_eq!(rows(&cprod, "r652dep#touch"), 1, "{cprod}");
+
+    // ── (b) AND THE CONSUMER MUST CHARGE `Unknown` ─────────────────────────────────────────────────
+    let (capp, cpol) = r608_consumer("r652app", "r652dep", CONSUMER, "deny Net Unknown\n");
+    let (ccode, cv) = r608_run(&capp, &cpol, Some(&crep));
+    let crun = cv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{cv}"));
+    assert_eq!(crun["inferred"], serde_json::json!(["Unknown"]),
+        "this is R608's conjunct 3 reading wire absence — it can only read it if the producer stopped \
+         manufacturing the row: {cv}");
+    assert_eq!(crun["unknownWhy"], serde_json::json!(["dispatch:Write.emit"]), "{cv}");
+    assert_eq!(ccode, 1,
+        "`deny Net Unknown` MUST fail. Before R652 this exited 0 with `inferred: []` — the cardinal \
+         sin: {cv}");
+
+    // ── (c) THE CONTROL: A REAL LOCAL IMPLEMENTOR STILL PUBLISHES, AND STILL READS PURE ────────────
+    // Without this arm the test passes on a binary that refuses every union row, which would delete
+    // everything R609 bought.
+    let (rdep, rrep) = r608_dep_report("r652real", REAL);
+    let rprod: serde_json::Value = serde_json::from_slice(&std::fs::read(&rrep).unwrap()).unwrap();
+    let ru = rprod["functions"].as_array().unwrap().iter()
+        .find(|e| e["hash"] == "r652real#Write::emit")
+        .unwrap_or_else(|| panic!("a CONFIRMED local implementor must still publish its pure-only \
+                                   union — that is R609, and R652 must not take it: {rprod}"));
+    assert_eq!(ru["interfaceUnion"], serde_json::json!(true), "{rprod}");
+    assert_eq!(ru["inferred"], serde_json::json!([]), "{rprod}");
+    let (rapp, rpol) = r608_consumer("r652realapp", "r652real",
+        "pub fn run(h: &dyn r652real::Write) -> String { h.emit() }\n", "deny Net Unknown\n");
+    let (rcode, rv) = r608_run(&rapp, &rpol, Some(&rrep));
+    let rrun = rv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{rv}"));
+    assert_eq!(rrun["inferred"], serde_json::json!([]),
+        "a library whose only implementor is pure is LEGITIMATELY pure — hedging it is the \
+         fabrication R609's `pure` arm exists to forbid: {rv}");
+    assert_eq!(rcode, 0, "{rv}");
+
+    // ── (d) CALIBRATION — the SAME fixture on the pre-fix emission, which must show the sin ─────────
+    // The guard lives in the PRODUCER, so the pre-arm is a dep report re-made with `CANDOR_R652_PRE`;
+    // the consumer run below is byte-identical to arm (b) and reads whichever report it is handed.
+    let preout = cdep.join("prerep");
+    std::fs::create_dir_all(&preout).unwrap();
+    let st = Command::new(bin())
+        .arg(cdep.to_string_lossy().as_ref())
+        .arg("--out").arg(preout.join("r").to_string_lossy().as_ref())
+        .env("CANDOR_R652_PRE", "1")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let prerep = preout.join("r.r652dep.scan.json");
+    let preprod: serde_json::Value = serde_json::from_slice(&std::fs::read(&prerep).unwrap()).unwrap();
+    let pre_rows = rows(&preprod, "r652dep#Write::emit");
+    let (precode, prev) = r608_run(&capp, &cpol, Some(&prerep));
+    let prerun = prev["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{prev}"));
+
+    for d in [&cdep, &capp, &rdep, &rapp] { let _ = std::fs::remove_dir_all(d); }
+
+    assert_eq!(pre_rows, 1,
+        "THE GATE MUST BE ABLE TO FAIL: with the guard disabled the producer must manufacture the row \
+         again, or arm (a) is passing for some other reason: {preprod}");
+    assert_eq!(prerun["inferred"], serde_json::json!([]),
+        "and the consumer must read PURE off it — conjunct 3 sees the key as ANSWERED: {prev}");
+    assert_eq!(precode, 0,
+        "and `deny Net Unknown` must exit 0 on the pre-fix emission. That is the sin R652 closes, \
+         executed rather than described: {prev}");
+}
