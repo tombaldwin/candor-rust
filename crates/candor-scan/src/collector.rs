@@ -4708,15 +4708,57 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let segs: Vec<String> = node.path.segments.iter().map(|s| s.ident.to_string()).collect();
             let leaf = segs[segs.len() - 1].clone();
             let tr = segs[segs.len() - 2].clone();
-            if self.bound_trait_leaves.contains(&tr) && self.local_traits.get(&tr).is_none() {
-                let full = crate::lang::expand(&tr, &self.uses);
+            // ⟨0.40⟩ SOUNDNESS R693 — …AND `bound_trait_leaves` CANNOT SEE THE ARGUMENT-POSITION FORM.
+            //
+            // It is a SIGNATURE index (the generics of this fn and of its enclosing `impl`), so it
+            // answers "is this name a trait" only for a trait this signature BOUNDS. R690's third
+            // spelling bounds nothing: `pub fn f(v: Vec<Mine>) { v.iter().for_each(dep::Sink::emit) }`
+            // — the receiver's type is concrete and the trait appears ONLY in the fn-reference. No key
+            // was minted at all, so `dispatchesOn` was absent (⟨0.39⟩ obligation 3 had nothing to join)
+            // and the hedge in `scan.rs` that reads `foreign_dispatch` could not fire either. Measured:
+            // `inferred: []`, `deny Net f::` exit 0, over a `TcpStream::connect` in the same crate,
+            // while the byte-identical body over a LOCAL trait is charged `Net`.
+            //
+            // THE SECOND WITNESS IS THIS CRATE'S OWN OBLIGATION-2 INDEX, and it answers the same
+            // question `bound_trait_leaves` was standing in for. A crate that writes
+            // `impl dep::Sink for Mine { fn emit(&self) {..} }` has POSITIVELY SHOWN that
+            // `dep::Sink` is a trait and `emit` is one of its members — which is exactly what
+            // disqualifies `deplib::Thing::new` (an inherent associated fn is in no `impl Trait for`
+            // block, so it is never a `foreign_impls` key). Same shape as R551's rewrite gate: ask the
+            // crate's own implementor index rather than assert, and let two indexes disagree (§G).
+            //
+            // ADDITIVE, and it can only mint a key that is WELL-FORMED by that witness — which is the
+            // property R549's own class (`tower_service#Service::map_err`, a `ServiceExt` member) is
+            // the absence of. The disjunct is an OR, so R549's population is untouched.
+            // …AND THE TRAIT PATH IS EVERY SEGMENT BUT THE LAST, NOT JUST `segs[-2]` (R6). R549 expanded
+            // the penultimate segment alone, which reads `use dep::Sink; for_each(Sink::emit)` and CANNOT
+            // read the fully-qualified twin `for_each(dep::Sink::emit)`: `expand("Sink", uses)` has no
+            // import to follow, returns `Sink`, and `is_dependency_crate_root("Sink")` is false — so one
+            // of the two spellings of one call minted no key. `foreign_trait_owner_qual` (the impl side of
+            // this same key) already joins every segment and expands the join; this is that one authority's
+            // rule on the reference side. A 2-segment path is unchanged by construction (`segs[..1]` IS
+            // `segs[-2]`), so R549's measured population cannot move.
+            if self.local_traits.get(&tr).is_none() {
+                let written = segs[..segs.len() - 1].join("::");
+                let full = crate::lang::expand(&written, &self.uses);
                 let root = full.split("::").next().unwrap_or("");
                 if crate::lang::is_dependency_crate_root(root) {
                     if let Some((owner, rest)) = full.split_once("::") {
-                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-                            eprintln!("R549HIT {owner}#{rest}::{leaf}"); // §E1 REACH PROBE
+                        let key = format!("{owner}#{rest}::{leaf}");
+                        let bound = self.bound_trait_leaves.contains(&tr);
+                        let implemented = self.foreign_impls.contains_key(&key);
+                        if bound || implemented {
+                            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                eprintln!("R549HIT {key}"); // §E1 REACH PROBE
+                            }
+                            // §E1 REACH PROBE on the CHANGED branch ONLY — fires where the implementor
+                            // witness is what opened the gate and the signature bound did not, because
+                            // "CHANGED 0 is not evidence until REACH is measured".
+                            if !bound && std::env::var_os("CANDOR_R693_INSTR").is_some() {
+                                eprintln!("R693KEY\t{key}");
+                            }
+                            self.foreign_dispatch_sites.insert(key);
                         }
-                        self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
                     }
                 }
             }

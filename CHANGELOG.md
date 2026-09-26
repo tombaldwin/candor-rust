@@ -10,6 +10,78 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.40⟩ — A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
+  CRATE SUPPLIES THE IMPLEMENTOR (SOUNDNESS R693, closing the R690 cardinal sin).** Published in
+  candor-scan 0.39.2 and live until now: with `impl dep::Sink for Mine` in the same crate, three
+  spellings of the receiver read `inferred: []`, no `unknownWhy`, no `unresolved` — and **both
+  `deny Net <q>::` and `deny Net Unknown <q>::` exited 0 over a real `TcpStream::connect`** — while the
+  byte-identical body over a LOCAL trait was charged `Net`:
+
+      impl mxdep::Sink for Mine { fn emit(&self) { let _ = TcpStream::connect("127.0.0.1:9"); } }
+      pub fn gen<T: mxdep::Sink>(r: &T)   { r.emit(); }                  // PURE  -> now Unknown
+      pub fn impltr(r: impl mxdep::Sink)  { r.emit(); }                  // PURE  -> now Unknown
+      pub fn fnref(v: Vec<Mine>)          { v.iter().for_each(mxdep::Sink::emit); }  // PURE -> Unknown
+      pub fn dynp(r: &dyn mxdep::Sink)    { r.emit(); }                  // ['Net'] — unchanged
+
+  **TWO CORRECT RULES MEETING, neither wrong alone.** `collector.rs`'s R4 ERASURE carve-out refuses
+  bounded CHA over local implementors of a FOREIGN trait unless the receiver is spelled `dyn` — a
+  `T: Trait` bound / `impl Trait` parameter is monomorphized BY THE CALLER, so this crate's impls are
+  not its witnesses (CHA-ing them put 32 fresh `Unknown`s on serde_json). R608's conjunct 4 then stops
+  the dispatch hedge when this crate supplies an implementor, **on the premise that the caller already
+  has the answer through that edge** — which is exactly the edge the carve-out withholds. So the two
+  spellings that get no edge got no hedge either, and the crate's own `interfaceUnion` row for the
+  member — published in the SAME report, and named by that fn's own `dispatchesOn` — was neither
+  unioned in nor disclosed.
+
+  **THE INVERSION IS WHY IT IS A DEFECT AND NOT A RESIDUAL:** with NO implementor the same body already
+  read `['Unknown']` / `dispatch:Sink.emit`. Supplying the implementor DELETED that disclosure.
+
+  Conjunct 4's skip is now narrowed by the fact it assumed: it holds only where the function REACHES a
+  local implementor of that member. Five conjuncts — real + chained dependency, not a §4
+  conventionally-pure leaf, the EXACT member (not its trait prefix) a key in this crate's own
+  obligation-2 implementor index, and no edge. Keyed member-exact so R549's malformed-key class
+  (`tower_service#Service::map_err` names a `ServiceExt` member) cannot be hedged: a malformed member is
+  never a key in `foreign_impls`. Second leg: a trait-member fn REFERENCE now mints its
+  `{owner}#{qual}::{method}` key when the crate's own `foreign_impls` witnesses the member, not only
+  when the SIGNATURE bounds the trait leaf — and the trait path is read as every segment but the last,
+  so `for_each(dep::Sink::emit)` forms the same key `for_each(Sink::emit)` already did (R6).
+
+  **DIRECTION IT FAILS IN: over-disclosure.** No path here removes an effect or a hedge. Named residual:
+  the edge test matches `{type leaf}::{method}` by suffix, so a same-leaf type in another module
+  implementing the same member withholds the hedge; an exact-only match would instead hedge every
+  module-nested implementor. `deny Net <q>::` alone still exits 0 on these rows — the honest limit of a
+  disclosure fix.
+
+  Cache schema rev43 -> **rev44**: both widenings land in the cached `FnInfo`'s `foreign_dispatch`, and
+  a rev43 entry would serve R690's silent purity claim warm.
+
+  **MEASURED, PRE = `17c3f9e` / POST = this commit, `shasum` distinct (R691).**
+  Standalone census, 1,625 crates / 340,914 post rows: `ADDED 396  REMOVED 0  CHANGED 2365` (wide,
+  multiset). All 226 added unit-keys carry `inferred: []` and no `unknownWhy` — pure rows published only
+  because they now carry the obligation-3 join key. 1,981 of 1,982 changed rows differ in `dispatchesOn`
+  alone; **exactly one gains `Unknown`** (rkyv `NodeHeader::manual_check_header`, ground-truthed from
+  rkyv's source: it calls `CheckBytes::check_bytes` by path and rkyv implements `bytecheck::CheckBytes`
+  inside `const _: () = { … }` blocks, i.e. R529's licence). REACH 1,920 `R693KEY` hits / 112 entries.
+  Chained consumer arm (`bin/corpus-chained-rs.sh`, calibration re-run GREEN at HEAD before use):
+  `noimpl` 1,294 entries / 110,224 units — `ADDED 0  REMOVED 0  CHANGED 32`, 13 disclosure gains
+  (0.022%), 4 concrete gains (0.0036%), **0 LOST**; `impl` 1,094 entries / 55,037 units —
+  `ADDED 4829  REMOVED 0  CHANGED 13615`, 11,412 disclosure gains, 4 concrete, **0 LOST**. That 19.6%
+  prices the SHAPE's prevalence under a consumer that implements every public trait, not shipped
+  under-reports. Gate-validated on both arms with the real gate: 29/29 and 17/17, 0 mispredictions.
+
+- **⚠ ⟨0.39⟩ — A TRAIT-MEMBER CALL IN A DEFAULT BODY OF AN EXTENSION TRAIT NOW PUBLISHES ITS DISPATCH
+  KEY (SOUNDNESS R694).** Found by R693's own A/B rather than predicted. `futures_lite`'s
+  `StreamExt::poll_next` default body is `Stream::poll_next(Pin::new(self), cx)` — a UFCS call on the
+  FOREIGN trait `futures_core::Stream`. The signature bounds `Unpin`, not `Stream` (the `Stream` bound is
+  a SUPERTRAIT of `StreamExt`), so `bound_trait_leaves` could not see it and **no key was minted at
+  all**: `futures_lite#stream::StreamExt::poll_next` published `dispatchesOn: []`. A consumer
+  dispatching on it therefore could not join `futures_core#stream::Stream::poll_next`, whose union the
+  same report carries as `['Rand', 'Unknown']` — supplied by futures-lite's own `Race::poll_next`
+  (`fastrand::bool()`). Four chained consumer probes take `deny Rand <q>::` from **exit 0 to exit 1**,
+  gate-validated 4/4 on both consumer variants. Closed by R693's `foreign_impls` witness (futures-lite
+  implements `Stream` for its own types, so the member is proven real).
+
+
 - **⚠ ⟨0.40⟩ — A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
   TRAIT (SOUNDNESS R652).** `trait_impls` is keyed by trait LEAF and records impls of FOREIGN and std
   traits too — `decls.rs` is `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)` with no

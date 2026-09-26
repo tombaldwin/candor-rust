@@ -6006,3 +6006,226 @@ fn r652_a_foreign_impl_sharing_a_trait_leaf_is_not_an_implementor_of_the_local_t
         "and `deny Net Unknown` must exit 0 on the pre-fix emission. That is the sin R652 closes, \
          executed rather than described: {prev}");
 }
+
+// ═══ ⟨0.40⟩ SOUNDNESS R693 — A CHAINED TRAIT THIS CRATE IMPLEMENTS, REACHED WITHOUT AN EDGE ════════
+//
+// [[R690]] is the cardinal sin: `impl dep::Sink for Mine { .. TcpStream::connect .. }` beside
+// `fn gen<T: dep::Sink>(r: &T) { r.emit() }` published `inferred: []`, no `unknownWhy`, no `unresolved`,
+// and BOTH `deny Net gen::` and `deny Net Unknown gen::` exited 0 — over a real socket in the same
+// crate — while the byte-identical body over a LOCAL trait was charged `Net`.
+//
+// The four bodies below are generated from ONE template and differ in HOW THE RECEIVER IS SPELLED and
+// in nothing else. `dynp` is the over-charge control: it gets the R4 CHA edge, so it must stay charged
+// with the CONCRETE `Net` and gain NO hedge. If it ever reads `Unknown` this fix has become a flood.
+fn r693_consumer_src(dep: &str) -> String {
+    format!(
+        "pub struct Mine;\n\
+         impl {dep}::Sink for Mine {{ fn emit(&self) {{ let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); }} }}\n\
+         pub fn dynp(r: &dyn {dep}::Sink) {{ r.emit(); }}\n\
+         pub fn gen<T: {dep}::Sink>(r: &T) {{ r.emit(); }}\n\
+         pub fn impltr(r: impl {dep}::Sink) {{ r.emit(); }}\n\
+         pub fn fnref(v: Vec<Mine>) {{ v.iter().for_each({dep}::Sink::emit); }}\n")
+}
+
+/// ⟨0.40⟩ SOUNDNESS R693 — **SUPPLYING THE IMPLEMENTOR MUST NOT DELETE THE DISCLOSURE.**
+///
+/// The mechanism is two correct rules meeting: `collector.rs`'s R4 ERASURE carve-out refuses bounded CHA
+/// over local implementors of a FOREIGN trait unless the receiver is spelled `dyn` (a `T: Trait` bound is
+/// monomorphized BY THE CALLER, so this crate's impls are not its witnesses — CHA-ing them fabricated 32
+/// fresh `Unknown`s on serde_json), and [[R608]]'s conjunct 4 stops the dispatch hedge when this crate
+/// supplies an implementor, ON THE PREMISE THAT THE CALLER ALREADY HAS THE ANSWER THROUGH THAT EDGE. The
+/// two spellings that get no edge therefore got no hedge either.
+///
+/// **THE INVERSION IS WHY THIS IS A DEFECT AND NOT A RESIDUAL, and it is what this test pins:** the arm
+/// with NO implementor already disclosed `['Unknown']` / `dispatch:Sink.emit` (R608's own arm). Adding an
+/// implementor DELETED that. One variable — whether the `impl` block is present — measured both ways in
+/// one test, so neither reading can be explained by the fixture.
+#[test]
+fn r693_supplying_an_implementor_must_not_delete_the_dispatch_disclosure() {
+    let (dep, rep) = r608_dep_report("r693inv", "pub trait Sink { fn emit(&self); }\n");
+    // WITH the implementor (R690's shape) …
+    let (wapp, wpol) = r608_consumer("r693invwith", "r693inv", &r693_consumer_src("r693inv"),
+        "deny Net Unknown gen::\n");
+    // … and WITHOUT it, byte-identical bodies. `Mine` is still declared so `fnref`'s `Vec<Mine>` parses.
+    let (napp, npol) = r608_consumer("r693invno", "r693inv",
+        "pub struct Mine;\n\
+         pub fn dynp(r: &dyn r693inv::Sink) { r.emit(); }\n\
+         pub fn gen<T: r693inv::Sink>(r: &T) { r.emit(); }\n\
+         pub fn impltr(r: impl r693inv::Sink) { r.emit(); }\n", "deny Net Unknown gen::\n");
+
+    let (wcode, wv) = r608_run(&wapp, &wpol, Some(&rep));
+    let (_ncode, nv) = r608_run(&napp, &npol, Some(&rep));
+
+    let row = |v: &serde_json::Value, n: &str| -> serde_json::Value {
+        v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == n)
+            .unwrap_or_else(|| panic!("{n} must be judged at all: {v}")).clone()
+    };
+
+    // ── THE ONE-VARIABLE CONTROL, FIRST: the no-implementor arm is what the with-implementor arm must
+    //    not fall below. Without this the row below is an assertion about one number.
+    for n in ["gen", "impltr"] {
+        assert_eq!(row(&nv, n)["inferred"], serde_json::json!(["Unknown"]),
+            "R608's own arm: with NOTHING implementing the chained trait, a monomorphized receiver \
+             already discloses. This is the baseline the `impl` block must not delete: {nv}");
+    }
+
+    // ── REACH: the `impl` block must have reached the obligation-2 index, or the assertions below are
+    //    about an index the rule never consulted (§E1 — an unchanged row is not evidence).
+    assert!(wv["functions"].as_array().unwrap().iter()
+            .any(|e| e["hash"] == "r693inv#Sink::emit" && e["interfaceUnion"] == serde_json::json!(true)),
+        "obligation 2 must publish the consumer's own implementor under the OWNING crate's key — that \
+         index, member-exact, is conjunct 4 of this rule: {wv}");
+
+    // ── THE ROW: three spellings that get no CHA edge …
+    for n in ["gen", "impltr", "fnref"] {
+        let r = row(&wv, n);
+        assert_eq!(r["inferred"], serde_json::json!(["Unknown"]),
+            "`{n}` reaches `Mine::emit`'s `TcpStream::connect` and read `[]` before ⟨0.40⟩ — a positive \
+             SPEC §2 purity claim over a real socket in the same crate: {wv}");
+        assert_eq!(r["unknownWhy"], serde_json::json!(["dispatch:Sink.emit"]),
+            "§4's normative dotted detail, one spelling (`r529_reason`), so `deny E Unknown[dispatch]` \
+             can class it: {wv}");
+        assert_eq!(r["dispatchesOn"], serde_json::json!(["r693inv#Sink::emit"]),
+            "⟨0.39⟩ obligation 3's join key must be published beside the hedge — `fnref` had NO key at \
+             all before this fix, which is the half `bound_trait_leaves` could not see: {wv}");
+    }
+
+    // ── … AND THE OVER-CHARGE CONTROL, in the same report, over the same trait and the same implementor.
+    let d = row(&wv, "dynp");
+    assert_eq!(d["inferred"], serde_json::json!(["Net"]),
+        "an ERASED receiver DOES get the R4 CHA edge, so it is charged the CONCRETE effect and this rule \
+         must leave it alone. `Unknown` here would mean the edge test (conjunct 5) is not reading the \
+         edge: {wv}");
+    assert!(d["unknownWhy"].is_null(),
+        "and no hedge beside it — a resolved dispatch is not an unresolved one: {wv}");
+    assert_eq!(d["calls"], serde_json::json!(["Mine::emit"]),
+        "the edge conjunct 5 reads, asserted directly rather than inferred from the effect: {wv}");
+
+    assert_eq!(wcode, 1,
+        "`deny Net Unknown gen::` MUST fail. R690 measured BOTH `deny Net gen::` and \
+         `deny Net Unknown gen::` at exit 0 here, which is what made it a cardinal sin rather than an \
+         imprecision: {wv}");
+
+    for p in [&dep, &wapp, &napp] { let _ = std::fs::remove_dir_all(p); }
+}
+
+/// ⟨0.40⟩ SOUNDNESS R693, THE FOUR CONTROLS THAT BOUND THE DISCLOSURE. Each is a `continue` in the rule,
+/// and a `continue` nothing exercises is a comment.
+///
+/// (a) is the one that matters most: it is [[R549]]'s class, the reason conjunct 4 next door is keyed on
+/// the trait PREFIX. A member key minted from SOURCE can name a member the trait does not declare
+/// (`tower_service#Service::map_err` is a `ServiceExt` method), and hedging it charges `Unknown` for a
+/// dispatch that does not exist. This rule is immune BY CONSTRUCTION — a malformed member is never a key
+/// in `foreign_impls` — and (a) is what turns "by construction" into a measurement.
+#[test]
+fn r693_the_four_controls_that_bound_the_dispatch_disclosure() {
+    // (a) A MEMBER THE TRAIT DOES NOT DECLARE — R549's class, i.e. the fabricated dispatch. The consumer
+    //     implements `Svc::call`, so the trait PREFIX is a hit; it calls `.other()` on a bound receiver,
+    //     and `r693svc#Svc::other` is in no implementor index. Nothing may be hedged.
+    let (adep, arep) = r608_dep_report("r693svc", "pub trait Svc { fn call(&self); }\n");
+    let (aapp, apol) = r608_consumer("r693svcapp", "r693svc",
+        "pub struct Mine;\n\
+         impl r693svc::Svc for Mine { fn call(&self) { let _ = 1 + 1; } }\n\
+         pub fn run<S: r693svc::Svc>(s: &S) { s.other(); }\n", "deny Net Unknown\n");
+    let (acode, av) = r608_run(&aapp, &apol, Some(&arep));
+    let arun = av["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run");
+    if let Some(r) = arun {
+        assert_eq!(r["inferred"], serde_json::json!([]),
+            "`other` is not a member of `Svc`; this crate implements `call`. Hedging here charges \
+             `Unknown` for a dispatch that DOES NOT EXIST — R549's class, and the reason this rule is \
+             member-exact while conjunct 4 next door is prefix-keyed: {av}");
+        assert!(r["unknownWhy"].is_null(), "{av}");
+    }
+    assert_eq!(acode, 0, "{av}");
+    let _ = std::fs::remove_dir_all(&adep); let _ = std::fs::remove_dir_all(&aapp);
+
+    // (b) AN UNCHAINED DEPENDENCY — conjunct 2, shared verbatim with the sibling rule. The crate is not
+    //     covered at all, so `invisible` is the channel; a SECOND channel for one fact is the ⟨0.34⟩
+    //     drift. Named residual: `invisible` arms no policy form, which is tracked separately and is not
+    //     this row's to close.
+    let (bdep, _brep) = r608_dep_report("r693un", "pub trait Sink { fn emit(&self); }\n");
+    let (bapp, bpol) = r608_consumer("r693unapp", "r693un", &r693_consumer_src("r693un"),
+        "deny Net Unknown gen::\n");
+    let (bcode, bv) = r608_run(&bapp, &bpol, None);
+    let brun = bv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "gen")
+        .unwrap_or_else(|| panic!("{bv}"));
+    assert_eq!(brun["inferred"], serde_json::json!([]),
+        "conjunct 2: an UNCHAINED dep is the ordinary coverage miss, unchanged by this rung: {bv}");
+    assert_eq!(brun["invisible"], serde_json::json!(["r693un"]),
+        "…and the coverage disclosure is still the one that carries it: {bv}");
+    assert_eq!(bcode, 0, "{bv}");
+    let _ = std::fs::remove_dir_all(&bdep); let _ = std::fs::remove_dir_all(&bapp);
+
+    // (c) A CONVENTIONALLY-PURE LEAF — SPEC §4's permitted exclusion (`r533_exempt_leaf`), with every
+    //     other conjunct passing so the exempt set is the only thing left deciding.
+    let (cdep, crep) = r608_dep_report("r693fmt", "pub trait Shower { fn fmt(&self); }\n");
+    let (capp, cpol) = r608_consumer("r693fmtapp", "r693fmt",
+        "pub struct Mine;\n\
+         impl r693fmt::Shower for Mine { fn fmt(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub fn run<T: r693fmt::Shower>(s: &T) { s.fmt(); }\n", "deny Net Unknown run::\n");
+    let (ccode, cv) = r608_run(&capp, &cpol, Some(&crep));
+    let crun = cv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run");
+    if let Some(r) = crun {
+        assert_eq!(r["inferred"], serde_json::json!([]),
+            "`fmt` is in §4's exempt leaf set, and the set is shared with the sibling rule rather than \
+             re-spelled: {cv}");
+    }
+    assert_eq!(ccode, 0, "{cv}");
+    let _ = std::fs::remove_dir_all(&cdep); let _ = std::fs::remove_dir_all(&capp);
+
+    // (d) A LOCAL TRAIT — the whole rule is about a FOREIGN one. `dispatch_calls_for_trait_method`
+    //     already fans CHA out over a local trait's implementors regardless of erasure, so the receiver
+    //     carries the CONCRETE effect and there is nothing here to hedge. This is the arm that proves the
+    //     fix did not widen into the local path (R690's LOCAL column, which was already correct).
+    let (dapp, dpol) = r608_consumer("r693localapp", "r693unusedlocal",
+        "pub trait Sink { fn emit(&self); }\n\
+         pub struct Mine;\n\
+         impl Sink for Mine { fn emit(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub fn gen<T: Sink>(r: &T) { r.emit(); }\n\
+         pub fn fnref(v: Vec<Mine>) { v.iter().for_each(Sink::emit); }\n", "deny Net Unknown\n");
+    let (_dcode, dv) = r608_run(&dapp, &dpol, None);
+    for n in ["gen", "fnref"] {
+        let r = dv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == n)
+            .unwrap_or_else(|| panic!("{n}: {dv}"));
+        assert_eq!(r["inferred"], serde_json::json!(["Net"]),
+            "a LOCAL trait resolves to its implementor and is charged the concrete effect — the arm \
+             R690's own matrix used as its one-variable control: {dv}");
+        assert!(r["unknownWhy"].is_null(), "and it must not gain a hedge beside the resolution: {dv}");
+    }
+    let _ = std::fs::remove_dir_all(&dapp);
+}
+
+/// ⟨0.40⟩ SOUNDNESS R693 — **BOTH SPELLINGS OF THE TRAIT PATH MINT ONE KEY (R6).** The fn-reference
+/// route read the PENULTIMATE path segment and expanded that, which answers `use dep::Sink; Sink::emit`
+/// and cannot answer `dep::Sink::emit`: `expand("Sink", uses)` has no import to follow, so the root is
+/// `Sink`, `is_dependency_crate_root` is false, and one of two spellings of one call minted nothing.
+///
+/// This is the arm that makes "a 2-segment path is unchanged by construction" a MEASUREMENT rather than
+/// an assertion about index arithmetic — it drives both spellings through one report and requires the
+/// SAME key, which is what `foreign_trait_owner_qual` already guarantees on the `impl` side.
+#[test]
+fn r693_both_spellings_of_a_trait_member_fn_reference_mint_one_key() {
+    let (dep, rep) = r608_dep_report("r693six", "pub trait Sink { fn emit(&self); }\n");
+    // THE TWO SPELLINGS MUST NOT SHARE A `use`, or the fixture cannot discriminate — the first draft
+    // put `use r693six::Sink;` at FILE level, which makes `expand("Sink")` resolve for BOTH arms and the
+    // test passed with the fix reverted. Each spelling gets its own module: `q` imports nothing, so only
+    // the every-segment read can resolve it; `i` carries the import, so the leaf read resolves it.
+    let (app, pol) = r608_consumer("r693sixapp", "r693six",
+        "pub struct Mine;\n\
+         impl r693six::Sink for Mine { fn emit(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub mod q { pub fn qualified(v: Vec<crate::Mine>) { v.iter().for_each(r693six::Sink::emit); } }\n\
+         pub mod i { use r693six::Sink; pub fn imported(v: Vec<crate::Mine>) { v.iter().for_each(Sink::emit); } }\n",
+        "deny Net Unknown\n");
+    let (_code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep); let _ = std::fs::remove_dir_all(&app);
+    let key = serde_json::json!(["r693six#Sink::emit"]);
+    for n in ["i::imported", "q::qualified"] {
+        let r = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == n)
+            .unwrap_or_else(|| panic!("{n} must be judged: {v}"));
+        assert_eq!(r["dispatchesOn"], key,
+            "`{n}` must publish the OWNING crate's spelling of the member — two spellings of one \
+             abstraction on the wire is what ⟨0.39⟩ obligation 3's join cannot survive (R503/R6): {v}");
+        assert_eq!(r["unknownWhy"], serde_json::json!(["dispatch:Sink.emit"]),
+            "…and one reason spelling beside it: {v}");
+    }
+}

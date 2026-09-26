@@ -3880,6 +3880,87 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 eprintln!("R533HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
             }
         }
+        // ── ⟨0.40⟩ SOUNDNESS R693 — CONJUNCT 4 ASSUMES AN EDGE THAT THE ERASURE CARVE-OUT WITHHELD ──
+        //
+        // R690, a CARDINAL SIN published in 0.39.2. `impl dep::Sink for Mine { .. TcpStream::connect .. }`
+        // beside `fn f<T: dep::Sink>(r: &T) { r.emit() }` reads `inferred: []`, no `unknownWhy`, no
+        // `unresolved` — and `deny Net f::` AND `deny Net Unknown f::` BOTH exit 0 over a real socket in
+        // the same crate. The byte-identical body over a LOCAL trait is charged `Net`. Three spellings:
+        // `<T: dep::Tr>`, `impl dep::Tr`, and `v.iter().for_each(dep::Tr::m)`.
+        //
+        // THE MECHANISM IS TWO CORRECT RULES MEETING, and neither is wrong on its own:
+        //   · `collector.rs`'s R4 ERASURE carve-out refuses bounded CHA over local implementors of a
+        //     FOREIGN trait unless the receiver is spelled `dyn`. A `T: Trait` bound / `impl Trait`
+        //     parameter is monomorphized BY THE CALLER, so this crate's impls are not its witnesses;
+        //     CHA-ing them fabricates (measured: 32 fresh `Unknown`s on serde_json). That stands.
+        //   · R608's conjunct 4 stops the dispatch hedge when THIS crate supplies an implementor of the
+        //     abstraction — on the premise that the caller therefore already HAS the answer, through the
+        //     CHA edge. That premise is exactly what the carve-out above withholds.
+        // So the two spellings that get no edge also get no hedge, and the crate's own `interfaceUnion`
+        // row for the member (`mxdep#Sink::emit  inferred: ['Net']`, published in the SAME report, and
+        // named by this fn's own `dispatchesOn`) is neither unioned in nor disclosed. R692's rule, one
+        // spelling over: a local answer must UNION with a chained row, never preempt it.
+        //
+        // WHAT THE INVERSION PROVES, and it is why this is a defect rather than a documented residual:
+        // with NO local implementor the same `<T: dep::Sink>` body reads `['Unknown']` /
+        // `dispatch:Sink.emit` (R608's own arm). SUPPLYING the implementor DELETES that disclosure. One
+        // variable, measured both ways.
+        //
+        // `Unknown` AND NOT THE UNION. Charging the member's union here would restore the `Net` — and
+        // would be the serde_json fabrication by a second door, because the witness really is the
+        // caller's. §4's answer for a dispatch whose body is not known is the hedge, which is what the
+        // zero-implementor arm already publishes; this makes the two agree.
+        //
+        // FIVE CONJUNCTS, each one the reason this is not a flood:
+        //   1-2. the owner is a REAL, CHAINED Cargo dependency — the sibling rule's conjuncts 1 and 2,
+        //        same `deps` / `deps_idx.crates` reads, for the same reasons. An UNCHAINED dep is the
+        //        ordinary coverage miss and `invisible` is its channel; a second channel for one fact is
+        //        the ⟨0.34⟩ drift, and a NAMED residual here (`invisible` arms no policy form) rather
+        //        than a second spelling of it.
+        //   3. the member is not in SPEC §4's conventionally-pure leaf set (`r533_exempt_leaf`).
+        //   4. THE EXACT MEMBER — not its trait prefix — is a key in this crate's own obligation-2
+        //      implementor index. That is the opposite keying from conjunct 4 next door, deliberately:
+        //      the prefix is right THERE because a malformed key (R549: `tower_service#Service::map_err`
+        //      names a `ServiceExt` member) must not be hedged, and it is right HERE for the same
+        //      reason — a malformed member is BY CONSTRUCTION never a key in `foreign_impls`, so this
+        //      rule cannot fire on one. `r608_conjunct_4_is_asked_of_the_abstraction_not_of_the_member`
+        //      is that control and it stays green: its `impl` block writes `a`, so `…Handler::b` is a
+        //      prefix hit and not a member hit, and nothing is hedged.
+        //   5. and THIS FUNCTION REACHES NONE of that member's local implementor units. This is the
+        //      fact conjunct 4 assumes rather than checks, and checking it is the whole fix: a `dyn`
+        //      receiver DOES get the CHA edge (`calls: ['Mine::emit']`) and is left alone, charged with
+        //      the concrete `Net` it already had. The rule therefore fires exactly where an edge is
+        //      absent, which is where the report was silent.
+        //
+        // DIRECTION IT FAILS IN: over-disclosure. It can only ADD `Unknown`; there is no path here that
+        // removes an effect or a hedge, so a wrong firing costs a false `Unknown` (loud) and never a
+        // false purity claim (silent). The ONE residual is conjunct 5's suffix match — the implementor
+        // index records `{type leaf}::{method}` while `calls` holds full quals, so a same-leaf type in
+        // another module implementing the same foreign member satisfies the test spuriously and
+        // WITHHOLDS the hedge. That is the silent direction, it is narrow, and it is stated rather than
+        // discovered: an exact-only match would instead hedge every module-nested implementor.
+        for member in &f.foreign_dispatch {
+            let Some((owner, mem)) = member.split_once('#') else { continue };
+            if !deps.contains(owner) { continue }                 // 1
+            if !deps_idx.crates.contains(owner) { continue }      // 2
+            if r533_exempt_leaf(mem) { continue }                 // 3
+            let t2 = tail2(mem).map(|t| format!("{owner}#{t}")).unwrap_or_else(|| member.clone());
+            // 4 — the crate's own obligation-2 index, member-exact. `Vec<"{ty}::{method}">`.
+            let Some(impls) = merged.foreign_impls.get(member)
+                .or_else(|| foreign_impls_by_tail2.get(&t2)) else { continue };
+            // 5 — did an edge to any of them actually land on this fn?
+            let reached = calls.get(&f.qual).is_some_and(|ts| {
+                impls.iter().any(|q| ts.iter().any(|t| t == q || t.ends_with(&format!("::{q}"))))
+            });
+            if reached { continue }
+            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+            // ONE SPELLING of §4's normative dotted detail — `r529_reason`, the same function the
+            // sibling rule and the R529 hedges call. A second `format!` here is the ⟨0.34⟩ drift.
+            unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
+            if std::env::var_os("CANDOR_R693_INSTR").is_some() {
+                eprintln!("R693HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
+            }
+        }
     }
 
     // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
