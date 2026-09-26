@@ -10,6 +10,86 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ AN ALL-CAPS TYPE NAME IS A TYPE AGAIN (SOUNDNESS R722 — a silent under-report, and the rule was
+  written THREE TIMES).** The UpperCamel test was *first char uppercase AND (one char OR contains a
+  lowercase)*, so `IO`, `BSTR`, `HSTRING`, `UTF8`, `O3` were not type-shaped at all — their DROP GLUE and
+  their RECEIVER TYPING were both lost, silently, with the caller ABSENT from `functions[]`. `struct IO`
+  with `impl Drop for IO { fs::remove_file }` read PURE at `let _g = IO { n: 1 }` while the byte-identical
+  `Io` control charged `['Fs']`, and `deny Fs <qual>` exited 0 over a real file deletion.
+
+  **THE RULE EXISTED IN THREE COPIES WITH THREE DIFFERENT CLAUSES**, which is why this unifies rather
+  than patches (§G): `lang::is_type_ident`; a `camel` closure inside `type_from_value_path` (the same two
+  clauses written again, gating `let` inference and therefore receiver typing); and `collector.rs`'s
+  bare-path receiver fallback — *upper-initial AND NO UNDERSCORE*, a third rule, and the reason
+  `DIRECT.touch()` already resolved while `let x = DIRECT; x.touch()` did not. The unified predicate is
+  the UNION of all three (upper-initial, and either it contains a lowercase or it contains no
+  underscore), so no caller narrows and a `SCREAMING_SNAKE` const is still refused.
+
+  **FIVE SPELLINGS MEASURED, EXECUTED against an `AtomicUsize` drop counter — every arm performs its
+  effect exactly ONCE, and every arm has a byte-identical mixed-case control in the same scan:**
+
+      SILENT before (caller ABSENT)    IO { n: 1 }   UTF8 (unit)   HSTRING(1) (tuple)
+                                       let x = MARKER; x.touch()   (receiver typing)
+      DISCLOSED, not silent            BSTR::new()  ->  `ambiguous:same-name fns with different
+                                       return types`, because the `returns` rescue only works while the
+                                       assoc-fn LEAF is unique crate-wide, and a second `new` is normal
+      ALREADY CORRECT                  DIRECT.touch()  — via the collector's third copy of the rule
+
+  **AND THREE REFUSALS COME WITH IT, because the widening makes `MAX`/`NONE`/`IID` type-shaped and
+  those are also const names.** Each was measured, not anticipated:
+
+  1. A declared MODULE-LEVEL `const`/`static` of a colliding all-caps name — refused by asking
+     `collect_static_types`, the authority `resolve_recv_type_for` already consults for the RECEIVER
+     route and which the construction and `let`-inference routes did not (§G again). Without it,
+     `mod a { const MAX }` beside `mod b { struct MAX + impl Drop + impl MAX }` charged `a`'s
+     `let m = MAX; m.count_ones()` both `Fs` AND `Net`, with edges to `b::MAX::drop` and
+     `b::MAX::count_ones`, for a function that adds two integers — R168's `Ordering::Acquire`
+     measurement with the case inverted.
+  2. `u32::MAX` / `f64::EPSILON` — an associated const of a PRIMITIVE, which appears in ordinary code
+     everywhere — refused outright by `type_from_value_path`.
+  3. `IUnknown::IID` — an ASSOCIATED const of a TYPE. Two trailing type-shaped segments made the
+     `Enum::Variant` rule fire, so a `GUID` constant was typed as an `IUnknown` (which has an
+     `impl Drop`) and `windows-core`'s `TearOff::WeakQueryInterface` was charged `IUnknown::drop`.
+     **FOUND BY THE 1,625-CRATE A/B, not by thinking about it**, and invisible to (1) because
+     `collect_static_types` indexes module-level consts. The cost, stated: an all-caps ENUM VARIANT
+     (`Color::RED`) is refused with it, since nothing in the path separates it from `Color::MAX`.
+
+  **A/B OVER THE PINNED 1,625-CRATE CENSUS** (`bin/corpus-ab.py`, `bin/corpus-census-rust.tsv`, wide
+  value key, `--key unit`, arm binaries with DIFFERENT shasums per R691):
+
+      rows pre 340872 / post 340842      ADDED 3   REMOVED 33   CHANGED 118   (keys +3 -21 ~80)
+      REACH 305,349 marker hits across 1,043 of 1,625 entries
+      buckets: 1 (a scoped deny moves) 0 | 2 (new Unknown) 0 | 3 (concrete effect LOST) 0 | 4 = 104
+      concrete effects GAINED 0, concrete effects LOST 0 — audited per effect, not per row value
+
+  **AND THE CORPUS DIRECTION IS THE OPPOSITE OF THE ONE THE ROW PREDICTED, so it is stated first.** All
+  21 removed rows are `['Unknown']` in `windows-core-0.56.0` (14) and `windows-strings-0.5.1` (7) —
+  `HSTRING`/`VARIANT`/`PROPVARIANT`/`PWSTR` functions whose hedge was
+  `ambiguous:same-name fns with different return types` on `X::new`. Resolving the type name retires the
+  hedge, because the callee path now says what it constructs. **21 of 21 SCOPED `deny Unknown` gates on
+  those quals flip 1 -> 0**; no crate-level gate flips, and no concrete-effect gate flips anywhere.
+  `HSTRING::from` additionally loses a FABRICATED `HSTRING::drop` edge — `impl From<&str>` constructs and
+  RETURNS, 0 in-frame drops, ground-truthed from source.
+
+  **Worth saying plainly, because it is the R718-on-mongodb pattern in the other direction: a hedge
+  retired for a CORRECT reason can be the only thing standing between a scoped gate and a real blind
+  spot.** `imp::factory_cache::get_activation_factory` really does `LoadLibraryExA` + `GetProcAddress`
+  through `delay_load`, and candor sees neither (they are `invisible: windows_targets` in BOTH arms). Its
+  `Unknown` was never about that — it was the return-type ambiguity — but it was covering it. The
+  crate-level `deny Unknown` still exits 1 in both arms.
+
+  The 3 added rows are mio's `interests_to_epoll` (three versions), pure with a NEW `invisible: ["libc"]`
+  disclosure: `let mut kind = EPOLLET` now reads as a value path and the libc constants reach the κ
+  ledger. **And the drop-glue payoff the prevalence measurement predicted does not materialise on this
+  census** — `HSTRING::drop` is `imp::heap_free`, which candor's effect vocabulary does not name, and
+  every windows construction site RETURNS its value, so the escape gate correctly refuses. The value of
+  this change is on the fixture class and on the 17 all-caps receiver-typing surfaces the census names
+  (`openssl`'s `X509`, `hickory-proto`'s `SIG`/`TLSA`/`SVCB`, `termwiz`'s `CSI`, `typenum`'s
+  `Z0`/`B0`/`B1`, `find-msvc-tools`' `GUID`), not on windows.
+
+  Cache schema rev46 -> **rev47**: the marker and the receiver-typed call both live IN the cached
+  `FnInfo`, so a warm rev46 read republishes exactly the silence this row closes (R631's direction).
+
 - **⚠ A BORROWED FIELD NO LONGER FABRICATES ITS TYPE'S DROP GLUE (SOUNDNESS R718 — the FIELD half of
   R168, pre-dating R709).** `owned_drops`, the R49 transitive drop-owner closure, took its candidate
   leaves straight out of `fields`/`field_elem` — and both of those are written through

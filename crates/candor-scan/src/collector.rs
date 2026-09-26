@@ -310,7 +310,9 @@ pub(crate) struct CallCollector<'a> {
     /// resolved as a phantom free-fn and the enclosing fn vanished from the report entirely.
     pub(crate) callable_statics: &'a std::collections::HashSet<String>,
     /// SOUNDNESS R557 — crate-wide `static`/`const` NAME → declared type path (`None` = refused). See
-    /// `ElemIndexes::static_types`; read in exactly ONE place, `resolve_recv_type_for`'s `Expr::Path` arm.
+    /// `ElemIndexes::static_types`; read in TWO places, and they are the two halves of one question:
+    /// `resolve_recv_type_for`'s `Expr::Path` arm (a bare-path RECEIVER) and `nominal_ctor_type` (R722 —
+    /// the `let`-INFERENCE half, which was the omission that let an all-caps const be typed as a type).
     pub(crate) static_types: &'a std::collections::HashMap<String, Option<String>>,
     /// R161 — the crate-wide `type NAME = <callable>` alias leaves; see `ElemIndexes::callable_aliases`.
     pub(crate) callable_aliases: &'a std::collections::HashSet<String>,
@@ -633,6 +635,28 @@ impl<'a> CallCollector<'a> {
     /// vein this closes was 16 of 17 executed positions silent because the marker fired only under
     /// `Pat::Ident`, so `let _ = Guard{..}`, a bare statement, a call argument, an array element, a
     /// `match` scrutinee, a tuple destructuring, `v.push(..)` and ten more read silent-pure.
+    /// SOUNDNESS R722 — `ctor_type` PLUS the all-caps/const refusal, and THE ONLY form the collector
+    /// calls. `ctor_type`'s bare-value-path arm now answers for an ALL-CAPS leaf (`let _g = UTF8`,
+    /// `let x = MARKER`), which is the whole point of the row — and that same spelling is how a declared
+    /// `const`/`static` is written, so the answer has to be checked against the authority on those
+    /// names. `resolve_recv_type_for`'s `via_static` arm already consults `static_types` for the bare-path
+    /// RECEIVER; this is the `let`-inference half, which did not, and the measured cost of the omission
+    /// was `let m = MAX; m.count_ones()` linking `b::MAX::count_ones` for a function that adds integers.
+    ///
+    /// Wrapping rather than guarding at each of the five call sites is deliberate: five copies of this
+    /// test is the §G drift the row exists to remove, one level down.
+    fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
+        let ty = ctor_type(expr, &self.uses, self.returns)?;
+        let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        if crate::lang::caps_leaf_shadowed_by_const(leaf, self.static_types) {
+            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                eprintln!("R722CONST {leaf}");
+            }
+            return None;
+        }
+        Some(ty)
+    }
+
     pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
         self.note_release(leaf, true)
     }
@@ -1080,8 +1104,13 @@ impl<'a> CallCollector<'a> {
                 // name matched the struct. Different codes, one guarantee. A same-leaf type in ANOTHER
                 // module is the only way a binding and a unit struct of one name can coexist, and there
                 // the binding is what the path means anyway.
-                let looks_like_a_type = name.chars().next().is_some_and(|c| c.is_uppercase())
-                    && !name.contains('_');
+                // SOUNDNESS R722 — `crate::lang::is_type_ident`, the ONE copy. This was the THIRD
+                // spelling of that rule (upper-initial AND no underscore) and it is why `DIRECT.touch()`
+                // already resolved while `let x = DIRECT; x.touch()` — the same question through
+                // `type_from_value_path` — did not. The unified rule is the UNION of all three, so this
+                // site loses nothing and gains `Foo_Bar` (upper-initial, has a lowercase, has an
+                // underscore), which the no-underscore form refused.
+                let looks_like_a_type = crate::lang::is_type_ident(&name);
                 let bound_here = self.locally_bound(&name);
                 let upper_no_underscore = looks_like_a_type && !bound_here;
                 let concrete = self.vars.get(&name).cloned();
@@ -1108,7 +1137,7 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
-            syn::Expr::Call(_) => ctor_type(expr, &self.uses, self.returns),
+            syn::Expr::Call(_) => self.nominal_ctor_type(expr),
             // `S {..}.method()` / `for _ in (S {..})` — an inline struct literal names its type directly
             // (the same type a `let x = S{..}` binding already resolves via `ctor_type`). Without this a
             // value CONSTRUCTED INLINE and immediately consumed typed to nothing, so the iterator-forcing
@@ -1118,7 +1147,7 @@ impl<'a> CallCollector<'a> {
             // resulting `Type::method` link to LOCAL types, so this never fabricates onto a non-local value.
             // (`Expr::Paren`/`Expr::Group` transparent wrappers are unwrapped by the arms above, so a
             // parenthesised `for _ in (S {..})` reaches this Struct arm through them.)
-            syn::Expr::Struct(_) => ctor_type(expr, &self.uses, self.returns),
+            syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
             // Explicit DEREFERENCE receiver `(*b).method()` — transparent: candor already collapses a
             // smart-pointer/reference binding to its POINTEE (`let b = Box::new(W)` types `b` as `W`, a
             // `&W` param types as `W`), so `*b` has the same resolved type as `b`. Recurse into the operand.
@@ -4881,14 +4910,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // so the call arm above owns that spelling.
         if node.qself.is_none() && !self.in_pattern {
             let full = path_to_string(&node.path);
-            let ctor = crate::lang::ctor_leaf_from_value_path(&full, &self.uses, self.fields);
+            // SOUNDNESS R722 — THE BARE VALUE PATH IS THE ONE AMBIGUOUS SPELLING, and it is refused
+            // HERE rather than in `drop_relevant`. The first version of this refusal filtered the
+            // drop-relevant SET, which reaches all three construction spellings — and `MAX::new()` /
+            // `MAX { p: 1 }` are not ambiguous at all (neither can be written for a const). That was
+            // not free: MEASURED on the PRE binary, `let _g = MAX::new()` beside `mod a`'s
+            // `const MAX` already charged `['Fs']` through the R165 `returns` rescue, so the wide
+            // filter WITHDREW A REAL PRE-EXISTING CHARGE — a silence, in a change whose whole subject
+            // is silences. Narrowed to this arm, `MAX::new()` keeps it and `let m = MAX` still refuses.
+            //
+            // `ctor_leaf_of_expr`'s Path arm (the ESCAPE pre-pass) is deliberately NOT guarded: it can
+            // only SUPPRESS a charge, and a leaf refused here has nothing left to suppress.
+            let caps_const = crate::lang::caps_leaf_shadowed_by_const(
+                crate::lang::expand(&full, &self.uses).rsplit("::").next().unwrap_or(&full),
+                self.static_types,
+            );
+            if caps_const && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                eprintln!("R722CONSTPATH {full}");
+            }
+            let ctor = (!caps_const)
+                .then(|| crate::lang::ctor_leaf_from_value_path(&full, &self.uses, self.fields))
+                .flatten();
             self.note_construction(ctor);
             // CROSS-CRATE sibling — R68(1). Before this, this was the ONLY spelling reaching a
             // correctly-keyed cross-crate marker, and only by accident (the lazy-static forcing code's
             // `dep_lazy_keys` shared this same visit and derived the right key purely because a
             // 2-segment written path's "rest" happens to equal the type leaf).
-            self.note_cross_construction(
-                crate::lang::cross_ctor_leaf_from_value_path(&full, &self.uses, self.fields));
+            self.note_cross_construction((!caps_const).then(||
+                crate::lang::cross_ctor_leaf_from_value_path(&full, &self.uses, self.fields)).flatten());
         }
         syn::visit::visit_expr_path(self, node);
     }
@@ -5376,7 +5425,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     .and_then(|t| t.get(i).cloned().flatten())
                     .or_else(|| match init {
                         Some(syn::Expr::Tuple(it)) => {
-                            it.elems.iter().nth(i).and_then(|e| ctor_type(e, &self.uses, self.returns))
+                            it.elems.iter().nth(i).and_then(|e| self.nominal_ctor_type(e))
                         }
                         _ => None,
                     });
@@ -5548,7 +5597,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                             }
                         }
-                        if let Some(ty) = ctor_type(&init.expr, &self.uses, self.returns) {
+                        if let Some(ty) = self.nominal_ctor_type(&init.expr) {
                             self.vars.insert(id.ident.to_string(), ty.clone());
                             // It typed after all — the provenance marker is redundant and must not fire.
                             self.dep_bound_vars.remove(&id.ident.to_string());
@@ -5735,7 +5784,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             self.tuple_trait_of.insert(id.ident.to_string(), leaves);
                         }
                         let types: Vec<Option<String>> =
-                            it.elems.iter().map(|e| ctor_type(e, &self.uses, self.returns)).collect();
+                            it.elems.iter().map(|e| self.nominal_ctor_type(e)).collect();
                         if types.iter().any(|t| t.is_some()) {
                             self.tuple_of.insert(id.ident.to_string(), types);
                         }

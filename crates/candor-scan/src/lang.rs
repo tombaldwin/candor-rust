@@ -1370,23 +1370,57 @@ pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> 
 /// (UpperCamel::UpperCamel = a unit enum variant) → `Color`. Only CamelCase leaves count as types —
 /// a snake_case variable or SCREAMING_SNAKE const yields None (no inference; honest under-report).
 pub(crate) fn type_from_value_path(full: &str, uses: &HashMap<String, String>) -> Option<String> {
-    let camel = |s: &str| {
-        // CamelCase = UpperCamel start, and either a single CHARACTER (`S`) or containing a lowercase
-        // (distinguishes a type from a SCREAMING_SNAKE const). `chars().count()`, not `s.len()`: a
-        // single-codepoint non-ASCII type ident (`struct É;`) is multi-BYTE and must still count as one
-        // character. (/code-review.)
-        let mut ch = s.chars();
-        ch.next().is_some_and(|c| c.is_uppercase())
-            && (s.chars().count() == 1 || s.chars().any(|c| c.is_lowercase()))
-    };
     let segs: Vec<&str> = full.split("::").collect();
     let last = segs.last()?;
-    if !camel(last) {
+    // SOUNDNESS R722 — `is_type_ident`, NOT a second copy of it. This fn used to carry a local `camel`
+    // closure that was the same two clauses written again, so widening one and not the other would have
+    // reintroduced exactly the §G drift this row is about: `is_type_ident` gates the CALL-path route
+    // while this gates `let` inference and hence receiver typing.
+    if !is_type_ident(last) {
         return None;
     }
-    // `Enum::Variant` — two trailing CamelCase segments: the VALUE's type is the enum (the penultimate).
-    if segs.len() >= 2 && camel(segs[segs.len() - 2]) {
+    // `u32::MAX` / `f64::EPSILON` / `f32::consts::PI` — an associated const of a PRIMITIVE. Reachable
+    // only because R722's union admits an all-caps leaf, and unbounded in a way the rest of that
+    // exposure is not: `u32::MAX` appears in ordinary code everywhere, so leaf-keying it as a local
+    // `MAX` would fabricate wherever any crate happens to declare an all-caps `MAX` type. `mod u32 {}`
+    // is legal Rust and would make this refuse a real local type — see `is_primitive_root`, where that
+    // corner is measured rather than waved away.
+    if segs.len() >= 2 && is_primitive_root(segs[0]) {
+        if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            eprintln!("R722PRIM {full}");
+        }
+        return None;
+    }
+    // `Enum::Variant` — two trailing type-shaped segments: the VALUE's type is the enum (the
+    // penultimate).
+    if segs.len() >= 2 && is_type_ident(segs[segs.len() - 2]) {
+        // ...UNLESS THE TRAILING SEGMENT IS ALL-CAPS, in which case it is an ASSOCIATED CONST and its
+        // type is the CONST's declared type, NOT the enclosing one. FOUND BY THE A/B, not reasoned
+        // about: `windows-core`'s `TearOff::WeakQueryInterface` compares `*iid == crate::IUnknown::IID`,
+        // and `IUnknown` has an `impl Drop` — so the variant rule typed a `GUID` constant as an
+        // `IUnknown` and charged the function `IUnknown::drop`. `IWeakReference::IID` and
+        // `IAgileObject::IID` are the same shape one line over. This is [[R168]]'s `Ordering::Acquire`
+        // measurement one level in: there the colliding const was module-level, here it is ASSOCIATED,
+        // so `caps_leaf_shadowed_by_const` — which reads `collect_static_types`, a module-level index —
+        // cannot see it.
+        //
+        // THE COST, stated: an ALL-CAPS ENUM VARIANT (`Color::RED`) is refused too, because nothing in
+        // the path distinguishes it from `Color::MAX`. Variants are UpperCamel by convention and by
+        // clippy, an associated const is SCREAMING by both, and the two errors are not symmetric — a
+        // refused variant is an under-report of a charge that never shipped, while a mistyped assoc
+        // const FABRICATES onto ordinary code.
+        if caps_only_ident(last) {
+            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                eprintln!("R722ASSOCCONST {full}");
+            }
+            return None;
+        }
         return Some(expand(&segs[..segs.len() - 1].join("::"), uses));
+    }
+    // §E1 REACH COUNTER, on the CHANGED branch only — an all-caps leaf this fn now answers for and
+    // previously refused. An unchanged row is not evidence the new code ran.
+    if caps_only_ident(last) && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+        eprintln!("R722CAPS {full}");
     }
     Some(expand(full, uses))
 }
@@ -3945,13 +3979,103 @@ pub(crate) fn tail2(path: &str) -> Option<String> {
 // rule is now stated once, here, and every caller asks it rather than re-deriving it.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// UpperCamel = TYPE-shaped, distinguishing `Guard` from a `snake_case` local and a `SCREAMING_SNAKE`
-/// const. A single CHARACTER counts (`struct S;`), counted in `chars()` not bytes so a non-ASCII single
-/// -codepoint ident (`struct É;`) is not read as multi-segment.
+/// TYPE-shaped, distinguishing `Guard` from a `snake_case` local and a `SCREAMING_SNAKE` const. THE
+/// ONE COPY — SOUNDNESS R722. A single CHARACTER counts (`struct S;`), counted in `chars()` not bytes
+/// so a non-ASCII single-codepoint ident (`struct É;`) is not read as multi-segment.
+///
+/// R722: the rule used to be *upper-initial AND (one char OR contains a lowercase)*, and the lowercase
+/// requirement means an ALL-CAPS TYPE NAME IS NOT A TYPE AT ALL. `IO`, `BSTR`, `HSTRING`, `UTF8`, `O3`
+/// all failed it, so `let _g = IO { n: 1 }` with `impl Drop for IO { fs::remove_file }` was ABSENT from
+/// `functions[]` while the byte-identical `Io` control charged `['Fs']` — a silent under-report decided
+/// by nothing but the case of a name. `windows-core`'s `BSTR`/`HSTRING`/`VARIANT`/`PROPVARIANT` are
+/// real instances whose `Drop` is `SysFreeString`/`WindowsDeleteString`.
+///
+/// AND THE RULE EXISTED IN THREE COPIES, which is why it is stated here and only here (§G):
+///   · this fn — gated `ctor_leaf_from_call_path` and `ctor_leaf_from_value_path`'s variant test
+///   · a `camel` closure inside `type_from_value_path` — the same two clauses written again, gating
+///     `let` inference and therefore RECEIVER TYPING
+///   · `collector.rs`'s bare-upper receiver fallback — upper-initial AND NO UNDERSCORE, a THIRD rule,
+///     which is why `DIRECT.touch()` already resolved while `let x = DIRECT; x.touch()` did not
+///
+/// The unified rule is the UNION of all three, so no caller narrows: upper-initial, and either it
+/// contains a lowercase (`Guard`, `Foo_Bar`) or it contains no underscore (`S`, `IO`, `MAX`). A
+/// `SCREAMING_SNAKE` const is still refused, because it has an underscore and no lowercase.
+///
+/// `MAX`/`NONE`/`DEFAULT` are now type-shaped, and they are also plausible const names. That exposure
+/// is [[R213]]'s leaf collision and is bounded the same way — every consumer is gated on a LOCAL
+/// declaration (`drop_types` for the glue, `local_types` for a method link), so an all-caps const only
+/// ever mis-answers where a local type of that exact leaf also exists. The one shape that was NOT so
+/// bounded — `u32::MAX`, an associated const of a PRIMITIVE, which is everywhere in real Rust — is
+/// refused by `type_from_value_path` rather than by narrowing this predicate.
 pub(crate) fn is_type_ident(s: &str) -> bool {
     let mut ch = s.chars();
     ch.next().is_some_and(|c| c.is_uppercase())
-        && (s.chars().count() == 1 || s.chars().any(|c| c.is_lowercase()))
+        && (s.chars().any(|c| c.is_lowercase()) || !s.contains('_'))
+}
+
+/// True for an ident the R722 union admits and the OLD lowercase-requiring rule REJECTED — the
+/// CHANGED BRANCH, for the §E1 reach counter. Not a classification anything depends on.
+pub(crate) fn caps_only_ident(s: &str) -> bool {
+    is_type_ident(s) && s.chars().count() > 1 && !s.chars().any(|c| c.is_lowercase())
+}
+
+/// SOUNDNESS R722, the OVER-CHARGE REFUSAL the row named. A leaf the union admits ONLY because it is
+/// ALL-CAPS is spelled identically to a declared `const`/`static` of that name — `MAX`, `NONE`,
+/// `DEFAULT`, `EMPTY` are all plausible both ways. `collect_static_types` is the authority on those
+/// names, and `resolve_recv_type_for`'s `via_static` arm ALREADY consults it for the receiver route;
+/// the construction and `let`-inference routes did not, which is §G one more time.
+///
+/// MEASURED on the row's own control, and it fabricated before this: `mod a { pub const MAX: u32 = 9; }`
+/// beside `mod b { pub struct MAX; impl Drop for MAX { fs::remove_file } impl MAX { fn count_ones ..} }`
+/// — every index here is LEAF-keyed and crate-wide, so `a`'s `let m = MAX; m.count_ones()` charged
+/// `['Fs','Net']` with edges to `b::MAX::drop` AND `b::MAX::count_ones` for a function that adds two
+/// integers. That is [[R168]]'s `Ordering::Acquire` shape with the case inverted.
+///
+/// The index is leaf-keyed and crate-wide, so this REFUSES the ambiguity rather than picking a winner
+/// — and it is NOT [[R718]]'s `&=` situation. There, ownership had to win because withdrawing was a
+/// silence. That holds only because of WHERE this is called: the BARE VALUE PATH arm of
+/// `visit_expr_path`, the one construction spelling a const shares.
+///
+/// THE FIRST VERSION WAS CALLED SOMEWHERE ELSE AND DID INTRODUCE A SILENCE. It filtered the
+/// `drop_relevant` SET, which gates all three spellings — and `ctor_leaf_from_call_returns`, the R165
+/// rescue, ALREADY reached an all-caps leaf pre-R722 wherever the constructor's own fn leaf was
+/// unambiguous crate-wide. Run against the PRE binary, `let _g = MAX::new()` beside `mod a`'s
+/// `const MAX` charged `['Fs']`; the wide filter withdrew it. `assert-audit.sh` flagged the comment that
+/// claimed otherwise, and running the PRE binary is what settled it. `MAX { .. }`, `MAX(1)` and
+/// `MAX::new()` cannot be written for a const, so they keep their charge and only the bare path is
+/// refused.
+///
+/// RESIDUAL: `use a::*;` does not expand, so a GLOB-imported const of a colliding all-caps name is not
+/// seen here at all — the same residual [[R168]] measured on tokio's `Ordering::*`. And an ASSOCIATED
+/// const (`IUnknown::IID`) is invisible to this index by construction — `collect_static_types` records
+/// MODULE-level consts — which is why `type_from_value_path`'s variant branch refuses that shape
+/// separately.
+pub(crate) fn caps_leaf_shadowed_by_const(
+    leaf: &str,
+    statics: &HashMap<String, Option<String>>,
+) -> bool {
+    // `contains_key`, not a `Some` test: a `None` entry means two declarations of that const name
+    // disagreed on their type, which still makes the name a const.
+    caps_only_ident(leaf) && statics.contains_key(leaf)
+}
+
+/// Rust's PRIMITIVE type names. A multi-segment VALUE path rooted in one of these is, in ordinary code,
+/// an associated const or fn of a primitive (`u32::MAX`, `f64::EPSILON`, `char::MAX`, `f32::consts::PI`),
+/// whose LEAF must not be allowed to collide with a local type. Same refusal `local_type_leaf` already
+/// makes for a `std`/`core`/`alloc` root, and for the same measured reason; stated here because R722's
+/// union admits `MAX`, which made `u32::MAX` reachable for the first time. Closed set, defined by the
+/// language.
+///
+/// NOT "a primitive root can never name a local type" — that is what this comment said first, and it is
+/// false: `mod u32 { pub struct BITS; }` COMPILES (primitive names are not keywords), and `u32::BITS`
+/// then denotes that struct. VERIFIED by building it rather than asserted. The corner is accepted, not
+/// overlooked: such a module shadows a primitive's inherent consts for every reader of the code, and
+/// declining to type it costs a charge no shipped build ever made — whereas reading `u32::MAX` as a
+/// local `MAX` fabricates in code that is everywhere.
+fn is_primitive_root(s: &str) -> bool {
+    matches!(s, "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "f16" | "f32" | "f64" | "f128" | "bool" | "char" | "str")
 }
 
 /// The type LEAF a CALLEE path constructs: a tuple-struct / tuple-variant literal (`Guard(f)`,
@@ -3978,6 +4102,13 @@ pub(crate) fn ctor_leaf_from_call_path(full: &str, uses: &HashMap<String, String
     let ty = head.rsplit("::").next().unwrap_or(head);
     if !is_type_ident(ty) {
         return None;
+    }
+    // §E1 REACH COUNTER — R722's union answering for an all-caps type this arm used to refuse
+    // (`BSTR::new()`). It was rescued by `ctor_leaf_from_call_returns` ONLY while the assoc-fn LEAF was
+    // unambiguous crate-wide; a second `new` anywhere in the crate made that rescue fail and the row
+    // land on `ambiguous:same-name fns with different return types`.
+    if caps_only_ident(ty) && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+        eprintln!("R722ASSOC {full}");
     }
     local_type_leaf(head)
 }

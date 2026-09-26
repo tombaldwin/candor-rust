@@ -15526,11 +15526,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R718 bumped the token to rev46 (`FileDecls` gained `field_borrows`, so a rev45 entry deserializes it EMPTY and every borrowed field reads as OWNED — the warm scan republishes the FABRICATED `<Type>::drop` edge this row removes; the stale direction is OVER-REPORT, but the `--incremental` byte-identity contract still requires the invalidation); R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R722 bumped the token to rev47 (`is_type_ident` now admits an ALL-CAPS type name, so a body constructing `IO`/`UTF8`/`HSTRING` gains a `<Type>::<construct>` marker and a `let x = MARKER` binding gains its receiver typing — both stored IN the cached `FnInfo`, so a rev46 entry republishes exactly the silence the row closes: the stale direction is SILENCE); R718 bumped the token to rev46 (`FileDecls` gained `field_borrows`, so a rev45 entry deserializes it EMPTY and every borrowed field reads as OWNED — the warm scan republishes the FABRICATED `<Type>::drop` edge this row removes; the stale direction is OVER-REPORT, but the `--incremental` byte-identity contract still requires the invalidation); R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15541,7 +15541,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev46/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev47/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -17478,6 +17478,261 @@ pub struct Inner<'x> { pub g: &'x crate::G }
                 "ARM 2 (two files, `merge_decls`): a BORROWING declaration in src/b.rs withdrew the \
                  charge from the OWNING `Inner` in src/a.rs. That is R718 traded for a silence, and it \
                  is the reason the merge is `&=` rather than a union:\n{v2:#}");
+    }
+
+    /// SOUNDNESS R722 — AN ALL-CAPS TYPE NAME IS A TYPE. The UpperCamel test required a LOWERCASE
+    /// letter, so `IO`, `BSTR`, `HSTRING`, `UTF8` were not type-shaped at all and their DROP GLUE and
+    /// their RECEIVER TYPING were both silently lost.
+    ///
+    /// EVERY ARM IS A PAIR DIFFERING IN EXACTLY ONE THING: whether the type's name contains a lowercase
+    /// letter. Same fields, same body, same effect, same file — so a mixed-case control that charges
+    /// beside an all-caps arm that does not is a statement about the NAME and nothing else.
+    ///
+    /// GROUND-TRUTHED BY EXECUTION, not by reading the report: every arm below was compiled and run
+    /// against an `AtomicUsize` drop counter and performed its effect exactly ONCE.
+    ///
+    /// AND THE FIXTURE NAMES ARE DELIBERATE, because a naming convention is what hid this: [[R718]]'s
+    /// first enumeration named its structs `O1`..`OF` and all fifteen shapes read CLEAN.
+    #[test]
+    fn an_all_caps_type_name_is_still_a_type() {
+        let v = scan_src_to_json("r722caps", "\
+            pub struct IO { pub n: u32 }\n\
+            impl Drop for IO { fn drop(&mut self) { let _ = std::fs::remove_file(\"/io\"); } }\n\
+            pub fn caps_struct_lit() -> u32 { let _g = IO { n: 1 }; 7 }\n\
+            pub struct Io { pub n: u32 }\n\
+            impl Drop for Io { fn drop(&mut self) { let _ = std::fs::remove_file(\"/Io\"); } }\n\
+            pub fn mixed_struct_lit() -> u32 { let _g = Io { n: 1 }; 7 }\n\
+            pub struct UTF8;\n\
+            impl Drop for UTF8 { fn drop(&mut self) { let _ = std::fs::remove_file(\"/u8\"); } }\n\
+            pub fn caps_unit_lit() -> u32 { let _g = UTF8; 7 }\n\
+            pub struct Utf8;\n\
+            impl Drop for Utf8 { fn drop(&mut self) { let _ = std::fs::remove_file(\"/U8\"); } }\n\
+            pub fn mixed_unit_lit() -> u32 { let _g = Utf8; 7 }\n\
+            pub struct HSTRING(pub u32);\n\
+            impl Drop for HSTRING { fn drop(&mut self) { let _ = std::fs::remove_file(\"/hs\"); } }\n\
+            pub fn caps_tuple_lit() -> u32 { let _g = HSTRING(1); 7 }\n\
+            pub struct Hstring(pub u32);\n\
+            impl Drop for Hstring { fn drop(&mut self) { let _ = std::fs::remove_file(\"/Hs\"); } }\n\
+            pub fn mixed_tuple_lit() -> u32 { let _g = Hstring(1); 7 }\n\
+            pub struct BSTR { pub p: u32 }\n\
+            impl BSTR { pub fn new() -> Self { BSTR { p: 0 } } }\n\
+            impl Drop for BSTR { fn drop(&mut self) { let _ = std::fs::remove_file(\"/bs\"); } }\n\
+            pub fn caps_assoc() -> u32 { let _g = BSTR::new(); 7 }\n\
+            pub struct Bstr { pub p: u32 }\n\
+            impl Bstr { pub fn new() -> Self { Bstr { p: 0 } } }\n\
+            impl Drop for Bstr { fn drop(&mut self) { let _ = std::fs::remove_file(\"/Bs\"); } }\n\
+            pub fn mixed_assoc() -> u32 { let _g = Bstr::new(); 7 }\n\
+            pub struct MARKER;\n\
+            impl MARKER { pub fn touch(&self) { let _ = std::fs::remove_file(\"/mk\"); } }\n\
+            pub fn caps_unit_recv() { let x = MARKER; x.touch(); }\n\
+            pub struct Marker;\n\
+            impl Marker { pub fn touch(&self) { let _ = std::fs::remove_file(\"/Mk\"); } }\n\
+            pub fn mixed_unit_recv() { let x = Marker; x.touch(); }\n\
+            pub struct DIRECT;\n\
+            impl DIRECT { pub fn touch(&self) { let _ = std::fs::remove_file(\"/dr\"); } }\n\
+            pub fn caps_direct_recv() { DIRECT.touch(); }\n\
+            pub struct Direct;\n\
+            impl Direct { pub fn touch(&self) { let _ = std::fs::remove_file(\"/Dr\"); } }\n\
+            pub fn mixed_direct_recv() { Direct.touch(); }\n\
+            pub struct Snake_Case;\n\
+            impl Snake_Case { pub fn touch(&self) { let _ = std::fs::remove_file(\"/sc\"); } }\n\
+            pub fn under_direct_recv() { Snake_Case.touch(); }\n");
+        // The CONTROLS first. If one of these is quiet the fixture never reached the routes under test
+        // and every all-caps assertion below would be vacuous (§E3: absence is also what a broken
+        // engine produces).
+        for f in ["mixed_struct_lit", "mixed_unit_lit", "mixed_tuple_lit", "mixed_assoc",
+                  "mixed_unit_recv", "mixed_direct_recv"] {
+            assert!(effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] the MIXED-CASE control must charge — without it the all-caps arm beside it \
+                     proves nothing:\n{v:#}");
+        }
+        // ARMS 1,2,5 — DROP GLUE through the three construction spellings (struct literal, bare unit
+        // value path, tuple-struct call). All three were silent; arm 5 is one the row did not name.
+        // ARM 4 — `BSTR::new()`. This one was NOT silent, it was DISCLOSED as
+        // `ambiguous:same-name fns with different return types`: `ctor_leaf_from_call_returns` rescued
+        // the all-caps type only while the assoc-fn LEAF was unambiguous crate-wide, and `Bstr::new`
+        // above is a second `new`, which is the ordinary case in real Rust.
+        // ARM 3 — RECEIVER TYPING through a `let`, the larger half. Note `caps_direct_recv` beside it:
+        // that spelling ALREADY worked, because `collector.rs` carried a THIRD copy of the rule with a
+        // different clause (no-underscore instead of has-lowercase). Two spellings of one question
+        // answering differently is §G, and it is why this row unifies rather than patches.
+        // THE COLLECTOR'S OWN COPY, which the two lang.rs copies cannot speak for. Its rule was
+        // upper-initial AND NO UNDERSCORE, so `Snake_Case.touch()` — a bare-path receiver whose type
+        // name has BOTH a lowercase and an underscore — was refused there while `type_from_value_path`
+        // accepted it. That asymmetry is the drift; this arm is red if the collector site is reverted to
+        // the no-underscore form, and no assertion on `is_type_ident` alone can see it.
+        assert!(effs_opt(&v, "under_direct_recv").contains(&"Fs".to_string()),
+                "a bare-path receiver of an UNDERSCORED upper-initial type must resolve — the                  collector's no-underscore copy of the rule refused it:\n{v:#}");
+        for f in ["caps_struct_lit", "caps_unit_lit", "caps_tuple_lit", "caps_assoc",
+                  "caps_unit_recv", "caps_direct_recv"] {
+            assert!(effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] an ALL-CAPS type name lost its effect — R722. EXECUTED against a drop \
+                     counter, this body performs Fs exactly once, and the byte-identical mixed-case \
+                     control charges it:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R722, THE OVER-CHARGE CONTROL THE ROW NAMED — a `SCREAMING_SNAKE` const whose leaf
+    /// collides with a local drop type's name. [[R168]]'s `Ordering::Acquire` measurement is the
+    /// precedent: tokio's atomic-ordering CONSTANT was read as a construction of a same-named FUTURE and
+    /// every `is_closed`/`is_idle` in two modules inherited its `Log` + `Unknown`.
+    ///
+    /// `MAX`, `NONE`, `DEFAULT`, `EMPTY` are all plausible const names AND plausible type names, and the
+    /// widened predicate cannot tell them apart LEXICALLY — which is why the refusal asks
+    /// `collect_static_types`, the authority that already answers this for the RECEIVER route, instead
+    /// of guessing (§G). Every index here is LEAF-keyed and crate-wide, so `mod a`'s const and
+    /// `mod b`'s type land on one key: before the refusal, `a::const_var_receiver` charged
+    /// `['Fs','Net']` with edges to BOTH `b::MAX::drop` and `b::MAX::count_ones` for a function that
+    /// adds two integers.
+    ///
+    /// `u32::MAX` has its own arm because it is the one shape the leaf gate does not bound: an
+    /// associated const of a PRIMITIVE appears in ordinary code everywhere, and a primitive root can
+    /// never name a local type — so `type_from_value_path` refuses it outright.
+    ///
+    /// EXECUTED: every `a::` function below performs ZERO effects.
+    #[test]
+    fn an_all_caps_const_is_not_a_construction_of_a_same_named_type() {
+        let v = scan_src_to_json("r722const", "\
+            pub mod b {\n\
+              pub struct MAX;\n\
+              impl MAX { pub fn count_ones(&self) -> u32 { let _ = std::net::TcpStream::connect(\"1:2\"); 0 } }\n\
+              impl Drop for MAX { fn drop(&mut self) { let _ = std::fs::remove_file(\"/m\"); } }\n\
+              pub struct NONE;\n\
+              impl Drop for NONE { fn drop(&mut self) { let _ = std::fs::remove_file(\"/n\"); } }\n\
+              pub struct KEPT { pub p: u32 }\n\
+              impl KEPT { pub fn new() -> Self { KEPT { p: 0 } } }\n\
+              impl Drop for KEPT { fn drop(&mut self) { let _ = std::fs::remove_file(\"/k\"); } }\n\
+            }\n\
+            pub mod a {\n\
+              pub const MAX: u32 = 9;\n\
+              pub const NONE: u32 = 0;\n\
+              pub fn reads_local_const() -> u32 { let m = MAX; m + 1 }\n\
+              pub fn reads_primitive_const() -> u32 { let m = u32::MAX; m / 2 }\n\
+              pub fn reads_two_consts() -> u32 { let x = NONE; let y = u32::MAX; x + y / 3 }\n\
+              pub fn const_as_receiver() -> u32 { MAX.count_ones() }\n\
+              pub fn const_var_receiver() -> u32 { let m = MAX; m.count_ones() }\n\
+            }\n\
+            pub fn builds_kept() -> u32 { let _g = crate::b::KEPT::new(); 7 }\n\
+            pub mod d {\n\
+              pub struct IUnknown(pub u32);\n\
+              impl IUnknown { pub const IID: u32 = 7; }\n\
+              impl Drop for IUnknown { fn drop(&mut self) { let _ = std::fs::remove_file(\"/i\"); } }\n\
+              pub fn compares_iid(x: u32) -> bool { x == IUnknown::IID }\n\
+              pub fn really_builds_iunknown() -> u32 { let _g = IUnknown(1); 7 }\n\
+            }\n\
+            pub mod c {\n\
+              pub struct BITS;\n\
+              impl Drop for BITS { fn drop(&mut self) { let _ = std::fs::remove_file(\"/l\"); } }\n\
+              pub fn reads_primitive_only() -> u32 { let m = u32::BITS; m / 4 }\n\
+              pub fn really_builds_bits() -> u32 { let _g = BITS; 7 }\n\
+            }\n");
+        // THE CONTROL ON THE CONTROL (§E3/R701): if nothing in this fixture can charge, the five
+        // assertions below could not fail. `b::KEPT` is an all-caps drop type with NO colliding const,
+        // reached through the unambiguous `KEPT::new()` spelling — so it must charge, and if it does
+        // not, the refusal has grown past the ambiguity it is for.
+        assert!(effs_opt(&v, "builds_kept").contains(&"Fs".to_string()),
+                "an all-caps drop type with no colliding const must still be charged — otherwise this \
+                 test's five refusal assertions are vacuous:\n{v:#}");
+        // THE ASSOCIATED-CONST ARM — FOUND BY THE 1,625-CRATE A/B, NOT BY THINKING ABOUT IT.
+        // `windows-core`'s `TearOff::WeakQueryInterface` compares `*iid == crate::IUnknown::IID`, and
+        // `IUnknown` has an `impl Drop`. Two trailing type-shaped segments made the `Enum::Variant` rule
+        // fire, so a `GUID` constant was typed as an `IUnknown` and the function was charged
+        // `IUnknown::drop`. `caps_leaf_shadowed_by_const` cannot see it: `IID` is an ASSOCIATED const,
+        // and `collect_static_types` indexes MODULE-level ones. The refusal is in
+        // `type_from_value_path`'s variant branch, and it is why an all-caps trailing segment under a
+        // type-shaped parent yields nothing.
+        assert!(effs_opt(&v, "d::really_builds_iunknown").contains(&"Fs".to_string()),
+                "`d::IUnknown` must still be charged where it is really CONSTRUCTED, or the assoc-const \
+                 assertion below is vacuous:\n{v:#}");
+        assert!(!effs_opt(&v, "d::compares_iid").contains(&"Fs".to_string()),
+                "an ASSOCIATED CONST (`IUnknown::IID`) was read as a construction of its enclosing \
+                 type. Its type is the CONST's, not the enclosing one — R168's shape one level in, and \
+                 the A/B on windows-core is where this was measured:\n{v:#}");
+        // THE PRIMITIVE ARM, ISOLATED — and the first version of this test could not fail, which is
+        // exactly R701's shape in my own control. `a::reads_primitive_const` is refused by the
+        // CONST-SHADOW rule (a declares `const MAX`), so removing the primitive refusal entirely left
+        // it green: it was testing the other guard. `mod c` declares `struct BITS` with an `impl Drop`
+        // and NO const of that name, so `caps_leaf_shadowed_by_const` is false there and
+        // `is_primitive_root` is the only thing between `u32::BITS` and a fabricated `c::BITS::drop`.
+        assert!(effs_opt(&v, "c::really_builds_bits").contains(&"Fs".to_string()),
+                "`c::BITS` must be a charged drop type, or the `u32::BITS` assertion below is                  vacuous:\n{v:#}");
+        assert!(!effs_opt(&v, "c::reads_primitive_only").contains(&"Fs".to_string()),
+                "`u32::BITS` is an associated const of a PRIMITIVE and was read as a construction of                  the local `c::BITS` — a primitive root can never name a local type:\n{v:#}");
+        for f in ["a::reads_local_const", "a::reads_primitive_const", "a::reads_two_consts",
+                  "a::const_as_receiver", "a::const_var_receiver"] {
+            let e = effs_opt(&v, f);
+            assert!(!e.contains(&"Fs".to_string()) && !e.contains(&"Net".to_string()),
+                    "[{f}] an all-caps CONST was read as a construction of the same-named type in \
+                     `mod b` — R722's over-charge direction, R168's shape with the case inverted. \
+                     EXECUTED: this body performs no effect at all. Got {e:?}:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R722 — THE CONST-SHADOW REFUSAL MUST NOT REACH THE UNAMBIGUOUS SPELLINGS, and the
+    /// first version of it did. It was applied by filtering `drop_relevant`, which gates all THREE
+    /// construction spellings — but `MAX::new()` and `MAX { p: 1 }` cannot be written for a const and
+    /// are not ambiguous at all.
+    ///
+    /// THAT WAS NOT A FREE OVER-REFUSAL, and only a measurement showed it. The wide version's doc
+    /// comment claimed it "can lose no charge, because no all-caps leaf was drop-relevant before"; run
+    /// against the PRE binary, `pub fn via_assoc() { let _g = MAX::new(); }` ALREADY charged `['Fs']`,
+    /// through the R165 `ctor_leaf_from_call_returns` rescue, which reaches an all-caps leaf whenever
+    /// the constructor's own fn leaf is unambiguous crate-wide. So the wide filter introduced a SILENCE
+    /// in a change whose entire subject is silences. `assert-audit.sh` flagged the claim; running the
+    /// PRE binary is what falsified it.
+    ///
+    /// The refusal now sits on the BARE VALUE PATH arm in `visit_expr_path` — the one spelling a const
+    /// shares — so this test pins both halves: the const stays pure, and both unambiguous spellings keep
+    /// their charge.
+    #[test]
+    fn the_const_shadow_refusal_does_not_reach_the_unambiguous_spellings() {
+        let v = scan_src_to_json("r722wide", "\
+            pub mod a { pub const MAX: u32 = 9;\n\
+              pub fn reads() -> u32 { let m = MAX; m + 1 } }\n\
+            pub mod b {\n\
+              pub struct MAX { pub p: u32 }\n\
+              impl MAX { pub fn new() -> Self { MAX { p: 0 } } }\n\
+              impl Drop for MAX { fn drop(&mut self) { let _ = std::fs::remove_file(\"/m\"); } }\n\
+              pub fn via_assoc() -> u32 { let _g = MAX::new(); 7 }\n\
+              pub fn via_literal() -> u32 { let _g = MAX { p: 1 }; 7 }\n\
+            }\n");
+        // The fixture really reached the engine and the Drop really was parsed — without this the three
+        // absence assertions could not fail (§E3).
+        assert!(effs_opt(&v, "b::MAX::drop").contains(&"Fs".to_string()),
+                "`b::MAX::drop` must itself be reported, or this test asserts about nothing:\n{v:#}");
+        // The one that MUST be silent: a const read.
+        assert!(!effs_opt(&v, "a::reads").contains(&"Fs".to_string()),
+                "the const read must not be charged — that is the refusal's whole purpose:\n{v:#}");
+        // AND the two spellings a const cannot be written as. `via_assoc` is the one the PRE binary
+        // already charged, so losing it would be a regression, not a cautious refusal.
+        for f in ["b::via_assoc", "b::via_literal"] {
+            assert!(effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] an UNAMBIGUOUS construction spelling lost its charge to the const-shadow \
+                     refusal. `MAX {{ p: 1 }}` and `MAX::new()` cannot be written for a const, so the \
+                     refusal must not reach them — and the PRE binary charged `via_assoc` already, \
+                     which makes this a SILENCE and not an over-refusal:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R722 — THE PREDICATE ITSELF, because the defect was that it existed in THREE COPIES
+    /// with three different clauses and the unified rule must be the UNION of all three, never a
+    /// narrowing of any of them. Each row below names which copy it came from.
+    #[test]
+    fn the_type_ident_predicate_is_the_union_of_the_three_rules_it_replaced() {
+        use crate::lang::is_type_ident;
+        // From the OLD `is_type_ident`/`camel`: a single char, and anything with a lowercase.
+        for s in ["S", "Guard", "Utf8", "É", "Foo_Bar"] {
+            assert!(is_type_ident(s), "`{s}` was type-shaped before R722 and must stay so");
+        }
+        // NEWLY admitted — the row's whole subject. `Foo_Bar` above is the one the COLLECTOR's
+        // no-underscore copy refused, so it is in both lists for a reason.
+        for s in ["IO", "BSTR", "HSTRING", "UTF8", "O3", "MAX", "DB"] {
+            assert!(is_type_ident(s), "`{s}` is an ALL-CAPS TYPE NAME — R722");
+        }
+        // STILL REFUSED: a `SCREAMING_SNAKE` const (underscore and no lowercase) and a lowercase start.
+        for s in ["MAX_SIZE", "SCREAMING_SNAKE", "A_B", "snake", "_Foo", "", "u32"] {
+            assert!(!is_type_ident(s), "`{s}` must not be type-shaped");
+        }
     }
 
     /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO — RE-AIMED BY R452, AND THE OLD ASSERTION WAS

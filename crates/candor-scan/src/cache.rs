@@ -44,6 +44,13 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev47: an ANALYSIS change that feeds `fninfos`, not a new field (SOUNDNESS R722). `is_type_ident`
+    // now admits an ALL-CAPS type name, so a body that constructs `IO`/`UTF8`/`HSTRING` gains a
+    // `<Type>::<construct>` marker and a `let x = MARKER` binding gains its receiver typing — both of
+    // which are stored IN the cached `FnInfo` (`CallCollector::calls`, and the `Type::method` call the
+    // typing produces). A rev46 entry was written by a binary that emitted NEITHER and deserializes
+    // without complaint, so a warm rev46 read republishes exactly the silence this row closes — R631's
+    // direction, not R718's, which is why the bump is mandatory and not merely a byte-identity chore.
     // rev46: `FileDecls` gained `field_borrows` (SOUNDNESS R718). A rev45 entry deserializes it EMPTY
     // — `#[serde(default)]` — and an absent key reads as OWNED, so a warm scan over a stale cache
     // republishes the pre-fix FABRICATED drop-glue edge rather than losing a charge. That is the
@@ -295,7 +302,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev46/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev47/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
