@@ -22,8 +22,19 @@ LIB=$(ls -t "$ROOT"/target/debug/libcandor@*.dylib "$ROOT"/target/debug/libcando
 command -v python3 >/dev/null || { echo "FAIL: python3 required"; exit 1; }
 
 pass=0; fail=0
-want()   { if printf '%s' "$2" | grep -qF -- "$3"; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1 — missing: $3"; fail=$((fail+1)); fi; }
-absent() { if printf '%s' "$2" | grep -qF -- "$3"; then echo "  FAIL $1 — unexpected: $3"; fail=$((fail+1)); else echo "  ok   $1"; pass=$((pass+1)); fi; }
+# THESE USE A HERESTRING, NOT A PIPE — SOUNDNESS R707/R708. Do not "simplify" them back.
+#
+# They were `printf '%s' "$2" | grep -qF -- "$3"` under this file's `pipefail`, which is the shape
+# that reddened candor-java's `main` at `a75cdbd`: `grep -q` exits the instant it matches and stops
+# reading, `printf` takes EPIPE on a haystack bigger than the pipe buffer, and pipefail makes the
+# PIPELINE non-zero even though the reader succeeded. So an assertion can fail BECAUSE its needle
+# appeared early. candor-java's copy passed 600/0 locally and failed in CI; this copy is
+# character-for-character the same and has simply not been unlucky yet.
+#
+# `absent()` is the one that matters: a spurious non-zero sends it to its ELSE branch, which is `ok`
+# — a FALSE PASS on an assertion whose whole job is to prove something is NOT in the output.
+want()   { if grep -qF -- "$3" <<<"$2"; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1 — missing: $3"; fail=$((fail+1)); fi; }
+absent() { if grep -qF -- "$3" <<<"$2"; then echo "  FAIL $1 — unexpected: $3"; fail=$((fail+1)); else echo "  ok   $1"; pass=$((pass+1)); fi; }
 # Run dylint on a dir with a fresh lint pass (dylint emits only on recompile).
 dl() { ( cd "$1"; rm -rf target/dylint; shift; "$@" cargo dylint --lib-path "$LIB" 2>&1 ); }
 
