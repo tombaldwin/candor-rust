@@ -66,8 +66,33 @@ after upgrading; review policies and regenerate baselines with the new build.
   21 removed rows are `['Unknown']` in `windows-core-0.56.0` (14) and `windows-strings-0.5.1` (7) —
   `HSTRING`/`VARIANT`/`PROPVARIANT`/`PWSTR` functions whose hedge was
   `ambiguous:same-name fns with different return types` on `X::new`. Resolving the type name retires the
-  hedge, because the callee path now says what it constructs. **21 of 21 SCOPED `deny Unknown` gates on
-  those quals flip 1 -> 0**; no crate-level gate flips, and no concrete-effect gate flips anywhere.
+  hedge, because the callee path now says what it constructs.
+
+  **CORRECTED BEFORE PUSH — THE WITHDRAWN-`Unknown` SET IS 52 ROWS, NOT 21, and this entry said 21.** The
+  A/B has 21 REMOVED plus **31 CHANGED rows whose `inferred` loses `Unknown` and keeps something else** —
+  hickory-resolver x20 (all inheriting from one root), openssl x4, core-foundation x2, crossterm_winapi x2.
+  The lane's loss audit was keyed on CONCRETE effects, so those 31 sat outside its loss set BY
+  CONSTRUCTION, and hickory's PUBLIC `Resolver::lookup` and `LookupIpFuture::poll` are among them.
+  **So: 52 scoped `deny Unknown` gates flip 1 -> 0**; still no crate-level and no concrete-effect flips.
+
+  Of the 52: 23 sit behind ONE PURE CONSTANT (hickory's root is a `Lazy` over `RData::AAAA`, whose hedge
+  really was the `AAAA::new` ambiguity — a correct retirement with nothing behind it); 8 reach cross-crate
+  FFI and POST discloses them as `invisible: ["ffi"]`/`["winapi"]`; 20 are memory alloc/copy; 1 is a
+  private dynamic load whose only caller still carries `Unknown`. **Zero capability-bearing flips.**
+
+  **AND THE FRAMING ABOVE IS WRONG IN BOTH DIRECTIONS.** All 21 windows removals reach a MACRO-DECLARED
+  extern (`windows_targets::link!`) that the scanner cannot see at all, and none of those calls appears in
+  any `calls` list in EITHER arm: `VARIANT::clone` -> `VariantCopy`, every `HSTRING::*` ->
+  `Header::alloc` -> `HeapAlloc`, `get_activation_factory` -> `delay_load` -> `LoadLibraryExA`. **So the
+  PRE arm was RIGHT BY ACCIDENT on all 21, and the POST arm is WRONG BY `decls.rs:3221`'s OWN STATED RULE
+  on all 21.** That hole is SOUNDNESS R732, it is pre-existing and case-independent, and it is why these
+  21 are neither a loss nor a correction — the PRE coverage was a typing accident that already failed to
+  cover `delay_load`, `heap_free` and every `drop` beside them.
+
+  **The drop-glue payoff this row predicted is ZERO IN BOTH DIRECTIONS:** `HSTRING::drop` is
+  `imp::heap_free` and `SysFreeString` is not in the vocabulary either, so R722's entire payoff is the
+  RECEIVER-TYPING half. Allocation is correctly out of scope (`Box::new` charges nothing); the vocabulary
+  question the inversion raises is DYNAMIC LOADING, filed as a candidate rather than a finding.
   `HSTRING::from` additionally loses a FABRICATED `HSTRING::drop` edge — `impl From<&str>` constructs and
   RETURNS, 0 in-frame drops, ground-truthed from source.
 
