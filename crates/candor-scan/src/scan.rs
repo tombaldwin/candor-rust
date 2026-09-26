@@ -1508,14 +1508,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // A field type's LEAF (`type_path` may qualify it — `inner: ffi::Deflate` — but `owned_drops`,
         // `drop_types`, and the struct keys are all LEAF-keyed, so compare by leaf or the transitive
         // owner chain breaks across modules).
+        //
+        // SOUNDNESS R718 — AND A BORROWED FIELD IS NOT AN OWNED ONE. `type_path` peels `&`/`&mut`/
+        // `Option<&mut _>` on the way into `fields`, and `elem_type` peels them on the way into
+        // `field_elem`, so `pub struct Ctx<'a> { pub g: &'a mut G }` arrives here as the bare leaf `G`
+        // and every `Ctx { g }` was charged `G::drop` — a drop that runs in whoever OWNS the `G`, never
+        // in this frame. `type_borrows` is the SAME test R168 added for the by-value PARAMETER half; the
+        // `field_borrows` index carries its answer from the declaration, which is the only place the
+        // `&` still exists. EXECUTED against a drop counter: 8 of 15 field shapes were fabricating
+        // (`&T`, `&mut T`, `Option<&mut T>`, `Vec<&T>`, `&[T]`, `&Inner`, `&mut Vec<T>`, tuple `&T`) and
+        // 6 must keep charging (`T`, `Option<T>`, `Box<T>`, `Vec<T>`, nested `T`, tuple `T`).
+        //
+        // ABSENCE READS AS OWNED, deliberately: `resolve_impl_bound_fields` joins generic-bound fields
+        // into `fields` AFTER the merge and contributes no declaration to this index, and a stale cache
+        // entry deserializes it empty. Both then behave exactly as they did before this row — an
+        // over-charge — rather than silently dropping a real charge. That is the denylist direction.
+        let borrows = |t: &str, field: &str| -> bool {
+            merged.field_borrows.get(t).and_then(|m| m.get(field)).copied().unwrap_or(false)
+        };
+        // §E1 REACH COUNTER, on the CHANGED branch and nowhere else: it fires only where the filter
+        // WITHDRAWS a candidate that `drop_types` would have accepted, which is precisely the charge
+        // this row removes. An unchanged corpus row is not evidence the code ran.
+        let withdrew = |t: &str, field: &str, ty: &str| {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+                && merged.drop_types.contains(ty.rsplit("::").next().unwrap_or(ty))
+            {
+                eprintln!("R718BORROW {t}.{field} {ty}");
+            }
+        };
         let candidates = |t: &str| -> Vec<String> {
             let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
             let mut v: Vec<String> = Vec::new();
-            if let Some(m) = fields.get(t) {
-                v.extend(m.values().map(&leaf));
-            }
-            if let Some(m) = field_elem.get(t) {
-                v.extend(m.values().map(&leaf));
+            for src in [fields.get(t), field_elem.get(t)].into_iter().flatten() {
+                for (k, ty) in src {
+                    if borrows(t, k) {
+                        withdrew(t, k, ty);
+                    } else {
+                        v.push(leaf(ty));
+                    }
+                }
             }
             v
         };

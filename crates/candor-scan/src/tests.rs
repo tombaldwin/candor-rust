@@ -8742,7 +8742,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -11802,7 +11802,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -11825,7 +11825,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -11860,7 +11860,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -11893,7 +11893,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -12301,7 +12301,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -12328,7 +12328,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut TraitFieldIndex::new(), &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::BTreeSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let evt: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(evt.get("Cb"), Some(&vec!["Fn".to_string()]), "dyn Fn() payload must record the Fn leaf");
@@ -13870,6 +13870,9 @@ trait G {
         // One mutator per field — each touches exactly that field and nothing else.
         let table = digest_field_table! {
             fields => |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); },
+            // SOUNDNESS R718 — `fields`' ownership twin. A stale digest here republishes the fabricated
+            // drop-glue edge a borrowed field used to earn.
+            field_borrows => |m| { m.field_borrows.entry("S".into()).or_default().insert("f".into(), true); },
             field_elem => |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); },
             field_elem_trait => |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); },
             rets => |m| { m.rets.insert("f".into(), Some("T".into())); },
@@ -15523,11 +15526,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R718 bumped the token to rev46 (`FileDecls` gained `field_borrows`, so a rev45 entry deserializes it EMPTY and every borrowed field reads as OWNED — the warm scan republishes the FABRICATED `<Type>::drop` edge this row removes; the stale direction is OVER-REPORT, but the `--incremental` byte-identity contract still requires the invalidation); R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15538,7 +15541,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev45/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev46/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -17322,6 +17325,159 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 "R213 through a MAP — the arm R454 makes reachable. It is the same over-charge as the \
                  Vec arm above, on the same leaf-keyed index, and it is recorded rather than traded \
                  for a silence:\n{v:#}");
+    }
+
+    /// SOUNDNESS R718, A FABRICATION THAT PRE-DATES R709 — THE FIELD HALF OF R168. `owned_drops` (the
+    /// R49 transitive drop-owner closure) took its candidate leaves straight out of `fields`/`field_elem`,
+    /// and BOTH of those are written through `type_path`/`elem_type`, which peel `&`/`&mut` by design so
+    /// a method call on a borrowed field still resolves. So `pub struct Ctx<'a> { pub g: &'a mut G }`
+    /// arrived here as the bare owned leaf `G`, `Ctx` became drop-relevant, and every `Ctx { g }`
+    /// construction was charged `G::drop` — a drop that runs in whoever OWNS the `G` and never in this
+    /// frame. R168 added exactly this test (`type_borrows`) for the by-value PARAMETER half and the field
+    /// half never consulted it; this reads the same authority rather than a second copy of it.
+    ///
+    /// EXECUTED, NOT ARGUED. Every arm below was compiled and run against an `AtomicUsize` drop counter,
+    /// and the number in each comment is that measured in-frame drop count — not candor's own report,
+    /// which is the thing under test. The OWNED arms take their owner from a `mk*` constructor so that no
+    /// `G` is built in the frame and no by-value parameter arrives: the ONLY route that can charge them
+    /// is the owned-field one, so a regression here is visible rather than masked by the direct route.
+    ///
+    /// REAL INSTANCE: mongodb's `Client::execute_operation_on_connection`, whose
+    /// `ExecutionContext<'a> { connection: &'a mut PooledConnection, session: Option<&'a mut ClientSession> }`
+    /// fabricated `PooledConnection::drop`, `ClientSession::drop`, `Client::drop` and `TrackingArc::drop`
+    /// in four census versions.
+    #[test]
+    fn a_borrowed_field_does_not_own_its_type_s_drop_glue() {
+        let v = scan_src_to_json("r718borrow", "\
+            pub struct G { pub n: u32 }\n\
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::remove_file(\"/g\"); } }\n\
+            pub fn gg() -> G { G { n: 1 } }\n\
+            pub struct Own { pub g: G }\n\
+            pub struct RefS<'a> { pub g: &'a G }\n\
+            pub struct RefM<'a> { pub g: &'a mut G }\n\
+            pub struct OptRefM<'a> { pub g: Option<&'a mut G> }\n\
+            pub struct OptOwn { pub g: Option<G> }\n\
+            pub struct BoxOwn { pub g: Box<G> }\n\
+            pub struct VecOwn { pub v: Vec<G> }\n\
+            pub struct VecRef<'a> { pub v: Vec<&'a G> }\n\
+            pub struct RawP { pub g: *const G }\n\
+            pub struct SliceRef<'a> { pub v: &'a [G] }\n\
+            pub struct Inner { pub g: G }\n\
+            pub struct NestOwn { pub i: Inner }\n\
+            pub struct NestRef<'a> { pub i: &'a Inner }\n\
+            pub struct RefVec<'a> { pub v: &'a mut Vec<G> }\n\
+            pub struct TupRef<'a>(pub &'a G);\n\
+            pub struct TupOwn(pub G);\n\
+            pub fn mk1() -> Own { Own { g: gg() } }\n\
+            pub fn mk5() -> OptOwn { OptOwn { g: Some(gg()) } }\n\
+            pub fn mk6() -> BoxOwn { BoxOwn { g: Box::new(gg()) } }\n\
+            pub fn mk7() -> VecOwn { VecOwn { v: vec![gg()] } }\n\
+            pub fn mk11() -> NestOwn { NestOwn { i: Inner { g: gg() } } }\n\
+            pub fn mk15() -> TupOwn { TupOwn(gg()) }\n\
+            pub fn owned_direct() -> u32 { let _s = mk1(); 0 }\n\
+            pub fn owned_option() -> u32 { let _s = mk5(); 0 }\n\
+            pub fn owned_box() -> u32 { let _s = mk6(); 0 }\n\
+            pub fn owned_vec() -> u32 { let _s = mk7(); 0 }\n\
+            pub fn owned_nested() -> u32 { let _s = mk11(); 0 }\n\
+            pub fn owned_tuple() -> u32 { let _s = mk15(); 0 }\n\
+            pub fn ref_shared(r: &G) -> u32 { let _s = RefS { g: r }; 0 }\n\
+            pub fn ref_mut(r: &mut G) -> u32 { let _s = RefM { g: r }; 0 }\n\
+            pub fn opt_ref_mut(r: &mut G) -> u32 { let _s = OptRefM { g: Some(r) }; 0 }\n\
+            pub fn vec_of_refs(r: &G) -> u32 { let _s = VecRef { v: vec![r] }; 0 }\n\
+            pub fn raw_ptr(r: &G) -> u32 { let _s = RawP { g: r as *const G }; 0 }\n\
+            pub fn slice_ref(r: &[G]) -> u32 { let _s = SliceRef { v: r }; 0 }\n\
+            pub fn nested_ref(r: &Inner) -> u32 { let _s = NestRef { i: r }; 0 }\n\
+            pub fn ref_vec(r: &mut Vec<G>) -> u32 { let _s = RefVec { v: r }; 0 }\n\
+            pub fn tuple_ref(r: &G) -> u32 { let _s = TupRef(r); 0 }\n");
+        // THE CHARGES THAT MUST SURVIVE — measured in-frame drops: 1 each. These are the R49 field route
+        // and nothing else reaches them, so if any goes quiet this change traded a fabrication for the
+        // silent under-report that is this project's cardinal sin.
+        for f in ["owned_direct", "owned_option", "owned_box", "owned_vec", "owned_nested", "owned_tuple"] {
+            assert!(effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] an OWNED field still drops its type in the constructing frame (EXECUTED: 1 \
+                     drop). Losing this is R718 traded for a silence:\n{v:#}");
+        }
+        // THE FABRICATIONS — measured in-frame drops: 0 each. `&T`, `&mut T` and `Option<&mut T>` are the
+        // three the row named; the other five are what the audit boundary would have missed had it been
+        // drawn around the two spellings in the report (§9): the ELEMENT route peels references too, so
+        // `Vec<&T>` and `&[T]` arrive as owned `G`, and so do a borrowed NESTED owner, a borrowed
+        // CONTAINER and a newtype over a borrow.
+        for f in ["ref_shared", "ref_mut", "opt_ref_mut", "vec_of_refs", "slice_ref", "nested_ref",
+                  "ref_vec", "tuple_ref"] {
+            assert!(!effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] a BORROWED field was charged its type's drop glue — the R718 fabrication. \
+                     EXECUTED against a drop counter: 0 in-frame drops:\n{v:#}");
+        }
+        // `*const T` was already correct, and for a reason worth pinning rather than assuming: `type_path`
+        // has no `Type::Ptr` arm, so a raw-pointer field never entered `fields` at all. If this ever
+        // starts charging, the index gained a pointer arm and this row's filter is what must catch it.
+        assert!(!effs_opt(&v, "raw_ptr").contains(&"Fs".to_string()),
+                "a raw-pointer field must not be charged drop glue:\n{v:#}");
+    }
+
+    /// SOUNDNESS R718, THE COLLISION DIRECTION — and it is the opposite of `fields`' own merge.
+    /// `field_borrows` is keyed by struct LEAF like every index around it, so R213's collision applies:
+    /// two modules declaring `Inner` with a field of the same name, one OWNING a drop-type and one
+    /// BORROWING it, land on one key. Both the within-file insert (`decls.rs`) and the cross-file merge
+    /// (`merge_decls`) resolve that with `&=` — one owning declaration anywhere clears the key — because
+    /// the two errors are not symmetric: letting the borrow win WITHDRAWS the owning twin's real charge
+    /// (a silent under-report), while letting ownership win keeps the pre-existing R213 over-charge,
+    /// which is already recorded and already disclosed.
+    ///
+    /// TWO ARMS BECAUSE THERE ARE TWO RULES, and the first version of this test had only one and was
+    /// VACUOUS. A single-file fixture never reaches `merge_decls` at all — the collision is settled by
+    /// the within-file `and_modify` — so it passed with the merge deliberately degraded to a union.
+    /// The two-file arm is what holds the merge; the one-file arm holds the insert. Each was calibrated
+    /// by degrading its own rule to `|=` and watching that arm, and only that arm, go red.
+    #[test]
+    fn a_leaf_collision_between_an_owned_and_a_borrowed_field_keeps_the_charge() {
+        // ARM 1 — WITHIN ONE FILE. `a::Inner` owns, `b::Inner` borrows, both field `g`.
+        let v = scan_src_to_json("r718collide", "\
+            pub struct G { pub n: u32 }\n\
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::remove_file(\"/g\"); } }\n\
+            pub fn gg() -> G { G { n: 1 } }\n\
+            pub mod a { pub struct Inner { pub g: crate::G }\n\
+              pub fn mk() -> Inner { Inner { g: crate::gg() } } }\n\
+            pub mod b { pub struct Inner<'x> { pub g: &'x crate::G } }\n\
+            pub fn builds_owned_twin() -> u32 { let _s = a::mk(); 0 }\n");
+        assert!(effs_opt(&v, "builds_owned_twin").contains(&"Fs".to_string()),
+                "ARM 1 (one file, the `decls.rs` insert): the OWNING declaration of a colliding leaf must \
+                 keep its charge — a borrowing twin one module over must never withdraw it:\n{v:#}");
+
+        // ARM 2 — TWO FILES, which is the only arm `merge_decls` participates in. Declared in walk order
+        // OWNED-then-BORROWED; `&=` is order-free, and a union would drop the charge whichever way round.
+        let d = std::env::temp_dir().join(format!("candor-r718merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r718merge\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "\
+pub mod a;
+pub mod b;
+pub struct G { pub n: u32 }
+impl Drop for G { fn drop(&mut self) { let _ = std::fs::remove_file(\"/g\"); } }
+pub fn gg() -> G { G { n: 1 } }
+").unwrap();
+        std::fs::write(d.join("src/a.rs"), "\
+pub struct Inner { pub g: crate::G }
+pub fn mk() -> Inner { Inner { g: crate::gg() } }
+pub fn builds_owned_twin() -> u32 { let _s = mk(); 0 }
+").unwrap();
+        std::fs::write(d.join("src/b.rs"), "\
+pub struct Inner<'x> { pub g: &'x crate::G }
+").unwrap();
+        let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0, "the fixture must scan:\n{body:?}");
+        let v2: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(effs_opt(&v2, "a::builds_owned_twin").contains(&"Fs".to_string()),
+                "ARM 2 (two files, `merge_decls`): a BORROWING declaration in src/b.rs withdrew the \
+                 charge from the OWNING `Inner` in src/a.rs. That is R718 traded for a silence, and it \
+                 is the reason the merge is `&=` rather than a union:\n{v2:#}");
     }
 
     /// SOUNDNESS R222, THE DIRECTION THE FIX MUST NOT GO — RE-AIMED BY R452, AND THE OLD ASSERTION WAS

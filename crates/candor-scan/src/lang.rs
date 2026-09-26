@@ -4894,7 +4894,14 @@ pub(crate) struct Escapes {
 /// `Option<&T>`? A parameter of such a type does not own what it names, so its `Drop` does not run in
 /// the callee. Checked structurally rather than at the top level, which is the whole point: an
 /// arbitrary-self-type `Pin<&mut Self>` hides the `&` one layer down.
-fn type_borrows(ty: &syn::Type) -> bool {
+///
+/// SOUNDNESS R718 — ONE AUTHORITY, TWO OWNERSHIP QUESTIONS. This is the test R168 added for the
+/// PARAMETER half; the FIELD half (`owned_drops`, the R49 transitive drop-owner closure) asked the
+/// same question and never consulted it, because `type_path` peels `&`/`&mut` on the way into
+/// `fields` and a borrowed field arrives as a bare owned leaf. `pub(crate)` rather than a second copy
+/// for the reason §G names: two paths computing one fact drift, and the FIELD side is where a wrong
+/// answer FABRICATES somebody else's drop glue rather than merely missing one.
+pub(crate) fn type_borrows(ty: &syn::Type) -> bool {
     struct V(bool);
     impl<'a> syn::visit::Visit<'a> for V {
         fn visit_type_reference(&mut self, _: &'a syn::TypeReference) { self.0 = true; }

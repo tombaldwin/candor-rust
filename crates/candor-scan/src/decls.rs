@@ -2586,6 +2586,9 @@ pub(crate) fn collect_decls(
     // `prim_aliases` (a `BareFn` RHS is non-nominal, so it already passes through there) so the two
     // questions about a `type` item cannot drift apart.
     callable_aliases: &mut std::collections::HashSet<String>,
+    // SOUNDNESS R718 — `fields`' ownership twin. See `FileDecls::field_borrows`. Written at the two
+    // arms that write `fields`/`field_elem` and nowhere else, so the key spaces cannot drift.
+    field_borrows: &mut HashMap<String, HashMap<String, bool>>,
 ) {
     // R123: same one authority as `scan_items` — see `use_item_applies`.
     // SOUNDNESS R372 — THE SENTENCE THAT USED TO BE HERE WAS FALSE, and it is what licensed this
@@ -2762,6 +2765,18 @@ pub(crate) fn collect_decls(
                                 continue;
                             }
                             if let Some(name) = &f.ident {
+                                // SOUNDNESS R718 — the ownership fact, recorded BEFORE the
+                                // dispatch/concrete branch below chooses which index the TYPE lands in,
+                                // because the question is about the DECLARATION and every branch below
+                                // loses the `&`. Unconditional: a field the `trait_fields` route claims
+                                // is still a field `resolve_impl_bound_fields` can later join INTO
+                                // `fields`, and a key missing from here reads as owned.
+                                field_borrows
+                                    .entry(s.ident.to_string())
+                                    .or_default()
+                                    .entry(name.to_string())
+                                    .and_modify(|b| *b &= crate::lang::type_borrows(&f.ty))
+                                    .or_insert(crate::lang::type_borrows(&f.ty));
                                 // Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
                                 // `Box` to `type_path`, which would shadow the CHA route.
                                 let leaves = trait_leaves(&f.ty, &struct_bounds);
@@ -2931,6 +2946,15 @@ pub(crate) fn collect_decls(
                             if has_cfg(&f.attrs) {
                                 continue;
                             }
+                            // SOUNDNESS R718 — the tuple position's half, keyed by the same string form
+                            // (`"0"`) `fields`/`field_elem` use. `struct TupRef<'a>(pub &'a G)` is the
+                            // newtype-over-a-borrow shape and fabricated `G::drop` at every `TupRef(r)`.
+                            field_borrows
+                                .entry(s.ident.to_string())
+                                .or_default()
+                                .entry(i.to_string())
+                                .and_modify(|b| *b &= crate::lang::type_borrows(&f.ty))
+                                .or_insert(crate::lang::type_borrows(&f.ty));
                             // SOUNDNESS R479 — THE TUPLE POSITION HAD NO GENERAL DISPATCH ROUTE AT ALL.
                             // The comment this replaces said `trait_fields` has no `Unnamed` arm and
                             // called that deliberate; the measurement says the deliberate part was the
@@ -3352,7 +3376,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, dyn_trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, dyn_trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases, field_borrows);
                 }
             }
             _ => {}

@@ -44,6 +44,12 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev46: `FileDecls` gained `field_borrows` (SOUNDNESS R718). A rev45 entry deserializes it EMPTY
+    // — `#[serde(default)]` — and an absent key reads as OWNED, so a warm scan over a stale cache
+    // republishes the pre-fix FABRICATED drop-glue edge rather than losing a charge. That is the
+    // over-report direction, not R631's silence, but the entry still has to be invalidated: the
+    // `--incremental` contract is a BYTE-IDENTICAL report, and a warm rev45 read would differ from a
+    // cold one on exactly the rows this row fixes.
     // rev45: an ANALYSIS change that feeds `fninfos`, not a field (SOUNDNESS R709). The escape model's
     // UNCONDITIONAL routes — a `mem::forget`/`ManuallyDrop::new` operand, an inline closure body, a
     // field/index/deref store — are now judged against the `?`s that precede them instead of being
@@ -289,7 +295,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev45/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev46/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -312,6 +318,19 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> String {
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileDecls {
     pub(crate) fields: FieldIndex,
+    /// SOUNDNESS R718 — `fields`' OWNERSHIP twin, keyed IDENTICALLY (struct leaf -> field name, or the
+    /// tuple POSITION's string form) and carrying, per declaration, whether the field's written type
+    /// BORROWS (`&T`, `&mut T`, `Option<&mut T>`, `*const T`, `&[T]`). `type_path` peels references on
+    /// the way into `fields`, so `g: &'a mut G` arrives there as the bare owned leaf `G` and the R49
+    /// transitive drop-owner closure fabricated `G::drop` at every construction of the borrowing
+    /// struct. The fact cannot be recovered downstream — only the declaration has the `&` — so it is
+    /// recorded HERE, beside the entry it qualifies, and read by nothing else.
+    ///
+    /// A NEGATIVE index would have been cheaper and is wrong: a leaf collision (R213) where one twin
+    /// OWNS the field and the other BORROWS it must keep the charge, and a union of "borrowed" keys
+    /// would drop it. Both polarities are recorded so `merge_decls` can let OWNED win.
+    #[serde(default)]
+    pub(crate) field_borrows: HashMap<String, HashMap<String, bool>>,
     pub(crate) field_elem: FieldElemIndex,
     /// `Type -> { field -> element dispatch leaves }` for a COLLECTION-OF-TRAIT-OBJECTS field (R37 field form).
     #[serde(default)]
@@ -476,6 +495,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
     let mut uses = HashMap::new();
     let mut fields = HashMap::new();
+    let mut field_borrows = HashMap::new();
     let mut field_elem = HashMap::new();
     let mut field_elem_trait = HashMap::new();
     let mut rets = HashMap::new();
@@ -501,7 +521,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::decls::seed_callable_aliases(items, include_tests, &mut callable_aliases);
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut dyn_trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases, &mut field_borrows);
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
     // an external `pub use`. `uses` is this file's top-level `use` map, as `collect_decls` left it, so a
@@ -563,6 +583,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::lang::collect_local_impl_members(items, include_tests, &uses, &mut impl_members);
     FileDecls {
         fields,
+        field_borrows,
         field_elem,
         field_elem_trait,
         rets,
@@ -643,6 +664,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
 #[derive(Default)]
 pub(crate) struct MergedDecls {
     pub(crate) fields: FieldIndex,
+    /// SOUNDNESS R718 — see `FileDecls::field_borrows`. Merged so OWNED WINS.
+    pub(crate) field_borrows: HashMap<String, HashMap<String, bool>>,
     pub(crate) field_elem: FieldElemIndex,
     pub(crate) field_elem_trait: FieldElemTraitIndex,
     pub(crate) rets: HashMap<String, Option<String>>,
@@ -844,6 +867,19 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         let e = acc.fields.entry(s.clone()).or_default();
         for (k, v) in fmap {
             e.insert(k.clone(), v.clone());
+        }
+    }
+    // SOUNDNESS R718 — OWNED WINS, which is the opposite merge from `fields` one loop up and
+    // deliberately so. `fields` keeps the LAST contributor's type because a wrong receiver type is a
+    // wrong classification either way; this index decides whether a DROP is charged, and the two
+    // errors are not symmetric. Under the R213 leaf collision (`a::Inner { v: Vec<Closer> }` beside
+    // `b::Inner { n: u32 }`) letting the borrowing declaration win would WITHDRAW the owning twin's
+    // charge — a silent under-report — while letting the owning one win keeps the pre-existing,
+    // disclosed over-charge. `&=` is that rule: one owning declaration anywhere clears the key.
+    for (s, fmap) in &fd.field_borrows {
+        let e = acc.field_borrows.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.entry(k.clone()).and_modify(|b| *b &= *v).or_insert(*v);
         }
     }
     for (s, fmap) in &fd.field_elem {
@@ -1135,6 +1171,15 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push('\n');
     };
     nested(&mut s, "fields", &m.fields);
+    // SOUNDNESS R718 — `field_borrows` is `fields`' ownership twin and steers whether a construction is
+    // charged drop glue, so it belongs in the digest for the same reason `fields` does: a Pass-B FnInfo
+    // is only reusable if the index it was derived from has not moved. Rendered through the same
+    // `nested` shape with the bool stringified, so the key ORDER cannot differ between the two.
+    nested(&mut s, "field_borrows",
+           &m.field_borrows.iter()
+               .map(|(k, v)| (k.clone(),
+                              v.iter().map(|(f, b)| (f.clone(), b.to_string())).collect()))
+               .collect());
     nested(&mut s, "field_elem", &m.field_elem);
     // field_elem_trait — nested map whose leaf is a Vec<String> (the element dispatch leaves).
     s.push_str("field_elem_trait");

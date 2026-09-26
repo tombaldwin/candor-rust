@@ -10,6 +10,66 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A BORROWED FIELD NO LONGER FABRICATES ITS TYPE'S DROP GLUE (SOUNDNESS R718 — the FIELD half of
+  R168, pre-dating R709).** `owned_drops`, the R49 transitive drop-owner closure, took its candidate
+  leaves straight out of `fields`/`field_elem` — and both of those are written through
+  `type_path`/`elem_type`, which peel `&`/`&mut`/`*const` by design so a method call on a borrowed field
+  still resolves. So `pub struct Ctx<'a> { pub g: &'a mut G }` arrived as the bare owned leaf `G`, `Ctx`
+  became drop-relevant, and every `Ctx { g }` was charged `G::drop` — a drop that runs in whoever OWNS
+  the `G` and never in this frame. `type_borrows` is the SAME authority R168 added for the by-value
+  PARAMETER half; the field half never consulted it, and the new `field_borrows` index carries its answer
+  from the declaration, which is the only place the `&` still exists.
+
+  **ENUMERATED AND EXECUTED, against an `AtomicUsize` drop counter — 15 field shapes, candor vs the
+  measured in-frame drop count.** 8 were fabricating and are now silent; 6 must keep charging and do;
+  `*const T` was already correct (`type_path` has no `Type::Ptr` arm, so it never entered `fields`):
+
+      FABRICATED (0 drops measured)   &T   &mut T   Option<&mut T>   Vec<&T>   &[T]   &Inner
+                                      &mut Vec<T>   tuple(&T)
+      MUST STILL CHARGE (1 drop)      T    Option<T>   Box<T>   Vec<T>   nested T   tuple(T)
+
+  **A/B over the pinned 1,626-crate census (`bin/corpus-census-rust.tsv`), `bin/corpus-ab.py`, wide value
+  key, two independently-hashed arm binaries: ADDED 0 · REMOVED 35 · CHANGED 584** (99 on `inferred`),
+  340,915 pre rows / 340,872 post rows, 1,625 entries compared. REACH **1,244 marker hits across 93
+  entries** — an unchanged row is not evidence the code ran. Verdict buckets: **bucket 1 (a scoped deny
+  moves) = 0**, bucket 3 (concrete effect lost) = 30, and every one of those 30 is an intended
+  withdrawal traced below.
+
+  **EVERY REMOVAL AUDITED, AND THE BOUNDARY DRAWN PAST THE TRIGGER.** The 35 removals and 29
+  concrete-effect losses are six mechanisms, each traced to source: mongodb's
+  `ExecutionContext`/`FindOne`/`WarmConnectionPool`/gridfs `Drop` (all-borrowed action builders, the
+  named instance), hashbrown's `VacantEntry`/`ParUnion`/`ParSymmetricDifference` (`table: &'a mut
+  HashMap` → no `RawTable::drop`), bindgen's `UsedTemplateParameters`/`ItemTraversal`/`StructLayoutTracker`
+  (`ctx: &BindgenContext`, which owns the `clang` handles whose `Drop` calls `fs::remove_file`), jiff's
+  `TimeZoneFormatter<'a>(&'a posix::TimeZone)` (whose `get_arc_posix` wraps the `Arc` in `ManuallyDrop`
+  precisely so nothing drops), tokio's `NotifiedProject<'a>` (four fields, four borrows) and
+  sqlx-sqlite's `ExecuteIter<'a> { handle: &'a mut ConnectionHandle }` — which had claimed `Db`, a
+  `sqlite3_close`, for a function that only iterates.
+
+  Then the CLASS rather than the instances: an independent `syn` reader (not a second copy of
+  `type_borrows`) was pointed at every crate in the census that produced a withdrawal, and **all 4,712
+  withdrawn (crate, struct, field) triples across 413 crates have EVERY declaration borrowing** — 0
+  mismatches, 0 unfound. That cross-check was itself calibrated with seeded poison (a real owned field
+  and a nonexistent triple; both reported).
+
+  **THE MERGE IS `&=` — OWNED WINS — AND THAT IS THE OPPOSITE OF `fields`' OWN.** `field_borrows` is
+  leaf-keyed like everything around it, so R213's collision applies: letting a borrowing twin win would
+  WITHDRAW the owning twin's real charge, a silent under-report, while letting ownership win keeps the
+  pre-existing, disclosed over-charge. Both the within-file insert and `merge_decls` follow that rule and
+  each has its own fixture arm, calibrated by degrading its own rule to `|=`.
+
+  Cache schema **rev45 → rev46**: a rev45 entry deserializes `field_borrows` EMPTY and an absent key
+  reads as OWNED, so a stale warm read republishes the FABRICATED edge rather than losing a charge — the
+  over-report direction, not R631's silence — but `--incremental` promises a BYTE-IDENTICAL report, so
+  the entry is invalidated anyway.
+
+  **RESIDUAL, STATED.** On mongodb's `FindOne::execute` the withdrawn `Client::drop` coincided with a
+  REAL in-frame drop reached by a different route: the `cursor` local is a `Cursor<T>` owning a
+  `RawBatchCursor`, whose `Drop` holds `client: Client`. candor never had that edge — the ownership chain
+  breaks at a GENERIC type parameter (`Stream<'a, Raw, T>`), which this row does not touch — so the
+  charge was right by accident and from a false premise. Four rows (one per census mongodb version) now
+  disclose nothing where they previously disclosed `Unknown`.
+
 - **⚠ ⟨0.40⟩ — AN *UNCONDITIONAL* ESCAPE ROUTE THAT LIES AFTER A `?` NO LONGER CERTIFIES THE ESCAPE
   (SOUNDNESS R709, closing the R680 cardinal sin).** R173 made the `?` veto POSITIONAL for everything
   that reaches an exit through a `return`/tail, and the unconditional half — a `mem::forget` /
