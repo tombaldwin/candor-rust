@@ -44,6 +44,16 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev45: an ANALYSIS change that feeds `fninfos`, not a field (SOUNDNESS R709). The escape model's
+    // UNCONDITIONAL routes — a `mem::forget`/`ManuallyDrop::new` operand, an inline closure body, a
+    // field/index/deref store — are now judged against the `?`s that precede them instead of being
+    // re-united whole after R173's positional filter, so a body whose route lies AFTER an early exit
+    // gains a `<Type>::<construct>` marker and with it a `<Type>::drop` call edge. That marker is a
+    // `Call` in `CallCollector::calls`, which is stored IN the cached `FnInfo` — a rev44 entry was
+    // written by a binary that emitted none of them and deserializes without complaint, so a warm scan
+    // republishes R680's purity claim (`deny Fs <qual>::` exit 0 over a body that really drops one `H`
+    // on its Err path). THE STALE DIRECTION IS SILENCE, the cardinal one, which is [[R631]]'s rule and
+    // why this bump is part of the fix rather than housekeeping.
     // rev44: an ANALYSIS change that feeds `fninfos`, not a field (SOUNDNESS R693). Two widenings in
     // `visit_expr_path`: a trait-member fn-reference now mints its `{owner}#{qual}::{method}` key when
     // this crate's own `foreign_impls` witnesses the member (not only when the SIGNATURE bounds the
@@ -279,7 +289,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev44/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev45/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -10,6 +10,74 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.40⟩ — AN *UNCONDITIONAL* ESCAPE ROUTE THAT LIES AFTER A `?` NO LONGER CERTIFIES THE ESCAPE
+  (SOUNDNESS R709, closing the R680 cardinal sin).** R173 made the `?` veto POSITIONAL for everything
+  that reaches an exit through a `return`/tail, and the unconditional half — a `mem::forget` /
+  `ManuallyDrop::new` operand, an inline closure body, a field/index/deref store — was re-united WHOLE
+  after that filter, on a comment reading *a forgotten value's destructor does not run whichever exit the
+  function takes*. **False when the route follows the exit:** on the `?`'s error path the route is never
+  reached and a value that was already live really does die in this frame.
+
+      let g = H::new("a"); let r = step(i)?; std::mem::forget(g); Ok(r)   // ABSENT -> ['Fs']
+      let g = H::new("b"); let r = step(i)?; self.g = Some(g);     Ok(r)  // ABSENT -> ['Fs']
+      let g = H::new("g"); let r = step(i)?; let m = ManuallyDrop::new(g); Ok(r)  // ABSENT -> ['Fs']
+
+  All three dropped **1 `H` inside the frame on the Err path and 0 on the Ok path** (executed, a drop
+  counter with the holder forgotten afterwards so a field store is not miscounted), were **ABSENT from
+  `functions[]`** — a §2 rule-3 purity claim — and `deny Fs Holder::` exited **0** over all three; it
+  now exits **1** on all three. Controls whose route precedes the `?` (`forget_before`, `fill_before`,
+  `forget_built_after`, `forget_plain`, `fill_plain`, `deref_before`) measured 0 drops on both paths and
+  stay absent.
+
+  **THE FIX IS POSITIONAL, NOT THE BLUNT ONE.** Deleting the exemption outright is already priced in
+  `collector.rs`'s `charge_at_construction` at **551 fabricated hard-effect charges over 1,561 crates,
+  0 of 28 sampled a real in-frame drop** — that is a fabrication, not a fix. So a route still certifies
+  its escape; it only certifies it against the `?`s it has already passed. Routes are grouped into
+  BUCKETS by which `?`s precede them (a body with no `?` has exactly one bucket and the shipped answer),
+  each bucket's marks are computed alone, and only the preceding `?`s filter it, by R173/R187/R194's own
+  rule. Three positions had to be told apart, and each is a fixture:
+  · `TryExit::src_seq`, the un-rewritten walk position — R187 moves a `?`'s `seq` to its loop's END so
+    it vetoes what that body builds, and that rewrite INVERTS for the route question, making a route in
+    the same loop read as preceding a `?` it plainly follows;
+  · `route_inside` — R194's trap from the other side: `Expr::Try` is numbered BEFORE its operand, so a
+    route INSIDE the operand reads as "after the `?`" while evaluating the operand is what ran it. The
+    tree's existing `spine_cb_tail` control (async-std's `spawn_blocking(|| File::create(&p)).await?`,
+    0 in-frame drops) went RED on the first draft and is what found this;
+  · a `?` inside a closure or `async` block is not an exit of this function and is excluded outright.
+
+  Cache schema rev44 -> **rev45**: the new `<Type>::<construct>` marker is a `Call` in the cached
+  `FnInfo`, so a rev44 entry would serve R680's purity claim warm (stale direction: SILENCE).
+
+  **MEASURED, PRE = `72c7efd` / POST = this commit, `shasum` distinct (R691).** Standalone census,
+  1,625 crates / 340,915 post rows, `bin/corpus-ab.py` (wide value, multiset unit key):
+  **ADDED 1  REMOVED 0  CHANGED 27** — 0.0082% of rows, 18 distinct functions in 11 crate families.
+  **REMOVED 0 and ZERO functions gain an effect** (the narrow `inferred` key reports
+  `ADDED 1 / REMOVED 0 / CHANGED 0`); 20 changed rows move `calls` alone, 7 also gain `dispatchesOn` /
+  `invisible` entries, both additive. REACH 14,398 `R709ROUTE` hits across 679 of 1,625 entries — the
+  branch is reached widely and changes the answer rarely, which is the shape a positional fix should
+  have. **All 28 rows audited in full, no sampling, ground-truthed from crate source: 23 are a real
+  in-frame drop and 5 are an over-charge.** The real ones are the R680 shape in shipped code —
+  rustix `dup2_stdin`/`dup2_stdout`/`dup2_stderr` (`forget(target)` after `dup2(..)?`, whose own comment
+  says *we pass the returned `OwnedFd` to `forget` so that it isn't dropped*, and on the error path it
+  IS dropped, closing fd 0/1/2), `arbitrary::try_create_array` and `hybrid_array::try_from_fn_erased`
+  (`mem::forget(guard)` after `f(..)?`, where the guard exists to drop the initialized prefix),
+  curl `Easy2::httppost` (`self.inner.form = Some(form)` after `setopt_ptr(..)?`, so `Form::drop`
+  frees the libcurl form list), reqwest's wasm `fetch` (`AbortGuard` built before three `?`s),
+  rsa `precompute` (`Vec<CrtValue>` partially filled when `ok_or(..)?` fires; `CrtValue::drop` zeroizes),
+  mysql `Conn::new` (`Conn::drop` on `connect_stream()?`), and arrow-schema
+  `FFI_ArrowSchema::with_metadata` (the one ADDED row: `mut self` of a `Drop` type, dropped on the
+  `try_into()?` path — it read PURE and now reports `Unknown` with the real `drop` edge). tokio's
+  `File::poll_complete`/`poll_write` and hyper's `h2::Server::poll` are also real, but for a DIFFERENT
+  reason than the route reasoning that produced them — `inner.state = next` OVERWRITES the place, and
+  that drop runs here; the specific edge set is widened by the pre-existing leaf-name merge (tokio has
+  13 distinct `State` types). **The 5 over-charges, named:** tokio `process::windows::Child::poll`
+  (`inner.waiting` is provably `None` at the store, so no `Waiting::drop` runs) and mongodb
+  `execute_operation_on_connection` × 4 versions (`ExecutionContext` is moved into `handle_response`,
+  never dropped here; its 4 derived edges come from `owned_drops` reading `&'a mut PooledConnection` as
+  an owned field). All 5 move `calls` only — **no fabricated effect claim, and no gate flip on real
+  code** — against the blunt version's 551. Perf neutral: windows-0.56.0 95.7s -> 92.8s,
+  tokio 0.45s -> 0.32s.
+
 - **⚠ ⟨0.40⟩ — A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
   CRATE SUPPLIES THE IMPLEMENTOR (SOUNDNESS R693, closing the R690 cardinal sin).** Published in
   candor-scan 0.39.2 and live until now: with `impl dep::Sink for Mine` in the same crate, three

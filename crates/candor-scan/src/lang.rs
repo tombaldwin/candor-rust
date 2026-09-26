@@ -4245,7 +4245,7 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     //   · any other use of the name (stored, passed on, invoked with its value bound and kept) — not
     //     provably local, so it stays suppressed. This is a DENYLIST of the exemption: an unrecognised
     //     spelling keeps today's behaviour and stays silent rather than fabricating.
-    for (name, body) in std::mem::take(&mut sites.pending_closure_escapes) {
+    for (name, body, seq) in std::mem::take(&mut sites.pending_closure_escapes) {
         let uses_n = sites.path_uses.get(&name).copied().unwrap_or(0);
         let disc_n = sites.discarded_calls.get(&name).copied().unwrap_or(0);
         // R304 — the counters are keyed on a BARE IDENT with no scope, so they only describe one
@@ -4255,7 +4255,7 @@ pub(crate) fn escaping_ctor_leaves<'a>(
         let one_entity = sites.name_bindings.get(&name).copied().unwrap_or(0) == 1
             && !sites.macro_idents.contains(&name);
         if !(one_entity && uses_n > 0 && uses_n == disc_n) {
-            sites.escapes.push(body);
+            sites.escapes.push((seq, body));
         } else if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             // INSTRUMENTED, because an unchanged corpus row is not evidence the new code ran — the
             // same switch decls.rs's alias counter and scan.rs's R105 counter use. This fires exactly
@@ -4268,22 +4268,25 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // root, by design — see `escape_from_root`), so `*slot = Some(G::new());` must still be seen. A
     // single call seeded from `None` runs exactly that unconditional half and nothing root-dependent,
     // which is the correct answer when there is no root to be dependent ON.
-    // The UNCONDITIONAL half on its own (a closure's return, a `mem::forget`/`ManuallyDrop::new`
-    // operand, a field/index/deref store). Every root's set already contains it, so intersecting the
-    // roots preserves it; it is computed separately here only so R173's positional `?` filter below
-    // cannot strip it — a forgotten value's destructor does not run whichever exit the function takes.
-    let uncond = escape_from_root(None, &sites);
+    // The UNCONDITIONAL half (a closure's return, a `mem::forget`/`ManuallyDrop::new` operand, a
+    // field/index/deref store) is in every root's set, so intersecting the roots preserves it. IT USED
+    // TO BE RE-UNITED WHOLE AFTER R173's POSITIONAL `?` FILTER, on this comment: *a forgotten value's
+    // destructor does not run whichever exit the function takes*. SOUNDNESS R680 / R709 — THAT SENTENCE
+    // IS FALSE WHEN THE ROUTE FOLLOWS THE EXIT, and it is the sentence that made the claim stop being
+    // measured (the standing rule about a comment asserting safety). The re-union below is now
+    // POSITIONAL, per route; read it there.
+    let every_route: &dyn Fn(usize) -> bool = &|_| true;
     let mut acc = if sites.roots.is_empty() {
-        uncond.clone()
+        escape_from_root(None, &sites, every_route)
     } else {
         let mut roots = sites.roots.iter();
         let first = roots.next().expect("checked non-empty above");
-        let mut acc = escape_from_root(*first, &sites);
+        let mut acc = escape_from_root(*first, &sites, every_route);
         for r in roots {
             if acc.names.is_empty() && acc.leaves.is_empty() {
                 break; // the intersection can only shrink further; every remaining root would too.
             }
-            let next = escape_from_root(*r, &sites);
+            let next = escape_from_root(*r, &sites, every_route);
             acc.names.retain(|n| next.names.contains(n));
             acc.leaves.retain(|l| next.leaves.contains(l));
             // SITES ARE UNIONED ACROSS EXITS WHILE LEAVES ARE INTERSECTED, and the two together are the
@@ -4365,10 +4368,83 @@ pub(crate) fn escaping_ctor_leaves<'a>(
             .retain(|l| sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && !t.interior.contains(l));
         acc.names.retain(|n| sites.first_bind_seq.get(n).is_some_and(|s| s > p));
     }
-    // The unconditional routes are re-united after the positional filter, per `uncond`'s comment.
-    acc.names.extend(uncond.names);
-    acc.leaves.extend(uncond.leaves);
-    acc.sites.extend(uncond.sites);
+    // SOUNDNESS R709 — THE UNCONDITIONAL ROUTES ARE RE-UNITED *POSITIONALLY*. The comment on `uncond`
+    // above used to justify re-uniting them whole, on the ground that "a forgotten value's destructor
+    // does not run whichever exit the function takes". That is true of the FORGETTING and false of the
+    // FUNCTION: if the `mem::forget`/`ManuallyDrop::new` call, the field/index/deref store, or the
+    // inline closure lies AFTER a `?`, then on that `?`'s error path the route is never reached and a
+    // value that was already live really does die in this frame. Executed ground truth, both spellings
+    // the row was filed for plus the `ManuallyDrop` sibling: 1 in-frame `H::drop` on the Err path, 0 on
+    // the Ok path, against 0/0 for every control whose route precedes the `?`.
+    //
+    // THE FIX IS POSITIONAL, NOT THE BLUNT ONE. Dropping the exemption outright is priced in
+    // `collector.rs`'s `charge_at_construction` at 551 FABRICATED hard-effect charges over 1,561
+    // crates, 0 of 28 sampled a real in-frame drop — so a route still certifies its escape, it just
+    // only certifies it against the `?`s it has already passed. Each route is judged by ITS OWN
+    // position: routes are grouped into BUCKETS by which `?`s precede them (which is why this is one
+    // extra fixpoint run per bucket and not one per route — a body with no `?` has exactly one bucket
+    // and gets the shipped answer unchanged), each bucket's marks are computed alone, and only the
+    // `?`s that precede that bucket filter it, by exactly R173/R187/R194's rule.
+    //
+    // A `?` INSIDE A CLOSURE IS NOT AN EXIT OF THIS FUNCTION, so it cannot kill a value live here and
+    // is excluded from the route comparison. R173's conditional half keeps its (pre-existing,
+    // over-charging) treatment of those; this half would be ADDING the over-charge, which is the one
+    // direction `charge_at_construction` measured as ruinous.
+    let mut route_seqs: Vec<usize> = sites
+        .escapes
+        .iter()
+        .map(|(q, _)| *q)
+        .chain(sites.assigns.iter().filter(|(l, _, _)| l.is_none()).map(|(_, _, q)| *q))
+        .collect();
+    route_seqs.sort_unstable();
+    route_seqs.dedup();
+    let mut buckets: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    for q in route_seqs {
+        let key: Vec<usize> = sites
+            .try_exits
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                !t.in_closure
+                    && t.src_seq < q
+                    && !sites.route_inside.get(&q).is_some_and(|open| open.contains(i))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        buckets.entry(key).or_default().push(q);
+    }
+    for (preceding, qs) in buckets {
+        let gate: &dyn Fn(usize) -> bool = &|s| qs.binary_search(&s).is_ok();
+        let mut m = escape_from_root(None, &sites, gate);
+        for i in preceding {
+            let t = &sites.try_exits[i];
+            // The LEAF test reads `t.seq` (R187's rewritten position), because the question there is
+            // R173's — "was this leaf already built?" — and R187 rewrote `seq` precisely for it. The
+            // ROUTE test above reads `src_seq`. Two questions, two positions; see `TryExit::src_seq`.
+            let p = &t.seq;
+            // §E1 HIT COUNTER — R709's branch is "an unconditional route lies after this `?`, so the
+            // exemption is withdrawn for something that was live there". Fires only when the answer
+            // really moves, so a zero count in an A/B means the corpus never reached the change.
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                for l in &m.leaves {
+                    if !(sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && !t.interior.contains(l)) {
+                        eprintln!("R709ROUTE {l}");
+                    }
+                }
+                for n in &m.names {
+                    if !sites.first_bind_seq.get(n).is_some_and(|s| s > p) {
+                        eprintln!("R709ROUTENAME {n}");
+                    }
+                }
+            }
+            m.leaves
+                .retain(|l| sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && !t.interior.contains(l));
+            m.names.retain(|n| sites.first_bind_seq.get(n).is_some_and(|s| s > p));
+        }
+        acc.names.extend(m.names);
+        acc.leaves.extend(m.leaves);
+        acc.sites.extend(m.sites);
+    }
     // R172, the site gate. `acc.leaves` is the shipped leaf-keyed answer; a leaf survives it only if
     // every construction of that leaf recorded by the body walk is one of the escaping sites. A leaf
     // with NO recorded site (only reachable through a macro, or through a walk position the site pass
@@ -4415,7 +4491,16 @@ pub(crate) fn escaping_ctor_leaves<'a>(
 /// `None` for an exit proven to carry nothing (see `escaping_ctor_leaves`'s doc comment); such a call
 /// simply returns the empty sets, which is what makes it veto any name/leaf during the caller's
 /// intersection.
-fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks {
+fn escape_from_root(
+    root: Option<&syn::Expr>,
+    sites: &EscapeSites<'_>,
+    // SOUNDNESS R709 — which UNCONDITIONAL routes this call may follow, by the route's own pre-order
+    // position. `route_at` is the identity `|_| true` for every root-seeded call (exactly the shipped
+    // behaviour: a root's set contains the whole unconditional half, which is what makes the
+    // intersection across roots preserve it). `escaping_ctor_leaves` uses it to compute ONE bucket of
+    // routes at a time, so each bucket's contribution can be filtered by the `?`s that precede it.
+    route_at: &dyn Fn(usize) -> bool,
+) -> Marks {
     let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
     // The SAME macro indexes the site walk used. `body_macros` is complete by now — `walk_block` has
     // finished — so both walks resolve every invocation to the same template.
@@ -4428,8 +4513,10 @@ fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks 
     // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
     // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
     // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
-    for e in &sites.escapes {
-        mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
+    for (q, e) in &sites.escapes {
+        if route_at(*q) {
+            mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
+        }
     }
     for _ in 0..8 {
         let before = (m.names.len(), m.leaves.len(), m.sites.len());
@@ -4438,7 +4525,7 @@ fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks 
                 mark_escape(init, &lens, guard, uses, fields, returns, &mut m);
             }
         }
-        for (lhs, rhs) in &sites.assigns {
+        for (lhs, rhs, q) in &sites.assigns {
             match lhs {
                 // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
@@ -4448,8 +4535,13 @@ fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks 
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
                 // unconditionally (not gated on this root, same as before this fix: a store is a store
-                // regardless of which exit the function eventually takes).
-                None => mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m),
+                // regardless of which exit the function eventually takes). R709 — it IS gated on the
+                // store's own position, because a store that has not happened yet stores nothing.
+                None => {
+                    if route_at(*q) {
+                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m);
+                    }
+                }
             }
         }
         for (recv, args) in &sites.method_args {
@@ -4891,6 +4983,13 @@ pub(crate) fn owned_drop_params(
 /// position alone cannot express: they are built BEFORE the `?` runs and numbered AFTER it.
 struct TryExit {
     seq: usize,
+    /// SOUNDNESS R709 — the pre-order position this `?` was WALKED at, never rewritten. `seq` is moved
+    /// to the enclosing loop's last position by R187 so that it vetoes everything that loop body builds;
+    /// that rewrite is right for the question R187 asks ("is this leaf live when the `?` runs again?")
+    /// and INVERTS for the question R709 asks ("had this escape ROUTE already run when the `?` fired?"),
+    /// because moving the `?` later makes a route inside the same loop look like it came first. Within
+    /// one iteration the lexical order is the evaluation order, so the route comparison reads this.
+    src_seq: usize,
     in_closure: bool,
     /// R194 — type leaves constructed inside this `?`'s operand at a position that is NOT on the
     /// operand's value spine. Evaluating the operand ran them, so they are live when this `?` takes
@@ -4926,7 +5025,7 @@ struct EscapeSites<'a> {
     /// `(name, closure body)` for each `let NAME = |…| …` whose body was NOT pushed onto `escapes`
     /// during the walk. The decision needs counts that only exist once the whole body has been walked,
     /// so it is deferred to `escape_sites` and applied there.
-    pending_closure_escapes: Vec<(String, &'a syn::Expr)>,
+    pending_closure_escapes: Vec<(String, &'a syn::Expr, usize)>,
     /// Every single-ident `Expr::Path` occurrence, counted.
     path_uses: HashMap<String, usize>,
     /// How many times each name is BOUND in this body — every `let NAME = …` and every body-local
@@ -4998,13 +5097,28 @@ struct EscapeSites<'a> {
     /// `ManuallyDrop::new` (which flows to suppression, not to a caller). Each is unconditional — exactly
     /// like a field/deref `assigns` entry — so it is applied once per `escape_from_root` call regardless
     /// of which root that call was seeded from, which is what lets it survive the intersection.
-    escapes: Vec<&'a syn::Expr>,
+    /// R709 — each route carries its own pre-order POSITION. Surviving the root intersection is not the
+    /// same as surviving the `?` filter: a route that lies after a `?` has not run when that `?` takes
+    /// its error exit, so it certifies nothing about a value that was already live there.
+    escapes: Vec<(usize, &'a syn::Expr)>,
     /// `let NAME = init` — single-ident binders only (a destructuring binder cannot name the value).
     lets: Vec<(String, &'a syn::Expr)>,
     /// `lhs = rhs`; `Some(name)` for a plain local lvalue, `None` for a field/index/deref lvalue.
-    assigns: Vec<(Option<String>, &'a syn::Expr)>,
+    /// R709 — each one carries the pre-order position of the assignment, read only for the `None`
+    /// (unconditional) half, which is an escape ROUTE and so has a position of its own.
+    assigns: Vec<(Option<String>, &'a syn::Expr, usize)>,
     /// `recv.m(args…)` where the receiver is a plain local name.
     method_args: Vec<(String, Vec<&'a syn::Expr>)>,
+    /// SOUNDNESS R709 — for each unconditional-route POSITION, the `try_exits` indices whose OPERAND
+    /// encloses it. This is R194's trap seen from the other side: `Expr::Try` is numbered at its
+    /// PRE-order position, i.e. before its operand is walked, so a route INSIDE that operand gets a
+    /// higher number and reads as "after the `?`" — while evaluating the operand is precisely what ran
+    /// it. `let h = run_cb_h(|| H::try_new(n, "a"))?;` (async-std's
+    /// `spawn_blocking(|| File::create(&p)).await?`, executed: 0 in-frame drops) is the fixture: the
+    /// closure IS the `?`'s operand, so the `?` cannot strip its route, and reading the raw pre-order
+    /// numbers charged it. A route in the operand has run — or, for a closure the callee never invoked,
+    /// built nothing at all — by the time that `?` decides, either way nothing live dies there.
+    route_inside: HashMap<usize, std::collections::HashSet<usize>>,
 }
 
 impl<'a> EscapeSites<'a> {
@@ -5042,7 +5156,15 @@ impl<'a> EscapeSites<'a> {
             lets: Vec::new(),
             assigns: Vec::new(),
             method_args: Vec::new(),
+            route_inside: HashMap::new(),
         }
+    }
+
+    /// R709 — record that any unconditional route at the CURRENT position sits inside the operand of
+    /// every `?` the walk still has open. Called at each route push site.
+    fn note_route_position(&mut self) {
+        let open: std::collections::HashSet<usize> = self.open_tries.iter().map(|(i, _)| *i).collect();
+        self.route_inside.entry(self.seq).or_default().extend(open);
     }
 
     /// R172 — record this expression if it is a construction. Called on EVERY expression the walk
@@ -5816,6 +5938,7 @@ impl<'a> EscapeSites<'a> {
             syn::Expr::Try(t) => {
                 let e = TryExit {
                     seq: self.seq,
+                    src_seq: self.seq,
                     in_closure: self.closure_depth > 0,
                     interior: std::collections::HashSet::new(),
                 };
@@ -5830,11 +5953,12 @@ impl<'a> EscapeSites<'a> {
                 // static/const (`GLOBAL = …`), which is storage this scope does not own.
                 syn::Expr::Path(p) if p.qself.is_none() => {
                     self.assigns
-                        .push((p.path.get_ident().map(|i| i.to_string()), &a.right));
+                        .push((p.path.get_ident().map(|i| i.to_string()), &a.right, self.seq));
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own.
                 syn::Expr::Field(_) | syn::Expr::Index(_) | syn::Expr::Unary(_) => {
-                    self.assigns.push((None, &a.right));
+                    self.assigns.push((None, &a.right, self.seq));
+                    self.note_route_position(); // R709
                 }
                 // `_ = Guard::new();` — the DISCARD spelling. It is not an escape at all: the value is
                 // dropped at the end of the statement, in THIS scope. Recording it as one made the
@@ -5874,8 +5998,9 @@ impl<'a> EscapeSites<'a> {
                         // an unrelated return/tail and could be vetoed by a path that never reaches this
                         // call at all.
                         for a in &c.args {
-                            self.escapes.push(a);
+                            self.escapes.push((self.seq, a));
                         }
+                        self.note_route_position(); // R709
                     }
                 }
             }
@@ -5902,9 +6027,10 @@ impl<'a> EscapeSites<'a> {
                     .get(&(e as *const syn::Expr as usize))
                     .cloned()
                 {
-                    Some(name) => self.pending_closure_escapes.push((name, &c.body)),
-                    None => self.escapes.push(&c.body),
+                    Some(name) => self.pending_closure_escapes.push((name, &c.body, self.seq)),
+                    None => self.escapes.push((self.seq, &c.body)),
                 }
+                self.note_route_position(); // R709 — a let-bound closure can become a route later
             }
             _ => {}
         }

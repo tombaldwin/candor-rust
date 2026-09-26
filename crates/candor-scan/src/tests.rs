@@ -15523,7 +15523,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
@@ -15538,7 +15538,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev44/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev45/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -20651,6 +20651,121 @@ pub fn go() {{ imp::doit(); }}
                         drops there (executed: 1 drop on the Err path) — the positional veto must keep \
                         charging it:\n{v:#}");
         }
+    }
+
+    /// SOUNDNESS R709 — THE *UNCONDITIONAL* ESCAPE ROUTES ARE POSITIONAL TOO. R173 made the `?` veto
+    /// positional for everything that reaches an exit through `roots`, and the unconditional half —
+    /// a `mem::forget`/`ManuallyDrop::new` operand, a closure body, a field/index/deref store — was
+    /// deliberately re-united AFTER that filter, on a comment reading *a forgotten value's destructor
+    /// does not run whichever exit the function takes*. That is false when the ROUTE ITSELF follows an
+    /// early exit: on the `?`'s error path the `forget` is never reached and the value dies in this
+    /// frame. R680 is the row; this is its fixture.
+    ///
+    /// EXECUTED GROUND TRUTH, a drop counter with the `Holder` forgotten afterwards so a field store is
+    /// not miscounted as an in-frame drop, on both the Err (`i=0`) and Ok (`i=1`) path:
+    /// `forget_after` 1/0, `fill_after` 1/0, `manually_after` 1/0 — and the controls
+    /// `forget_before` 0/0, `fill_before` 0/0, `forget_built_after` 0/0, `forget_plain` 0/0,
+    /// `fill_plain` 0/0. The three charged shapes were ABSENT from `functions[]` before this fix — a §2
+    /// rule-3 purity claim — and `deny Fs Holder::` exited 0 over all three.
+    #[test]
+    fn an_unconditional_escape_route_after_a_question_mark_does_not_certify_the_escape() {
+        let v = scan_src_to_json("r709uncond", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn step(n: usize) -> Result<usize, ()> { if n == 0 { Err(()) } else { Ok(n) } }\n\
+            pub struct Holder { pub g: Option<H> }\n\
+            impl Holder {\n\
+                pub fn forget_after(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"a\"); let r = step(i)?; std::mem::forget(g); Ok(r) }\n\
+                pub fn fill_after(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"b\"); let r = step(i)?; self.g = Some(g); Ok(r) }\n\
+                pub fn manually_after(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"g\"); let r = step(i)?; let m = std::mem::ManuallyDrop::new(g); let _ = &m; Ok(r) }\n\
+                pub fn forget_plain(&mut self, i: usize) -> usize { let g = H::new(\"c\"); std::mem::forget(g); i }\n\
+                pub fn fill_plain(&mut self, i: usize) -> usize { let g = H::new(\"d\"); self.g = Some(g); i }\n\
+                pub fn forget_before(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"e\"); std::mem::forget(g); let r = step(i)?; Ok(r) }\n\
+                pub fn fill_before(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"f\"); self.g = Some(g); let r = step(i)?; Ok(r) }\n\
+                pub fn forget_built_after(&mut self, i: usize) -> Result<usize, ()> { let r = step(i)?; let g = H::new(\"h\"); std::mem::forget(g); Ok(r) }\n\
+            }\n");
+        for n in ["Holder::forget_after", "Holder::fill_after", "Holder::manually_after"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` builds the `H` BEFORE a `?` and only reaches its escape route AFTER it, \
+                        so the error exit really drops it in this frame (executed: 1 drop at i=0) — the \
+                        unconditional route must not certify the escape past the `?`:\n{v:#}");
+        }
+        // THE CONTROLS FOR THE DIRECTION THIS FIX CAN OVERSHOOT IN, and they are the whole risk:
+        // removing an exemption ADDS charges, and `collector.rs`'s `charge_at_construction` already
+        // prices the blunt version (drop the exemption outright) at 551 fabricated hard-effect charges
+        // over 1,561 crates with 0 of 28 sampled showing a real in-frame drop. Every one of these five
+        // runs its route BEFORE the `?` (or builds the value after it), so nothing dies here.
+        for n in ["Holder::forget_plain", "Holder::fill_plain", "Holder::forget_before",
+                  "Holder::fill_before", "Holder::forget_built_after"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` reaches its escape route before any early exit can take the value (executed: \
+                     0 drops on both paths) — the positional rule must leave the exemption standing:\n{v:#}");
+        }
+    }
+
+    /// R709's SIBLINGS — the shapes the trigger's own fixture could not reach, written because a
+    /// boundary drawn around the two spellings the row was filed for is a boundary drawn around its
+    /// trigger. Three of them are about the POSITION the comparison reads, and each one is a different
+    /// position:
+    ///
+    ///   · `loop_after` — the route is inside a LOOP. R187 rewrites a `?`'s `seq` to the loop's LAST
+    ///     position so it vetoes everything that body builds, and that rewrite INVERTS for the route
+    ///     comparison: a route in the same loop would read as preceding a `?` it plainly follows. So
+    ///     the route test reads `TryExit::src_seq`, the un-rewritten walk position, and the leaf test
+    ///     still reads `seq`.
+    ///   · `take_after` / `take_forget_after` — the value is a by-value PARAMETER, built in the
+    ///     caller's frame and owned by this one. It has no `first_bind_seq`, which counts as live from
+    ///     the start — the charging direction, and here the correct one.
+    ///   · `cb_operand` — THE CONTROL THAT FOUND THE FABRICATION, and it was already in the tree:
+    ///     `spine_cb_tail` in the R194 test went red on the first draft of this fix. A route INSIDE a
+    ///     `?`'s operand has already run (or, for a closure the callee never invokes, built nothing)
+    ///     when that `?` decides, so the operand's own `?` must not filter it — `Expr::Try`'s
+    ///     pre-order number is lower than everything in its operand, which is R194's trap seen from
+    ///     the other side. `route_inside` is the field that records it.
+    ///   · `closure_after` — an inline CLOSURE is an unconditional route like the other two, and one
+    ///     that captures a value built before the `?`.
+    ///
+    /// EXECUTED GROUND TRUTH, the same drop counter with the `Holder` forgotten afterwards, at i=0
+    /// (Err) / i=1 (Ok): `loop_after` 1/1, `take_after` 1/0, `take_forget_after` 1/0,
+    /// `closure_after` 1/1 — and `cb_operand` 0/0.
+    #[test]
+    fn the_positional_rule_for_an_unconditional_route_reads_the_right_position() {
+        let v = scan_src_to_json("r709sib", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn step(n: usize) -> Result<usize, ()> { if n == 0 { Err(()) } else { Ok(n) } }\n\
+            pub fn run_cb<T>(f: impl FnOnce() -> T) -> Result<T, ()> { Ok(f()) }\n\
+            pub struct Holder { pub g: Option<H> }\n\
+            impl Holder {\n\
+                pub fn loop_after(&mut self, i: usize) -> Result<usize, ()> { for _k in 0..2 { let g = H::new(\"a\"); let _r = step(i)?; self.g = Some(g); } Ok(i) }\n\
+                pub fn take_after(&mut self, g: H, i: usize) -> Result<usize, ()> { let r = step(i)?; self.g = Some(g); Ok(r) }\n\
+                pub fn take_forget_after(&mut self, g: H, i: usize) -> Result<usize, ()> { let r = step(i)?; std::mem::forget(g); Ok(r) }\n\
+                pub fn closure_after(&mut self, i: usize) -> Result<usize, ()> { let g = H::new(\"d\"); let r = step(i)?; let _ = run_cb(move || g); Ok(r) }\n\
+                pub fn cb_operand(&mut self, i: usize) -> Result<usize, ()> { let h = run_cb(|| H::new(\"c\"))?; self.g = Some(h); Ok(i) }\n\
+            }\n\
+            pub fn deref_after(slot: &mut Option<H>, i: usize) -> Result<usize, ()> { let g = H::new(\"a\"); let r = step(i)?; *slot = Some(g); Ok(r) }\n\
+            pub fn index_after(xs: &mut Vec<Option<H>>, i: usize) -> Result<usize, ()> { let g = H::new(\"b\"); let r = step(i)?; xs[0] = Some(g); Ok(r) }\n\
+            pub fn deref_before(slot: &mut Option<H>, i: usize) -> Result<usize, ()> { let g = H::new(\"c\"); *slot = Some(g); let r = step(i)?; Ok(r) }\n");
+        // …and the OTHER TWO `assigns`-with-no-name spellings, because the `None` lvalue arm covers
+        // `Expr::Field`, `Expr::Index` AND `Expr::Unary` and a fixture for only the field is a fixture
+        // for the shape this row was reported with. Executed, i=0 / i=1: `deref_after` 1/0,
+        // `index_after` 1/0, `deref_before` 0/0.
+        for n in ["Holder::loop_after", "Holder::take_after", "Holder::take_forget_after",
+                  "Holder::closure_after", "deref_after", "index_after"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}` reaches its unconditional escape route only AFTER a `?` that the value is \
+                     already live at (executed: 1 in-frame drop):\n{v:#}");
+        }
+        assert!(!effs(fn_entry(&v, "Holder::cb_operand")).contains(&"Fs".to_string()),
+                "the closure IS the `?`'s own operand, so evaluating that operand is what ran the route \
+                 — the `?` cannot strip it (executed: 0 drops on both paths). Reading the raw pre-order \
+                 numbers charges this, and `spine_cb_tail` in the R194 test is the tree's own copy of \
+                 the same boundary (async-std's `spawn_blocking(|| File::create(&p)).await?`):\n{v:#}");
+        assert!(row_absent(&v, "deref_before"),
+                "the deref store runs BEFORE the `?`, so the value is already somewhere this frame does \
+                 not own when the error exit is taken (executed: 0 drops on both paths):\n{v:#}");
     }
 
     /// R187, the trigger, and the sibling R173's own fixtures could not reach. The positional `?` filter
