@@ -2101,6 +2101,45 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         ];
         return (!PURE_TRAITS.iter().any(|t| rest.starts_with(t))).then_some("Fs");
     }
+    // THE PLATFORM `process` MODULES — `std::os::{unix,windows,wasi}::process`. SOUNDNESS R141, the
+    // EXACT SIBLING of the `fs` rule above, and unruled for the same reason it was: R130 closed
+    // `std::os::*::fs` and translated that question across ENGINES while never translating it across
+    // SIBLING MODULES of the namespace it had just found unruled.
+    //
+    // Ground truth EXECUTED when the row was filed: a consumer printed `before`, then
+    // `EXECED-THROUGH-LIB`, and never reached the following line — `CommandExt::exec` is `execvp` and
+    // really does replace the process image. Re-measured at HEAD 2026-09-27 on a 5-function fixture:
+    // `CommandExt::exec(c)`, `std::os::unix::process::CommandExt::exec(c)` and
+    // `fn f<C: CommandExt>(c: &mut C) { c.exec() }` were all ABSENT from `functions[]` — no `Unknown`,
+    // no `unresolved` — and `deny Exec`, `pure` and `deny Exec Unknown` all exited 0, while on the SAME
+    // tree the RECEIVER spelling `c.exec()` exited 1 and the sibling-namespace UFCS control
+    // `FileExt::read_at(f, b, 0)` exited 1. So this is the one-spelling-of-two shape of R130 itself:
+    // `c.exec()` was only ever charged because the receiver types to `std::process::Command` and the
+    // whole-type rule below answers; nothing answered for the trait-path spelling.
+    //
+    // A DENYLIST keyed on the TRAIT, exactly like the `fs` rule and for the same reason — subtract only
+    // the provably-pure surfaces so a std addition nobody here has read about fails in the SAFE
+    // direction. What is subtracted, and why each is pure:
+    //   * `ExitStatusExt` / `ExitStatusError` / `ExitCodeExt` — accessors and constructors over an
+    //     ALREADY-COLLECTED status (`signal()`, `core_dumped()`, `from_raw(n)`). The wait that produced
+    //     it is charged at its own site under `std::process::Child`.
+    //   * `parent_id` — `getppid()`, a read of this process's own identity, no spawn. Kept at PARITY
+    //     with `std::process::id`, which carries no rule either; subtracting it here rather than
+    //     leaving it to the Exec cliff is the one place this rule departs from "unrecognised keeps
+    //     Exec", and it is named rather than folded in.
+    // Everything else keeps Exec: `CommandExt::{exec, pre_exec, arg0, uid, gid, groups,
+    // process_group}` and the windows `CommandExt::{creation_flags, raw_arg, …}` / `ChildExt`. That is
+    // also what the receiver spelling already answers — `c.uid(0)` reports `['Exec']` at HEAD — so this
+    // rule makes the two spellings agree rather than inventing a new verdict for either.
+    if let Some(rest) = path
+        .strip_prefix("std::os::unix::process::")
+        .or_else(|| path.strip_prefix("std::os::windows::process::"))
+        .or_else(|| path.strip_prefix("std::os::wasi::process::"))
+    {
+        const PURE: &[&str] =
+            &["ExitStatusExt::", "ExitStatusError::", "ExitCodeExt::", "parent_id"];
+        return (!PURE.iter().any(|t| rest.starts_with(t))).then_some("Exec");
+    }
     // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
     // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
     if path.starts_with("std::fs::")
@@ -5177,6 +5216,50 @@ mod tests {
                        "{p} reads or configures data already in hand — charging it would FABRICATE Fs");
         }
         // `std::os::unix::net` is Ipc and must be untouched by a rule keyed one segment along.
+        assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
+    }
+
+    /// SOUNDNESS R141 — the platform `process` modules, the sibling `fs` had a rule and `process` did
+    /// not. `CommandExt::exec` is `execvp`: it REPLACES the process image, ground-truthed by a
+    /// `cargo run` that printed a line from the exec'd image and never reached the line after the call.
+    /// Both directions are driven here: the spawn surface must charge Exec (without the rule every
+    /// assertion in the first loop returns `None` and `deny Exec` over a library whose only function
+    /// calls `CommandExt::exec` exits 0), and the already-collected-status traits must NOT, or the fix
+    /// trades a silent under-report for a fabrication on every `status.signal()` — the same control
+    /// shape as the `fs` test above.
+    #[test]
+    fn the_platform_process_modules_are_exec_and_their_status_traits_are_not() {
+        for p in [
+            "std::os::unix::process::CommandExt::exec",
+            "std::os::unix::process::CommandExt::pre_exec",
+            "std::os::unix::process::CommandExt::arg0",
+            "std::os::unix::process::CommandExt::uid",
+            "std::os::unix::process::CommandExt::gid",
+            "std::os::unix::process::CommandExt::groups",
+            "std::os::unix::process::CommandExt::process_group",
+            "std::os::windows::process::CommandExt::creation_flags",
+            "std::os::windows::process::CommandExt::raw_arg",
+            "std::os::windows::process::ChildExt::main_thread_handle",
+            "std::os::wasi::process::CommandExt::exec",
+        ] {
+            assert_eq!(classify("std", p), Some("Exec"), "{p} is subprocess machinery");
+        }
+        for p in [
+            "std::os::unix::process::ExitStatusExt::signal",
+            "std::os::unix::process::ExitStatusExt::core_dumped",
+            "std::os::unix::process::ExitStatusExt::from_raw",
+            "std::os::unix::process::ExitStatusExt::into_raw",
+            "std::os::unix::process::ExitStatusError::signal",
+            "std::os::windows::process::ExitStatusExt::from_raw",
+            "std::os::windows::process::ExitCodeExt::from_raw",
+            "std::os::unix::process::parent_id",
+        ] {
+            assert_eq!(classify("std", p), None,
+                       "{p} reads a status already collected (or this process's own pid) — charging it \
+                        would FABRICATE Exec");
+        }
+        // Keyed one segment along: `fs` and `net` under the same platform root must be untouched.
+        assert_eq!(classify("std", "std::os::unix::fs::FileExt::read_at"), Some("Fs"));
         assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
     }
 
