@@ -14043,6 +14043,11 @@ trait G {
             macro_twins => |m| { m.macro_twins.insert("same".into()); },
             blanket_methods => |m| { m.blanket_methods.insert("ext".into(), "T".into()); },
             root_reexports => |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); },
+            // SOUNDNESS R186 — the crate ROOT's own declared names. Seeded into EVERY file's `use` map and
+            // it DECIDES whether a `crate::<name>::…` TYPE path is glob-attributed, so a root `mod` added
+            // or removed re-resolves receiver types in other files. A stale digest here replays the pre-fix
+            // silence: the caller absent from `functions[]` over a call that really reads a file.
+            root_decls => |m| { m.root_decls.insert("stream".into()); },
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
             reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into(), cfg_gated: false }); },
@@ -15672,7 +15677,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15683,7 +15688,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev48/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev49/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -23316,4 +23321,130 @@ pub fn go() {{ imp::doit(); }}
                                        signature, never a skip:\n{v:#}"));
         f["unknownWhy"].as_array().unwrap_or_else(|| panic!("`{name}` has no unknownWhy:\n{v:#}"))
             .iter().map(|w| w.as_str().unwrap().to_string()).collect()
+    }
+
+    /// SOUNDNESS R186 — **ONE OUT-OF-CRATE GLOB IMPORT KILLED EVERY CRATE-LOCAL TYPE IN PARAMETER
+    /// POSITION**, and with it the call edge off that parameter.
+    ///
+    /// `expand`'s glob-attribution branch rewrote `crate::stream::Stream` to
+    /// `std::io::prelude::stream::Stream`, matching no local definition. Its own comment argued the
+    /// rewrite was *"ATTRIBUTION only … local wins … no fabrication"*, which is TRUE FOR A CALL PATH —
+    /// the 2-segment tail rescues it downstream — and FALSE FOR A TYPE PATH, which has no such rescue.
+    ///
+    /// GROUND TRUTH, EXECUTED: all six `q`s below really read a file (the fixture compiles and prints
+    /// `62 62 62 62 62 62`). Before the fix, three of them were ABSENT from `functions[]` entirely — no
+    /// `Unknown`, no `unknownWhy`, nothing — and `deny Fs with_glob` exited **0** while the byte-identical
+    /// `deny Fs no_glob` exited 1 on the same tree. The only difference between the two modules is the
+    /// `use std::io::prelude::*;` line.
+    ///
+    /// Four arms, because each was measured separately and each was silent:
+    ///   * the glob alone,
+    ///   * the glob BEATING an explicit `use crate::stream::Stream;` in the same module,
+    ///   * a glob in a DIFFERENT file (the per-file `unique_glob` route), covered by `rootglob` below,
+    ///   * and two controls that must keep resolving: an IN-CRATE glob and a NON-glob named import.
+    #[test]
+    fn r186_an_out_of_crate_glob_must_not_rename_a_crate_local_type() {
+        let v = scan_src_to_json("r186glob", "\
+            pub mod stream {\n\
+                pub struct Stream { pub path: String }\n\
+                impl Stream { pub fn wibble(&self) -> usize {\n\
+                    std::fs::read(&self.path).map(|v| v.len()).unwrap_or(0) } }\n\
+            }\n\
+            pub mod with_glob {\n\
+                #[allow(unused_imports)] use std::io::prelude::*;\n\
+                pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n\
+            pub mod no_glob {\n\
+                pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n\
+            pub mod with_glob_explicit {\n\
+                #[allow(unused_imports)] use std::io::prelude::*;\n\
+                use crate::stream::Stream;\n\
+                pub fn q(p: &Stream) -> usize { p.wibble() }\n\
+            }\n\
+            pub mod with_glob_collections {\n\
+                #[allow(unused_imports)] use std::collections::*;\n\
+                pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n\
+            pub mod incrate_glob {\n\
+                #[allow(unused_imports)] use crate::stream::*;\n\
+                pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n\
+            pub mod nonglob_named {\n\
+                #[allow(unused_imports)] use std::io::Read;\n\
+                pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n");
+        for m in ["with_glob", "no_glob", "with_glob_explicit", "with_glob_collections",
+                  "incrate_glob", "nonglob_named"] {
+            let name = format!("{m}::q");
+            let f = fn_entry(&v, &name);
+            assert_eq!(effs(f), vec!["Fs".to_string()],
+                       "`{name}` calls `Stream::wibble`, which reads a file — an out-of-crate glob in the \
+                        module must not rename `crate::stream::Stream` away from its own definition");
+            assert!(f["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "stream::Stream::wibble")),
+                    "`{name}` must keep the call EDGE, not just the effect — the edge is what `path`, \
+                     `callers` and the κ ledger read:\n{f:#}");
+        }
+    }
+
+    /// SOUNDNESS R186, THE CROSS-FILE HALF AND THE WIDER ONE: a single glob in `lib.rs` is seeded into
+    /// EVERY file's `use` map as `crate::` + `GLOB_KEY`, so it renamed crate-local types in files that
+    /// contain no glob at all. Measured: `filenoglob::q` read `['Env']` with the `Fs` and the call edge
+    /// both gone, from a `use std::io::prelude::*;` three files away.
+    #[test]
+    fn r186_a_root_glob_must_not_rename_crate_local_types_in_other_files() {
+        let d = std::env::temp_dir().join(format!("candor-scan-r186root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r186root\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"),
+            "#[allow(unused_imports)] use std::io::prelude::*;\npub mod stream;\npub mod other;\n").unwrap();
+        std::fs::write(d.join("src/stream.rs"),
+            "pub struct Stream { pub path: String }\n\
+             impl Stream { pub fn wibble(&self) -> usize {\n\
+                 std::fs::read(&self.path).map(|v| v.len()).unwrap_or(0) } }\n").unwrap();
+        std::fs::write(d.join("src/other.rs"),
+            "pub fn q(p: &crate::stream::Stream) -> usize { p.wibble() }\n").unwrap();
+        let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(effs(fn_entry(&v, "other::q")), vec!["Fs".to_string()],
+                   "a glob in `lib.rs` must not reach into `other.rs` and rename `crate::stream::Stream`");
+    }
+
+    /// SOUNDNESS R186 — **THE TWO CONTROLS, AND THEY FAIL IN OPPOSITE DIRECTIONS.** The glob-attribution
+    /// branch exists because it closed the sqlx `PgStream::connect` cardinal sin, so the fix must be
+    /// tested against the shape it must NOT narrow as well as the one it must.
+    ///
+    ///   * RESCUE (must keep charging): the root re-exports a prelude by glob and the crate declares no
+    ///     `read`, so `crate::read` really IS the glob's name. Executed: 65 bytes read from disk.
+    ///   * SHADOW (must stop charging): the crate DECLARES `read` itself, which shadows the glob in
+    ///     rustc, and its own `read` is pure. Executed: 0 bytes, no filesystem access — so the pre-fix
+    ///     `['Fs']` here was a FABRICATION, not merely a mis-attribution. This arm is what makes the fix
+    ///     a correctness change rather than a widening: the refusal removes a charge as well as adding
+    ///     one, and a fix that only added charges would leave this one standing.
+    #[test]
+    fn r186_glob_attribution_survives_where_the_crate_does_not_declare_the_name() {
+        let rescue = scan_src_to_json("r186rescue", "\
+            pub use std::fs::*;\n\
+            pub mod pg { pub fn slurp() -> usize {\n\
+                crate::read(\"Cargo.toml\").map(|v| v.len()).unwrap_or(0) } }\n");
+        assert_eq!(effs(fn_entry(&rescue, "pg::slurp")), vec!["Fs".to_string()],
+                   "`read` is NOT declared by this crate — it arrives through the root glob re-export, so \
+                    the attribution is the crate's real origin and must survive (the sqlx rescue)");
+
+        let shadow = scan_src_to_json("r186shadow", "\
+            pub use std::fs::*;\n\
+            pub fn read(_p: &str) -> Result<Vec<u8>, std::io::Error> { Ok(Vec::new()) }\n\
+            pub mod pg { pub fn slurp() -> usize {\n\
+                crate::read(\"Cargo.toml\").map(|v| v.len()).unwrap_or(0) } }\n");
+        assert!(shadow["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "pg::slurp"),
+                "the crate DECLARES `read`, which shadows the glob — `crate::read` is its own pure \
+                 function and charging `Fs` here is a fabrication:\n{shadow:#}");
     }

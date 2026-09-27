@@ -1712,6 +1712,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // otherwise see (each file starts with a fresh `use` map). Crate-rooted only: a bare `net::foo` never
         // looks up a `crate::…` key, so a genuine external-crate call is never hijacked (see `expand`).
         let mut uses = seed_root_reexports(&merged.root_reexports);
+        // R186 — …and the crate ROOT's OWN declarations, under `crate::` + `ROOT_DECL_KEY`. `expand`'s
+        // glob-attribution branch reads it to refuse a `crate::<name>::…` rewrite where `<name>` is this
+        // crate's own root item: an explicit declaration shadows a glob in rustc, so the attribution was
+        // provably wrong, and for a TYPE path (which has no tail2 rescue) it cost the call edge outright.
+        crate::lang::seed_root_decls(&merged.root_decls, &mut uses);
         // …and the MODULE-QUALIFIED external aliases (R99): a submodule `pub use std::process::Command`, a
         // nominal `pub type Cmd = std::process::Command`, a callable-typed `const`. Same cross-file problem
         // the root re-exports have — the declaring module is usually a DIFFERENT file — and the same answer.

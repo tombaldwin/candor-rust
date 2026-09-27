@@ -255,6 +255,12 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // vetoes what that loop body builds, so a rev18 entry replays, warm, a body that reads as pure
     // while its guard demonstrably drops. serde would read that entry without complaint; the token is
     // the only thing that stops it. Same shape as rev16.
+    // rev49: FileDecls gained `root_decls` (R186 — the crate ROOT's own declared item names). A rev48
+    // entry has none, so it deserializes EMPTY: "the crate root declares nothing" — and an empty set is
+    // exactly what makes `expand`'s glob branch attribute `crate::stream::Stream` to a prelude again. A
+    // warm cache would therefore serve the pre-fix SILENCE (caller absent from `functions[]`, `deny Fs`
+    // exit 0 over a real read) for every unchanged file, which is the same shape as rev17, rev15, rev14,
+    // rev12 and rev9.
     // rev18: `Reexport` gained `cfg_gated` (R176 — whether a `pub use` is one arm of a `#[cfg]` split).
     // A pre-rev18 entry has no such field, so `#[serde(default)]` reads FALSE — "this re-export is
     // unconditional" — which is precisely the input that makes explicit-beats-glob silence the other
@@ -309,7 +315,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev48/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev49/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -426,6 +432,14 @@ pub(crate) struct FileDecls {
     /// See `collect_root_reexports`. Empty for a non-root file.
     #[serde(default)]
     pub(crate) root_reexports: HashMap<String, String>,
+    /// SOUNDNESS R186 — the item names the crate ROOT declares ITSELF, populated ONLY for the root file
+    /// (module path ""). Seeded into every file's `use` map under `crate::` + `ROOT_DECL_KEY` so
+    /// `expand` can refuse to attribute a `crate::<name>::…` path to a re-export glob when `<name>` is a
+    /// declaration of this crate — see the R186 comment at that branch. A cache entry written before this
+    /// field deserializes EMPTY, i.e. "the root declares nothing", which restores the pre-fix silence for
+    /// every warm file: the under-report direction, and the reason for the rev bump in `cache_schema`.
+    #[serde(default)]
+    pub(crate) root_decls: Vec<String>,
     /// This file's SUBMODULE-level `pub use` RE-EXPORT edges (see `Reexport` / `collect_reexports`) —
     /// every module in the file, not just its top level. The crate-wide union feeds the alias index a
     /// qualified call falls back to when its 2-segment tail names no definition.
@@ -626,6 +640,13 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         blanket_methods,
         // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
         root_reexports: if modpath.is_empty() { collect_root_reexports(items, include_tests) } else { HashMap::new() },
+        // R186 — the root's OWN declarations, a root-file fact for the same reason and from the same
+        // `items`. A `BTreeSet` on the wire as a sorted `Vec`, so the content hash is deterministic.
+        root_decls: if modpath.is_empty() {
+            crate::lang::collect_root_decls(items, include_tests).into_iter().collect()
+        } else {
+            Vec::new()
+        },
         // …and the SUBMODULE-level re-exports, which every file can contribute (the crate root included:
         // a `pub use self::platform::*` at the root is BOTH a root re-export and a module-alias edge, and
         // the two answer different questions — see `Reexport`).
@@ -713,6 +734,11 @@ pub(crate) struct MergedDecls {
     /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
     /// / `crate::X::foo` in ANY file resolves through the crate-root re-export (`root_reexports`).
     pub(crate) root_reexports: HashMap<String, String>,
+    /// SOUNDNESS R186 — the crate ROOT's own declared item names (see `FileDecls::root_decls`). UNIONED
+    /// across contributors rather than inserted, because a crate with BOTH `lib.rs` and `main.rs` has two
+    /// files at module path "" and each declares its own items — `root_reexports`' plain insert lets one
+    /// of the two win, which for THIS field would silently un-protect the other's modules.
+    pub(crate) root_decls: std::collections::BTreeSet<String>,
     /// Every file's SUBMODULE-level `pub use` re-export edges, concatenated in file walk order. Turned
     /// into the tail2-keyed alias index by `reexport_aliases`.
     pub(crate) reexports: Vec<Reexport>,
@@ -1131,6 +1157,8 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         // Only the ROOT file populates this, so there is at most one contributor — a plain insert.
         acc.root_reexports.insert(k.clone(), v.clone());
     }
+    // R186 — UNION, not insert: `lib.rs` and `main.rs` are both at module path "" and both contribute.
+    acc.root_decls.extend(fd.root_decls.iter().cloned());
     // Re-export EDGES are facts about distinct modules — they never collide, so they concatenate. The
     // caller walks files in a fixed order and `reexport_aliases` folds them into sorted maps, so the
     // resulting index does not depend on this order.
@@ -1512,6 +1540,15 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.root_reexports[k]);
+    }
+    s.push('\n');
+    // R186 — root_decls, sorted. Seeded into every file's `use` map and it DECIDES whether a
+    // `crate::<name>::…` path is glob-attributed, so adding or removing a root `mod`/type re-resolves
+    // types in OTHER files: same invalidation argument as `root_reexports` one block up.
+    s.push_str("root_decls");
+    for k in &m.root_decls {
+        s.push('|');
+        s.push_str(k);
     }
     s.push('\n');
     // reexports — the SUBMODULE-level `pub use` edges, SORTED (they are facts about distinct modules; the

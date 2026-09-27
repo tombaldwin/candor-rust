@@ -10,6 +10,64 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **ONE OUT-OF-CRATE GLOB IMPORT KILLED EVERY CRATE-LOCAL TYPE IN PARAMETER POSITION
+  (SOUNDNESS R186, with R224 merged into it — a published silent under-report).** `expand`'s
+  glob-attribution branch rewrote a `crate::`-rooted path to the file's (or `lib.rs`'s) single
+  external re-export glob, so `crate::stream::Stream` became `std::io::prelude::stream::Stream`,
+  matched no local definition, and the call edge off that parameter was DROPPED — no effect, no
+  `Unknown`, no row. Its own comment argued the rewrite was *"ATTRIBUTION only … local wins … no
+  fabrication"*, which is TRUE FOR A CALL PATH, whose 2-segment tail rescues it downstream, and
+  FALSE FOR A TYPE PATH, which has no such rescue.
+
+  Measured on two byte-identical modules differing only in a `use std::io::prelude::*;` line, both
+  COMPILED AND RUN (each `q` really reads 62 bytes): `deny Fs with_glob` exited **0** while
+  `deny Fs no_glob` exited **1** on the same tree. Also silent under `use std::collections::*` and
+  `use std::fmt::*`; the glob BEAT an explicit `use crate::stream::Stream;` in the same module; and a
+  single glob in `lib.rs` reached through the seeded `crate::*` key to rename crate-local types in
+  files containing no glob at all.
+
+  **The fix is a fact, not a hedge:** if the crate ROOT declares the head name itself, `crate::<head>`
+  names that declaration in rustc and can name nothing else (an explicit item shadows a glob), so the
+  attribution was provably wrong. A new `MergedDecls::root_decls` — the root file's own declared item
+  names, via the existing `declared_item_name` authority — is seeded into every file's `use` map and
+  the glob branch consults it. It does NOT narrow the sqlx `driver_prelude` rescue the branch exists
+  for: `sqlx-postgres` declares no root `net`, and both directions are gated
+  (`r186_glob_attribution_survives_where_the_crate_does_not_declare_the_name`).
+
+  Corpus A/B over 1,465 registry crates, arms proven distinct by content hash
+  (`d67d081b…` vs `17de3aa1…`), 321,073 → 320,549 rows: **ADDED 65 / REMOVED 585 / CHANGED 1,264**,
+  REACH **65,760 refusals across 254 of the 1,465 crates**. Verdict buckets: **67 rows went
+  absent/pure → a CONCRETE effect** (0.021% of post rows), **161 → `Unknown` only** (0.050%), **5 lost
+  a concrete effect** (0.0016%), 1,536 changed other fields. Every concrete GAIN was ground-truthed to
+  source and all four distinct claims are real: `criterion`'s 69 plot rows reach
+  `std::env::var_os("CRITERION_DEBUG")` through `crate::debug_enabled`; `term::{stdout,stderr}` reach
+  `env::var("TERM")` plus the terminfo file reads; `compiletest_rs`' `EarlyProps::from_file` reaches
+  `env::current_dir()` through `parse_aux_build`; `termina`'s `UnixTerminal::new` reaches
+  `UnixStream::pair()` (Ipc); and `dotenvy`/`dotenv` `Iter::next` reach `env::var` in `parse_line`.
+  **Zero fabrications in the ADDED population.** Real gates flipped in the silence-closing direction:
+  `term-0.7.0 deny Env Fs stdout` 0→1 and `criterion-0.7.0 deny Env plot` 0→1.
+
+  **The 5 concrete losses are named rather than rounded off.** Two are `proptest`'s
+  `var_error::osstring_invalid_string`, where the pre-fix `Env` was a FABRICATION — the file's
+  `use std::env::*` turned `crate::collection::vec` into `std::env::collection::vec`, and the executed
+  function touches no environment. The other three are `deadpool-postgres`'
+  `generic_client::Transaction::{prepare_cached, prepare_typed_cached, transaction}`, which lose a real
+  `Db` and a per-unit scoped gate with it (1→0). That is an UNMASKING, not a regression: with
+  `pub use deadpool::managed::reexports::*;` deleted from its `lib.rs`, BOTH binaries lose the same
+  three rows identically, so the pre-fix `Db` was the right answer by the wrong route. The underlying
+  hole — a call naming the enclosing impl's own type (`Transaction::prepare_cached` inside
+  `impl GenericClient for Transaction<'_>`) refuses on tail2 ambiguity and discloses NOTHING — is
+  reproduced by a standalone fixture and is identical on both binaries; it is filed separately.
+
+  79 rows also LOST an `Unknown`, almost all `ambiguous:same-name fns with different return types`
+  raised by the mis-prefixed path reaching the LEAF route. Spot-checked to source
+  (`openssl::ssl::SslRef::tmp_key`, `mongodb::client::Client::database`,
+  `flate2::zlib::read::ZlibDecoder::new_with_buf`, `tokio::sync::batch_semaphore::Semaphore::new_closed`):
+  each is pure construction, so the withdrawn ambiguity was an artifact of the wrong path, not a real
+  boundary. Cache schema **rev48 → rev49**, because a stale entry deserializes `root_decls` EMPTY —
+  "the crate root declares nothing" — which is exactly the input that restores the pre-fix silence off
+  a warm cache; a rev48 entry is now discarded (gated).
+
 - **THE PLATFORM `process` MODULE HAD NO RULE (SOUNDNESS R141 — a published silent under-report).**
   `std::os::{unix,windows,wasi}::process` is the exact sibling of `std::os::*::fs`, which R130 closed,
   and it was left unruled for the reason that row records: the audit boundary was drawn around `fs`.

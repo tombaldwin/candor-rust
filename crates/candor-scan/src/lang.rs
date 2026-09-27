@@ -1677,10 +1677,43 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // The crate's UNIQUE re-export glob: the seeded root glob (`crate::` + GLOB_KEY, the cross-file case) or,
     // failing that, a glob in THIS file's own `use` map (`GLOB_KEY` — the single-file/collect-time case,
     // iso_A/iso_C). Attribution only; a genuinely-local `net` module still resolves by tail2 downstream.
-    if let Some(glob) = root_glob(uses).or_else(|| unique_glob(uses)) {
-        return format!("{glob}::{}", segs.join("::"));
+    //
+    // SOUNDNESS R186 — **"ATTRIBUTION ONLY … LOCAL WINS … NO FABRICATION" IS TRUE FOR A CALL PATH AND
+    // FALSE FOR A TYPE PATH, AND THAT ASYMMETRY IS THE WHOLE DEFECT.** A call keeps its 2-segment tail, so
+    // a genuinely-local `net::foo` is rescued downstream by the tail2 index. A TYPE has no such rescue:
+    // the receiver-typing route stores exactly this string, so one `use std::io::prelude::*` anywhere in
+    // the file — or, through the seeded `crate::*`, anywhere in `lib.rs` — renamed `crate::stream::Stream`
+    // to `std::io::prelude::stream::Stream`, matched no local definition, dropped the CALL EDGE from
+    // `p.wibble()` entirely, and left the caller absent from `functions[]` with `deny Fs <mod>` at exit 0
+    // while the body provably read a file. Measured on two byte-identical modules differing only in that
+    // `use` line, both EXECUTED.
+    //
+    // The refusal is narrow and it is a FACT, not a hedge: if the crate ROOT declares `head` itself, then
+    // `crate::head` names that declaration in rustc and can name nothing else — an explicit item shadows
+    // a glob, and a root `mod net;` beside a root `use x::*` compiles precisely because of that rule. So
+    // this removes only attributions that were provably wrong; it does not narrow the sqlx
+    // `driver_prelude` rescue the branch exists for (`sqlx-postgres` declares no root `net`).
+    //
+    // WHAT IT DOES NOT COVER, stated as the limit it is: `root_decls` is read off the root file's item
+    // list, so a `mod`/type hidden behind an item-position macro (`cfg_rt! { pub mod net; }`, `include!`)
+    // is not in it and the glob attribution still fires there. That is the PRE-EXISTING behaviour, not a
+    // new hole, and the alternative — refusing whenever the root is macro-hidden — would withdraw the
+    // rescue that closed the sqlx `PgStream::connect` cardinal sin on evidence we do not have. Under-fire
+    // here, never over-fire.
+    match root_glob(uses).or_else(|| unique_glob(uses)) {
+        // R186 — THE REACH COUNTER (§E1), same shape and same reason as R160's `SELFALIAS` above: an
+        // unchanged corpus row is not evidence this code ran, and "0 changed with 0 reaches" is a
+        // different claim from "0 changed with 800 reaches". Gated on the cheap glob lookup having already
+        // succeeded, so the env read happens only where the refusal is the thing being counted.
+        Some(glob) if !root_declares(uses, segs[0]) => format!("{glob}::{}", segs.join("::")),
+        Some(_) => {
+            if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                eprintln!("R186REFUSE {path}");
+            }
+            segs.join("::")
+        }
+        None => segs.join("::"),
     }
-    segs.join("::")
 }
 
 /// R99 — resolve a MULTI-SEGMENT prefix of `segs` against the module-qualified alias entries
@@ -1789,6 +1822,45 @@ pub(crate) fn seed_mod_aliases(
             uses.insert(format!("{rel}::{name}"), target.clone());
         }
     }
+}
+
+/// SOUNDNESS R186 — the sentinel key under which the CRATE ROOT's own declared item names are seeded
+/// into every file's `use` map, as a `\u{1}`-separated list (`seed_root_decls`). Same escape-free
+/// reasoning as `GLOB_KEY`: `*` cannot appear in a Rust path segment, so the key can collide with no
+/// real import, and the seeded form is `crate::`-prefixed so no bare lookup can reach it either.
+pub(crate) const ROOT_DECL_KEY: &str = "*rootdecls";
+
+/// SOUNDNESS R186 — does the crate ROOT declare an item called `name`? Consulted before `expand`
+/// attributes a `crate::`-rooted path to a re-export glob; see the call site for why a positive answer
+/// makes the attribution provably wrong rather than merely doubtful.
+fn root_declares(uses: &HashMap<String, String>, name: &str) -> bool {
+    uses.get(&format!("crate::{ROOT_DECL_KEY}"))
+        .is_some_and(|list| list.split('\u{1}').any(|n| n == name))
+}
+
+/// SOUNDNESS R186 — seed the crate ROOT's declared item names into ONE file's `use` map under
+/// `crate::` + `ROOT_DECL_KEY`. Crate-rooted key only, for the reason `seed_root_reexports` states: a
+/// bare lookup must never reach a crate-wide fact.
+pub(crate) fn seed_root_decls(names: &std::collections::BTreeSet<String>, uses: &mut HashMap<String, String>) {
+    if names.is_empty() {
+        return;
+    }
+    let joined = names.iter().cloned().collect::<Vec<_>>().join("\u{1}");
+    uses.insert(format!("crate::{ROOT_DECL_KEY}"), joined);
+}
+
+/// SOUNDNESS R186 — the item names the crate ROOT declares ITSELF (`mod net;`, `struct Stream`, `fn f`),
+/// read from the root file's TOP-LEVEL item list only, because `crate::<head>` resolves at the root and
+/// nowhere else. Uses `decls::declared_item_name`, the one authority for "does this item bind a name",
+/// so a `#[cfg(test)]` item is included exactly when the scan includes tests.
+pub(crate) fn collect_root_decls(
+    items: &[syn::Item],
+    include_tests: bool,
+) -> std::collections::BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|it| crate::decls::declared_item_name(it, include_tests))
+        .collect()
 }
 
 /// The single crate-ROOT re-export glob (seeded under `crate::` + `GLOB_KEY`), if unambiguous — see
