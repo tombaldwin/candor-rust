@@ -23629,11 +23629,16 @@ pub fn go() {{ imp::doit(); }}
     /// definition. It must resolve to `other::Tx::grab` and must NOT acquire the root `Tx::grab`'s `Fs`.
     /// EXECUTED: it returns the path's length and opens nothing.
     ///
-    /// AND THE SPELLING THE FIX DOES NOT REACH, asserted so it cannot quietly change: `blind::via` writes
-    /// `crate::other::Tx::grab(x)` EXPLICITLY. `expand` strips a written `crate::` prefix (the R128 note in
-    /// `collector.rs` records that and depends on it), so the anchor is gone by the time this helper sees
-    /// the path, the ranking does not apply, and the call stays refused. That population is unchanged by
-    /// this fix — a stated limit, not a claim of safety.
+    /// AND THE EXPLICITLY-WRITTEN SPELLING, which (i) could NOT reach and (ii) DOES — recorded here because
+    /// this assertion is what forced the check. `blind::via` writes `crate::other::Tx::grab(x)` in full.
+    /// `expand` strips a written `crate::` prefix (the R128 note in `collector.rs` records that and depends
+    /// on it), so (i)'s anchor-gated exact pass never sees an anchor and declines. (ii)'s SPECIFICITY
+    /// ranking resolves it anyway and for a different reason: of the claimants, `other::Tx::grab` accounts
+    /// for all three written segments while the root's `Tx::grab` accounts for only two, so the deeper one
+    /// wins outright. It picks the PURE definition the source spelled, which is the correct answer.
+    /// This test asserted "stays refused" until (ii) landed, with a note saying to re-check the R128
+    /// paragraph if it ever resolved — it did, the anchor did NOT survive, and the R128 note is still
+    /// accurate: what changed is the ranking, not the stripping.
     #[test]
     fn r186i_a_root_anchored_use_map_path_resolves_to_the_definition_it_names() {
         let v = scan_src_to_json("r186iexact", "\
@@ -23673,11 +23678,122 @@ pub fn go() {{ imp::doit(); }}
                     direction a widening fails in:\n{vu:#}");
         assert!(vu["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "other::Tx::grab")),
                 "…and it must still resolve, to the definition the source spelled:\n{vu:#}");
-        // the spelling the fix does not reach — `expand` already stripped the anchor
+        // the explicitly-written spelling: (ii) resolves it by SPECIFICITY, to the PURE definition
         let bl = fn_entry(&v, "blind::via");
-        assert_eq!(effs(bl), vec!["Env".to_string()]);
-        assert!(bl["calls"].as_array().is_none_or(|c| c.is_empty()),
-                "an EXPLICITLY written `crate::other::Tx::grab` loses its anchor in `expand`, so this \
-                 stays refused. If it ever resolves, the anchor survived and the R128 note above it is \
-                 stale — check that note before accepting the change:\n{bl:#}");
+        assert_eq!(effs(bl), vec!["Env".to_string()],
+                   "`crate::other::Tx::grab` names the PURE `other::Tx::grab`; an `Fs` here would be the \
+                    root namesake's effect fabricated onto it:\n{bl:#}");
+        assert!(bl["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "other::Tx::grab")),
+                "…and it must RESOLVE: `other::Tx::grab` accounts for all three written segments while \
+                 the root's `Tx::grab` accounts for two, so specificity settles it outright:\n{bl:#}");
+    }
+
+    /// SOUNDNESS R186 lane, follow-up (ii) — **THE THREE MATCH RELATIONS ARE NOT EQUALLY STRONG, AND A
+    /// CLAIMANT ACCOUNTING FOR A TAIL OF THE WRITTEN PATH WAS CANCELLING ONE THAT ACCOUNTED FOR ALL OF IT.**
+    /// Two shapes, both taken from the registry, both driven here.
+    ///
+    /// (a) `super::`/`self::` WERE NOT STRIPPED, so a relative `use`-map value matched nothing at all.
+    /// `flate2`'s `gz/read.rs` writes `use super::bufread::GzDecoder;` then `GzDecoder::new(r)`, which
+    /// `expand` leaves as `super::bufread::GzDecoder::new`. Three claimants share the tail
+    /// (`bufread::`/`read::`/`write::`) and NO claimant can end with `::super::bufread::GzDecoder::new`, so
+    /// every relation missed and the PUBLIC `gz::read::GzDecoder::new` was refused and went ABSENT.
+    ///
+    /// (b) SPECIFICITY. `memchr`'s `memchr.rs` calls `arch::x86_64::memchr::count_raw`; that claimant
+    /// matches exactly, while the caller's own `memchr::count_raw` matches only because the written path
+    /// ends with `::memchr::count_raw` — two segments out of four. Ranked equal, two matches, refused.
+    ///
+    /// **A TIE AT THE MAXIMUM STILL REFUSES**, which is the whole safety argument: this narrows nothing
+    /// about the refusal, it only stops a weaker match cancelling a stronger one, so it can still pick only
+    /// a definition the source spelled. The third arm below is that control — two claimants at the SAME
+    /// specificity must yield None, never a coin flip.
+    #[test]
+    fn arm_exact_target_ranks_claimants_by_how_much_of_the_written_path_they_account_for() {
+        use crate::collector::arm_exact_target;
+        // (a) the flate2 shape — a `super::`-rooted use-map value
+        let mut f2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["gz::bufread::GzDecoder::new", "gz::read::GzDecoder::new", "gz::write::GzDecoder::new"] {
+            f2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert_eq!(arm_exact_target("super::bufread::GzDecoder::new", &f2).map(String::as_str),
+                   Some("gz::bufread::GzDecoder::new"),
+                   "`super::` must be stripped like `crate::` is, or a relative use-map value matches \
+                    nothing and a public API goes silent");
+        assert_eq!(arm_exact_target("self::bufread::GzDecoder::new", &f2).map(String::as_str),
+                   Some("gz::bufread::GzDecoder::new"), "and `self::` the same way");
+        // …and a relative path naming a module NO claimant has must still refuse
+        assert_eq!(arm_exact_target("super::nosuch::GzDecoder::new", &f2), None,
+                   "a module no claimant carries must refuse, never fall back to picking one");
+
+        // (b) the memchr shape — four written segments vs a two-segment tail match
+        let mut mc: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["memchr::count_raw", "arch::x86_64::memchr::count_raw", "arch::aarch64::memchr::count_raw"] {
+            mc.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert_eq!(arm_exact_target("arch::x86_64::memchr::count_raw", &mc).map(String::as_str),
+                   Some("arch::x86_64::memchr::count_raw"),
+                   "the claimant accounting for ALL FOUR written segments must not be vetoed by one that \
+                    accounts for the last two");
+        assert_eq!(arm_exact_target("arch::aarch64::memchr::count_raw", &mc).map(String::as_str),
+                   Some("arch::aarch64::memchr::count_raw"), "and symmetrically for the other arch");
+
+        // (c) THE TIE CONTROL. Two claimants at the SAME specificity — both accounting for every written
+        //     segment — must yield None. If this ever returns Some, the ranking has become a coin flip
+        //     and every safety claim above it is void.
+        let mut tie: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["a::deep::Thing::go", "b::deep::Thing::go"] {
+            tie.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert_eq!(arm_exact_target("deep::Thing::go", &tie), None,
+                   "two claimants EXTEND the written path equally — the source did not settle it, so \
+                    nothing may be picked");
+        // and a tie at the WEAK tier refuses too
+        let mut tie2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["Thing::go", "go::Thing::go"] {
+            tie2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert!(arm_exact_target("x::y::Thing::go", &tie2).is_none()
+                    || arm_exact_target("x::y::Thing::go", &tie2).map(String::as_str) == Some("Thing::go"),
+                "a weak-tier outcome must be a single spelled claimant or nothing");
+    }
+
+    /// SOUNDNESS R186 lane, follow-up (ii) — the END-TO-END half, on the `flate2` shape, EXECUTED.
+    /// `read::Wrapper::new` reaches the crate's own `bufread::Wrapper::new` through
+    /// `use super::bufread::Wrapper;`, and that one really reads a file. Before (ii) the caller was ABSENT
+    /// from `functions[]` and `deny Fs read` exited 0. The `write::` sibling is the over-charge control:
+    /// it is PURE and must not acquire its namesake's `Fs`.
+    #[test]
+    fn r186ii_a_relative_use_map_path_resolves_to_the_module_the_source_named() {
+        let v = scan_src_to_json("r186ii", "\
+            pub mod outer {\n\
+                pub mod bufread {\n\
+                    pub struct Wrapper { pub path: String }\n\
+                    impl Wrapper { pub fn new(p: &str) -> usize {\n\
+                        std::fs::read(p).map(|v| v.len()).unwrap_or(0) } }\n\
+                }\n\
+                pub mod write {\n\
+                    pub struct Wrapper;\n\
+                    impl Wrapper { pub fn new(p: &str) -> usize { p.len() } }\n\
+                }\n\
+                pub mod read {\n\
+                    use super::bufread::Wrapper;\n\
+                    pub fn make(p: &str) -> usize { Wrapper::new(p) }\n\
+                }\n\
+                pub mod readw {\n\
+                    use super::write::Wrapper;\n\
+                    pub fn make(p: &str) -> usize { let _ = std::env::var(\"X\"); Wrapper::new(p) }\n\
+                }\n\
+            }\n");
+        let r = fn_entry(&v, "outer::read::make");
+        assert_eq!(effs(r), vec!["Fs".to_string()],
+                   "`use super::bufread::Wrapper;` names the bufread one, which reads a file. Refusing \
+                    the whole tail because `read::`/`write::` share it is a §4 purity claim over a real \
+                    read:\n{r:#}");
+        assert!(r["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "outer::bufread::Wrapper::new")),
+                "and the EDGE must name the module the source wrote:\n{r:#}");
+        let w = fn_entry(&v, "outer::readw::make");
+        assert_eq!(effs(w), vec!["Env".to_string()],
+                   "`use super::write::Wrapper;` names the PURE one — an `Fs` here is the bufread \
+                    namesake's effect fabricated onto it, which is the direction a widening fails in:\n{w:#}");
+        assert!(w["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "outer::write::Wrapper::new")),
+                "…and it must resolve to that one:\n{w:#}");
     }

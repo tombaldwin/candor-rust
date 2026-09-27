@@ -10,6 +10,66 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **A CLAIMANT ACCOUNTING FOR A TAIL OF THE WRITTEN PATH WAS CANCELLING ONE THAT ACCOUNTED FOR ALL OF
+  IT, AND `self::`/`super::` WERE NOT STRIPPED AT ALL.** Two more defects in `arm_exact_target`'s match
+  relations, found by attacking the premise of a briefed HEDGE rather than building it — the answer for
+  27.7% of that hedge's own population is to RESOLVE, not to disclose.
+
+  (a) Only `crate::` was stripped, so a relative `use`-map value matched nothing. `flate2`'s `gz/read.rs`
+  writes `use super::bufread::GzDecoder;` then `GzDecoder::new(r)`, which `expand` leaves as
+  `super::bufread::GzDecoder::new`; three claimants share the tail (`bufread::`/`read::`/`write::`) and
+  no claimant can end with `::super::bufread::GzDecoder::new`, so the PUBLIC `gz::read::GzDecoder::new`
+  was refused and went ABSENT. (b) `memchr`'s `memchr.rs` calls `arch::x86_64::memchr::count_raw`; that
+  claimant matches EXACTLY while the caller's own `memchr::count_raw` matches only because the written
+  path ends with `::memchr::count_raw` — two segments out of four. Ranked equal, two matches, refused.
+
+  The score is how many WRITTEN segments a claimant accounts for. **A tie at the maximum still refuses**,
+  so this narrows nothing about the refusal — it only stops a weaker match cancelling a stronger one, and
+  can still pick only a definition the source spelled. Simulated over the 583 contested calls a
+  full-registry probe dumped before any code changed: **137 newly resolve, 0 stop resolving, 0 pick a
+  different claimant.**
+
+  **THE POPULATION WAS RE-MEASURED AFTER THE EXACT-QUAL FIX LANDED, and the two do not overlap:** same
+  counting code, only the binary differing, the exact-qual fix removed **256 contested lines, all
+  root-anchored and zero unanchored**. 583 lines / 504 callers remain — 494 unanchored (415 distinct
+  callers) plus 89 anchored ones the exact pass declined. Disambiguator census over the 494:
+  **137 (27.7%) RESOLVABLE** (117 by a deeper tail, 20 a single cfg-arm set), 197 need an
+  inherent-vs-trait fact the index does not hold, 160 are genuine multi-way contests.
+
+  A/B, `bin/corpus-ab.py`, 1,465 registry crates, `f92f4c26…` vs `793e44b9…`:
+  **ADDED 12 / REMOVED 264 / CHANGED 108**, REACH **3,183 rankings across 188 crates**. Buckets:
+  **9 absent/pure → CONCRETE, 4 → `Unknown` only, 0 CONCRETE LOST**, 366 other fields.
+  **REMOVED is not 0 and that is expected, because this is a RESOLUTION and not the disclosure-only
+  change that was briefed** — all 264 were `['Unknown']`, and the transitive closure partition puts
+  **264/264 in C1** (every reachable unit local, analysed and pure), **C2 = 0, C3 = 0**, using the same
+  classifier that bins 194 C3 rows in the κ-`invisible` population and 6/6 on synthetic injection.
+
+  **Every concrete gain traced to source; zero fabrications, and in all nine the callee's own row is
+  IDENTICAL in both arms, so the change is purely the edge existing.** `arboard`'s
+  `platform::linux::{Get::text, Get::image, Set::text, Set::image, Set::html}` really call
+  `x11::Clipboard::get_text`/`get_image` (`Clipboard::X11(clipboard) => clipboard.get_text(..)`), whose
+  row is `['Clock','Log']` in both arms; `lettre`'s `SmtpTransportBuilder::build` really calls
+  `Pool::new(self.pool_config, client)` and the ranking picks the **sync** pool for the sync builder and
+  the **async** pool for the async one — the sync/async pair being exactly the coin flip the tie rule
+  forbids; `async_process`'s `Reaper::register` edges to `reaper::Reaper::register`.
+  **BENEFIT, MEASURED NOT INFERRED: 8 scoped gates flip 0 → 1** — `arboard` ×6
+  (`deny Clock Log platform::linux::Get::text`, …) and `lettre` ×2. `async_process`'s was already 1 at
+  that scope, and `flate2`/`memchr`/`same-file` do not flip because their newly-resolved callees are
+  pure: there the gain is graph completeness, not an effect.
+
+  **One stated under-report:** `arboard`'s dispatch has an X11 arm and a `#[cfg(feature =
+  "wayland-data-control")]` arm, and the ranking resolves the X11 one only — the wayland arm's edge is
+  still missing. That is the enum-variant receiver typing's pre-existing single-arm behaviour, in the
+  under-report direction, on a non-default feature.
+
+  **No cache rev bump:** Pass-B resolution, nothing stored in `FileDecls`; `incremental_equiv.sh` is
+  120/120 edits byte-identical.
+
+  **What this leaves for the hedge, unbuilt and priced:** 446 contested lines / **442 distinct callers /
+  0.067% of 661,060 analysed units** across 138 crates (x11rb-protocol 44, time 16, cap-std 10×2, …),
+  of which 228 need the inherent-vs-trait fact and 197 are genuine contests. That residual is
+  disclosure-only and is the decision that still has to be taken.
+
 - ⚠ **AN EXACT QUAL IS STRONGER EVIDENCE THAN A `::`-SUFFIX, AND `arm_exact_target` RANKED THEM EQUAL —
   so a suffix claimant VETOED an exact one and the call went silent.** `arm_exact_target` (R440,
   generalised by R452) resolves a multi-claimant tail2 by taking the claimant the written path names,

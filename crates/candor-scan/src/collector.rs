@@ -6171,19 +6171,73 @@ pub(crate) fn arm_exact_target<'a>(
             return Some(hit);
         }
     }
-    let mut hit: Option<&String> = None;
-    for c in cands {
-        let names_it = c == bare
-            || bare.ends_with(&format!("::{c}"))
-            || c.ends_with(&format!("::{bare}"));
-        if names_it {
-            if hit.is_some() {
-                return None;
-            }
-            hit = Some(c);
+    // SOUNDNESS R186 lane, follow-up (ii) — **THE THREE RELATIONS ARE NOT EQUALLY STRONG EITHER, AND
+    // RANKING THEM BY HOW MUCH OF THE WRITTEN PATH EACH CLAIMANT ACCOUNTS FOR RESOLVES A POPULATION THAT
+    // WAS BEING REFUSED AS "AMBIGUOUS" WHILE THE SOURCE HAD ALREADY SETTLED IT.** Two things were wrong:
+    //
+    //  (a) ONLY `crate::` WAS STRIPPED, so a `self::`/`super::`-rooted `use`-map value kept its head and
+    //      matched nothing. `flate2`'s `gz/read.rs` writes `use super::bufread::GzDecoder;` then
+    //      `GzDecoder::new(r)`, which `expand` leaves as `super::bufread::GzDecoder::new`. Its tail
+    //      `GzDecoder::new` is claimed by `gz::bufread::`, `gz::read::` and `gz::write::` — and NO
+    //      claimant can end with `::super::bufread::GzDecoder::new`, so all three relations missed and the
+    //      public `gz::read::GzDecoder::new` was refused. With the head stripped, `bufread::GzDecoder::new`
+    //      is a suffix of exactly one claimant.
+    //
+    //  (b) A CLAIMANT ACCOUNTING FOR EVERY SEGMENT THE AUTHOR WROTE WAS VETOED BY ONE ACCOUNTING FOR A
+    //      TAIL OF IT. `memchr`'s `memchr.rs` calls `arch::x86_64::memchr::count_raw`; the claimant of
+    //      that name matches EXACTLY, while the caller's own `memchr::count_raw` matches only because the
+    //      written path ends with `::memchr::count_raw` — two segments out of four. Equal weight, two
+    //      matches, refused. So `count_raw`, `memchr2_raw`, `memchr3_raw` and their siblings were ABSENT.
+    //
+    // The score is the number of WRITTEN segments a claimant accounts for: all of them when the claimant
+    // IS the relative path or EXTENDS it with module context, and only its own length when the written
+    // path merely ends with it. **A TIE AT THE MAXIMUM STILL REFUSES** — this narrows nothing about the
+    // refusal, it only stops a weaker match from cancelling a stronger one, so it can still pick only a
+    // definition the source text spelled out. Simulated over the 583 contested calls a full-registry probe
+    // dumped: 137 newly resolve, **0 stop resolving and 0 pick a different claimant**.
+    //
+    // WHAT THIS DOES NOT CLAIM: the ranking is specificity, not scope. A relative path is resolved here
+    // without knowing which module it is relative to — the same pre-existing conflation the R186 guard
+    // inherits — so a crate with two same-named module chains could have the wrong one named. The refusal
+    // on a tie is what bounds that, and the direction is unchanged: it picks a spelled definition or it
+    // picks nothing.
+    let rel = {
+        let mut r = path;
+        while let Some(t) = r
+            .strip_prefix("crate::")
+            .or_else(|| r.strip_prefix("self::"))
+            .or_else(|| r.strip_prefix("super::"))
+        {
+            r = t;
         }
+        r
+    };
+    if rel.is_empty() {
+        return None;
     }
-    hit
+    let nrel = rel.split("::").count();
+    let scored: Vec<(usize, &String)> = cands
+        .iter()
+        .filter_map(|c| {
+            if c.as_str() == rel || c.ends_with(&format!("::{rel}")) {
+                Some((nrel, c)) // accounts for EVERY segment the author wrote
+            } else if rel.ends_with(&format!("::{c}")) {
+                Some((c.split("::").count(), c)) // accounts for only a tail of it
+            } else {
+                None
+            }
+        })
+        .collect();
+    let best = scored.iter().map(|(s, _)| *s).max()?;
+    let mut top = scored.iter().filter(|(s, _)| *s == best).map(|(_, c)| *c);
+    let hit = top.next()?;
+    if top.next().is_some() {
+        return None; // a TIE at the maximum refuses, exactly as the unranked loop did
+    }
+    if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+        eprintln!("SPECRANK {path} -> {hit}");
+    }
+    Some(hit)
 }
 
 /// SOUNDNESS R128 — is this call path's OWNING MODULE one whose items candor could not read in full?
