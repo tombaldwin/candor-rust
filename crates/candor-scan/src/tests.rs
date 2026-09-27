@@ -12811,6 +12811,32 @@ trait G {
         serde_json::from_str(&body.unwrap()).unwrap()
     }
 
+    /// `scan_src_to_json` for a MULTI-FILE crate — SOUNDNESS R751's fixtures need real FILE modules,
+    /// because the fact under test is the module path `module_path()` derives from a file's LOCATION. An
+    /// inline `mod` cannot exercise it (and the inline case is refused on purpose — see
+    /// `r751_an_inline_module_is_refused_rather_than_answered_one_level_off`).
+    #[cfg(test)]
+    fn scan_src_to_json_multi(tag: &str, files: &[(&str, &str)]) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-scan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{tag}\"\n")).unwrap();
+        for (rel, body) in files {
+            let f = d.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, body).unwrap();
+        }
+        let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        serde_json::from_str(&body.unwrap()).unwrap()
+    }
+
     /// `scan_src_to_json` with a `[dependencies]` table. SOUNDNESS R223 keys on the manifest's own
     /// dependency list, so a fixture whose Cargo.toml declares nothing cannot reach that branch at all.
     #[cfg(test)]
@@ -15677,7 +15703,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15688,7 +15714,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev49/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev50/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -23796,4 +23822,128 @@ pub fn go() {{ imp::doit(); }}
                     namesake's effect fabricated onto it, which is the direction a widening fails in:\n{w:#}");
         assert!(w["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "outer::write::Wrapper::new")),
                 "…and it must resolve to that one:\n{w:#}");
+    }
+
+    /// SOUNDNESS R751 — **A RELATIVE PATH KEEPS THE MODULE IT IS RELATIVE TO, AND BOTH LEVELS OF `super::`
+    /// LAND.** The fixture COMPILES AND RUNS (`one_up=10 two_up=61 selfcall=61`), and the two numbers are
+    /// the whole test: `a::eff::go` returns the path's LENGTH and opens nothing, while the root's
+    /// `eff::go` really reads the file.
+    ///
+    /// `super::eff::go` written in `a::b` means `a::eff::go` — the SHADOWING, pure one — and
+    /// `super::super::eff::go` means the root's effectful one. Before this, `expand` collapsed both to the
+    /// bare `eff::go`, whose tail is claimed by both definitions, and BOTH callers went silent.
+    ///
+    /// The two-level arm is also the proof that the three rules collapsed into two rather than piling up:
+    /// it lands only because `arm_exact_target`'s exact-qual preference now reads a REAL absoluteness
+    /// assertion (a `crate::`-rooted path) instead of `starts_with("crate::")` as a proxy for one. With the
+    /// proxy it died on a tail2 tie against `a::eff::go`.
+    #[test]
+    fn r751_a_relative_path_keeps_its_module_and_both_super_levels_resolve() {
+        let v = scan_src_to_json_multi("r751rel", &[
+            ("src/lib.rs", "pub mod eff { pub fn go(p: &str) -> usize {\n\
+                 std::fs::read(p).map(|v| v.len()).unwrap_or(0) } }\n\
+             pub mod a;\n"),
+            ("src/a/mod.rs", "pub mod eff { pub fn go(p: &str) -> usize { p.len() } }\npub mod b;\n"),
+            ("src/a/b.rs", "\
+                pub fn one_up(p: &str) -> usize { let _ = std::env::var(\"X\"); super::eff::go(p) }\n\
+                pub fn two_up(p: &str) -> usize { let _ = std::env::var(\"Y\"); super::super::eff::go(p) }\n\
+                pub fn selfcall(p: &str) -> usize { self::helper(p) }\n\
+                pub fn helper(p: &str) -> usize {\n\
+                    std::fs::read(p).map(|v| v.len()).unwrap_or(0) }\n"),
+        ]);
+        let one = fn_entry(&v, "a::b::one_up");
+        assert!(!effs(one).iter().any(|e| e == "Fs"),
+                "`super::eff::go` in `a::b` is `a::eff::go`, which returns the path's LENGTH and opens \
+                 nothing (EXECUTED: 10). An `Fs` here is the ROOT namesake's effect fabricated onto it — \
+                 the direction a path-rewriting change fails in:\n{one:#}");
+        assert!(one["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "a::eff::go")),
+                "…and it must RESOLVE, to the shadowing definition:\n{one:#}");
+        let two = fn_entry(&v, "a::b::two_up");
+        assert!(effs(two).iter().any(|e| e == "Fs"),
+                "`super::super::eff::go` is the ROOT's `eff::go`, which really reads the file (EXECUTED: \
+                 61). Two levels land only because the exact-qual preference now reads a real \
+                 absoluteness assertion rather than a `crate::`-prefix proxy:\n{two:#}");
+        assert!(two["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "eff::go")),
+                "…and the edge must name the ROOT definition, not `a::eff::go`:\n{two:#}");
+    }
+
+    /// SOUNDNESS R751 — **THE DIRECTION BOUND, IN ITS OWN WORDS, AND IT IS WEAKER THAN R186's.**
+    ///
+    /// R186's guard could only ever UNDER-resolve, because its branch emits the glob prefix or the literal
+    /// and nothing else. R751 REWRITES the path, so that argument does not carry and must never be quoted
+    /// for it. The bound that does:
+    ///
+    /// > `module_path()` does not have to agree with rustc. It has to agree with the ENGINE'S OWN QUAL
+    /// > SPACE, and it does BY CONSTRUCTION, because the quals this scan mints and the `modpath` seeded
+    /// > into `expand` both come from that one function.
+    ///
+    /// A `#[path]` module is where those two could diverge from rustc together, which is the point: the
+    /// file is `src/elsewhere.rs` while the module is really `holder::inner`, so `module_path()` answers
+    /// `elsewhere` — and the unit quals are `elsewhere::…` too. `self::sibling` therefore resolves to
+    /// `elsewhere::sibling`, the qual the scan actually emitted, and `super::eff::go` to the root's. Both
+    /// are right IN THE ENGINE'S OWN TERMS, which is the only frame in which resolution happens.
+    /// EXECUTED: `viasuper=63 selfsib=63`, both real reads.
+    #[test]
+    fn r751_a_path_attribute_module_stays_consistent_with_the_engines_own_quals() {
+        let v = scan_src_to_json_multi("r751path", &[
+            ("src/lib.rs", "pub mod eff { pub fn go(p: &str) -> usize {\n\
+                 std::fs::read(p).map(|v| v.len()).unwrap_or(0) } }\n\
+             pub mod holder { pub mod eff { pub fn go(_p: &str) -> usize { 7 } } }\n\
+             #[path = \"elsewhere.rs\"]\npub mod inner_of_holder;\n"),
+            ("src/elsewhere.rs", "\
+                pub fn viasuper(p: &str) -> usize { let _ = std::env::var(\"X\"); super::eff::go(p) }\n\
+                pub fn selfsib(p: &str) -> usize { self::sibling(p) }\n\
+                pub fn sibling(p: &str) -> usize {\n\
+                    std::fs::read(p).map(|v| v.len()).unwrap_or(0) }\n"),
+        ]);
+        let s = fn_entry(&v, "elsewhere::selfsib");
+        assert!(s["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "elsewhere::sibling")),
+                "`self::sibling` must resolve to the qual THIS SCAN MINTED for it — `module_path()` feeds \
+                 both, so they cannot disagree even where both disagree with rustc:\n{s:#}");
+        let u = fn_entry(&v, "elsewhere::viasuper");
+        assert!(effs(u).iter().any(|e| e == "Fs"),
+                "`super::eff::go` pops one level off `elsewhere` and names the ROOT's `eff::go`, which \
+                 really reads (EXECUTED: 63):\n{u:#}");
+        assert!(!u["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "holder::eff::go")),
+                "…and it must NOT name `holder::eff::go`, which returns 7 and opens nothing:\n{u:#}");
+    }
+
+    /// SOUNDNESS R751 — **AN INLINE MODULE IS REFUSED RATHER THAN ANSWERED ONE LEVEL OFF**, and this is the
+    /// R400 shape: `modpath` is the FILE's, an inline `mod inner { … }` is one level deeper, so using it
+    /// for `super::` there would resolve to the file's own module instead of its parent. `submodule_uses`
+    /// plants `SUPER_SCOPE_MARKER` for exactly this question and `absolutise` refuses on it.
+    ///
+    /// The assertion is the NEGATIVE one: inside the inline module, `super::pick` must NOT acquire the
+    /// effect of the file-module's `pick`, because one level off is precisely what would name it. Where the
+    /// refusal leaves it is today's behaviour — an under-report, which is the side this file prefers.
+    /// EXECUTED: `inner=4` (the root's pure `pick`), never the file module's effectful one.
+    #[test]
+    fn r751_an_inline_module_is_refused_rather_than_answered_one_level_off() {
+        // THE FIXTURE IS ARRANGED SO THE WRONG ANSWER IS VISIBLE, and the first version was not: it had
+        // the ROOT's `pick` pure, so "refused" and "resolved one level off" produced the SAME report and
+        // the test passed with the refusal deliberately disabled — a vacuous guard of exactly the shape
+        // §E1 warns about. Now the ROOT's `pick` READS A FILE and the file module's is pure, so answering
+        // one level off (root instead of `outer`) shows up as a fabricated `Fs` and the test fails.
+        let v = scan_src_to_json_multi("r751inline", &[
+            ("src/lib.rs", "pub mod deep { pub fn target(p: &str) -> usize {\n\
+                 std::fs::read(p).map(|v| v.len()).unwrap_or(0) } }\npub mod outer;\n"),
+            ("src/outer.rs", "\
+                pub mod deep { pub fn target(p: &str) -> usize { p.len() } }\n\
+                pub mod inner {\n\
+                    pub fn call(p: &str) -> usize { let _ = std::env::var(\"X\"); super::deep::target(p) }\n\
+                }\n"),
+        ]);
+        // the control: the ROOT's `deep::target` must really be the effectful one, or the assertion below
+        // is empty. It is TWO segments deliberately — a one-segment root target is unreachable by the
+        // level-off answer too, which is what made the first two versions of this test vacuous.
+        assert_eq!(effs(fn_entry(&v, "deep::target")), vec!["Fs".to_string()],
+                   "the crate root's `deep::target` must read a file — it is the effect whose ABSENCE \
+                    below is the whole test");
+        let c = fn_entry(&v, "outer::inner::call");
+        assert!(!effs(c).iter().any(|e| e == "Fs"),
+                "inside an INLINE module `super::deep::target` means `outer::deep::target`, which is PURE \
+                 — but `modpath` here is the FILE's (`outer`), so popping one level names the CRATE ROOT's \
+                 `deep::target`, which READS A FILE. Answering one level off is the R400 shape; \
+                 `absolutise` refuses on `SUPER_SCOPE_MARKER` instead. An `Fs` here is that \
+                 fabrication:\n{c:#}");
     }

@@ -255,6 +255,13 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // vetoes what that loop body builds, so a rev18 entry replays, warm, a body that reads as pure
     // while its guard demonstrably drops. serde would read that entry without complaint; the token is
     // the only thing that stops it. Same shape as rev16.
+    // rev50: SOUNDNESS R751 changed what an EXISTING field RECORDS. Pass A resolves TYPE paths through
+    // `expand`, which now turns a `self::`/`super::`-rooted path into a crate-root-ABSOLUTE one instead of
+    // collapsing it — so `fields`, `rets`, `field_elem` and the rest hold DIFFERENT strings for every
+    // relative path in the file. A rev49 entry was written by a binary that collapsed them, so a warm
+    // cache serves the pre-fix answer: the module context absent, the path matching no definition, and
+    // the caller ABSENT from `functions[]` over a call that really performs the effect. Same shape as
+    // rev16 — a change in what a field records needs a bump exactly as a field addition does.
     // rev49: FileDecls gained `root_decls` (R186 — the crate ROOT's own declared item names). A rev48
     // entry has none, so it deserializes EMPTY: "the crate root declares nothing" — and an empty set is
     // exactly what makes `expand`'s glob branch attribute `crate::stream::Stream` to a prelude again. A
@@ -315,7 +322,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev49/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev50/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -522,6 +529,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // `#[path = "…"]` on a `mod` resolves against the DIRECTORY of the file that declares it.
     let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
     let mut uses = HashMap::new();
+    // SOUNDNESS R751 — Pass A resolves TYPE paths through `expand` too, so it needs the same fact.
+    crate::lang::seed_modpath(modpath, &mut uses);
     let mut fields = HashMap::new();
     let mut field_borrows = HashMap::new();
     let mut field_elem = HashMap::new();

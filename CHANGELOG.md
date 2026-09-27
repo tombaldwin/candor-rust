@@ -10,6 +10,80 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **A RELATIVE PATH LOST THE MODULE IT WAS RELATIVE TO, AND THREE RULES HAD BEEN ADDED OVER THAT LOSS
+  BEFORE ANYONE SAID WHAT THE LOSS WAS (SOUNDNESS R751).** `expand` stripped `crate`/`self`/`super` in one
+  loop and then resolved all three as if crate-rooted, discarding the module a *relative* path is relative
+  to. `self::pixmap` became `pixmap`; `super::choose_n` became `choose_n`. It now recovers the module:
+  `self::X` in module M is `M::X`, and each `super::` pops one segment off M.
+
+  **A GUARD CAN SUPPRESS BUT IT CANNOT SUPPLY** — the sentence that decides this area, and the reason the
+  proposed remedy (a per-MODULE version of `root_decls`) was refused rather than built. Measured on x11rb it
+  is worse than doing nothing: `protocol::present` really does declare `pixmap`, so that guard fires on
+  `self::pixmap(..)`, correctly suppresses the glob — and the glob was the only thing SUPPLYING the module
+  qualifier stripping had discarded. The path collapses to the one-segment `pixmap`, whose LEAF is claimed
+  by both `protocol::present::pixmap` and `protocol::xproto::PixmapWrapper::pixmap`, and a real `Log` is
+  lost. Nothing a guard over that branch can do produces a module name.
+
+  **The absoluteness assertion is now the thing itself rather than a proxy for it.** `absolutise` emits a
+  `crate::`-rooted path, and a surviving `crate::` head already means "absolute from the crate root"
+  everywhere downstream — so R748(i)'s exact-qual preference, which was gated on
+  `starts_with("crate::")` *as a stand-in*, now reads the real fact. Three readers consult that head and
+  all three want exactly root-absoluteness, so none needs a second spelling: `arm_exact_target`,
+  `macro_hidden_owner` (R128, whose own note recorded the relative spellings as a STATED under-report —
+  they are answerable now), and `scan.rs`'s R270 module-relative `by_leaf` check.
+  **That is the three rules collapsing into two:** `super::super::eff::go` previously absolutised to the
+  right string and then died on a tail2 tie; with a real assertion the exact preference settles it.
+
+  **DIRECTION — WEAKER THAN R186's BOUND AND NEVER TO BE QUOTED AS THE SAME.** The guard could only
+  under-resolve; this REWRITES the path. The bound that applies: *`module_path()` need not agree with
+  rustc; it must agree with the ENGINE'S OWN QUAL SPACE, and does by construction, because the quals this
+  scan mints and the seeded `modpath` both come from that one function.* A `#[path]` fixture pins it. Inline
+  modules are REFUSED outright via the existing `SUPER_SCOPE_MARKER` — `modpath` is the FILE's and is stale
+  by one level there, which is the R400 shape — and that refusal is DRIVEN: disabling it fabricates an `Fs`
+  and the test fails. Two earlier versions of that test were vacuous (they passed with their own subject
+  disabled) because the wrong answer was indistinguishable; the fixture now makes it visible.
+
+  A/B, `bin/corpus-ab.py` from the umbrella, 1,465 registry crates, `793e44b9…` vs `89c3e955…`:
+  **ADDED 21 / REMOVED 85 / CHANGED 535**, REACH **136,520 rewrites across 495 crates** — the largest reach
+  of this lane by two orders of magnitude. Buckets: **212 absent/pure → CONCRETE (0.066% of 319,981 post
+  rows)**, 23 → `Unknown` only, **2 CONCRETE LOST**, 352 other fields.
+
+  **EVERY CONCRETE GAIN TRACED, AND NOT BY SAMPLING: 224 rows reduce to 58 distinct (crate, fn) pairs,
+  which reduce to FOUR distinct edges, all four read back to their source line, and in all four the
+  callee's row is IDENTICAL in both arms** — so the change is purely the edge existing.
+  · **mongodb, 53 fns / 210 rows:** `server_selection.rs:89` writes `super::choose_n(..)`; `topology.rs:752`
+    is `values.choose_multiple(&mut rand::rngs::SmallRng::from_os_rng(), n)`. The driver reaches the OS RNG
+    on the server-selection path of essentially every operation and candor said it did not.
+    `deny Rand sdam::…::server_selection`, `deny Rand gridfs::upload` and `deny Rand client::csfle` all go
+    **0 → 1**.
+  · **rustversion, 4 fns:** `expr.rs:125/154` write `self::parse(..)`; `expr::parse` carries
+    `['Clock','Env','Unknown']` in both arms, from `time.rs` reading `env::var_os("CARGO_PKG_NAME")` and
+    `SystemTime::now()`. `deny Clock Env expr::parse_any` **0 → 1**.
+  · **aws-smithy-runtime, 1 fn:** `operation.rs:149` writes `super::invoke(..)`.
+  · plus 3 added rows of the same shape.
+
+  **THE 2 LOSSES ARE R751 BEING RIGHT WHERE THE OLD ROUTE WAS ACCIDENTALLY RIGHT**, and they are named
+  rather than rounded off. `cap-primitives`' `rustix::freebsd::fs::set_permissions_impl` writes
+  `super::beneath_supported()`; the true unit is `…fs::check::beneath_supported`, reached through
+  `pub(crate) use check::beneath_supported;` at `fs/mod.rs:11`. The module-blind route leaf-matched it; the
+  correct absolute qual `…fs::beneath_supported` names no unit, so it under-reports and
+  `deny Fs rustix::freebsd::fs::set_permissions_impl` goes 1 → 0 on that one function. The remedy is the
+  re-export index answering a module-qualified key, which is a separate change.
+
+  Removal partition of the 85 (transitive closure, same classifier that bins 194 C3 rows elsewhere and 6/6
+  on synthetic injection): **74 C1** (whole closure local, analysed, pure), **C2 = 0**, **C3 = 11 — and C3
+  is NOT empty this time.** Ten of the eleven are foreign-keyed `interfaceUnion`/`dispatchesOn` rows
+  (`serde#Serialize::serialize`, `sval#Value::stream`) that no consumer can join — the R653 phantom-key
+  class, so their withdrawal is a win. The eleventh is `arc_swap`'s `<lazy>::debt::list::THREAD_HEAD`,
+  which loses an `ambiguous:same-name fns with different return types` hedge: the body is
+  `LocalNode { node: Cell::new(None), fast: FastLocal::default(), … }` and the ambiguity claim was FALSE —
+  the source named the module. One row in 1,465 crates.
+
+  **Cache rev 49 → 50.** Pass A resolves TYPE paths through `expand`, so `fields`/`rets`/`field_elem` hold
+  different strings for every relative path; a rev49 entry was written by a binary that collapsed them, and
+  a warm cache would serve the pre-fix answer — module context absent, path matching no definition, caller
+  ABSENT over a call that really performs the effect.
+
 - ⚠ **A CLAIMANT ACCOUNTING FOR A TAIL OF THE WRITTEN PATH WAS CANCELLING ONE THAT ACCOUNTED FOR ALL OF
   IT, AND `self::`/`super::` WERE NOT STRIPPED AT ALL.** Two more defects in `arm_exact_target`'s match
   relations, found by attacking the premise of a briefed HEDGE rather than building it — the answer for

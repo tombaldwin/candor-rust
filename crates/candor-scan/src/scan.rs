@@ -1717,6 +1717,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // crate's own root item: an explicit declaration shadows a glob in rustc, so the attribution was
         // provably wrong, and for a TYPE path (which has no tail2 rescue) it cost the call edge outright.
         crate::lang::seed_root_decls(&merged.root_decls, &mut uses);
+        // SOUNDNESS R751 — …and this file's own module path, so `expand` can turn a `self::`/`super::`
+        // path into a crate-root-ABSOLUTE one instead of collapsing it and losing the module context.
+        crate::lang::seed_modpath(&modpath, &mut uses);
         // …and the MODULE-QUALIFIED external aliases (R99): a submodule `pub use std::process::Command`, a
         // nominal `pub type Cmd = std::process::Command`, a callable-typed `const`. Same cross-file problem
         // the root re-exports have — the declaring module is usually a DIFFERENT file — and the same answer.

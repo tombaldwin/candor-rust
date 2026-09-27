@@ -1598,6 +1598,17 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // `use` aliases, so after stripping the prefix we return it as-is. (Re-applying `uses` here would let
     // a `use other::config;` import hijack a local `crate::config::load` call.)
     let rooted_local = matches!(segs.first().copied(), Some("crate" | "self" | "super"));
+    // SOUNDNESS R751 — recover the module a `self::`/`super::` path is relative to BEFORE the collapse
+    // below discards it. `abs` is the crate-root-absolute form; the only OUTPUT it changes is this
+    // branch's literal fallthrough, which is returned `crate::`-rooted so downstream reads the
+    // absoluteness assertion rather than a proxy for it. See `absolutise`.
+    let abs = absolutise(&segs, uses);
+    if let Some(a) = &abs {
+        segs = a.split("::").collect();
+        if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+            eprintln!("R751ABS {path} -> crate::{a}"); // §E1 REACH COUNTER
+        }
+    }
     while matches!(segs.first().copied(), Some("crate" | "self" | "super")) {
         segs.remove(0);
     }
@@ -1744,9 +1755,20 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
             if std::env::var("CANDOR_R186_DEBUG").is_ok() {
                 eprintln!("R186REFUSE {path}");
             }
-            segs.join("::")
+            r751_literal(&segs, abs.is_some())
         }
-        None => segs.join("::"),
+        None => r751_literal(&segs, abs.is_some()),
+    }
+}
+
+/// SOUNDNESS R751 — the rooted branch's LITERAL fallthrough, carrying the absoluteness assertion when
+/// `absolutise` supplied it. One helper rather than two call sites, so the two cannot drift.
+fn r751_literal(segs: &[&str], absolutised: bool) -> String {
+    let joined = segs.join("::");
+    if absolutised {
+        format!("crate::{joined}")
+    } else {
+        joined
     }
 }
 
@@ -1856,6 +1878,117 @@ pub(crate) fn seed_mod_aliases(
             uses.insert(format!("{rel}::{name}"), target.clone());
         }
     }
+}
+
+/// SOUNDNESS R751 — the sentinel key under which THIS FILE'S OWN MODULE PATH is seeded. Same
+/// escape-free argument as `GLOB_KEY`: `*` cannot appear in a Rust path segment, so it can collide with
+/// no import, and `expand` matches whole `::`-separated segments so it can never be matched as one.
+pub(crate) const MODPATH_KEY: &str = "*modpath";
+
+/// SOUNDNESS R751 — seed this file's module path, so `expand` can recover the module a `self::`/`super::`
+/// path is relative TO instead of discarding it.
+pub(crate) fn seed_modpath(modpath: &str, uses: &mut HashMap<String, String>) {
+    uses.insert(MODPATH_KEY.to_string(), modpath.to_string());
+}
+
+/// SOUNDNESS R751 — **THE CONFLATION ITSELF, NOT A THIRD GUARD OVER ITS SYMPTOMS.**
+///
+/// `expand` strips `crate`/`self`/`super` in ONE loop and then resolves all three as if crate-rooted, so
+/// the module a RELATIVE path is relative to is thrown away. Three separate rules were added over that
+/// loss before anyone said what the loss was; this recovers the fact instead. `self::X` in module M is
+/// `M::X`; each `super::` pops one segment off M.
+///
+/// **THE SENTENCE THAT DECIDES THIS WHOLE AREA, and neither R186's row nor the brief that commissioned
+/// the alternative had it: A GUARD CAN SUPPRESS BUT IT CANNOT SUPPLY.** The remedy proposed for this was a
+/// per-MODULE version of `root_decls` — ask whether the path's own parent declares the head, rather than
+/// whether the crate root does. Measured on x11rb, that is WORSE than doing nothing: `protocol::present`
+/// really does declare `pixmap`, so the guard fires on `self::pixmap(..)`, correctly suppresses the glob —
+/// and the glob was the only thing SUPPLYING the module qualifier that stripping `self::` had discarded.
+/// The path collapses to the one-segment `pixmap`, whose LEAF is claimed by both
+/// `protocol::present::pixmap` and `protocol::xproto::PixmapWrapper::pixmap`, so it is refused and a real
+/// `Log` is lost. A guard over this branch can only ever withhold an attribution; nothing it can do
+/// produces a module name. That is why the fix is here and not there.
+///
+/// **IT EMITS A `crate::`-ROOTED PATH ON PURPOSE, AND THAT IS THE WHOLE PLUMBING.** A surviving `crate::`
+/// head already means "absolute from the crate root" everywhere downstream, so returning one turns what
+/// was a PROXY into the assertion itself — `arm_exact_target`'s exact-qual preference was gated on
+/// `starts_with("crate::")` precisely as a stand-in for absoluteness, and now that gate is reading the
+/// real thing. Three readers consult that head and all three want exactly root-absoluteness, so none has
+/// to be taught a second spelling and none can drift from the others:
+///   * `arm_exact_target` — the exact-qual preference (and `bare`);
+///   * `macro_hidden_owner` — R128's "which module owns this path", whose own note recorded the
+///     relative spellings as a STATED under-report; they are now answerable, so that hedge reaches them;
+///   * `scan.rs`'s R270 module-relative `by_leaf` check, which strips the head to get the target.
+///
+/// **DIRECTION — AND IT IS A WEAKER BOUND THAN THE GUARD-ONLY CHANGES, WHICH MUST NEVER BE QUOTED FOR IT.**
+/// R186's guard could only ever UNDER-resolve, because its branch emits the glob prefix or the literal and
+/// nothing else (`r186_the_rooted_glob_branch_emits_only_the_glob_prefix_or_the_literal` pins that). This
+/// REWRITES the path, so that argument does not carry. The bound that does:
+///
+/// > `module_path()` does not have to agree with rustc. It has to agree with the ENGINE'S OWN QUAL SPACE,
+/// > and it does BY CONSTRUCTION, because the quals this scan mints and the `modpath` seeded here both
+/// > come from that one function.
+///
+/// So a `#[path = "elsewhere.rs"]` module whose real path is `real::inner` is called `elsewhere` by both,
+/// and `self::sibling` resolves to `elsewhere::sibling` — the qual the scan actually emitted. Pinned by
+/// `r751_a_path_attribute_module_stays_consistent_with_the_engines_own_quals`.
+///
+/// **REFUSED INSIDE AN INLINE MODULE, and that refusal is load-bearing rather than tidy.** `modpath` is
+/// the FILE's, while an inline `mod inner { … super::X … }` sits one level deeper, so using it there is
+/// wrong by exactly one level — the R400 shape this file already records a REVERT for. `submodule_uses`
+/// plants `SUPER_SCOPE_MARKER` for precisely this question and `rebound` already consults it; so does
+/// this, and `r751_an_inline_module_is_refused_rather_than_answered_one_level_off` drives it.
+fn absolutise(segs: &[&str], uses: &HashMap<String, String>) -> Option<String> {
+    if uses.contains_key(crate::decls::SUPER_SCOPE_MARKER) {
+        return None; // inline module: `modpath` is the FILE's and is stale by at least one level
+    }
+    let modpath = uses.get(MODPATH_KEY)?;
+    let mut ups = 0usize;
+    let mut i = 0usize;
+    while let Some(h) = segs.get(i) {
+        match *h {
+            "self" => {}
+            "super" => ups += 1,
+            // An explicitly written `crate::` head is ALREADY absolute and keeps today's handling. Left
+            // alone deliberately: prefixing it too would change every crate-rooted path in every crate,
+            // which is a larger change with its own audit surface, not a tidy-up of this one.
+            "crate" => return None,
+            // The first non-prefix segment ENDS the prefix run — `break`, never `return`. Writing
+            // `return None` here made the whole function inert (`self::pixmap` bails on `pixmap`), and it
+            // was caught by the §E1 reach counter reading 0 where the prototype read 62 on the same crate,
+            // not by any test: every fixture simply kept its pre-fix answer, which is what an inert change
+            // and a safe one look like from the outside.
+            _ => break,
+        }
+        i += 1;
+    }
+    if i == 0 {
+        return None; // not a relative rooted path
+    }
+    let mut base: Vec<&str> =
+        if modpath.is_empty() { Vec::new() } else { modpath.split("::").collect() };
+    for _ in 0..ups {
+        // `?` rather than an `if`: walking above the crate root refuses rather than guessing. Written as
+        // the explicit `if` first, which `cargo +stable clippy` rejects (`question_mark`) while the pinned
+        // nightly accepts — the third time this session the two toolchains have disagreed.
+        base.pop()?;
+    }
+    let rest = &segs[i..];
+    if rest.is_empty() {
+        return None;
+    }
+    // A target that lands at the CRATE ROOT with a ONE-segment name gets no prefix, because the prefix
+    // would break the very key it has to be looked up by: `tail2("crate::pick")` is `crate::pick`, which
+    // no definition qual can ever equal, so the path would resolve to nothing at all. A root free fn has
+    // a one-segment qual and is reached through `by_leaf` — `scan.rs`'s R270 note records exactly that
+    // shape. Emitting the bare leaf here leaves it on that route, which is what it was on before, so this
+    // case is a NO-OP against HEAD rather than an improvement. Found by an inline-module test that kept
+    // passing with its own subject disabled.
+    if base.is_empty() && rest.len() == 1 {
+        return None;
+    }
+    base.extend_from_slice(rest);
+    Some(base.join("::"))
 }
 
 /// SOUNDNESS R186 — the sentinel key under which the CRATE ROOT's own declared item names are seeded
