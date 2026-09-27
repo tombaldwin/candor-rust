@@ -23448,3 +23448,108 @@ pub fn go() {{ imp::doit(); }}
                 "the crate DECLARES `read`, which shadows the glob — `crate::read` is its own pure \
                  function and charging `Fs` here is a fabrication:\n{shadow:#}");
     }
+
+    /// SOUNDNESS R186 — **THE GUARD FIRES ON WRONG EVIDENCE FOR A `self::`/`super::` PATH, AND THIS TEST
+    /// IS THE ENTIRE SAFETY ARGUMENT FOR THAT.** It pins the DIRECTION, not the correctness.
+    ///
+    /// `expand` strips `crate`/`self`/`super` in one loop and then runs crate-ROOT resolution on all
+    /// three, so `self::stream::Stream` written inside `mod m` — which in rustc means `m::stream::Stream`,
+    /// the root's `stream` not being in scope inside `m` at all — is asked whether the CRATE ROOT declares
+    /// `stream`. The conflation predates `root_decls` and the guard inherits it. What makes it affordable
+    /// is that the branch has only TWO possible outputs, the glob prefix or the literal, so a
+    /// wrong-evidence refusal can only UNDER-RESOLVE and can never emit a third, different prefix.
+    ///
+    /// GROUND TRUTH, EXECUTED: the fixture compiles and prints `rel=10 slf=10 rooted=63` — `rel` and `slf`
+    /// reach `m`'s own PURE `Stream::wibble` (the path string's length), `rooted` reaches the ROOT's, which
+    /// really reads a file. So the ONE thing this test must forbid is `m::rel`/`m::slf` acquiring `Fs`:
+    /// that is the fabrication a scope-blind rule would produce, and it is the reason this file's
+    /// [[candor-denylist-over-allowlist]] discipline tolerates the wrong question here at all.
+    ///
+    /// It also records what the guard BOUGHT on this shape rather than only what it cost: before the fix
+    /// `m::slf` and `m::rooted` were ABSENT from `functions[]` — this family's under-report signature —
+    /// and they are now disclosed.
+    ///
+    /// If this test ever fails with `Fs` on `rel` or `slf`, the branch has gained a third output and the
+    /// whole direction argument above is void; do not "fix" the fixture.
+    #[test]
+    fn r186_a_wrong_scope_refusal_under_resolves_and_never_fabricates() {
+        let v = scan_src_to_json("r186scope", "\
+            pub mod stream {\n\
+                pub struct Stream { pub path: String }\n\
+                impl Stream { pub fn wibble(&self) -> usize {\n\
+                    std::fs::read(&self.path).map(|v| v.len()).unwrap_or(0) } }\n\
+            }\n\
+            pub mod m {\n\
+                #[allow(unused_imports)] use std::io::prelude::*;\n\
+                pub mod stream {\n\
+                    pub struct Stream { pub path: String }\n\
+                    impl Stream { pub fn wibble(&self) -> usize { self.path.len() } }\n\
+                }\n\
+                pub fn rel(p: &stream::Stream) -> usize { p.wibble() }\n\
+                pub fn slf(p: &self::stream::Stream) -> usize { p.wibble() }\n\
+                pub fn rooted(p: &crate::stream::Stream) -> usize { p.wibble() }\n\
+            }\n");
+        // The root's own effectful method is the control: if THIS stops reading `Fs` the fixture has
+        // stopped exercising anything and every assertion below is vacuous.
+        assert_eq!(effs(fn_entry(&v, "stream::Stream::wibble")), vec!["Fs".to_string()],
+                   "the root's `Stream::wibble` reads a file — without this the fixture proves nothing");
+        for f in ["m::rel", "m::slf", "m::rooted"] {
+            let row = fn_entry(&v, f);
+            let e = effs(row);
+            assert!(!e.iter().any(|x| x == "Fs"),
+                    "`{f}` resolves to `m`'s OWN pure `Stream::wibble` (EXECUTED: it returns the path \
+                     length, it opens nothing). An `Fs` here is a FABRICATION from a scope-blind rule — \
+                     the guard asks the CRATE ROOT about a path that is relative to `m`, and the only \
+                     thing that makes that affordable is that its wrong answer UNDER-resolves:\n{row:#}");
+            assert_eq!(e, vec!["Unknown".to_string()],
+                       "`{f}` must be DISCLOSED rather than absent or silently pure — `m::slf` and \
+                        `m::rooted` were ABSENT from functions[] before R186:\n{row:#}");
+        }
+    }
+
+    /// SOUNDNESS R186 — **THE STRUCTURAL HALF OF THE DIRECTION ARGUMENT, asserted on `expand` itself
+    /// rather than through a scan.**
+    ///
+    /// The end-to-end fixture above cannot fully distinguish "the branch under-resolved" from "the branch
+    /// mis-attributed and tail2 refused it afterwards", because a shadowed name is ambiguous downstream
+    /// and the ambiguity is a second line of defence. So the property that actually licenses the wrong
+    /// scope — **this branch emits the glob prefix or the LITERAL and nothing else, ever** — is pinned
+    /// here, where the literal can be compared character for character.
+    ///
+    /// Both directions are driven: with the head absent from `root_decls` the glob prefix must appear
+    /// (that is the sqlx rescue, and an equality against the literal would catch its silent loss); with
+    /// the head present the result must be EXACTLY `segs.join("::")` — not the glob form, and not any
+    /// third spelling such as a root-qualified one, which is the mis-resolution a scope-blind rule would
+    /// produce on a `self::`/`super::` path.
+    #[test]
+    fn r186_the_rooted_glob_branch_emits_only_the_glob_prefix_or_the_literal() {
+        use crate::lang::{expand, GLOB_KEY, ROOT_DECL_KEY};
+        let with_glob = |decls: &[&str]| -> HashMap<String, String> {
+            let mut u = HashMap::new();
+            u.insert(GLOB_KEY.to_string(), "std::io::prelude".to_string());
+            if !decls.is_empty() {
+                u.insert(format!("crate::{ROOT_DECL_KEY}"), decls.join("\u{1}"));
+            }
+            u
+        };
+        // (1) head NOT root-declared -> the glob prefix. This is the rescue arm; if the guard ever
+        //     over-fires this becomes the bare literal and the sqlx cardinal sin is back.
+        assert_eq!(expand("crate::stream::Stream", &with_glob(&[])),
+                   "std::io::prelude::stream::Stream");
+        assert_eq!(expand("crate::stream::Stream", &with_glob(&["other", "thing"])),
+                   "std::io::prelude::stream::Stream",
+                   "a root-decl set that does not contain `stream` must not refuse");
+        // (2) head root-declared -> EXACTLY the literal, for all three rooted spellings. The `self::`
+        //     and `super::` rows are the wrong-scope cases: the guard answers them from the ROOT's
+        //     declarations, which is the wrong question, and the assertion is that its wrong answer is
+        //     the literal — an UNDER-resolution — and never a third prefix.
+        for p in ["crate::stream::Stream", "self::stream::Stream", "super::stream::Stream",
+                  "super::super::stream::Stream"] {
+            assert_eq!(expand(p, &with_glob(&["stream"])), "stream::Stream",
+                       "`{p}` must come back as the bare literal — the ONLY two outputs this branch may \
+                        have are the glob prefix and `segs.join(\"::\")`");
+        }
+        // (3) and with NO glob at all the literal is also what comes back, so (2) is not accidentally
+        //     asserting the no-glob path.
+        assert_eq!(expand("crate::stream::Stream", &HashMap::new()), "stream::Stream");
+    }

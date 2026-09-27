@@ -1688,11 +1688,45 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // while the body provably read a file. Measured on two byte-identical modules differing only in that
     // `use` line, both EXECUTED.
     //
-    // The refusal is narrow and it is a FACT, not a hedge: if the crate ROOT declares `head` itself, then
-    // `crate::head` names that declaration in rustc and can name nothing else — an explicit item shadows
-    // a glob, and a root `mod net;` beside a root `use x::*` compiles precisely because of that rule. So
-    // this removes only attributions that were provably wrong; it does not narrow the sqlx
-    // `driver_prelude` rescue the branch exists for (`sqlx-postgres` declares no root `net`).
+    // TWO CLAIMS, AND EACH IS DRIVEN BY A TEST THAT FAILS WITHOUT IT — stated that way because the
+    // sentence this replaced ("ATTRIBUTION only … local wins … no fabrication") read as considered and
+    // was unfalsifiable in place, which is exactly what stopped it being measured for months.
+    //
+    //  (1) For a path whose head the crate ROOT declares, `crate::head` names that declaration in rustc
+    //      and can name nothing else — an explicit item shadows a glob. Driven by `globshadow` in
+    //      `r186_glob_attribution_survives_where_the_crate_does_not_declare_the_name`: the crate declares
+    //      its own PURE `read` beside `pub use std::fs::*`, the fixture COMPILES AND RUNS and prints 0
+    //      bytes, so the pre-fix `Fs` there was a fabrication. If (1) were false it would print 65.
+    //  (2) This does not narrow the rescue the branch exists for. Driven by `globrescue` in the same test:
+    //      the crate declares no `read`, `crate::read` really IS the root glob's name, the fixture reads
+    //      65 real bytes and the row must keep `["Fs"]`. **A review proposed deleting this branch outright
+    //      for rooted paths on the argument that "rustc never resolves a `crate::`-prefixed path through a
+    //      glob at all". That argument is FALSE and `globrescue` is the refutation: a `pub use x::*` at the
+    //      CRATE ROOT puts those names in the root module, so `crate::<name>` does resolve to them — which
+    //      is the sqlx `PgStream::connect` cardinal-sin shape. A binary built with that rule reads
+    //      `pg::slurp` ABSENT over a provably real filesystem read.**
+    //
+    // A THIRD CLAIM IS NOT MADE, BECAUSE IT IS FALSE: this guard is NOT asked of the right scope.
+    // `expand` strips `crate`/`self`/`super` in ONE loop above and then runs crate-ROOT resolution on all
+    // three, so a `self::stream::X` inside `mod m` — which in rustc means `m::stream::X`, the root's item
+    // not being in scope in `m` at all — is asked whether the CRATE ROOT declares `stream`. That
+    // conflation is PRE-EXISTING and this guard inherits it; it is not safe, and the only thing that makes
+    // it affordable is the DIRECTION it fails in, which is measured rather than argued:
+    //
+    //   * a BARE relative path never reaches here — the `!rooted_local` branch above returns
+    //     `segs.join("::")` first — so the case a reviewer worried about (a relative path resolved to the
+    //     ROOT's item where rustc takes the glob's) cannot occur;
+    //   * and this branch has only TWO possible outputs, the glob prefix or the literal, so a
+    //     wrong-evidence refusal can only UNDER-RESOLVE. It can never emit a third, different prefix and
+    //     so can never mis-attribute.
+    //
+    // `r186_a_wrong_scope_refusal_under_resolves_and_never_fabricates` pins exactly that, on a fixture
+    // that COMPILES AND RUNS (`rel=10 slf=10 rooted=63` — m's pure method twice, the root's real file
+    // read once). **The cost of the wrong scope is real and measured, not hypothetical:**
+    // `filetime`'s `unix::macos::set_times` writes `super::utimes::set_times(..)`, whose head `utimes` is
+    // not a ROOT declaration, so the guard does not fire, the file's glob still eats the path and a real
+    // `Fs` stays lost. Closing that needs the enclosing module's declarations rather than the root's — a
+    // different change with its own audit surface, not a tightening of this one.
     //
     // WHAT IT DOES NOT COVER, stated as the limit it is: `root_decls` is read off the root file's item
     // list, so a `mod`/type hidden behind an item-position macro (`cfg_rt! { pub mod net; }`, `include!`)
