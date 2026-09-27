@@ -10,6 +10,45 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **A TAIL CONTEST THAT INCLUDES THE CALLER ITSELF WENT SILENT (SOUNDNESS R750 — disclosure-only).**
+  A qualified, non-method call whose 2-segment tail is claimed by two-or-more DISTINCT quals, **one of
+  which is the caller's own**, was refused by `resolve_target` and then vanished: no edge, no `Unknown`,
+  no reason, the caller ABSENT from `functions[]` — an affirmative §4 purity claim over a body the engine
+  declined to read. It now discloses `Unknown` with `ambiguous:same-name local defs`.
+
+  **The silence it closes, in one checkable sentence:** `impl Tr for Ty { fn m(..) { Ty::m(self) } }` — a
+  trait impl forwarding to its type's inherent method of the same name — made the forwarder disappear,
+  and `deadpool-postgres`' `generic_client::Transaction::prepare_cached` was exactly that shape over a
+  real `Db`. (That one is now RESOLVED rather than hedged, by R748(i); what remains here is the residue
+  where no written segment names a claimant.)
+
+  **Why a hedge here and a resolution one site over, because the same lane answered both ways.** Where
+  the written path NAMES one claimant — an exact qual under a `crate::` root, or more of the written
+  segments than any rival — `arm_exact_target` resolves it and that is strictly better. What reaches this
+  branch is the residue with no such evidence: the tail is genuinely contested, or the choice needs an
+  inherent-vs-trait fact the index does not hold. **It is NOT the general qualified-tail hedge, which
+  this repo priced at 4.88–7.02% of analysed units and DECLINED** — the self-claimant condition is what
+  makes it affordable, and it is a fact rather than a size filter: the caller is one of the contestants,
+  so the contest is partly an artefact of its own existence. Reason string REUSED, not minted (§G).
+
+  A/B, `bin/corpus-ab.py` from the umbrella, 1,465 registry crates, `682b1bd5…` vs `3e7258f5…`:
+  **ADDED 282 / REMOVED 0 / CHANGED 776**, REACH **800 hedges across 137 crates**. Buckets:
+  **0 absent/pure → CONCRETE, 287 → `Unknown` ONLY, 0 CONCRETE LOST**, 166 other fields.
+  **REMOVED is 0 and no concrete effect moves in either direction** — disclosure-only, measured.
+
+  **BENEFIT, which the standing ruling says outranks the proxy: 155 distinct units / 354 rows across 137
+  crates newly take a scoped `deny Unknown <unit>` from 0 to 1**, and a 20-crate sample was validated
+  against the real gate rather than predicted — **20 of 20 flipped**, on `indexmap`, `tokio`,
+  `proc-macro2`, `reqwest`, `cap-std`, `time`, `sqlx-mysql`, `http`, `bytes`, `bumpalo`, `toml`,
+  `regex-automata`, `native-tls`, `pgvector`, `windows-strings`, `wasip3`.
+
+  **Priced against the band with absolute counts: 155 units of 661,060 analysed = 0.023% (354 rows =
+  0.054%)** — 28–64× under the ~1.5% ship threshold. Lower than the 0.067% this was held at, because the
+  resolutions that landed first (R748(i)/(ii), R751) took the resolvable part of the population out of it.
+
+  No cache rev: this is Pass-B accumulation into `direct`/`unknown_why` and stores nothing in
+  `FileDecls`; `incremental_equiv.sh` is 120/120 edits byte-identical.
+
 - ⚠ **A RELATIVE PATH LOST THE MODULE IT WAS RELATIVE TO, AND THREE RULES HAD BEEN ADDED OVER THAT LOSS
   BEFORE ANYONE SAID WHAT THE LOSS WAS (SOUNDNESS R751).** `expand` stripped `crate`/`self`/`super` in one
   loop and then resolved all three as if crate-rooted, discarding the module a *relative* path is relative

@@ -3624,6 +3624,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs".to_string());
             }
+            // ── §4 HONESTY — SOUNDNESS R750: THE CONTEST THAT INCLUDES THE CALLER ITSELF ──────────
+            // A qualified, non-method call whose 2-segment tail is claimed by two-or-more DISTINCT quals,
+            // ONE OF WHICH IS THE CALLER'S OWN, was refused by `resolve_target` and then went SILENT: no
+            // edge, no `Unknown`, no reason, and the caller ABSENT from `functions[]` — an affirmative §4
+            // purity claim over a body the engine declined to read.
+            //
+            // THE SILENCE IT CLOSES, in one checkable sentence: `impl Tr for Ty { fn m(..) { Ty::m(self) }}`
+            // — a trait impl forwarding to its type's inherent method of the same name — made the forwarder
+            // vanish, and `deadpool-postgres`' `generic_client::Transaction::prepare_cached` was exactly
+            // that shape over a real `Db`.
+            //
+            // WHY A HEDGE HERE AND A RESOLUTION THERE, because the same lane answered both ways and the
+            // difference is evidence, not taste. Where the written path NAMES one claimant — an exact qual
+            // under a `crate::` root, or more of the written segments than any rival — `arm_exact_target`
+            // RESOLVES it (R748(i)/(ii)) and that is strictly better than disclosing. What reaches here is
+            // the residue with no such evidence: the tail is genuinely contested, or the choice needs an
+            // inherent-vs-trait fact this index does not hold. For that residue the honest answer is
+            // `Unknown` with a reason, never a pick and never silence.
+            //
+            // NOT the general R190(c) hedge, which this repo priced at 4.88-7.02% of analysed units and
+            // DECLINED — see the note immediately below, which stands. The self-claimant condition is what
+            // makes this affordable, and it is a fact rather than a size filter: the caller is one of the
+            // contestants, so the contest is partly an artefact of the caller's own existence.
+            //
+            // REASON STRING REUSED, NOT MINTED (§G): `ambiguous:same-name local defs` already names this
+            // kind one site up, and `ReasonClass::classify` reads it through the one prefix table. A second
+            // spelling for one question is the drift §F1-3 describes.
+            if !c.is_macro && !c.method && !already_handled && c.path.contains("::") {
+                if let Some(t2) = tail2(&c.path) {
+                    if let Some(v) = by_tail2.get(&t2) {
+                        let distinct: std::collections::BTreeSet<&String> = v.iter().collect();
+                        if distinct.len() >= 2 && distinct.contains(&f.qual) {
+                            if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                                eprintln!("R750HEDGE\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why
+                                .entry(f.qual.clone())
+                                .or_default()
+                                .insert("ambiguous:same-name local defs".to_string());
+                        }
+                    }
+                }
+            }
             // SOUNDNESS R190(c) — THE QUALIFIED-TAIL SPELLING OF THE SAME REFUSAL IS *NOT* CLOSED HERE,
             // AND THE REASON IS A MEASUREMENT. The block above hedges a BARE leaf naming two-or-more local
             // defs; a QUALIFIED call whose 2-segment tail names two-or-more does not, so

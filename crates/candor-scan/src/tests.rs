@@ -23947,3 +23947,74 @@ pub fn go() {{ imp::doit(); }}
                  `absolutise` refuses on `SUPER_SCOPE_MARKER` instead. An `Fs` here is that \
                  fabrication:\n{c:#}");
     }
+
+    /// SOUNDNESS R750 — **A CONTEST THAT INCLUDES THE CALLER ITSELF WENT SILENT**, and this test drives
+    /// both the disclosure and the boundary that keeps it from becoming the general R190(c) hedge.
+    ///
+    /// `impl Tr for Ty { fn m(..) { Ty::m(self) } }` — a trait impl forwarding to its type's inherent
+    /// method of the same name — leaves a 2-segment tail claimed by TWO quals, one of which is the
+    /// forwarder itself. `resolve_target` refuses (right: linking a many-way tail fabricates one type's
+    /// effect onto another's caller) and the forwarder then vanished from `functions[]` with no `Unknown`
+    /// and no reason: a §4 purity claim over a body that really performs the effect. Measured live on
+    /// `deadpool-postgres`' `generic_client::Transaction::prepare_cached` over a real `Db`.
+    ///
+    /// **THE BOUNDARY IS THE SECOND ARM, and it is what stops this being the hedge this repo DECLINED at
+    /// 4.88–7.02%.** `unrelated` reaches the same ambiguous tail WITHOUT being a claimant of it, and must
+    /// stay exactly as it was. The self-claimant condition is a fact, not a size filter: the caller is one
+    /// of the contestants, so the contest is partly an artefact of its own existence.
+    ///
+    /// And `viaresolved` is the third arm: where the written path NAMES one claimant, R748(i)/(ii) RESOLVE
+    /// it and no hedge is wanted — a resolution beats a disclosure. If that arm ever starts carrying
+    /// `Unknown`, this hedge has begun firing where the resolution should have won.
+    #[test]
+    fn r750_a_tail_contest_including_the_caller_discloses_instead_of_vanishing() {
+        let v = scan_src_to_json("r750self", "\
+            pub struct Tx { pub p: String }\n\
+            impl Tx { pub fn grab(&self) -> usize {\n\
+                std::fs::read(&self.p).map(|v| v.len()).unwrap_or(0) } }\n\
+            pub mod gc {\n\
+                pub trait Gen { fn grab(&self) -> usize; }\n\
+                impl Gen for crate::Tx { fn grab(&self) -> usize { Tx::grab(self) } }\n\
+            }\n\
+            pub mod a {\n\
+                pub struct Other { pub p: String }\n\
+                impl Other { pub fn grab(&self) -> usize { self.p.len() } }\n\
+                pub fn unrelated(x: &Other) -> usize {\n\
+                    let _ = std::env::var(\"X\"); Other::grab(x) }\n\
+            }\n\
+            pub mod b {\n\
+                pub struct Other { pub p: String }\n\
+                impl Other { pub fn grab(&self) -> usize { self.p.len() } }\n\
+            }\n\
+            pub mod viares {\n\
+                use crate::a::Other;\n\
+                pub fn viaresolved(x: &Other) -> usize {\n\
+                    let _ = std::env::var(\"Y\"); Other::grab(x) }\n\
+            }\n");
+        // (1) the forwarder must be DISCLOSED rather than absent, with a reason a consumer can classify
+        let gc = fn_entry(&v, "gc::Tx::grab");
+        assert!(effs(gc).iter().any(|e| e == "Unknown"),
+                "`Tx::grab(self)` inside `impl Gen for crate::Tx` leaves a tail two quals claim, one of \
+                 them this very function. Refusing is right; VANISHING is a §4 purity claim over a body \
+                 that reads a file:\n{gc:#}");
+        assert!(why_of(&v, "gc::Tx::grab").iter().any(|w| w == "ambiguous:same-name local defs"),
+                "…and the reason must be the EXISTING spelling, not a second one for the same question");
+        // (2) THE BOUNDARY, and the fixture is built so that removing the condition VISIBLY fires here.
+        //     `a::unrelated` writes `Other::grab(x)` with no `use` binding, so the path is the bare
+        //     2-segment `Other::grab` — a tail GENUINELY claimed by `a::Other::grab` AND `b::Other::grab`,
+        //     which the specificity rank ties on and refuses. The caller is not one of those claimants, so
+        //     the self-claimant condition must keep it untouched. An earlier version of this arm had only
+        //     ONE claimant for that tail, so deleting the condition changed nothing and the arm was
+        //     vacuous — the same trap as R751's inline test, twice.
+        let pl = fn_entry(&v, "a::unrelated");
+        assert!(!effs(pl).iter().any(|e| e == "Unknown"),
+                "`a::unrelated` is not a claimant of `Other::grab`'s contested tail — hedging it would make \
+                 this the general R190(c) hedge this repo priced at 4.88-7.02% and DECLINED:\n{pl:#}");
+        // (3) and where the written path NAMES a claimant, the RESOLUTION must still win outright
+        let vr = fn_entry(&v, "viares::viaresolved");
+        assert!(vr["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "a::Other::grab")),
+                "…and it must actually RESOLVE, or this arm proves nothing about precedence:\n{vr:#}");
+        assert!(!effs(vr).iter().any(|e| e == "Unknown"),
+                "`use crate::Other; Other::grab(x)` is resolved by the exact-qual rule — a hedge here would \
+                 mean this fired where a resolution should have:\n{vr:#}");
+    }
