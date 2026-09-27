@@ -6129,6 +6129,48 @@ pub(crate) fn arm_exact_target<'a>(
     }
     // `expand` leaves a `use`-map value crate-rooted; a definition qual never is.
     let bare = path.strip_prefix("crate::").unwrap_or(path);
+    // SOUNDNESS R186 lane, follow-up (i) — **AN EXACT QUAL IS STRONGER EVIDENCE THAN A `::`-SUFFIX
+    // RELATION, AND THESE THREE RELATIONS WERE RANKED EQUAL, SO A SUFFIX VETOED AN EXACT.** Measured on
+    // `deadpool-postgres-0.14.2`: `use crate::Transaction;` then `Transaction::prepare_cached(self, ..)`
+    // leaves the path `crate::Transaction::prepare_cached`, whose tail two definitions claim — the root's
+    // own `Transaction::prepare_cached` (EXACT) and `generic_client::Transaction::prepare_cached` (a mere
+    // `::`-suffix). Both "named it", two matches were seen, the call was refused, and
+    // `generic_client::Transaction::{prepare_cached, prepare_typed_cached, transaction}` were ABSENT from
+    // `functions[]` over a real `Db` — a §4 purity claim, and a scoped `deny Db` on each exited 0.
+    //
+    // **THE SURVIVING `crate::` HEAD IS WHAT LICENSES THE RANKING, AND IT IS A FACT, NOT A PREFERENCE.**
+    // A crate-rooted head means the path came from a `use` MAP VALUE (`R128`'s note above says so and
+    // depends on the same property), so `bare` is a qual measured FROM THE CRATE ROOT. `crate::X::y`
+    // names the root's `X::y` in rustc and can name nothing else — an item in another module is not
+    // reachable through that spelling at all. So a candidate whose qual EQUALS `bare` is the definition
+    // the source spelled; one that merely ends with `::<bare>` lives somewhere `crate::X::y` does not
+    // name, and letting it veto is throwing away the anchor the author wrote.
+    //
+    // WITHOUT THE ANCHOR THE RANKING WOULD BE A GUESS and is not applied: `expand` STRIPS an explicitly
+    // written `crate::`/`self::`/`super::` prefix, so an unanchored `Tx::grab` is module-RELATIVE and its
+    // equality with a root-level qual can be pure coincidence (`Tx::grab` written inside `mod gc` that
+    // declares its own `Tx`). That population keeps refusing, unchanged.
+    //
+    // IT PICKS ONLY WHAT THE SOURCE SPELLED, WHICH IS THE WHOLE DISCIPLINE THIS HELPER WAS BUILT ON: two
+    // DISTINCT quals cannot both equal one string, so the exact pass cannot be ambiguous; and where NO
+    // candidate matches exactly it FALLS THROUGH to the unranked pass below rather than refusing, so
+    // nothing R440/R452 already resolved is lost. The `aes-0.8.4` control is the one that matters —
+    // `crate::armv8::hazmat::cipher_round` and `crate::ni::hazmat::cipher_round` are two live cfg arms,
+    // both declared, and each must select ITS OWN arm and never the sibling; a rule that could pick
+    // either would be a coin flip and strictly worse than the refusal it replaces.
+    if path.starts_with("crate::") {
+        let mut exact = cands.iter().filter(|c| *c == bare);
+        if let Some(hit) = exact.next() {
+            debug_assert!(exact.all(|c| c == hit), "two DISTINCT quals cannot equal one string");
+            // §E1 REACH COUNTER, same shape as R160's `SELFALIAS` and the R186 refusal counter: an
+            // unchanged corpus row is not evidence this pass ran. Env-gated and behind the match, so it
+            // costs a lookup only where the ranking is what decided the call.
+            if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                eprintln!("EXACTQUAL {path} -> {hit}");
+            }
+            return Some(hit);
+        }
+    }
     let mut hit: Option<&String> = None;
     for c in cands {
         let names_it = c == bare

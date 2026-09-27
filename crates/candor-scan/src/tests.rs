@@ -23553,3 +23553,131 @@ pub fn go() {{ imp::doit(); }}
         //     asserting the no-glob path.
         assert_eq!(expand("crate::stream::Stream", &HashMap::new()), "stream::Stream");
     }
+
+    /// SOUNDNESS R186 lane, follow-up (i) — **AN EXACT QUAL MATCH IS STRONGER EVIDENCE THAN A `::`-SUFFIX
+    /// RELATION, AND `arm_exact_target` RANKED THEM EQUAL, SO A SUFFIX VETOED AN EXACT.**
+    ///
+    /// `arm_exact_target` (R440, generalised by R452) takes a claimant only where the written path names
+    /// it, by one of three relations: exact equality, `bare` ends with `::<cand>`, or `<cand>` ends with
+    /// `::<bare>`. Unranked, so for a ROOT-ANCHORED path `crate::Transaction::prepare_cached` both
+    /// `Transaction::prepare_cached` (exact) and `generic_client::Transaction::prepare_cached` (suffix)
+    /// "name it", two matches were seen, and the whole call was refused.
+    ///
+    /// **A surviving `crate::` head is what licenses the ranking, and it is not a preference.** `expand`
+    /// leaves a `use`-map value crate-rooted, so `bare` there is a qual measured FROM THE CRATE ROOT —
+    /// `crate::X::y` names the root's `X::y` in rustc and can name nothing else. A candidate whose qual
+    /// EQUALS it is that definition; one that merely ends with `::<bare>` lives in some other module,
+    /// which `crate::X::y` does not name. Without the anchor the ranking would be a guess (a
+    /// module-relative `Tx::grab` inside `mod gc` equals the root qual `Tx::grab` by coincidence), which
+    /// is why the exact-preference is gated on the anchor and the unanchored case is unchanged.
+    #[test]
+    fn arm_exact_target_prefers_an_exact_qual_over_a_suffix_when_the_path_is_root_anchored() {
+        use crate::collector::arm_exact_target;
+        let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["Transaction::prepare_cached", "generic_client::Transaction::prepare_cached"] {
+            by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        // (1) THE DEADPOOL SHAPE. `use crate::Transaction;` then `Transaction::prepare_cached(self, ..)`
+        //     leaves the path crate-rooted. The root's own definition is what it names.
+        assert_eq!(arm_exact_target("crate::Transaction::prepare_cached", &by_tail2).map(String::as_str),
+                   Some("Transaction::prepare_cached"),
+                   "a root-anchored path names the ROOT's definition; a deeper claimant that merely ends \
+                    with the same two segments must not veto it");
+        // (2) WITHOUT THE ANCHOR THE REFUSAL STANDS. `Transaction::prepare_cached` written bare is
+        //     module-relative and the equality could be coincidence — nothing may be picked.
+        assert_eq!(arm_exact_target("Transaction::prepare_cached", &by_tail2), None,
+                   "an unanchored path must keep refusing — the exact equality is not evidence there");
+
+        // (3) THE aes-0.8.4 CONTROL, and it is the one that matters: two cfg-arm quals BOTH exist, and
+        //     the caller is a third claimant. The written arm must win and the OTHER ARM must never be
+        //     picked — if either arm could be chosen it is a coin flip and strictly worse than refusing.
+        let mut aes: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["armv8::hazmat::cipher_round", "ni::hazmat::cipher_round", "hazmat::cipher_round"] {
+            aes.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert_eq!(arm_exact_target("crate::armv8::hazmat::cipher_round", &aes).map(String::as_str),
+                   Some("armv8::hazmat::cipher_round"), "the WRITTEN arm, never the sibling arm");
+        assert_eq!(arm_exact_target("crate::ni::hazmat::cipher_round", &aes).map(String::as_str),
+                   Some("ni::hazmat::cipher_round"), "and symmetrically for the other arm");
+        // …and a root-anchored path naming NEITHER arm exactly must still refuse rather than pick one.
+        assert_eq!(arm_exact_target("crate::hazmat::cipher_round", &aes).map(String::as_str),
+                   Some("hazmat::cipher_round"),
+                   "`crate::hazmat::cipher_round` exactly names the root-level one");
+        let mut two_arms: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["armv8::hazmat::cipher_round", "ni::hazmat::cipher_round"] {
+            two_arms.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        assert_eq!(arm_exact_target("crate::soft::hazmat::cipher_round", &two_arms), None,
+                   "a root-anchored path that names NO claimant exactly must fall through to the refusal, \
+                    never pick an arm it did not spell");
+    }
+
+    /// SOUNDNESS R186 lane, follow-up (i) — the END-TO-END half of
+    /// `arm_exact_target_prefers_an_exact_qual_over_a_suffix_when_the_path_is_root_anchored`, driven in
+    /// BOTH directions on one fixture that COMPILES AND RUNS (`gc=64 blind=10 viause=10`).
+    ///
+    /// THE SILENCE IT CLOSES. `gc::Tx::grab` writes `Tx::grab(self)` under `use crate::Tx;`, which leaves
+    /// the resolved path crate-rooted. Its tail is claimed by three definitions, one of them the caller
+    /// itself, so `resolve_target` refused and `arm_exact_target`'s unranked pass refused too — the deeper
+    /// `other::Tx::grab` is a `::`-suffix of the root's `Tx::grab` and vetoed the exact match. The caller
+    /// was ABSENT from `functions[]` over a real 64-byte file read, and `deny Fs gc` exited 0. This is the
+    /// `deadpool-postgres` shape reduced: there it was `Transaction::prepare_cached` under
+    /// `use crate::Transaction;`, three units, a real `Db`, and a scoped `deny Db` at exit 0.
+    ///
+    /// THE OVER-CHARGE CONTROL, which is the arm that matters for a change that ADDS EDGES. `viause::via`
+    /// takes the SAME `use`-map route — `use crate::other::Tx;` then `Tx::grab(x)` — to the PURE
+    /// definition. It must resolve to `other::Tx::grab` and must NOT acquire the root `Tx::grab`'s `Fs`.
+    /// EXECUTED: it returns the path's length and opens nothing.
+    ///
+    /// AND THE SPELLING THE FIX DOES NOT REACH, asserted so it cannot quietly change: `blind::via` writes
+    /// `crate::other::Tx::grab(x)` EXPLICITLY. `expand` strips a written `crate::` prefix (the R128 note in
+    /// `collector.rs` records that and depends on it), so the anchor is gone by the time this helper sees
+    /// the path, the ranking does not apply, and the call stays refused. That population is unchanged by
+    /// this fix — a stated limit, not a claim of safety.
+    #[test]
+    fn r186i_a_root_anchored_use_map_path_resolves_to_the_definition_it_names() {
+        let v = scan_src_to_json("r186iexact", "\
+            pub struct Tx { pub path: String }\n\
+            impl Tx { pub fn grab(&self) -> usize {\n\
+                std::fs::read(&self.path).map(|v| v.len()).unwrap_or(0) } }\n\
+            pub mod other {\n\
+                pub struct Tx { pub path: String }\n\
+                impl Tx { pub fn grab(&self) -> usize { self.path.len() } }\n\
+            }\n\
+            pub mod gc {\n\
+                use crate::Tx;\n\
+                pub trait Gen { fn grab(&self) -> usize; }\n\
+                impl Gen for Tx { fn grab(&self) -> usize { Tx::grab(self) } }\n\
+            }\n\
+            pub mod viause {\n\
+                use crate::other::Tx;\n\
+                pub fn via(x: &Tx) -> usize { let _ = std::env::var(\"X\"); Tx::grab(x) }\n\
+            }\n\
+            pub mod blind {\n\
+                pub fn via(x: &crate::other::Tx) -> usize {\n\
+                    let _ = std::env::var(\"X\"); crate::other::Tx::grab(x) }\n\
+            }\n");
+        // the silence closed, with the EDGE and not merely the effect — the edge is what `path`,
+        // `callers` and the κ ledger read
+        let gc = fn_entry(&v, "gc::Tx::grab");
+        assert_eq!(effs(gc), vec!["Fs".to_string()],
+                   "`Tx::grab(self)` under `use crate::Tx;` names the ROOT's definition, which reads a \
+                    file (EXECUTED: 64 bytes). A `::`-suffix claimant must not veto that exact match:\n{gc:#}");
+        assert!(gc["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "Tx::grab")),
+                "and it must be an EDGE to `Tx::grab`, not a bare effect:\n{gc:#}");
+        // the over-charge control: the same route to the PURE definition
+        let vu = fn_entry(&v, "viause::via");
+        assert_eq!(effs(vu), vec!["Env".to_string()],
+                   "`viause::via` names `other::Tx::grab`, which opens nothing (EXECUTED: returns 10). An \
+                    `Fs` here is the root `Tx::grab`'s effect FABRICATED onto its namesake's caller — the \
+                    direction a widening fails in:\n{vu:#}");
+        assert!(vu["calls"].as_array().is_some_and(|c| c.iter().any(|x| x == "other::Tx::grab")),
+                "…and it must still resolve, to the definition the source spelled:\n{vu:#}");
+        // the spelling the fix does not reach — `expand` already stripped the anchor
+        let bl = fn_entry(&v, "blind::via");
+        assert_eq!(effs(bl), vec!["Env".to_string()]);
+        assert!(bl["calls"].as_array().is_none_or(|c| c.is_empty()),
+                "an EXPLICITLY written `crate::other::Tx::grab` loses its anchor in `expand`, so this \
+                 stays refused. If it ever resolves, the anchor survived and the R128 note above it is \
+                 stale — check that note before accepting the change:\n{bl:#}");
+    }

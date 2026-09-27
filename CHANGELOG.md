@@ -10,6 +10,65 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **AN EXACT QUAL IS STRONGER EVIDENCE THAN A `::`-SUFFIX, AND `arm_exact_target` RANKED THEM EQUAL —
+  so a suffix claimant VETOED an exact one and the call went silent.** `arm_exact_target` (R440,
+  generalised by R452) resolves a multi-claimant tail2 by taking the claimant the written path names,
+  through three relations: exact equality, `bare` ends with `::<cand>`, or `<cand>` ends with `::<bare>`.
+  Unranked. So for the root-anchored `crate::Transaction::prepare_cached`, BOTH the root's own
+  `Transaction::prepare_cached` (exact) and `generic_client::Transaction::prepare_cached` (a mere suffix)
+  "named it", two matches were seen, and the whole call was refused.
+
+  **Measured on `deadpool-postgres-0.14.2`:** `generic_client::Transaction::{prepare_cached,
+  prepare_typed_cached, transaction}` were ABSENT from `functions[]` over a real `Db`, and a per-unit
+  scoped `deny Db` on each exited **0**. They now resolve with the right edge and each exits **1**.
+  Reduced to a fixture that COMPILES AND RUNS (`gc=64 blind=10 viause=10`): `deny Fs gc` **0 → 1**.
+
+  **The surviving `crate::` head is what licenses the ranking, and it is a fact rather than a
+  preference.** A crate-rooted head means the path came from a `use` MAP VALUE — the same property the
+  R128 note beside it already depends on — so `bare` is a qual measured FROM THE CRATE ROOT.
+  `crate::X::y` names the root's `X::y` in rustc and can name nothing else; a candidate whose qual
+  EQUALS it is that definition, and one that merely ends with `::<bare>` lives where that spelling does
+  not reach. Two DISTINCT quals cannot equal one string, so the exact pass cannot be ambiguous, and
+  where nothing matches exactly it FALLS THROUGH to the unranked pass rather than refusing — nothing
+  R440/R452 already resolved is lost. **Gated on the anchor**, because `expand` strips an explicitly
+  written `crate::`/`self::`/`super::` prefix, and an unanchored `Tx::grab` is module-relative whose
+  equality with a root qual can be coincidence; that population is unchanged.
+
+  Controls, both driven: the **`aes-0.8.4`** shape — `crate::armv8::hazmat::cipher_round` and
+  `crate::ni::…` are two live cfg arms, both declared, and each must select ITS OWN arm and never the
+  sibling (a rule that could pick either would be a coin flip, strictly worse than the refusal); and the
+  **over-charge** arm — `use crate::other::Tx;` then `Tx::grab(x)` must resolve to the PURE
+  `other::Tx::grab` and must not acquire the root namesake's `Fs` (EXECUTED: returns 10, opens nothing).
+
+  A/B, `bin/corpus-ab.py`, 1,465 registry crates, pre-R186 (`d67d081b…`) vs R186+this
+  (`f92f4c26…`): **ADDED 78 / REMOVED 850 / CHANGED 1,336**, REACH **3,301 exact resolutions across 126
+  crates**. Against R186 alone the buckets move the right way: **absent/pure → CONCRETE 67 → 90**, and
+  **CONCRETE LOST 5 → 2** — the deadpool three are recovered, so **no concrete-carrying row is removed
+  anywhere in the combined arm (3 → 0)** and the two remaining losses are the `proptest` FABRICATIONS
+  R186 was right to remove. Removal partition on the combined arm: 850 rows — **0** concrete, 327
+  `Unknown`-only, 523 κ-`invisible`-only, **0** carrying nothing.
+
+  **Every new concrete claim traced to source; zero fabrications.** `same_file`'s public
+  `Handle::from_path`/`from_file` (ripgrep's dependency) read PURE over
+  `OpenOptions::new().read(true).open(p)?` and `file.metadata()?`, because `use crate::unix as imp;`
+  makes `imp::Handle::from_path` a four-claimant tail across the platform arms; the exact match picks
+  `unix::` and never `win::`. `mongodb`'s `client::csfle::{ClientState::make_aux_clients, ClientState::new,
+  Client::init_csfle, client_builder::EncryptedClientBuilder::build}` reach `Client::with_options` —
+  literally written at `csfle.rs:198` — whose own row is IDENTICAL in both arms, so the propagation is
+  purely the edge existing; `deny Net client::csfle::ClientState::make_aux_clients` **0 → 1**. The 168
+  withdrawn `Unknown`s (mongodb 144, proc_macro2 24) are R452(a)'s hedge giving way to an EDGE, which
+  R452's own comment calls "the better answer for every one of them" — spot-checked to source
+  (`action::CollRef::new` is `Self { inner: coll.clone_with_type(), _ref: PhantomData }`, genuinely pure).
+
+  **One near-miss, stated rather than buried:** `same_file`'s `win::Handle::from_file` reaches its `Fs`
+  through a PRE-EXISTING loose edge (`winutil::Handle::from_file` resolved to the local
+  `Handle::from_file`), not through an edge this change added — the resulting `Fs` is still true by
+  ground truth, since `winutil::file::information` is `GetFileInformationByHandle`.
+
+  **No cache rev bump, and that is measured rather than reasoned:** this is Pass-B resolution, which
+  stores nothing in `FileDecls` and is re-derived on every run — `soundness/incremental_equiv.sh` is
+  120/120 edits byte-identical against a full scan.
+
 - ⚠ **ONE OUT-OF-CRATE GLOB IMPORT KILLED EVERY CRATE-LOCAL TYPE IN PARAMETER POSITION
   (SOUNDNESS R186, with R224 merged into it — a published silent under-report).** `expand`'s
   glob-attribution branch rewrote a `crate::`-rooted path to the file's (or `lib.rs`'s) single
