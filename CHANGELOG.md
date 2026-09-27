@@ -10,6 +10,59 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **THE PLATFORM `process` MODULE HAD NO RULE (SOUNDNESS R141 — a published silent under-report).**
+  `std::os::{unix,windows,wasi}::process` is the exact sibling of `std::os::*::fs`, which R130 closed,
+  and it was left unruled for the reason that row records: the audit boundary was drawn around `fs`.
+  `CommandExt::exec` is `execvp` — it REPLACES the process image, ground-truthed by a `cargo run` that
+  printed a line from the exec'd image and never reached the line after the call — and every trait-path
+  spelling of it read PURE with NO disclosure. On a five-function fixture, `CommandExt::exec(c)`,
+  `std::os::unix::process::CommandExt::exec(c)` and `CommandExt::pre_exec(c, ..)` were all ABSENT from
+  `functions[]` and `deny Exec`, `pure` and `deny Exec Unknown` all exited 0, while on the SAME tree the
+  RECEIVER spelling `c.exec()` exited 1 and the sibling-namespace UFCS control `FileExt::read_at(f, b, 0)`
+  exited 1. Those three now report `['Exec']` and `deny Exec` exits 1 on each.
+
+  A DENYLIST keyed on the trait, like the `fs` rule: `ExitStatusExt`, `ExitStatusError`, `ExitCodeExt` and
+  `parent_id` stay pure (a status already collected, or this process's own pid — charging them would
+  FABRICATE Exec on every `status.signal()`), and everything unrecognised keeps Exec. Corpus A/B over
+  1,465 registry crates / 321,663 rows, arms proven distinct by content hash: **ADDED 0 / REMOVED 0 /
+  CHANGED 0** — and that is a SAFETY result, not a value one: a `grep` over the whole local registry finds
+  exactly ONE trait-path `Ext::method(` call site and it belongs to a different crate (`wait_timeout`), so
+  the corpus has no instance of this spelling and cannot price the fix. The reach is the fixture and the
+  classify unit test, which drives both directions.
+
+  **STILL OPEN, and it is not this rule's shape:** `fn f<C: CommandExt>(c: &mut C) { c.exec() }` remains
+  ABSENT with no disclosure. The call path there is formed from the receiver's GENERIC PARAMETER, not the
+  trait path, so no classify rule can reach it — that is the `trait_quals` route and a separate fix.
+
+- **⚠ A BARE `#[test] fn` AT MODULE SCOPE IS NOT PRODUCTION CODE (SOUNDNESS R167 — a fabrication in every
+  report that contained one).** `is_cfg_test` answers only for `#[cfg(test)]`, so a `#[test]`-attributed fn
+  written directly at module scope — sqlx-postgres does this in `options/parse.rs` — was scanned as the
+  crate's own and its `['Env','Fs','Log']` published as the crate's effects.
+
+  The justification is rustc's, not a policy call: a `#[test] pub fn f()` called from `main` in the same
+  crate fails to compile with `E0425: cannot find function 'f' in this scope`. The item does not exist in a
+  non-test build, so nothing a consumer builds can reach it. `#[bench]` behaves identically. The match is
+  deliberately TIGHT — last path segment exactly `test` or `bench`, so `#[test]`, `#[bench]`,
+  `#[tokio::test]`, `#[async_std::test]` and `#[actix_rt::test]` are excluded and `#[test_case(..)]`,
+  `#[rstest]` and `#[quickcheck]` are NOT — because excluding a production fn is a silent under-report
+  while failing to exclude a harness fn is only the fabrication this closes.
+
+  **AND THE FIRST VERSION OF THIS FIX FLIPPED A GATE IN THE CARDINAL DIRECTION**, which is what this
+  family expects of a fabrication fix and why the scope is now explicit. `tests/`, `benches/` and
+  `examples/` are compiled ONLY as test/bench/example binaries, harness included, so rustc does not strip
+  a `#[test]` item there and the justification does not apply. Applying the skip to them anyway made
+  `deny Net` go from exit **2** with the function named in `outOfScope` to exit **0** with
+  `outOfScope: []` over a `tests/it.rs` holding `#[test] fn direct_net() { TcpStream::connect(..) }` — the
+  ⟨0.29⟩ peek exists precisely to look INTO excluded targets. Caught by this repo's own
+  `peek_scope_attribution_…` test; now gated on `is_nonlib_target_file` and pinned by its own assertion.
+
+  Priced on the corpus: **ADDED 0 / REMOVED 590 / CHANGED 0** over 1,465 crates / 321,663 rows (0.183% of
+  rows, 118 crates / 8.1%), 95 of the removed rows carrying a concrete effect, `Env,Fs,Log` ×18 being
+  sqlx-postgres itself. **All 590 removals were read back against the original source: every one carries a
+  `#[test]` or `#[bench]`-family attribute, none is in a non-library target, and ADDED is 0** — so no
+  production function lost a charge. `--include-tests` is byte-identical before and after on ten of the
+  most-affected crates: the harness view is unchanged, only the crate's own.
+
 - **⚠ AN ALL-CAPS TYPE NAME IS A TYPE AGAIN (SOUNDNESS R722 — a silent under-report, and the rule was
   written THREE TIMES).** The UpperCamel test was *first char uppercase AND (one char OR contains a
   lowercase)*, so `IO`, `BSTR`, `HSTRING`, `UTF8`, `O3` were not type-shaped at all — their DROP GLUE and

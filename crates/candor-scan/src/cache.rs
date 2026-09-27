@@ -44,6 +44,13 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev48: a change in WHICH FUNCTIONS `fninfos` CONTAINS (SOUNDNESS R167). `scan_items` and `fn_locs`
+    // now skip a fn carrying a `#[test]`-family attribute in the default scan, so a rev47 entry — written
+    // by a binary that emitted a `FnInfo` for every bare `#[test] fn` at module scope — replays those
+    // harness rows warm, with their `['Env','Fs','Log']` intact. The stale direction here is the
+    // OVER-report, not R631's silence, so this bump is not about a cardinal sin; it is mandatory anyway
+    // because `--incremental` promises a BYTE-IDENTICAL report and a warm rev47 read would differ from a
+    // cold one on exactly the rows this change removes. Same argument as rev46.
     // rev47: an ANALYSIS change that feeds `fninfos`, not a new field (SOUNDNESS R722). `is_type_ident`
     // now admits an ALL-CAPS type name, so a body that constructs `IO`/`UTF8`/`HSTRING` gains a
     // `<Type>::<construct>` marker and a `let x = MARKER` binding gains its receiver typing — both of
@@ -302,7 +309,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev47/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev48/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

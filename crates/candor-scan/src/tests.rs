@@ -8619,6 +8619,144 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         assert_eq!(spawns, vec!["helper_test::t".to_string()], "{v}");
     }
 
+    /// SOUNDNESS R167 — a bare `#[test] fn` at MODULE scope was scanned as PRODUCTION, and its effects
+    /// fabricated into the crate's report: `is_cfg_test` answers only for `#[cfg(test)]`, and
+    /// sqlx-postgres writes exactly this shape in `options/parse.rs` (46 of R160's 2,621 added rows were
+    /// such harness functions carrying `['Env','Fs','Log']`).
+    ///
+    /// The justification is rustc's, not a policy call: a `#[test] pub fn f()` called from `main` in the
+    /// same crate fails to compile — `E0425: cannot find function 'f' in this scope` — so the item does
+    /// not exist in a non-test build and nothing a consumer builds can reach its effects. `#[bench]`
+    /// behaves identically.
+    ///
+    /// BOTH DIRECTIONS, because excluding too much is the cardinal sin and excluding too little is only
+    /// the fabrication: the harness spellings must go, the PRODUCTION neighbours must stay with their
+    /// `loc` intact (the two walks that emit fns and locs are consumed in lockstep, so a skip added to
+    /// one and not the other silently shifts every later position), and `--include-tests` must still see
+    /// everything.
+    #[test]
+    fn a_bare_test_attributed_fn_is_not_production_r167() {
+        // ── the predicate, both directions ────────────────────────────────────────────────────────
+        let f = |s: &str| syn::parse_str::<syn::ItemFn>(s).unwrap();
+        for s in ["#[test] fn t() {}", "#[bench] fn b(_: &mut u32) {}",
+                  "#[tokio::test] async fn t() {}", "#[async_std::test] async fn t() {}",
+                  "#[actix_rt::test] async fn t() {}",
+                  "#[test] #[should_panic] fn t() {}"] {
+            assert!(crate::lang::is_test_attr_fn(&f(s).attrs), "`{s}` is a harness fn");
+        }
+        // NOT matched — the tight direction. Excluding a production fn is a silent under-report, so a
+        // third-party harness spelling keeps its (over-reporting) charge rather than risk that.
+        for s in ["fn plain() {}", "#[inline] fn i() {}", "#[should_panic] fn s() {}",
+                  "#[test_case(1)] fn tc() {}", "#[rstest] fn r() {}", "#[quickcheck] fn q() {}",
+                  "#[cfg(test)] fn c() {}", "#[tokio::main] async fn m() {}",
+                  "#[doc = \"test\"] fn d() {}"] {
+            assert!(!crate::lang::is_test_attr_fn(&f(s).attrs),
+                    "`{s}` is NOT a proven harness fn — excluding it would be a silent under-report");
+        }
+
+        // ── the report a user reads, with a production fn on EACH side of every harness one ────────
+        let src = concat!(
+            "pub fn before_a() { std::fs::write(\"/tmp/a\", b\"x\").unwrap(); }\n",
+            "#[test]\n",
+            "fn t1() { let _ = std::process::Command::new(\"sh\").status(); }\n",
+            "pub fn middle_b() { std::env::set_var(\"B\", \"1\"); }\n",
+            "#[tokio::test]\n",
+            "async fn t2() { let _ = std::process::Command::new(\"sh\").status(); }\n",
+            "pub fn after_c() { std::env::set_var(\"C\", \"1\"); }\n",
+        );
+        let v = scan_tree("r167-bare", &[("src/lib.rs", src)]);
+        let rows: Vec<(String, String)> = v["functions"].as_array().unwrap().iter()
+            .map(|f| (f["fn"].as_str().unwrap().to_string(), f["loc"].as_str().unwrap().to_string()))
+            .collect();
+        let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"t1"), "a bare `#[test] fn` is not production: {v}");
+        assert!(!names.contains(&"t2"), "a `#[tokio::test] fn` is not production either: {v}");
+        // The (0, Exec) pair is the point: WITHOUT the fix both harness fns land here carrying Exec.
+        let (_, spawns) = testmod_verdict(&v);
+        assert!(spawns.is_empty(), "no production fn spawns anything in this crate: {spawns:?} {v}");
+        // …and the neighbours keep their real source positions, which is the lockstep assertion.
+        for (want_fn, want_loc) in [("before_a", "src/lib.rs:1:1"), ("middle_b", "src/lib.rs:4:1"),
+                                    ("after_c", "src/lib.rs:7:1")] {
+            assert!(rows.iter().any(|(n, l)| n == want_fn && l == want_loc),
+                    "`{want_fn}` must still be reported at {want_loc}: {rows:?}");
+        }
+
+        // ── the CONTROL that makes the exclusion a scope decision and not a deletion ──────────────
+        // `--include-tests` must still see all five.
+        let d = std::env::temp_dir().join(format!("candor-r167-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r167inc\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let idx = load_dep_reports(None);
+        // SCOPED: `SCAN_SERIAL` is a plain `Mutex` and the peek block below locks it again. Holding this
+        // guard for the rest of the test body DEADLOCKED the suite (a 12-minute hang, no output).
+        let (rc, body) = {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: true, policy: None, baseline: None, ws_member: false, quiet: true,
+                deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run())
+        };
+        assert_eq!(rc, 0);
+        let vi: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let inc: Vec<&str> = vi["functions"].as_array().unwrap().iter()
+            .map(|f| f["fn"].as_str().unwrap()).collect();
+        for n in ["t1", "t2"] {
+            assert!(inc.contains(&n), "`--include-tests` still describes the harness: {vi}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+
+        // ── THE SCOPE OF THE JUSTIFICATION, and the gate flip it prevents ─────────────────────────
+        // `is_test_attr_fn` is sound because rustc strips a `#[test]` item outside `--test`. That is
+        // true of a LIBRARY file and FALSE of `tests/`, `benches/` and `examples/`, which are only ever
+        // compiled AS a test/bench/example binary. Applying the skip there too made `deny Net` go from
+        // exit 2 with the function named in `outOfScope` to exit 0 with `outOfScope: []` over an
+        // integration test that really opens a socket — the cardinal direction, from a fabrication fix,
+        // which is the failure this family expects of fabrication fixes. Pinned here as well as in
+        // `peek_scope_attribution_…` because that test reaches it only incidentally.
+        let e = std::env::temp_dir().join(format!("candor-r167-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&e);
+        std::fs::create_dir_all(e.join("src")).unwrap();
+        std::fs::create_dir_all(e.join("tests")).unwrap();
+        std::fs::write(e.join("Cargo.toml"), "[package]\nname = \"r167peek\"\n").unwrap();
+        std::fs::write(e.join("src/lib.rs"), "pub fn lib_pure() -> u32 { 1 }\n").unwrap();
+        std::fs::write(e.join("tests/it.rs"), concat!(
+            "#[test]\n",
+            "fn direct_net() { let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); }\n",
+        )).unwrap();
+        std::fs::write(e.join("p.pol"), "deny Net\n").unwrap();
+        crate::gate::reset_gate_run_state();
+        let (rc_peek, body_peek) = {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|x| x.into_inner());
+            scan_one(&e.to_string_lossy(), ScanOpts {
+                prefix: e.join("out/p").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false,
+                policy: Some(e.join("p.pol").to_string_lossy().into_owned()),
+                baseline: None, quiet: true, ws_member: false, deps_idx: &idx,
+                peek_excluded: false,
+            }, &crate::gate::begin_run())
+        };
+        let vp: serde_json::Value = serde_json::from_str(&body_peek.unwrap()).unwrap();
+        let oos: Vec<&str> = vp["outOfScope"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        assert_eq!(oos, vec!["tests::it::direct_net"],
+                   "a `#[test] fn` in an EXCLUDED non-library target is NOT stripped by rustc — the \
+                    ⟨0.29⟩ peek must still name it: {vp:#}");
+        assert_eq!(rc_peek, 2,
+                   "…and the verdict must stay INCOMPLETE rather than become a clean pass: {vp:#}");
+        let _ = std::fs::remove_dir_all(&e);
+
+        // …and the predicate that draws that line, both directions.
+        for f in ["tests/it.rs", "tests/sub/it.rs", "benches/b.rs", "examples/e.rs"] {
+            assert!(crate::lang::is_nonlib_target_file(f), "`{f}` is a non-library target");
+        }
+        for f in ["src/lib.rs", "src/a/b.rs", "build.rs", "src/testing.rs", "src/benchmark.rs"] {
+            assert!(!crate::lang::is_nonlib_target_file(f), "`{f}` is library source");
+        }
+    }
+
     #[test]
     fn cfg_test_modules_are_recognised() {
         let yes1: syn::ItemMod = syn::parse_str("#[cfg(test)] mod tests {}").unwrap();
@@ -11839,7 +11977,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), true, &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -11874,7 +12012,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), true, &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
     }
 
@@ -11907,7 +12045,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), true, &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.loc)).collect()
     }
 
@@ -15526,7 +15664,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R722 bumped the token to rev47 (`is_type_ident` now admits an ALL-CAPS type name, so a body constructing `IO`/`UTF8`/`HSTRING` gains a `<Type>::<construct>` marker and a `let x = MARKER` binding gains its receiver typing — both stored IN the cached `FnInfo`, so a rev46 entry republishes exactly the silence the row closes: the stale direction is SILENCE); R718 bumped the token to rev46 (`FileDecls` gained `field_borrows`, so a rev45 entry deserializes it EMPTY and every borrowed field reads as OWNED — the warm scan republishes the FABRICATED `<Type>::drop` edge this row removes; the stale direction is OVER-REPORT, but the `--incremental` byte-identity contract still requires the invalidation); R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R167 bumped the token to rev48 (`scan_items`/`fn_locs` now skip a `#[test]`-family fn in the
+        // default scan, so a rev47 entry — written by a binary that emitted a `FnInfo` for every bare
+        // `#[test] fn` at module scope — replays those harness rows warm with their effects intact; the
+        // stale direction is OVER-REPORT, but the `--incremental` byte-identity contract requires the
+        // invalidation just as it did for rev46); R722 bumped the token to rev47 (`is_type_ident` now admits an ALL-CAPS type name, so a body constructing `IO`/`UTF8`/`HSTRING` gains a `<Type>::<construct>` marker and a `let x = MARKER` binding gains its receiver typing — both stored IN the cached `FnInfo`, so a rev46 entry republishes exactly the silence the row closes: the stale direction is SILENCE); R718 bumped the token to rev46 (`FileDecls` gained `field_borrows`, so a rev45 entry deserializes it EMPTY and every borrowed field reads as OWNED — the warm scan republishes the FABRICATED `<Type>::drop` edge this row removes; the stale direction is OVER-REPORT, but the `--incremental` byte-identity contract still requires the invalidation); R709 bumped the token to rev45 (the escape model's UNCONDITIONAL routes are now judged against the `?`s that precede them, so a body whose route lies after an early exit gains a `<Type>::<construct>` marker and a `<Type>::drop` call edge — both stored IN the cached `FnInfo`'s `calls`, so a rev44 entry republishes R680's purity claim: the stale direction is SILENCE); R693 bumped the token to rev44 (`visit_expr_path` now mints a foreign dispatch key from this crate's own `foreign_impls` witness and reads the trait path as every segment but the last, both of which land in the cached `FnInfo`'s `foreign_dispatch` — a rev43 entry has neither, so the consumer hedge cannot fire and the warm scan republishes R690's silent purity claim: the stale direction is SILENCE); R652 bumped the token to rev43 (`impl_members` gained the `!` CRATE-LOCAL-TRAIT key, so a rev42 entry reads every implementor as UNCONFIRMED and the interface-union publishes nothing — the stale direction here is OVER-DISCLOSURE); R569 bumped the token to rev42 (an unannotated `let` bound to a reference now types its binding, which changes the `calls` list stored in the cached `FnInfo` — the stale direction is SILENCE); R598 bumped it to rev41; R485 bumped the token to rev33 (FnInfo gained `unresolved_why` — a rev32 entry deserializes it EMPTY, so `scan.rs` republishes the pre-fix `callback:unresolved call` for a dispatch/ambiguity hole, warm and invisible, since the effect set is `['Unknown']` on both sides); R478/R479/R482 bumped the token to rev32; R476 bumped the token to rev31; R459 bumped the token to rev30; R454 bumped the token to rev29; R452 bumped the token to rev28; R451 bumped the token to rev27; R334 bumped the token to rev26; R330 bumped it to rev25; R271 bumped it to rev24; R238 bumped it to rev23; R182 had bumped it to rev21 and R208 to rev22; R188 bumped it to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
@@ -15541,7 +15683,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev47/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev48/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -15649,7 +15791,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
-                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
+                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
             out
         })
@@ -15700,7 +15842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
-                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
+                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
             out
         })

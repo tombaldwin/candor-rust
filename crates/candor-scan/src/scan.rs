@@ -1736,7 +1736,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut out: Vec<FnInfo> = Vec::new();
             let mut idx = loc_idx;
             let mut u = uses.clone();
-            scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &drop_relevant, &mut u, &mut out);
+            // R167's `skip_test_fns` -- from `rel`, the SAME argument `fn_locs` derives it from, so the
+            // two lockstep walks cannot disagree about which fns they emit.
+            scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &drop_relevant, !crate::lang::is_nonlib_target_file(rel), &mut u, &mut out);
             (out, idx, u)
         }));
         match walked {

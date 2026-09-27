@@ -2331,6 +2331,66 @@ pub(crate) fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// SOUNDNESS R167 — a fn carrying a `#[test]`-FAMILY attribute is test-only, and this is not a policy
+/// choice: **the function does not exist in a non-test build.** Measured with rustc, not argued — a
+/// `#[test] pub fn bare_test_fn()` called from `main` in the same crate fails to compile with
+/// `E0425: cannot find function 'bare_test_fn' in this scope`, and `#[bench]` fails the same way. The
+/// builtin `test` macro strips the item outside `--test`, so nothing a consumer builds can reach its
+/// effects. `is_cfg_test` answers only for `#[cfg(test)]`, so a `#[test] fn` written directly at module
+/// scope — sqlx-postgres does this in `options/parse.rs` — was scanned as PRODUCTION and its
+/// `['Env','Fs','Log']` FABRICATED into the crate's report (46 of R160's 2,621 added rows were this).
+///
+/// The match is deliberately TIGHT — the LAST path segment being exactly `test` or `bench` — because the
+/// two error directions do not cost the same: excluding a PRODUCTION fn is a silent under-report, the
+/// cardinal sin, while failing to exclude a harness fn is only the fabrication this closes. So `#[test]`,
+/// `#[bench]`, `#[tokio::test]`, `#[async_std::test]` and `#[actix_rt::test]` are matched — all of them
+/// expand to the builtin `test` and are stripped identically — and `#[test_case(..)]`, `#[rstest]`,
+/// `#[quickcheck]` and every other third-party harness spelling is NOT: those keep their current
+/// over-charge rather than risk the other direction. `#[should_panic]` needs no arm of its own; it only
+/// ever accompanies `#[test]`.
+///
+/// Applied at the fn-emitting sites of `scan_items` AND the matching sites of `fn_locs`, which consume
+/// positions in LOCKSTEP — one predicate, both walks, for the same reason `is_cfg_test` is one function
+/// rather than two conditions (§G: the two walks must not answer one question two ways).
+/// SOUNDNESS R167 — is this source file a NON-LIBRARY TARGET (`tests/`, `benches/`, `examples/`)?
+///
+/// This is the exact SCOPE of `is_test_attr_fn`'s justification, and it is load-bearing rather than
+/// tidy. `is_test_attr_fn` is sound because rustc STRIPS a `#[test]` item outside `--test` — true of a
+/// LIBRARY file, and FALSE of these three, which are only ever compiled as a test/bench/example binary,
+/// harness included. Applying the skip to them anyway produced a gate flip in the cardinal direction,
+/// measured on a two-file fixture and caught by this repo's own
+/// `peek_scope_attribution_reaches_the_dispatching_caller_and_never_double_reports`: over a crate whose
+/// `tests/it.rs` holds `#[test] fn direct_net() { TcpStream::connect("evil.example.com:80") }`,
+/// `deny Net` went from exit **2** with the function named in `outOfScope` to exit **0** with
+/// `outOfScope: []` — a clean pass over an integration test that really opens a socket. The ⟨0.29⟩ peek
+/// exists precisely to look INTO excluded targets, so a rule premised on the ordinary build must not
+/// reach it.
+///
+/// Keyed on the FIRST segment, taken from the file's path relative to the scan root — one authority, fed
+/// from `rel` at both the `fn_locs` and `scan_items` call sites, because those two walks are consumed in
+/// lockstep and a predicate they could answer differently would desynchronise every later `loc`.
+///
+/// The known FALSE NEGATIVE, named rather than folded in: a LIBRARY module that happens to be called
+/// `tests` (`src/tests.rs`, or `src/tests/`) is read as non-library here, so a `#[test] fn` inside it
+/// keeps its (fabricated) charge. That is the over-report direction. R457 is the standing warning about
+/// deciding test-ness from a filename; this use of the filename can only ever FAIL TO EXCLUDE, never
+/// exclude something real, which is the direction that warning asks for.
+pub(crate) fn is_nonlib_target_file(rel: &str) -> bool {
+    matches!(
+        rel.split(['/', '\\']).next(),
+        Some("tests" | "benches" | "examples")
+    )
+}
+
+pub(crate) fn is_test_attr_fn(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        matches!(
+            a.path().segments.last().map(|s| s.ident.to_string()).as_deref(),
+            Some("test" | "bench")
+        )
+    })
+}
+
 /// The crate's CFG-FEATURE picture, from Cargo.toml `[features]`: `active` = the transitive closure of
 /// `default` (features enabling features); `declared` = every feature name that appears. A
 /// `#[cfg(feature = "X")]` is KNOWN-FALSE when X is declared but not active (compiled out under a default

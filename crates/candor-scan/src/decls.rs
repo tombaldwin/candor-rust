@@ -73,6 +73,10 @@ pub(crate) fn scan_items(
     // DROP-GLUE: the local type leaves worth emitting a `<construct>` marker for (see
     // `CallCollector::drop_relevant`). Threaded from scan.rs, where the merged decl index is complete.
     drop_relevant: &std::collections::HashSet<String>,
+    // SOUNDNESS R167 -- may a `#[test]`-attributed fn be skipped in this file?
+    // `!is_nonlib_target_file(rel)`, computed ONCE at the call site and handed to `fn_locs` as the same
+    // bool, because these two walks are consumed in lockstep and must not answer the question twice.
+    skip_test_fns: bool,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -90,7 +94,12 @@ pub(crate) fn scan_items(
                 // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
                 // the tests', not the crate's, same as a `#[cfg(test)] mod`. The guard was on `mod` only,
                 // so a bare `#[cfg(test)] fn helper()` leaked into the default report.
-                if !include_tests && is_cfg_test(&f.attrs) {
+                // R167 — and a bare `#[test] fn` at module scope is test-only too: rustc strips it
+                // outside `--test`, so it is not part of the crate a consumer builds.
+                if !include_tests
+                    && (is_cfg_test(&f.attrs)
+                        || (skip_test_fns && crate::lang::is_test_attr_fn(&f.attrs)))
+                {
                     continue;
                 }
                 let n = f.sig.ident.to_string();
@@ -125,8 +134,13 @@ pub(crate) fn scan_items(
                 }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        if !include_tests && is_cfg_test(&m.attrs) {
-                            continue; // a `#[cfg(test)]` method within an otherwise-production impl
+                        if !include_tests
+                            && (is_cfg_test(&m.attrs)
+                                || (skip_test_fns && crate::lang::is_test_attr_fn(&m.attrs)))
+                        {
+                            // a `#[cfg(test)]` — or R167, a `#[test]`-attributed — method within an
+                            // otherwise-production impl
+                            continue;
                         }
                         let n = m.sig.ident.to_string();
                         let q = match &tyname {
@@ -151,7 +165,9 @@ pub(crate) fn scan_items(
                     // The file's imports do NOT reach into an inline module's own declarations — see
                     // `submodule_uses`, and the `mod mine { struct Command }` fabrication it closes.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, &mut subuses, out);
+                    // R167 -- an inline `mod` is in the SAME FILE, so it inherits this file's answer,
+                    // which is exactly what `fn_locs`' own recursion does with its unchanged `file`.
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, skip_test_fns, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -1701,6 +1717,12 @@ pub(crate) fn next_loc(locs: &[String], loc_idx: &mut usize) -> String {
 /// the ident, so a `pub fn foo` at column 0 reports col 1, not the column of `foo`.
 pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out: &mut Vec<String>) {
     use syn::spanned::Spanned;
+    // R167 -- the SAME question `scan_items` is handed as `skip_test_fns`, answered by the SAME predicate
+    // over the SAME `rel`: `file` here IS that `rel` (both call sites pass it) and the recursion below
+    // keeps it, so a nested `mod` answers identically. These two walks are consumed in lockstep by
+    // `next_loc`, so a skip in one that is missing in the other shifts every later `loc` -- which is why
+    // the predicate is SHARED rather than re-derived from `modpath` on the other side.
+    let skip_test_fns = !crate::lang::is_nonlib_target_file(file);
     let loc = |sp: proc_macro2::Span| {
         let s = sp.start();
         format!("{file}:{}:{}", s.line, s.column + 1)
@@ -1708,7 +1730,12 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
     for it in items {
         match it {
             syn::Item::Fn(f) => {
-                if !include_tests && is_cfg_test(&f.attrs) {
+                // R167 — MUST mirror `scan_items`' `Item::Fn` arm exactly: these two walks are consumed
+                // in lockstep (`next_loc`), so a skip here that is missing there shifts every later loc.
+                if !include_tests
+                    && (is_cfg_test(&f.attrs)
+                        || (skip_test_fns && crate::lang::is_test_attr_fn(&f.attrs)))
+                {
                     continue;
                 }
                 out.push(loc(f.span()));
@@ -1719,7 +1746,10 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
                 }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        if !include_tests && is_cfg_test(&m.attrs) {
+                        if !include_tests
+                            && (is_cfg_test(&m.attrs)
+                                || (skip_test_fns && crate::lang::is_test_attr_fn(&m.attrs)))
+                        {
                             continue;
                         }
                         out.push(loc(m.span()));
