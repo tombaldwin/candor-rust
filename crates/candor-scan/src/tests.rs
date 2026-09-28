@@ -21108,16 +21108,134 @@ pub fn go() {{ imp::doit(); }}
         // charged for a value handed straight back. Measured as three fabrications on the corpus A/B
         // (openssl `MemBio::from_ptr`, tokio-postgres `Socket::new_tcp` and `SqlState::from_code`),
         // none of them present on published 0.34.0. `nested_ctor` is the two-deep spelling.
-        // `two_exits` is why sites are UNIONED across exits while leaves are intersected: each exit
-        // escapes a DIFFERENT construction of `H`, and neither site is in both. Intersecting them
-        // charged anyhow's `ensure::render` (`.. return Error::msg(string); .. Error::msg(msg)`) for a
-        // destructor that runs in its caller — measured on the corpus A/B, absent on published 0.34.0.
+        // `two_exits` is why the OPERAND-LOCAL sites are UNIONED across exits while leaves are
+        // intersected: each exit escapes a DIFFERENT construction of `H`, and neither site is in both.
+        // Intersecting them charged anyhow's `ensure::render` (`.. return Error::msg(string); ..
+        // Error::msg(msg)`) for a destructor that runs in its caller — measured on the corpus A/B,
+        // absent on published 0.34.0. SOUNDNESS R189 narrowed that union to exactly this shape: both
+        // constructions here are written INSIDE a root's own operand, and an exit that cannot reach
+        // such an expression really has no opinion about it. A site reached through a `let` is a
+        // different question and is intersected — see `a_value_escaping_only_on_an_explicit_return_...`.
         for n in ["forwards", "forgets", "two_out", "two_in_vec", "builder", "tuple_ctor",
                   "nested_ctor", "two_exits"] {
             assert!(row_absent(&v, n),
                     "`{n}` hands every `H` it builds to someone else — charging it fabricates a \
                      destructor that runs in another frame:\n{v:#}");
         }
+    }
+
+    /// SOUNDNESS R189, the trigger — and the discriminator is the EXPLICIT `return` EXIT, not the
+    /// number of exits and not the binder spelling. `escaping_ctor_leaves` intersected leaves across
+    /// roots and UNIONED their construction sites, which R172's own comment defended on the ground that
+    /// "an exit that cannot reach a site has no opinion about it". That is true of a site written inside
+    /// a root's operand and FALSE of one reached through a `let`: `let a = H::new(p); let b = H::new(q);`
+    /// binds two values that are both live at BOTH exits, so `return Ok(a)` escaping `a` said nothing
+    /// about the tail exit — and the union handed the site gate both sites as escaping, suppressing a
+    /// leaf the intersection had correctly kept.
+    ///
+    /// EXECUTED GROUND TRUTH, one `H::drop` inside each of these frames while the returned value is
+    /// still alive (`loop_ret` two, `other_root` one on the branch that does not return `g`), measured
+    /// by an atomic counter with the returned value `mem::forget`-ed so the count is the callee's own.
+    /// `ifelse` and `match_tail` are the SAME PROGRAMS RE-SPELLED and were already charged — by
+    /// accident, via `mark_escape`'s arm-level NAME intersection, which is why they are asserted here as
+    /// the no-regression half rather than as evidence the gate was right. UNDER-REPORT direction:
+    /// `deny Fs <each>` exited 0 before this fix, on a scoped rule verified BOUND.
+    #[test]
+    fn a_value_escaping_only_on_an_explicit_return_is_still_dropped_on_the_other_exit() {
+        let v = scan_src_to_json("r189ret", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn either(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); if n == 0 { return Ok(a); } Ok(b) }\n\
+            pub fn two_returns(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); if n == 0 { return Ok(a); } return Ok(b); }\n\
+            pub fn other_root(n: u32) -> Option<H> { let g = H::new(\"a\"); if n == 0 { return Some(g); } Some(H::new(\"b\")) }\n\
+            pub fn loop_ret(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); for i in 0..3u32 { if i == n { return Ok(a); } } Ok(b) }\n\
+            pub fn recv_pair(n: u32) -> Result<Vec<H>, ()> { let mut v: Vec<H> = Vec::new(); let mut w: Vec<H> = Vec::new(); v.push(H::new(\"a\")); w.push(H::new(\"b\")); if n == 0 { return Ok(v); } Ok(w) }\n\
+            pub fn two_late_binds(n: u32) -> Result<H, ()> { if n == 0 { return Ok(H::new(\"a\")); } let first = H::new(\"b\"); let second = H::new(\"c\"); if n == 1 { return Ok(first); } Ok(second) }\n\
+            pub fn ifelse(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); if n == 0 { Ok(a) } else { Ok(b) } }\n\
+            pub fn match_tail(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); match n { 0 => Ok(a), _ => Ok(b) } }\n\
+            pub fn drops_local(p: &str) { let _g = H::new(p); }\n");
+        let plain = effs(fn_entry(&v, "drops_local"));
+        assert_eq!(plain, vec!["Fs".to_string()],
+                   "the single-construction control is what proves the marker itself fires");
+        for n in ["either", "two_returns", "other_root", "loop_ret", "recv_pair", "two_late_binds"] {
+            assert_eq!(effs(fn_entry(&v, n)), plain,
+                       "`{n}` drops one `H` in its own frame on the exit that does NOT carry it out \
+                        (executed) — a value leaving through the OTHER exit must not answer for it");
+        }
+        for n in ["ifelse", "match_tail"] {
+            assert_eq!(effs(fn_entry(&v, n)), plain,
+                       "`{n}` is the same program re-spelled and was already charged; this is the \
+                        no-regression half, not evidence the site union was right");
+        }
+    }
+
+    /// R189 CONTROL — THE OVER-CHARGE DIRECTION, and the only direction this fix can fail in: it turns
+    /// a union into an intersection, so it can only ever charge MORE. R230 is the mirror of this family
+    /// (widening ownership converts silence into over-charge), so every cell here runs ZERO destructors
+    /// in its own frame, executed, and must stay ABSENT. Passes in BOTH arms.
+    ///
+    /// `render` is the anyhow shape the union was introduced FOR (`.. return Error::msg(s); ..
+    /// Error::msg(m)`): both constructions are written inside a root's own operand, so they keep the
+    /// union and stay suppressed — that is the whole content of the narrowing. `both_exits`,
+    /// `three_same` and `struct_wrap` are the same value carried out of EVERY exit, which is what the
+    /// intersection has to keep certifying. `forget_other` mixes the two: one exit returns the value,
+    /// the other forgets it and builds a fresh one. `store_then_return` escapes through a `*slot =`
+    /// store on both paths and returns neither.
+    ///
+    /// `late_bind` IS THE ONE FABRICATION THE 1,624-CRATE CENSUS A/B FOUND, and it is why the site
+    /// intersection is POSITIONAL rather than blanket. `windows-strings`' `BSTR::from_wide` is
+    /// `if value.is_empty() { return Self::new(); } let result = Self(SysAllocStringLen(..)); .. result`:
+    /// a blanket intersection let the early `return` — taken BEFORE `result` is bound — veto `result`'s
+    /// escape, and charged `BSTR::drop` to a body that drops nothing on either path. The rule is R173's
+    /// for a `?` (an exit cannot kill a value whose construction it precedes) applied to an ordinary
+    /// exit. The cell that proves it is not merely "stop charging late bindings" is `two_late_binds` in
+    /// the trigger test above — two bindings AFTER the first `return`, two exits after THEM, executed
+    /// 1 drop, still charged.
+    #[test]
+    fn a_value_carried_out_of_every_exit_is_still_suppressed_when_sites_are_intersected() {
+        let v = scan_src_to_json("r189ctl", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub struct S { pub h: H }\n\
+            pub fn both_exits(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); if n == 0 { return Ok(a); } Ok(a) }\n\
+            pub fn render(n: u32, s: &str, m: &str) -> H { if n == 0 { return H::new(s); } H::new(m) }\n\
+            pub fn forget_other(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); if n == 0 { return Ok(a); } std::mem::forget(a); Ok(H::new(\"b\")) }\n\
+            pub fn single_exit(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); Ok(a) }\n\
+            pub fn struct_wrap(n: u32) -> Result<S, ()> { let a = H::new(\"a\"); let s = S { h: a }; if n == 0 { return Ok(s); } Ok(s) }\n\
+            pub fn three_same(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); if n == 0 { return Ok(a); } if n == 1 { return Ok(a); } return Ok(a); }\n\
+            pub fn store_then_return(n: u32, slot: &mut Option<H>) -> Result<u32, ()> { let a = H::new(\"a\"); if n == 0 { *slot = Some(a); return Ok(1); } *slot = Some(a); Ok(2) }\n\
+            pub fn late_bind(n: u32) -> Result<H, ()> { if n == 0 { return Ok(H::new(\"a\")); } let result = H::new(\"b\"); Ok(result) }\n");
+        for n in ["both_exits", "render", "forget_other", "single_exit", "struct_wrap", "three_same",
+                  "store_then_return", "late_bind"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` runs no destructor in its own frame (executed: 0 drops) — charging it \
+                     fabricates an effect that happens in another frame:\n{v:#}");
+        }
+    }
+
+    /// R189, THE CALLER. R756's half-fix fired on the enclosing scope through prefix matching and left
+    /// `main` silent, so a gate exit on the narrow scope is not proof the effect reached anything. These
+    /// two callers do NOT own the returned value (`mem::forget`), so their ONLY route to `Fs` is the
+    /// callee's own in-frame drop — executed, 1 and 0. A caller that drops the returned `H` itself is
+    /// charged either way and cannot discriminate, which is why neither of these is written that way.
+    #[test]
+    fn the_caller_of_a_return_exit_drop_inherits_it_and_the_control_caller_does_not() {
+        let v = scan_src_to_json("r189call", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn either(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); let b = H::new(\"b\"); if n == 0 { return Ok(a); } Ok(b) }\n\
+            pub fn both_exits(n: u32) -> Result<H, ()> { let a = H::new(\"a\"); if n == 0 { return Ok(a); } Ok(a) }\n\
+            pub fn caller_either(n: u32) -> bool { let r = either(n); std::mem::forget(r); true }\n\
+            pub fn caller_both(n: u32) -> bool { let r = both_exits(n); std::mem::forget(r); true }\n");
+        assert_eq!(effs(fn_entry(&v, "caller_either")), vec!["Fs".to_string()],
+                   "the caller inherits the callee's in-frame drop (executed: 1) — a fix that charges \
+                    only the enclosing scope leaves every caller silent:\n{v:#}");
+        assert!(row_absent(&v, "caller_both"),
+                "`caller_both`'s callee drops nothing (executed: 0) and neither does it — this is the \
+                 control that proves the assertion above is not just 'every caller is charged':\n{v:#}");
     }
 
     /// R172, the MACRO half. Construction sites are identified by the address of their `syn::Expr`,

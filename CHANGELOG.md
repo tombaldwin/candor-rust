@@ -10,6 +10,62 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **A VALUE THAT ESCAPES ONLY ON AN EXPLICIT `return` WAS CREDITED TO EVERY OTHER EXIT TOO, so its
+  destructor on the exits that do NOT carry it out vanished (SOUNDNESS R189 — a silent under-report,
+  now closed).** `escaping_ctor_leaves` INTERSECTED leaves across the function's exits and UNIONED their
+  construction SITES. R172's comment defended the union on the ground that *"a site is a single
+  construction expression, so an exit that cannot reach it has no opinion about it"* — which is true of a
+  site written inside an exit's own operand and **false of one reached through a `let`**: a bound value is
+  live at EVERY exit, so `return Ok(a)` escaping `a` said nothing about the tail exit, and the union then
+  handed the site gate both sites as escaping. The leaf the intersection had correctly KEPT was suppressed
+  anyway. **The discriminator is the explicit `return`, not the number of exits and not the binder
+  spelling** — the `if`/`else`-tail and `match`-tail spellings of the same program were already charged,
+  by `mark_escape`'s arm-level NAME intersection, which is what made the hole look covered.
+
+  **The silence it closes, executed with the frame's own drop counter and the returned value
+  `mem::forget`-ed so the count is the callee's own:** `let a = H::new(p); let b = H::new(q); if n == 0 {
+  return Ok(a); } Ok(b)` runs **one** `H::drop` inside that frame, was ABSENT from `functions[]`, and
+  `deny Fs either` exited **0** on a rule verified BOUND. Six shapes, all executed, all silent before:
+  two `return`s, a `return` beside a tail that builds its own value, a `return` from inside a `for`
+  (2 drops), a pair of `Vec`s each pushed then one returned per exit, and two bindings made AFTER the
+  first `return`. **And the CALLER, which is the assertion R756 taught this repo to make separately:**
+  `caller_either` — which `mem::forget`s the result, so its ONLY route to `Fs` is the callee's own
+  in-frame drop — went from ABSENT to `{ Fs }`, executed 1 drop. **Five scoped gate flips 0 → 1**, eight
+  controls unmoved.
+
+  **THE UNION IS KEPT, NARROWED TO THE HALF THE ARGUMENT IS TRUE OF.** Sites written inside an exit's own
+  operand still union across exits — that is what keeps anyhow's `ensure::render`
+  (`.. return Error::msg(s); .. Error::msg(msg)`) uncharged, the over-charge the union was introduced for.
+  Sites reached through a `let`/assignment/receiver are intersected.
+
+  **AND THE INTERSECTION IS POSITIONAL, FOR R173's REASON — THE CORPUS A/B IS WHAT FOUND THAT.** A blanket
+  intersection let an EARLY `return`, taken before a binding exists, veto that binding's escape:
+  `windows-strings`' `BSTR::from_wide` is `if value.is_empty() { return Self::new(); } let result =
+  Self(SysAllocStringLen(..)); .. result`, and it gained a `BSTR::drop` edge over a body that drops nothing
+  on either path. That was the ONE row the whole census moved under the blanket rule, and it was a
+  fabrication; an exit cannot kill a value whose construction it precedes, which is exactly what R173
+  already says about a `?`. Both halves are independently guard-deleted: remove the fix and the trigger
+  and caller tests go red; remove the POSITIONAL filter alone and the `late_bind` over-charge control goes
+  red, while `two_late_binds` (two bindings after the first `return`, two exits after THEM, executed 1
+  drop) stays charged either way.
+
+  **CORPUS A/B — `bin/corpus-ab.py` from the umbrella over the PINNED rust census
+  (`bin/corpus-census-rust.tsv`), 1,624 of 1,625 entries, 227,151 rows per arm, `700f36d1cb4c…` vs
+  `ec02a166b2a3…`: ADDED 0 / REMOVED 0 / CHANGED 0 on every key mode, with REACH 204 `R189EXIT` hits
+  across 111 entries.** So the escape decision really moved, 204 times, and no reported row followed it —
+  because on this census the shape never lands on a type with a local `impl Drop`. The reached leaves are
+  error enums and plain value types (`jiff`'s `MonthError`/`WeekdayError`, `pxfm`'s `DoubleDouble`), which
+  have no destructor to charge. **State that plainly: on 1,624 real crates this fix costs nothing and buys
+  nothing; its whole measured value is the executed fixtures and the five gate flips**, and its whole
+  measured cost is the one fabrication the blanket version introduced and the positional rule removed.
+  (`windows-0.56.0` is EXCLUDED — ~4M lines of generated bindings, over the 300s per-entry cap in both
+  arms. 97 entries report `analyzed.count 0` — macro-only, proc-macro and `cfg`-gated crates — and are
+  compared under `--allow-unjudged`.)
+
+  `CANDOR_ALIAS_DEBUG=1` prints `R189EXIT <leaf> (<n> sites, <k> escaping)` exactly when the intersection
+  withdraws an escape the union certified, so a zero-diff can be told from a corpus that never reached the
+  change. Kept, not rebuilt next time.
+
 - **THE DEEP ENGINE EMITTED NO ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST, so two consumers were answering about
   nothing (SOUNDNESS R761 — instrument, strictly additive).** `write_report_files` called
   `to_packaged_report_json`, which has no `analyzed` parameter, so every deep-engine report was a §2

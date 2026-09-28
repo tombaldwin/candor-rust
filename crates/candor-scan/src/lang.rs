@@ -4706,19 +4706,29 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // measured (the standing rule about a comment asserting safety). The re-union below is now
     // POSITIONAL, per route; read it there.
     let every_route: &dyn Fn(usize) -> bool = &|_| true;
+    // §E1 HIT COUNTER state for R189 — the UNION of every root's binding-mediated sites, i.e. exactly
+    // what `acc.sites` held before this change. Read once, at the site gate, to print the leaves whose
+    // answer the intersection actually moved. It must never be read by a decision.
+    let mut via_union: std::collections::HashSet<SiteId> = std::collections::HashSet::new();
     let mut acc = if sites.roots.is_empty() {
         escape_from_root(None, &sites, every_route)
     } else {
         let mut roots = sites.roots.iter();
-        let first = roots.next().expect("checked non-empty above");
+        let (q0, first) = roots.next().expect("checked non-empty above");
         let mut acc = escape_from_root(*first, &sites, every_route);
-        for r in roots {
+        // SOUNDNESS R189 — every root's binding-mediated sites, WITH THAT ROOT'S POSITION, kept until
+        // the whole root set is known. They cannot be folded pairwise like `names`/`leaves`, because a
+        // root only gets a VOTE on a site it could have reached — see the intersection below.
+        let mut via_by_root: Vec<(usize, std::collections::HashSet<SiteId>)> =
+            vec![(*q0, std::mem::take(&mut acc.via))];
+        for (q, r) in roots {
             if acc.names.is_empty() && acc.leaves.is_empty() {
                 break; // the intersection can only shrink further; every remaining root would too.
             }
             let next = escape_from_root(*r, &sites, every_route);
             acc.names.retain(|n| next.names.contains(n));
             acc.leaves.retain(|l| next.leaves.contains(l));
+            via_by_root.push((*q, next.via));
             // SITES ARE UNIONED ACROSS EXITS WHILE LEAVES ARE INTERSECTED, and the two together are the
             // rule. A site is a single construction expression, so an exit that cannot reach it has no
             // opinion about it — intersecting made `fn render(..) -> Error { .. return Error::msg(s);
@@ -4731,8 +4741,42 @@ pub(crate) fn escaping_ctor_leaves<'a>(
             // could not exceed the shipped leaf-keyed set; R173, one commit later, deliberately widens
             // the set the gate is handed, so state the narrowing property, which is the one this code
             // actually has.)
+            //
+            // SOUNDNESS R189 — AND THAT REASONING IS SOUND FOR EXACTLY THE SITES IT DESCRIBES AND FOR
+            // NO OTHERS. `return Error::msg(s)` and the tail `Error::msg(msg)` are each lexically
+            // inside ONE root's operand, which is why "an exit that cannot reach it has no opinion
+            // about it" is true of them — and it is FALSE of `let a = H::new(p);`, a value that is
+            // live at every exit and whose site the old code unioned all the same. So the union is
+            // kept, narrowed to the operand-local half (`sites`); the binding-mediated half (`via`) is
+            // intersected one line up. The comment above claimed the leaf INTERSECTION caught the
+            // conditional case; measured, it does not when both exits carry the SAME leaf under
+            // DIFFERENT names — `either` (R189) keeps `H` through the intersection and then loses it
+            // to this union, executed 1 drop, reported ABSENT, `deny Fs` exit 0.
             acc.sites.extend(next.sites);
         }
+        // SOUNDNESS R189 — THE BINDING-MEDIATED INTERSECTION, AND IT IS POSITIONAL FOR R173's REASON.
+        // A value reached through a `let`/assignment/receiver is live at every exit that comes AFTER
+        // its construction, so each of those exits has to certify its escape; an exit that comes BEFORE
+        // it has no opinion, because the value does not exist yet and that exit cannot drop it.
+        //
+        // MEASURED, and the corpus A/B is what found it: `windows-strings`' `BSTR::from_wide` is
+        // `if value.is_empty() { return Self::new(); } let result = Self(SysAllocStringLen(..)); ..
+        // result` — a blanket intersection let the EARLY return, taken before `result` exists, veto
+        // `result`'s escape, and charged `BSTR::drop` to a body that drops nothing on either path. That
+        // was the ONE row the whole 1,624-crate census moved, and it was a fabrication.
+        //
+        // `all()` over an empty vote set answers TRUE (suppressed), which is the pre-change direction:
+        // a site no exit could have reached is not evidence of a local drop.
+        let all_via: std::collections::HashSet<SiteId> =
+            via_by_root.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        via_union.extend(all_via.iter().copied());
+        acc.via = all_via
+            .into_iter()
+            .filter(|s| {
+                let p = sites.site_seq.get(s).copied().unwrap_or(0);
+                via_by_root.iter().filter(|(q, _)| *q > p).all(|(_, v)| v.contains(s))
+            })
+            .collect();
         acc
     };
     // SOUNDNESS R173 — THE `?` VETO IS POSITIONAL. A `?` is a genuine early exit that carries nothing
@@ -4873,13 +4917,21 @@ pub(crate) fn escaping_ctor_leaves<'a>(
         }
         acc.names.extend(m.names);
         acc.leaves.extend(m.leaves);
+        // R189 — a route-only (`root: None`) walk has no exit to be relative to: `mem::forget(a)` or
+        // `*slot = a` happens on whatever path reaches it, which is what the bucket machinery above
+        // already decides positionally. So BOTH halves of its marks join the unioned side here, which
+        // is the shipped behaviour for the unconditional routes unchanged.
         acc.sites.extend(m.sites);
+        acc.sites.extend(m.via);
     }
     // R172, the site gate. `acc.leaves` is the shipped leaf-keyed answer; a leaf survives it only if
     // every construction of that leaf recorded by the body walk is one of the escaping sites. A leaf
     // with NO recorded site (only reachable through a macro, or through a walk position the site pass
     // does not reach) keeps the old answer — the site set is an added refusal, never a new licence.
-    let escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
+    let mut escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
+    escaped_sites.extend(std::mem::take(&mut acc.via));
+    // R189 — what the pre-change code would have handed the gate. Only the hit counter reads it.
+    via_union.extend(escaped_sites.iter().copied());
     acc.leaves.retain(|l| {
         // SOUNDNESS R229 — THE LEAF-KEYED MACRO LICENCE IS GONE. `macro_ctor_leaves` said "this leaf
         // was built inside a macro somewhere, and no site table can hold that construction, so keep
@@ -4900,6 +4952,16 @@ pub(crate) fn escaping_ctor_leaves<'a>(
                     && v.iter().filter(|s| s.1 < ORD_DEEP0).all(|s| escaped_sites.contains(s))
                 {
                     eprintln!("R229DECIDE {l}");
+                }
+                // §E1 HIT COUNTER — R189's branch is "every site of this leaf was escaping under the
+                // blanket site UNION, and is not under the binding-mediated INTERSECTION". That is
+                // precisely the set of leaves this change charges and the old code suppressed, so a
+                // zero count in an A/B means the corpus never reached it.
+                if !all && v.iter().all(|s| via_union.contains(s))
+                    && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+                {
+                    eprintln!("R189EXIT {l} ({} sites, {} escaping)", v.len(),
+                              v.iter().filter(|s| escaped_sites.contains(s)).count());
                 }
                 // §E1 HIT COUNTER — the branch R172 adds is exactly "the leaf gate WOULD have
                 // suppressed a leaf that has a NON-escaping construction site too". Printed only when
@@ -4948,11 +5010,18 @@ fn escape_from_root(
             mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
         }
     }
+    // SOUNDNESS R189 — EVERY MARK BELOW THIS LINE IS BINDING-MEDIATED, so its sites are `via`, not
+    // `sites`. `mark_escape` only ever INSERTS, so a scratch `Marks` per call is equivalent to marking
+    // into `m` directly, and `absorb_via` then files the sites under the kind that decides how they
+    // combine across exits. The one exception is the `lhs: None` store arm, which is unconditional and
+    // not exit-dependent — it keeps marking directly, exactly as the route walk above does.
     for _ in 0..8 {
-        let before = (m.names.len(), m.leaves.len(), m.sites.len());
+        let before = (m.names.len(), m.leaves.len(), m.sites.len(), m.via.len());
         for (name, init) in &sites.lets {
             if m.names.contains(name) {
-                mark_escape(init, &lens, guard, uses, fields, returns, &mut m);
+                let mut sub = Marks::default();
+                mark_escape(init, &lens, guard, uses, fields, returns, &mut sub);
+                m.absorb_via(sub);
             }
         }
         for (lhs, rhs, q) in &sites.assigns {
@@ -4960,7 +5029,9 @@ fn escape_from_root(
                 // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
                     if m.names.contains(n) {
-                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m);
+                        let mut sub = Marks::default();
+                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut sub);
+                        m.absorb_via(sub);
                     }
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
@@ -4977,11 +5048,13 @@ fn escape_from_root(
         for (recv, args) in &sites.method_args {
             if m.names.contains(recv) {
                 for a in args {
-                    mark_escape(a, &lens, guard, uses, fields, returns, &mut m);
+                    let mut sub = Marks::default();
+                    mark_escape(a, &lens, guard, uses, fields, returns, &mut sub);
+                    m.absorb_via(sub);
                 }
             }
         }
-        if (m.names.len(), m.leaves.len(), m.sites.len()) == before {
+        if (m.names.len(), m.leaves.len(), m.sites.len(), m.via.len()) == before {
             break;
         }
     }
@@ -4991,11 +5064,36 @@ fn escape_from_root(
 /// One escape walk's findings. `leaves` is the shipped leaf-keyed answer, kept because it is what the
 /// macro fallback still needs; `sites` is the R172 refinement — the ADDRESS of each construction
 /// expression that escapes, so two constructions of one type in one body stop being one fact.
+///
+/// SOUNDNESS R189 — AND THE SITES COME IN TWO KINDS, BECAUSE THEY ANSWER TO DIFFERENT EXITS. A site
+/// LEXICALLY INSIDE this root's operand (`return Ok(H::new(p))`, a tail operand) is evaluated on THIS
+/// exit and on no other, so no other exit has an opinion about it and unioning it across roots is
+/// sound — that is `sites`. A site reached through a `let`/assignment/receiver BINDING is a value that
+/// exists at EVERY exit, so one exit carrying it out says nothing about the exits that do not; its
+/// escape has to be certified by all of them, which is an INTERSECTION — that is `via`. Collapsing the
+/// two into one unioned set is R189: `let a=H::new(p); let b=H::new(q); if n==0 { return Ok(a); } Ok(b)`
+/// handed the site gate both sites as escaping, so the leaf the intersection had correctly KEPT was
+/// suppressed anyway and one executed `H::drop` vanished.
 #[derive(Default, Clone)]
 struct Marks {
     names: std::collections::HashSet<String>,
     leaves: std::collections::HashSet<String>,
     sites: std::collections::HashSet<SiteId>,
+    /// Sites reached through a BINDING rather than through this root's own operand — see the type
+    /// comment. Intersected across roots by `escaping_ctor_leaves`; unioned for the route-only
+    /// (`root: None`) calls, whose marks are not exit-dependent in the first place.
+    via: std::collections::HashSet<SiteId>,
+}
+
+impl Marks {
+    /// Merge a binding-mediated walk's findings: its names and leaves are this walk's, and every site
+    /// it found — including sites IT reached through a further binding — is a `via` site here.
+    fn absorb_via(&mut self, sub: Marks) {
+        self.names.extend(sub.names);
+        self.leaves.extend(sub.leaves);
+        self.via.extend(sub.sites);
+        self.via.extend(sub.via);
+    }
 }
 
 /// R172 — a construction site's identity, comparable between the body walk and the escape walk.
@@ -5442,6 +5540,12 @@ struct EscapeSites<'a> {
     /// ADDRESS of its `syn::Expr`. Collected from the SAME walk that finds the escape sites, so the
     /// two halves cannot disagree about what counts as a construction.
     ctor_sites: HashMap<String, Vec<SiteId>>,
+    /// SOUNDNESS R189 — each site's own PRE-ORDER POSITION, which is what makes the binding-mediated
+    /// site intersection positional. Exactly `first_ctor_seq`'s question asked per SITE instead of per
+    /// LEAF: a construction has not happened yet at an exit that precedes it, so that exit cannot drop
+    /// it and must not veto its escape. A site missing from this table counts as position 0 — live from
+    /// the start, the same default R173 takes for a leaf it cannot place, and the CHARGING direction.
+    site_seq: HashMap<SiteId, usize>,
     /// R172 — CALLEE positions, which are NOT construction sites. `MemBio(bio)` is a construction; the
     /// `MemBio` inside it is the callee PATH of that same call, and reading it as a second site of the
     /// same leaf is fatal, because `mark_escape` descends only VALUE children (`for_each_value_child`
@@ -5527,7 +5631,11 @@ struct EscapeSites<'a> {
     /// the function. `None` marks an exit that provably carries nothing out of this scope (a bare
     /// `return;`, or the implicit early-return a `?` can take): a real, present counterexample, not an
     /// absence of information, so it must veto a name/leaf exactly like an exit that visibly drops it.
-    roots: Vec<Option<&'a syn::Expr>>,
+    /// SOUNDNESS R189 — each exit WITH ITS PRE-ORDER POSITION. The position is read for one question
+    /// only: whether a binding-mediated construction site had already been evaluated when this exit
+    /// was taken. An exit that precedes the construction has no opinion about it (the value does not
+    /// exist yet), which is R173's rule for a `?` applied to an ordinary exit.
+    roots: Vec<(usize, Option<&'a syn::Expr>)>,
     /// Escape ROUTES that are not an exit of THIS function at all, so they must never be intersected
     /// against `roots`: a closure's own return value (which flows out through the closure's eventual
     /// invocation, not through this function returning) and the operand of `mem::forget`/
@@ -5574,6 +5682,7 @@ impl<'a> EscapeSites<'a> {
             macro_expanding: std::collections::HashSet::new(),
             opaque_interior_leaves: std::collections::HashSet::new(),
             ctor_sites: HashMap::new(),
+            site_seq: HashMap::new(),
             skip_sites: std::collections::HashSet::new(),
             let_bound_closures: HashMap::new(),
             pending_closure_escapes: Vec::new(),
@@ -5625,7 +5734,9 @@ impl<'a> EscapeSites<'a> {
                 }
             }
             self.first_ctor_seq.entry(l.clone()).or_insert(seq); // R173
-            self.ctor_sites.entry(l).or_default().push((e as *const syn::Expr as usize, 0));
+            self.ctor_sites.entry(l).or_default().push((addr, 0));
+            self.site_seq.insert((addr, 0), seq); // R189
+
         }
     }
 
@@ -5675,6 +5786,10 @@ impl<'a> EscapeSites<'a> {
         }
         for (l, o) in found {
             self.ctor_sites.entry(l).or_default().push((base, o));
+            // R189 — a construction inside a macro's tokens is evaluated where the INVOCATION is, so
+            // the invocation's own position is the site's position. `self.seq` is that position: this
+            // runs from the walk of the `Expr::Macro` node itself.
+            self.site_seq.insert((base, o), self.seq);
         }
         // NESTED READINGS. A macro invoked inside a macro is where R203 stopped, and its
         // constructions were the last shape neither walk could address-key. `ord_nested(j, inner)`
@@ -5729,6 +5844,7 @@ impl<'a> EscapeSites<'a> {
                         eprintln!("R229NESTED {l}"); // §E1 HIT COUNTER
                     }
                     self.ctor_sites.entry(l).or_default().push((base, o));
+                    self.site_seq.insert((base, o), self.seq); // R189, as above
                 }
             }
         }
@@ -5872,6 +5988,7 @@ impl<'a> EscapeSites<'a> {
             }
             self.first_ctor_seq.entry(l.clone()).or_insert(seq);
             self.ctor_sites.entry(l).or_default().push((base, ord));
+            self.site_seq.insert((base, ord), seq); // R189
         }
         for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, on_spine, inner_spine, n));
     }
@@ -6230,7 +6347,10 @@ impl<'a> EscapeSites<'a> {
                 }
                 syn::Stmt::Expr(e, semi) => {
                     if tail && last && semi.is_none() {
-                        self.roots.push(Some(e));
+                        // R189 — the TAIL is evaluated after every statement before it, so
+                        // `self.seq` here is greater than every binding's position, which is what makes
+                        // the tail root veto every one of them (the shipped behaviour).
+                        self.roots.push((self.seq, Some(e)));
                     }
                     // `f();` — the value is discarded, so anything the callee built dies here.
                     //
@@ -6358,9 +6478,11 @@ impl<'a> EscapeSites<'a> {
         }
         match e {
             syn::Expr::Return(r) => match &r.expr {
-                Some(v) => self.roots.push(Some(v)),
+                // R189 — the `return`'s OWN pre-order position, which is before its operand is
+                // walked: the exit is taken there, so a `let` bound later is not live at it.
+                Some(v) => self.roots.push((self.seq, Some(v))),
                 // Bare `return;` — this exit is `()`-typed and provably carries nothing out.
-                None => self.roots.push(None),
+                None => self.roots.push((self.seq, None)),
             },
             // `expr?`'s implicit early-return is a genuine, separate exit of the FUNCTION (not just
             // this block), and it carries only the error/`None` residual — never a name bound earlier in
@@ -6634,6 +6756,12 @@ fn mark_escape(
                 NestedMacro::Stmt(_) => None,
             })
             .collect();
+        // R189 — this renumbering reads `sub.sites` ONLY, and that is complete because `mark_escape`
+        // never files a `via` site: the two kinds are separated by `escape_from_root`'s binding
+        // fixpoint (`Marks::absorb_via`), which is not on this path. Asserted rather than commented,
+        // because a `via` site silently dropped here would be a site that can never be marked
+        // escaping — a FABRICATION, the direction this file is not allowed to be wrong in.
+        debug_assert!(sub.via.is_empty(), "mark_escape must not produce `via` sites");
         for (addr, ord) in &sub.sites {
             // A site written DIRECTLY in this parse carries `ord == 0` and is renumbered onto this
             // reading's ordinals.
@@ -6690,6 +6818,11 @@ fn mark_escape(
             // found directly inside one arm is a self-contained fact about that arm.
             m.leaves.extend(then_m.leaves.union(&else_m.leaves).cloned());
             m.sites.extend(then_m.sites.union(&else_m.sites).cloned());
+            // R189 — `mark_escape` itself never files a `via` site (only `escape_from_root`'s
+            // binding fixpoint does, through `absorb_via`), so these two sets are always empty here.
+            // Carried anyway rather than dropped: a dropped set is a silent licence if that ever
+            // changes, and the union is the same rule the `sites` line above uses.
+            m.via.extend(then_m.via.union(&else_m.via).cloned());
             return;
         }
         syn::Expr::Match(mt) => {
@@ -6703,10 +6836,13 @@ fn mark_escape(
                     names: a.names.intersection(&n.names).cloned().collect(),
                     leaves: a.leaves.union(&n.leaves).cloned().collect(),
                     sites: a.sites.union(&n.sites).cloned().collect(),
+                    // R189 — always empty here; see the `If` arm's note on why it is carried.
+                    via: a.via.union(&n.via).cloned().collect(),
                 });
                 m.names.extend(folded.names);
                 m.leaves.extend(folded.leaves);
                 m.sites.extend(folded.sites);
+                m.via.extend(folded.via);
             }
             return;
         }

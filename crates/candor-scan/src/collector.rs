@@ -7,7 +7,7 @@ use crate::*;
 ///
 /// The drop-glue charge is gated on `escaping_ctors` / `escapes.names`, computed by
 /// `lang::escaping_ctor_leaves` — the model whose job is to prove a constructed value leaves this
-/// frame, so its destructor runs in the CALLER. Seven open silent rows live in it, and R297 shows it
+/// frame, so its destructor runs in the CALLER. Several open silent rows live in it, and R297 shows it
 /// is blind BY CONSTRUCTION: `*slot = v` has no construction site to key on. §6d S2 proposed deleting
 /// it — charge every construction and every by-value parameter of a drop-relevant type, escape or no
 /// escape. Sound, no name keys, no site keys, no scopes.
@@ -17,8 +17,12 @@ use crate::*;
 /// same argument `bin/corpus-ab.py` exists for. Proven inert when unset: flag-off vs the pre-change
 /// binary, 300 crates, 17,419 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 0.
 ///
-/// **WHAT IT CLOSES (executed ground truth, in-frame drops counted with the frame's own counter):**
-/// R189 `either` 1 / `condesc_other_root` 1, R195 `reassign_no_q` 2, R198 both arms, R201 both arms,
+/// **WHAT IT CLOSES (executed ground truth, in-frame drops counted with the frame's own counter).**
+/// R189's two cells are struck from this list: **the return-exit half is CLOSED by the TARGETED fix**
+/// (`escaping_ctor_leaves` now intersects binding-mediated sites positionally instead of unioning them
+/// blanket), at a corpus cost three orders of magnitude below this flag's. The list is kept as measured —
+/// it is the price comparison, and re-pricing it means re-running the A/B, not editing the prose:
+/// ~~R189 `either` 1 / `condesc_other_root` 1~~, R195 `reassign_no_q` 2, R198 both arms, R201 both arms,
 /// R297 `overwrite_place` 1, R300 body-local `fn` 1, R323 shadowed closure 2, R200's CALLER half 1 —
 /// eight fixtures, every one ABSENT before and charged after. **It does NOT close three the brief
 /// grouped in:** R197 (turbofish type ORIGIN — its own row says so and it is measured ABSENT in both
