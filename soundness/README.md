@@ -306,7 +306,62 @@ finding arrives with a reproduction.
 - **One effectful `Drop` on one guard type.** No trait objects, generics, cross-crate edges, `async`,
   threads, or non-`Drop` effect routes. The other fuzzers in this directory cover those, and none of
   them covers these two properties.
-- **The deep (dylint) engine.** These drive `candor-scan` only.
+- **The deep (dylint) engine.** These drive `candor-scan` only — and until `run_differential.sh`
+  existed, NOTHING in this directory put the two engines' answers next to each other. See
+  "The two engines, differenced" below; that is SOUNDNESS R758.
 - **Shapes outside the composed space** — the ~13 construction forms, ~11 macro forms, ~11 contexts and
   3 endings enumerated in the two generators. It is a bigger space than any fixture set, and it is
   still a list somebody wrote down.
+
+## The two engines, differenced (`run_differential.sh`) — SOUNDNESS R758
+
+Every other gate in this directory drives exactly ONE engine. `run.sh`, `run_cross.sh`, `run_drop.sh`,
+`oracle.sh` and `oracle_pf.sh` drive the nightly rustc/MIR engine; `run_q.sh` and `run_macro.sh` drive
+`candor-scan`. **No script drove both and differenced them**, and that is a measured cost rather than a
+tidiness complaint: R756 — every implicit scope-exit drop inside a closure or coroutine body invisible to
+the deep engine — survived three weeks while `candor-scan` answered R756's own one-line reproduction
+CORRECTLY. Two engines disagreed on the same input and nothing was listening.
+
+The pair is the strongest one available here because the two engines answer from **different
+authorities**: one asks rustc (types, MIR, real dispatch), one parses `syn`. Agreement between them is
+evidence, not agreement between two copies of one mistake.
+
+```sh
+bash soundness/run_differential.sh --calibrate   # prove the instrument can FAIL, then exit
+bash soundness/run_differential.sh 12            # the gate: 12 generated drop crates
+DIRS="/path/a /path/b" bash soundness/run_differential.sh   # ad-hoc crates, same verdict
+```
+
+**What it compares.** Both engines emit the §3.3 structured verdict `{ spec, ok, violations }` — the deep
+one via `CANDOR_GATE_JSON`, `candor-scan` via `--gate-json` — under one policy file. `candor-scan` calls
+itself a *"syntactic floor — a clean run is necessary, not sufficient"*, so the deep engine is meant to be
+a **superset**: every function the floor flags, the sound engine must flag too.
+
+| bucket | meaning | verdict |
+| --- | --- | --- |
+| **FLOOR-ONLY** | `candor-scan` flags it, the deep engine does not | **exit 1** — a PAIR TO READ |
+| DEEP-ONLY | the deep engine flags it, the floor does not | INFO — expected; the floor is syntactic |
+| agree | both | — |
+
+**A FLOOR-ONLY row does not say which engine is wrong.** Both directions are real: the deep engine
+silently under-reporting (R756's exact signature), or `candor-scan` over-charging (its documented
+direction — an item behind an inactive `#[cfg]`, which rustc never compiles and `syn` always parses). The
+script prints both engines' full violation lists so the reader can tell in one look.
+
+**Calibration, and it is not optional.** `--calibrate` seeds the second shape — one effectful fn behind an
+inactive `#[cfg]` — and FAILS if the differential does not report it. CI runs it before the gate on every
+push, because a green differential whose instrument was asleep is indistinguishable from agreement.
+Separately, **retro-rediscovery**: run against a pre-R756-fix engine (restore the
+`DefKind::Fn | AssocFn` filter in `mir_spike.rs`), the differential reports FLOOR-ONLY rows on **6 of 6**
+generated crates, 29 rows in total — the defect it was built for, re-found from scratch.
+
+**The join is on NAMES, and that is stated rather than hidden.** The two engines' `hash` fields are not
+comparable — `candor-scan` writes §2.2's `package#fn`, the nightly engine writes a rustc `DefPathHash`
+(`dph_hex`, which its own cross-crate chaining parses back), and the nightly engine's verdict rows omit
+`hash` entirely — so there is no shared join key. Exactly one normalisation is applied,
+`<T as Trait>::m` → `T::m`, which is the only spelling difference the two engines actually produce
+(`<Guard as std::ops::Drop>::drop` vs `Guard::drop`).
+
+**What it cannot catch.** A defect both engines share (they are differenced against each other, not
+against ground truth — `run_drop.sh` + the oracles are what compare against truth); anything outside the
+generated crates' shape in the default arm; and a FLOOR-ONLY row it correctly reports but nobody reads.

@@ -520,6 +520,62 @@ cout=$(dl "$DC")
 want   "a closure capturing an effectful Drop by move propagates on scope exit, even if never called (closure_scope_exit gains Net)" "$cout" '`closure_scope_exit` effects: { Net'
 rm -rf "$(dirname "$DC")"
 
+# ── 9c-v. The drop INSIDE a closure / coroutine BODY — SOUNDNESS R756, and the assertion is the GATE ──
+# 9c-iii above is a DIFFERENT question: there the guard is an UPVAR of a closure that is itself dropped
+# from a plain `fn` body, so the enclosing body is a `DefKind::Fn` and the walker's per-`TyKind` arms are
+# what matter. Here the guard is a LOCAL OF THE CLOSURE BODY, and the question is whether that body is
+# looked at at all. `drop_edges` filtered `hir_body_owners()` to `DefKind::Fn | DefKind::AssocFn`, and a
+# closure / `async` block / coroutine is its own body owner with its own MIR — so every implicit
+# scope-exit drop in one was invisible to the deep engine, the one every soundness script drives as the
+# ORACLE. Measured on a one-line pair with observed drop counts: 0 violations under
+# `deny Fs <the enclosing fn>` against 1 for the identical body with an explicit `drop(g)`.
+#
+# THE ASSERTION IS THE GATE EXIT, NOT THE PRESENCE OF A `{{closure}}` ROW. Admitting the body while
+# keying the edge on the closure's own `LocalDefId` charges a unit candor never reports: the fixture then
+# shows a `{{closure}}` row and `deny Fs <enclosing>` STILL passes. That half-fix measures green on any
+# report-shaped assertion, which is why this scenario reads the CANDOR_VIOLATIONS sentinel.
+echo "== drop inside a closure / coroutine BODY (R756) =="
+DB=$(mktemp -d)/db; mkdir -p "$DB/src"
+printf '[package]\nname="db"\nversion="0.1.0"\nedition="2021"\n' > "$DB/Cargo.toml"
+{
+  printf 'struct Guard;\n'
+  printf 'impl Drop for Guard { fn drop(&mut self){ let _=std::fs::remove_file("/tmp/candor_r756_probe"); } }\n'
+  printf 'fn in_closure_body(){ let c = || { let _g = Guard; }; c(); }\n'
+  printf 'async fn in_async_fn(){ let _g = Guard; }\n'
+  printf 'fn in_pure_closure_body(){ let c = || { let _n = 1u8; }; c(); }\n'
+  printf 'fn main(){ in_closure_body(); }\n'
+} > "$DB/src/main.rs"
+# The sentinel is read as a WHOLE SET, joined, not grepped for a substring: `grep -F 'AS-EFF-006
+# in_closure_body'` also matches `AS-EFF-006 in_closure_body::{closure#0}`, so the loose form passes
+# under the half-fix. Measured — that false pass was live in this file for the length of one edit.
+DBVIO="$DB/violations"
+echo "deny Fs  in_closure_body" > "$DB/policy"
+: > "$DBVIO"; dl "$DB" env CANDOR_POLICY="$DB/policy" CANDOR_VIOLATIONS="$DBVIO" >/dev/null
+scoped=$(sort "$DBVIO" | tr '\n' '|')
+want   "R756 GATE: a fn-scoped deny Fs fires on the ENCLOSING fn, and on nothing else" "$scoped" 'AS-EFF-006 in_closure_body|'
+absent "the charged unit is the fn, not the closure (a re-keyed edge names {closure#N})" "$scoped" '{closure#'
+# THE PROPAGATION ASSERTION, and it is the one the half-fix cannot pass. Keying the edge on the closure
+# does flip a NAME-PREFIX-scoped rule (the closure's path starts with the fn's name), so that gate alone
+# does not separate the two. What it cannot do is reach the CALLER: with the edge on the closure, an
+# unscoped `deny Fs` lists the closure units and `Guard::drop` and NOT `main`, so a caller of an
+# effectful closure body reads pure. Measured on all three engines-under-test: HEAD lists only
+# `Guard::drop`; the half-fix lists the two `{closure#0}` units; the fix lists the two fns AND `main`.
+echo "deny Fs" > "$DB/policy-all"
+: > "$DBVIO"; dl "$DB" env CANDOR_POLICY="$DB/policy-all" CANDOR_VIOLATIONS="$DBVIO" >/dev/null
+allv=$(sort "$DBVIO" | tr '\n' '|')
+want   "R756: the CALLER of a closure-body drop inherits the effect (main is charged)"  "$allv" 'AS-EFF-006 main|'
+want   "R756: the coroutine body's owner is charged (in_async_fn)"                      "$allv" 'AS-EFF-006 in_async_fn|'
+absent "an unscoped gate charges no closure unit either"                               "$allv" '{closure#'
+absent "a closure body with no destructor is NOT charged (in_pure_closure_body)"        "$allv" 'in_pure_closure_body'
+# THE REACH PROBE, both directions. `CANDOR_DROP_DEBUG=1` names every edge whose drop was found in a
+# body that is not the charged unit's own; it exists so a future corpus A/B can tell "0 changed because
+# the change is inert" from "0 changed because the corpus never reached it". A probe nobody has seen
+# fire is not a probe, and one that fires unconditionally is noise — so assert both.
+rout=$(dl "$DB" env CANDOR_DROP_DEBUG=1)
+want   "CANDOR_DROP_DEBUG names the closure-body edge and its enclosing owner"   "$rout" 'CANDOR_DROP_BODY_EDGE in_closure_body <- body in_closure_body::{closure#0}'
+absent "the reach probe is SILENT without CANDOR_DROP_DEBUG"                     "$(dl "$DB")" 'CANDOR_DROP_BODY_EDGE'
+rm -rf "$(dirname "$DB")"
+
 # ── 9c-iv. A `path`/`git` dependency named `core`/`alloc`/`std`/`proc_macro`/`test` — a same-name
 # IMPOSTOR of the sysroot frontier, not a rename ──
 # `record_resolved_call`'s coverage/invisible-floor skip and `is_pure_std_trait`'s trait-purity
@@ -556,7 +612,10 @@ PY
 # it must carry the SAME `invisible` disclosure an ordinary uncalibrated dependency gets. This is a
 # JSON-report check, not a `dl`-warning one: a floored-pure-but-invisible fn (empty `inferred`) never
 # gets a text warning either way — the fix's effect is only visible in the report's `invisible` field.
-want "an impostor `core`'s direct call is disclosed like any other uncovered dependency (call_direct)" \
+# NOTE: no BACKTICKS in an assertion message — the message is double-quoted, so `core` ran as a command
+# and printed "core: command not found" into this suite's output on every run since it was written. A
+# stray error line in a gate's output is where a real one hides.
+want "an impostor 'core's direct call is disclosed like any other uncovered dependency (call_direct)" \
      "$ci_summary" "call_direct inferred=[] invisible=['core']"
 # `via_dyn` dispatches through a trait the IMPOSTOR itself defines, named `Display` — one of
 # `is_pure_std_trait`'s 11 exempted names. It must read honestly Unknown, not silently pure.

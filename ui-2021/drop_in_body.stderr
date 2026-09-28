@@ -1,0 +1,76 @@
+warning: `<Guard as std::ops::Drop>::drop` effects: { Net }   (* = via callee)
+  --> $DIR/drop_in_body.rs:32:5
+   |
+LL |     fn drop(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `call_in_uncalled_closure` effects: { Net }   (* = via callee)
+  --> $DIR/drop_in_body.rs:63:1
+   |
+LL | fn call_in_uncalled_closure() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `escaping_closure_maker` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:103:1
+   |
+LL | fn escaping_closure_maker() -> Box<dyn FnOnce()> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `escaping_closure_runner` effects: { Unknown }   (* = via callee)
+  --> $DIR/drop_in_body.rs:108:1
+   |
+LL | fn escaping_closure_runner(f: Box<dyn FnOnce()>) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_async_block_unpolled` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:93:1
+   |
+LL | fn in_async_block_unpolled() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_async_fn` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:81:1
+   |
+LL | async fn in_async_fn() {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_async_fn_across_await` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:86:1
+   |
+LL | async fn in_async_fn_across_await() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_closure_body` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:47:1
+   |
+LL | fn in_closure_body() {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_closure_body_uncalled` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:57:1
+   |
+LL | fn in_closure_body_uncalled() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_for_each_callback` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:113:1
+   |
+LL | fn in_for_each_callback() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `in_nested_closure_body` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_in_body.rs:70:1
+   |
+LL | fn in_nested_closure_body() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `main` effects: { Net*, Unknown }   (* = via callee)
+  --> $DIR/drop_in_body.rs:146:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: 12 warnings emitted
+

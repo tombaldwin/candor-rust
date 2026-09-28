@@ -267,11 +267,50 @@ fn walk_drop_tys<'tcx>(
 pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
     let mut edges = Vec::new();
     for did in tcx.hir_body_owners() {
-        if !matches!(tcx.def_kind(did.to_def_id()), DefKind::Fn | DefKind::AssocFn)
-            || !tcx.is_mir_available(did.to_def_id())
-        {
+        // `is_fn_like()` is RUSTC'S OWN predicate for the bodies `optimized_mir` is defined on —
+        // `Fn | AssocFn | Closure | SyntheticCoroutineBody` — and it is load-bearing, not tidiness.
+        // `hir_body_owners()` also yields `Const`/`Static`/`AnonConst` bodies, `is_mir_available` says
+        // TRUE for them, and `optimized_mir` then ICEs with *"do not use `optimized_mir` for
+        // constants"* (those bodies are CTFE-only; `mir_for_ctfe` is their query). The previous
+        // `DefKind::Fn | DefKind::AssocFn` filter avoided that by accident while ALSO excluding every
+        // closure and coroutine body, which was SOUNDNESS R756 — so widening it to "every body owner"
+        // traded a silent under-report for an ICE. Asking the compiler which bodies the query accepts
+        // is the fix that is right for both reasons at once.
+        if !tcx.def_kind(did.to_def_id()).is_fn_like() || !tcx.is_mir_available(did.to_def_id()) {
             continue;
         }
+        // WHICH UNIT OWES THIS DROP. `hir_body_owners()` yields closure, `async` block and coroutine
+        // bodies alongside `Fn`/`AssocFn`, and each of those has its OWN MIR — so a `let` inside a
+        // closure body or an `async fn` produces its scope-exit `Drop` terminator in the CLOSURE's MIR,
+        // not the enclosing function's. This used to filter to `DefKind::Fn | DefKind::AssocFn` and so
+        // never looked at those bodies at all: SOUNDNESS R756, a silent under-report across the whole
+        // closure/coroutine class, in the engine every soundness script drives as the ORACLE. Measured
+        // on a one-line pair with observed drop counts: a closure body dropping an effectful guard read
+        // 0 violations under `deny Fs <enclosing fn>` while the identical `drop(gg)` read 1.
+        //
+        // ADMITTING THE BODY IS ONLY HALF THE REPAIR, and the missing half is the caller. An edge keyed
+        // on the CLOSURE's own `LocalDefId` charges a unit candor never reports as such, and nothing
+        // edges the enclosing fn to its own closure — the HIR path charges a closure body's CALLS
+        // straight to the enclosing item instead of edging to it — so the effect stops at the closure.
+        // MEASURED on the same fixture, three engines, one policy each (`tests/integration.sh` 9c-v):
+        //   HEAD            `deny Fs` lists only `Guard::drop`.
+        //   edge on closure `deny Fs` lists `in_closure_body::{closure#0}` and `in_async_fn::{closure#0}`
+        //                   — and NOT `main`, which calls `in_closure_body` and really does reach the
+        //                   filesystem. The enclosing fn's own `inferred` stays empty and nothing
+        //                   propagates past it, so every transitive caller reads pure.
+        //   edge on owner   `deny Fs` lists `in_closure_body`, `in_async_fn`, `Guard::drop` AND `main`.
+        // Note what the half-fix does NOT do, because the row predicted otherwise and the prediction is
+        // worth correcting: a rule scoped by NAME PREFIX (`deny Fs in_closure_body`) still fires, on
+        // `in_closure_body::{closure#0}`. The gate flip is therefore not the discriminator — the CALLER
+        // is. So attribute the edge exactly where every other effect found in a closure body goes:
+        // `enclosing_reportable_owner`, the SAME rule `enclosing_named_fn` applies on the HIR side.
+        //
+        // The attribution is an over-approximation in the same direction and by the same rule as the
+        // rest of the engine: a closure that is never called, or one that escapes and is dropped
+        // elsewhere, still charges the item whose body constructed it — which is precisely what already
+        // happens to a `fs::read()` CALL written inside an uncalled closure. The alternative is silence,
+        // and a caller that invokes an escaped closure it cannot see keeps its own honest `Unknown`.
+        let Some(owner) = crate::enclosing_reportable_owner(tcx, did) else { continue };
         let body = tcx.optimized_mir(did);
         let mut impls = std::collections::HashSet::new();
         for bb in body.basic_blocks.iter() {
@@ -302,8 +341,25 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
             }
         }
         for impl_did in impls {
-            if impl_did != did {
-                edges.push((did, impl_did));
+            // Self-edge guard, against the ATTRIBUTION TARGET rather than the body owner: a `Drop::drop`
+            // that lets a value of its own type fall out of scope (directly or inside a closure in its
+            // body) would otherwise edge itself.
+            if impl_did != owner {
+                // REACH, on demand. `CANDOR_DROP_DEBUG=1` names every edge whose drop was found in a
+                // body that is NOT the charged unit's own — a closure, an `async` block, a coroutine.
+                // It exists because "CHANGED 0" over a corpus is not evidence a change is inert until
+                // REACH is measured: the register has a row (R756's own vein) where 17,944 analysed
+                // units read "inert" and a probe showed the code had never run. This is the probe, kept
+                // rather than rebuilt, so the next A/B over this path can quote a reach count.
+                if owner != did && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+                    eprintln!(
+                        "CANDOR_DROP_BODY_EDGE {} <- body {} (drop impl {})",
+                        tcx.def_path_str(owner.to_def_id()),
+                        tcx.def_path_str(did.to_def_id()),
+                        tcx.def_path_str(impl_did.to_def_id()),
+                    );
+                }
+                edges.push((owner, impl_did));
             }
         }
     }

@@ -48,7 +48,12 @@ def main():
             bad.append(fn + "{" + ",".join(inf) + "}")
 
     if bad:
-        print("FAIL " + effect + " :: " + " ".join(bad) + " :: forms=" + json.dumps(truth["forms"]))
+        # `sites` is gen_drop.py's second axis (which BODY the drop happens in — SOUNDNESS R757); absent
+        # from the other generators' truth files, so read it optionally rather than requiring it.
+        where = " :: forms=" + json.dumps(truth["forms"]) if "forms" in truth else ""
+        if truth.get("sites"):
+            where += " :: sites=" + json.dumps(truth["sites"])
+        print("FAIL " + effect + " :: " + " ".join(bad) + where)
     else:
         print("OK")
 

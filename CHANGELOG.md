@@ -10,6 +10,57 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ EVERY IMPLICIT SCOPE-EXIT DROP INSIDE A CLOSURE OR COROUTINE BODY WAS INVISIBLE TO THE DEEP ENGINE
+  (SOUNDNESS R756 — a silent under-report, now closed).** `mir_spike::drop_edges` walked
+  `tcx.hir_body_owners()` and filtered to `DefKind::Fn | DefKind::AssocFn`. A closure, an `async` block
+  and an `async fn`'s coroutine are each their OWN body owner with their own MIR, so a `let` inside one
+  emits its scope-exit `Drop` terminator in THAT body — and the filter meant the engine never looked.
+
+  **The silence it closes, measured on a one-line pair with observed drop counts:** a closure body that
+  drops an effectful guard read **0 violations** under `deny Fs <the enclosing fn>`, while the identical
+  body with an explicit `drop(g)` read 1 — the explicit form is rescued by the separate HIR `mem::drop`
+  route, which is what made the hole look covered. `candor-scan`, the syntactic floor, got both right.
+  The same silence covered `async fn`, a drop live across an `.await`, a nested closure, a combinator
+  callback, and a closure returned from the fn that built it.
+
+  **The repair is the ATTRIBUTION, not the filter.** Admitting the body while keying the edge on the
+  closure's own `LocalDefId` charges a unit candor does not report as such and **never reaches the
+  caller**: `main`, which calls the enclosing fn and really does touch the filesystem, still reads pure.
+  So the edge is attributed with `enclosing_reportable_owner` — the SAME rule `enclosing_named_fn`
+  already applies to every CALL found in a closure body — and the two paths are now one function.
+  The filter itself is now rustc's own `DefKind::is_fn_like()`: `hir_body_owners()` also yields
+  `Const`/`Static` bodies where `is_mir_available` says true and `optimized_mir` ICEs.
+
+  **What it costs.** The attribution is an over-approximation in the same direction, by the same rule, as
+  the rest of the engine: a closure that is never called still charges the item whose body built it —
+  exactly as a `fs::read()` CALL written in an uncalled closure already did. A caller that invokes an
+  escaped closure it cannot see keeps its own honest `Unknown`. Over 88 buildable registry crates the
+  deep-engine A/B is **ADDED 0 / REMOVED 0 / CHANGED 8**, every change an ADDED call-graph edge and no
+  value lost, **0 gate flips**, with **13 closure-body drop edges reached** across `crossbeam-utils`
+  (a `WaitGroup` dropped in `ScopedThreadBuilder::spawn`'s closure), `fastrand` and `widestring`. None of
+  those three destructors performs a classified effect, which is why the effect sets did not move.
+
+  Gated by `ui-2021/drop_in_body.rs`, `tests/integration.sh` 9c-v (which reads the whole violation SET,
+  because a name-prefix-scoped `deny` fires under the half-fix too — the CALLER is the discriminator),
+  and a new SITE axis in the drop fuzzer. `CANDOR_DROP_DEBUG=1` names each closure-body edge.
+
+- **THE DROP FUZZER COULD NOT EXPRESS THE DEFECT ABOVE (SOUNDNESS R757 — instrument).**
+  `soundness/gen_drop.py` emitted a top-level `fn` for every form it knew, and its one `closure` form put
+  the closure VALUE in a top-level fn, never a drop inside a closure BODY — so `run_drop.sh 40` was green
+  over 40 cases none of which could reach the filter. It now has a second axis, the SITE: `fn`,
+  `closure`, `closure_uncalled`, `closure_nested`, `async_block`, `async_await`, `for_each`. Six of the
+  seven FAIL 3/3 on a pre-fix engine; `fn` passes, which is what made the blind spot invisible.
+
+- **NOTHING COMPARED THE TWO RUST ENGINES (SOUNDNESS R758 — instrument).** `run.sh`, `run_cross.sh`,
+  `run_drop.sh` and the oracles drive the deep engine; `run_q.sh` and `run_macro.sh` drive `candor-scan`.
+  No script drove both, which is why R756 survived while the other engine answered its reproduction
+  correctly. `soundness/run_differential.sh` compares their §3.3 gate VERDICTS under one policy and fails
+  on a FLOOR-ONLY violation — one the syntactic floor reports and the sound engine does not. A FLOOR-ONLY
+  row is a PAIR TO READ, not a verdict: it can mean the deep engine is silent OR that `candor-scan` is
+  over-charging. `--calibrate` seeds the second shape (an effectful fn behind an inactive `#[cfg]`) and
+  fails if the differential does not report it; CI runs it before the gate on every push. Against a
+  pre-R756-fix engine it re-finds the defect on **6 of 6** generated crates, 29 rows.
+
 - **A TAIL CONTEST THAT INCLUDES THE CALLER ITSELF WENT SILENT (SOUNDNESS R750 — disclosure-only).**
   A qualified, non-method call whose 2-segment tail is claimed by two-or-more DISTINCT quals, **one of
   which is the caller's own**, was refused by `resolve_target` and then vanished: no edge, no `Unknown`,

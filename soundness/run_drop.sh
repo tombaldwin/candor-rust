@@ -3,10 +3,19 @@
 #
 # For each seed: generate a crate whose `Guard::drop` performs a known effect, with the guard wrapped
 # in random container forms (direct / field / tuple / array / Option / Box / Vec / Rc / Arc / HashMap /
-# nested), and assert every dropping function inherits that effect (or `Unknown`). A dropping function
-# reported PURE is a silent under-report — the implicit-Drop hole the Bet 4 fix closed.
+# nested) AND placed in a random BODY — a top-level fn, a closure body, an uncalled closure, a nested
+# closure, an `async` block, an `async` block across an `.await`, a combinator callback — then assert
+# every dropping function inherits that effect (or `Unknown`). A dropping function reported PURE is a
+# silent under-report — the implicit-Drop hole the Bet 4 fix closed.
+#
+# THE SITE AXIS IS WHY R757 EXISTS. Every form this generator knew emitted a top-level `fn`, so all 40
+# default seeds landed in a `DefKind::Fn` body — and R756 was a filter that admitted exactly those. The
+# gate was green over 40 cases none of which could reach the defect. Restricting the site pool to `fn`
+# reproduces that blind spot exactly; the other six sites all FAIL on a pre-R756-fix engine.
 #
 #   bash soundness/run_drop.sh [N]        # default 40 seeds
+#   CANDOR_FUZZ_DROP_SITES=closure bash soundness/run_drop.sh 10     # one body kind
+#   CANDOR_FUZZ_DROP_FORMS="box vec" bash soundness/run_drop.sh 10   # one wrapper kind
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

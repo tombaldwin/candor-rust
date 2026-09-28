@@ -2492,7 +2492,25 @@ fn gained_effects<'a>(inferred: &BTreeSet<&'a str>, baseline: &BTreeSet<String>)
 /// Nearest enclosing reportable item of `hir_id`, walking up out of closures so that
 /// effects performed inside an inline closure are charged to the item that owns it.
 fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
-    let mut owner = tcx.hir_enclosing_body_owner(hir_id);
+    enclosing_reportable_owner(tcx, tcx.hir_enclosing_body_owner(hir_id))
+}
+
+/// THE ENGINE'S ONE ATTRIBUTION RULE, as a function of a BODY OWNER rather than of a `HirId`: the
+/// nearest enclosing REPORTABLE item, walking up out of closure and coroutine bodies.
+///
+/// A closure, an `async` block and an `async fn`'s coroutine are each their OWN body owner with their
+/// own `DefKind::Closure` and their own MIR — and candor never reports a closure as a unit, so every
+/// effect found in one of those bodies is charged to the item that owns it. `enclosing_named_fn` is
+/// this rule reached from an expression; `mir_spike::drop_edges` is the same rule reached from a body
+/// owner, and they MUST be the same rule: SOUNDNESS R756 was a second, hand-rolled answer to this
+/// question (a `DefKind::Fn | DefKind::AssocFn` filter) that silently disagreed with this one, so every
+/// implicit scope-exit drop inside a closure or coroutine body was invisible to the deep engine while
+/// the identical `drop(x)` was caught. Two paths computing one fact must not each compute it.
+///
+/// Returns `None` for a body the engine has no reportable owner for at all — an `InlineConst` /
+/// `AnonConst` body, which is the documented gap `local_key_init_fns` exists to work around. That
+/// answer is deliberately unchanged here: widening it would move the HIR path too.
+pub(crate) fn enclosing_reportable_owner(tcx: TyCtxt<'_>, mut owner: LocalDefId) -> Option<LocalDefId> {
     loop {
         let dk = tcx.def_kind(owner.to_def_id());
         if is_reportable_item(dk) {

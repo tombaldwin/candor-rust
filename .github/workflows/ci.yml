@@ -413,8 +413,30 @@ jobs:
       # container forms (direct / field / tuple / array / Option / Box / Vec / Rc / Arc / HashMap /
       # nested). Gates the implicit-Drop edge handling the Bet 4 spike added — including the heap
       # owning-container cases (Vec<Guard>/Box<Guard>) that field-recursion alone would miss.
+      #
+      # SECOND AXIS, added for SOUNDNESS R757: the drop is also placed in a random BODY — a top-level
+      # fn, a closure body, an uncalled closure, a nested closure, an `async` block, an `async` block
+      # across an `.await`, a combinator callback. Every form the generator knew emitted a top-level
+      # `fn`, so these 40 seeds were green over 40 cases none of which could reach R756's defect (a
+      # `DefKind::Fn | AssocFn` filter hiding every closure and coroutine body). Six of the seven sites
+      # fail on a pre-R756-fix engine; the `fn` site passes, which is what made the blind spot invisible.
       - name: Soundness fuzzer (drop)
         run: bash soundness/run_drop.sh 40
+
+      # THE TWO RUST ENGINES, DIFFERENCED (SOUNDNESS R758). Every gate above drives exactly ONE engine:
+      # run.sh / run_cross.sh / run_drop.sh / the oracles drive the nightly MIR engine, run_q.sh and
+      # run_macro.sh drive candor-scan. So two engines disagreeing on the same input produced no signal
+      # at all — which is how R756 survived three weeks: every implicit scope-exit drop inside a closure
+      # or coroutine body was invisible to the deep engine while candor-scan answered R756's own
+      # reproduction correctly. This step compares their §3.3 gate VERDICTS under one policy and fails on
+      # a FLOOR-ONLY violation (candor-scan flags a fn the sound engine does not).
+      #
+      # `--calibrate` runs FIRST, on every run, and is not decoration: it seeds a disagreement (an
+      # effectful fn behind an INACTIVE `#[cfg]`, which rustc never compiles and syn always parses) and
+      # fails if the differential does NOT report it. Without it a green differential below could equally
+      # mean the instrument was asleep — the vacuous-guard shape this suite exists to avoid.
+      - name: Soundness differential (deep engine vs candor-scan)
+        run: bash soundness/run_differential.sh --calibrate && bash soundness/run_differential.sh 12
 
       # PROPERTY gates for the STABLE scanner (candor-scan), not the dylint engine. Each generated
       # pair is two spellings of ONE program — `let t = EXPR; t?;` vs `EXPR?;`, a `?` before vs after
