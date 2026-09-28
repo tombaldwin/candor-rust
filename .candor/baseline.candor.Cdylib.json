@@ -349,20 +349,23 @@
     },
     {
       "fn": "mir_spike::drop_edges",
-      "loc": "src/mir_spike.rs:198:1: 198:75",
+      "loc": "src/mir_spike.rs:267:1: 267:75",
       "inferred": [
+        "Env",
         "Unknown"
       ],
       "direct": [
+        "Env",
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "7db9109f0371c9d7330cbad715781e90",
+      "hash": "f6222c1b51f9d77e06aa685efa222c6a",
       "unknownWhy": [
         "callback:generic iterable driven by next"
       ],
       "invisible": [
         "indexmap",
+        "rustc_hir",
         "rustc_index",
         "rustc_middle",
         "rustc_span",
