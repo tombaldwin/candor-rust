@@ -1,0 +1,13 @@
+# PLANTED NEGATIVE (b) — THE R766 DEFECT.  The crate DOES declare a local `impl Drop` (on an
+# unrelated `G`) and every shape IS present, which is exactly the conjunction the old probe counted.
+# A non-zero TIGHT column here means the bug is back and every number this tool prints is void.
+R189   1 0
+R198   1 0
+R200c  1 0
+R200d  1 0
+R201   1 0
+R209a  1 0
+R297   1 0
+R297opt 0 0
+R300   1 0
+R323   1 0

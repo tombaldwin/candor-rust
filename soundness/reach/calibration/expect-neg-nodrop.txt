@@ -1,0 +1,12 @@
+# PLANTED NEGATIVE (a) — the shapes are all there, no type in the crate has a destructor.
+# LOOSE 1 proves the matcher still SEES the shape; TIGHT 0 is the property under test.
+R189   1 0
+R198   1 0
+R200c  1 0
+R200d  1 0
+R201   1 0
+R209a  1 0
+R297   1 0
+R297opt 0 0
+R300   1 0
+R323   1 0

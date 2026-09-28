@@ -1,0 +1,23 @@
+# candor-reach — the drop-glue REACH probe.  SOUNDNESS R766.
+#
+# A SEPARATE workspace (like soundness/realworld), so `cargo build` at the repo root never drags it in
+# and a build here never touches the engine's target dir.
+[package]
+name = "candor-reach"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "candor-reach"
+path = "src/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "extra-traits", "parsing", "printing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+
+[profile.release]
+debug = false
+
+[workspace]

@@ -1,0 +1,12 @@
+# PLANTED POSITIVE — every row MUST fire.  Columns: row loose tight (exact).
+# `loose` is the superset, so loose == tight == 1 means the one site is drop-relevant.
+R189   1 1
+R198   1 1
+R200c  1 1
+R200d  1 1
+R201   2 2
+R209a  1 1
+R297   1 1
+R297opt 0 0
+R300   1 1
+R323   1 1

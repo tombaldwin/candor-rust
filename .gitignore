@@ -24,3 +24,7 @@ soundness/.last-run.gen_*.seed*/
 /eval/coverage-gate/entries.json
 /eval/coverage-gate/scan_errors.json
 /eval/coverage-gate/classify_check/target
+# soundness/reach.sh's build + hit dump (SOUNDNESS R766). The probe SOURCE and its calibration
+# fixtures are checked in; the binary, the fixtures' check dirs and reach-hits.tsv are not.
+/soundness/reach/target/
+/soundness/reach/calibration/*/target/

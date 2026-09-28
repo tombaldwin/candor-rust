@@ -1,0 +1,13 @@
+# The OWNED-DROP half of `drop_relevant`, and R718's borrowed negatives beside it.
+# R297: 3 place assignments — `W` (owns directly) and `V` (owns transitively) TIGHT, `B` (borrows) not.
+# R200d: 2 container parameters — over `C` (owns through a Vec ELEMENT) TIGHT, over `CB` (borrows) not.
+R189   0 0
+R198   0 0
+R200c  0 0
+R200d  2 1
+R201   0 0
+R209a  0 0
+R297   3 2
+R297opt 0 0
+R300   0 0
+R323   0 0

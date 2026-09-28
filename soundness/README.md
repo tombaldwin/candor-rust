@@ -365,3 +365,25 @@ comparable — `candor-scan` writes §2.2's `package#fn`, the nightly engine wri
 **What it cannot catch.** A defect both engines share (they are differenced against each other, not
 against ground truth — `run_drop.sh` + the oracles are what compare against truth); anything outside the
 generated crates' shape in the default arm; and a FLOOR-ONLY row it correctly reports but nobody reads.
+
+## The drop-glue REACH probe (`reach.sh`) — SOUNDNESS R766
+
+`bash soundness/reach.sh` answers one question: **how many sites in real code could a given open
+drop-glue row's fix actually move?**
+
+It exists because the previous answer was measured wrong. That probe counted *the crate declares a
+local `impl Drop`* AND *the shape appears* — never *the shape is ON a type with a destructor*, which is
+the only conjunction that can move a row, because `note_construction` marks nothing outside
+`drop_relevant`. R189 was ordered at 146 sites / 60 crates on that predicate and measured, with the fix
+in hand, REACH 204 with ADDED 0 / REMOVED 0 / CHANGED 0.
+
+Five planted fixtures run first and **gate the measurement** — including `neg-otherdrop`, which is
+R766's own defect as a fixture (an unrelated `impl Drop` plus every shape: 9 hits on the old
+predicate, 0 on this one), and `neg-shape`, whose functions are six real census hits a hand audit
+threw out. R189 is kept in the table although it is closed, as the real-world calibration: its true
+payoff is measured at zero and this probe scores it at 15 sites, which is the noise floor everything
+else must be read against.
+
+**`soundness/REACH.md` states what it cannot see, beside the counts.** Read it before quoting a
+number from it — the biggest blind spot is that a DEPENDENCY's `Drop` is invisible, exactly as it is
+to the engine without `CANDOR_DEPS`.

@@ -1,0 +1,13 @@
+# PLANTED NEGATIVE (c) — the ROWS' OWN CHARGED CONTROLS, all on a type WITH a destructor.
+# Drop-relevance is satisfied throughout; what each function fails is the row's own discriminator.
+# Six of these are real census hits a hand audit threw out (see the file header).
+R189   0 0
+R198   0 0
+R200c  0 0
+R200d  0 0
+R201   0 0
+R209a  1 0
+R297   1 0
+R297opt 0 0
+R300   1 0
+R323   0 0
