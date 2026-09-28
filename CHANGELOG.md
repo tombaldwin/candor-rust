@@ -10,6 +10,37 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **THE DEEP ENGINE EMITTED NO ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST, so two consumers were answering about
+  nothing (SOUNDNESS R761 — instrument, strictly additive).** `write_report_files` called
+  `to_packaged_report_json`, which has no `analyzed` parameter, so every deep-engine report was a §2
+  **ROW-3** document: one that makes no completeness claim at all. `candor-query gate --report`
+  accumulated `analyzed_count` 0 for every deep report it was handed, and an all-pure deep report read as
+  *"says it JUDGED NOTHING"* when it had judged a real, enumerable set. Worse for the family's own
+  measuring: **`bin/corpus-ab.py`'s R242 hollow-corpus guard keys on exactly this integer**, so a
+  deep-engine A/B could only be run with `--allow-unjudged` — the fabrication control with its vacuity
+  guard switched off. The R756 A/B named **20 of 88** entries as unjudged for this reason alone.
+
+  **The count is not a new number, it is the §2.2 callgraph sidecar's own node set.** That sidecar's
+  contract is already *"EVERY analyzed function is a key, pure leaves included"*, which is the definition
+  ⟨0.21⟩ asks for and the one `candor-scan` uses (`all`, not the effectful-only entries). So the manifest
+  is read off its keys and the two documents cannot disagree — asserted as a PARITY check in
+  `tests/integration.sh` 9c-v, not as a presence check, because **a manifest whose count is invented is
+  worse than no manifest**: ⟨0.21⟩ makes it a fail-closed completeness claim.
+
+  Strictly additive at the key level: the report is `to_packaged_report_json_full` with `analyzed` and
+  nothing else changed, and a PRE/POST pair over the same source is structurally identical apart from the
+  one new key. The consumer change is pinned with NEAR-MISS POISON (§D) — the same report with that one
+  key removed is the pre-fix shape, and `gate --report` must still hedge over exactly that one.
+
+  **MEASURED ON THE DEEP ENGINE'S OWN CORPUS, 88 of 93 buildable zero-dependency registry crates, 1,551
+  rows per arm: ADDED 0 / REMOVED 0 / CHANGED 0** — the envelope key is the only difference, as intended.
+  And the instrument consequence, which is the point of the row: **the unjudged population falls from 20
+  to 5**, and the 5 that remain are REAL — `clipboard-win` and `winapi-util` are `#![cfg(windows)]` crates
+  with zero analysed units on this platform, `cfg_aliases` is a `macro_rules!`-only crate with no function
+  bodies. Those are exactly R242's signature and the guard must keep refusing them, so **"0 unjudged" was
+  never the right target**; 15 of the former 20 are now correctly compared as the legitimate all-pure kind
+  (SPEC ⟨0.24⟩) instead of being lumped in with them.
+
 - **⚠ EVERY IMPLICIT SCOPE-EXIT DROP INSIDE A CLOSURE OR COROUTINE BODY WAS INVISIBLE TO THE DEEP ENGINE
   (SOUNDNESS R756 — a silent under-report, now closed).** `mir_spike::drop_edges` walked
   `tcx.hir_body_owners()` and filtered to `DefKind::Fn | DefKind::AssocFn`. A closure, an `async` block

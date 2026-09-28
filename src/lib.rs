@@ -3411,20 +3411,6 @@ impl Candor {
     fn write_report_files(&self, cx: &LateContext<'_>, prefix: &str, krate: &str, kinds: &str,
                           json_entries: &[ReportEntry],
                           eff: &HashMap<LocalDefId, BTreeSet<&'static str>>) {
-        let file = format!("{prefix}.{krate}.{kinds}.json");
-        // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
-        let meta = ReportMeta {
-            version: CANDOR_VERSION.into(),
-            toolchain: CANDOR_TOOLCHAIN.into(),
-            spec: candor_report::SPEC_VERSION.into(),
-        };
-        match candor_report::to_packaged_report_json(&meta, krate, json_entries) {
-            Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
-                Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
-                Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
-            },
-            Err(e) => eprintln!("candor: failed to serialize report ({e})"),
-        }
         // Full local call graph sidecar (every function's direct callees by path, INCLUDING pure
         // ones the report omits). `cargo candor callers <fn>` reads it to answer "who (transitively)
         // calls X" for ANY function — the pre-edit blast-radius question an agent asks before adding
@@ -3449,6 +3435,47 @@ impl Candor {
                 })
                 .unwrap_or_default();
             cg.insert(cx.tcx.def_path_str(f.to_def_id()), cs);
+        }
+        let file = format!("{prefix}.{krate}.{kinds}.json");
+        // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
+        let meta = ReportMeta {
+            version: CANDOR_VERSION.into(),
+            toolchain: CANDOR_TOOLCHAIN.into(),
+            spec: candor_report::SPEC_VERSION.into(),
+        };
+        // SOUNDNESS R761 — ⟨0.21⟩/⟨0.22⟩ THE COMPLETENESS MANIFEST, AND IT IS THE §2.2 NODE SET, NOT A
+        // SECOND COUNT OF IT. This writer used `to_packaged_report_json`, which omits `analyzed`
+        // entirely, so every deep-engine report was a §2 ROW-3 document: it makes no completeness claim
+        // at all. `bin/corpus-ab.py`'s R242 hollow guard keys on exactly this integer to tell a safely
+        // inert change from a measurement over nothing, so a deep-engine A/B could only be run with
+        // `--allow-unjudged` — the family's fabrication control with its vacuity guard switched off
+        // (the R756 A/B named 20 of 88 entries as unjudged).
+        //
+        // THE COUNT IS NOT INVENTED, IT IS THE SIDECAR'S OWN NODE SET. `cg` above is built for SPEC
+        // §2.2 and its contract is already "EVERY analyzed function is a key, pure leaves included" —
+        // which is the definition ⟨0.21⟩ asks for and the one `candor-scan` uses (`all`, the §2.2
+        // callgraph node set, NOT the effectful-only `entries`). So the sidecar's MAP is built first and
+        // the manifest is read off its keys: the two documents cannot disagree, and a consumer computing
+        // the pure count as `analyzed.count - |functions|` gets the same universe it can then join
+        // against the sidecar. Reading `eff.len()` instead would be a SECOND count of the same thing,
+        // free to drift from the sidecar by any name two `LocalDefId`s spell identically — and the
+        // direction it would drift in is the over-claiming one.
+        let analyzed = {
+            let quals: Vec<String> = cg.keys().cloned().collect(); // BTreeMap ⇒ already sorted
+            candor_report::Analyzed { count: quals.len(), digest: candor_report::fnv1a_hex(&quals) }
+        };
+        match candor_report::to_packaged_report_json_full(
+            &meta, krate, json_entries, None, &[], Some(&analyzed), &[], None, None, None,
+        ) {
+            Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
+                Ok(()) => eprintln!(
+                    "candor: wrote {} entries ({} analyzed) to {file}",
+                    json_entries.len(),
+                    analyzed.count
+                ),
+                Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
+            },
+            Err(e) => eprintln!("candor: failed to serialize report ({e})"),
         }
         let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
         if let Ok(body) = serde_json::to_string(&cg) {

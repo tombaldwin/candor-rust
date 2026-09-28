@@ -576,6 +576,87 @@ want   "CANDOR_DROP_DEBUG names the closure-body edge and its enclosing owner"  
 absent "the reach probe is SILENT without CANDOR_DROP_DEBUG"                     "$(dl "$DB")" 'CANDOR_DROP_BODY_EDGE'
 rm -rf "$(dirname "$DB")"
 
+# ── 9c-v. SOUNDNESS R761: the deep engine's ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST ──
+# `write_report_files` called `to_packaged_report_json`, which has no `analyzed` parameter, so every
+# deep-engine report was a §2 ROW-3 document — one that makes no completeness claim at all. Two
+# consumers read that key and both were answering about nothing: `candor-query gate --report`
+# accumulated `analyzed_count` 0 for every deep report it was handed, and `bin/corpus-ab.py`'s R242
+# hollow guard, which keys on this integer, could not tell a safely-inert deep-engine A/B from a
+# measurement over a corpus that judged nothing (the R756 A/B had to pass `--allow-unjudged` and named
+# 20 of 88 entries).
+#
+# THE ASSERTIONS ARE ABOUT PARITY, NOT PRESENCE. A manifest whose count is invented is WORSE than no
+# manifest — ⟨0.21⟩ makes it a fail-closed completeness claim — so the count is read off the SPEC §2.2
+# callgraph sidecar's own node set, and what is asserted here is that the two documents agree, that the
+# count EXCEEDS the effectful-row count (i.e. it covers pure leaves, which is the whole content of the
+# claim), and that it is STABLE across re-scans of the same source.
+MF=$(mktemp -d)/mf; mkdir -p "$MF/src"
+printf '[package]\nname="mf"\nversion="0.1.0"\nedition="2021"\n' > "$MF/Cargo.toml"
+{
+  printf 'pub fn effectful(){ let _=std::fs::read("/tmp/candor_r761"); }\n'
+  printf 'pub fn pure_one(x: u32) -> u32 { x + 1 }\n'
+  printf 'pub fn pure_two(x: u32) -> u32 { pure_one(x) + 1 }\n'
+  printf 'pub fn pure_leaf() {}\n'
+  printf 'fn main(){ effectful(); let _=pure_two(1); pure_leaf(); }\n'
+} > "$MF/src/main.rs"
+dl "$MF" env CANDOR_JSON="$MF/r" >/dev/null
+mfq=$(python3 - "$MF" <<'PY'
+import json, glob, os, sys
+d = sys.argv[1]
+reps = [f for f in glob.glob(os.path.join(d, "r.*.json"))
+        if "callgraph" not in f and ".calibrated." not in f and ".encountered-" not in f]
+out = []
+for f in sorted(reps):
+    doc = json.load(open(f))
+    cg = json.load(open(f[:-5] + ".callgraph.json"))
+    a = doc.get("analyzed")
+    if not isinstance(a, dict) or not isinstance(a.get("count"), int):
+        out.append("NOMANIFEST %s %r" % (os.path.basename(f), a))
+        continue
+    out.append("MANIFEST %s count=%d nodes=%d rows=%d parity=%s digest=%s"
+               % (os.path.basename(f), a["count"], len(cg), len(doc["functions"]),
+                  a["count"] == len(cg), a.get("digest", "")))
+print("\n".join(out))
+PY
+)
+want   "R761: the deep engine's report carries an ⟨0.21⟩ analyzed manifest"      "$mfq" 'MANIFEST r.mf.Executable.json'
+want   "R761: count EQUALS the §2.2 callgraph node set (no second count)"        "$mfq" 'parity=True'
+absent "R761: no report is left without a manifest"                             "$mfq" 'NOMANIFEST'
+# The count must EXCEED the effectful rows — a manifest that only counted `functions[]` would make the
+# pure count (`count - |functions|`) zero and license nothing, which is the claim ⟨0.21⟩ is for.
+mfcount=$(sed -n 's/.*r\.mf\.Executable\.json count=\([0-9]*\).*/\1/p' <<<"$mfq")
+mfrows=$(sed -n 's/.*r\.mf\.Executable\.json .*rows=\([0-9]*\).*/\1/p' <<<"$mfq")
+if [ -n "$mfcount" ] && [ -n "$mfrows" ] && [ "$mfcount" -gt "$mfrows" ]; then
+  echo "  ok   R761: the manifest counts PURE units too ($mfcount analyzed > $mfrows reported)"; pass=$((pass+1))
+else
+  echo "  FAIL R761: manifest does not exceed the effectful rows (count=$mfcount rows=$mfrows)"; fail=$((fail+1))
+fi
+# STABILITY — `digest` is only worth carrying if a re-scan of the same source reproduces it.
+dl "$MF" env CANDOR_JSON="$MF/r2" >/dev/null
+d1=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["analyzed"])' "$MF/r.mf.Executable.json")
+d2=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["analyzed"])' "$MF/r2.mf.Executable.json")
+want   "R761: the manifest is reproducible across re-scans of one source"        "$d2" "$d1"
+# THE CONSUMER, WITH NEAR-MISS POISON (§D): the same report with ONE key removed is what the pre-fix
+# engine emitted, and `gate --report` must treat exactly that one as making no claim. An all-pure
+# report is the case that separates them — `functions: []` with `count: n>0` is a real claim §2 rule 3
+# requires the verb to BELIEVE, while the same document without the key is §2 row 3 and hedges.
+PM=$(mktemp -d)/pm; mkdir -p "$PM/src"
+printf '[package]\nname="pm"\nversion="0.1.0"\nedition="2021"\n' > "$PM/Cargo.toml"
+printf 'pub fn a(x: u32) -> u32 { x + 1 }\npub fn b(x: u32) -> u32 { a(x) + 1 }\n' > "$PM/src/lib.rs"
+dl "$PM" env CANDOR_JSON="$PM/r" >/dev/null
+echo 'deny Net' > "$PM/policy"
+pmok=$("$QBIN" gate --report "$PM/r" --policy "$PM/policy" 2>&1 || true)
+python3 - "$PM" <<'PY'
+import json, glob, os, sys
+f = [g for g in glob.glob(os.path.join(sys.argv[1], "r.*.json")) if "callgraph" not in g and ".calibrated." not in g and ".encountered-" not in g][0]
+doc = json.load(open(f)); doc.pop("analyzed", None)      # the ONE difference: the pre-fix shape
+json.dump(doc, open(os.path.join(sys.argv[1], "poison.pm.Rlib.json"), "w"), indent=2)
+PY
+pmbad=$("$QBIN" gate --report "$PM/poison" --policy "$PM/policy" 2>&1 || true)
+absent "R761: an all-pure deep report is no longer read as JUDGED NOTHING"       "$pmok"  "JUDGED NOTHING"
+want   "R761 CONTROL: the same report WITHOUT the key still hedges (§2 row 3)"   "$pmbad" "JUDGED NOTHING"
+rm -rf "$(dirname "$MF")" "$(dirname "$PM")"
+
 # ── 9c-iv. A `path`/`git` dependency named `core`/`alloc`/`std`/`proc_macro`/`test` — a same-name
 # IMPOSTOR of the sysroot frontier, not a rename ──
 # `record_resolved_call`'s coverage/invisible-floor skip and `is_pure_std_trait`'s trait-purity
