@@ -5,10 +5,47 @@ All notable changes to candor are recorded here. Format loosely follows
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
 **⚠ marks a verdict-affecting change** — a gate/guard/report that was green may read differently
-after upgrading; review policies and regenerate baselines with the new build.
+after upgrading; review policies and regenerate baselines with the new build. **A patch release can
+and routinely does change gate verdicts — read every ⚠ entry before bumping a pin.**
 
 
 ## Unreleased
+
+### ⚠ Upgrading from 0.39.2 — which gates can flip, and which way
+
+This is a large correctness release and **gate verdicts move in BOTH directions**. Read the ⚠ entries
+below before bumping a pin; the SOUNDNESS ids name the register rows.
+
+**GREEN → RED (exit 0 → 1) — silences closed, so a `deny <E>` / `pure` over real code can now fail:**
+- drop glue that runs in the frame and was not charged: a value escaping only on an explicit `return`
+  (R189), an escape route after a `?` (R709), ALL-CAPS type names (R722), an owned value whose type
+  merely MENTIONS a borrow (`HashMap<&str, Guard>`, `TempFile<&Path>`; R718's second half); on the deep
+  engine, every scope-exit drop inside a closure / `async` body (R756);
+- calls that resolved to nothing: relative `self::`/`super::` paths and exact-vs-suffix claimants
+  (R751, R748), a crate-local type behind an out-of-crate glob import (R186), `CommandExt::exec` /
+  `pre_exec` trait-path spellings (R141), reference-bound `let`s (R569), trait use-independence (R577),
+  collection literals (R582/R586), `dyn` fields/returns/`let`s/closure params (R562, R556, R561), a
+  `static`/`const` receiver (R557), an upper-initial binding name (R564), a default body shadowing the
+  implementor union (R597);
+- **`deny Unknown` / `deny <E> Unknown`**: a tail contest that includes the caller (R750 — 155 units in
+  the corpus), a chained trait with a local implementor (R693), a chained abstraction with an empty
+  implementor union (R608), a foreign impl no longer counted as a local trait's implementor (R652);
+- **`allow <E> in <scope> <literal>` (AS-EFF-008)**: now fails closed over `libc`/`nix`/`rustix`,
+  `sqlx::query_with`/`query_as`/`query_scalar` and a `bind`-then-`send_to` socket that receive a
+  caller-supplied locator (R806, R807); on the deep engine also for a caller's `Command` (R808) and for
+  a rule whose only match was a `bind`/`listen` address (R809).
+
+**RED → GREEN (exit 1 → 0) — fabrications removed, so a gate that failed on a false charge can pass:**
+- a BORROWED field no longer charges its type's drop glue (R718); a bare module-scope `#[test] fn` is
+  no longer the crate's code (R167); an inherent method's effects are no longer charged to a trait
+  member (R598); a `dyn` binding no longer licenses CHA on the caller-monomorphized receivers beside it
+  (R571); one function in `cap-primitives` loses a coincidentally-correct `Fs` but keeps `['Unknown']`
+  with a named reason, so `deny Unknown` there stays at 1 (R751/R752).
+
+**EXIT 2 → 0:** `candor-query gate --report` over a DEEP-engine report no longer reads it as having
+judged nothing — the deep engine now emits the ⟨0.21⟩ completeness manifest (R761).
+
+`--incremental` caches are invalidated (schema rev 51); the first warm scan after upgrading is cold.
 
 - ⚠ **THE AS-EFF-008 MASKING GUARD IS NOW ONE FUNCTION BOTH RUST ENGINES ASK, AND ITS LISTS ARE READ FROM
   THE TABLES THAT CHARGE THE EFFECT (SOUNDNESS R806 / R807 / R808 / R809 — four silent or false
@@ -33,7 +70,23 @@ after upgrading; review policies and regenerate baselines with the new build.
 
   Corpus A/B (candor-scan, 2,029 registry crates): ADDED 0, REMOVED 0, `inferred` unchanged; 391 rows
   gain `incomplete` and nothing else. Upgraders may see `allow` gates that were green fail closed on
-  code that really passes a runtime path, command, host or query to one of these calls.
+  code that really passes a runtime path, command, host or query to one of these calls. **The
+  deep-engine side of R806, R808 and R809 was NOT corpus-measured** — its evidence is the executed
+  fixtures only.
+
+  ⚠ **Deep-engine users:** an `allow Net in <scope> <addr>` rule whose only match was a `bind`/`listen`
+  address (R809) no longer certifies — that address is not a destination, so the rule now fails closed
+  (exit 1) where it exited 0. Re-derive such rules from the addresses the code actually connects to.
+
+  **STILL OPEN after this change:**
+  - **SOUNDNESS R810 (candor-scan):** literal resolution ignores REASSIGNMENT — `let mut p =
+    "/tmp/benign"; p = user; fs::write(p, ..)` publishes `/tmp/benign`, and `allow Fs`/`allow Exec` with
+    the benign literal still exits 0 over a write/spawn of the caller's value (a loop-carried
+    reassignment does the same). The deep engine answers this shape correctly.
+  - **SOUNDNESS R816 (deep engine, UNTESTED lead):** the deep engine may never mask
+    `sqlx::query(caller).fetch_all(&pool)`, because it may not charge sqlx builder calls at all —
+    a possible deep-only miss that candor-scan catches. Not yet settled either way; no claim is made
+    for the deep engine on sqlx builder chains.
 
 - ⚠ **A VALUE THAT ESCAPES ONLY ON AN EXPLICIT `return` WAS CREDITED TO EVERY OTHER EXIT TOO, so its
   destructor on the exits that do NOT carry it out vanished (SOUNDNESS R189 — a silent under-report,
@@ -173,7 +226,8 @@ after upgrading; review policies and regenerate baselines with the new build.
   fails if the differential does not report it; CI runs it before the gate on every push. Against a
   pre-R756-fix engine it re-finds the defect on **6 of 6** generated crates, 29 rows.
 
-- **A TAIL CONTEST THAT INCLUDES THE CALLER ITSELF WENT SILENT (SOUNDNESS R750 — disclosure-only).**
+- ⚠ **A TAIL CONTEST THAT INCLUDES THE CALLER ITSELF WENT SILENT (SOUNDNESS R750 — disclosure-only; 155
+  units / 354 rows newly take a scoped `deny Unknown <unit>` from exit 0 to exit 1).**
   A qualified, non-method call whose 2-segment tail is claimed by two-or-more DISTINCT quals, **one of
   which is the caller's own**, was refused by `resolve_target` and then vanished: no edge, no `Unknown`,
   no reason, the caller ABSENT from `functions[]` — an affirmative §4 purity claim over a body the engine
@@ -268,9 +322,13 @@ after upgrading; review policies and regenerate baselines with the new build.
   rather than rounded off. `cap-primitives`' `rustix::freebsd::fs::set_permissions_impl` writes
   `super::beneath_supported()`; the true unit is `…fs::check::beneath_supported`, reached through
   `pub(crate) use check::beneath_supported;` at `fs/mod.rs:11`. The module-blind route leaf-matched it; the
-  correct absolute qual `…fs::beneath_supported` names no unit, so it under-reports and
-  `deny Fs rustix::freebsd::fs::set_permissions_impl` goes 1 → 0 on that one function. The remedy is the
-  re-export index answering a module-qualified key, which is a separate change.
+  correct absolute qual `…fs::beneath_supported` is claimed by two re-exporting modules and is REFUSED
+  WITH A NAMED REASON rather than dropped: the unit keeps `['Unknown']` with
+  `unknownWhy: ['ambiguous:re-export key claimed by two modules']` (SOUNDNESS R752, open). So the bare
+  `deny Fs rustix::freebsd::fs::set_permissions_impl` goes 1 → 0 on that one function, while
+  `deny Unknown` and `deny Fs Unknown` over it stay at 1 — a precision loss with the disclosure intact,
+  not a silence. The remedy is the re-export index answering a module-qualified key (R752), a separate
+  change.
 
   Removal partition of the 85 (transitive closure, same classifier that bins 194 C3 rows elsewhere and 6/6
   on synthetic injection): **74 C1** (whole closure local, analysed, pure), **C2 = 0**, **C3 = 11 — and C3
@@ -463,7 +521,8 @@ after upgrading; review policies and regenerate baselines with the new build.
   "the crate root declares nothing" — which is exactly the input that restores the pre-fix silence off
   a warm cache; a rev48 entry is now discarded (gated).
 
-- **THE PLATFORM `process` MODULE HAD NO RULE (SOUNDNESS R141 — a published silent under-report).**
+- ⚠ **THE PLATFORM `process` MODULE HAD NO RULE (SOUNDNESS R141 — a published silent under-report; `deny
+  Exec` over the `CommandExt::exec`/`pre_exec` trait-path spellings goes from exit 0 to exit 1).**
   `std::os::{unix,windows,wasi}::process` is the exact sibling of `std::os::*::fs`, which R130 closed,
   and it was left unruled for the reason that row records: the audit boundary was drawn around `fs`.
   `CommandExt::exec` is `execvp` — it REPLACES the process image, ground-truthed by a `cargo run` that
@@ -621,6 +680,33 @@ after upgrading; review policies and regenerate baselines with the new build.
   Cache schema rev46 -> **rev47**: the marker and the receiver-typed call both live IN the cached
   `FnInfo`, so a warm rev46 read republishes exactly the silence this row closes (R631's direction).
 
+- ⚠ **R718 WITHDREW DROPS THAT REALLY RUN: AN OWNED VALUE WHOSE TYPE MERELY *MENTIONS* A BORROW LOST ITS
+  DROP GLUE (SOUNDNESS R718, second half — a silent under-report introduced by the entry below, unreleased,
+  now closed; plus the same shape on the PARAMETER side, silent since R168).** R718 decided "borrowed"
+  with `type_borrows` over the WHOLE declared field type — *is there a `&` anywhere?* — and withdrew both
+  the field's own leaf and its element leaf on that one bit. But a `&` in a map KEY or in a GENERIC
+  ARGUMENT of an owned type is on neither walk: `m: HashMap<&'static str, Guard>` owns its `Guard`
+  values, and `t: TempFile<&'a Path>` / `c: Closer<&'a mut File>` own a `TempFile`/`Closer` whose local
+  `Drop` runs in the frame. EXECUTED against a drop counter and a real file: each owned arm ran 1 drop in
+  the call and the file was gone; `deny Fs` over the unit AND its caller went 1 → 0 at R718 and is 1
+  again. The by-value parameter `fn take(t: TempFile<&Path>)` (1 drop, executed) was ABSENT on every
+  build since R168 and now reports `['Fs']`.
+
+  The fact is now asked along the SAME walk that produces each index entry (`type_path_b` for the
+  field's leaf, `elem_type_b` for its element) and recorded PER INDEX, so a `&` counts only where it
+  sits between the field and the leaf that index holds. R718's own fabrication fix stands — `Vec<&T>`,
+  `&T`, a newtype over `&T`, `(&T,)` and `Box<&T>` stay uncharged (0 in-frame drops), and all 15 of
+  R718's executed shapes still pass. **Failure direction if wrong: over-charge** (a borrowed leaf read
+  as owned), never a new silence — the whole-type test is kept only for `self: Pin<&mut Self>`-style
+  receivers, where the charged leaf is `Self` and the `&` inside the generic IS the borrow.
+
+  Corpus A/B, `bin/corpus-ab.py` over the pinned rust census (1,470 of 1,626 entries present locally,
+  320,182 rows per arm, arm binaries hash-distinct): **ADDED 0 / REMOVED 0 / CHANGED 10**, `inferred`
+  unchanged, REACH 7,133 field and 16,166 parameter re-decisions across ~440 entries. All 10 changed
+  rows are `clipboard-win`'s `raw::*`, each gaining a `utils::Scope::drop` call edge: `RawMem(Scope<*mut
+  c_void>)` owns a `Scope` whose `Drop` runs the stored release fn, and `let ptr = RawMem::…` drops in
+  that frame — a real drop, read from source (windows-only, so not executed here). Cache rev 50 → 51.
+
 - **⚠ A BORROWED FIELD NO LONGER FABRICATES ITS TYPE'S DROP GLUE (SOUNDNESS R718 — the FIELD half of
   R168, pre-dating R709).** `owned_drops`, the R49 transitive drop-owner closure, took its candidate
   leaves straight out of `fields`/`field_elem` — and both of those are written through
@@ -749,8 +835,9 @@ after upgrading; review policies and regenerate baselines with the new build.
   code** — against the blunt version's 551. Perf neutral: windows-0.56.0 95.7s -> 92.8s,
   tokio 0.45s -> 0.32s.
 
-- **⚠ ⟨0.39⟩ — A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
-  CRATE SUPPLIES THE IMPLEMENTOR (SOUNDNESS R693, closing the R690 cardinal sin).** Published in
+- **⚠ A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
+  CRATE SUPPLIES THE IMPLEMENTOR (SOUNDNESS R693, closing the R690 cardinal sin — per SPEC §4's defining
+  rule, `SPEC.md:4299`: dispatch over an unknown type MUST contribute `Unknown`).** Published in
   candor-scan 0.39.2 and live until now: with `impl dep::Sink for Mine` in the same crate, three
   spellings of the receiver read `inferred: []`, no `unknownWhy`, no `unresolved` — and **both
   `deny Net <q>::` and `deny Net Unknown <q>::` exited 0 over a real `TcpStream::connect`** — while the
@@ -821,8 +908,8 @@ after upgrading; review policies and regenerate baselines with the new build.
   implements `Stream` for its own types, so the member is proven real).
 
 
-- **⚠ ⟨0.39⟩ — A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
-  TRAIT (SOUNDNESS R652).** `trait_impls` is keyed by trait LEAF and records impls of FOREIGN and std
+- **⚠ A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
+  TRAIT (SOUNDNESS R652 — per SPEC §4's defining rule, `SPEC.md:4299`).** `trait_impls` is keyed by trait LEAF and records impls of FOREIGN and std
   traits too — `decls.rs` is `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)` with no
   locality test at all — so:
 
@@ -898,8 +985,9 @@ after upgrading; review policies and regenerate baselines with the new build.
   `if incremental`), and `bin/corpus-ab.py` passes no such flag — it runs the argv templates it is
   given, and `cf8782d`'s were plain `--json` scans. `REACH 3,829` stands as measured.
 
-- **⚠ ⟨0.39⟩ — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
-  PURE-ONLY UNION IS PUBLISHED INSTEAD OF DROPPED (SOUNDNESS R608 + R609).** Two halves of one rung;
+- **⚠ A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
+  PURE-ONLY UNION IS PUBLISHED INSTEAD OF DROPPED (SOUNDNESS R608 + R609 — per SPEC §4's defining rule,
+  `SPEC.md:4299`: dispatch over an unknown type MUST contribute `Unknown`).** Two halves of one rung;
   neither is shippable without the other.
 
       pub fn run(h: &dyn dep::Handler) { h.handle(); }   // nothing implements Handler, anywhere
