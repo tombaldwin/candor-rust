@@ -681,7 +681,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   charge was right by accident and from a false premise. Four rows (one per census mongodb version) now
   disclose nothing where they previously disclosed `Unknown`.
 
-- **⚠ ⟨0.40⟩ — AN *UNCONDITIONAL* ESCAPE ROUTE THAT LIES AFTER A `?` NO LONGER CERTIFIES THE ESCAPE
+- **⚠ AN *UNCONDITIONAL* ESCAPE ROUTE THAT LIES AFTER A `?` NO LONGER CERTIFIES THE ESCAPE
   (SOUNDNESS R709, closing the R680 cardinal sin).** R173 made the `?` veto POSITIONAL for everything
   that reaches an exit through a `return`/tail, and the unconditional half — a `mem::forget` /
   `ManuallyDrop::new` operand, an inline closure body, a field/index/deref store — was re-united WHOLE
@@ -749,7 +749,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   code** — against the blunt version's 551. Perf neutral: windows-0.56.0 95.7s -> 92.8s,
   tokio 0.45s -> 0.32s.
 
-- **⚠ ⟨0.40⟩ — A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
+- **⚠ ⟨0.39⟩ — A RECEIVER WHOSE TRAIT IS DECLARED IN A CHAINED DEPENDENCY NO LONGER READS PURE WHEN THIS
   CRATE SUPPLIES THE IMPLEMENTOR (SOUNDNESS R693, closing the R690 cardinal sin).** Published in
   candor-scan 0.39.2 and live until now: with `impl dep::Sink for Mine` in the same crate, three
   spellings of the receiver read `inferred: []`, no `unknownWhy`, no `unresolved` — and **both
@@ -821,7 +821,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   implements `Stream` for its own types, so the member is proven real).
 
 
-- **⚠ ⟨0.40⟩ — A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
+- **⚠ ⟨0.39⟩ — A FOREIGN IMPL SHARING A TRAIT'S LEAF IS NO LONGER READ AS AN IMPLEMENTOR OF THE LOCAL
   TRAIT (SOUNDNESS R652).** `trait_impls` is keyed by trait LEAF and records impls of FOREIGN and std
   traits too — `decls.rs` is `trait_impls.entry(leaf.ident.to_string()).or_default().push(ty)` with no
   locality test at all — so:
@@ -898,7 +898,7 @@ after upgrading; review policies and regenerate baselines with the new build.
   `if incremental`), and `bin/corpus-ab.py` passes no such flag — it runs the argv templates it is
   given, and `cf8782d`'s were plain `--json` scans. `REACH 3,829` stands as measured.
 
-- **⚠ ⟨0.40⟩ — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
+- **⚠ ⟨0.39⟩ — A CHAINED ABSTRACTION WITH AN EMPTY IMPLEMENTOR UNION NOW READS `Unknown`, AND A
   PURE-ONLY UNION IS PUBLISHED INSTEAD OF DROPPED (SOUNDNESS R608 + R609).** Two halves of one rung;
   neither is shippable without the other.
 
