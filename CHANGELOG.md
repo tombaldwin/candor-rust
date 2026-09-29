@@ -144,8 +144,9 @@ judged nothing — the deep engine now emits the ⟨0.21⟩ completeness manifes
   withdraws an escape the union certified, so a zero-diff can be told from a corpus that never reached the
   change. Kept, not rebuilt next time.
 
-- **THE DEEP ENGINE EMITTED NO ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST, so two consumers were answering about
-  nothing (SOUNDNESS R761 — instrument, strictly additive).** `write_report_files` called
+- ⚠ **THE DEEP ENGINE EMITTED NO ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST, so two consumers were answering about
+  nothing (SOUNDNESS R761 — additive to the report, but `candor-query gate --report` over a deep-engine
+  report can now go EXIT 2 → 0, as the upgrade summary says).** `write_report_files` called
   `to_packaged_report_json`, which has no `analyzed` parameter, so every deep-engine report was a §2
   **ROW-3** document: one that makes no completeness claim at all. `candor-query gate --report`
   accumulated `analyzed_count` 0 for every deep report it was handed, and an all-pure deep report read as
@@ -1563,8 +1564,9 @@ judged nothing — the deep engine now emits the ⟨0.21⟩ completeness manifes
   — with `bin/corpus-ab.py` (never a fresh `ab.py`), wide key, multiset: see the commit message for the
   corpora, the REMOVED column and the reach counts.
 
-- **An EXTENSION TRAIT's method was published under the BASE trait the receiver happened to carry
-  (SOUNDNESS R551; R549 mechanism A).** `inner.map_future(..)` where `inner: S, S: tower_service::Service<R>`
+- ⚠ **An EXTENSION TRAIT's method was published under the BASE trait the receiver happened to carry
+  (SOUNDNESS R551; R549 mechanism A). Re-keys `dispatchesOn`, which a chained consumer's ⟨0.39⟩ obligation-3
+  join reads, so its verdict can move — inferred from the join, not demonstrated on a fixture.** `inner.map_future(..)` where `inner: S, S: tower_service::Service<R>`
   published `tower_service#Service::map_future`. `tower_service::Service` declares exactly `call` and
   `poll_ready`; `map_future` belongs to `ServiceExt`, a trait **tower declares locally**. So the key named
   a member of nothing — ⟨0.39⟩ obligation 3's join can never find it — and the key that IS joinable,
@@ -1604,8 +1606,10 @@ judged nothing — the deep engine now emits the ⟨0.21⟩ completeness manifes
   moved**; each target was ground-truthed against the declaring trait's source, never against candor's
   own report. R549's census over the six pairs goes **26 of 78 malformed → 20 of 78**.
 
-- **A trait method named as a FUNCTION REFERENCE is a dispatch, and the key for it was never published
-  (SOUNDNESS R549, mechanism B).** `xs.front().map(Buf::chunk)` spells the dispatch as a value, so
+- ⚠ **A trait method named as a FUNCTION REFERENCE is a dispatch, and the key for it was never published
+  (SOUNDNESS R549, mechanism B). Adds `dispatchesOn` keys a chained consumer's obligation-3 join reads, so its
+  verdict can move — inferred, not demonstrated (a release reviewer's `Buf::chunk` fixture was already
+  disclosed `Unknown` on 0.39.2).** `xs.front().map(Buf::chunk)` spells the dispatch as a value, so
   `visit_expr_method_call` never saw it. Measured on http-body-util: `bytes#Buf::chunk` appeared NOWHERE
   in the report while the same function published `bytes#Buf::map` and `bytes#Buf::unwrap_or_default` —
   neither a `Buf` member. ⟨0.39⟩ obligation 3 tells a consumer to JOIN on the key; there was no key.
