@@ -1186,11 +1186,22 @@ pub(crate) fn tuple_trait_leaves(
 /// Constructor-style associated function names: `let x = Foo::new(..)` (or `::connect().await?`) means
 /// `x: Foo`. Conservative set of names that return `Self` (or `Result<Self>`), so the inferred type is
 /// reliable. A non-constructor assoc call (`Foo::parse`) is NOT treated as producing a `Foo`.
+///
+/// SOUNDNESS R807 — `bind` WAS ABSENT, AND IT IS THE ONLY CONSTRUCTOR A UDP SOCKET HAS. So
+/// `let s = UdpSocket::bind("0.0.0.0:0")?; s.send_to(buf, dst)` left `s` untyped, the `send_to` never
+/// became `UdpSocket::send_to`, and the caller-chosen destination reached no rule and no masking arm:
+/// `allow Net in <fn> <benign literal>` exited 0 on the unit AND its caller, EXECUTED sending a real
+/// datagram to the caller's address. The same function taking the socket as a PARAMETER was typed from
+/// the signature and failed closed — the local bind was the single variable. (The row as filed blamed
+/// `is_net_binding` withholding a collapsed record; measured, no such record exists — the `bind` record
+/// is withheld correctly and the `send_to` was never classified at all.) `connect` sat here already,
+/// so the asymmetry was one name. std, tokio, mio, async-std and smol all spell a UDP socket's and a
+/// listener's constructor `bind`, returning `Self` (or `Result<Self>`, or a future of it).
 pub(crate) fn is_ctor(name: &str) -> bool {
     matches!(
         name,
         "new" | "default" | "builder" | "with_capacity" | "connect" | "open" | "init" | "from"
-            | "from_path" | "from_str" | "with_config" | "create"
+            | "from_path" | "from_str" | "with_config" | "create" | "bind"
     )
 }
 
@@ -1251,7 +1262,28 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                     }
                 }
                 if is_ctor(last) && type_like {
+                    // R807 REACH PROBE — the one name R807 adds, so the A/B can count what it typed.
+                    if last == "bind" && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                        eprintln!("R807CTOR {}::bind", expand(ty, uses));
+                    }
                     return Some(expand(ty, uses));
+                }
+                // SOUNDNESS R807 — THE PRECONDITION PROBE, diagnostic only. A `Type::f(..)` factory that
+                // `classify` CHARGES but that is not a known constructor leaves the value it produces
+                // untyped, so every later method on it (`s.send_to(buf, dst)` after
+                // `let s = UdpSocket::bind(..).unwrap()`) reaches no rule and no masking arm — and so
+                // prints none of the mask probes. `R807UNTYPED` (scan.rs) sees only the `?` and inline
+                // spellings, because only those leave a `<untyped>` marker; `.unwrap()`/`.expect()`
+                // leave NOTHING, which is the commonest spelling. This line fires wherever typing is
+                // attempted and fails on such a factory, whatever the binder, so it is the census the
+                // fix's reach is read against.
+                if type_like && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                    let full_ty = expand(ty, uses);
+                    let cr = full_ty.split("::").next().unwrap_or("");
+                    let p = format!("{full_ty}::{last}");
+                    if let Some(eff) = candor_classify::classify(cr, &p) {
+                        eprintln!("R807CTORMISS {eff} {p}");
+                    }
                 }
             }
             // a local factory function call — its recorded (unambiguous) return type. The fn-typed

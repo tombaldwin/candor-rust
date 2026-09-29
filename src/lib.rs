@@ -2318,6 +2318,94 @@ fn first_str_lit_arg(expr: &Expr<'_>) -> Option<String> {
     None
 }
 
+/// SOUNDNESS R808 — is the RECEIVER of this Exec method call a command NAMED IN THIS FUNCTION?
+///
+/// True when the receiver chain peels back to a `…Command::new(..)` call in this body — inline
+/// (`Command::new("git").arg("x").status()`) or through a `let` binding that is never reassigned
+/// (`let mut c = Command::new("git"); c.arg("x"); c.status()`). That root call is itself an
+/// `is_cmd_naming_method` site, so it either publishes its literal head or marks the surface
+/// incomplete; the spawn adds nothing it has not already said. `candor-scan` reaches the same answer by
+/// resolving the chain into the call's `str_arg` (`resolve_cmd_recv`).
+///
+/// False — so the spawn is masked — for a receiver this function did not build: a parameter, a field,
+/// another function's return, or a local that is reassigned anywhere in the body (`c = other;` could
+/// hand the spawn a program the `let` never named, so the `let` cannot vouch for it).
+fn exec_recv_named_here<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
+    let ExprKind::MethodCall(_, recv, _, _) = expr.kind else { return false };
+    let mut e = recv;
+    let mut hops = 0;
+    loop {
+        hops += 1;
+        if hops > 64 {
+            return false;
+        }
+        e = match e.kind {
+            ExprKind::MethodCall(_, r, _, _) => r,
+            ExprKind::AddrOf(_, _, inner) | ExprKind::DropTemps(inner) => inner,
+            ExprKind::Call(func, _) => {
+                let ExprKind::Path(ref qpath) = func.kind else { return false };
+                return match cx.qpath_res(qpath, func.hir_id) {
+                    rustc_hir::def::Res::Def(_, did) => {
+                        let p = cx.tcx.def_path_str(did);
+                        p.ends_with("Command::new")
+                    }
+                    _ => false,
+                };
+            }
+            ExprKind::Path(rustc_hir::QPath::Resolved(None, p)) => {
+                let rustc_hir::def::Res::Local(id) = p.res else { return false };
+                let rustc_hir::Node::LetStmt(local) = cx.tcx.parent_hir_node(id) else { return false };
+                let Some(init) = local.init else { return false };
+                if local_reassigned(cx, id) {
+                    return false;
+                }
+                init
+            }
+            _ => return false,
+        };
+    }
+}
+
+/// Whether local `id` can be handed a DIFFERENT value after its `let`: it is the target of an
+/// assignment, or it is explicitly borrowed `&mut` (so `mem::replace(&mut c, other)` or a callee doing
+/// `*c = ..` could swap the command). Searched over the body that DECLARES it, nested closures included,
+/// since a closure capturing `c` can reassign it. Conservative by design: `true` only costs a mask.
+fn local_reassigned<'tcx>(cx: &LateContext<'tcx>, id: HirId) -> bool {
+    use rustc_hir::intravisit::Visitor;
+    struct V<'tcx> {
+        tcx: TyCtxt<'tcx>,
+        id: HirId,
+        found: bool,
+    }
+    fn is_the_local(e: &Expr<'_>, id: HirId) -> bool {
+        matches!(e.kind, ExprKind::Path(rustc_hir::QPath::Resolved(None, p))
+            if matches!(p.res, rustc_hir::def::Res::Local(l) if l == id))
+    }
+    impl<'tcx> Visitor<'tcx> for V<'tcx> {
+        type NestedFilter = rustc_middle::hir::nested_filter::All;
+        fn maybe_tcx(&mut self) -> TyCtxt<'tcx> {
+            self.tcx
+        }
+        fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+            if self.found {
+                return;
+            }
+            match e.kind {
+                ExprKind::Assign(lhs, _, _) if is_the_local(lhs, self.id) => self.found = true,
+                ExprKind::AddrOf(_, rustc_hir::Mutability::Mut, inner) if is_the_local(inner, self.id) => {
+                    self.found = true
+                }
+                _ => rustc_hir::intravisit::walk_expr(self, e),
+            }
+        }
+    }
+    let owner = cx.tcx.hir_enclosing_body_owner(id);
+    let Some(body) = cx.tcx.hir_maybe_body_owned_by(owner) else { return true };
+    let mut v = V { tcx: cx.tcx, id, found: false };
+    v.visit_body(body);
+    v.found
+}
+
 /// Conventionally-pure std/core/alloc traits. Dynamic dispatch over these (e.g.
 /// `.to_string()` / `.source()` on a `&dyn std::error::Error`) is overwhelmingly
 /// side-effect-free, so we DON'T stamp it `Unknown` — doing so floods reports with
@@ -2984,6 +3072,9 @@ impl Candor {
         }
         let path = cx.tcx.def_path_str(def_id);
         let builtin = classify(crate_name.as_str(), &path);
+        // Method form (`recv.m(..)`) vs call form — the `method` argument `masks_locator` takes, so the
+        // receiver-locator arms can fire and a path-stat is not mistaken for an argument-form call.
+        let is_method = matches!(expr.kind, ExprKind::MethodCall(..));
         // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a call resolving into
         // a curated model-provider client dispatches a request → `Llm` + `Net` (Net is never dropped — a
         // model call IS network I/O). No method gating (single-purpose clients), the Rust analog of the java
@@ -3029,6 +3120,17 @@ impl Candor {
                 // `deny Llm` catches it but `allow Llm localhost` has no literal to certify (fails closed).
                 // Matches candor-java's dotless-host branch. Partition it out of the captured set.
                 let mut hosts = net_hosts_in_call(expr);
+                // SOUNDNESS R809 / ⟨0.29⟩ — A BIND/LISTEN ADDRESS IS LOCAL, never a destination. This
+                // engine published `UdpSocket::bind("10.0.0.5:9")`'s address into `hosts`, the surface
+                // `allow Net` certifies against, so `allow Net in <fn> 10.0.0.5` answered `ok: true` over
+                // a function that only LISTENS there — a FALSE destination claim. `candor-scan` has
+                // withheld it since ⟨0.29⟩; the rule is the shared `is_net_binding`, now asked here too.
+                // Withhold the literal and add no hedge, exactly as the floor does: a Net function with
+                // no captured host fails closed on its own, and a sibling runtime destination
+                // (`s.send_to(buf, dst)`) is masked by its own establishing verb below.
+                if candor_classify::is_net_binding(path.rsplit("::").next().unwrap_or("")) {
+                    hosts.clear();
+                }
                 let dotless_ollama: Vec<String> =
                     hosts.iter().filter(|h| is_ollama_dotless(h)).cloned().collect();
                 for h in &dotless_ollama {
@@ -3047,7 +3149,9 @@ impl Candor {
                     }
                     self.net_hosts_direct.entry(caller).or_default().extend(hosts);
                 } else if dotless_ollama.is_empty()
-                    && candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or(""))
+                    // SOUNDNESS R806/R808 — the ONE masking authority both rust engines ask.
+                    && candor_classify::masks_locator("Net", crate_name.as_str(), &path,
+                        path.rsplit("::").next().unwrap_or(""), is_method)
                 {
                     // a host-ESTABLISHING Net call with no captured host literal → runtime endpoint, invisible
                     // to the gate (masking; sweep [3]/[7]). Use-verbs (write/read/send) are not establishing.
@@ -3072,9 +3176,26 @@ impl Candor {
                             .extend(classify_command_head(&cmd).iter().copied());
                         self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
                     }
-                } else if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
+                } else if candor_classify::masks_locator("Exec", crate_name.as_str(), &path,
+                        path.rsplit("::").next().unwrap_or(""), is_method)
+                    // The determined-receiver excuse applies to the RECEIVER arm only; a program-naming
+                    // call keeps the unconditional mark it always had, so nothing here can withdraw one.
+                    && !(is_method
+                        && !is_cmd_naming_method(path.rsplit("::").next().unwrap_or(""))
+                        && exec_recv_named_here(cx, expr))
+                {
                     // a program-NAMING Exec call (`Command::new(runtime_var)`) with no literal head → the
                     // command is invisible to the gate (masking; sweep [3]/[7]).
+                    //
+                    // SOUNDNESS R808 — …OR a spawn whose program is its RECEIVER (R460). This arm asked
+                    // only `is_cmd_naming_method`, so `fn go(cmd: &mut Command) { Command::new("git")
+                    // .status(); cmd.spawn(); }` was FLAGGED by `candor-scan` and PASSED here, EXECUTED
+                    // spawning a real program while this engine — the one `--help` calls the sound gate —
+                    // answered `ok: true`. It now asks the shared `masks_locator`, which carries R460's
+                    // receiver arm and R806's libc `system`/`exec*`/`posix_spawn*` arm. The DETERMINED
+                    // receiver is excused by `exec_recv_named_here`: a chain rooted at `Command::new(..)`
+                    // in this very function is named by that root call, which is itself published or
+                    // masked on its own, so `Command::new("git").arg("x").status()` stays certifiable.
                     self.incomplete_direct.entry(caller).or_default().insert("Exec");
                 }
             }
@@ -3115,7 +3236,15 @@ impl Candor {
                     // and stays conformant" — and the alternative on offer was to keep certifying a
                     // caller-controlled stat, which does not. The precision half is owed, not free: it
                     // needs the receiver resolved the way `candor-scan`'s collector does.
-                    if candor_classify::is_fs_path_arg(leaf)
+                    // SOUNDNESS R806/R808 — the shared authority first (it carries R383's
+                    // `OpenOptions::open`/`DirBuilder::create`/`Dir::*` arm and R806's libc/nix/rustix
+                    // arm, neither of which this engine had), then this engine's OWN two disjuncts kept
+                    // verbatim: they are method-blind, so they mark a use-verb on an open handle
+                    // (`f.set_permissions(..)`) and a UFCS stat the shared rule does not. Dropping them
+                    // would REMOVE hedges, a different change with its own accounting — so this engine
+                    // stays a superset of the floor here, which is what the pair differential asks.
+                    if candor_classify::masks_locator("Fs", crate_name.as_str(), &path, leaf, is_method)
+                        || candor_classify::is_fs_path_arg(leaf)
                         || candor_classify::is_fs_receiver_locator(&path)
                     {
                         self.incomplete_direct.entry(caller).or_default().insert("Fs");
@@ -3133,7 +3262,9 @@ impl Candor {
                         self.db_tables_direct.entry(caller).or_default().extend(ts);
                     }
                     // (a literal SQL with no table — `SELECT 1` — is visible-but-tableless, NOT incomplete.)
-                } else if candor_classify::is_db_query_arg(path.rsplit("::").next().unwrap_or("")) {
+                } else if candor_classify::masks_locator("Db", crate_name.as_str(), &path,
+                        path.rsplit("::").next().unwrap_or(""), is_method)
+                {
                     // a SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with no literal
                     // query → the table is a runtime value, invisible to the gate (masking; the AS-EFF-008
                     // guard generalized from Net/Exec to Db). The allowlist excludes build-then-execute

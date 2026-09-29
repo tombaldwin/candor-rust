@@ -2474,6 +2474,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+                // SOUNDNESS R807 — THE PROBE THAT CAN SEE AN UNTYPED HANDLE. Diagnostic only; no
+                // behaviour. Every masking probe (`R379MASK`, `R460*`, `R417MASK`, `UNMASKED`) lives
+                // inside the CLASSIFIED arm below, so a call that was never classified emits none of
+                // them — and that is R807's shape: `let s = UdpSocket::bind(..)?; s.send_to(buf, dst)`
+                // left `s` untyped, the `send_to` was never formed as `UdpSocket::send_to`, and the
+                // caller-chosen destination vanished with no tag at all. A 0/0/0 A/B over a fix for it
+                // would read exactly like an inert one.
+                //
+                // It prints a method call whose receiver was PRODUCED by a factory `classify` charges
+                // (`std::net::UdpSocket::bind` → Net) but whose own type was never learned, so the call
+                // reached no rule. `loc=1` is the gate-relevant subset: the method is a locator-bearing
+                // verb for that effect (`masks_locator`), i.e. a runtime destination a benign sibling
+                // literal could certify. Placed BEFORE the chained-dep conjunct below on purpose: a
+                // `std` factory is never a declared dependency, so that branch is where it went silent.
+                if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                    if let Some((callee, method)) = rest.rsplit_once("::") {
+                        let factory = format!("{cr_real}::{callee}");
+                        if let Some(eff) = candor_classify::classify(cr_real, &factory) {
+                            let loc = candor_classify::masks_locator(
+                                eff, cr_real, &format!("{factory}::{method}"), method, true);
+                            eprintln!("R807UNTYPED {eff} loc={} {} :: {factory} .{method}()", u8::from(loc), f.qual);
+                        }
+                    }
+                }
                 // THIRD conjunct, and it is what makes this precise rather than noisy: the dep must be
                 // CHAINED. For an UNCHAINED dep the κ ledger already discloses `invisible: [cr]`, so the
                 // reader is warned and a second disclosure buys nothing but false uncertainty — measured,
@@ -3237,7 +3261,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     paths.entry(f.qual.clone()).or_default().insert(p2.clone());
                 }
                 if c.str_arg.is_none() {
-                    if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
+                    // SOUNDNESS R806/R808 — every arm below asks ONE shared authority,
+                    // `candor_classify::masks_locator`, which the deep engine asks too. The per-arm
+                    // comments record why each disjunct inside it exists; the disjunctions themselves no
+                    // longer live here, because two copies of them is how R460 reached this engine and
+                    // not the other one.
+                    let masks = candor_classify::masks_locator(eff, cr_real, &c.path, &c.leaf, c.method)
+                        // SOUNDNESS R806 — the Db arm's scan-ONLY half, derived from the scan-only table
+                        // that charges it. `scan_builder_entry_effect` charges `sqlx::query_with` /
+                        // `query_as` / `query_scalar` / `diesel::sql_query` `Db` at the ENTRY because this
+                        // engine cannot type the chain to its terminal; every one of those entries takes
+                        // the SQL text at argument 0, and `is_db_query_arg` held only `query` of them. The
+                        // deep engine never charges an entry (it types the terminal), which is why this
+                        // disjunct lives here and not in the shared authority.
+                        || (eff == "Db" && scan_builder_entry_effect(cr_real, &path_real) == Some("Db"));
+                    // R806 REACH PROBE — the table-derived arms only, asked of the SAME function the guard
+                    // asks, so the A/B's reach counts exactly the calls this row's fix newly masks.
+                    if masks
+                        && std::env::var("CANDOR_MASK_DEBUG").is_ok()
+                        && (candor_classify::masks_locator_by_table(eff, cr_real, &c.path, &c.leaf)
+                            || (eff == "Db"
+                                && !candor_classify::is_db_query_arg(&c.leaf)
+                                && scan_builder_entry_effect(cr_real, &path_real) == Some("Db")))
+                        && !candor_classify::masks_locator(eff, "", &c.path, &c.leaf, c.method)
+                    {
+                        eprintln!("R806MASK {eff} {} :: {} :: {}", f.qual, c.path, c.leaf);
+                    }
+                    if eff == "Net" && masks {
                         // R379 — instrument the TRIGGER, not the outcome. Which verb marked this
                         // surface incomplete is the whole question when pricing the denylist.
                         if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
@@ -3245,7 +3295,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
                     } else if eff == "Exec"
-                        && (candor_classify::is_cmd_naming_method(&c.leaf)
+                        && masks
+                        // (was: is_cmd_naming_method(&c.leaf)
                             // SOUNDNESS R460 / SPEC ⟨0.37⟩ — …OR a METHOD whose locator is its RECEIVER.
                             // `cmd.spawn()` runs the program the `Command` it is invoked ON was built
                             // with; when that construction is not in this function, nothing here names
@@ -3256,7 +3307,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // collector resolves a receiver whose chain is rooted at `Command::new(lit)`
                             // into `str_arg`, so `Command::new("git").status()` is certifiable exactly as
                             // before and only an unnamed receiver reaches this branch.
-                            || (c.method && candor_classify::is_exec_receiver_locator(&c.path)))
+                            //  || (c.method && is_exec_receiver_locator(&c.path)) — now inside `masks_locator`)
                     {
                         // R379's rule — instrument the TRIGGER, not the outcome. Which verb masked the
                         // surface is the question when pricing a denylist, and this arm IS a denylist.
@@ -3279,12 +3330,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         incomplete.entry(f.qual.clone()).or_default().insert("Exec");
                     } else if eff == "Fs"
-                        && (!c.method && candor_classify::is_fs_path_arg(&c.leaf)
+                        && masks
+                        // (was: !c.method && is_fs_path_arg(&c.leaf)
                             // SOUNDNESS R383 — …OR a METHOD whose path is an ARGUMENT rather than the
                             // receiver. `!c.method` alone let `OpenOptions::new().open(runtime_path)`
                             // through unmasked, so a benign sibling literal certified it and
                             // `allow Fs <lit>` exited 0 over a caller-supplied path.
-                            || (c.method && candor_classify::is_fs_path_arg_method(&c.path))
+                            //  || (c.method && is_fs_path_arg_method(&c.path))
                             // SOUNDNESS R414 / SPEC ⟨0.37⟩ — …OR a method whose locator is its RECEIVER.
                             // `p.exists()` stats the path it is invoked on; the argument spelling of the
                             // same reach (`fs::metadata(p)`) was already marked, so a silent receiver form
@@ -3293,7 +3345,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // receiver into `str_arg`, so `Path::new("/lit").exists()` is captured and
                             // published rather than marked, and only an indeterminate receiver reaches
                             // this branch. That split is the rung's over-charge control (arm a4local).
-                            || (c.method && candor_classify::is_fs_receiver_locator(&c.path)))
+                            //  || (c.method && is_fs_receiver_locator(&c.path)) — now inside `masks_locator`)
                     {
                         // R379's rule — instrument the TRIGGER, not the outcome — applied to the Fs
                         // twin, which had no probe. R417 needed one: the `Dir` arm masks by DEFAULT on
@@ -3310,7 +3362,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // path-stat METHODS (`p.metadata()`/`p.exists()`) whose path is the RECEIVER, not an
                         // arg — same establishing-allowlist discipline as Net/Exec (matches candor-java).
                         incomplete.entry(f.qual.clone()).or_default().insert("Fs");
-                    } else if eff == "Db" && candor_classify::is_db_query_arg(&c.leaf) {
+                    } else if eff == "Db" && masks {
                         // A SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with NO captured
                         // query literal → the table is a runtime value, invisible to the gate. Mark Db
                         // incomplete so a benign sibling literal can't certify the masked table. The allowlist

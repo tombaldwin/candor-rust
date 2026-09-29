@@ -449,6 +449,50 @@ want   "AS-EFF-008 fails closed on a MASKED Fs path despite a benign sibling (fs
 absent "a single allowed literal Fs path still certifies (fs_ok)"                       "$out" '[AS-EFF-008] `fs_ok`'
 rm -rf "$(dirname "$MK")"
 
+# ── 9a-R808/R809. The deep engine asks the SHARED masking authority (candor_classify::masks_locator) ──
+# SOUNDNESS R808: R460's receiver-locator rule reached candor-scan and never this engine, so a spawn whose
+# program arrives as a RECEIVER was certified here beside a benign `Command::new("git")` — EXECUTED
+# spawning a real program while the deep gate answered ok. SOUNDNESS R809: ⟨0.29⟩'s `is_net_binding` was
+# absent here too, so a LOCAL bind address was published as a destination and certified `allow Net`.
+# The determined spellings (inline chain, let-bound builder) must still certify, and a let-bound command
+# that is REASSIGNED must not (the `let` cannot vouch for what the spawn runs).
+echo "== shared masking authority in the deep engine (R808 receiver, R809 bind) =="
+SM=$(mktemp -d)/sm; mkdir -p "$SM/src"
+printf '[package]\nname="sm"\nversion="0.1.0"\nedition="2021"\n' > "$SM/Cargo.toml"
+cat > "$SM/src/main.rs" <<'RS'
+use std::process::Command;
+pub fn r808_recv(cmd: &mut Command) { let _ = Command::new("git").status(); let _ = cmd.spawn(); }
+pub fn r808_inline() { let _ = Command::new("git").arg("status").status(); }
+pub fn r808_bound() { let mut c = Command::new("git"); c.arg("status"); let _ = c.status(); }
+pub fn r808_reasg(o: Command) { let mut c = Command::new("git"); c = o; let _ = c.status(); }
+pub fn r808_ext(cmd: &mut Command) { use std::os::unix::process::CommandExt; let _ = Command::new("git").status(); let _ = cmd.exec(); }
+pub fn r808_ufcs(cmd: &mut Command) { let _ = Command::new("git").status(); let _ = Command::spawn(cmd); }
+pub fn r809_bind() -> std::io::Result<()> { let _s = std::net::UdpSocket::bind("10.0.0.5:9")?; Ok(()) }
+fn main() {
+    r808_recv(&mut Command::new("true")); r808_inline(); r808_bound(); r808_reasg(Command::new("true"));
+    r808_ufcs(&mut Command::new("true")); if std::env::args().count() > 99 { r808_ext(&mut Command::new("true")); }
+    let _ = r809_bind();
+}
+RS
+echo "allow Exec git" > "$SM/policy"
+out=$(dl "$SM" env CANDOR_POLICY="$SM/policy")
+want   "R808: a receiver-supplied spawn is not certified by a benign sibling head (r808_recv)" "$out" '[AS-EFF-008] `r808_recv`'
+want   "R808: a REASSIGNED let-bound command is not vouched for by its let (r808_reasg)"   "$out" '[AS-EFF-008] `r808_reasg`'
+want   "R808: CommandExt::exec — the trait path the deep engine resolves to (r808_ext)"      "$out" '[AS-EFF-008] `r808_ext`'
+want   "R808: the UFCS spelling Command::spawn(cmd) (r808_ufcs)"                              "$out" '[AS-EFF-008] `r808_ufcs`'
+absent "R808: an inline determined chain still certifies (r808_inline)"                    "$out" '[AS-EFF-008] `r808_inline`'
+absent "R808: a let-bound determined command still certifies (r808_bound)"                 "$out" '[AS-EFF-008] `r808_bound`'
+echo "allow Net 10.0.0.5" > "$SM/policy"
+out=$(dl "$SM" env CANDOR_POLICY="$SM/policy")
+want   "R809: a LOCAL bind address does not certify allow Net (r809_bind fails closed)"   "$out" '[AS-EFF-008] `r809_bind`'
+# Under a policy naming a DIFFERENT host the pre-fix engine printed `reaches { 10.0.0.5:9 }` — the bind
+# address as a destination — so this absence can fail; under `allow Net 10.0.0.5` it could not.
+echo "allow Net 10.0.0.6" > "$SM/policy"
+out=$(dl "$SM" env CANDOR_POLICY="$SM/policy")
+absent "R809: the bind address is not published as a reached destination"                  "$out" 'reaches { 10.0.0.5:9 }'
+want   "R809: …and the same fn still fails closed under the other host (r809_bind)"          "$out" '[AS-EFF-008] `r809_bind`'
+rm -rf "$(dirname "$SM")"
+
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
 LY=$(mktemp -d)/ly; mkdir -p "$LY/src"

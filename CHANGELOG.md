@@ -10,6 +10,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- ⚠ **THE AS-EFF-008 MASKING GUARD IS NOW ONE FUNCTION BOTH RUST ENGINES ASK, AND ITS LISTS ARE READ FROM
+  THE TABLES THAT CHARGE THE EFFECT (SOUNDNESS R806 / R807 / R808 / R809 — four silent or false
+  certifications, now closed).** `allow <E> in <fn> <benign literal>` exited 0 over a caller-supplied
+  locator in each of these, EXECUTED on the fixtures:
+  - **R806 (candor-scan and the deep engine):** `libc`/`nix`/`rustix` path, program and destination
+    syscalls (`unlink`, `unlinkat`, `utimensat`, `system`, `execv*`, `posix_spawn*`, `getaddrinfo`,
+    `sendto`…), `sqlx::query_with`/`query_as`/`query_scalar`, `prepare_typed_cached` and `sqlx_core`'s
+    `prepare_with` — every one charged by `classify` and absent from the hand-written masking list. The
+    guard (`candor_classify::masks_locator`) now reads the charging table minus a signature-checked
+    no-locator denylist (`LIBC_FS_NO_PATH`, `LIBC_EXEC_NO_PROGRAM`, `LIBC_NET_NO_DESTINATION`,
+    `PG_DB_VERBS_NO_SQL`), so a leaf added to the table is masked by default.
+  - **R807 (candor-scan):** `let s = UdpSocket::bind(..)?; s.send_to(buf, dst)` — `bind` was not a
+    constructor, so `s` was untyped and the `send_to` was never classified. Precision gain alongside:
+    a bind beside a LITERAL destination now certifies by that destination.
+  - **R808 (deep engine):** R460's receiver-locator rule (`cmd.spawn()` on a caller's `Command`) had
+    never been ported; it now comes from the shared function, with the `CommandExt::exec` trait path and
+    the UFCS `Command::spawn(cmd)` spelling (silent in BOTH engines) included. A `let`-bound command that
+    is reassigned or `&mut`-borrowed is no longer vouched for by its `let`.
+  - **R809 (deep engine):** a `bind`/`listen` address was published as a `Net` destination and certified
+    `allow Net <that address>`; it is now withheld, as candor-scan has done since ⟨0.29⟩.
+
+  Corpus A/B (candor-scan, 2,029 registry crates): ADDED 0, REMOVED 0, `inferred` unchanged; 391 rows
+  gain `incomplete` and nothing else. Upgraders may see `allow` gates that were green fail closed on
+  code that really passes a runtime path, command, host or query to one of these calls.
+
 - ⚠ **A VALUE THAT ESCAPES ONLY ON AN EXPLICIT `return` WAS CREDITED TO EVERY OTHER EXIT TOO, so its
   destructor on the exits that do NOT carry it out vanished (SOUNDNESS R189 — a silent under-report,
   now closed).** `escaping_ctor_leaves` INTERSECTED leaves across the function's exits and UNIONED their

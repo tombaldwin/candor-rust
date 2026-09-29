@@ -8230,6 +8230,178 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn masking_r806_table_derived_and_r807_bind_ctor() {
+        // SOUNDNESS R806 — the masking guard read FOUR hand lists that were SHORT against the `classify`
+        // tables charging the effect, so a benign sibling literal certified a caller-supplied locator
+        // reached through `libc::unlink`, `libc::system`, `libc::getaddrinfo` or `sqlx::query_with`/
+        // `query_as`. EXECUTED on the sweep fixtures: a file really unlinked, a shell command really run,
+        // a real resolver lookup, and `DELETE FROM secrets` really run — each at exit 0 on the unit AND
+        // its caller. The guard now READS the charging table minus a signature-checked no-locator
+        // denylist (`candor_classify::masks_locator_by_table`).
+        //
+        // SOUNDNESS R807 — `bind` was not a constructor, so `let s = UdpSocket::bind(..)?; s.send_to(b,
+        // dst)` left `s` untyped and the `send_to` was never classified: no charge, no mask, exit 0 while
+        // a datagram really left for the caller's address. Every arm below is scoped to the UNIT and to
+        // its CALLER, because a caller-scoped gate is the one a user writes and it is where a masked
+        // disclosure has to survive propagation.
+        let run = |name: &str, src: &str, policy: &str| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-r806-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!(
+                "[package]\nname = \"{name}\"\n[dependencies]\nlibc = \"0.2\"\nnix = \"0.29\"\nsqlx = \"0.8\"\n"
+            )).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, policy).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+        let both = |name: &str, src: &str, eff: &str, lit: &str| -> (i32, i32) {
+            (run(&format!("{name}u"), src, &format!("allow {eff} in go {lit}\n")),
+             run(&format!("{name}c"), src, &format!("allow {eff} in caller {lit}\n")))
+        };
+
+        // ── R806, one arm per effect. Each: benign literal + a caller-supplied locator through the table.
+        let fs = r#"
+            pub fn go(p: &std::ffi::CStr) {
+                let _ = std::fs::write("/tmp/benign", b"x");
+                unsafe { libc::unlink(p.as_ptr()); }
+            }
+            pub fn caller(p: &std::ffi::CStr) { go(p) }
+        "#;
+        assert_eq!(both("fs", fs, "Fs", "/tmp/benign"), (1, 1), "libc::unlink(caller) must mask");
+        let fsat = r#"
+            pub fn go(p: &std::ffi::CStr) {
+                let _ = std::fs::write("/tmp/benign", b"x");
+                unsafe { libc::unlinkat(libc::AT_FDCWD, p.as_ptr(), 0); }
+            }
+            pub fn caller(p: &std::ffi::CStr) { go(p) }
+        "#;
+        assert_eq!(both("fsat", fsat, "Fs", "/tmp/benign"), (1, 1), "the `*at` form, path at arg 1");
+        let nix = r#"
+            pub fn go(p: &str) {
+                let _ = std::fs::write("/tmp/benign", b"x");
+                let _ = nix::unistd::unlink(p);
+            }
+            pub fn caller(p: &str) { go(p) }
+        "#;
+        assert_eq!(both("nix", nix, "Fs", "/tmp/benign"), (1, 1), "the nix spelling");
+        let exec = r#"
+            pub fn go(c: &std::ffi::CStr) {
+                let _ = std::process::Command::new("git").status();
+                unsafe { libc::system(c.as_ptr()); }
+            }
+            pub fn caller(c: &std::ffi::CStr) { go(c) }
+        "#;
+        assert_eq!(both("exec", exec, "Exec", "git"), (1, 1), "libc::system(caller) must mask");
+        // SOUNDNESS R808's boundary, found porting it: the UFCS spelling of a receiver spawn was silent
+        // in BOTH engines, because the receiver arm was gated on METHOD form. EXECUTED: a marker file
+        // created through `Command::spawn(cmd)` beside a benign `Command::new("git")`.
+        let ufcs = r#"
+            use std::process::Command;
+            pub fn go(cmd: &mut Command) { let _ = Command::new("git").status(); let _ = Command::spawn(cmd); }
+            pub fn caller(cmd: &mut Command) { go(cmd) }
+        "#;
+        assert_eq!(both("ufcs", ufcs, "Exec", "git"), (1, 1), "a UFCS receiver spawn must mask");
+        let net = r#"
+            pub fn go(h: &std::ffi::CStr) {
+                let _ = std::net::TcpStream::connect("good.example.com:443");
+                let mut r: *mut libc::addrinfo = std::ptr::null_mut();
+                unsafe { libc::getaddrinfo(h.as_ptr(), std::ptr::null(), std::ptr::null(), &mut r); }
+            }
+            pub fn caller(h: &std::ffi::CStr) { go(h) }
+        "#;
+        assert_eq!(both("net", net, "Net", "good.example.com"), (1, 1), "getaddrinfo(caller) must mask");
+        let db = r#"
+            pub async fn go(pool: &sqlx::SqlitePool, sql: &str) {
+                let _ = sqlx::query("INSERT INTO users (id) VALUES (1)").execute(pool).await;
+                let _ = sqlx::query_as::<_, (i64,)>(sql).fetch_all(pool).await;
+            }
+            pub async fn caller(pool: &sqlx::SqlitePool, sql: &str) { go(pool, sql).await }
+        "#;
+        assert_eq!(both("db", db, "Db", "users"), (1, 1), "sqlx::query_as(caller) must mask");
+
+        // ── R806 OVER-MASK CONTROLS: the no-locator denylist members must NOT mask, or `allow` becomes
+        // unusable over every fd-level and reaping call. Each would be exit 1 if the denylist were empty.
+        let fsfd = r#"
+            pub fn go(fd: i32) { let _ = std::fs::write("/tmp/benign", b"x"); unsafe { libc::fsync(fd); } }
+            pub fn caller(fd: i32) { go(fd) }
+        "#;
+        assert_eq!(both("fsfd", fsfd, "Fs", "/tmp/benign"), (0, 0), "an fd-only op names no path");
+        let wait = r#"
+            pub fn go(pid: i32) {
+                let _ = std::process::Command::new("git").status();
+                unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0); }
+            }
+            pub fn caller(pid: i32) { go(pid) }
+        "#;
+        assert_eq!(both("wait", wait, "Exec", "git"), (0, 0), "reaping names no program");
+        let lbind = r#"
+            pub fn go(fd: i32, a: *const libc::sockaddr) {
+                let _ = std::net::TcpStream::connect("good.example.com:443");
+                unsafe { libc::bind(fd, a, 16); }
+            }
+            pub fn caller(fd: i32, a: *const libc::sockaddr) { go(fd, a) }
+        "#;
+        assert_eq!(both("lbind", lbind, "Net", "good.example.com"), (0, 0), "a local bind is no destination");
+        let dblit = r#"
+            pub async fn go(pool: &sqlx::SqlitePool) {
+                let _ = sqlx::query_with("DELETE FROM users WHERE id = ?", Default::default()).execute(pool).await;
+            }
+            pub async fn caller(pool: &sqlx::SqlitePool) { go(pool).await }
+        "#;
+        assert_eq!(both("dblit", dblit, "Db", "users"), (0, 0), "a literal query_with must still certify");
+
+        // ── R807: every spelling of a LOCAL bind followed by a runtime destination.
+        for (tag, bind) in [
+            ("q", "let s = std::net::UdpSocket::bind(\"127.0.0.1:0\")?;"),
+            ("u", "let s = std::net::UdpSocket::bind(\"127.0.0.1:0\").unwrap();"),
+            ("e", "let s = std::net::UdpSocket::bind(\"127.0.0.1:0\").expect(\"b\");"),
+        ] {
+            let src = format!(r#"
+                pub fn go(dst: &str) -> std::io::Result<()> {{
+                    let _ = std::net::TcpStream::connect("good.example.com:443");
+                    {bind}
+                    s.send_to(b"x", dst)?;
+                    Ok(())
+                }}
+                pub fn caller(dst: &str) {{ let _ = go(dst); }}
+            "#);
+            assert_eq!(both(&format!("r807{tag}"), &src, "Net", "good.example.com"), (1, 1),
+                       "a let-bound bind ({tag}) must not hide the send_to destination");
+        }
+        let inline = r#"
+            pub fn go(dst: &str) -> std::io::Result<usize> {
+                let _ = std::net::TcpStream::connect("good.example.com:443");
+                std::net::UdpSocket::bind("127.0.0.1:0")?.send_to(b"x", dst)
+            }
+            pub fn caller(dst: &str) { let _ = go(dst); }
+        "#;
+        assert_eq!(both("r807i", inline, "Net", "good.example.com"), (1, 1), "the inline chain");
+        // OVER-CHARGE CONTROL — a bind beside a LITERAL destination is fully determined and must
+        // certify by that destination. Before the fix this was exit 1 (the send_to was never seen, and
+        // the bind's own literal is withheld), so this arm also pins the precision R807 buys.
+        let litdst = r#"
+            pub fn go() -> std::io::Result<usize> {
+                let s = std::net::UdpSocket::bind("127.0.0.1:0")?;
+                s.send_to(b"x", "good.example.com:53")
+            }
+            pub fn caller() { let _ = go(); }
+        "#;
+        assert_eq!(both("r807l", litdst, "Net", "good.example.com"), (0, 0), "a literal destination certifies");
+        // CALIBRATION — the determined arm must be able to fail.
+        assert_eq!(both("r807cal", litdst, "Net", "other.example.com"), (1, 1), "…and fail on another host");
+    }
+
+    #[test]
     fn r459_cfg_test_file_module_is_excluded_whatever_its_filename() {
         // SOUNDNESS R459 — THE MIRROR OF R457. A `#[cfg(test)] mod X;` file module whose FILENAME does
         // not match the `tests.rs`/`*_test.rs` convention was scanned as PRODUCTION, so test code was

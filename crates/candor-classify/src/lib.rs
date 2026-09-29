@@ -647,35 +647,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // std::fs was already correct, which is why only the rustix-only effects (Clock/Ipc) were missing.
     if crate_name == "libc" || crate_name == "nix" || crate_name == "rustix" {
         let f = path.rsplit("::").next().unwrap_or(path);
-        // path / directory / metadata syscalls (incl. *64 and *at variants)
-        const FS: &[&str] = &[
-            "open", "open64", "openat", "openat2", "creat", "creat64", "stat", "stat64", "lstat",
-            "lstat64", "fstatat", "fstatat64", "newfstatat", "statx", "access", "faccessat",
-            "faccessat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", "rename", "renameat",
-            "renameat2", "link", "linkat", "symlink", "symlinkat", "readlink", "readlinkat", "chmod",
-            "fchmodat", "chown", "lchown", "fchownat", "truncate", "truncate64", "ftruncate",
-            "ftruncate64", "opendir", "fdopendir", "readdir", "readdir64", "readdir_r", "closedir",
-            "rewinddir", "seekdir", "telldir", "scandir", "mkstemp", "mkstemps", "mkostemp", "mkdtemp",
-            "mknod", "mknodat", "chdir", "fchdir", "getcwd", "get_current_dir_name", "chroot",
-            "pivot_root", "statfs", "statfs64", "fstatfs", "fstatfs64", "statvfs", "fstatvfs", "mount",
-            "umount", "umount2", "fsync", "fdatasync", "sync", "syncfs", "sync_file_range", "fallocate",
-            "posix_fallocate", "posix_fadvise", "sendfile", "sendfile64", "copy_file_range", "flock",
-            "getdents", "getdents64", "utime", "utimes", "lutimes", "futimens", "utimensat", "futimesat",
-            "realpath",
-        ];
+        // path / directory / metadata syscalls (incl. *64 and *at variants) — `LIBC_FS`, hoisted to module
+        // level so the AS-EFF-008 masking guard reads THE SAME TABLE (SOUNDNESS R806); see `masks_locator`.
+        const FS: &[&str] = LIBC_FS;
         // socket family — these operate only on sockets, so Net is unambiguous (AF_UNIX domain isn't
         // visible at the call, so a Unix socket reads as Net rather than Ipc; acceptable over-general).
-        const NET: &[&str] = &[
-            "socket", "setsockopt", "getsockopt", "bind", "listen", "accept", "accept4", "connect",
-            "shutdown", "send", "sendto", "sendmsg", "sendmmsg", "recv", "recvfrom", "recvmsg",
-            "recvmmsg", "getpeername", "getsockname", "getaddrinfo", "freeaddrinfo", "getnameinfo",
-        ];
+        const NET: &[&str] = LIBC_NET;
         // process creation / replacement / reaping
-        const EXEC: &[&str] = &[
-            "fork", "vfork", "clone", "clone3", "execl", "execlp", "execle", "execv", "execvp",
-            "execvpe", "execve", "execveat", "fexecve", "posix_spawn", "posix_spawnp", "system",
-            "popen", "pclose", "wait", "waitpid", "wait3", "wait4", "waitid",
-        ];
+        const EXEC: &[&str] = LIBC_EXEC;
         // pipes / FIFOs / SysV + POSIX message queues, semaphores, shared memory; socketpair (AF_UNIX)
         const IPC: &[&str] = &[
             "pipe", "pipe2", "mkfifo", "mkfifoat", "socketpair", "msgget", "msgsnd", "msgrcv", "msgctl",
@@ -1574,24 +1553,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // only BUILDS — it keeps the narrow set below. (Found by running on a real
         // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
         if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
-            const PG: [&str; 21] = [
-                "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
-                "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
-                "::copy_in", "::copy_out", "::transaction", "::connect",
-                // `Config::connect_raw` (tokio-postgres config.rs:739) does the SAME protocol handshake
-                // as `Config::connect` over a caller-supplied stream (a Unix socket, a TLS-terminated
-                // proxy) instead of dialing one itself — real Db/Net I/O, missing because the verb
-                // doesn't end in the plain `connect` spelling.
-                "::connect_raw",
-                // rusqlite's dialect of the same verbs (a verb-probe found the CANONICAL rusqlite
-                // consumer API classifying pure): `query_row` is the one-row read, `query_map`/
-                // `query_and_then` the many-row reads, `execute_batch` is rusqlite's name for
-                // batch_execute, `prepare_cached` round-trips like prepare. `query_typed` is
-                // tokio_postgres 0.7.10+.
-                "::query_row", "::query_map", "::query_and_then", "::execute_batch",
-                "::prepare_cached", "::query_typed",
-                "::prepare_typed_cached",
-            ];
+            // `PG_DB_VERBS`, hoisted to module level so the AS-EFF-008 masking guard reads the SAME
+            // table (SOUNDNESS R806; see `masks_locator` and `PG_DB_VERBS_NO_SQL`).
+            const PG: &[&str] = PG_DB_VERBS;
             if PG.iter().any(|v| path.ends_with(v)) {
                 return Some("Db");
             }
@@ -3343,6 +3307,106 @@ pub fn is_model_sdk_crate(crate_name: &str) -> bool {
     MODEL_SDK_CRATES.contains(&crate_name)
 }
 
+/// The libc / nix / rustix PATH-and-directory syscall leaves `classify` charges `Fs` (incl. `*64` and
+/// `*at` variants). Module-level, not local to `classify`, because it is ONE of the two answers to one
+/// question: the AS-EFF-008 masking guard (`masks_locator`) reads this same table, so a leaf added here
+/// is masked by default — see `LIBC_FS_NO_PATH` for the direction. SOUNDNESS R806.
+pub const LIBC_FS: &[&str] = &[
+            "open", "open64", "openat", "openat2", "creat", "creat64", "stat", "stat64", "lstat",
+            "lstat64", "fstatat", "fstatat64", "newfstatat", "statx", "access", "faccessat",
+            "faccessat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", "rename", "renameat",
+            "renameat2", "link", "linkat", "symlink", "symlinkat", "readlink", "readlinkat", "chmod",
+            "fchmodat", "chown", "lchown", "fchownat", "truncate", "truncate64", "ftruncate",
+            "ftruncate64", "opendir", "fdopendir", "readdir", "readdir64", "readdir_r", "closedir",
+            "rewinddir", "seekdir", "telldir", "scandir", "mkstemp", "mkstemps", "mkostemp", "mkdtemp",
+            "mknod", "mknodat", "chdir", "fchdir", "getcwd", "get_current_dir_name", "chroot",
+            "pivot_root", "statfs", "statfs64", "fstatfs", "fstatfs64", "statvfs", "fstatvfs", "mount",
+            "umount", "umount2", "fsync", "fdatasync", "sync", "syncfs", "sync_file_range", "fallocate",
+            "posix_fallocate", "posix_fadvise", "sendfile", "sendfile64", "copy_file_range", "flock",
+            "getdents", "getdents64", "utime", "utimes", "lutimes", "futimens", "utimensat", "futimesat",
+            "realpath",
+        ];
+
+/// The libc / nix / rustix socket-family leaves `classify` charges `Net`. See `LIBC_NET_NO_DESTINATION`.
+pub const LIBC_NET: &[&str] = &[
+            "socket", "setsockopt", "getsockopt", "bind", "listen", "accept", "accept4", "connect",
+            "shutdown", "send", "sendto", "sendmsg", "sendmmsg", "recv", "recvfrom", "recvmsg",
+            "recvmmsg", "getpeername", "getsockname", "getaddrinfo", "freeaddrinfo", "getnameinfo",
+        ];
+
+/// The libc / nix / rustix process creation / replacement / reaping leaves `classify` charges `Exec`.
+/// See `LIBC_EXEC_NO_PROGRAM`.
+pub const LIBC_EXEC: &[&str] = &[
+            "fork", "vfork", "clone", "clone3", "execl", "execlp", "execle", "execv", "execvp",
+            "execvpe", "execve", "execveat", "fexecve", "posix_spawn", "posix_spawnp", "system",
+            "popen", "pclose", "wait", "waitpid", "wait3", "wait4", "waitid",
+        ];
+
+/// The Postgres / SQLite-family client verbs `classify` charges `Db` for `postgres`, `tokio_postgres`,
+/// `deadpool_postgres` and `rusqlite` — the round-trips themselves. Module-level because the masking
+/// guard reads it too (`masks_locator`, SOUNDNESS R806): every verb here takes the SQL text at
+/// argument 0 except the three in `PG_DB_VERBS_NO_SQL`, so a verb added here is masked by default.
+pub const PG_DB_VERBS: &[&str] = &[
+                "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
+                "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
+                "::copy_in", "::copy_out", "::transaction", "::connect",
+                // `Config::connect_raw` (tokio-postgres config.rs:739) does the SAME protocol handshake
+                // as `Config::connect` over a caller-supplied stream (a Unix socket, a TLS-terminated
+                // proxy) instead of dialing one itself — real Db/Net I/O, missing because the verb
+                // doesn't end in the plain `connect` spelling.
+                "::connect_raw",
+                // rusqlite's dialect of the same verbs (a verb-probe found the CANONICAL rusqlite
+                // consumer API classifying pure): `query_row` is the one-row read, `query_map`/
+                // `query_and_then` the many-row reads, `execute_batch` is rusqlite's name for
+                // batch_execute, `prepare_cached` round-trips like prepare. `query_typed` is
+                // tokio_postgres 0.7.10+.
+                "::query_row", "::query_map", "::query_and_then", "::execute_batch",
+                "::prepare_cached", "::query_typed",
+                "::prepare_typed_cached",
+];
+
+/// The members of `PG_DB_VERBS` that take NO SQL text, each checked against its signature:
+/// `Client::transaction(&mut self)`, `connect(params, tls)` / `Config::connect_raw(stream, tls)` —
+/// a connection string or a stream, never a query. A name wrongly listed here is a silent bypass;
+/// a name missing from here is an over-mask that fails closed. SOUNDNESS R806.
+pub const PG_DB_VERBS_NO_SQL: &[&str] = &["::transaction", "::connect", "::connect_raw"];
+
+/// The members of `LIBC_FS` that take NO path — every one operates on a file DESCRIPTOR, a `DIR*`
+/// stream, or nothing — so a missing literal there hides no locator. **CHECKED AGAINST EACH SIGNATURE,
+/// because this is a denylist on a masking guard: a path-taking name wrongly listed here is the
+/// benign-sibling-literal bypass (R399), while a no-path name missing from here only over-masks.**
+/// Everything else in `LIBC_FS` names a path, at argument 0 or — for the `*at` family — argument 1.
+pub const LIBC_FS_NO_PATH: &[&str] = &[
+    "ftruncate", "ftruncate64", "fdopendir", "readdir", "readdir64", "readdir_r", "closedir",
+    "rewinddir", "seekdir", "telldir", "fchdir", "getcwd", "get_current_dir_name", "fstatfs",
+    "fstatfs64", "fstatvfs", "fsync", "fdatasync", "sync", "syncfs", "sync_file_range", "fallocate",
+    "posix_fallocate", "posix_fadvise", "sendfile", "sendfile64", "copy_file_range", "flock",
+    "getdents", "getdents64", "futimens",
+];
+
+/// The members of `LIBC_EXEC` that name NO program: process duplication (`fork`/`vfork`/`clone*`,
+/// which run THIS image) and reaping (`wait*`, `pclose`). Every other member names what runs —
+/// `system`/`popen` a shell command line, `exec*`/`posix_spawn*` a path or file name, `fexecve` an fd
+/// whose program is invisible at the call. Same direction rule as `LIBC_FS_NO_PATH`.
+pub const LIBC_EXEC_NO_PROGRAM: &[&str] = &[
+    "fork", "vfork", "clone", "clone3", "wait", "waitpid", "wait3", "wait4", "waitid", "pclose",
+];
+
+/// The members of `LIBC_NET` that name NO destination: socket setup and options, the LOCAL side
+/// (`bind`/`listen`/`accept*` — where the process listens, never a place it reaches; ⟨0.29⟩
+/// `is_net_binding`), use-verbs on an already-connected or already-bound socket (`send`/`recv*`),
+/// teardown and read-backs. The destination-naming remainder is `connect`, `sendto`, `sendmsg`,
+/// `sendmmsg`, and the resolver pair `getaddrinfo`/`getnameinfo`.
+pub const LIBC_NET_NO_DESTINATION: &[&str] = &[
+    "socket", "setsockopt", "getsockopt", "bind", "listen", "accept", "accept4", "shutdown", "send",
+    "recv", "recvfrom", "recvmsg", "recvmmsg", "getpeername", "getsockname", "freeaddrinfo",
+];
+
+/// Whether `crate_name` is one of the three crates `classify` routes through the libc syscall tables.
+fn is_syscall_crate(crate_name: &str) -> bool {
+    matches!(crate_name, "libc" | "nix" | "rustix")
+}
+
 /// Whether a subprocess-builder method only MODIFIES the command (`.arg`, `.env`, `.current_dir`)
 /// rather than NAMING the program (`Command::new`, `duct::cmd`). A WHOLE-CRATE-Exec crate
 /// (`portable_pty`, `duct`, `async_process`) classifies *every* method as `Exec`, so the
@@ -3817,7 +3881,13 @@ pub fn is_fs_receiver_locator(call_path: &str) -> bool {
 pub fn is_exec_receiver_locator(call_path: &str) -> bool {
     let mut segs = call_path.rsplit("::");
     let (Some(leaf), Some(recv)) = (segs.next(), segs.next()) else { return false };
-    recv == "Command" && !is_cmd_builder_method(leaf) && !leaf.starts_with("get_")
+    // SOUNDNESS R808 — AND ITS EXTENSION TRAIT. The deep engine resolves `cmd.exec()` to the TRAIT method
+    // `std::os::unix::process::CommandExt::exec`, not to `Command::exec`, so a receiver test on the
+    // literal segment `Command` let the deep engine certify a caller-supplied `exec` while `candor-scan`
+    // (which forms `Command::exec` from the typed receiver) flagged it — the R808 port's own boundary,
+    // measured on the port's fixture one method over. `CommandExt`'s other members (`uid`, `gid`,
+    // `groups`, `pre_exec`, `arg0`, `process_group`) are already `is_cmd_builder_method` carve-outs.
+    matches!(recv, "Command" | "CommandExt") && !is_cmd_builder_method(leaf) && !leaf.starts_with("get_")
 }
 
 pub fn is_fs_path_arg_method(call_path: &str) -> bool {
@@ -3946,6 +4016,91 @@ pub fn is_db_query_arg(leaf: &str) -> bool {
             | "prep"
             | "run_command"
     )
+}
+
+/// THE AS-EFF-008 MASKING GUARD, ONE AUTHORITY FOR BOTH RUST ENGINES. SOUNDNESS R806 / R808.
+///
+/// The question: this call carries a surface effect `eff` and NO literal locator was captured for it —
+/// is its locator (host, program, path, SQL) therefore a RUNTIME value the gate cannot see? If so the
+/// caller marks the surface `incomplete`, so a benign sibling literal cannot certify it.
+///
+/// **WHY ONE FUNCTION.** Both rust engines asked this question, each with its own copy of the
+/// disjunction over the `is_*` predicates below, and the copies drifted: R460's receiver-locator arm and
+/// R383's `OpenOptions::open` arm reached `candor-scan` and never the deep engine (R808). A rule added
+/// here now reaches both, which is the only way this class stops recurring one crate over.
+///
+/// `leaf` is the call's own method/function name; `path` the resolved call path; `method` whether the
+/// call is written in method form on a receiver (so a path-stat `p.exists()` is not mistaken for an
+/// argument-form `fs::metadata(p)`, and the receiver-locator arms can fire). `crate_name` is the
+/// resolved crate, used only to scope the table-derived FFI arms.
+///
+/// **THE DIRECTION, stated so it cannot drift:** a wrong `true` over-masks — the gate fails CLOSED and
+/// says so; a wrong `false` is the benign-sibling-literal bypass, a broken gate (R399). Every arm that
+/// reads a `classify` table below reads it with a NO-LOCATOR DENYLIST, so a leaf added to that table is
+/// masked until someone reads its signature and says otherwise.
+pub fn masks_locator(eff: &str, crate_name: &str, path: &str, leaf: &str, method: bool) -> bool {
+    let by_list = match eff {
+        "Net" => is_net_establishing(leaf),
+        // SOUNDNESS R808 — the receiver arm is NOT gated on method form. `Command::spawn(cmd)` (UFCS)
+        // runs the same caller-supplied program as `cmd.spawn()`, and with the gate BOTH engines
+        // certified it at exit 0 on the unit and its caller. In call form the receiver is argument 0;
+        // neither engine resolves a determined argument-0 command, so a UFCS spawn on a command built
+        // in the same function over-masks (fails closed) — the rare spelling paying for the silent one.
+        "Exec" => is_cmd_naming_method(leaf) || is_exec_receiver_locator(path),
+        "Fs" => {
+            (!method && is_fs_path_arg(leaf))
+                || (method && is_fs_path_arg_method(path))
+                || (method && is_fs_receiver_locator(path))
+        }
+        "Db" => is_db_query_arg(leaf),
+        _ => false,
+    };
+    by_list || masks_locator_by_table(eff, crate_name, path, leaf)
+}
+
+/// SOUNDNESS R806 — THE TABLE-DERIVED HALF OF `masks_locator`, separate only so a reach probe can ask
+/// the very function the guard asks (`R806MASK` in candor-scan) rather than a copy of it.
+///
+/// Each hand list in `masks_locator` was SHORT against the `classify` table that charges the effect:
+/// `is_fs_path_arg` held 28 names while `LIBC_FS` charges 92, `is_cmd_naming_method` held `new`/`cmd`
+/// while `LIBC_EXEC` names `system`/`popen`/`exec*`/`posix_spawn*`, `is_net_establishing` lacked
+/// `getaddrinfo`, and `is_db_query_arg` lacked `prepare_typed_cached` from `PG_DB_VERBS`. EXECUTED on
+/// each: a caller's file really unlinked, a caller's shell command really run, a real resolver lookup,
+/// all under `allow <E> in <unit> <benign literal>` at exit 0 on the unit AND its caller.
+///
+/// Adding the missing names would leave two tables to drift again the next time one grows — the shape
+/// swift closed as R787 and java as R794, both by derivation. So these arms READ the charging table and
+/// subtract a signature-checked NO-LOCATOR denylist: a leaf added to the table is masked by default.
+pub fn masks_locator_by_table(eff: &str, crate_name: &str, path: &str, leaf: &str) -> bool {
+    let syscall = is_syscall_crate(crate_name);
+    match eff {
+        "Net" => {
+            syscall
+                && LIBC_NET.contains(&leaf)
+                && !LIBC_NET_NO_DESTINATION.contains(&leaf)
+                // `rustix::net::sendmsg(socket, iov, control, flags)` takes NO address — rustix spells
+                // the addressed forms `sendmsg_addr`/`sendmsg_v4`/`sendmsg_v6`/`sendmsg_unix` (not in
+                // `LIBC_NET`, so unclassified). libc's and nix's `sendmsg` DO carry one (`msg_name` /
+                // `addr: Option<&S>`), which is why this is scoped to the crate rather than the leaf.
+                // Measured on the A/B: x11rb's `DefaultStream::do_write` over its connected X11 socket
+                // was the only reach, an over-mask, removed here.
+                && !(crate_name == "rustix" && leaf == "sendmsg")
+        }
+        "Exec" => syscall && LIBC_EXEC.contains(&leaf) && !LIBC_EXEC_NO_PROGRAM.contains(&leaf),
+        "Fs" => syscall && LIBC_FS.contains(&leaf) && !LIBC_FS_NO_PATH.contains(&leaf),
+        "Db" => {
+            (matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite")
+                && PG_DB_VERBS.iter().any(|v| path.ends_with(v))
+                && !PG_DB_VERBS_NO_SQL.iter().any(|v| path.ends_with(v)))
+                // `sqlx_core`'s `Executor::prepare_with(sql, params)` — the one SQL-TEXT verb in that
+                // crate's Db rule that the leaf list lacked (`prepare` is there). The rest of that rule
+                // (`fetch*`/`execute*` on a `Query`) takes an EXECUTOR at argument 0, so deriving the
+                // whole rule would mask every `query(lit).fetch_all(&pool)`; it is a named member
+                // rather than a derivation for that reason.
+                || (crate_name == "sqlx_core" && leaf == "prepare_with")
+        }
+        _ => false,
+    }
 }
 
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
@@ -5498,5 +5653,81 @@ mod fs_kind_tests {
                     "{p}'s direction was set by the builder chain, which this function cannot see");
         }
         assert_eq!(fs_kind("std::fs::File::open"), &["read"], "`File::open` is unambiguously a read");
+    }
+}
+
+#[cfg(test)]
+mod masks_locator_tests {
+    use super::*;
+
+    /// SOUNDNESS R806 — each no-locator DENYLIST must be a SUBSET of the table it subtracts from. A
+    /// typo'd or stale entry that is not in the table would subtract nothing and read as a decision;
+    /// a table entry renamed without its denylist twin would silently start masking (the safe
+    /// direction) — but only this check says which happened.
+    #[test]
+    fn every_no_locator_denylist_is_a_subset_of_its_charging_table() {
+        for n in LIBC_FS_NO_PATH {
+            assert!(LIBC_FS.contains(n), "LIBC_FS_NO_PATH names `{n}`, which LIBC_FS does not charge");
+        }
+        for n in LIBC_EXEC_NO_PROGRAM {
+            assert!(LIBC_EXEC.contains(n), "LIBC_EXEC_NO_PROGRAM names `{n}`, absent from LIBC_EXEC");
+        }
+        for n in LIBC_NET_NO_DESTINATION {
+            assert!(LIBC_NET.contains(n), "LIBC_NET_NO_DESTINATION names `{n}`, absent from LIBC_NET");
+        }
+        for n in PG_DB_VERBS_NO_SQL {
+            assert!(PG_DB_VERBS.contains(n), "PG_DB_VERBS_NO_SQL names `{n}`, absent from PG_DB_VERBS");
+        }
+    }
+
+    /// SOUNDNESS R806 — THE DERIVATION, pinned from the table side: every leaf the table charges that is
+    /// not on the denylist MASKS. So a leaf added to `LIBC_FS` tomorrow is masked with no second edit,
+    /// which is the property the hand list lacked.
+    #[test]
+    fn every_charged_libc_leaf_off_the_denylist_masks() {
+        for (eff, table, deny) in [
+            ("Fs", LIBC_FS, LIBC_FS_NO_PATH),
+            ("Exec", LIBC_EXEC, LIBC_EXEC_NO_PROGRAM),
+            ("Net", LIBC_NET, LIBC_NET_NO_DESTINATION),
+        ] {
+            for leaf in table.iter().filter(|l| !deny.contains(l)) {
+                for cr in ["libc", "nix"] {
+                    let path = format!("{cr}::{leaf}");
+                    assert_eq!(classify(cr, &path), Some(eff), "{path} must still be charged {eff}");
+                    assert!(masks_locator(eff, cr, &path, leaf, false), "{path} names a locator — must mask");
+                }
+            }
+            for leaf in deny.iter() {
+                let path = format!("libc::{leaf}");
+                assert!(!masks_locator(eff, "libc", &path, leaf, false) || is_net_establishing(leaf),
+                        "{path} is on the no-locator denylist — must not mask via the table");
+            }
+        }
+        // The named members, from the row: the sweep's EXECUTED arms.
+        for (eff, leaf) in [("Fs", "unlink"), ("Fs", "unlinkat"), ("Fs", "utimensat"), ("Exec", "system"),
+                            ("Exec", "popen"), ("Exec", "execvp"), ("Exec", "posix_spawn"), ("Net", "getaddrinfo"),
+                            ("Net", "sendto")] {
+            assert!(masks_locator(eff, "libc", &format!("libc::{leaf}"), leaf, false), "libc::{leaf}");
+        }
+        // Scoped to the syscall crates: the same leaf on an unrelated crate is not this table's to judge.
+        assert!(!masks_locator("Fs", "mycrate", "mycrate::unlink", "unlink", false));
+        // rustix spells `sendmsg` WITHOUT an address; libc and nix carry one.
+        assert!(!masks_locator("Net", "rustix", "rustix::net::sendmsg", "sendmsg", false));
+        assert!(masks_locator("Net", "libc", "libc::sendmsg", "sendmsg", false));
+    }
+
+    #[test]
+    fn pg_verbs_take_sql_except_the_named_three() {
+        for v in PG_DB_VERBS.iter().filter(|v| !PG_DB_VERBS_NO_SQL.contains(v)) {
+            let path = format!("deadpool_postgres::Client{v}");
+            let leaf = &v[2..];
+            assert!(masks_locator("Db", "deadpool_postgres", &path, leaf, true), "{path} takes SQL — must mask");
+        }
+        assert!(masks_locator("Db", "tokio_postgres", "tokio_postgres::Client::prepare_typed_cached",
+                              "prepare_typed_cached", true));
+        assert!(!masks_locator("Db", "tokio_postgres", "tokio_postgres::Client::transaction", "transaction", true));
+        assert!(masks_locator("Db", "sqlx_core", "sqlx_core::executor::Executor::prepare_with", "prepare_with", true));
+        assert!(!masks_locator("Db", "sqlx_core", "sqlx_core::query::Query::fetch_all", "fetch_all", true),
+                "a Query terminal takes an EXECUTOR at arg 0 — masking it would swallow every literal query");
     }
 }
