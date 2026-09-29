@@ -779,10 +779,23 @@ pub(crate) fn generic_bounds_of_generics(generics: &syn::Generics) -> HashMap<St
 /// `&reqwest::Client` -> `reqwest::Client`, `Pool<Postgres>` -> `sqlx::Pool` (via `uses`). `None` for
 /// non-nameable types (impl Trait, tuples, …) where there's nothing to classify a method against.
 pub(crate) fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
+    type_path_b(ty, uses).map(|(t, _)| t)
+}
+
+/// SOUNDNESS R718, THE OWNED-WITH-A-BORROW HALF — `type_path` AND whether the leaf it answers was reached THROUGH a reference.
+/// `type_path` is the ONE authority for which layers are peeled on the way to a field's type; the
+/// ownership question has to be asked along that SAME walk, because it is a question about the leaf
+/// this function returns and not about the declared type as a whole. `type_borrows(&f.ty)` asked the
+/// whole type — "is there a `&` ANYWHERE?" — and so `t: TempFile<&'a Path>` read as borrowed although
+/// the leaf, `TempFile`, is OWNED and its `Drop` runs in the constructing frame (EXECUTED: 1 drop, the
+/// file really removed). A `&` inside a GENERIC ARGUMENT of the leaf is not on this walk and does not
+/// make the leaf borrowed. Returning the flag from the walk itself rather than re-implementing the peel
+/// list beside it is §G: two copies of one peel drift, and here the drift is a silence.
+pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(String, bool)> {
     match ty {
-        syn::Type::Reference(r) => type_path(&r.elem, uses),
-        syn::Type::Paren(p) => type_path(&p.elem, uses),
-        syn::Type::Group(g) => type_path(&g.elem, uses),
+        syn::Type::Reference(r) => type_path_b(&r.elem, uses).map(|(t, _)| (t, true)),
+        syn::Type::Paren(p) => type_path_b(&p.elem, uses),
+        syn::Type::Group(g) => type_path_b(&g.elem, uses),
         syn::Type::Path(p) => {
             // A transparent OWNED smart-pointer wrapper (`Box<T>`/`Arc<T>`/`Rc<T>`) auto-derefs:
             // `wrapper.method()` dispatches to `T`'s method. Peel to `T` so the method resolves against
@@ -798,12 +811,12 @@ pub(crate) fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                             syn::GenericArgument::Type(t) => Some(t),
                             _ => None,
                         }) {
-                            return type_path(inner, uses);
+                            return type_path_b(inner, uses);
                         }
                     }
                 }
             }
-            Some(expand(&path_to_string(&p.path), uses))
+            Some((expand(&path_to_string(&p.path), uses), false))
         }
         _ => None,
     }
@@ -841,13 +854,22 @@ pub(crate) fn is_map_container(name: &str) -> bool {
 /// without it, a very common Rust shape (`for c in xs { c.send() }`, `xs[0].send()`) dropped its
 /// receiver to pure (a §4 under-report). Peels references/parens/groups around the collection.
 pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
+    elem_type_b(ty, uses).map(|(t, _)| t)
+}
+
+/// SOUNDNESS R718, THE OWNED-WITH-A-BORROW HALF — `elem_type` AND whether the ELEMENT it answers is reached through a reference,
+/// either around the collection (`&mut Vec<G>`, `&[G]`) or around the element (`Vec<&G>`). The
+/// question `type_path_b` asks for the field's own leaf, asked along THIS function's walk: a map's KEY
+/// is not on the walk, so `HashMap<&'static str, Guard>` owns its `Guard` values (EXECUTED: 1 drop)
+/// although the type contains a `&`.
+pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(String, bool)> {
     match ty {
-        syn::Type::Reference(r) => elem_type(&r.elem, uses),
-        syn::Type::Paren(p) => elem_type(&p.elem, uses),
-        syn::Type::Group(g) => elem_type(&g.elem, uses),
+        syn::Type::Reference(r) => elem_type_b(&r.elem, uses).map(|(t, _)| (t, true)),
+        syn::Type::Paren(p) => elem_type_b(&p.elem, uses),
+        syn::Type::Group(g) => elem_type_b(&g.elem, uses),
         // `[T]` (slice) and `[T; N]` (array) — the element is the type directly.
-        syn::Type::Slice(s) => type_path(&s.elem, uses),
-        syn::Type::Array(a) => type_path(&a.elem, uses),
+        syn::Type::Slice(s) => type_path_b(&s.elem, uses),
+        syn::Type::Array(a) => type_path_b(&a.elem, uses),
         syn::Type::Path(p) => {
             let seg = p.path.segments.last()?;
             let name = seg.ident.to_string();
@@ -858,7 +880,7 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
             })?;
             match name.as_str() {
                 // The single-type-arg sequence collections: their first generic arg IS the element.
-                n if is_sequence_container(n) => type_path(first_ty, uses),
+                n if is_sequence_container(n) => type_path_b(first_ty, uses),
                 // SOUNDNESS R454 — a MAP's VALUE (2nd type arg), the arm `elem_trait_leaves` has had
                 // since R46 and this one never got. The consequence was an asymmetry nobody chose:
                 // `HashMap<String, Box<dyn Doer>>` answered and `HashMap<String, G>` did not, so which
@@ -894,9 +916,9 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                     let v = args.args.iter().filter_map(|a| match a {
                         syn::GenericArgument::Type(t) => Some(t),
                         _ => None,
-                    }).nth(1).and_then(|v| type_path(v, uses));
+                    }).nth(1).and_then(|v| type_path_b(v, uses));
                     if v.is_some() && std::env::var_os("CANDOR_R454_INSTR").is_some() {
-                        eprintln!("R454HIT\t{}\t{}", n, v.as_deref().unwrap_or(""));
+                        eprintln!("R454HIT\t{}\t{}", n, v.as_ref().map(|(t, _)| t.as_str()).unwrap_or(""));
                     }
                     v
                 }
@@ -911,7 +933,7 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                 // `if let Ok(h) = &self.r` binds `h: &T`, and `for h in &self.r` is legal Rust too.
                 // The error type is deliberately not reachable here: nothing binds a name out of it
                 // through any of this function's callers.
-                "Option" | "Result" | "IoResult" => type_path(first_ty, uses),
+                "Option" | "Result" | "IoResult" => type_path_b(first_ty, uses),
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
                 //
@@ -933,7 +955,7 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
                 // So the type peel needs the closure route to know that `unwrap_or_else`'s parameter is
                 // the ERROR and not the element, which is a separate fix in a separate place. The
                 // silence is recorded rather than traded for an over-report.
-                "Box" | "Arc" | "Rc" => elem_type(first_ty, uses),
+                "Box" | "Arc" | "Rc" => elem_type_b(first_ty, uses),
                 _ => None,
             }
         }
@@ -5524,8 +5546,20 @@ pub(crate) fn owned_drop_params(
                 }
             }
             syn::FnArg::Typed(pt) => {
-                if type_borrows(&pt.ty) {
+                // SOUNDNESS R718, THE OWNED-WITH-A-BORROW HALF, on the PARAMETER side: the question is
+                // whether the leaf charged below — `type_path`'s — is reached through a reference, so it
+                // is asked along THAT walk (`type_path_b`) and not of the whole type. `type_borrows`
+                // read `t: TempFile<&Path>` as borrowed and the by-value `TempFile`, whose `Drop` really
+                // runs here (EXECUTED: 1 drop, the file removed), was ABSENT from `functions[]` on every
+                // build since R168. The RECEIVER arm above keeps `type_borrows` deliberately: there the
+                // charged leaf is `self_ty`, not the declared type, and `self: Pin<&mut Self>` is exactly
+                // the `&`-inside-a-generic case where the whole-type test is the right one.
+                let Some((t, borrowed)) = type_path_b(&pt.ty, uses) else { continue };
+                if borrowed {
                     continue;
+                }
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && type_borrows(&pt.ty) {
+                    eprintln!("R718OWNP {t}"); // §E1 REACH COUNTER — the changed branch only
                 }
                 let Some(name) = single_pat_ident(&pt.pat) else { continue };
                 if escaping_names.contains(&name) && !crate::collector::charge_at_construction() {
@@ -5534,9 +5568,7 @@ pub(crate) fn owned_drop_params(
                 if escaping_names.contains(&name) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                     eprintln!("S2PARAM {name}");
                 }
-                if let Some(t) = type_path(&pt.ty, uses) {
-                    out.push(leaf_of(t));
-                }
+                out.push(leaf_of(t));
             }
             _ => {}
         }

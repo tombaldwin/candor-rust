@@ -170,6 +170,36 @@ pub(crate) struct FnInfo {
 /// classified by the existing per-crate method rules (`reqwest::Client::execute` -> Net).
 pub(crate) type FieldIndex = HashMap<String, HashMap<String, String>>;
 
+/// SOUNDNESS R718 — whether a field's recorded LEAVES are reached through a reference, ONE FACT PER
+/// INDEX the field lands in. `leaf` qualifies the field's `fields` entry (the `type_path` walk) and
+/// `elem` its `field_elem` entry (the `elem_type` walk). They were ONE bool, computed from the whole
+/// declared type (`type_borrows`: "is there a `&` ANYWHERE?"), and that answered two different
+/// questions with the answer to a third: `m: HashMap<&'static str, Guard>` owns its `Guard` values and
+/// `t: TempFile<&'a Path>` owns its `TempFile`, yet both read as borrowed because a `&` appears in a
+/// position neither walk visits — so both constructions WITHDREW a drop that EXECUTES in the frame.
+/// `None` = the walk named no leaf (so that index has no entry from this declaration), which is the
+/// identity for the OWNED-WINS merge: a declaration with nothing to say about an index cannot clear a
+/// twin's answer in it.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FieldBorrow {
+    pub(crate) leaf: Option<bool>,
+    pub(crate) elem: Option<bool>,
+}
+
+impl FieldBorrow {
+    /// OWNED WINS per index (`&=`), with `None` as the identity. See `merge_decls`.
+    pub(crate) fn merge(&mut self, o: FieldBorrow) {
+        fn m(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+            match (a, b) {
+                (Some(x), Some(y)) => Some(x && y),
+                (x, None) | (None, x) => x,
+            }
+        }
+        self.leaf = m(self.leaf, o.leaf);
+        self.elem = m(self.elem, o.elem);
+    }
+}
+
 /// `struct-name-leaf -> { field -> ELEMENT-type-path }` for COLLECTION-typed fields, e.g.
 /// `Pool -> { senders: Sender }` (the element T of `Vec<Sender>`). Lets a loop/index/closure over a
 /// collection FIELD (`for c in &self.senders`, `self.senders[0].send()`) type its element so the

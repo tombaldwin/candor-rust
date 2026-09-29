@@ -14208,7 +14208,7 @@ trait G {
             fields => |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); },
             // SOUNDNESS R718 — `fields`' ownership twin. A stale digest here republishes the fabricated
             // drop-glue edge a borrowed field used to earn.
-            field_borrows => |m| { m.field_borrows.entry("S".into()).or_default().insert("f".into(), true); },
+            field_borrows => |m| { m.field_borrows.entry("S".into()).or_default().insert("f".into(), crate::model::FieldBorrow { leaf: Some(true), elem: None }); },
             field_elem => |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); },
             field_elem_trait => |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); },
             rets => |m| { m.rets.insert("f".into(), Some("T".into())); },
@@ -15875,7 +15875,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15886,7 +15886,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev50/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev51/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -17823,6 +17823,71 @@ pub struct Inner<'x> { pub g: &'x crate::G }
                 "ARM 2 (two files, `merge_decls`): a BORROWING declaration in src/b.rs withdrew the \
                  charge from the OWNING `Inner` in src/a.rs. That is R718 traded for a silence, and it \
                  is the reason the merge is `&=` rather than a union:\n{v2:#}");
+    }
+
+    /// SOUNDNESS R718, THE OWNED-WITH-A-BORROW HALF — R718's own fix introduced the class it closed.
+    /// `field_borrows` was ONE bool per field computed by `type_borrows` over the WHOLE declared type
+    /// ("is there a `&` anywhere?"), and `owned_drops` withdrew BOTH the `fields` leaf and the
+    /// `field_elem` leaf on it. But a `&` in a MAP KEY or in a GENERIC ARGUMENT of an owned type is on
+    /// neither walk: `HashMap<&'static str, Guard>` owns its `Guard` values, and `TempFile<&'a Path>` /
+    /// `Closer<&'a mut File>` own the `TempFile`/`Closer` whose local `Drop` runs in the frame.
+    ///
+    /// EXECUTED against a drop counter AND a real file: every OWNED arm below ran 1 drop in the call and
+    /// the file was gone afterwards; every BORROWED control ran 0 and the file survived. Measured gate
+    /// exits, pre-R718 parent `e926f0f` / R718 `909102f`..`f05dd9e` / this change, on the unit AND its
+    /// caller: `map_key` 1/0/1, `generic_arg` 1/0/1, `generic_mut_file` 1/0/1 — and the controls
+    /// `Vec<&G>` and newtype `(&G)` 1/0/0 (R718's fabrication fix stands), `(&G,)` 0/0/0.
+    ///
+    /// The PARAMETER arm is the same mechanism on R168's side and was silent on ALL three builds:
+    /// `fn take(t: TempFile<&Path>)` drops a `TempFile` here (EXECUTED: 1 drop) and was ABSENT.
+    #[test]
+    fn an_owned_value_whose_type_mentions_a_borrow_still_owns_its_drop_glue() {
+        let v = scan_src_to_json("r718ownedborrow", "\
+            use std::collections::HashMap;\n\
+            use std::fs::File;\n\
+            use std::path::Path;\n\
+            pub struct Guard { pub path: String }\n\
+            impl Drop for Guard { fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); } }\n\
+            pub fn mkg(p: &str) -> Guard { Guard { path: p.to_string() } }\n\
+            pub struct Reg { pub m: HashMap<&'static str, Guard> }\n\
+            pub fn mk_reg(p: &str) -> Reg { let mut m = HashMap::new(); m.insert(\"k\", mkg(p)); Reg { m } }\n\
+            pub fn map_key(p: &str) -> u32 { let _r = mk_reg(p); 0 }\n\
+            pub fn map_key_caller(p: &str) -> u32 { map_key(p) }\n\
+            pub struct TempFile<P: AsRef<Path>> { pub p: P }\n\
+            impl<P: AsRef<Path>> Drop for TempFile<P> { fn drop(&mut self) { let _ = std::fs::remove_file(self.p.as_ref()); } }\n\
+            pub struct Holder<'a> { pub t: TempFile<&'a Path> }\n\
+            pub fn mk_holder(p: &Path) -> Holder<'_> { Holder { t: TempFile { p } } }\n\
+            pub fn generic_arg(p: &Path) -> u32 { let _h = mk_holder(p); 0 }\n\
+            pub fn generic_arg_caller(p: &Path) -> u32 { generic_arg(p) }\n\
+            pub struct Closer<F> { pub f: F, pub path: String }\n\
+            impl<F> Drop for Closer<F> { fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); } }\n\
+            pub struct Holder2<'a> { pub c: Closer<&'a mut File> }\n\
+            pub fn mk_holder2<'a>(f: &'a mut File, p: &str) -> Holder2<'a> { Holder2 { c: Closer { f, path: p.to_string() } } }\n\
+            pub fn generic_mut_file(f: &mut File, p: &str) -> u32 { let _h = mk_holder2(f, p); 0 }\n\
+            pub fn generic_mut_file_caller(f: &mut File, p: &str) -> u32 { generic_mut_file(f, p) }\n\
+            pub fn take_param(t: TempFile<&Path>) -> u32 { let _ = &t.p; 0 }\n\
+            pub struct VecRef<'a> { pub v: Vec<&'a Guard> }\n\
+            pub fn vec_of_refs(g: &Guard) -> u32 { let _s = VecRef { v: vec![g] }; 0 }\n\
+            pub fn vec_of_refs_caller(g: &Guard) -> u32 { vec_of_refs(g) }\n\
+            pub struct TupRef<'a>(pub &'a Guard);\n\
+            pub fn tuple_ref(g: &Guard) -> u32 { let _s = TupRef(g); 0 }\n\
+            pub struct TupField<'a> { pub t: (&'a Guard,) }\n\
+            pub fn tuple_field(g: &Guard) -> u32 { let _s = TupField { t: (g,) }; 0 }\n\
+            pub struct BoxRef<'a> { pub b: Box<&'a Guard> }\n\
+            pub fn box_of_ref(g: &Guard) -> u32 { let _s = BoxRef { b: Box::new(g) }; 0 }\n\
+            pub fn take_ref_param(t: &TempFile<&Path>) -> u32 { let _ = &t.p; 0 }\n");
+        for f in ["map_key", "map_key_caller", "generic_arg", "generic_arg_caller", "generic_mut_file",
+                  "generic_mut_file_caller", "take_param"] {
+            assert!(effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] an OWNED value whose type merely MENTIONS a borrow still drops in this frame \
+                     (EXECUTED: 1 drop, the file removed). Withdrawing it is a silent under-report:\n{v:#}");
+        }
+        for f in ["vec_of_refs", "vec_of_refs_caller", "tuple_ref", "tuple_field", "box_of_ref",
+                  "take_ref_param"] {
+            assert!(!effs_opt(&v, f).contains(&"Fs".to_string()),
+                    "[{f}] a BORROWED leaf was charged drop glue — R718's fabrication is back \
+                     (EXECUTED: 0 in-frame drops):\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R722 — AN ALL-CAPS TYPE NAME IS A TYPE. The UpperCamel test required a LOWERCASE

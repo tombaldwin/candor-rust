@@ -255,6 +255,11 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // vetoes what that loop body builds, so a rev18 entry replays, warm, a body that reads as pure
     // while its guard demonstrably drops. serde would read that entry without complaint; the token is
     // the only thing that stops it. Same shape as rev16.
+    // rev51: SOUNDNESS R718's OWNED-WITH-A-BORROW half changed what `field_borrows` RECORDS — one bool
+    // from the whole declared type became a `FieldBorrow` per index, read off each index's own walk. A
+    // rev50 entry holds the bool, which does not deserialize as the new shape; and even if it did, it
+    // carries the whole-type answer that read `HashMap<&str, Guard>` / `TempFile<&Path>` as BORROWED,
+    // so a warm read would replay the withdrawn drop — the SILENCE direction. The bump is mandatory.
     // rev50: SOUNDNESS R751 changed what an EXISTING field RECORDS. Pass A resolves TYPE paths through
     // `expand`, which now turns a `self::`/`super::`-rooted path into a crate-root-ABSOLUTE one instead of
     // collapsing it — so `fields`, `rets`, `field_elem` and the rest hold DIFFERENT strings for every
@@ -322,7 +327,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev50/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev51/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -357,7 +362,7 @@ pub(crate) struct FileDecls {
     /// OWNS the field and the other BORROWS it must keep the charge, and a union of "borrowed" keys
     /// would drop it. Both polarities are recorded so `merge_decls` can let OWNED win.
     #[serde(default)]
-    pub(crate) field_borrows: HashMap<String, HashMap<String, bool>>,
+    pub(crate) field_borrows: HashMap<String, HashMap<String, crate::model::FieldBorrow>>,
     pub(crate) field_elem: FieldElemIndex,
     /// `Type -> { field -> element dispatch leaves }` for a COLLECTION-OF-TRAIT-OBJECTS field (R37 field form).
     #[serde(default)]
@@ -709,7 +714,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
 pub(crate) struct MergedDecls {
     pub(crate) fields: FieldIndex,
     /// SOUNDNESS R718 — see `FileDecls::field_borrows`. Merged so OWNED WINS.
-    pub(crate) field_borrows: HashMap<String, HashMap<String, bool>>,
+    pub(crate) field_borrows: HashMap<String, HashMap<String, crate::model::FieldBorrow>>,
     pub(crate) field_elem: FieldElemIndex,
     pub(crate) field_elem_trait: FieldElemTraitIndex,
     pub(crate) rets: HashMap<String, Option<String>>,
@@ -928,7 +933,7 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for (s, fmap) in &fd.field_borrows {
         let e = acc.field_borrows.entry(s.clone()).or_default();
         for (k, v) in fmap {
-            e.entry(k.clone()).and_modify(|b| *b &= *v).or_insert(*v);
+            e.entry(k.clone()).or_default().merge(*v);
         }
     }
     for (s, fmap) in &fd.field_elem {
@@ -1229,7 +1234,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     nested(&mut s, "field_borrows",
            &m.field_borrows.iter()
                .map(|(k, v)| (k.clone(),
-                              v.iter().map(|(f, b)| (f.clone(), b.to_string())).collect()))
+                              v.iter().map(|(f, b)| (f.clone(), format!("{b:?}"))).collect()))
                .collect());
     nested(&mut s, "field_elem", &m.field_elem);
     // field_elem_trait — nested map whose leaf is a Vec<String> (the element dispatch leaves).

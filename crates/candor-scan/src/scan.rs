@@ -1523,8 +1523,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // into `fields` AFTER the merge and contributes no declaration to this index, and a stale cache
         // entry deserializes it empty. Both then behave exactly as they did before this row — an
         // over-charge — rather than silently dropping a real charge. That is the denylist direction.
-        let borrows = |t: &str, field: &str| -> bool {
-            merged.field_borrows.get(t).and_then(|m| m.get(field)).copied().unwrap_or(false)
+        //
+        // AND THE FACT IS PER INDEX (`FieldBorrow::leaf` for `fields`, `::elem` for `field_elem`), read
+        // off the walk that produced each entry. One whole-type bool withdrew BOTH leaves of
+        // `m: HashMap<&'static str, Guard>` and `t: TempFile<&'a Path>` — owned values whose drop
+        // EXECUTES in the constructing frame (1 drop each, file really removed) — and `deny Fs` over
+        // the unit and its caller went 1 -> 0. That was R718's fix introducing the class it closed.
+        let borrows = |t: &str, field: &str, elem: bool| -> bool {
+            merged
+                .field_borrows
+                .get(t)
+                .and_then(|m| m.get(field))
+                .and_then(|b| if elem { b.elem } else { b.leaf })
+                .unwrap_or(false)
         };
         // §E1 REACH COUNTER, on the CHANGED branch and nowhere else: it fires only where the filter
         // WITHDRAWS a candidate that `drop_types` would have accepted, which is precisely the charge
@@ -1539,9 +1550,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let candidates = |t: &str| -> Vec<String> {
             let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
             let mut v: Vec<String> = Vec::new();
-            for src in [fields.get(t), field_elem.get(t)].into_iter().flatten() {
+            for (elem, src) in [(false, fields.get(t)), (true, field_elem.get(t))] {
+                let Some(src) = src else { continue };
                 for (k, ty) in src {
-                    if borrows(t, k) {
+                    if borrows(t, k, elem) {
                         withdrew(t, k, ty);
                     } else {
                         v.push(leaf(ty));

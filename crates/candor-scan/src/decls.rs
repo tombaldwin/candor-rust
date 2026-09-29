@@ -2571,6 +2571,25 @@ fn r372_type_path(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> Option<S
     tp
 }
 
+/// SOUNDNESS R718 — the ownership fact for each index a field declaration can land in, read off the
+/// SAME walk that produces the index entry (`type_path_b` for `fields`, `elem_type_b` for
+/// `field_elem`), so the fact is about the leaf the index holds and cannot drift from it (§G).
+fn field_borrow_of(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> crate::model::FieldBorrow {
+    let fb = crate::model::FieldBorrow {
+        leaf: crate::lang::type_path_b(ty, uses_ty).map(|(_, b)| b),
+        elem: crate::lang::elem_type_b(ty, uses_ty).map(|(_, b)| b),
+    };
+    // §E1 REACH COUNTER, on the CHANGED branch only: the whole-type test said BORROWED and at least one
+    // index's own walk says OWNED — exactly the declarations whose answer this change moves.
+    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+        && crate::lang::type_borrows(ty)
+        && (fb.leaf == Some(false) || fb.elem == Some(false))
+    {
+        eprintln!("R718OWNB {}", crate::lang::type_path_b(ty, uses_ty).map(|(t, _)| t).unwrap_or_default());
+    }
+    fb
+}
+
 pub(crate) fn note_amb_ret(rets: &mut HashMap<String, Option<String>>, fn_leaf: &str, tp: &str) {
     if let Some(ty_leaf) = crate::lang::local_type_leaf(tp) {
         rets.insert(
@@ -2618,7 +2637,7 @@ pub(crate) fn collect_decls(
     callable_aliases: &mut std::collections::HashSet<String>,
     // SOUNDNESS R718 — `fields`' ownership twin. See `FileDecls::field_borrows`. Written at the two
     // arms that write `fields`/`field_elem` and nowhere else, so the key spaces cannot drift.
-    field_borrows: &mut HashMap<String, HashMap<String, bool>>,
+    field_borrows: &mut HashMap<String, HashMap<String, crate::model::FieldBorrow>>,
 ) {
     // R123: same one authority as `scan_items` — see `use_item_applies`.
     // SOUNDNESS R372 — THE SENTENCE THAT USED TO BE HERE WAS FALSE, and it is what licensed this
@@ -2801,12 +2820,17 @@ pub(crate) fn collect_decls(
                                 // loses the `&`. Unconditional: a field the `trait_fields` route claims
                                 // is still a field `resolve_impl_bound_fields` can later join INTO
                                 // `fields`, and a key missing from here reads as owned.
+                                //
+                                // AND ASKED ALONG EACH INDEX'S OWN WALK, not of the whole type: the
+                                // `&` in `HashMap<&'static str, Guard>` or `TempFile<&'a Path>` sits
+                                // where neither walk goes, and a whole-type test WITHDREW the owned
+                                // value's drop (EXECUTED: 1 drop each). See `model::FieldBorrow`.
                                 field_borrows
                                     .entry(s.ident.to_string())
                                     .or_default()
                                     .entry(name.to_string())
-                                    .and_modify(|b| *b &= crate::lang::type_borrows(&f.ty))
-                                    .or_insert(crate::lang::type_borrows(&f.ty));
+                                    .or_default()
+                                    .merge(field_borrow_of(&f.ty, uses_ty));
                                 // Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
                                 // `Box` to `type_path`, which would shadow the CHA route.
                                 let leaves = trait_leaves(&f.ty, &struct_bounds);
@@ -2983,8 +3007,8 @@ pub(crate) fn collect_decls(
                                 .entry(s.ident.to_string())
                                 .or_default()
                                 .entry(i.to_string())
-                                .and_modify(|b| *b &= crate::lang::type_borrows(&f.ty))
-                                .or_insert(crate::lang::type_borrows(&f.ty));
+                                .or_default()
+                                .merge(field_borrow_of(&f.ty, uses_ty));
                             // SOUNDNESS R479 — THE TUPLE POSITION HAD NO GENERAL DISPATCH ROUTE AT ALL.
                             // The comment this replaces said `trait_fields` has no `Unnamed` arm and
                             // called that deliberate; the measurement says the deliberate part was the
