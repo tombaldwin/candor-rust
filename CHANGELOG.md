@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.39.3] — 2026-09-30
+
 ### ⚠ Upgrading from 0.39.2 — which gates can flip, and which way
 
 This is a large correctness release and **gate verdicts move in BOTH directions**. Read the ⚠ entries
