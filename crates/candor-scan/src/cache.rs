@@ -255,6 +255,11 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // vetoes what that loop body builds, so a rev18 entry replays, warm, a body that reads as pure
     // while its guard demonstrably drops. serde would read that entry without complaint; the token is
     // the only thing that stops it. Same shape as rev16.
+    // rev52: SOUNDNESS R856/R857 changed what Pass B's `calls` RECORDS — a method on a dependency VALUE
+    // (`dep::SHARED.ping()`, `n.parent.visit()` with `n: &dep::Node`, `let s = &dep::SHARED; s.ping()`)
+    // now emits a `<untyped>` marker, and a qualified unit-struct literal (`m::Unit.go()`) now types.
+    // `calls` is stored IN the cached `FnInfo`, so a rev51 entry replays the marker-less list warm and
+    // the caller reads ABSENT again — the exact silence the change closes. The bump is mandatory.
     // rev51: SOUNDNESS R718's OWNED-WITH-A-BORROW half changed what `field_borrows` RECORDS — one bool
     // from the whole declared type became a `FieldBorrow` per index, read off each index's own walk. A
     // rev50 entry holds the bool, which does not deserialize as the new shape; and even if it did, it
@@ -327,7 +332,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev51/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev52/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -2517,7 +2517,74 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // from a dep but `.first()` is a std Vec method. Only when the dep IS chained does the
                 // ledger fall silent (covered, correctly, per §2 rule 3) — and that silence is the
                 // confident purity claim this exists to prevent.
+                // SOUNDNESS R856/R857 — THE κ LEDGER FOR A DEPENDENCY VALUE, which no CALL carries. The
+                // factory form's provenance is itself a qualified call (`dep::build()`), so the ledger
+                // below already counts the crate for it; a static or a field hop is not a call at all,
+                // and with the dependency UNCHAINED the caller was ABSENT with no `invisible` either —
+                // the same silence as R856, one mode over (measured: `ratescore::SHARED.ping()`,
+                // `n.parent.visit()`, `t.0.visit()` all absent, no `invisible`, while every caller that
+                // also made a qualified call carried `invisible: ["ratescore"]`). Recorded exactly as
+                // the ledger records a floored qualified call, so the coverage filter downstream (which
+                // drops a chained, calibrated or otherwise covered crate) is the one authority on whether
+                // it surfaces — for a CHAINED crate it is filtered and the `Unknown` below speaks instead.
+                let new_prov = rest.contains(VALUE_PROV_SEG) || rest.contains(TYPE_PROV_SEG)
+                    || rest.contains(FIELD_HOP_SEG);
+                if new_prov && deps.contains(cr) {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
                 if deps_idx.crates.contains(cr_real) {
+                    // SOUNDNESS R856/R857 §E1 REACH COUNTER, on the new provenance only: a receiver that
+                    // is a dependency VALUE (`<value>`) or a field of one (`<type>`/`<field>`). Their
+                    // callees carry an angle-bracket segment, so the `returns` lookup below misses by
+                    // construction and they always reach the disclosure — the counter is what lets an
+                    // A/B tell "never fired" from "fired and changed nothing".
+                    if new_prov && std::env::var_os("CANDOR_R856_INSTR").is_some() {
+                        eprintln!("R856HIT\t{}\t{cr_real}::{rest}", f.qual);
+                    }
+                    // SOUNDNESS R856 — A DEPENDENCY VALUE PATH WHOSE LEAF IS TYPE-SHAPED NAMES ITS OWN
+                    // TYPE when it is a unit struct: `ratescore::Other.ping()` is `Other::ping` on the
+                    // value `Other`. That is the same reading `resolve_recv_type`'s unit-struct fallback
+                    // already gives the IMPORTED spelling (`use ratescore::Other; Other.ping()`), which
+                    // types and joins; the qualified spelling had no route and read ABSENT. So ask the
+                    // chained report the typed key first — a RESOLUTION from the entry hashes the chain
+                    // already publishes, not a new fact — and disclose only on a miss.
+                    //
+                    // Confined to a path whose segment BEFORE the leaf is not itself type-shaped, so
+                    // the leaf is an item of a MODULE: `ratescore::Kind::A` (an enum variant, whose type
+                    // is `Kind`) and `ratescore::Other::DEFAULT` (an associated const) never form a key
+                    // and fall to the disclosure. A type-ident const coexisting with a same-named
+                    // non-unit struct is the one mis-read left, and it is the bare spelling's today.
+                    // Full key, then the 2-segment tail — the same two keys the ordinary typed join
+                    // asks, so the two spellings answer alike.
+                    if let Some((callee, method)) = rest.rsplit_once("::") {
+                        if let Some(vp) = callee.strip_prefix(&format!("{VALUE_PROV_SEG}::")) {
+                            let segs: Vec<&str> = vp.split("::").collect();
+                            let leaf_ty = segs.last().copied().unwrap_or("");
+                            let owner_is_module = segs.len() < 2
+                                || !crate::lang::is_type_ident(segs[segs.len() - 2]);
+                            if !vp.contains('<') && crate::lang::is_type_ident(leaf_ty) && owner_is_module {
+                                let full = format!("{cr_real}#{vp}::{method}");
+                                let t2 = format!("{cr_real}#{leaf_ty}::{method}");
+                                let typed_hit =
+                                    deps_idx.by_key.get(&full).or_else(|| deps_idx.by_key.get(&t2));
+                                if std::env::var_os("CANDOR_R856_INSTR").is_some() {
+                                    eprintln!("R856TYPED-{}\t{}\t{full}",
+                                        if typed_hit.is_some() { "HIT" } else { "MISS" }, f.qual);
+                                }
+                                if let Some(de) = typed_hit {
+                                    apply_dep_fn(de, &f.qual, DepSink {
+                                        direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds,
+                                        paths: &mut paths, tables: &mut tables,
+                                        incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                                        blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                                        unknown_via_dep: &mut unknown_via_dep,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     // ⟨typeSurface.returns⟩ DETERMINATION BEFORE DISCLOSURE (half 2). `rest` is
                     // `<callee path>::<method>`; the method leaf is one segment and the callee path is
                     // not, so it splits from the RIGHT. If the dependency PUBLISHED what that factory

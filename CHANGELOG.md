@@ -11,6 +11,32 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ A method on a dependency's static or field no longer reads pure (SOUNDNESS R856, R857)
+
+`ratescore::SHARED.ping()` (a chained dependency's `pub static`) and `n.parent.visit()` (with
+`n: &dep::Node`, `parent` a `pub` field) left the caller ABSENT from `functions[]`: `deny Env` and
+`deny Env Unknown` both exited 0 over a body that, executed, reads the environment. A chained report
+publishes neither a static's type nor a field's (`typeSurface` carries `returns` only), so the call
+now takes SPEC §2 ⟨0.23⟩'s miss rule — **disclosed** as `Unknown` with
+`dispatch:untyped cross-package receiver`, the factory form's existing reason. Covered spellings:
+`pub static` / `const` at the root or behind a module path, `LazyLock`/`OnceLock` statics, the
+imported (`use dep::SHARED`), referenced, dereferenced and `let`-bound forms, enum unit variants and
+associated consts, nested field hops, a field off a method's return, off a factory call, off a
+static, and tuple-struct fields. With the dependency UNCHAINED these callers now carry
+`invisible: [<dep>]`, which they lacked because no call into the crate was ever made. Two spellings
+**resolve** instead, because the value names its own type and the chained report answers that key: a
+qualified unit-struct literal (`dep::Other.ping()`, and the local `m::Unit.go()`, which was absent
+too) and an all-caps unit struct (`dep::DB.query()`).
+
+- **GREEN → RED**: `deny <E> Unknown` / `deny Unknown` over such a caller (bare `deny <E>` does not
+  move for the disclosed shapes; it does for the two resolved ones). Measured over 909 cargo-registry
+  crates chained on their registry dependencies: 1,094 rows newly carry `Unknown` (0.27% of 403,300
+  analysed units), REMOVED 0, no concrete effect lost, no new concrete charge.
+- Not closed here: a method on a dependency method's RETURN (`n.get_parent().visit()`) still charges
+  the base type's same-named method; a `use dep::*` glob import; a dependency type whose leaf collides
+  with a local struct in the field index.
+- Scan-cache schema rev52.
+
 ## [0.39.3] — 2026-09-30
 
 ### ⚠ Upgrading from 0.39.2 — which gates can flip, and which way

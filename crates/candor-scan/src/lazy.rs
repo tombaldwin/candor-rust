@@ -33,6 +33,20 @@ pub(crate) const CONSTRUCT_MARKER: &str = "<construct>";
 /// effect across. See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md (half 1).
 pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
 
+/// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
+/// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
+/// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a
+/// dependency type whose fields the scan cannot see), and `…::<field>::parent` (a field hop off either).
+/// The angle-bracket segments are the containment: no published `typeSurface.returns` key and no entry
+/// hash can contain one, so the consumer's `returns` lookup on such a callee MISSES BY CONSTRUCTION and
+/// falls through to the disclosure. That is the only answer a consumer reading reports can give: a
+/// dependency's static and field types are on no wire (SPEC §2 ⟨0.23⟩ publishes `returns` only), so the
+/// miss rule — "a miss falls back to the disclosure of the unformed key, never to silence" — applies.
+/// The resolution needs the pending R843 rung.
+pub(crate) const VALUE_PROV_SEG: &str = "<value>";
+pub(crate) const TYPE_PROV_SEG: &str = "<type>";
+pub(crate) const FIELD_HOP_SEG: &str = "<field>";
+
 /// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
 /// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
 /// `resolve_target`'s tail2 lookup, now ambiguous, dropped the forcing edge and every reader read

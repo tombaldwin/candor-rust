@@ -2573,6 +2573,136 @@ pub fn joined(d: &depx::io::Deser) -> u8 { d.read() }
         let _ = std::fs::remove_dir_all(&dep);
     }
 
+    /// SOUNDNESS R856 / R857 — A DEPENDENCY VALUE AS A RECEIVER: a chained crate's `pub static` /
+    /// `const` reached by path (R856), and a field hop off a value of a dependency type (R857). Every
+    /// one of these left the caller ABSENT at v0.39.3 — `deny Env` and `deny Env Unknown` both exit 0 —
+    /// over a body that, EXECUTED (the fixture in the commit message prints a marker from each), reads
+    /// the environment. A chained report publishes neither a static's type nor a field's (SPEC §2
+    /// ⟨0.23⟩ publishes `returns` only), so the sound answer is the ⟨0.23⟩ miss rule's: DISCLOSE.
+    ///
+    /// Three spellings RESOLVE instead, because the value names its own type: a qualified unit-struct
+    /// literal (`ratescore::Other.ping()`, the bare `Other.ping()` spelling's reading) and an all-caps
+    /// unit struct, qualified or imported (`ratescore::DB.query()`), whose typed key the chained report
+    /// answers. The controls pin the directions this must NOT move: a typed parameter keeps its concrete
+    /// charge and gains nothing; an UNCHAINED dep gets the κ ledger's `invisible`, not `Unknown`; a std
+    /// associated const and a LOCAL static stay as they were.
+    #[test]
+    fn a_dependency_value_receiver_discloses_or_resolves_never_reads_pure() {
+        let dep = std::env::temp_dir().join(format!("candor-r856-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // What candor-scan publishes for the fixture's `ratescore` (`typeSurface.returns` only).
+        std::fs::write(dep.join("report.ratescore.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}},
+            "package": "ratescore",
+            "typeSurface": {{"returns": {{"ratescore#Node::new": "ratescore#Node"}}}},
+            "functions": [
+              {{"fn": "Other::ping", "inferred": ["Env"], "hash": "ratescore#Other::ping"}},
+              {{"fn": "Other::visit", "inferred": ["Env"], "hash": "ratescore#Other::visit"}},
+              {{"fn": "Node::visit", "inferred": ["Fs"], "hash": "ratescore#Node::visit"}},
+              {{"fn": "DB::query", "inferred": ["Env"], "hash": "ratescore#DB::query"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep);
+        assert!(idx.crates.contains("ratescore"));
+        let run = |name: &str, deps_idx: &DepIndex, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r856-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\nratescore = \"1\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                ws_member: false, quiet: true, deps_idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        const SRC: &str = r#"
+use ratescore::{Node, Tup, Wrap};
+use ratescore::SHARED;
+pub fn s1_static_qual() { ratescore::SHARED.ping() }
+pub fn s2_static_imported() { SHARED.ping() }
+pub fn s3_static_modpath() { ratescore::inner::DEEP.ping() }
+pub fn s4_const_qual() { ratescore::CONSTO.ping() }
+pub fn s5_lazylock() { ratescore::LAZY.ping() }
+pub fn s6_oncelock() { ratescore::ONCE.get_or_init(|| ratescore::Other).ping() }
+pub fn s8_static_ref() { (&ratescore::SHARED).ping() }
+pub fn e1_enum_variant() { ratescore::Kind::A.describe() }
+pub fn a1_assoc_const() { ratescore::Other::DEFAULT.ping() }
+pub fn f1_field(n: &Node) { n.parent.visit() }
+pub fn f2_nested(w: &Wrap) { w.node.parent.visit() }
+pub fn f3_factory_field() { ratescore::Node::new().parent.visit() }
+pub fn f4_method_ret_field(n: &Node) { n.me().parent.visit() }
+pub fn f5_tuple(t: &Tup) { t.0.visit() }
+pub fn f6_static_field() { ratescore::HOLDER.parent.visit() }
+pub fn f8_let_field(n: &Node) { let p = &n.parent; p.visit() }
+pub fn s9_let_static() { let s = &ratescore::SHARED; s.ping() }
+pub fn s7_unit_literal_qual() { ratescore::Other.ping() }
+pub fn q1_caps_unit_qual() { ratescore::DB.query() }
+pub fn q2_caps_unit_imported() { use ratescore::DB; DB.query() }
+pub fn c1_typed_param(o: &ratescore::Other) { o.ping() }
+pub fn p1_std_const() -> u32 { u32::MAX.min(3) }
+pub fn p2_std_path() -> f64 { std::f64::consts::PI.sqrt() }
+"#;
+        let v = run("r856a", &idx, SRC);
+        let why_ok = |f: &serde_json::Value| f["unknownWhy"].as_array().into_iter().flatten()
+            .any(|r| r.as_str() == Some("dispatch:untyped cross-package receiver"));
+        // 1. DISCLOSED — every shape whose type is on no wire.
+        for name in ["s1_static_qual", "s2_static_imported", "s3_static_modpath", "s4_const_qual",
+                     "s5_lazylock", "s6_oncelock", "s8_static_ref", "e1_enum_variant", "a1_assoc_const",
+                     "f1_field", "f2_nested", "f3_factory_field", "f4_method_ret_field", "f5_tuple",
+                     "f6_static_field", "f8_let_field", "s9_let_static"] {
+            let f = fn_entry(&v, name);
+            assert!(effs(f).contains(&"Unknown".to_string()) && why_ok(f),
+                    "`{name}` must DISCLOSE (R856/R857) — it was ABSENT, a purity claim over a body that \
+                     reads the environment:\n{v:#}");
+            // …and must not GUESS. In particular `f1_field` must not charge `Node::visit`'s Fs — the
+            // receiver is the FIELD, not the node.
+            assert!(!effs(f).contains(&"Fs".to_string()), "`{name}` fabricated Fs:\n{v:#}");
+        }
+        // 2. RESOLVED — the value names its own type, and the chained report answers that key.
+        for name in ["s7_unit_literal_qual", "q1_caps_unit_qual", "q2_caps_unit_imported", "c1_typed_param"] {
+            assert_eq!(effs(fn_entry(&v, name)), vec!["Env".to_string()],
+                       "`{name}` must resolve to exactly `Env` — no hedge beside a key that answered:\n{v:#}");
+        }
+        // 3. CONTROL — a std receiver is not a dependency value.
+        for name in ["p1_std_const", "p2_std_path"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != name),
+                    "`{name}` is std — nothing to disclose:\n{v:#}");
+        }
+        // 4. CONTROL — UNCHAINED: the κ ledger's `invisible`, never `Unknown` (the factory rule's own
+        //    control, test above). Before this change the static and field shapes carried NEITHER.
+        let u = run("r856b", &DepIndex::default(), SRC);
+        for name in ["s1_static_qual", "f1_field", "f5_tuple", "f6_static_field"] {
+            let f = fn_entry(&u, name);
+            assert!(!effs(f).contains(&"Unknown".to_string()), "`{name}` double-disclosed:\n{u:#}");
+            assert_eq!(f["invisible"], serde_json::json!(["ratescore"]),
+                       "`{name}` reaches an UNCHAINED dep through a value and must say so:\n{u:#}");
+        }
+        // 5. CONTROL — the crate's OWN statics and qualified unit structs (R557's route, and the local
+        //    twin of `s7`, which was absent too).
+        let l = run("r856c", &idx, r#"
+mod m {
+    pub struct L;
+    impl L { pub fn go(&self) { let _ = std::env::var("HOME"); } }
+    pub static X: L = L;
+    pub struct Unit;
+    impl Unit { pub fn go(&self) { let _ = std::env::var("HOME"); } }
+}
+pub fn l1_local_static_qual() { m::X.go() }
+pub fn l2_local_unit_qual() { m::Unit.go() }
+"#);
+        for name in ["l1_local_static_qual", "l2_local_unit_qual"] {
+            assert_eq!(effs(fn_entry(&l, name)), vec!["Env".to_string()], "`{name}`:\n{l:#}");
+        }
+    }
+
     /// One signature may bind the same trait LEAF to two different crates. `trait_quals` is keyed by leaf,
     /// and last-wins made `a.go()` on an `alpha::Handler` form `beta::Handler::go` and inherit BETA's
     /// reported effects — a fabrication on a function that never touches beta.
@@ -11903,18 +12033,25 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
                     .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
                 .collect()
         };
+        // SOUNDNESS R856 — and every one of them now ALSO carries `Unknown`, which is the point rather
+        // than noise: `.len()` is a METHOD on the dependency's static, whose TYPE no chained report
+        // publishes, so the key it would be joined on cannot be formed. The initializer's forcing edge
+        // (this test's subject) and the method's disclosure are two different calls on one line. The
+        // invariant this test exists for is unchanged and still asserted exactly: the SPELLING decides
+        // nothing — all four crate-root spellings agree, both module spellings agree.
         for f in ["qualified", "imported", "imported_deref", "body_use"] {
-            assert_eq!(eff(f), vec!["Env"],
+            assert_eq!(eff(f), vec!["Env", "Unknown"],
                        "{f} forces the chained dep's crate-root lazy static — the spelling must not \
                         decide whether the initializer's Env is seen:\n{body}");
         }
         for f in ["mod_qualified", "mod_imported"] {
-            assert_eq!(eff(f), vec!["Fs"],
+            assert_eq!(eff(f), vec!["Fs", "Unknown"],
                        "{f} forces a lazy static the dep declares inside a MODULE — its published key \
                         carries that module (`<lazy>::cfg::MODC`), so the consumer must ask for it:\n{body}");
         }
-        assert!(eff("pure_dep_static").is_empty(),
-                "a pure init publishes no unit; its reader stays pure (per-static keying):\n{body}");
+        assert_eq!(eff("pure_dep_static"), vec!["Unknown"],
+                "a pure init publishes no unit, so its reader is charged NO initializer effect \
+                 (per-static keying) — only R856's disclosure for the method on it:\n{body}");
         assert!(eff("shadowed_by_an_untypable_let").is_empty(),
                 "an untypable `let` still shadows the import — the fabrication mirror:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
@@ -15867,6 +16004,9 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R856/R857 bumped the token to rev52 (a method on a dependency VALUE now emits a `<untyped>`
+        // marker and a qualified unit-struct literal now types — both land in the cached `FnInfo`'s
+        // `calls`, so a rev51 entry republishes the caller ABSENT: the stale direction is SILENCE);
         // R167 bumped the token to rev48 (`scan_items`/`fn_locs` now skip a `#[test]`-family fn in the
         // default scan, so a rev47 entry — written by a binary that emitted a `FnInfo` for every bare
         // `#[test] fn` at module scope — replays those harness rows warm with their effects intact; the
@@ -15875,7 +16015,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -15886,7 +16026,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev51/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev52/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

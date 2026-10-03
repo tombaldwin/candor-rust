@@ -4372,6 +4372,14 @@ pub(crate) fn caps_only_ident(s: &str) -> bool {
     is_type_ident(s) && s.chars().count() > 1 && !s.chars().any(|c| c.is_lowercase())
 }
 
+/// SOUNDNESS R856 — a type-shaped leaf with NO lowercase letter (`SHARED`, `DB`, `C`, `T0`): the
+/// spelling a `static`/`const` and a unit struct share, so a VALUE path ending in one cannot be read as
+/// naming its own type. `caps_only_ident` plus the one-character case it excludes (it is an R722 reach
+/// counter and must stay as it is); a dependency's `pub static C` is as much a static as its `SHARED`.
+pub(crate) fn caps_value_leaf(s: &str) -> bool {
+    is_type_ident(s) && !s.chars().any(|c| c.is_lowercase())
+}
+
 /// SOUNDNESS R722, the OVER-CHARGE REFUSAL the row named. A leaf the union admits ONLY because it is
 /// ALL-CAPS is spelled identically to a declared `const`/`static` of that name — `MAX`, `NONE`,
 /// `DEFAULT`, `EMPTY` are all plausible both ways. `collect_static_types` is the authority on those

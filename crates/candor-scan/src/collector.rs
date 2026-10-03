@@ -1069,8 +1069,42 @@ impl<'a> CallCollector<'a> {
                 let Some(name) = p.path.get_ident().map(|i| i.to_string()) else {
                     if via_static.is_some() {
                         probe("R557HITQ"); // the QUALIFIED spelling, which had no route at all before
+                        return via_static;
                     }
-                    return via_static;
+                    // SOUNDNESS R856 sibling — THE QUALIFIED UNIT-STRUCT LITERAL. The fallback below
+                    // types `T0.run()` as `T0` (and `use dep::Other; Other.ping()` as `dep::Other`), but
+                    // only for a BARE ident: `m::U.go()` and `ratescore::Other.ping()` — the same value,
+                    // spelled with its path — fell out here with nothing, and the caller read ABSENT
+                    // (measured, executed: both print their marker, both absent at v0.39.3, `deny Env`
+                    // 0). The qualified spelling gets the bare spelling's reading, under three refusals
+                    // the bare one does not need because a path can name more kinds of thing:
+                    //  - the segment BEFORE the leaf must not itself be type-shaped, so the leaf is an
+                    //    item of a MODULE: `Kind::A` (an enum variant, of type `Kind`) and
+                    //    `Other::DEFAULT` (an associated const, of any type) are refused — typing either
+                    //    as the path would form `A::go`/`DEFAULT::go`, a key about a different item;
+                    //  - an ALL-CAPS leaf is refused (`lang::caps_value_leaf`): `dep::SHARED` is far more
+                    //    often a `static` than a type, and typing it would turn the R856 disclosure for
+                    //    that spelling back into a silent typed miss;
+                    //  - `qself`, `Self::…` and a `<`-bearing expansion are refused by the shape checks.
+                    // Every refusal leaves today's answer (None), so this can only ADD a typed route.
+                    let segs = &p.path.segments;
+                    if p.qself.is_none() && segs.len() >= 2 {
+                        let leaf = segs[segs.len() - 1].ident.to_string();
+                        let owner = segs[segs.len() - 2].ident.to_string();
+                        if crate::lang::is_type_ident(&leaf)
+                            && !crate::lang::caps_value_leaf(&leaf)
+                            && !crate::lang::is_type_ident(&owner)
+                            && owner != "Self"
+                            && segs.iter().all(|s| s.arguments.is_none())
+                        {
+                            let full = expand(&path_to_string(&p.path), &self.uses);
+                            if !full.contains('<') && !full.contains(crate::decls::ALIAS_ALT_SEP) {
+                                probe("R856QUNIT");
+                                return Some(full);
+                            }
+                        }
+                    }
+                    return None;
                 };
                 // A local binding/param/`self` wins. Failing that, a bare UPPER-INITIAL path used AS A
                 // VALUE is a UNIT-STRUCT (or unit enum variant) LITERAL receiver — `T0.run()` where
@@ -2586,6 +2620,80 @@ impl<'a> CallCollector<'a> {
         let Some(name) = bare_name(expr) else { return false };
         self.mono_recv_traits.get(&name).is_some_and(|ls| ls.iter().any(|x| x == tr))
     }
+    /// SOUNDNESS R856/R857 — the PROVENANCE of a receiver that is a dependency VALUE rather than the
+    /// result of a dependency call, as a crate-rooted callee string for the `<untyped>` marker (see
+    /// `VALUE_PROV_SEG`). `None` whenever the receiver is not provably rooted in a crate-qualified value,
+    /// which leaves the call exactly as it was. Three shapes, and each was MEASURED silent (executed
+    /// fixture, caller ABSENT from `functions[]`, `deny Env` and `deny Env Unknown` both exit 0):
+    ///
+    /// - a PATH to a value in another crate — `ratescore::SHARED`, `ratescore::inner::DEEP`,
+    ///   `ratescore::CONSTO`, a `LazyLock` static, or `SHARED` after `use ratescore::SHARED`. R557's
+    ///   `static_types` answers this for the crate's OWN statics; it is built from this crate's source and
+    ///   so cannot hold a dependency's, and no chained report publishes one either.
+    /// - a FIELD of a value whose type resolved to a type in another crate — `n.parent` with
+    ///   `n: &ratescore::Node`. `fields` is likewise this crate's own index.
+    /// - a FIELD of either of the above, or of a dependency factory call, recursively — `w.node.parent`,
+    ///   `ratescore::HOLDER.parent`, `ratescore::Node::new().parent`, `t.0`.
+    ///
+    /// The crate root is checked against the CHAINED dependencies at consumption (scan.rs), the same
+    /// gate the factory form uses, so a local module that happens to look crate-qualified emits an inert
+    /// marker. `self.locally_bound` and `self.static_types` are consulted first for a single-segment
+    /// path: a binding, or one of this crate's own statics, is never a dependency value.
+    fn dep_value_provenance(&self, expr: &syn::Expr) -> Option<String> {
+        match peel_value(expr) {
+            syn::Expr::Path(p) if p.qself.is_none() => {
+                let segs = &p.path.segments;
+                if segs.len() == 1 {
+                    let n = segs[0].ident.to_string();
+                    if let Some(prov) = self.dep_bound_vars.get(&n) {
+                        return Some(prov.clone());
+                    }
+                    if self.locally_bound(&n) || self.static_types.contains_key(&n) {
+                        return None;
+                    }
+                }
+                let full = expand(&path_to_string(&p.path), &self.uses);
+                if full.starts_with("::") || full.contains(crate::decls::ALIAS_ALT_SEP) {
+                    return None;
+                }
+                let (root, rest) = full.split_once("::")?;
+                Some(format!("{root}::{VALUE_PROV_SEG}::{rest}"))
+            }
+            syn::Expr::Call(c) => match &*c.func {
+                // The factory form, reached here only as the BASE of a field hop
+                // (`ratescore::Node::new().parent`): the direct `dep::build().go()` spelling is answered
+                // by the caller's own arm before this function is consulted.
+                syn::Expr::Path(p) => {
+                    let full = expand(&path_to_string(&p.path), &self.uses);
+                    (full.contains("::") && !full.starts_with("::")
+                        && !full.contains(crate::decls::ALIAS_ALT_SEP))
+                        .then_some(full)
+                }
+                _ => None,
+            },
+            syn::Expr::Field(f) => {
+                let member = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                let base = match self.resolve_recv_type(&f.base) {
+                    // A base whose type RESOLVED. Only a crate-qualified type can be a dependency's: a
+                    // bare type is this crate's own, and for those `fields` either answered (so this
+                    // function is never reached) or genuinely does not know, which is not this row.
+                    Some(t) => {
+                        if t.starts_with("::") || t.contains(crate::decls::ALIAS_ALT_SEP) {
+                            return None;
+                        }
+                        let (root, rest) = t.split_once("::")?;
+                        format!("{root}::{TYPE_PROV_SEG}::{rest}")
+                    }
+                    None => self.dep_value_provenance(&f.base)?,
+                };
+                Some(format!("{base}::{FIELD_HOP_SEG}::{member}"))
+            }
+            _ => None,
+        }
+    }
     fn locally_bound(&self, name: &str) -> bool {
         self.vars.contains_key(name)
             || self.closure_vars.contains(name)
@@ -3688,7 +3796,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 },
                 _ => None,
             },
-        };
+        }
+        // SOUNDNESS R856/R857 — …AND A DEPENDENCY VALUE, which is the third provenance and had no route:
+        // `ratescore::SHARED.ping()` (a dependency's `pub static`) and `n.parent.visit()` (a field of a
+        // dependency type) both left the caller ABSENT under `deny Env` AND `deny Env Unknown`. Consulted
+        // only when the two forms above found nothing, so neither existing answer can change.
+        .or_else(|| self.dep_value_provenance(&node.receiver));
         if let Some(callee_path) = dep_recv_callee {
             if self.resolve_recv_type(&node.receiver).is_none()
                 && self.resolve_recv_traits(&node.receiver).is_empty()
@@ -3714,6 +3827,49 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     method: false,
                     is_macro: false,
                 });
+            }
+        }
+        // SOUNDNESS R856 — THE IMPORTED ALL-CAPS SPELLING, which the arm above never sees because the
+        // receiver DID type, wrongly. `use ratescore::SHARED; SHARED.ping()`: `SHARED` is upper-initial
+        // with no underscore, so R722's `is_type_ident` admits it and `resolve_recv_type`'s unit-struct
+        // fallback types it as `ratescore::SHARED` — a type no crate declares. The typed join then asks
+        // the chained report for `ratescore#SHARED::ping`, misses, and the caller read ABSENT (measured,
+        // `deny Env` and `deny Env Unknown` both 0) while `ratescore::SHARED.ping()` discloses.
+        //
+        // An ALL-CAPS leaf is exactly the one the type/const question cannot be settled for from a
+        // dependency's name alone (`lang::caps_value_leaf`; `caps_only_ident`'s doc says so: `MAX`, `DB`, `DEFAULT`), so
+        // the typed call is KEPT — a dependency's real `pub struct DB;` still joins as it did, and that is
+        // the floor — and the value marker is ADDED beside it. The consumer tries the typed key first and
+        // discloses only on a miss, so the hit case is byte-identical. Gated on a single-segment path
+        // that is not a binding and not one of this crate's own statics, and on the expansion being
+        // crate-qualified; the crate root is checked against the chained deps at consumption.
+        if let syn::Expr::Path(rp) = peel_value(&node.receiver) {
+            if let Some(n) = rp.path.get_ident().map(|i| i.to_string()) {
+                // The unbound spelling (`SHARED.ping()` after `use ratescore::SHARED`), or the BOUND one
+                // (`let s = &ratescore::SHARED; s.ping()`), whose provenance `visit_local` keeps for
+                // exactly this case. Both only when the receiver DID type — otherwise the arm above
+                // has already emitted the marker.
+                let bound_caps = self.dep_bound_vars.get(&n).filter(|p| {
+                    p.contains(VALUE_PROV_SEG)
+                        && crate::lang::caps_value_leaf(p.rsplit("::").next().unwrap_or(""))
+                });
+                let unbound_caps = crate::lang::caps_value_leaf(&n)
+                    && !self.locally_bound(&n)
+                    && !self.static_types.contains_key(&n);
+                if (bound_caps.is_some() || unbound_caps)
+                    && self.resolve_recv_type(&node.receiver).is_some()
+                    && self.resolve_recv_traits(&node.receiver).is_empty()
+                {
+                    if let Some(prov) = bound_caps.cloned().or_else(|| self.dep_value_provenance(&node.receiver)) {
+                        let (root, rest) = prov.split_once("::").unwrap_or((prov.as_str(), ""));
+                        self.calls.push(Call { argc: 0, entropy_arg: false,
+                            path: format!("{root}::{UNTYPED_RECV_MARKER}::{rest}::{leaf}"),
+                            leaf: leaf.clone(), str_arg: None,
+                            path_lits_partial: false, path_lit2: None,
+                            typed: false, method: false, is_macro: false,
+                        });
+                    }
+                }
             }
         }
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
@@ -5600,11 +5756,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     self.dep_bound_vars.insert(id.ident.to_string(), full.clone());
                                 }
                             }
+                        } else if let Some(prov) = self.with_pre_bindings(&pre_bindings, |s| {
+                            // SOUNDNESS R856/R857 — the BOUND spelling of a dependency-value receiver:
+                            // `let p = &n.parent; p.visit()`, `let s = &ratescore::SHARED; s.ping()`.
+                            // Read against the PRE-statement bindings, like every other RHS read here
+                            // (R107), so a self-shadowing `let n = &n.parent;` asks about the OUTER `n`.
+                            // Only when the RHS does not type: `vars` (written below, or by the
+                            // reference arm) wins at the call site regardless, because the marker is
+                            // emitted only for a receiver that resolves to nothing.
+                            if s.resolve_recv_type(&init.expr).is_some() {
+                                None
+                            } else {
+                                s.dep_value_provenance(&init.expr)
+                            }
+                        }) {
+                            self.dep_bound_vars.insert(id.ident.to_string(), prov);
                         }
                         if let Some(ty) = self.nominal_ctor_type(&init.expr) {
                             self.vars.insert(id.ident.to_string(), ty.clone());
                             // It typed after all — the provenance marker is redundant and must not fire.
-                            self.dep_bound_vars.remove(&id.ident.to_string());
+                            // SOUNDNESS R856 — EXCEPT for an all-caps dependency VALUE (`let s =
+                            // &ratescore::SHARED;`), which `ctor_type` types as a struct named `SHARED`
+                            // by R722's reading; the call site's all-caps arm needs the provenance kept
+                            // so it can ask the typed key AND disclose on its miss. See that arm.
+                            let keep = self.dep_bound_vars.get(&id.ident.to_string()).is_some_and(|p| {
+                                p.contains(VALUE_PROV_SEG)
+                                    && crate::lang::caps_value_leaf(p.rsplit("::").next().unwrap_or(""))
+                            });
+                            if !keep {
+                                self.dep_bound_vars.remove(&id.ident.to_string());
+                            }
                             // (The DROP-GLUE marker used to be emitted HERE, off the `Pat::Ident` binder.
                             // That is what made the charge BINDER-keyed: `let g = Guard{..}` was charged
                             // and the other sixteen executed positions a construction can occupy were
@@ -6049,6 +6230,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.charge_coercion(&node.expr, "Index", "index");
         syn::visit::visit_expr_index(self, node);
     }
+}
+
+/// SOUNDNESS R856 — `peel_recv` plus an explicit DEREFERENCE (`(*C).len()`), for the dependency-value
+/// provenance only. `resolve_recv_type` already treats `*x` as `x` (it collapses references and smart
+/// pointers to the pointee), so a provenance test that did not would see `C` typed and `(*C)` not — the
+/// spelling deciding the disclosure. Kept separate from `peel_recv`, which has seven other callers whose
+/// answers this change has no business moving.
+pub(crate) fn peel_value(expr: &syn::Expr) -> &syn::Expr {
+    let mut e = peel_recv(expr);
+    while let syn::Expr::Unary(u) = e {
+        if !matches!(u.op, syn::UnOp::Deref(_)) {
+            break;
+        }
+        e = peel_recv(&u.expr);
+    }
+    e
 }
 
 /// Peel the wrappers a method-call RECEIVER can carry without changing which value it is — `&x`, `(x)`,
