@@ -1490,7 +1490,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_fields = &merged.trait_fields;
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
-                       foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals };
+                       foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,
+                       impl_members: &merged.impl_members };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -2006,6 +2007,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // no trait qual can be formed, so there is nothing to compare and the caller falls through.
     let r533_fi_prefix: HashSet<String> =
         merged.foreign_impls.keys().filter_map(|k| r533_trait_prefix(k)).collect();
+    // SOUNDNESS R828 — `"{trait leaf}::{method}"` -> the units that implement it for a NON-NOMINAL self
+    // type, and the set of unit quals that exist, so a recorded qual that names no unit is hedged rather
+    // than trusted.
+    let nonnominal: HashMap<String, Vec<String>> = {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for e in &merged.nonnominal_impls {
+            if let Some((k, q)) = e.split_once('\u{1f}') {
+                m.entry(k.to_string()).or_default().push(q.to_string());
+            }
+        }
+        m
+    };
+    let unit_quals: HashSet<String> = fns.iter().map(|f| f.qual.clone()).collect();
+    // VEIN C — a LOCAL type's impls of a DEPENDENCY's trait, `type leaf -> [(trait leaf, expanded trait
+    // path)]`, read off R652's `!` key (the path each `impl` block wrote). Consulted only where a typed
+    // method call on that type resolved to nothing local; see the inherited-dependency-default arm.
+    let dep_traits_by_ty: HashMap<String, Vec<(String, String)>> = {
+        let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for k in &merged.impl_members {
+            let mut it = k.splitn(3, '\u{1f}');
+            let (Some(tr), Some(ty), Some(p)) = (it.next(), it.next(), it.next()) else { continue };
+            let Some(path) = p.strip_prefix('!') else { continue };
+            let Some((root, _)) = path.split_once("::") else { continue };
+            if crate::lang::is_dependency_crate_root(root) && deps_idx.crates.contains(root) {
+                m.entry(ty.to_string()).or_default().push((tr.to_string(), path.to_string()));
+            }
+        }
+        m
+    };
     let r533_fi_prefix_t2: HashSet<String> =
         foreign_impls_by_tail2.keys().filter_map(|k| r533_trait_prefix(k)).collect();
     let mut direct_dispatchers: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
@@ -2894,6 +2924,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // bare-leaf-METHOD suppression below was the special case of this; this covers the general
             // case (free fns and qualified `Type::method` calls the bare-leaf guard missed).
             let mut resolved_local = false;
+            // VEIN C — set when a typed call on a local type reaches a DEFAULT it inherits from a
+            // DEPENDENCY's trait; the chained join below then answers that member instead of `c.path`.
+            let mut dep_default_path: Option<String> = None;
             if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
                     .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport));
@@ -3040,6 +3073,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                             }
                         }
+                        // VEIN C — …AND A DEFAULT INHERITED FROM A DEPENDENCY'S TRAIT. `impl dep::Def for
+                        // Mine {}` with `m.def()` reached no local unit (the default body lives in the
+                        // dependency) and the rule above looks only for a LOCAL `Trait::leaf`, so the caller
+                        // left `functions[]` while the program ran the dependency's default — the UFCS
+                        // spelling `Def::def(m)` of the same call was already answered by the chained join.
+                        // Ask the chained report for that member, exactly as the UFCS spelling does, and
+                        // only where this type's impl block does NOT declare the member (else `Mine::def`
+                        // is a unit and was resolved above). A key the report does not answer adds nothing.
+                        if !resolved_local {
+                            if let Some(dts) = dep_traits_by_ty.get(&t_type) {
+                                for (tr_leaf, tpath) in dts {
+                                    if !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, &t_type, &c.leaf) {
+                                        continue;
+                                    }
+                                    let Some((root, rest)) = tpath.split_once("::") else { continue };
+                                    let full = format!("{root}#{rest}::{}", c.leaf);
+                                    let t2 = tail2(&format!("{rest}::{}", c.leaf)).map(|t| format!("{root}#{t}"));
+                                    let hit = deps_idx.by_key.get(&full)
+                                        .or_else(|| t2.as_ref().and_then(|k| deps_idx.by_key.get(k)));
+                                    if hit.is_some() && dep_default_path.is_none() {
+                                        if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                                            eprintln!("VEINC_DEPDEFAULT\t{}\t{full}", f.qual);
+                                        }
+                                        // Joined below by the SAME chained join the UFCS spelling
+                                        // reaches, so the member's `dispatchesOn` is followed too.
+                                        dep_default_path = Some(format!("{tpath}::{}", c.leaf));
+                                    }
+                                }
+                            }
+                        }
                         // AUTO-DEREF fallback (last, after inherent + trait-default — Rust's resolution
                         // order): a custom `impl Deref for t_type { type Target = U }` makes `recv.leaf()`
                         // dispatch to `U::leaf`. Chase the Deref chain (bounded) and edge to the first
@@ -3125,10 +3188,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // A renamed dep joins under its real package name (`cr_real`, hoisted above).
             let mut dep_join_hit = false;
             let mut dep_join_unknown = false;
-            if classified.is_none() && !resolved_local && !suppress_bare_leaf
-                && c.path.contains("::") && deps_idx.crates.contains(cr_real)
+            // The path the join asks with: the written one, or the dependency trait member a typed call
+            // inherits (see `dep_default_path`). Shadowed for this block only.
+            let (jpath, cr, cr_real): (&str, &str, &str) = match dep_default_path.as_deref() {
+                Some(p) => {
+                    let r = p.split("::").next().unwrap_or("");
+                    (p, r, dep_renames.get(r).map(String::as_str).unwrap_or(r))
+                }
+                None => (c.path.as_str(), cr, cr_real),
+            };
+            if classified.is_none() && (!resolved_local || dep_default_path.is_some()) && !suppress_bare_leaf
+                && jpath.contains("::") && deps_idx.crates.contains(cr_real)
             {
-                let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
+                let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
                 let key = if rel.contains("::") {
                     tail2(rel).map(|t2| format!("{cr_real}#{t2}"))
                 } else {
@@ -4029,7 +4101,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // member in a position Pass A cannot read — the same evidence shape as R452's
         // `macro_hidden_types`/`macro_hidden_fns` gate, not a blanket hedge on every dispatch.
         for (tr, meth) in &f.dispatch {
-            if merged.nested_impl_members.contains(&format!("{tr}::{meth}")) {
+            // SOUNDNESS R828 — a NON-NOMINAL implementor (`impl T5 for (u8, u8)`) is RESOLVED: its
+            // method is a unit, so this dispatch edges to it like the bounded CHA edges to a nominal
+            // one. A recorded qual that names no unit cannot be trusted, and is hedged instead.
+            if let Some(qs) = nonnominal.get(&format!("{tr}::{meth}")) {
+                for q in qs {
+                    if unit_quals.contains(q) {
+                        if q != &f.qual {
+                            calls.entry(f.qual.clone()).or_default().insert(q.clone());
+                        }
+                    } else {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{meth}"));
+                    }
+                }
+            }
+            if merged.nested_impl_members.contains(&format!("{tr}::{meth}"))
+                || merged.nested_impl_members.contains(&format!("{tr}::*")) // R828 — derive / `fn $m`
+            {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 // §4's normative `dispatch:<owner>.<member>` — the owner type IS resolvable (it is the
                 // trait), only the concrete body is not, which is verbatim the state this kind names.
@@ -4246,9 +4335,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     /// `tower_service#Service::clone` (41 -> 34). So this is a guard against a shape the corpus did
     /// not contain, not a cost reducer — crediting it with any part of the 39 -> 6 would be crediting
     /// it with the trait-prefix conjunct's work.
+    ///
+    /// **SOUNDNESS R630 — NOW KEYED ON THE (TRAIT, MEMBER) PAIR, NOT THE LEAF.** java's test is
+    /// `(name, desc)` on an `INVOKEINTERFACE` of `java.lang.Object`'s protocol, and those names are
+    /// RESERVED there. In rust none of these leaves is: any trait may declare `hash`, `fmt`, `cmp`,
+    /// `eq` or `to_string` as an ordinary, effectful requirement. Keyed on the leaf alone, a
+    /// dependency's `trait Digest { fn hash(&self) -> String; }` dispatched through `&dyn dep::Digest`
+    /// read PURE with no implementor anywhere (`deny Net Unknown` exit 0), and the R693 sibling —
+    /// `<T: dep::Shower>` over this crate's own `fmt` that opens a socket — read pure too; a test
+    /// pinned that as the expected answer. The member's key carries its trait qual
+    /// (`{owner}#{trait qual}::{method}`), so the exemption now asks for the protocol TRAIT as well:
+    /// `Debug::fmt` is the conventional member, `Digest::hash` is not. A DENYLIST of known-conventional
+    /// abstractions in place of an allowlist of bare names — the direction
+    /// [[candor-denylist-over-allowlist]] requires for narrowing a sound over-approximation, because an
+    /// unrecognised pair now keeps the hedge.
+    ///
+    /// THE RESIDUAL, STATED: the trait is matched by its LEAF, because a dependency that re-exports
+    /// `core::fmt::Debug` is keyed `dep#Debug::fmt` and nothing at this site can see the re-export. So a
+    /// dependency's OWN trait that is literally named `Hash` and declares an effectful `hash` is still
+    /// exempted. Measured cost of the narrowing is in the commit; the previous wording's "measured
+    /// inert" applies to the pricing corpus, which is also what makes this cheap.
     fn r533_exempt_leaf(mem: &str) -> bool {
-        let leaf = mem.rsplit("::").next().unwrap_or(mem);
-        matches!(leaf, "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp" | "to_string")
+        let mut it = mem.rsplit("::");
+        let leaf = it.next().unwrap_or(mem);
+        let tr = it.next().unwrap_or("");
+        match tr {
+            "Debug" | "Display" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp"
+            | "UpperExp" => leaf == "fmt",
+            "PartialEq" => matches!(leaf, "eq" | "ne"),
+            "Hash" => leaf == "hash",
+            "Ord" => leaf == "cmp",
+            "PartialOrd" => leaf == "partial_cmp",
+            "Clone" => leaf == "clone",
+            "ToString" => leaf == "to_string",
+            _ => false,
+        }
     }
 
     fn r529_reason(member: &str) -> String {
@@ -4949,7 +5070,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // union above is taken over the implementors this engine could NAME, not over the ones
                 // this crate has. Publishing that union as a complete answer is the silent-purity claim
                 // one spelling over from the one ⟨0.39⟩ closes; `Unknown` is what the union honestly is.
-                if merged.nested_impl_members.contains(&format!("{trait_leaf}::{method}")) {
+                // R828 — the NON-NOMINAL implementors' units, unioned like any other implementor's.
+                if let Some(qs) = nonnominal.get(&format!("{trait_leaf}::{method}")) {
+                    for q in qs {
+                        if !unit_quals.contains(q) {
+                            inf_u.insert("Unknown");
+                            continue;
+                        }
+                        if let Some(s) = inferred.get(q) {
+                            inf_u.extend(s.iter().copied());
+                        }
+                        if let Some(s) = blind_acc.get(q) {
+                            blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                        }
+                    }
+                }
+                if merged.nested_impl_members.contains(&format!("{trait_leaf}::{method}"))
+                    || merged.nested_impl_members.contains(&format!("{trait_leaf}::*")) // R828
+                {
                     inf_u.insert("Unknown");
                     if std::env::var_os("CANDOR_R529_INSTR").is_some() {
                         eprintln!("R529HIT\tUNION-LOCAL\t{trait_leaf}::{method}"); // §E1 REACH PROBE

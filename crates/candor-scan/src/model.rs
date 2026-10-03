@@ -753,6 +753,14 @@ pub(crate) struct LocalTrait {
     /// trait's methods AND (transitively) its supertraits' — else `t.base()` (a Super method via a `T: Sub`
     /// bound) read silent-pure. External supertraits are recorded but resolve to nothing (documented miss).
     pub(crate) supertraits: Vec<String>,
+    /// SOUNDNESS R776/R570 — the trait's ASSOCIATED fns (no receiver: `fn open(p) -> Self;`), kept apart
+    /// from `methods` on purpose. `methods` answers "is `x.leaf()` this trait's dispatch?", and an
+    /// associated fn can never be called with a receiver, so mixing them would let `x.open()` on an
+    /// unrelated value read as this trait's dispatch. This set answers the OTHER question, asked only by
+    /// a PATH call whose head is the trait or a generic bounded by it (`S::open(p)` under `S: Sink`,
+    /// `Sink::open(p)`, `Self::open(p)` in a default body) — the shapes that reached no dispatch decision
+    /// at all and read silent (R776).
+    pub(crate) assoc: std::collections::HashSet<String>,
 }
 
 /// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),
@@ -777,6 +785,10 @@ pub(crate) struct TraitIndexes<'a> {
     /// where a field / return / closure-parameter receiver has produced a bare leaf that the consuming
     /// file's `use` map cannot expand. See `lang::collect_written_trait_quals`.
     pub(crate) written_quals: &'a HashMap<String, String>,
+    /// SOUNDNESS R598's member index (`lang::collect_local_impl_members`), threaded into Pass B for ONE
+    /// reader: `route_trait_member_path`, which must not edge a UFCS call to `Ty::m` when `impl Tr for
+    /// Ty` does not declare `m` — `Ty::m` is then an INHERENT method the call does not run (R53).
+    pub(crate) impl_members: &'a std::collections::HashSet<String>,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

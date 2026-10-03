@@ -5808,20 +5808,37 @@ fn r608_an_unchained_dep_and_a_conventionally_pure_leaf_are_not_hedged() {
     let _ = std::fs::remove_dir_all(&dep);
     let _ = std::fs::remove_dir_all(&app);
 
-    // (b) A CONVENTIONALLY-PURE LEAF — SPEC §4's permitted exclusion, here with a zero implementor union
-    //     so that EVERY other conjunct passes and the exempt list is the only thing left deciding.
-    let (fdep, frep) = r608_dep_report("r608fmt", "pub trait Shower { fn fmt(&self); }\n");
+    // (b) A CONVENTIONALLY-PURE MEMBER — SPEC §4's permitted exclusion, here with a zero implementor
+    //     union so that EVERY other conjunct passes and the exempt set is the only thing left deciding.
+    //     SOUNDNESS R630: the set is keyed on the (TRAIT, MEMBER) PAIR. A dependency trait named `Debug`
+    //     declaring `fmt` is the protocol member and stays exempt…
+    let (fdep, frep) = r608_dep_report("r608fmt", "pub trait Debug { fn fmt(&self); }\n");
     let (fapp, fpol) = r608_consumer("r608fmtapp", "r608fmt",
-        "pub fn run(s: &dyn r608fmt::Shower) { s.fmt(); }\n", "deny Net Unknown\n");
+        "pub fn run(s: &dyn r608fmt::Debug) { s.fmt(); }\n", "deny Net Unknown\n");
     let (fcode, fv) = r608_run(&fapp, &fpol, Some(&frep));
     let _ = std::fs::remove_dir_all(&fdep);
     let _ = std::fs::remove_dir_all(&fapp);
     let frun = fv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
         .unwrap_or_else(|| panic!("{fv}"));
     assert_eq!(frun["inferred"], serde_json::json!([]),
-        "`fmt` is in the exempt leaf set; `call` deliberately is NOT, because in rust it is a real \
+        "`Debug::fmt` is in the exempt set; `call` deliberately is NOT, because in rust it is a real \
          effectful trait method (`tower_service#Service::call`): {fv}");
     assert_eq!(fcode, 0, "{fv}");
+
+    // (c) …and the SAME leaf on any other trait is an ordinary requirement. CHANGED DELIBERATELY: this
+    //     arm used to assert `[]`/exit 0 for `trait Shower { fn fmt(&self); }`, which is R630 itself —
+    //     no implementor anywhere, and a purity claim over a dispatch nobody can answer.
+    let (sdep, srep) = r608_dep_report("r630shw", "pub trait Shower { fn fmt(&self); }\n");
+    let (sapp, spol) = r608_consumer("r630shwapp", "r630shw",
+        "pub fn run(s: &dyn r630shw::Shower) { s.fmt(); }\n", "deny Net Unknown\n");
+    let (scode, sv) = r608_run(&sapp, &spol, Some(&srep));
+    let _ = std::fs::remove_dir_all(&sdep);
+    let _ = std::fs::remove_dir_all(&sapp);
+    let srun = sv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("{sv}"));
+    assert_eq!(srun["inferred"], serde_json::json!(["Unknown"]), "R630: {sv}");
+    assert_eq!(srun["unknownWhy"], serde_json::json!(["dispatch:Shower.fmt"]), "R630: {sv}");
+    assert_eq!(scode, 1, "R630 — `deny Net Unknown` must fire: {sv}");
 }
 
 /// ⟨0.40⟩ SOUNDNESS R609 — **A PURE-ONLY UNION IS PUBLISHED; A ZERO-IMPLEMENTOR ONE IS NOT.** That
@@ -6156,22 +6173,40 @@ fn r693_the_four_controls_that_bound_the_dispatch_disclosure() {
     assert_eq!(bcode, 0, "{bv}");
     let _ = std::fs::remove_dir_all(&bdep); let _ = std::fs::remove_dir_all(&bapp);
 
-    // (c) A CONVENTIONALLY-PURE LEAF — SPEC §4's permitted exclusion (`r533_exempt_leaf`), with every
-    //     other conjunct passing so the exempt set is the only thing left deciding.
-    let (cdep, crep) = r608_dep_report("r693fmt", "pub trait Shower { fn fmt(&self); }\n");
+    // (c) A CONVENTIONALLY-PURE MEMBER — SPEC §4's permitted exclusion (`r533_exempt_leaf`), with every
+    //     other conjunct passing so the exempt set is the only thing left deciding. SOUNDNESS R630 keys
+    //     the set on the (TRAIT, MEMBER) pair, so the exempt arm names the protocol trait. NOTE WHAT THIS
+    //     PINS: the trait is matched by LEAF (a re-export of `core::fmt::Display` is keyed by its leaf
+    //     too), so a dependency's OWN trait literally named `Display` with an effectful `fmt` is the
+    //     stated residual of `r533_exempt_leaf`, and this arm is that residual, executed and recorded…
+    let (cdep, crep) = r608_dep_report("r693fmt", "pub trait Display { fn fmt(&self); }\n");
     let (capp, cpol) = r608_consumer("r693fmtapp", "r693fmt",
         "pub struct Mine;\n\
-         impl r693fmt::Shower for Mine { fn fmt(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
-         pub fn run<T: r693fmt::Shower>(s: &T) { s.fmt(); }\n", "deny Net Unknown run::\n");
+         impl r693fmt::Display for Mine { fn fmt(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub fn run<T: r693fmt::Display>(s: &T) { s.fmt(); }\n", "deny Net Unknown run::\n");
     let (ccode, cv) = r608_run(&capp, &cpol, Some(&crep));
     let crun = cv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run");
     if let Some(r) = crun {
         assert_eq!(r["inferred"], serde_json::json!([]),
-            "`fmt` is in §4's exempt leaf set, and the set is shared with the sibling rule rather than \
+            "`Display::fmt` is in §4's exempt set, and the set is shared with the sibling rule rather than \
              re-spelled: {cv}");
     }
     assert_eq!(ccode, 0, "{cv}");
     let _ = std::fs::remove_dir_all(&cdep); let _ = std::fs::remove_dir_all(&capp);
+    // (c2) …and the byte-identical program over a trait that merely DECLARES a `fmt` is the R630 sin
+    //      this arm used to pin as the expected answer: this crate's own implementor opens a socket,
+    //      the bound receiver reaches it, and `deny Net Unknown run::` exited 0. CHANGED DELIBERATELY.
+    let (c2dep, c2rep) = r608_dep_report("r630fmt", "pub trait Shower { fn fmt(&self); }\n");
+    let (c2app, c2pol) = r608_consumer("r630fmtapp", "r630fmt",
+        "pub struct Mine;\n\
+         impl r630fmt::Shower for Mine { fn fmt(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub fn run<T: r630fmt::Shower>(s: &T) { s.fmt(); }\n", "deny Net Unknown run::\n");
+    let (c2code, c2v) = r608_run(&c2app, &c2pol, Some(&c2rep));
+    let c2run = c2v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "run")
+        .unwrap_or_else(|| panic!("R630: `run` must not be ABSENT: {c2v}"));
+    assert_eq!(c2run["unknownWhy"], serde_json::json!(["dispatch:Shower.fmt"]), "R630: {c2v}");
+    assert_eq!(c2code, 1, "R630 — `deny Net Unknown run::` must fire: {c2v}");
+    let _ = std::fs::remove_dir_all(&c2dep); let _ = std::fs::remove_dir_all(&c2app);
 
     // (d) A LOCAL TRAIT — the whole rule is about a FOREIGN one. `dispatch_calls_for_trait_method`
     //     already fans CHA out over a local trait's implementors regardless of erasure, so the receiver
@@ -6228,4 +6263,79 @@ fn r693_both_spellings_of_a_trait_member_fn_reference_mint_one_key() {
         assert_eq!(r["unknownWhy"], serde_json::json!(["dispatch:Sink.emit"]),
             "…and one reason spelling beside it: {v}");
     }
+}
+
+/// VEIN C — a LOCAL trait sharing its LEAF with a dependency's trait must not capture the dependency's
+/// dispatch. `pub fn run(h: &dyn dep::Handler)` beside an unrelated local `trait Handler` was sent down
+/// the local arm (CHA over the local, pure implementor) and read `[]`, with the WRONG `dispatchesOn`
+/// key, where the identical consumer without the local trait reads `Unknown` (R608). EXECUTED in scratch
+/// `fx/z/zapp4`: the dependency's implementor writes a file through `run_dep`.
+#[test]
+fn veinc_a_same_leaf_local_trait_does_not_capture_a_dependency_dispatch() {
+    let (dep, rep) = r608_dep_report("vcdep", "pub trait Handler { fn handle(&self); }\n");
+    let (app, pol) = r608_consumer("vcdepapp", "vcdep",
+        "pub trait Handler { fn handle(&self); }\n\
+         pub struct Mine;\n\
+         impl Handler for Mine { fn handle(&self) {} }\n\
+         pub fn run_dep(h: &dyn vcdep::Handler) { h.handle() }\n\
+         pub fn run_own(h: &dyn Handler) { h.handle() }\n", "deny Net Unknown run_dep::\n");
+    let (code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+    let f = |n: &str| v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == n).cloned();
+    let d = f("run_dep").unwrap_or_else(|| panic!("`run_dep` must not be ABSENT: {v}"));
+    assert_eq!(d["inferred"], serde_json::json!(["Unknown"]), "{v}");
+    assert_eq!(d["unknownWhy"], serde_json::json!(["dispatch:Handler.handle"]), "{v}");
+    assert_eq!(code, 1, "`deny Net Unknown run_dep::` must fire: {v}");
+    // CONTROL — the crate's own trait is still the crate's own: answered by its pure implementor.
+    assert_eq!(f("run_own").map(|e| e["inferred"].clone()).unwrap_or(serde_json::json!([])),
+               serde_json::json!([]), "{v}");
+}
+
+/// SOUNDNESS R629, CHAINED — a library trait with NO implementor of its own, whose default body
+/// dispatches on a requirement. The library published NOTHING for `Zero::drive` (absent = pure), so a
+/// consumer that implements `Zero` with a socket and calls `m.drive()` read pure. The default body now
+/// discloses and publishes `dispatchesOn`, and the consumer's own implementor answers the join.
+#[test]
+fn veinc_r629_a_zero_implementor_default_body_is_not_published_pure() {
+    let (dep, rep) = r608_dep_report("vczero",
+        "pub trait Zero { fn sink(&self); fn drive(&self) { self.sink() } }\n");
+    let dv: serde_json::Value = serde_json::from_slice(&std::fs::read(&rep).unwrap()).unwrap();
+    let drive = dv["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "Zero::drive")
+        .unwrap_or_else(|| panic!("the library must not publish `Zero::drive` as pure: {dv}"));
+    assert_eq!(drive["unknownWhy"], serde_json::json!(["dispatch:Zero.sink"]), "{dv}");
+    let (app, pol) = r608_consumer("vczeroapp", "vczero",
+        "use vczero::Zero;\n\
+         pub struct Mine;\n\
+         impl Zero for Mine { fn sink(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+         pub fn go(m: &Mine) { m.drive() }\n", "deny Net go::\n");
+    let (code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+    assert_eq!(code, 1, "`deny Net go::` must fire through the consumer's own implementor: {v}");
+}
+
+/// VEIN C — a concrete receiver calling a DEFAULT method it inherits from a DEPENDENCY's trait.
+/// `impl dep::Def for Mine { fn req(&self) {} }` + `m.def()` left the caller ABSENT: the inherit-the-default
+/// rule looks only for a LOCAL `Trait::def` unit, while the UFCS spelling `Def::def(m)` of the same call
+/// was answered by the chained join. EXECUTED in scratch `fx/nc2`: `method` writes the file.
+#[test]
+fn veinc_an_inherited_dependency_default_method_is_joined() {
+    let (dep, rep) = r608_dep_report("vcdef",
+        "pub trait Def { fn req(&self); fn def(&self) { let _ = std::fs::write(\"/tmp/vcdef\", \"x\"); } }\n");
+    let (app, pol) = r608_consumer("vcdefapp", "vcdef",
+        "use vcdef::Def;\n\
+         pub struct Mine;\n\
+         impl Def for Mine { fn req(&self) {} }\n\
+         pub fn method(m: &Mine) { m.def() }\n\
+         pub struct Own;\n\
+         impl Def for Own { fn req(&self) {} fn def(&self) {} }\n\
+         pub fn overridden(o: &Own) { o.def() }\n", "deny Fs method::\n");
+    let (code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+    assert_eq!(code, 1, "`deny Fs method::` must fire: {v}");
+    // CONTROL — an impl that OVERRIDES the member is its own unit; the dependency's default is not run.
+    let o = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "overridden");
+    assert!(o.is_none_or(|e| !e["inferred"].as_array().unwrap().iter().any(|x| x == "Fs")), "{v}");
 }

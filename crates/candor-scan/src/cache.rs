@@ -255,6 +255,13 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // vetoes what that loop body builds, so a rev18 entry replays, warm, a body that reads as pure
     // while its guard demonstrably drops. serde would read that entry without complaint; the token is
     // the only thing that stops it. Same shape as rev16.
+    // rev53: `FileDecls` gained `trait_assoc` (R776 — a trait's ASSOCIATED fns) and `nonnominal_impls`
+    // (R828 — a non-nominal implementor's unit), `nested_impl_members`/`nested_impl_foreign` now also
+    // record macro-generated and derived implementors (R828), `trait_impls`/`impl_members` key a renamed
+    // trait import under the trait's real leaf (R828), and Pass B's `calls` records new dispatch edges
+    // for trait-member PATH calls and default-body `self.m()` (R570, R576(a), R629, R743). A rev52 entry
+    // deserializes the new fields EMPTY and replays the old `calls`, so a warm cache would serve exactly
+    // the silences those rows close. Same shape as rev52.
     // rev52: SOUNDNESS R856/R857 changed what Pass B's `calls` RECORDS — a method on a dependency VALUE
     // (`dep::SHARED.ping()`, `n.parent.visit()` with `n: &dep::Node`, `let s = &dep::SHARED; s.ping()`)
     // now emits a `<untyped>` marker, and a qualified unit-struct literal (`m::Unit.go()`) now types.
@@ -332,7 +339,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev52/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev53/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -383,6 +390,10 @@ pub(crate) struct FileDecls {
     pub(crate) trait_impls: TraitImplIndex,
     /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
     pub(crate) trait_decls: HashMap<String, (usize, Vec<String>, Vec<String>)>,
+    /// R776 — `LocalTrait::assoc`, flattened beside `trait_decls` (trait leaf -> associated fn names).
+    /// A separate map rather than a fourth tuple slot so the existing triple keeps its shape.
+    #[serde(default)]
+    pub(crate) trait_assoc: HashMap<String, Vec<String>>,
     pub(crate) trait_fields: TraitFieldIndex,
     /// SOUNDNESS R562 — the `dyn`-ONLY twin of `trait_fields`, keyed identically (struct leaf ->
     /// field name -> trait leaves). `trait_fields` collapses `dyn T`, `impl T` and `T: Bound`; the
@@ -521,6 +532,12 @@ pub(crate) struct FileDecls {
     /// `collect_foreign_trait_impls`'s own `"{owner}#{trait qual}::{method}"` key spelling.
     #[serde(default)]
     pub(crate) nested_impl_foreign: Vec<String>,
+    /// SOUNDNESS R828 — a LOCAL trait implemented for a NON-NOMINAL self type (`impl T5 for (u8, u8)`):
+    /// `"{trait leaf}::{method}\u{1f}{unit qual}"`. `collect_decls` files no CHA edge for it (no type
+    /// name), but `scan_items` DOES mint the method as a unit — under the module path alone — so the
+    /// implementor can be reached, which a hedge would only disclose. See `lang::collect_opaque_trait_impls`.
+    #[serde(default)]
+    pub(crate) nonnominal_impls: Vec<String>,
     /// SOUNDNESS R598 — the EVIDENCE about which members this file's `impl Trait for Ty` blocks declare
     /// (`lang::collect_local_impl_members`; three key shapes, `model::impl_seen_key`). A pre-rev41 entry
     /// deserializes EMPTY, which reads as "no evidence" and restores the pre-fix over-approximation for
@@ -621,6 +638,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut nested_externs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_block_nested_trait_impls(
         items, include_tests, &uses, &mut nested_local, &mut nested_foreign, &mut nested_externs);
+    // SOUNDNESS R828 — and the item-level implementors the CHA index cannot name (a non-nominal self
+    // type, a `macro_rules!`-generated impl, a `#[derive]`), into the SAME two sets: one question
+    // ("does this crate implement that member somewhere the index cannot see?"), one answer.
+    let mut nonnominal: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    crate::lang::collect_opaque_trait_impls(
+        items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal);
     extern_fns.extend(nested_externs);
     // R598 — which members each `impl Trait for Ty` block actually declares. Walked beside the two
     // above for the same reason and over the same `items`: `collect_decls` records the CHA edge and
@@ -637,6 +660,15 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         enum_tmp,
         enum_variant_traits,
         trait_impls,
+        trait_assoc: trait_decls
+            .iter()
+            .filter(|(_, v)| !v.assoc.is_empty())
+            .map(|(k, v)| {
+                let mut a: Vec<String> = v.assoc.iter().cloned().collect();
+                a.sort(); // content-hashed: a HashSet's order must not reach the entry
+                (k.clone(), a)
+            })
+            .collect(),
         trait_decls: trait_decls
             .into_iter()
             .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect(), v.supertraits)))
@@ -707,6 +739,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
+        nonnominal_impls: nonnominal.into_iter().collect(),
         // R598 — same determinism requirement, same reason.
         impl_members: impl_members.into_iter().collect(),
     }
@@ -791,6 +824,8 @@ pub(crate) struct MergedDecls {
     pub(crate) nested_impl_members: std::collections::HashSet<String>,
     /// R529 — the same, keyed under the OWNING crate for an abstraction this crate does not own.
     pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
+    /// R828 — every file's `FileDecls::nonnominal_impls`, unioned.
+    pub(crate) nonnominal_impls: std::collections::HashSet<String>,
     /// SOUNDNESS R598 — every file's IMPL-MEMBER EVIDENCE, unioned. See `FileDecls::impl_members` and
     /// `model::impl_seen_key`. Union is the right merge in both directions: two files can write two
     /// `impl Tr for Ty` blocks for two different `Ty`s under one leaf, and a file that cannot read its
@@ -1046,6 +1081,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for (tr, tys) in &fd.trait_impls {
         acc.trait_impls.entry(tr.clone()).or_default().extend(tys.iter().cloned());
     }
+    for (tr, assoc) in &fd.trait_assoc {
+        acc.trait_decls.entry(tr.clone()).or_default().assoc.extend(assoc.iter().cloned()); // set union (R776)
+    }
     for (tr, (count, methods, supers)) in &fd.trait_decls {
         let e = acc.trait_decls.entry(tr.clone()).or_default();
         e.count += count;
@@ -1084,6 +1122,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for n in &fd.macro_hidden_fns {
         acc.macro_hidden_fns.insert(n.clone()); // set union — order-independent (R452)
+    }
+    for n in &fd.nonnominal_impls {
+        acc.nonnominal_impls.insert(n.clone()); // set union — order-independent (R828)
     }
     for n in &fd.nested_impl_members {
         acc.nested_impl_members.insert(n.clone()); // set union — order-independent (R529)
@@ -1318,6 +1359,12 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
             s.push(';');
             s.push_str(mname);
         }
+        let mut asc: Vec<&String> = lt.assoc.iter().collect();
+        asc.sort();
+        for aname in asc {
+            s.push('&'); // R776 — associated fns; a distinct sigil so `fn a` and `fn a(&self)` differ
+            s.push_str(aname);
+        }
         let mut sup: Vec<&String> = lt.supertraits.iter().collect();
         sup.sort();
         for sname in sup {
@@ -1389,6 +1436,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for (label, set) in [
         ("nested_impl_members", &m.nested_impl_members),
         ("nested_impl_foreign", &m.nested_impl_foreign),
+        ("nonnominal_impls", &m.nonnominal_impls),
         ("impl_members", &m.impl_members),
     ] {
         s.push_str(label);

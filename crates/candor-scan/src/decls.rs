@@ -2133,6 +2133,12 @@ pub(crate) fn fninfo(
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
         // a LOCAL `let`'s type annotation.
         generic_bounds: crate::lang::generic_bounds_of(sig),
+        // R570/R776 — the impl block's generics, read only by the trait-member path router.
+        impl_generic_bounds: impl_generics.map(crate::lang::generic_bounds_of_generics).unwrap_or_default(),
+        // R576(a)/R629 — a trait DEFAULT body is the one `fninfo` call with a self type and no impl
+        // block (see the three call sites in `scan_items`), so this is exactly that case.
+        trait_self: if impl_generics.is_none() { self_ty.map(str::to_string) } else { None },
+        impl_members: traits.impl_members,
         // The crate-qualified spelling of any bound written in full (`&dyn deplib::Handler`) — R6.
         trait_quals: crate::lang::sig_trait_quals(sig),
         bound_trait_leaves: {
@@ -3256,6 +3262,10 @@ pub(crate) fn collect_decls(
                         // never mis-reads `Trait::assoc(&x)` as a receiver call on `x`.
                         if matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
                             e.methods.insert(m.sig.ident.to_string());
+                        } else {
+                            // R776 — recorded in its OWN set; see `LocalTrait::assoc` for why the two
+                            // must not mix.
+                            e.assoc.insert(m.sig.ident.to_string());
                         }
                     }
                 }
@@ -3353,7 +3363,10 @@ pub(crate) fn collect_decls(
                 // `impl Trait for Type` — a CHA edge from the trait leaf to the implementing type.
                 if let (Some((_, tr, _)), Some(ty)) = (&im.trait_, &self_ty) {
                     if let Some(leaf) = tr.segments.last() {
-                        trait_impls.entry(leaf.ident.to_string()).or_default().push(ty.clone());
+                        // SOUNDNESS R828 — keyed by the trait's REAL leaf: a renamed import
+                        // (`use super::T10 as Renamed; impl Renamed for M10`) is filed under `T10`.
+                        let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
+                        trait_impls.entry(key).or_default().push(ty.clone());
                         // A LOCAL `impl Drop for Type` — its `drop` body runs at scope exit, an implicit
                         // edge the syntactic call graph doesn't otherwise model. Record the type leaf so a
                         // fn that BINDS a value of this type inherits the (already-scanned) `Type::drop`

@@ -238,7 +238,7 @@
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -291,7 +291,7 @@
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars,
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -620,7 +620,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
@@ -7683,8 +7683,8 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         let mut ti = TraitImplIndex::new();
         ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
-        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![] });
-        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![] }); // no impl in sight
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() }); // no impl in sight
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
@@ -7705,7 +7705,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars,
                 trait_vars,
-                dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
                 dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
@@ -7762,7 +7762,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -7788,7 +7788,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -7823,7 +7823,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -7862,7 +7862,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
-                dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+                dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
                 dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
@@ -12279,7 +12279,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -12314,7 +12314,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -12347,7 +12347,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -14419,6 +14419,8 @@ trait G {
             // appeared would replay the silent purity claim the row closes.
             nested_impl_members => |m| { m.nested_impl_members.insert("Backend::size".into()); },
             nested_impl_foreign => |m| { m.nested_impl_foreign.insert("iface#backend::Backend::size".into()); },
+            // SOUNDNESS R828: a non-nominal implementor's unit, which a dispatch now edges to.
+            nonnominal_impls => |m| { m.nonnominal_impls.insert("T5::go\u{1f}go".into()); },
             // SOUNDNESS R598: WHICH members an `impl Trait for Ty` block declares. It decides whether
             // `{ty}::{method}` is read as that trait's implementation at all, so a file gaining or
             // losing an impl member changes what the interface-union publishes for the whole crate.
@@ -16026,7 +16028,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev52/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev53/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -16132,7 +16134,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let mut li = 0usize;
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
-                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() },
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
@@ -16183,7 +16185,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (mut uses, mut out, mut li) = (HashMap::new(), Vec::new(), 0usize);
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
-                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new() },
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
@@ -20721,7 +20723,7 @@ pub fn go() {{ imp::doit(); }}
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
@@ -20889,7 +20891,11 @@ pub fn go() {{ imp::doit(); }}
                 fn via_self() -> String { Self::helper() }\n\
                 fn via_trait() -> String { <Self as R>::helper() }\n\
             }\n");
-        assert_eq!(effs(fn_entry(&v, "R::via_self")), vec!["Env".to_string()]);
+        // SOUNDNESS R629 — CHANGED DELIBERATELY from `["Env"]`. The default body is still reached (the
+        // `Env` is kept: R160's floor), and `R` has NO local implementor, so `Self::helper()` is ALSO a
+        // dispatch nobody here can answer — an implementor elsewhere may override `helper`. That is the
+        // `&dyn R` answer (`dispatch:R.helper`), which the path spelling now shares.
+        assert_eq!(effs(fn_entry(&v, "R::via_self")), vec!["Env".to_string(), "Unknown".to_string()]);
         assert_eq!(effs(fn_entry(&v, "R::via_self")), effs(fn_entry(&v, "R::via_trait")),
                    "the two spellings of the same call must agree");
     }
@@ -21191,8 +21197,15 @@ pub fn go() {{ imp::doit(); }}
                 pub fn probe() -> usize { let _ = std::fs::read_to_string(\"/p\"); 13 }\n\
                 pub fn outer() -> usize { impl Sl for &[u8] { fn go() -> usize { Self::probe() } } <&[u8] as Sl>::go() }\n\
             }\n");
-        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "C2::outer"),
+        // The property is that `C2::probe`'s Fs is NOT charged. CHANGED DELIBERATELY from "C2::outer is
+        // absent": since R570/R776 `<&[u8] as Sl>::go()` asks the dispatch authority, and `Sl`'s only
+        // implementor is body-nested (no unit), so the honest answer is `dispatch:Sl.go`, never Fs.
+        let outer = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "C2::outer");
+        if let Some(o) = outer {
+            assert_eq!(o["inferred"], serde_json::json!(["Unknown"]),
                 "`Self` inside `impl Sl for &[u8]` is not `C2`; charging `C2::probe`'s Fs is a fabrication:\n{v:#}");
+            assert_eq!(o["unknownWhy"], serde_json::json!(["dispatch:Sl.go"]), "{v:#}");
+        }
     }
 
     /// R175 — the GENERIC impl the panel left unexamined. `impl<T> Fo<T>`'s own `Self::` forwarder must
@@ -24512,4 +24525,184 @@ pub fn go() {{ imp::doit(); }}
         assert!(!effs(vr).iter().any(|e| e == "Unknown"),
                 "`use crate::Other; Other::grab(x)` is resolved by the exact-qual rule — a hedge here would \
                  mean this fired where a resolution should have:\n{vr:#}");
+    }
+
+    // ── VEIN C — TRAIT DISPATCH DECIDED AT ONE AUTHORITY ────────────────────────────────────────────
+    // Every fixture below was compiled and EXECUTED (scratch `fx/vc`, `fx/z`, `fx/r828`): each silent
+    // cell really writes its file. On candor-scan HEAD `ac782c4` every `must charge` cell below is
+    // ABSENT from `functions[]` (or `[]` with a row), and its scoped `deny` gate exits 0.
+
+    /// SOUNDNESS R570 — every PATH spelling of a trait-member call reaches the dispatch authority.
+    /// `s.limit()` was charged and `Dsl::limit(s)`, `<S1 as Dsl>::limit(s)`, `T::limit(t)`,
+    /// `<T as Dsl>::limit(t)`, `let f = Dsl::limit; f(s)` and `Dsl::limit(d)` over `d: &dyn Dsl` were
+    /// all ABSENT: a requirement has no body, so the path resolved to no unit and nothing disclosed.
+    #[test]
+    fn veinc_r570_every_path_spelling_of_a_trait_member_call_dispatches() {
+        let v = scan_src_to_json("veincr570", "\
+            pub trait Dsl { fn limit(&self) -> u8; }\n\
+            pub struct S1;\n\
+            impl Dsl for S1 { fn limit(&self) -> u8 { let _ = std::fs::write(\"/tmp/vc\", \"x\"); 1 } }\n\
+            pub fn ufcs_trait(s: &S1) -> u8 { Dsl::limit(s) }\n\
+            pub fn ufcs_qself(s: &S1) -> u8 { <S1 as Dsl>::limit(s) }\n\
+            pub fn ufcs_generic<T: Dsl>(t: &T) -> u8 { T::limit(t) }\n\
+            pub fn ufcs_qself_generic<T: Dsl>(t: &T) -> u8 { <T as Dsl>::limit(t) }\n\
+            pub fn ufcs_fnref(s: &S1) -> u8 { let f = Dsl::limit; f(s) }\n\
+            pub fn ufcs_dyn(s: &dyn Dsl) -> u8 { Dsl::limit(s) }\n\
+            pub fn ctl_method(s: &S1) -> u8 { s.limit() }\n\
+            pub trait Tp { fn parse(&self) -> u8; fn parse_ref(&self) -> u8 { Tp::parse(self) } }\n\
+            pub struct P1;\n\
+            impl Tp for P1 { fn parse(&self) -> u8 { let _ = std::fs::write(\"/tmp/vp\", \"x\"); 1 } }\n\
+            pub fn via_tp(p: &P1) -> u8 { p.parse_ref() }\n");
+        for f in ["ufcs_trait", "ufcs_qself", "ufcs_generic", "ufcs_qself_generic", "ufcs_fnref", "ufcs_dyn",
+                  "ctl_method", "Tp::parse_ref", "via_tp"] {
+            assert_eq!(effs(fn_entry(&v, f)), vec!["Fs".to_string()], "R570 `{f}`:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R570 — R53's precision requirement survives: a qself that NAMES the implementor edges
+    /// to that implementor alone, never to a sibling (CHA over every implementor fabricates on a
+    /// statically-known receiver). The OVER-CHARGE control for the test above.
+    #[test]
+    fn veinc_r570_a_named_implementor_is_not_fanned_out_to_its_siblings() {
+        let v = scan_src_to_json("veincr570named", "\
+            pub trait Dsl { fn limit(&self) -> u8; }\n\
+            pub struct Quiet;\n\
+            impl Dsl for Quiet { fn limit(&self) -> u8 { 1 } }\n\
+            pub struct Loud;\n\
+            impl Dsl for Loud { fn limit(&self) -> u8 { let _ = std::fs::write(\"/tmp/vl\", \"x\"); 2 } }\n\
+            pub fn named_qself(q: &Quiet) -> u8 { <Quiet as Dsl>::limit(q) }\n\
+            pub fn named_arg(q: &Quiet) -> u8 { Dsl::limit(q) }\n\
+            pub fn unnamed<T: Dsl>(t: &T) -> u8 { T::limit(t) }\n");
+        assert_eq!(effs_opt(&v, "named_qself"), Vec::<String>::new(), "`Loud` is not `Quiet`:\n{v:#}");
+        assert_eq!(effs_opt(&v, "named_arg"), Vec::<String>::new(), "`Loud` is not `Quiet`:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "unnamed")), vec!["Fs".to_string()],
+                   "an UNNAMED implementor is every implementor:\n{v:#}");
+    }
+
+    /// SOUNDNESS R776 — an ASSOCIATED fn (no receiver) reached through a generic bound, a `where`
+    /// clause, the trait path, or `Self::` in a default body. All four were ABSENT with no union row.
+    #[test]
+    fn veinc_r776_an_associated_fn_through_a_bound_dispatches() {
+        let v = scan_src_to_json("veincr776", "\
+            pub trait Sink: Sized { fn open(p: &str) -> Self; fn make() -> Self { Self::open(\"d\") } }\n\
+            pub struct RealSink;\n\
+            impl Sink for RealSink { fn open(_p: &str) -> Self { let _ = std::fs::write(\"/tmp/vs\", \"x\"); RealSink } }\n\
+            pub fn build_via_trait<S: Sink>(p: &str) -> S { S::open(p) }\n\
+            pub fn build_where<S>(p: &str) -> S where S: Sink { S::open(p) }\n\
+            pub fn build_trait_path<S: Sink>(p: &str) -> S { Sink::open(p) }\n\
+            pub fn outer_build(p: &str) { let _s: RealSink = build_via_trait(p); }\n\
+            pub struct Pipe<S>(pub S);\n\
+            impl<S: Sink> Pipe<S> { pub fn fresh(p: &str) -> S { S::open(p) } }\n");
+        for f in ["build_via_trait", "build_where", "build_trait_path", "outer_build", "Sink::make", "Pipe::fresh"] {
+            assert_eq!(effs(fn_entry(&v, f)), vec!["Fs".to_string()], "R776 `{f}`:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R576(a) — `self.m()` in a default body where `m` HAS a default and an implementor
+    /// OVERRIDES it. The static binding reached only the (pure) default, so `concrete` was ABSENT and
+    /// `dynr` read `[]` with a row. Control: a REQUIREMENT `m` (Pass B's twin) was already charged.
+    #[test]
+    fn veinc_r576a_an_override_of_a_defaulted_member_is_reached_from_the_default_body() {
+        let v = scan_src_to_json("veincr576a", "\
+            pub trait Run { fn emit(&self) {} fn run(&self) { self.emit() } }\n\
+            pub struct L;\n\
+            impl Run for L { fn emit(&self) { let _ = std::fs::write(\"/tmp/v5\", \"x\"); } }\n\
+            pub fn concrete(l: &L) { l.run() }\n\
+            pub fn dynr(r: &dyn Run) { r.run() }\n\
+            pub fn generic<R: Run>(r: &R) { r.run() }\n\
+            pub trait Run2 { fn emit(&self); fn run(&self) { self.emit() } }\n\
+            pub struct L2;\n\
+            impl Run2 for L2 { fn emit(&self) { let _ = std::fs::write(\"/tmp/v6\", \"x\"); } }\n\
+            pub fn ctl_concrete(l: &L2) { l.run() }\n");
+        for f in ["Run::run", "concrete", "dynr", "generic", "ctl_concrete"] {
+            assert_eq!(effs(fn_entry(&v, f)), vec!["Fs".to_string()], "R576(a) `{f}`:\n{v:#}");
+        }
+        assert!(fn_entry(&v, "Run::run")["dispatchesOn"].as_array().unwrap().iter()
+                    .any(|k| k == "veincr576a#Run::emit"),
+                "the default body now publishes the key ⟨0.39⟩ obligation 3 joins on:\n{v:#}");
+    }
+
+    /// SOUNDNESS R629 — a default body dispatching on a member of a trait with NO local implementor
+    /// (a library's extension point). Pass B's twin CHA lived inside `if let Some(impls)`, so `drive`
+    /// left `functions[]`; the `&dyn Zero` spelling already disclosed. Both spellings now agree, and
+    /// the defaulted-member twin (R576(a)'s shape at zero implementors) discloses too.
+    #[test]
+    fn veinc_r629_a_zero_implementor_dispatch_in_a_default_body_discloses() {
+        let v = scan_src_to_json("veincr629", "\
+            pub trait Zero { fn sink(&self); fn drive(&self) { self.sink() } }\n\
+            pub trait ZeroD { fn sink(&self) {} fn drive(&self) { self.sink() } }\n\
+            pub fn via_dyn(z: &dyn Zero) { z.sink() }\n");
+        for (f, why) in [("Zero::drive", "dispatch:Zero.sink"), ("ZeroD::drive", "dispatch:ZeroD.sink"),
+                         ("via_dyn", "dispatch:Zero.sink")] {
+            let e = fn_entry(&v, f);
+            assert_eq!(effs(e), vec!["Unknown".to_string()], "R629 `{f}`:\n{v:#}");
+            assert_eq!(e["unknownWhy"], serde_json::json!([why]), "R629 `{f}`:\n{v:#}");
+        }
+        // CONTROL — one visible PURE implementor: the dispatch is answered, nothing is hedged.
+        let c = scan_src_to_json("veincr629ctl", "\
+            pub trait Zero { fn sink(&self); fn drive(&self) { self.sink() } }\n\
+            pub struct P;\n\
+            impl Zero for P { fn sink(&self) {} }\n");
+        assert_eq!(effs_opt(&c, "Zero::drive"), Vec::<String>::new(), "{c:#}");
+    }
+
+    /// SOUNDNESS R743 — a toolchain trait's method through a generic bound reaches the classifier the
+    /// way `CommandExt::exec(c)` already did. Control: a std trait with NO classifier rule (`Write`)
+    /// is unchanged — the `&mut dyn Write` and UFCS spellings agree on no effect.
+    #[test]
+    fn veinc_r743_a_std_trait_method_through_a_bound_is_classified() {
+        let v = scan_src_to_json("veincr743", "\
+            use std::os::unix::process::CommandExt;\n\
+            pub fn bound<C: CommandExt>(c: &mut C) -> std::io::Error { c.exec() }\n\
+            pub fn bound_where<C>(c: &mut C) -> std::io::Error where C: CommandExt { c.exec() }\n\
+            pub fn bound_impl(c: &mut impl CommandExt) -> std::io::Error { c.exec() }\n\
+            pub fn ctl_trait_path(c: &mut std::process::Command) -> std::io::Error { CommandExt::exec(c) }\n\
+            pub fn w_bound<W: std::io::Write>(w: &mut W) { let _ = w.write_all(b\"x\"); }\n\
+            pub fn w_dyn(w: &mut dyn std::io::Write) { let _ = w.write_all(b\"x\"); }\n");
+        for f in ["bound", "bound_where", "bound_impl", "ctl_trait_path"] {
+            assert_eq!(effs(fn_entry(&v, f)), vec!["Exec".to_string()], "R743 `{f}`:\n{v:#}");
+        }
+        assert_eq!(effs_opt(&v, "w_bound"), effs_opt(&v, "w_dyn"), "{v:#}");
+    }
+
+    /// SOUNDNESS R828 — implementors the CHA index cannot name. A `macro_rules!`-generated impl is
+    /// disclosed (`dispatch:T1.go`, and the published union carries `Unknown`); a TUPLE self type and a
+    /// RENAMED import are RESOLVED — the tuple impl's method is a unit (minted under the module path),
+    /// and the renamed trait can be named. Control: a trait whose implementors are all nominal and pure
+    /// keeps its pure-only union and a pure dispatch.
+    #[test]
+    fn veinc_r828_implementors_the_index_cannot_name_are_disclosed_or_resolved() {
+        let v = scan_src_to_json("veincr828", "\
+            fn wr(p: &str) { let _ = std::fs::write(p, \"x\"); }\n\
+            pub struct Pure;\n\
+            pub trait T1 { fn go(&self, p: &str); }\n\
+            impl T1 for Pure { fn go(&self, _p: &str) {} }\n\
+            macro_rules! mk1 { ($t:ident) => { impl T1 for $t { fn go(&self, p: &str) { let _ = std::fs::write(p, \"x\"); } } } }\n\
+            pub struct M1; mk1!(M1);\n\
+            pub trait T5 { fn go(&self, p: &str); }\n\
+            impl T5 for Pure { fn go(&self, _p: &str) {} }\n\
+            impl T5 for (u8, u8) { fn go(&self, p: &str) { wr(p) } }\n\
+            pub trait T10 { fn go(&self, p: &str); }\n\
+            impl T10 for Pure { fn go(&self, _p: &str) {} }\n\
+            pub mod ren { use super::T10 as Renamed; pub struct M10; impl Renamed for M10 { fn go(&self, p: &str) { super::wr(p) } } }\n\
+            pub trait Tc { fn go(&self, p: &str); }\n\
+            impl Tc for Pure { fn go(&self, _p: &str) {} }\n\
+            pub fn l1(t: &dyn T1, p: &str) { t.go(p) }\n\
+            pub fn l5(t: &dyn T5, p: &str) { t.go(p) }\n\
+            pub fn l10(t: &dyn T10, p: &str) { t.go(p) }\n\
+            pub fn lc(t: &dyn Tc, p: &str) { t.go(p) }\n");
+        let e = fn_entry(&v, "l1");
+        assert_eq!(effs(e), vec!["Unknown".to_string()], "R828 `l1`:\n{v:#}");
+        assert_eq!(e["unknownWhy"], serde_json::json!(["dispatch:T1.go"]), "{v:#}");
+        let u = v["functions"].as_array().unwrap().iter()
+            .find(|x| x["fn"] == "T1::go" && x["interfaceUnion"] == true)
+            .unwrap_or_else(|| panic!("`T1::go` union row:\n{v:#}"));
+        assert_eq!(effs(u), vec!["Unknown".to_string()], "the published union must not claim purity:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "l10")), vec!["Fs".to_string()], "the renamed impl resolves:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "l5")), vec!["Fs".to_string()], "the tuple impl resolves:\n{v:#}");
+        let u5 = v["functions"].as_array().unwrap().iter()
+            .find(|x| x["fn"] == "T5::go" && x["interfaceUnion"] == true)
+            .unwrap_or_else(|| panic!("`T5::go` union row:\n{v:#}"));
+        assert_eq!(effs(u5), vec!["Fs".to_string()], "the published union carries the tuple impl:\n{v:#}");
+        assert_eq!(effs_opt(&v, "lc"), Vec::<String>::new(), "control:\n{v:#}");
     }

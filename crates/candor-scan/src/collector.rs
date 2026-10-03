@@ -194,6 +194,19 @@ pub(crate) struct CallCollector<'a> {
     /// across a nested `fn`/`impl` beside `dyn_sig_traits`, for the same reason — a nested item's `T`
     /// is its own, not the enclosing signature's.
     pub(crate) generic_bounds: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R570/R776 — the ENCLOSING IMPL BLOCK's generic bounds (`impl<S: Sink> Pipe<S>`), read
+    /// ONLY by `route_trait_member_path` so `S::open(p)` inside a method of that impl reaches the same
+    /// dispatch decision as one under a method-level bound. Kept out of `generic_bounds` deliberately:
+    /// that map types `let` annotations and casts, and widening it would change those readers too.
+    /// Cleared for a nested fn/impl (a nested item's generics are its own).
+    pub(crate) impl_generic_bounds: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R576(a)/R629 — `Some(trait leaf)` while walking that trait's DEFAULT method body, where
+    /// `self` is the unknown IMPLEMENTOR. `decls` types `self` as the trait in `vars` (R160), which
+    /// routes `self.m()` to a static target — the default body when `m` has one, the Pass B twin when it
+    /// does not — and neither of those is the dispatch authority. Read by the method-call site to ask it.
+    pub(crate) trait_self: Option<String>,
+    /// R598's member index, for `route_trait_member_path`'s R53 guard (see `TraitIndexes::impl_members`).
+    pub(crate) impl_members: &'a std::collections::HashSet<String>,
     /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
     /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
     /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
@@ -2408,11 +2421,19 @@ impl<'a> CallCollector<'a> {
     /// `Unknown`, never a guess); a bounded impl set (`<=12`) pushes a `Type::method` edge to every local
     /// implementor. Either way the caller must do nothing further for this `(tr, leaf)`.
     fn dispatch_calls_for_trait_method(&mut self, tr: &str, leaf: &str, str_arg: Option<String>) -> bool {
+        self.dispatch_trait_member(tr, leaf, str_arg, false)
+    }
+
+    /// The authority above, with ONE widening a caller must ask for by name: `assoc` admits the trait's
+    /// ASSOCIATED fns (`fn open(p) -> Self;`) as members. Only a PATH call can name one (`S::open(p)`
+    /// under `S: Sink`, `Sink::open(p)`, `Self::open(p)` in a default body) — SOUNDNESS R776 — so the
+    /// receiver-call sites keep `false` and cannot read `x.open()` as this trait's dispatch.
+    fn dispatch_trait_member(&mut self, tr: &str, leaf: &str, str_arg: Option<String>, assoc: bool) -> bool {
         let Some(lt) = self.local_traits.get(tr) else { return false };
         // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a `Super`
         // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
-        if !self.trait_declares_method(tr, leaf, 0) {
+        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf))) {
             return false; // blanket/unrelated name — not this trait's dispatch
         }
         let count = lt.count;
@@ -2452,6 +2473,180 @@ impl<'a> CallCollector<'a> {
             _ => self.mark_unresolved(format!("dispatch:{tr}.{leaf}")), // >12, or no impl visible: honest indeterminacy
         }
         true
+    }
+
+    /// Does this RECEIVER's written trait qualification for leaf `tr` name a DEPENDENCY's trait — a
+    /// multi-segment path, rooted at a crate-looking head (`lang::is_dependency_crate_root`) that the
+    /// crate root does not itself declare as an item? Same per-parameter-then-signature lookup the
+    /// foreign arm uses to form its key, so the two cannot disagree about what was written.
+    fn receiver_written_dep_trait(&self, recv: &syn::Expr, tr: &str) -> bool {
+        let recv_param = match peel_recv(recv) {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            _ => None,
+        };
+        let written = recv_param
+            .as_ref()
+            .and_then(|n| self.trait_quals_by_param.get(n))
+            .and_then(|m| m.get(tr))
+            .filter(|q| !q.is_empty())
+            .or_else(|| self.trait_quals.get(tr).filter(|q| !q.is_empty()));
+        let Some(written) = written else { return false };
+        let full = crate::lang::expand(written, &self.uses);
+        let Some((root, _)) = full.split_once("::") else { return false };
+        crate::lang::is_dependency_crate_root(root) && !crate::lang::root_declares(&self.uses, root)
+    }
+
+    /// SOUNDNESS R570 / R776 — A PATH CALL THAT NAMES A TRAIT MEMBER ASKS THE DISPATCH AUTHORITY.
+    ///
+    /// `Tr::m(x)`, `<T as Tr>::m(x)`, `T::m(x)` and `S::assoc()` under a generic bound, `Self::assoc()`
+    /// in a trait's default body, and `let f = Tr::m; f(x)` all arrive here as a PATH, and a path is
+    /// resolved by `resolve_target` against UNITS. A trait requirement has no body and therefore no
+    /// unit, so every one of these spellings linked to nothing, pushed no reason, and the caller left
+    /// `functions[]` — while `x.m()` on the same receiver, which reaches `dispatch_calls_for_trait_method`
+    /// through `resolve_recv_traits`, was charged. One question ("which implementors can this reach?"),
+    /// answered at the receiver site and not at the path site.
+    ///
+    /// So this does not decide anything itself. It works out what the path says about the IMPLEMENTOR,
+    /// and then either:
+    ///   * the implementor is STATICALLY NAMED — a concrete qself (`<S1 as Dsl>::limit`) or a first
+    ///     argument whose binding is a concrete local type that implements the trait — and the call is
+    ///     pushed exactly as the receiver spelling `s1.limit()` pushes it (`S1::limit`, typed). This is
+    ///     R53's precision requirement: a statically-known receiver must never be CHA'd over every
+    ///     implementor. The bare `Tr::m` path the caller still pushes keeps reaching the DEFAULT body,
+    ///     which is what runs when the implementor does not override;
+    ///   * or it is NOT named — a generic parameter, `Self` inside the trait, a `dyn` binding, an untyped
+    ///     argument — and the member goes to `dispatch_trait_member`, the same bounded CHA (≤12 local
+    ///     implementors) and the same `dispatch:<Tr>.<m>` disclosure (`>12`, none visible, or an
+    ///     ambiguous trait name) the receiver spelling gets.
+    ///
+    /// LOCAL traits only. A dependency's trait reached by path already forms a crate-qualified key
+    /// (`dep::Tr::m`) that the chained join answers; that half is not this function's.
+    ///
+    /// Returns nothing: the caller's own push of the written path is unchanged, so every answer the
+    /// engine gave before (a default body reached through `Tr::m`) is still given. This only ADDS.
+    fn route_trait_member_path(
+        &mut self,
+        p: &syn::ExprPath,
+        path: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+        str_arg: Option<String>,
+    ) {
+        // The WRITTEN segments, unless the callee is a one-segment binding the caller already resolved
+        // through `fn_alias` (`let f = Dsl::limit; f(s)`) — then the resolved path is what was written.
+        let segs: Vec<String> = if p.path.segments.len() >= 2 || p.qself.is_some() {
+            p.path.segments.iter().map(|s| s.ident.to_string()).collect()
+        } else {
+            path.split("::").map(str::to_string).collect()
+        };
+        if segs.len() < 2 {
+            return;
+        }
+        // (trait leaf, Some(concrete implementor) | None)
+        let mut targets: Vec<(String, Option<String>)> = Vec::new();
+        let generic = |s: &Self, n: &str| -> Option<Vec<String>> {
+            s.generic_bounds.get(n).or_else(|| s.impl_generic_bounds.get(n)).cloned()
+        };
+        if let Some(q) = p.qself.as_ref().filter(|q| q.position > 0) {
+            // `<Ty as Tr>::m` — the trait is the last segment before the member; the qself names the
+            // implementor, unless it is a generic parameter or `Self` inside the trait itself.
+            let tr = segs[segs.len() - 2].clone();
+            let qid = match &*q.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            };
+            let unnamed = qid.as_deref().is_some_and(|i| {
+                generic(self, i).is_some() || (i == "Self" && self.trait_self.as_deref() == Some(tr.as_str()))
+            });
+            let concrete = if unnamed {
+                None
+            } else {
+                crate::lang::type_path(&q.ty, &self.uses)
+            };
+            targets.push((tr, concrete));
+        } else if p.qself.is_none() && segs.len() == 2 {
+            if let Some(bounds) = generic(self, &segs[0]) {
+                // `T::m(x)` / `S::open(p)` — the head is a generic parameter: every bound is a candidate.
+                for b in bounds {
+                    targets.push((b, None));
+                }
+            }
+        }
+        if targets.is_empty() && p.qself.is_none() {
+            // `Tr::m(x)` (or `Self::m(x)` in a default body, which `expand` has already turned into the
+            // trait's path): the second-last segment of the RESOLVED path names the trait.
+            let rs: Vec<&str> = path.split("::").collect();
+            if rs.len() >= 2 {
+                let tr = rs[rs.len() - 2].to_string();
+                if self.local_traits.contains_key(&tr) {
+                    // The first argument may NAME the implementor (`Dsl::limit(&s1)`): only a plain
+                    // binding is read, from `vars` alone — never a typed expression, so no inference
+                    // this engine does elsewhere (the builder assumption) can mis-name it.
+                    let named = args.first().and_then(|a| match peel_recv(a) {
+                        syn::Expr::Path(ap) => ap.path.get_ident().map(|i| i.to_string()),
+                        _ => None,
+                    }).filter(|n| !self.trait_vars.contains_key(n))
+                      .and_then(|n| self.vars.get(&n).cloned())
+                      .filter(|ty| {
+                          let tl = ty.rsplit("::").next().unwrap_or(ty);
+                          tl != tr && self.trait_impls.get(&tr).is_some_and(|is| {
+                              is.iter().any(|i| i.rsplit("::").next().unwrap_or(i) == tl)
+                          })
+                      });
+                    targets.push((tr, named));
+                } else if self.local_traits.values().any(|lt| lt.methods.contains(leaf) || lt.assoc.contains(leaf))
+                    && self.trait_impls.iter().any(|(t, tys)| {
+                        // …and THIS type's impl of that trait does NOT declare the member, so the call
+                        // can only be reaching the trait's DEFAULT (or an inherent method Pass B
+                        // prefers). An impl that declares it already has a `Ty::m` unit, which the
+                        // written path resolves without help.
+                        self.local_traits.get(t).is_some_and(|lt| lt.methods.contains(leaf) || lt.assoc.contains(leaf))
+                            && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
+                            && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
+                    })
+                {
+                    // `RealSink::make()` — a CONCRETE implementor's path naming a member it INHERITS from
+                    // a local trait's default body. The written path resolves to no unit (`RealSink`
+                    // declares no `make`), and the inherit-the-default rule in Pass B is asked only for
+                    // TYPED METHOD calls, so this read ABSENT while `r.make()`-style spellings resolved.
+                    // Push the same call TYPED, so Pass B answers it exactly as it answers the method
+                    // spelling — an own or inherent `RealSink::make` first, the trait default otherwise.
+                    if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                        eprintln!("VEINC_TYPEPATH\t{path}");
+                    }
+                    self.calls.push(Call { argc: 0, entropy_arg: false, path: path.to_string(),
+                        leaf: leaf.to_string(), str_arg: str_arg.clone(), typed: true, method: true,
+                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                }
+            }
+        }
+        for (tr, concrete) in targets {
+            let Some(lt) = self.local_traits.get(&tr) else { continue };
+            let is_method = self.trait_declares_method(&tr, leaf, 0);
+            let is_assoc = lt.assoc.contains(leaf);
+            if !is_method && !is_assoc {
+                continue; // not this trait's member — a blanket/unrelated name, left as it was
+            }
+            if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                eprintln!("VEINC_PATH\t{tr}::{leaf}\t{}", if concrete.is_some() { "named" } else { "cha" });
+            }
+            match concrete {
+                // R53 — `impl Tr for Ty` does NOT declare `m`: the call runs Tr's DEFAULT body, which
+                // the written `Tr::m` path already reaches. `Ty::m` would be an INHERENT method the call
+                // never runs (the recorded fabrication), so nothing more is pushed.
+                Some(ty) if crate::model::impl_does_not_declare(
+                    self.impl_members, &tr, ty.rsplit("::").next().unwrap_or(&ty), leaf) => {}
+                Some(ty) => {
+                    let p2 = crate::lang::alias_join(&ty, &[leaf]);
+                    self.calls.push(Call { argc: 0, entropy_arg: false, path: p2, leaf: leaf.to_string(),
+                        str_arg: str_arg.clone(), typed: true, method: true, is_macro: false,
+                        path_lits_partial: false, path_lit2: None });
+                }
+                None => {
+                    self.dispatch_trait_member(&tr, leaf, str_arg.clone(), true);
+                }
+            }
+        }
     }
 }
 
@@ -3356,7 +3551,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // but not this one left a nested item reading the outer signature's crate for a same-named
         // receiver — the collision arriving by nesting, which is what scoping the others was meant to stop.
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
+        // R570/R576(a) — a nested fn has no `self` and no enclosing impl's generics.
+        let outer_ts = self.trait_self.take();
+        let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
         syn::visit::visit_item_fn(self, node);
+        self.trait_self = outer_ts;
+        self.impl_generic_bounds = outer_ig;
         self.dyn_sig_traits = outer;
         self.dyn_local_traits = outer_l;
         self.mono_recv_traits = outer_m;
@@ -3389,7 +3589,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SOUNDNESS R175 — …and `Self`, which is the one binding in this list that is NOT empty on entry.
         let bound = crate::lang::impl_type_name(&node.self_ty).map(|t| crate::lang::expand(&t, &self.uses));
         let outer_self = self.rebind_self(bound);
+        // R570/R576(a) — a nested impl's methods are not the enclosing trait's default bodies, and its
+        // own generics are already installed in `generic_bounds` above.
+        let outer_ts = self.trait_self.take();
+        let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
         syn::visit::visit_item_impl(self, node);
+        self.trait_self = outer_ts;
+        self.impl_generic_bounds = outer_ig;
         self.restore_self(outer_self);
         self.dyn_sig_traits = outer;
         self.dyn_local_traits = outer_l;
@@ -3405,7 +3611,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// Same binding as the file-level arm, from the same authority, restored on exit.
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
         let outer_self = self.rebind_self(Some(node.ident.to_string()));
+        // R576(a) — NOT installed for a nested trait: its default bodies' `self` is not a binding this
+        // collector types (the outer `vars` still holds the enclosing `self`), so the receiver test at
+        // the method-call site could not tell the two apart. Cleared, which only withholds the new edge.
+        let outer_ts = self.trait_self.take();
+        let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
         syn::visit::visit_item_trait(self, node);
+        self.trait_self = outer_ts;
+        self.impl_generic_bounds = outer_ig;
         self.restore_self(outer_self);
     }
     /// A METHOD of a nested `impl` carries its own generics (`fn m<T: Doer>(&self, d: T)`), which the
@@ -3690,6 +3903,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // crate segment `ctor_leaf_from_call_path` discards.
                         self.note_cross_construction(
                             crate::lang::cross_ctor_leaf_from_call_path(&path, &self.uses));
+                        // SOUNDNESS R570/R776 — a path naming a TRAIT MEMBER also asks the dispatch
+                        // authority; the written path below is still pushed, so nothing is withdrawn.
+                        self.route_trait_member_path(p, &path, &leaf, &node.args, str_arg.clone());
                         // SOUNDNESS R330 — the arity travels with the call. See `Call::argc`: this is
                         // the ExprCall spelling, so `node.args` INCLUDES the receiver for a UFCS
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the
@@ -3890,6 +4106,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the same function over a `tokio::process::Command` was caught, because tokio is not std. "An
         // honest miss beats a wrong effect" was the right instinct for `std::fs::Metadata` and the wrong
         // one for `std::fs::File`, and it was applied to both by a test on the crate ROOT.
+        // R576(a) — kept for the default-body dispatch below; the typed branch consumes `str_arg`.
+        let str_arg_self = if self.trait_self.is_some() { str_arg.clone() } else { None };
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
@@ -3988,7 +4206,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             //  - the dispatch must be narrow (≤12 impls, the cross-engine bound) → edges to
             //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
             for tr in self.resolve_recv_traits(&node.receiver) {
-                if self.local_traits.get(&tr).is_none() {
+                // SOUNDNESS (vein C, same-leaf collision) — A WRITTEN DEPENDENCY TRAIT IS NOT THE LOCAL
+                // TRAIT THAT SHARES ITS LEAF. Every trait index here is leaf-keyed, so a crate that
+                // declares its own `trait Handler` and ALSO takes `h: &dyn zdep::Handler` sent the
+                // dependency's dispatch down the LOCAL arm: CHA over this crate's implementors (pure),
+                // the wrong `dispatchesOn` key, and none of the foreign handling — R608's hedge, the
+                // chained join — that the identical receiver gets when no local trait shares the leaf.
+                // Measured: `run_dep` read `[]` while the program wrote through the dependency's
+                // implementor; delete the unrelated local trait and it reads `Unknown`.
+                //
+                // So when the receiver's WRITTEN qualification roots at a dependency-looking crate that
+                // the crate root does not itself declare, the foreign arm runs AS WELL. The local arm
+                // still runs after it: this adds the dependency's answer, it does not withdraw the local
+                // one (an over-report where the leaf really was the local trait, never a silence).
+                let dep_written = self.local_traits.get(&tr).is_some()
+                    && self.receiver_written_dep_trait(&node.receiver, &tr);
+                if dep_written && std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                    eprintln!("VEINC_COLLIDE\t{tr}::{leaf}");
+                }
+                if self.local_traits.get(&tr).is_none() || dep_written {
                     // EXTERNAL trait dispatch (`x.publish()`, `x: &dyn dep::OutboundChannel`). Formerly a
                     // documented miss (dropped → pure). If the trait resolves via `use` to a DEPENDENCY-
                     // qualified path (not std/core/alloc), emit a crate-qualified Call so a CANDOR_DEPS chain
@@ -4313,14 +4549,74 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                             }
                         }
+                    } else if full.contains("::")
+                        && matches!(root, "std" | "core" | "alloc")
+                        && self.local_traits.get(&tr).is_none()
+                    {
+                        // SOUNDNESS R743 — A TOOLCHAIN TRAIT'S METHOD THROUGH A BOUND IS STILL A CALL TO
+                        // THAT METHOD, AND THE CLASSIFIER OWNS IT. `fn f<C: CommandExt>(c: &mut C) {
+                        // c.exec() }` replaces the process, and it read ABSENT: the arm above refuses a
+                        // std root (correctly — a std trait's KEY is not a dependency's to publish, and
+                        // R4's carve-out keeps CHA off it), and nothing else was pushed but the bare
+                        // leaf `exec`, which no rule keys on. The trait-path spelling of the SAME call,
+                        // `CommandExt::exec(c)`, pushes exactly `std::os::unix::process::CommandExt::exec`
+                        // and is charged `Exec`; so is the concrete `Command` receiver.
+                        //
+                        // So push what the UFCS spelling pushes: the written trait path plus the member,
+                        // UNTYPED. That is a CLASSIFICATION question only — an untyped std-rooted path is
+                        // never `resolvable` to a local unit in Pass B, never a dispatch key, and adds no
+                        // CHA edge — so it can charge only what the classifier already charges for
+                        // `Trait::m(x)`. Where no rule exists (`std::io::Write::write_all`) nothing
+                        // changes, which is exactly the answer `&mut dyn Write` and the UFCS spelling
+                        // already give.
+                        if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                            eprintln!("VEINC_STD\t{full}::{leaf}");
+                        }
+                        self.calls.push(Call { argc: node.args.len().min(255) as u8,
+                            entropy_arg: args_name_entropy_source(&node.args),
+                            path: format!("{full}::{leaf}"),
+                            leaf: leaf.clone(),
+                            str_arg: str_arg.clone(),
+                            path_lits_partial: false, path_lit2: None,
+                            typed: false,
+                            method: false,
+                            is_macro: false,
+                        });
                     }
-                    continue;
+                    if !dep_written {
+                        continue;
+                    }
                 }
                 // A LOCAL trait: the declares/inherits check, the ambiguous-local-name guard, and the
                 // bounded-CHA fan-out (edges to <=12 local implementors, else honest `Unknown`) are the
                 // SAME rules `dispatch_calls_for_trait_method` applies for a trait method passed as a
                 // first-class value (R89) — ask that one authority rather than a second copy here.
                 self.dispatch_calls_for_trait_method(&tr, &leaf, str_arg.clone());
+            }
+        }
+        // SOUNDNESS R576(a) / R629 — `self.m()` INSIDE A TRAIT'S DEFAULT BODY IS A DISPATCH. `self` is
+        // whichever implementor the caller holds, so the question is the one `&dyn Tr` asks, and the
+        // authority that answers it is `dispatch_calls_for_trait_method`. This site never asked it:
+        // `self` is typed as the TRAIT in `vars` (R160), so the typed branch above pushed `Tr::m` and
+        // stopped. That static target is right only when no implementor overrides `m`:
+        //   * (a) when `m` HAS a default body, `Tr::m` resolves to it and every OVERRIDE is invisible —
+        //     `l.run()` read pure over an `L::emit` that writes a file;
+        //   * R629: when `m` is a REQUIREMENT, Pass B's twin CHA fans out — but only inside
+        //     `if let Some(impls)`, so a trait with NO local implementor (a library's extension point)
+        //     produced no edge and no reason, and the default body left `functions[]`.
+        // Asking the authority as well gives both the same answer the `&dyn` receiver gets: an edge to
+        // every local implementor's `m` (≤12; a non-overriding one resolves to the default through Pass
+        // B's inherit-default branch), or `dispatch:<Tr>.<m>` when there are none, more than 12, or two
+        // traits share the leaf. The typed `Tr::m` push above is KEPT, so the default body is still
+        // reached and Pass B's twin still runs: this only ADDS.
+        if let Some(tr) = self.trait_self.clone() {
+            let recv_is_self = matches!(peel_recv(&node.receiver),
+                syn::Expr::Path(rp) if rp.qself.is_none() && rp.path.is_ident("self"));
+            if recv_is_self && self.trait_declares_method(&tr, &leaf, 0) {
+                if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                    eprintln!("VEINC_SELF\t{tr}::{leaf}");
+                }
+                self.dispatch_calls_for_trait_method(&tr, &leaf, str_arg_self);
             }
         }
         // ITERATOR-ADAPTER CLOSURE: `xs.iter().for_each(|c| c.send())`, `.map(|c| ..)`, `.filter`, …
