@@ -135,6 +135,10 @@ pub(crate) struct FnInfo {
     /// MODULE-QUALIFIED fn qual beside it, which a leaf-keyed index does not have.
     #[serde(rename = "b", default, skip_serializing_if = "Option::is_none")]
     pub(crate) ret_bound_type: Option<String>,
+    /// ⟨0.40⟩ `typeSurface.returnsProtocol` — the ONE trait this fn's declared result is (`-> impl Tr`,
+    /// `-> &dyn Tr`), as a `typesurf` TyRef the crate-level producer resolves. Never in `returns`.
+    #[serde(rename = "rp", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ret_proto: Option<String>,
     /// SOUNDNESS R182/R196 — the REFUSAL reasons this body hit: a place where name resolution found
     /// MORE THAN ONE answer, refused to guess (correctly), and then had nothing to say. Each entry is a
     /// SPEC §4 `kind:detail` reason string, which `scan.rs` turns into a DIRECT `Unknown` beside the

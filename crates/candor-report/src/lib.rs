@@ -494,6 +494,13 @@ pub fn fnv1a_hex(sorted_quals: &[String]) -> String {
 /// declaration by the same rule that governs the list: this engine computes it, so it says so.
 pub const RESOLVES: &[&str] = &["fs", "incomplete"];
 
+/// ⟨0.40⟩ SPEC §2 — the same list for a report that ALSO carries the declared-type surface: a ⟨0.40⟩
+/// producer "LISTS EACH ONE IT COMPUTES IN `resolves`". Used by [`to_packaged_report_json_typed`] whenever
+/// it is handed a surface (`Some`), because that is the writer's only evidence the four were computed —
+/// an empty `holds` from a crate with no `pub` statics is still a computed answer, and an absent key in a
+/// producer that does not list it is the older-producer case a consumer must treat as a MISS.
+pub const RESOLVES_TYPED: &[&str] = &["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"];
+
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
@@ -591,6 +598,43 @@ pub struct TypeSurface {
     /// it enables succeeds and yields pure, which is what silence already yields.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub returns: std::collections::BTreeMap<String, String>,
+    /// ⟨0.40⟩ `holds` — a `pub` static/const, a `pub` field or an associated const -> the type it is
+    /// DECLARED to hold (`&T` publishes `T`; `&dyn Tr` the one protocol). A wrapper (`Option<T>`,
+    /// `Box<dyn Tr>`) is never unwrapped. Not a manifest: an absent key is a MISS for the consumer.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub holds: std::collections::BTreeMap<String, String>,
+    /// ⟨0.40⟩ `returnsProtocol` — a function whose declared result is exactly ONE trait (`-> impl Tr`,
+    /// `-> &dyn Tr`) -> that trait. A SEPARATE key from `returns` on purpose: a shipped ⟨0.23⟩ consumer
+    /// joins a `returns` value exactly, and `returns` must never name a trait.
+    #[serde(rename = "returnsProtocol", default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub returns_protocol: std::collections::BTreeMap<String, String>,
+    /// ⟨0.40⟩ `types` — a MANIFEST of every type the package declares: its `kind` and its COMPLETE direct
+    /// supertypes, or NO `supers` at all (a KIND-ONLY key) where the producer cannot close them. A type
+    /// whose kind cannot be known (an attribute macro may replace it) has no key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub types: std::collections::BTreeMap<String, TypeEntry>,
+    /// ⟨0.40⟩ `adds` — a type owned by ANOTHER package -> the traits this package implements for it.
+    /// Never complete.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub adds: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl TypeSurface {
+    /// Nothing to publish in any of the five keys.
+    pub fn is_empty(&self) -> bool {
+        self.returns.is_empty() && self.holds.is_empty() && self.returns_protocol.is_empty()
+            && self.types.is_empty() && self.adds.is_empty()
+    }
+}
+
+/// ⟨0.40⟩ One `types` key. `supers: None` is a KIND-ONLY key — "the kind is known, the supertypes could
+/// not be closed" — and it is NOT an empty list: serialised with no `supers` field at all, so no consumer
+/// can read it as "complete, no supertypes".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeEntry {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supers: Option<Vec<String>>,
 }
 
 /// Parse a report's function entries, accepting BOTH the v0.2 envelope `{ candor, functions }` and
@@ -894,10 +938,13 @@ pub fn to_packaged_report_json_typed(
         net_partners: Option<&'a NetPartners>,
         functions: &'a [ReportEntry],
     }
-    let ts = type_surface.filter(|t| !t.returns.is_empty());
+    let ts = type_surface.filter(|t| !t.is_empty());
+    // ⟨0.40⟩ `Some` is the producer saying it COMPUTED the surface, so the four keys are listed even when
+    // every one is empty (a crate with no types still answered); `None` keeps the pre-rung list.
+    let resolves = if type_surface.is_some() { RESOLVES_TYPED } else { RESOLVES };
     serde_json::to_string_pretty(&Out {
         candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, scanned_under,
-        net_partners, type_surface: ts, resolves: RESOLVES, functions,
+        net_partners, type_surface: ts, resolves, functions,
     })
 }
 
@@ -2153,14 +2200,19 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
         let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None, None, None).unwrap();
+        let none = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
+                                                 None, &[], None, None, None).unwrap();
+        assert_eq!(old, none, "no type surface must not change one byte of the report");
+        // ⟨0.40⟩ an EMPTY surface is a computed answer: the key is omitted, the four are listed.
         let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
                                                   Some(&TypeSurface::default()), &[], None, None, None).unwrap();
-        assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
+        assert!(report_type_surface(&empty).is_none(), "an empty surface omits the key");
+        assert!(empty.contains("\"returnsProtocol\""), "…and lists what it computed in `resolves`");
         assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
         let mut returns = std::collections::BTreeMap::new();
         returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
         let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                 Some(&TypeSurface { returns }), &[], None, None, None).unwrap();
+                                                 Some(&TypeSurface { returns, ..Default::default() }), &[], None, None, None).unwrap();
         let back = report_type_surface(&full).expect("typeSurface must round-trip");
         assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
                    "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");

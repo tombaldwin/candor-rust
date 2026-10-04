@@ -2263,6 +2263,7 @@ pub(crate) fn fninfo(
         syn::ReturnType::Type(_, ty) => bound_return_type(ty, uses, self_ty, modpath),
         syn::ReturnType::Default => None,
     };
+    let ret_proto = crate::typesurf::ret_proto_ref(&sig.output, uses, modpath);
     FnInfo {
         qual: qual.to_string(),
         leaf: leaf.to_string(),
@@ -2272,6 +2273,7 @@ pub(crate) fn fninfo(
         unresolved_why: c.unresolved_why.into_iter().collect(),
         ret_idents,
         ret_bound_type,
+        ret_proto,
         refusals: c.refusals.into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),

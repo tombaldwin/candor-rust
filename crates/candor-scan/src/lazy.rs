@@ -47,6 +47,13 @@ pub(crate) const VALUE_PROV_SEG: &str = "<value>";
 pub(crate) const TYPE_PROV_SEG: &str = "<type>";
 pub(crate) const FIELD_HOP_SEG: &str = "<field>";
 
+/// ⟨0.40⟩ SOUNDNESS R861 — `cr::<chain>::<step>.<step>::<base type rest>::<method>`: a typed method call
+/// whose receiver type came from the builder-chain walk's "every step returns its receiver" assumption.
+/// Emitted BESIDE the typed call (which keeps the guess); consumed only by scan.rs, which re-types the
+/// chain from the dependency's published `returns`/`returnsProtocol` or, where a step is unanswered,
+/// discloses. Same containment as the other markers: the angle-bracket segment reaches no classifier.
+pub(crate) const CHAIN_GUESS_MARKER: &str = "<chain>";
+
 /// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
 /// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
 /// `resolve_target`'s tail2 lookup, now ambiguous, dropped the forcing edge and every reader read

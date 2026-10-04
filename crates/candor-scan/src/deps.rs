@@ -290,6 +290,20 @@ pub(crate) struct DepIndex {
     /// DIFFERENT types for one fn id drop the key rather than pick, because a wrong receiver type
     /// FABRICATES where a missing one merely misses.
     pub(crate) returns: HashMap<String, String>,
+    /// ⟨0.40⟩ the chained `holds` / `returnsProtocol` / `types` / `adds`, merged (see `typesurf.rs`).
+    pub(crate) surface: crate::typesurf::SurfaceIdx,
+    /// ⟨0.40⟩ The NON-`interfaceUnion` rows of every key that ALSO carries a union row. A walk from an EXACT
+    /// receiver (a known `value`) joins only a body the ancestor itself carries: a trait's union row is
+    /// every implementor's override, and charging those to a struct that inherits the DEFAULT is a
+    /// sibling's effect on a body that never runs. A key absent here has no union row, so `by_key` is
+    /// already its own rows.
+    pub(crate) by_key_own: HashMap<String, DepFn>,
+    /// ⟨0.40⟩ every key carrying an `interfaceUnion` row (so `typesurf::row` can tell "no own row" from
+    /// "no union row").
+    pub(crate) union_keys: std::collections::HashSet<String>,
+    /// ⟨0.40⟩ `<member leaf>` -> `(package, owner qual)` of every entry publishing it — the in-scope-trait
+    /// question (`typesurf::in_scope_publishes`) asks this.
+    pub(crate) members: HashMap<String, Vec<(String, String)>>,
 }
 
 /// ⟨0.21⟩ Does this dep report DECLARE ITSELF INCOMPLETE — does its `unanalyzed` manifest name source the
@@ -419,6 +433,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     // which is a different question and still withdraws: guessing a receiver type fabricates a call
     // target, whereas the fallback is half 1's disclosure rather than silence.
     let mut ret_ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut union_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &files {
         // ⟨0.27⟩ THE SAME RULE AS THE TOKEN ARM ABOVE, and it was missing here. SPEC §2 binds the
         // configured case with one sentence — a dep path that "does not exist OR CANNOT BE READ MUST
@@ -465,6 +480,18 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // `fns.is_empty()` — the two are the same shape on the wire and only the count separates a facade
         // from a legitimately all-pure crate; `fns` enters ONLY as SPEC §2's manifest-less third row.
         let judged_nothing = candor_report::claims_to_have_judged_nothing(&v, !fns.is_empty());
+        // ⟨0.40⟩ the declared-type surface. A stale or judged-nothing copy is no more trusted than its
+        // entries: it contributes only a MISS for its package. An incomplete one never read some of its own
+        // source, so no `supers` it publishes can be complete.
+        {
+            let file_pkg = f
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".scan.json"))
+                .and_then(|n| n.rsplit('.').next());
+            let pkg = v.get("package").and_then(|x| x.as_str()).or(file_pkg);
+            idx.surface.load(&v, pkg, !stale && !judged_nothing, incomplete);
+        }
         // ⟨typeSurface.returns⟩ Merge this report's published return types. GATED ON `!stale` for the
         // same reason the effects are: a report from a different producer version is not trusted, and a
         // type surface read off one would silently key the consumer through a claim we just refused to
@@ -761,6 +788,20 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 push_key(format!("{krate}#{t2}"), &mut keys);
             }
             push_key(format!("{krate}#{qual}"), &mut keys);
+            let is_union = e.get("interfaceUnion").and_then(|x| x.as_bool()).unwrap_or(false);
+            if let Some((owner, leaf)) = qual.rsplit_once("::") {
+                let v = idx.members.entry(leaf.to_string()).or_default();
+                if !v.iter().any(|(p, o)| *p == krate && o == owner) {
+                    v.push((krate.clone(), owner.to_string()));
+                }
+            }
+            for k in &keys {
+                if is_union {
+                    union_keys.insert(k.clone());
+                } else {
+                    idx.by_key_own.entry(k.clone()).or_default().union_with(&de);
+                }
+            }
             for k in keys {
                 // TWO ENTRIES UNDER ONE KEY ARE UNIONED — never withdrawn, never picked between.
                 // Decided family-wide in candor-spec/ENTRY-COLLISION-DECISION.md after measuring all four
@@ -805,6 +846,9 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             }
         }
     }
+    idx.by_key_own.retain(|k, _| union_keys.contains(k));
+    idx.union_keys = union_keys;
+    idx.surface.finish();
     // THE STALENESS DISCLOSURE, on the channel that can carry prose. The §2.1 downgrade puts `Unknown`
     // on every entry of an untrusted report and withholds its coverage, but until now rust said so
     // NOWHERE a reader could see: no report field names the report, and the reason field is the wrong

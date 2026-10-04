@@ -925,6 +925,41 @@ impl<'a> CallCollector<'a> {
         self.resolve_recv_type_for(expr, "")
     }
 
+    /// ⟨0.40⟩ R861 — the method-chain STEPS `resolve_recv_type_for`'s builder-chain walk passes through
+    /// (innermost first) and the base type it lands on, when — and only when — every step was taken by
+    /// that walk's plain "returns its receiver" assumption. A step any other arm answers (a `dyn` return,
+    /// a type-changing read-back, an element accessor) is not this guess, so the chain is not reported.
+    fn chain_steps(&self, expr: &syn::Expr) -> Option<(Vec<String>, String)> {
+        let mut steps = Vec::new();
+        let mut e = expr;
+        loop {
+            match e {
+                syn::Expr::Reference(r) => e = &r.expr,
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Try(t) => e = &t.expr,
+                syn::Expr::Await(a) => e = &a.base,
+                syn::Expr::MethodCall(m) => {
+                    let name = m.method.to_string();
+                    if self.returns.get(&name).and_then(|t| ret_dyn_leaves(t)).is_some()
+                        || is_recv_type_changing(&name)
+                        || crate::lang::is_element_yielding_accessor(&name)
+                    {
+                        return None;
+                    }
+                    steps.push(name);
+                    e = &m.receiver;
+                }
+                _ => break,
+            }
+        }
+        if steps.is_empty() {
+            return None;
+        }
+        steps.reverse();
+        Some((steps, self.resolve_recv_type(e)?))
+    }
+
     /// `resolve_recv_type`, told WHICH METHOD the answer is about to be joined to — SOUNDNESS R451's
     /// second gate needs it, and nothing else in here does. Every caller that is not forming a
     /// `<Type>::<method>` for a method call passes `""`, which matches no `impl_fn_key` and therefore
@@ -4189,6 +4224,37 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
                                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                // ⟨0.40⟩ SOUNDNESS R861 — A GUESSED OWNER. When the receiver is a method CHAIN, the type
+                // above is the chain's BASE type: the builder-chain walk ASSUMED every step returns its
+                // receiver's type. For a dependency's type that is a guess (`n.get_parent().visit()` with
+                // `get_parent -> &Other` charges `Node::visit`), and SPEC §2 ⟨0.40⟩'s miss rule binds it:
+                // the guess is KEPT (the typed call above is unchanged) and a MARKER rides beside it so
+                // the consumer can re-type the chain from the dependency's own `returns` — or, where no
+                // trusted surface answers a step, ADD `Unknown`. Consumed by scan.rs and nothing else.
+                // …and a VALUE PATH read as a unit struct (`dep::Other.ping()`, `Other.ping()` after a
+                // `use`): the other naming-convention guess an owner can come from. Same marker, with no
+                // steps; the consumer asks the manifest whether `Other` really is a type.
+                let unit_guess = match peel_value(&node.receiver) {
+                    syn::Expr::Path(p) if p.qself.is_none() => p.path.get_ident().is_none_or(|i| {
+                        let n = i.to_string();
+                        !self.locally_bound(&n) && !self.static_types.contains_key(&n)
+                    }),
+                    _ => false,
+                };
+                let guess = self.chain_steps(&node.receiver)
+                    .or_else(|| unit_guess.then(|| (Vec::new(), ty.clone())));
+                if let Some((steps, base)) = guess {
+                    let root = base.split("::").next().unwrap_or("");
+                    if base == ty && base.contains("::") && !base.contains(crate::decls::ALIAS_ALT_SEP)
+                        && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
+                    {
+                        let rest = base.split_once("::").map_or("", |(_, r)| r);
+                        self.calls.push(Call { argc: 0, entropy_arg: false,
+                            path: format!("{root}::{CHAIN_GUESS_MARKER}::{}::{rest}::{leaf}", steps.join(".")),
+                            leaf: leaf.clone(), str_arg: None, typed: false, method: false,
+                            is_macro: false, path_lits_partial: false, path_lit2: None });
+                    }
+                }
             }
         } else {
             // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no

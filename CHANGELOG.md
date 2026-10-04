@@ -11,6 +11,54 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ declared types and the dependency's own hierarchy — producer and consumer, resolution only (SOUNDNESS R843; conformance PART 95)
+
+**The engine still declares spec `0.39`.** ⟨0.40⟩ is implemented here and by candor-swift; the declaration
+moves at the floor-bump commit, after both engines have ported.
+
+- **⚠ Producer: every report now carries `typeSurface.holds` / `returnsProtocol` / `types` / `adds`, and
+  `resolves` lists all four.** `holds` maps a `pub` static/const, a `pub` field and an associated const to
+  its DECLARED type (`&T` publishes `T`, `&dyn Tr` the one trait; `Option<T>`, `Box<dyn Tr>` and other
+  wrappers publish nothing). `returnsProtocol` maps a `-> impl Tr` / `-> &dyn Tr` function to its trait;
+  `returns` never names a trait. `types` is a MANIFEST of every struct/enum/union (`value`) and trait
+  (`protocol`) with its COMPLETE supertraits / implemented traits (std and platform traits omitted), or
+  KIND-ONLY (no `supers`) where the crate holds anything that could add an impl unseen — a non-std
+  derive, an attribute macro, an item-position macro invocation, an impl or macro inside a block, an
+  unanalyzed file; a type under an attribute macro has no key. `adds` records `impl LocalTrait for
+  foreign::Type`. Measured over the 742 dependency crates of the chained corpus: 43,089 types keyed,
+  **93.1% kind-only** (531 of the 909 corpus crates are unclosable; the commonest cause is an
+  item-position macro invocation, 411), 24,729 `holds`, 324 `returnsProtocol`, 428 `adds`; +6.3 MB of wire on 35.2 MB.
+  Report bytes change for every scan; `functions[]` is byte-identical unchained (742 crates, 0/0/0, the
+  producer reached on all 742). Scan-cache schema rev53 → rev54.
+- **⚠ Consumer: a declared type ADDS a resolution and never removes one.** A dependency VALUE receiver
+  (`dep::SHARED.ping()`, `n.parent.ping()`, `dep::HOLDER.parent.visit()`) joins its declared type's member,
+  a `-> impl Tr` factory joins the trait (with its ⟨0.39⟩ union), and a typed method call whose own key
+  misses is looked for through the dependency's supertraits and any chained `adds` — the walk. A KNOWN
+  `value` receiver joins only the body an ancestor carries, never a sibling implementor's `interfaceUnion`
+  row. Every disclosure the release made is kept: **the `dispatch:untyped cross-package receiver`
+  `Unknown` is NOT withdrawn even where the hop resolves** (SPEC permits it; not taken — the removal
+  direction, and its corpus payoff is unmeasured).
+- **⚠ A guessed owner hedges (the ⟨0.40⟩ miss rule).** A method chain typed by the builder-chain walk
+  (`n.get_parent().visit()` assumed to return a `Node` — SOUNDNESS R861) and a value path read as a unit
+  struct now ADD `Unknown` (`dispatch:untyped cross-package receiver`) beside the kept guess, unless the
+  dependency's `returns`/`returnsProtocol` types every step and the walk reaches the member, or its
+  manifest says the value is a type. A walk that reaches nothing on a source-typed receiver discloses
+  (`dispatch:<T>.<m>`) when a chained TRAIT carrying the member is in scope in the file (Rust resolves an
+  inherited method only through an in-scope trait; `adds` is never complete).
+- **Executed fixtures** (one variable each; the body that ran is the ground truth), unit AND caller:
+  `Mid: Grand` inheriting `Grand::tok` (Env) — absent → `deny Env` 0 → 1; `impl Ext for tbase::Tok`
+  overriding (Env) — `[]` → `deny Env` 0 → 1; a kind-only `K: Tr2` with `Tr2` in scope — absent →
+  `deny Env Unknown` 0 → 1; `n.get_parent().visit()` — `[Fs]` → `[Fs, Unknown]`, `deny Env Unknown`
+  0 → 1; `S: Tr` inheriting the default while a sibling overrides with Env — `deny Fs` 0 → 1 and
+  `deny Env` stays 0 (the exact-receiver control; a mutant joining the union row reads Env).
+- **Corpus, chained (909 entries, 403,300 analysed units, dependency reports produced by each arm's own
+  engine) against `ad30e26`:** ADDED 1,269 · REMOVED 0 · CHANGED 3,417; no row loses any value (one pure
+  `interfaceUnion` row is replaced by the real row now carrying `Unknown`). **Direction: adds `Unknown`
+  only on the corpus** — 2,625 rows newly carry `Unknown` (0.65%; 2,118 of them the guessed-owner hedge),
+  0 rows gain a concrete effect. Gate flips, all 0 → 1: `deny Unknown` 2,376 functions / 270 modules /
+  3 crates; `deny <E>` 0 at every scope; `deny Unknown[dispatch]` 2,588 / 622 / 28 (rows gaining the
+  `dispatch` class). Against v0.39.3 every loss present is already present at `ad30e26`.
+
 ### ⚠ Trait dispatch is answered by one authority: path calls, default bodies, and implementors the index could not name (SOUNDNESS R570, R776, R743, R576(a), R629, R630, R828)
 
 Every spelling below left its caller ABSENT from `functions[]` (or present as `[]`), so `deny <E>` and

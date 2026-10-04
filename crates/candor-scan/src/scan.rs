@@ -1099,7 +1099,7 @@ fn build_type_surface(
             fns.len(), nonpure.len(), map.len()
         );
     }
-    candor_report::TypeSurface { returns: map }
+    candor_report::TypeSurface { returns: map, ..Default::default() }
 }
 
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
@@ -1841,6 +1841,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // tier — is a named blind spot (invisible, not Unknown: the curated-κ caveat). Counted here,
     // disclosed in the receipt, so the caveat is per-scan evidence instead of a doc footnote.
     let (deps, dep_renames) = cargo_deps(dir);
+    // ⟨0.40⟩ the per-file `use` paths (the in-scope-trait question) and the reach probe.
+    let file_uses: HashMap<&str, &[String]> =
+        decls_per_file.iter().map(|(rel, _, fd)| (rel.as_str(), fd.ts.uses.as_slice())).collect();
+    let r843_probe = std::env::var_os("CANDOR_R843_PROBE").is_some();
     // dep crate root -> count of FLOORED call sites into it. Floored only: the tally has to mean the
     // same thing as the crate name beside it — calls whose effects this scan could not see.
     let mut dep_seen: HashMap<String, usize> = HashMap::new();
@@ -2381,6 +2385,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || alt.contains(DROP_MARKER)
                         || alt.contains(CONSTRUCT_MARKER)
                         || alt.contains(UNTYPED_RECV_MARKER)
+                        || alt.contains(CHAIN_GUESS_MARKER)
                     {
                         continue;
                     }
@@ -2504,6 +2509,113 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 continue;
             }
+            // ⟨0.40⟩ SOUNDNESS R861 — A GUESSED OWNER (`cr::<chain>::<steps>::<base>::<method>`, see
+            // `CHAIN_GUESS_MARKER`). The typed call beside this marker joined the chain's BASE type's
+            // member on the assumption that every step returned its receiver; that join is KEPT. Here the
+            // chain is re-typed from the dependency's own surface: every step answered by `returns` (or
+            // `returnsProtocol`) and the final type's member reached by the walk is a RESOLUTION, joined
+            // and ADDED; anything less — a step no trusted surface answers, a member the walk does not
+            // reach — keeps the guess and ADDS `Unknown` (SPEC §2 ⟨0.40⟩ "every miss keeps the guess and
+            // ADDS `Unknown`", which names this walk). `clone` is the one step whose type is the
+            // receiver's by contract (`Clone::clone(&self) -> Self`).
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{CHAIN_GUESS_MARKER}::")) {
+                if deps_idx.crates.contains(cr_real) {
+                    let parsed = rest.rsplit_once("::").and_then(|(head, method)| {
+                        head.split_once("::").map(|(steps, base)| (steps, base, method))
+                    });
+                    // Only where the guessed typed call beside this marker really ASKED the chained
+                    // report: a call the builtin table classifies is answered by the rule, not by a lookup
+                    // on the guessed owner (the chained join is skipped for it), so the miss rule has
+                    // nothing to cover there.
+                    let typed_classified = parsed.is_some_and(|(_, base, method)| {
+                        let tp = format!("{cr_real}::{base}::{method}");
+                        candor_classify::classify(cr_real, &tp).is_some()
+                            || scan_builder_entry_effect(cr_real, &tp).is_some()
+                    });
+                    if let Some((_, base, method)) = parsed.filter(|(steps, _, _)| steps.is_empty() && !typed_classified) {
+                        // A VALUE PATH read as a unit struct. BACKED when the manifest says `base` is a
+                        // type; when `holds` says it is a VALUE, its declared type is joined (the guess
+                        // beside it is kept); neither → the miss rule's hedge.
+                        let ts = &deps_idx.surface;
+                        let vkey = format!("{cr_real}#{base}");
+                        let held: Vec<String> = ts.holds_of(&vkey).map(|t| t.iter().cloned().collect()).unwrap_or_default();
+                        for t in &held {
+                            let (rows, _) = crate::typesurf::join_through(deps_idx, t, method, false);
+                            for de in rows {
+                                apply_dep_fn(de, &f.qual, DepSink {
+                                    direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds,
+                                    paths: &mut paths, tables: &mut tables, incomplete: &mut incomplete,
+                                    unknown_why: &mut unknown_why, blind_direct: &mut blind_direct,
+                                    dep_invisible: &mut dep_invisible, unknown_via_dep: &mut unknown_via_dep,
+                                });
+                            }
+                        }
+                        let backed = !ts.distrusted.contains(cr_real)
+                            && (!held.is_empty() || ts.type_key(cr_real, base).is_some());
+                        if r843_probe {
+                            eprintln!("R843UNIT\t{}\t{vkey}\t.{method}\tbacked={backed}", f.qual);
+                        }
+                        if !backed {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert("dispatch:untyped cross-package receiver".to_string());
+                        }
+                    } else if let Some((steps, base, method)) = parsed.filter(|_| !typed_classified) {
+                        let ts = &deps_idx.surface;
+                        let mut cur: Vec<String> =
+                            vec![ts.type_key(cr_real, base).unwrap_or_else(|| format!("{cr_real}#{base}"))];
+                        let mut forced = false;
+                        let mut answered = true;
+                        for step in steps.split('.') {
+                            if step == "clone" {
+                                continue;
+                            }
+                            let mut next: BTreeSet<String> = BTreeSet::new();
+                            forced = false;
+                            for t in &cur {
+                                let k = format!("{t}::{step}");
+                                if let Some(r) = deps_idx.returns.get(&k) {
+                                    next.insert(r.clone());
+                                } else if let Some(ps) = ts.rproto.get(&k) {
+                                    next.extend(ps.iter().cloned());
+                                    forced = true;
+                                } else {
+                                    answered = false;
+                                }
+                            }
+                            if !answered {
+                                break;
+                            }
+                            cur = next.into_iter().collect();
+                        }
+                        let mut all_hit = answered;
+                        if answered {
+                            for t in &cur {
+                                let (rows, w) = crate::typesurf::join_through(deps_idx, t, method, forced);
+                                all_hit &= !w.hits.is_empty();
+                                for de in rows {
+                                    apply_dep_fn(de, &f.qual, DepSink {
+                                        direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds,
+                                        paths: &mut paths, tables: &mut tables, incomplete: &mut incomplete,
+                                        unknown_why: &mut unknown_why, blind_direct: &mut blind_direct,
+                                        dep_invisible: &mut dep_invisible, unknown_via_dep: &mut unknown_via_dep,
+                                    });
+                                }
+                            }
+                        }
+                        if r843_probe {
+                            eprintln!("R843CHAIN\t{}\t{cr_real}#{base}\t{steps}\t.{method}\tanswered={answered}\thit={all_hit}",
+                                f.qual);
+                        }
+                        if !all_hit {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert("dispatch:untyped cross-package receiver".to_string());
+                        }
+                    }
+                }
+                continue;
+            }
             // COULD-NOT-FORM-A-KEY: `cr::<untyped>::method`. The receiver came from `cr` but we never
             // learned its type, so no lookup happened — and the dep report's silence is only an answer to
             // a question that was asked. Disclose `Unknown` with the existing `dispatch:` reason class
@@ -2572,6 +2684,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if new_prov && std::env::var_os("CANDOR_R856_INSTR").is_some() {
                         eprintln!("R856HIT\t{}\t{cr_real}::{rest}", f.qual);
                     }
+                    // ⟨0.40⟩ THE DECLARED TYPE (SPEC §2 ⟨0.40⟩; SOUNDNESS R843). A chained `holds` (a
+                    // static, a field, an associated const), a `returns` or a `returnsProtocol` names what
+                    // this receiver IS, so its member is joined — through the walk, so an inherited one is
+                    // found — and that join is ADDED. Nothing below changes: the typed guess and the
+                    // `returns` join still run, and the `dispatch:untyped cross-package receiver`
+                    // disclosure still fires wherever it fired. SPEC permits withdrawing it where every
+                    // walk path hits; this engine does not (CHANGELOG ⟨0.40⟩ — the removal direction).
+                    // A stale copy beside a trusted one does not outrank it (§2 rule 1, TRUST LEVELS DO
+                    // NOT RANK): the surface index holds only trusted copies, and the stale copy's own
+                    // entries are already downgraded to `Unknown` in `by_key`.
+                    {
+                        if let Some((callee, method)) = rest.rsplit_once("::") {
+                            if let Some((targets, forced)) =
+                                crate::typesurf::receiver_targets(deps_idx, cr_real, callee)
+                            {
+                                for t in &targets {
+                                    let (rows, w) = crate::typesurf::join_through(deps_idx, t, method, forced);
+                                    if r843_probe {
+                                        eprintln!("R843HOLDS\t{}\t{cr_real}::{rest}\t{t}\thits={}\tstructural={}",
+                                            f.qual, w.hits.len(), w.structural);
+                                    }
+                                    for de in rows {
+                                        apply_dep_fn(de, &f.qual, DepSink {
+                                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds,
+                                            paths: &mut paths, tables: &mut tables,
+                                            incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                                            unknown_via_dep: &mut unknown_via_dep,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // SOUNDNESS R856 — A DEPENDENCY VALUE PATH WHOSE LEAF IS TYPE-SHAPED NAMES ITS OWN
                     // TYPE when it is a unit struct: `ratescore::Other.ping()` is `Other::ping` on the
                     // value `Other`. That is the same reading `resolve_recv_type`'s unit-struct fallback
@@ -2610,6 +2756,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                         blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                                         unknown_via_dep: &mut unknown_via_dep,
                                     });
+                                    // ⟨0.40⟩ "every miss keeps the guess and ADDS `Unknown`" — and a HIT
+                                    // on a GUESSED owner too. Reading the value `dep::X` as the unit
+                                    // struct `X` is a naming convention; it is a fact only when a trusted
+                                    // surface says `X` is a type (its `types` key) or says what the value
+                                    // `X` holds (`holds`, joined above). Neither → keep the join, hedge.
+                                    let ts = &deps_idx.surface;
+                                    let backed = !ts.distrusted.contains(cr_real)
+                                        && (ts.holds_of(&format!("{cr_real}#{vp}")).is_some()
+                                            || ts.type_key(cr_real, vp).is_some());
+                                    if !backed {
+                                        if r843_probe {
+                                            eprintln!("R843GUESS\tunit\t{}\t{full}", f.qual);
+                                        }
+                                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                        unknown_why.entry(f.qual.clone()).or_default()
+                                            .insert("dispatch:untyped cross-package receiver".to_string());
+                                    }
                                     continue;
                                 }
                             }
@@ -3333,6 +3496,54 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                // ⟨0.40⟩ THE WALK, for a typed method call whose own key MISSED (SPEC §2 ⟨0.40⟩ "the walk
+                // reads absence as 'may be inherited'"). The receiver's type is read from THIS crate's
+                // source, but the member may be one the dependency's type INHERITS — a trait default
+                // (`impl Grand4 for Mid4 {}`, R858's concrete twin) — or one a chained package ADDS to a
+                // type it does not own (`impl PBase for base::Tok`, PART 95 `r8_adds`, SILENT before
+                // this). Every key the walk reaches is ADDED; nothing is withdrawn.
+                //
+                // WHERE THE WALK FINDS NOTHING, the miss stays a purity claim (§2 rule 3) UNLESS a trait
+                // of a chained package that publishes this member is IN SCOPE in this file. Rust resolves
+                // an inherited method only through a trait in scope, so that is the one place an `impl`
+                // the walk could not see (an `adds` withheld, a kind-only node, an unkeyed type) can still
+                // be supplying the body — and `adds` is never complete (PART 95 `o10_adds_partial`).
+                if hit.is_none() && c.method && c.typed && dep_default_path.is_none() {
+                    if let Some((tpath, member)) = rel.rsplit_once("::") {
+                        let ts = &deps_idx.surface;
+                        let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
+                        let (rows, w) = crate::typesurf::join_through(deps_idx, &start, member, false);
+                        let in_scope = if w.hits.is_empty() {
+                            let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
+                            crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, member)
+                        } else {
+                            None
+                        };
+                        if r843_probe && (!w.hits.is_empty() || in_scope.is_some()) {
+                            eprintln!("R843WALK\t{}\t{start}::{member}\thits={}\tstructural={}\tinscope={}",
+                                f.qual, w.hits.len(), w.structural, in_scope.as_deref().unwrap_or("-"));
+                        }
+                        // MEASUREMENT ONLY: a walk that missed STRUCTURALLY (a kind-only or unkeyed node) with
+                        // no in-scope trait carrying the member — what a reading that hedges every structural
+                        // miss on a source-typed receiver would add, and this engine does not.
+                        if r843_probe && w.hits.is_empty() && w.structural && in_scope.is_none() {
+                            eprintln!("R843SMISS\t{}\t{start}::{member}", f.qual);
+                        }
+                        for de in rows {
+                            apply_dep_fn(de, &f.qual, DepSink {
+                                direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                                tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                                blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                                unknown_via_dep: &mut unknown_via_dep,
+                            });
+                        }
+                        if in_scope.is_some() {
+                            let leaf = tpath.rsplit("::").next().unwrap_or(tpath);
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
                         }
                     }
                 }
@@ -4176,6 +4387,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !deps_idx.crates.contains(owner) { continue }
             let t2 = tail2(mem).map(|t| format!("{owner}#{t}")).unwrap_or_else(|| member.clone());
             if deps_idx.by_key.contains_key(member) || deps_idx.by_key.contains_key(&t2) { continue }
+            // ⟨0.40⟩ THE WALK over the dependency's own supertrait edges — `&dyn dep::PSub` calling a
+            // member `PBase` declares (PART 95 `r5_refined`, R858). What it reaches is ADDED; the R608
+            // disclosure below is unchanged (a walk hit does not withdraw it).
+            {
+                if let Some((tq, m)) = mem.rsplit_once("::") {
+                    let start = deps_idx.surface.type_key(owner, tq).unwrap_or_else(|| format!("{owner}#{tq}"));
+                    let (rows, w) = crate::typesurf::join_through(deps_idx, &start, m, true);
+                    if r843_probe && !w.hits.is_empty() {
+                        eprintln!("R843DYN\t{}\t{start}::{m}\thits={}", f.qual, w.hits.len());
+                    }
+                    for de in rows {
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
+                }
+            }
             if r533_exempt_leaf(mem) { continue }
             if r533_trait_prefix(member).is_some_and(|p| r533_fi_prefix.contains(&p))
                 || r533_trait_prefix(&t2).is_some_and(|p| r533_fi_prefix_t2.contains(&p)) { continue }
@@ -5451,7 +5682,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // ⟨typeSurface.returns⟩ THE PRODUCER (DEP-RECEIVER-TYPING-DESIGN.md half 2). A consumer cannot type
     // `let c = deplib::build()` because `build` is PURE and therefore absent from this report entirely —
     // publishing its return type is the only way that key can ever be formed.
-    let type_surface = build_type_surface(&crate_name, &fns, &entries);
+    let mut type_surface = build_type_surface(&crate_name, &fns, &entries);
+    // ⟨0.40⟩ THE DECLARED-TYPE SURFACE (SPEC §2 ⟨0.40⟩, SOUNDNESS R843): `holds`, `returnsProtocol`, the
+    // `types` manifest and `adds`, from Pass A's per-file `FileSurface`s. See `typesurf.rs`.
+    {
+        let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
+        let ctx = crate::typesurf::BuildCtx {
+            crate_name: &crate_name,
+            deps: &deps,
+            renames: &dep_renames,
+            chained: &deps_idx.surface,
+            incomplete: !unanalyzed_units.is_empty(),
+        };
+        crate::typesurf::build(&ctx, &files, &fns, &mut type_surface);
+        // §E1 REACH, producer side: how much of the manifest is KIND-ONLY is the number SPEC §2 ⟨0.40⟩
+        // records as unmeasured ("how many rust types lose `supers` this way").
+        if r843_probe {
+            let ko = type_surface.types.values().filter(|t| t.supers.is_none()).count();
+            let why: BTreeSet<&str> = files.iter().flat_map(|f| f.unclosable.iter().map(String::as_str)).collect();
+            eprintln!("R843TS\t{crate_name}\ttypes={}\tkindonly={ko}\tholds={}\trproto={}\tadds={}\twhy={}",
+                type_surface.types.len(), type_surface.holds.len(), type_surface.returns_protocol.len(),
+                type_surface.adds.len(), why.into_iter().collect::<Vec<_>>().join("|"));
+        }
+    }
     // ⟨0.29⟩ THE SCOPE, aggregated by class. The REASON is the engine's own rationale, verbatim in
     // substance from the comment at each `continue` — a consumer reads it to decide whether the exclusion
     // matches the question they are asking, so paraphrasing it into something vaguer would defeat the

@@ -2666,11 +2666,20 @@ pub fn p2_std_path() -> f64 { std::f64::consts::PI.sqrt() }
             // receiver is the FIELD, not the node.
             assert!(!effs(f).contains(&"Fs".to_string()), "`{name}` fabricated Fs:\n{v:#}");
         }
-        // 2. RESOLVED — the value names its own type, and the chained report answers that key.
-        for name in ["s7_unit_literal_qual", "q1_caps_unit_qual", "q2_caps_unit_imported", "c1_typed_param"] {
-            assert_eq!(effs(fn_entry(&v, name)), vec!["Env".to_string()],
-                       "`{name}` must resolve to exactly `Env` — no hedge beside a key that answered:\n{v:#}");
+        // 2. RESOLVED — the value names its own type, and the chained report answers that key. ⟨0.40⟩:
+        //    reading the VALUE `ratescore::Other` as the unit struct `Other` is a naming convention, and
+        //    this report is an OLDER producer's (`returns` only, no `types`) — so the join is KEPT and the
+        //    miss rule ADDS `Unknown` beside it (SPEC §2 ⟨0.40⟩ "a guess kept silently is the defect this
+        //    rung exists to close"). The typed PARAMETER is read from source and stays exact. Section 6
+        //    below is the same source over a CURRENT producer, where the manifest backs the reading.
+        for name in ["s7_unit_literal_qual", "q1_caps_unit_qual", "q2_caps_unit_imported"] {
+            let f = fn_entry(&v, name);
+            assert!(effs(f).contains(&"Env".to_string()) && effs(f).contains(&"Unknown".to_string())
+                        && why_ok(f),
+                    "`{name}` must keep the resolved `Env` AND hedge the unbacked guess:\n{v:#}");
         }
+        assert_eq!(effs(fn_entry(&v, "c1_typed_param")), vec!["Env".to_string()],
+                   "a typed parameter is no guess — exactly `Env`:\n{v:#}");
         // 3. CONTROL — a std receiver is not a dependency value.
         for name in ["p1_std_const", "p2_std_path"] {
             assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != name),
@@ -2701,6 +2710,125 @@ pub fn l2_local_unit_qual() { m::Unit.go() }
         for name in ["l1_local_static_qual", "l2_local_unit_qual"] {
             assert_eq!(effs(fn_entry(&l, name)), vec!["Env".to_string()], "`{name}`:\n{l:#}");
         }
+        // 6. ⟨0.40⟩ THE SAME SOURCE OVER A CURRENT PRODUCER — one that publishes `holds` and the `types`
+        //    manifest. Every hop whose DECLARED type is now on the wire RESOLVES (its real `Env` is
+        //    charged) and KEEPS the untyped-hop disclosure (this engine does not take SPEC's
+        //    MAY-withdrawal); the unit-struct readings are BACKED by the manifest and stay exact.
+        let dep2 = std::env::temp_dir().join(format!("candor-r856-rep40-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep2);
+        let _ = std::fs::create_dir_all(&dep2);
+        let ty = |k: &str| format!(r#""ratescore#{k}": {{"kind": "value", "supers": []}}"#);
+        std::fs::write(dep2.join("report.ratescore.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}},
+            "package": "ratescore",
+            "resolves": ["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"],
+            "typeSurface": {{"returns": {{"ratescore#Node::new": "ratescore#Node"}},
+              "holds": {{"ratescore#SHARED": "ratescore#Other", "ratescore#inner::DEEP": "ratescore#Other",
+                         "ratescore#CONSTO": "ratescore#Other", "ratescore#Node::parent": "ratescore#Other",
+                         "ratescore#HOLDER": "ratescore#Node"}},
+              "types": {{{}, {}, {}}}}},
+            "functions": [
+              {{"fn": "Other::ping", "inferred": ["Env"], "hash": "ratescore#Other::ping"}},
+              {{"fn": "Other::visit", "inferred": ["Env"], "hash": "ratescore#Other::visit"}},
+              {{"fn": "Node::visit", "inferred": ["Fs"], "hash": "ratescore#Node::visit"}},
+              {{"fn": "DB::query", "inferred": ["Env"], "hash": "ratescore#DB::query"}}]}}"#,
+            ty("Other"), ty("Node"), ty("DB"))).unwrap();
+        let idx2 = load_dep_reports(Some(dep2.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep2);
+        let w = run("r856d", &idx2, SRC);
+        for name in ["s1_static_qual", "s2_static_imported", "s3_static_modpath", "s4_const_qual",
+                     "s8_static_ref", "s9_let_static", "f1_field", "f3_factory_field", "f6_static_field",
+                     "f8_let_field"] {
+            let f = fn_entry(&w, name);
+            assert!(effs(f).contains(&"Env".to_string()), "`{name}` must RESOLVE its declared type:\n{w:#}");
+            assert!(effs(f).contains(&"Unknown".to_string()) && why_ok(f),
+                    "`{name}` must KEEP the untyped-hop disclosure (no withdrawal):\n{w:#}");
+            assert!(!effs(f).contains(&"Fs".to_string()), "`{name}` fabricated Fs:\n{w:#}");
+        }
+        for name in ["s7_unit_literal_qual", "q1_caps_unit_qual", "q2_caps_unit_imported", "c1_typed_param"] {
+            assert_eq!(effs(fn_entry(&w, name)), vec!["Env".to_string()],
+                       "`{name}` is backed by the manifest — exactly `Env`:\n{w:#}");
+        }
+    }
+
+    /// ⟨0.40⟩ (SOUNDNESS R843; SPEC §2 ⟨0.40⟩) — A SOURCE-TYPED RECEIVER'S MEMBER IS LOOKED FOR THROUGH THE
+    /// DEPENDENCY'S OWN HIERARCHY, AND A GUESSED OWNER HEDGES. The dependency report is what candor-scan
+    /// itself produced for the executed fixture in the commit (`tdep`/`tbase`/`tmac`); each program was RUN
+    /// and the body that executed is the one each assertion names:
+    ///   f2  `s.m()`, `S: Tr` inheriting the default (Fs) — a sibling `L` overrides with Env. EXACT: the
+    ///       struct runs the DEFAULT, so `Tr::m`'s union row (L's Env) must NOT be charged.
+    ///   f3  `m.tok()`, `Mid: Grand` inheriting `Grand::tok` (Env) — absent at v0.39.3, now RESOLVED.
+    ///   f4  `k.m2()` on a KIND-ONLY type (its crate has an item macro): the walk cannot close it, and the
+    ///       trait carrying `m2` is IN SCOPE — DISCLOSED, never read as "complete, no supertypes".
+    ///   f5  `t.ext()` on a FOREIGN type the dependency `adds` `Ext` to, overriding it (Env) — the adding
+    ///       package's own body, not the trait default (Fs).
+    ///   f1  `n.get_parent().visit()` — the builder-chain walk guesses `Node`; nothing on the wire types
+    ///       `get_parent`'s `&Other`, so the guess (Fs) is KEPT and `Unknown` ADDED.
+    #[test]
+    fn a_member_is_found_through_the_dependency_hierarchy_and_a_guessed_owner_hedges() {
+        let dep = std::env::temp_dir().join(format!("candor-r843-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let rs = r#""resolves": ["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"]"#;
+        std::fs::write(dep.join("report.tdep.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}}, "package": "tdep", {rs},
+            "typeSurface": {{"returns": {{"tdep#Node::new": "tdep#Node"}},
+              "types": {{"tdep#Ext": {{"kind": "protocol", "supers": []}}, "tdep#Grand": {{"kind": "protocol", "supers": []}},
+                "tdep#L": {{"kind": "value", "supers": ["tdep#Tr"]}}, "tdep#Mid": {{"kind": "value", "supers": ["tdep#Grand"]}},
+                "tdep#Node": {{"kind": "value", "supers": []}}, "tdep#Other": {{"kind": "value", "supers": []}},
+                "tdep#S": {{"kind": "value", "supers": ["tdep#Tr"]}}, "tdep#Tr": {{"kind": "protocol", "supers": []}}}},
+              "adds": {{"tbase#Tok": ["tdep#Ext"]}}}},
+            "functions": [
+              {{"fn": "Ext::ext", "inferred": ["Fs"], "hash": "tdep#Ext::ext"}},
+              {{"fn": "Ext::ext", "inferred": ["Env"], "hash": "tdep#Ext::ext", "interfaceUnion": true}},
+              {{"fn": "Grand::tok", "inferred": ["Env"], "hash": "tdep#Grand::tok"}},
+              {{"fn": "L::m", "inferred": ["Env"], "hash": "tdep#L::m"}},
+              {{"fn": "Node::visit", "inferred": ["Fs"], "hash": "tdep#Node::visit"}},
+              {{"fn": "Other::visit", "inferred": ["Env"], "hash": "tdep#Other::visit"}},
+              {{"fn": "Tok::ext", "inferred": ["Env"], "hash": "tdep#Tok::ext"}},
+              {{"fn": "Tr::m", "inferred": ["Fs"], "hash": "tdep#Tr::m"}},
+              {{"fn": "Tr::m", "inferred": ["Env"], "hash": "tdep#Tr::m", "interfaceUnion": true}}]}}"#)).unwrap();
+        std::fs::write(dep.join("report.tbase.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}}, "package": "tbase", {rs},
+            "typeSurface": {{"types": {{"tbase#Tok": {{"kind": "value", "supers": []}}}}}}, "functions": []}}"#)).unwrap();
+        std::fs::write(dep.join("report.tmac.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}}, "package": "tmac", {rs},
+            "typeSurface": {{"types": {{"tmac#K": {{"kind": "value"}}, "tmac#Tr2": {{"kind": "protocol"}}}}}},
+            "functions": [{{"fn": "Tr2::m2", "inferred": ["Env"], "hash": "tmac#Tr2::m2"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let d = std::env::temp_dir().join(format!("candor-r843-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n[dependencies]\ntbase = \"1\"\ntdep = \"1\"\ntmac = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), r#"
+use tdep::{Ext, Grand, Tr};
+use tmac::Tr2;
+pub fn f1_chain(n: &tdep::Node) { n.get_parent().visit() }
+pub fn f2_exact(s: &tdep::S) { s.m() }
+pub fn f3_inherit(m: &tdep::Mid) { m.tok() }
+pub fn f4_kindonly(k: &tmac::K) { k.m2() }
+pub fn f5_adds(t: &tbase::Tok) { t.ext() }
+pub fn c1_own(l: &tdep::L) { l.m() }
+"#).unwrap();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true, include_tests: false,
+            policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let e = |n: &str| effs(fn_entry(&v, n));
+        let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(e("f2_exact"), s(&["Fs"]), "EXACT receiver: the default runs, never a sibling's override:\n{v:#}");
+        assert_eq!(e("f3_inherit"), s(&["Env"]), "the inherited default must be joined:\n{v:#}");
+        assert_eq!(e("f4_kindonly"), s(&["Unknown"]), "a KIND-ONLY node with the trait in scope discloses:\n{v:#}");
+        assert_eq!(e("f5_adds"), s(&["Env"]), "the ADDING package's override runs:\n{v:#}");
+        assert_eq!(e("f1_chain"), s(&["Fs", "Unknown"]), "the guess is kept AND hedged:\n{v:#}");
+        assert_eq!(e("c1_own"), s(&["Env"]), "an own key answers directly:\n{v:#}");
     }
 
     /// One signature may bind the same trait LEAF to two different crates. `trait_quals` is keyed by leaf,
@@ -16006,6 +16134,10 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // ⟨0.40⟩ (R843) bumped the token to rev54 (`FnInfo` gained `ret_proto` and `FileDecls` gained the
+        // per-file declared-type surface `ts`; a rev53 entry deserializes both EMPTY, so a warm run would
+        // publish a `types` manifest built from nothing and no `returnsProtocol`: the stale direction is a
+        // SHORT manifest, the one silent direction the rung has);
         // R856/R857 bumped the token to rev52 (a method on a dependency VALUE now emits a `<untyped>`
         // marker and a qualified unit-struct literal now types — both land in the cached `FnInfo`'s
         // `calls`, so a rev51 entry republishes the caller ABSENT: the stale direction is SILENCE);
@@ -16017,7 +16149,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16028,7 +16160,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev53/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev54/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
