@@ -276,6 +276,10 @@ pub(crate) struct CallCollector<'a> {
     /// element (it has no nominal path). Grown as tuple-of-dyn params / var rebinds are seen (R46 tuple).
     pub(crate) tuple_trait_of: HashMap<String, Vec<Vec<String>>>,
     pub(crate) calls: Vec<Call>,
+    /// SOUNDNESS R754 — the foreign functions this BODY declares (`decls::body_declared_externs`). A
+    /// bare call naming one is recorded under `decls::EXTERN_SENTINEL`, which `scan.rs` answers as an
+    /// FFI call before any crate-wide name lookup can resolve it to a same-named wrapper.
+    pub(crate) body_externs: std::collections::HashSet<String>,
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
     /// invocation the scan can't see through — not a call to a free fn named `f`.
     pub(crate) closure_vars: std::collections::HashSet<String>,
@@ -4235,6 +4239,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // row carries the union. `alias_targets_of_path` never records a qself path, so
                         // the extras need none of the qself repair below.
                         let aliased = ident.as_ref().and_then(|n| self.fn_alias.get(n).cloned());
+                        let fn_aliased = aliased.is_some();
                         if let Some(ts) = &aliased {
                             for extra in ts.iter().skip(1) {
                                 let leaf2 = extra.rsplit("::").next().unwrap_or(extra).to_string();
@@ -4373,6 +4378,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the
                         // consumer normalize. Saturating: 255 arguments is not a signature anyone is
                         // adjudicating, and a wrap would read as the sentinel.
+                        // SOUNDNESS R754 — a bare call naming a foreign import THIS BODY declared is,
+                        // by Rust's block scoping, that import — whatever the crate-wide index would
+                        // resolve the leaf to (windows' wrappers share the import's name).
+                        let path = match &ident {
+                            Some(n) if !fn_aliased && self.body_externs.contains(n) => {
+                                format!("{}{n}", crate::decls::EXTERN_SENTINEL)
+                            }
+                            _ => path,
+                        };
                         self.calls.push(Call { argc: node.args.len().min(255) as u8,
                                                entropy_arg: args_name_entropy_source(&node.args),
                                                path, leaf, str_arg, typed: false, method,

@@ -2348,6 +2348,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if c.entropy_arg {
                 direct.entry(f.qual.clone()).or_default().insert("Rand");
             }
+            // SOUNDNESS R754 — A CALL TO A FOREIGN FUNCTION THIS BODY DECLARED. The collector records a
+            // bare call to a body-local `extern` / `link!` name under `EXTERN_SENTINEL` (see
+            // `body_declared_externs`), so
+            // this path IS the import by Rust's scoping, and it is answered here — before `resolve_target`
+            // can look the bare leaf up crate-wide and find a same-named WRAPPER (windows' own shape),
+            // whose self-edge is then dropped and whose `resolved_local` suppresses every disclosure.
+            // Same answer the item-level `extern` block has always produced: `Unknown`, `native:extern fn`.
+            if !c.is_macro && c.path.starts_with(crate::decls::EXTERN_SENTINEL) {
+                if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                    eprintln!("VEINE_EXTERNCALL\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string());
+                continue;
+            }
             // ── R105 — A `#[cfg]`-DUPLICATED ALIAS, ADJUDICATED WHERE THE LEAF IS KNOWN ────────────────
             // `decls::record_alias` keeps EVERY arm of an alias whose declaration is duplicated across
             // `#[cfg]` branches (the ordinary platform/feature shim) instead of letting the last one in
@@ -4494,7 +4509,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !c.typed
                 && !already_handled
                 && !opaque_scope.is_empty()
-                // a sentinel-rebound name (R106 `<body-item>`) is the BODY's own
+                // a sentinel-rebound name (R106 `<body-item>`, R754 `<body-extern>`) is the BODY's own
                 // declaration, never a name the module's namespace supplies
                 && !c.path.starts_with('<')
                 && !local_types.contains(&c.leaf)

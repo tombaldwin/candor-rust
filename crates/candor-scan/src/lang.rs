@@ -7859,6 +7859,31 @@ fn macro_token_impls(ts: proc_macro2::TokenStream, out: &mut Vec<(syn::Path, Vec
     }
 }
 
+/// SOUNDNESS R732 / R754 — the FUNCTION NAME a `link!` invocation declares as a foreign import, or
+/// `None` when the invocation is not that shape.
+///
+/// `windows_targets::link!("kernel32.dll" "system" fn CreateFileW(..) -> HANDLE)` (and its successor
+/// `windows_link::link!`) expands to an `extern "system" { pub fn CreateFileW(..); }` block: a foreign
+/// declaration in every sense `collect_decls`' `Item::ForeignMod` arm records, written in a spelling no
+/// arm read. Recognised on the macro's LEAF plus the shape of its arguments — a LIBRARY-NAME string
+/// literal first, then a `fn NAME` — rather than on the leaf alone, because `link` is an ordinary word
+/// and a crate's own `link!` that declares a bodied fn is not a foreign boundary. The shape test is what
+/// keeps an unrelated macro out; the failure it leaves is a third-party macro with this exact argument
+/// shape that does NOT declare an import, which over-discloses (`Unknown`) and never silences.
+pub(crate) fn link_macro_fn_name(mac: &syn::Macro) -> Option<String> {
+    if mac.path.segments.last()?.ident != "link" {
+        return None;
+    }
+    let toks: Vec<proc_macro2::TokenTree> = mac.tokens.clone().into_iter().collect();
+    match toks.first()? {
+        proc_macro2::TokenTree::Literal(l) if l.to_string().starts_with('"') => {}
+        _ => return None,
+    }
+    toks.windows(2).find_map(|w| match (&w[0], &w[1]) {
+        (proc_macro2::TokenTree::Ident(k), proc_macro2::TokenTree::Ident(n)) if k == "fn" => Some(n.to_string()),
+        _ => None,
+    })
+}
 
 // ── SOUNDNESS R145 — `include!` TEXT IS READ WHERE IT CAN BE, AND DISCLOSED WHERE IT CANNOT ─────────────
 //

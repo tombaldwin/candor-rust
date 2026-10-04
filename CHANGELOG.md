@@ -11,6 +11,40 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ Vein E, foreign imports — `link!` is read, and a body-local import is the call it names (SOUNDNESS R732, R754) — ABOVE THE DECLINE BAND, NEEDS A RULING
+
+Two declarations no arm read. `windows_targets::link!("kernel32.dll" "system" fn F(..))` / `windows_link::link!`
+expands to an `extern` block and recorded nothing (R732). And `windows`' generated wrappers declare the
+import INSIDE a same-named function (`pub unsafe fn CreateFileW(..) { link!(.. fn CreateFileW(..)); CreateFileW(..) }`),
+so the inner call resolved to the wrapper ITSELF, the self-edge was dropped and every disclosure skipped
+(R754). The second is not specific to the macro: a REAL `extern "C" { fn truncate(..); }` in a body named
+`truncate` was the same silence. EXECUTED on macOS (each wrapper performs a real filesystem syscall through a
+`link!` with the real crate's non-raw-dylib expansion): five spellings, `deny Unknown` 0 → 1 at wrapper and
+caller; the real item-level `extern` control was 1 throughout.
+
+- **Item-level `link!`** joins `extern_fns`, exactly as an `extern` block does (shape test: a library string
+  first, then `fn NAME` — a crate's own `link!` declaring a bodied fn is not matched).
+- **A body-local import** (`extern` block or `link!`, R119 block scoping) is recorded by the collector under
+  `<body-extern>`, and `scan.rs` answers that call as `Unknown`, `native:extern fn`, before any crate-wide
+  lookup. Carried on the collector, not in the `use` map: the map conflates namespaces, and the first cut
+  that used it LOST a concrete effect when a body declared `extern { fn dlsym }` beside `macro_rules! dlsym`
+  (objc2's shape; pinned by a test).
+- `windows` `CreateFileW`, `CreateProcessW`, `WinSock::connect`, `LoadLibraryExA` read `['Unknown']` with
+  `native:extern fn` (were `[]`, disclosed only by `invisible`, which arms no policy form).
+- **⚠ Gates that can flip, vs `1e11e7f` (both Vein E commits; R145's own share is 105 rows) — only 0 → 1, and this is the PRICE QUESTION.**
+  Unchained 1,838 entries / 757,917 units: 24,774 functions newly `Unknown` (**3.27%**, above the ~2.6% band),
+  of which **20,109 (2.65%) are ONE crate, `windows-0.56.0`** — already 79,932-of-112,200 rows `Unknown` at
+  HEAD; module scope 731 flips (188 in `windows`), crate scope 5 (gethostname ×2, hostname, objc2-app-kit,
+  and R145's rustc_version_runtime). Excluding `windows`, 4,665 (0.62%): objc2-* CoreFoundation/CoreGraphics
+  wrappers, wasi/wasip2/wasip3 imports, windows-core/registry/strings/result. Chained 909 entries / 403,300
+  units: 12,291 (3.05%), `windows` 9,315. REMOVED 0, no concrete effect lost, no reason withdrawn except
+  `ambiguous:same-name local defs` → `native:extern fn` on cfg-twin wrappers (524 rows). Every new charge is
+  a call to a declared foreign import.
+- Not covered, stated: a consumer calling a dependency's foreign import DIRECTLY (`dep::creat(..)`) reads
+  pure when chained — for a real `extern` block as much as for `link!`; the dep publishes no row for a
+  body-less declaration.
+- Scan-cache schema rev56 → rev57.
+
 ### ⚠ Vein E, `include!` — a readable target is read, an unreadable one is disclosed (SOUNDNESS R145)
 
 `include!` text was never read: a call into an included function was an unresolved bare call and its

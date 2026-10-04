@@ -530,6 +530,105 @@ fn body_declared_items(
     out
 }
 
+/// SOUNDNESS R754 — the prefix a bare call to a FUNCTION-BODY-LOCAL FOREIGN declaration is recorded
+/// under. A call that expands to `EXTERN_SENTINEL + name` is, by Rust's own scoping, a call to
+/// the foreign function the body declared — and `scan.rs` discloses it as such before any name lookup can
+/// send it anywhere else. Same construction as `ITEM_SENTINEL`: characters no Rust path can carry, so no
+/// index, classifier head or dependency key can match it by accident.
+pub(crate) const EXTERN_SENTINEL: &str = "<body-extern>";
+
+/// SOUNDNESS R754 — the foreign functions a FUNCTION BODY declares, by name: `extern "C" { fn f(); }`
+/// blocks and `link!("lib" "abi" fn f(..))` invocations written as statements of the body or of a block
+/// nested in it.
+///
+/// THE DEFECT. `windows`' generated wrappers are all one shape:
+///
+///     pub unsafe fn CreateFileW(..) -> HANDLE {
+///         windows_targets::link!("kernel32.dll" "system" fn CreateFileW(..) -> HANDLE);
+///         CreateFileW(..)
+///     }
+///
+/// The inner `CreateFileW(..)` names the body-local import — a block item shadows the module item of the
+/// same name — but the resolver looks the bare leaf up crate-wide, finds exactly one unit (the wrapper
+/// ITSELF), drops the self-edge and marks the call `resolved_local`, which suppresses every disclosure
+/// after it. So `CreateFileW`, `CreateProcessW` and `WinSock::connect` read `inferred: []`. Putting the
+/// leaf in the crate-wide `extern_fns` set cannot help (the hedge is skipped once `resolved_local` is
+/// set), and R106's `ITEM_SENTINEL` defeats the leaf lookup too. The disclosure has to come from the
+/// DECLARATION SITE, which is what this set is: the body knows what it declared, and a bare call naming
+/// it is recorded under `EXTERN_SENTINEL` (by the collector — not through the `use` map, which conflates
+/// the value and macro namespaces) and answered as an FFI call before any lookup runs.
+///
+/// NOT ONLY `link!`, measured: a REAL `extern "C" { fn truncate(..); }` block in the body of a wrapper
+/// named `truncate` is the same silence (EXECUTED: the file is truncated, `deny Unknown` exits 0) — the
+/// defect is the self-resolution, and the macro spelling only made it common.
+///
+/// SCOPING mirrors R119's for body items: a name declared in the body's own statement list covers the
+/// whole body; one declared in a NESTED block is promoted only when every occurrence of the identifier in
+/// the body already lies inside that block (`count_ident`, with the same macro-template reach), and a name
+/// two nested blocks declare is not promoted. A refused promotion leaves today's answer for that name.
+/// The direction of an over-promotion here is not silence: a call it wrongly rebinds is disclosed
+/// `Unknown` instead of resolved, which withdraws a concrete answer but never certifies purity.
+pub(crate) fn body_declared_externs(
+    block: &syn::Block,
+    local_macros: &HashMap<String, String>,
+) -> std::collections::HashSet<String> {
+    fn direct(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for s in stmts {
+            match s {
+                syn::Stmt::Item(syn::Item::ForeignMod(fm)) if !is_cfg_test(&fm.attrs) => {
+                    for fi in &fm.items {
+                        if let syn::ForeignItem::Fn(f) = fi {
+                            if !is_cfg_test(&f.attrs) {
+                                out.insert(f.sig.ident.to_string());
+                            }
+                        }
+                    }
+                }
+                syn::Stmt::Item(syn::Item::Macro(m)) if m.ident.is_none() && !is_cfg_test(&m.attrs) => {
+                    out.extend(crate::lang::link_macro_fn_name(&m.mac));
+                }
+                syn::Stmt::Macro(m) if !is_cfg_test(&m.attrs) => {
+                    out.extend(crate::lang::link_macro_fn_name(&m.mac));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+    let mut out = direct(&block.stmts);
+    struct Nested<'ast> {
+        out: Vec<(&'ast syn::Block, std::collections::HashSet<String>)>,
+        direct: fn(&[syn::Stmt]) -> std::collections::HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Nested<'ast> {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            let d = (self.direct)(&b.stmts);
+            if !d.is_empty() {
+                self.out.push((b, d));
+            }
+            syn::visit::visit_block(self, b);
+        }
+    }
+    let mut n = Nested { out: Vec::new(), direct };
+    syn::visit::visit_block(&mut n, block);
+    let mut cand: HashMap<String, Option<usize>> = HashMap::new();
+    for (i, (_, names)) in n.out.iter().enumerate() {
+        for name in names {
+            if !out.contains(name) {
+                cand.entry(name.clone()).and_modify(|v| *v = None).or_insert(Some(i));
+            }
+        }
+    }
+    for (name, who) in cand {
+        let Some(i) = who else { continue };
+        if count_ident(block, &name, local_macros) == count_ident(n.out[i].0, &name, local_macros) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
 /// Does the signature's PARAMETER LIST, RETURN TYPE or GENERICS mention `name`? The function's own ident
 /// is deliberately not looked at — it is not a type position. Debug instrumentation only (`BODYSIG`).
 fn sig_mentions(sig: &syn::Signature, name: &str) -> bool {
@@ -2053,6 +2152,17 @@ pub(crate) fn fninfo(
     // fabrication). Applied in the same place and the same way as the additive half, so a body's `use`
     // and a body's `struct` are answered by one map rather than by one map and an omission.
     let shadowed = body_declared_items(qual, block, local_macros);
+    // SOUNDNESS R754 — the body's own FOREIGN declarations. See `body_declared_externs`.
+    // Carried on the collector rather than written into the `use` map: the map conflates namespaces,
+    // and a body that declares `extern { fn dlsym(..); }` beside `macro_rules! dlsym` (objc2's
+    // `os_version/apple.rs`) must still expand `dlsym!(..)` from its own template. Measured: the map
+    // spelling withdrew that body's `macro:unreadable macro_rules! template` reason.
+    let externs = body_declared_externs(block, local_macros);
+    if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+        for n in &externs {
+            eprintln!("VEINE_BODYEXTERN\t{qual}\t{n}"); // §E1 REACH PROBE
+        }
+    }
     // R119 — THE SIGNATURE IS NOT IN THE BODY'S SCOPE, and the first cut of R106 shadowed it too. A
     // parameter's type resolves where the function is DECLARED, so a body-local item cannot rebind it:
     //
@@ -2232,6 +2342,7 @@ pub(crate) fn fninfo(
         tuple_of,
         tuple_trait_of,
         calls: Vec::new(),
+        body_externs: externs,
         closure_vars: std::collections::HashSet::new(),
         fn_typed_vars,
         // Empty at entry: filled as `let`s are visited (DEP-RECEIVER-TYPING-DESIGN.md half 1).
@@ -3401,6 +3512,20 @@ pub(crate) fn collect_decls(
                     if let syn::ForeignItem::Fn(f) = fi {
                         extern_fns.insert(f.sig.ident.to_string());
                     }
+                }
+            }
+            // SOUNDNESS R732 — THE SAME DECLARATION IN A MACRO'S SPELLING. `windows_targets::link!(
+            // "kernel32.dll" "system" fn F(..))` expands to exactly the `extern` block the arm above
+            // reads, and an item-position invocation of it recorded nothing, so a safe wrapper calling
+            // `F` read silent-pure. Item level only: a `link!` inside a FUNCTION BODY is scoped to that
+            // body, and is answered there — see `body_declared_externs` (R754) — rather than by widening
+            // this crate-wide leaf set to a name no other body can reach.
+            syn::Item::Macro(m) if m.ident.is_none() && (include_tests || !is_cfg_test(&m.attrs)) => {
+                if let Some(n) = crate::lang::link_macro_fn_name(&m.mac) {
+                    if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                        eprintln!("VEINE_LINKITEM\t{n}"); // §E1 REACH PROBE
+                    }
+                    extern_fns.insert(n);
                 }
             }
             syn::Item::Impl(im) => {
