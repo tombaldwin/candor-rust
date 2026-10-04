@@ -934,6 +934,24 @@ pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                 // The error type is deliberately not reachable here: nothing binds a name out of it
                 // through any of this function's callers.
                 "Option" | "Result" | "IoResult" => type_path_b(first_ty, uses),
+                // VEIN B (R878, R568) — a std interior-mutability / lazy-init WRAPPER holds exactly one
+                // value of its type argument, the same shape as `Option`. Recorded here so the wrapper
+                // accessors (`is_wrapper_accessor`) can answer `self.db.borrow_mut()` with `T`.
+                // NOT when the argument is itself a container, `Option`/`Result` or another wrapper
+                // (`Mutex<Option<X>>`, `Mutex<Vec<G>>`): that value names nothing the chain goes on to call,
+                // and recording it fed the element-preserving adapters (`lock`, `as_ref`) an `Option` where
+                // they had nothing before — measured on the chained corpus, mongodb's
+                // `inner.lock().await.as_ref()?.cache` lost its ⟨0.40⟩ `dispatch:` disclosure. R347's
+                // guard-chain half (`Mutex<Vec<Guard>>`) stays open, as it was.
+                n if is_value_wrapper(n) => type_path_b(first_ty, uses).filter(|(t, _)| {
+                    let leaf = t.rsplit("::").next().unwrap_or(t);
+                    !(is_sequence_container(leaf)
+                        || is_map_container(leaf)
+                        || is_value_wrapper(leaf)
+                        || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
+                        || (matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
+                            && !candor_classify::is_std_effect_handle(t)))
+                }),
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
                 //
@@ -1313,6 +1331,15 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             // Neither sentinel is a NOMINAL type: `RET_FN_TYPED` types no var (a callback), and the
             // `RET_DYN_PREFIX` dispatch-object return is resolved by TRAIT (via `resolve_recv_traits`'s
             // Call arm), never as a concrete `Type::method`. Filter both out of concrete var-typing.
+            //
+            // VEIN B (R197) — A TURBOFISH NAMES A GENERIC RETURN. `net::mk::<net::Conn>()` over
+            // `fn mk<T: Default>() -> T`: the plain recorded return below is the PARAMETER NAME (`T`), a
+            // type no value has, so the binding typed to nothing and `c.send()` read ABSENT while the
+            // annotated twin charged. `ret_generic_key` holds the parameter's position only when every
+            // same-leaf contributor agrees, so a non-generic `mk` elsewhere withdraws it.
+            if let Some(t) = turbofish_return(p, leaf, uses, returns) {
+                return Some(t);
+            }
             recorded_return_type(leaf, returns)
         }
         // `let s = S {..};` — a struct literal names its type directly.
@@ -1323,6 +1350,40 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
         syn::Expr::Path(p) => type_from_value_path(&path_to_string(&p.path), uses),
         _ => None,
     }
+}
+
+/// VEIN B (R197, R733) — the TYPE ARGUMENT a call-site turbofish supplies for the generic parameter the
+/// callee's return names. `None` unless `ret_generic_key(leaf)` holds a position (every same-leaf
+/// contributor agreed) and the last path segment carries a type argument there.
+pub(crate) fn turbofish_return_ty<'e>(p: &'e syn::ExprPath, leaf: &str, returns: &ReturnIndex) -> Option<&'e syn::Type> {
+    let pos: usize = returns.get(&crate::model::ret_generic_key(leaf))?.parse().ok()?;
+    let syn::PathArguments::AngleBracketed(args) = &p.path.segments.last()?.arguments else { return None };
+    args.args
+        .iter()
+        .filter_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .nth(pos)
+}
+
+/// `turbofish_return_ty` as a nominal type path (`type_path`, so `&`/`Box`/`Arc`/`Rc` peel as every
+/// other binder peels them). `_` and a non-path type answer nothing.
+pub(crate) fn turbofish_return(
+    p: &syn::ExprPath,
+    leaf: &str,
+    uses: &HashMap<String, String>,
+    returns: &ReturnIndex,
+) -> Option<String> {
+    let t = turbofish_return_ty(p, leaf, returns)?;
+    let tp = type_path(t, uses)?;
+    if tp == "_" {
+        return None;
+    }
+    if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+        eprintln!("VEINB_TURBOFISH\t{leaf}\t{tp}");
+    }
+    Some(tp)
 }
 
 /// The recorded return type of a fn LEAF, as a NOMINAL type path — the one authority for "what concrete
@@ -3121,6 +3182,61 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// result the element itself*, which is why the `Option`-returning accessors are on both: at a
 /// receiver position they are always spelled through an `.unwrap()`/`.expect()`, and those two walk
 /// to their own receiver rather than needing an entry here.
+/// VEIN B — the std single-value wrappers whose type argument `elem_type_b` records as their element.
+pub(crate) fn is_value_wrapper(name: &str) -> bool {
+    matches!(
+        name,
+        "RefCell" | "Cell" | "Mutex" | "RwLock" | "OnceLock" | "OnceCell" | "LazyLock" | "LazyCell"
+            | "ReentrantMutex"
+    )
+}
+
+/// VEIN B — `(wrapper kind, method)` pairs whose result IS the wrapper's type argument (possibly behind a
+/// guard, `&`, `LockResult` or `Option`, all of which the typer already treats as transparent). Keyed on
+/// the KIND, never on the method alone: `Vec::as_ref` yields a slice and `Mutex::get_mut` a `&mut T`, so
+/// the same leaf means different things on different receivers. Every entry is a std inherent method.
+/// True when ANY wrapper kind in `is_wrapper_accessor` declares `method` — the cheap pre-test that keeps
+/// the receiver re-typing off every other chain step.
+/// VEIN B — the `Option`/`Result` PLUMBING a guard or cell accessor's result is unwrapped through
+/// (`m.lock().unwrap()`, `c.try_borrow_mut().expect(..)`). The typer answers the accessor with the
+/// wrapped `T`, so a typed call formed for the plumbing would read `T::unwrap` — and for a std effect
+/// handle the whole-type rule charges that. The method is never `T`'s own.
+pub(crate) fn is_result_plumbing(method: &str) -> bool {
+    matches!(
+        method,
+        "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "unwrap_unchecked"
+            | "ok" | "err" | "map_err" | "is_ok" | "is_err" | "is_some" | "is_none" | "as_ref" | "as_mut"
+            | "as_deref" | "as_deref_mut" | "cloned" | "copied"
+    )
+}
+
+pub(crate) fn is_any_wrapper_accessor(method: &str) -> bool {
+    ["RefCell", "Mutex", "RwLock", "OnceLock", "LazyLock", "Cell", "Option", "Result"]
+        .iter()
+        .any(|k| is_wrapper_accessor(k, method))
+}
+
+pub(crate) fn is_wrapper_accessor(kind: &str, method: &str) -> bool {
+    match kind {
+        "RefCell" => matches!(method, "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut" | "get_mut"),
+        "Mutex" | "ReentrantMutex" => matches!(method, "lock" | "try_lock" | "get_mut" | "blocking_lock"),
+        "RwLock" => matches!(method, "read" | "write" | "try_read" | "try_write" | "get_mut"
+            | "blocking_read" | "blocking_write"),
+        "OnceLock" | "OnceCell" => matches!(method, "get" | "get_mut" | "get_or_init" | "get_or_try_init" | "wait"),
+        "LazyLock" | "LazyCell" => matches!(method, "force"),
+        "Cell" => matches!(method, "get" | "take" | "replace" | "get_mut"),
+        // NOT `as_ref`/`as_mut`/`as_deref`: those yield `Option<&T>`, still an Option, and typing them as
+        // `T` formed `Child::unwrap` on `self.inner.as_mut().unwrap()` — charged `Exec` by the whole-type
+        // handle rule over a getter (async-process `ChildGuard::get_mut`, measured on the corpus). They
+        // are element-PRESERVING adapters, which is how the `unwrap` after them already reaches `T`.
+        "Option" => matches!(method, "unwrap" | "expect"
+            | "unwrap_unchecked" | "unwrap_or_default" | "insert" | "get_or_insert" | "get_or_insert_with"),
+        "Result" | "IoResult" => matches!(method, "unwrap" | "expect" | "unwrap_unchecked"
+            | "unwrap_or_default"),
+        _ => false,
+    }
+}
+
 pub(crate) fn is_element_yielding_accessor(method: &str) -> bool {
     matches!(
         method,

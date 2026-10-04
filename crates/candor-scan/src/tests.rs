@@ -12976,13 +12976,18 @@ trait G {
             assert_eq!(crate::lang::elem_trait_leaves(&dynn, &g, &aliases), vec!["Doer".to_string()],
                        "{n}: the DISPATCH value is the element — the half that already worked");
         }
-        // The deliberate divergences stay: `elem_type` answers for `IoResult` and does NOT peel the
-        // interior-mutability cells (R347's backed-out half), and neither is unified away.
+        // The deliberate divergences stay: `elem_type` answers for `IoResult`, and neither is unified away.
         let io: syn::Type = syn::parse_str("IoResult<Sender>").unwrap();
         assert_eq!(elem_type(&io, &u).as_deref(), Some("Sender"));
+        // VEIN B — the interior-mutability cells now record their DIRECT type argument when it is a
+        // nominal value (the `Option` shape, one held value), and nothing when it is a container. R347's backed-out half peeled THROUGH to the element, and its precondition —
+        // a closure in the error position is not the element — is now enforced at the HOF route (see
+        // `an_unwrap_or_else_error_closure_is_not_the_guarded_value`).
         let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
         assert_eq!(elem_type(&mx, &u), None,
-                   "R347: peeling Mutex here costs a fabrication and is deliberately absent");
+                   "vein B: a wrapper of a CONTAINER records nothing (R347's guard-chain half stays open)");
+        let rc: syn::Type = syn::parse_str("RefCell<Sender>").unwrap();
+        assert_eq!(elem_type(&rc, &u).as_deref(), Some("Sender"));
     }
 
     /// The Pass-A enum-variant index keeps only UNAMBIGUOUS single-payload variant leaves; a leaf two
@@ -16260,6 +16265,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // VEIN B bumped it to rev55 (four new `rets` key spaces, a static element key, and what
+        // `field_elem` and Pass B's `calls` record — a rev54 entry replays the silences warm).
         // ⟨0.40⟩ (R843) bumped the token to rev54 (`FnInfo` gained `ret_proto` and `FileDecls` gained the
         // per-file declared-type surface `ts`; a rev53 entry deserializes both EMPTY, so a warm run would
         // publish a `types` manifest built from nothing and no `returnsProtocol`: the stale direction is a
@@ -16275,7 +16282,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16286,7 +16293,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev54/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev55/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -24963,4 +24970,292 @@ pub fn go() {{ imp::doit(); }}
             .unwrap_or_else(|| panic!("`T5::go` union row:\n{v:#}"));
         assert_eq!(effs(u5), vec!["Fs".to_string()], "the published union carries the tuple impl:\n{v:#}");
         assert_eq!(effs_opt(&v, "lc"), Vec::<String>::new(), "control:\n{v:#}");
+    }
+
+    // ── VEIN B — ONE STRICT EXPRESSION TYPER ────────────────────────────────────────────────────────
+    //
+    // R193(b), R197, R733, R568, R542, R341, R861 (bound spelling), R877, R878. Every fixture below was
+    // EXECUTED as a binary before it was pinned (the effect really runs: a marker file is written), and
+    // every row the assertions call ABSENT-before was ABSENT at bad25d4 with the control charging.
+
+    /// The `let` binder asks `type_of`, which answers a method call only from a fact the RECEIVER'S OWN
+    /// impl declares — never the builder-chain guess. The first vein-B probe typed `let` through that
+    /// guess and REMOVED mysql_async's `get_conn` (`let pool = state.pool_mut(); pool.poll_new_conn()`
+    /// became a phantom `State::poll_new_conn`); `get_conn` below is that shape and is the must-not-
+    /// regress row, written before the fix.
+    #[test]
+    fn vein_b_the_let_binder_types_what_declarations_prove() {
+        let src = "\
+fn mark() { let _ = std::fs::write(\"/tmp/vb_t\", \"x\"); }\n\
+pub struct Pool;\n\
+impl Pool { pub fn poll_new_conn(&self) { mark() } }\n\
+pub struct State { pub pool: Option<Pool> }\n\
+impl State { pub fn pool_mut(&mut self) -> &mut Pool { self.pool.as_mut().expect(\"x\") } }\n\
+pub fn get_conn(pool: Pool) { let mut state = State { pool: Some(pool) }; let pool = state.pool_mut(); pool.poll_new_conn() }\n\
+pub fn get_conn_param(mut state: State) { let pool = state.pool_mut(); pool.poll_new_conn() }\n\
+pub struct Maker; pub struct Tool;\n\
+impl Maker { pub fn make(&self) -> Tool { Tool } }\n\
+impl Tool { pub fn go(&self) { mark() } }\n\
+pub fn r193b_let(m: &Maker) { let t = m.make(); t.go() }\n\
+pub struct Writer; impl Writer { pub fn go(&self) { mark() } }\n\
+pub struct Holder { pub writer: Writer }\n\
+impl Holder { pub fn via_let_self(&self) { let me = self; me.writer.go() } }\n\
+pub fn r877_ref(wr: &Writer) { let alias = wr; alias.go() }\n\
+pub fn r877_owned(wr: Writer) { let alias = wr; alias.go() }\n\
+pub struct Q; impl Q { pub fn step(self) -> Self { self } pub fn go(&self) { mark() } }\n\
+pub fn fluent_let(q: Q) { let q2 = q.step(); q2.go() }\n\
+pub struct A1; impl A1 { pub fn to_b(&self) -> B1 { B1 } pub fn go(&self) { mark() } }\n\
+pub struct B1; impl B1 { pub fn go(&self) {} }\n\
+pub fn stale_shadow(x: A1) { let x = x.to_b(); x.go() }\n\
+pub struct G2; impl G2 { pub fn conv<T: Default>(&self) -> T { T::default() } }\n\
+#[derive(Default)] pub struct Zq; impl Zq { pub fn go(&self) {} }\n\
+pub fn undeclared(g: &G2) { let z = g.conv::<Zq>(); z.go() }\n";
+        let v = scan_fixture("veinb_let", src);
+        for name in ["get_conn", "get_conn_param", "r193b_let", "Holder::via_let_self", "r877_ref",
+                     "r877_owned", "fluent_let"] {
+            assert_eq!(fixture_effects(&v, name), vec!["Fs".to_string()],
+                       "`{name}`: the binding's type is DECLARED, so the call must charge:\n{v:#}");
+        }
+        // THE REMOVAL THIS CHANGE MAKES, pinned. `x` is rebound to `x.to_b()`, declared `-> B1`; the old
+        // binder left the PARAMETER's `A1` standing and charged `A1::go` — executed, `B1::go` writes
+        // nothing. A fabrication withdrawn by a declared fact, not a narrowing by name.
+        assert!(fixture_effects(&v, "stale_shadow").is_empty(),
+                "a rebind to a declared different type must not keep the shadowed binding's type:\n{v:#}");
+        // A method whose return the index does not know types NOTHING (`conv` is generic over a method
+        // turbofish the strict typer does not read): no guess, so no `Zq::go` and no `G2::go`.
+        assert!(fixture_effects(&v, "undeclared").is_empty(), "{v:#}");
+    }
+
+    /// R878, R568 — a std wrapper's accessor yields its TYPE ARGUMENT, keyed on the wrapper KIND.
+    #[test]
+    fn vein_b_a_wrapper_accessor_yields_the_type_argument() {
+        let src = "\
+use std::cell::RefCell; use std::sync::{Mutex, RwLock, OnceLock};\n\
+pub struct Inner; impl Inner { pub fn go(&self) { let _ = std::fs::write(\"/tmp/vb_w\", \"x\"); } }\n\
+pub struct Other; impl Other { pub fn go(&self) {} }\n\
+pub struct H { pub r: RefCell<Inner>, pub m: Mutex<Inner>, pub w: RwLock<Inner>, pub o: Option<Inner>, pub c: OnceLock<Inner> }\n\
+impl H {\n\
+    pub fn refcell(&self) { self.r.borrow_mut().go() }\n\
+    pub fn refcell_let(&self) { let g = self.r.borrow_mut(); g.go() }\n\
+    pub fn mutex(&self) { self.m.lock().unwrap().go() }\n\
+    pub fn mutex_let(&self) { let g = self.m.lock().unwrap(); g.go() }\n\
+    pub fn rw_read(&self) { self.w.read().unwrap().go() }\n\
+    pub fn opt(&self) { self.o.as_ref().unwrap().go() }\n\
+    pub fn once(&self) { self.c.get_or_init(|| Inner).go() }\n\
+}\n\
+static CELL: OnceLock<Inner> = OnceLock::new();\n\
+pub fn r568_static() { CELL.get_or_init(|| Inner).go() }\n\
+pub fn r568_let_bound() { let c: OnceLock<Inner> = OnceLock::new(); let x = c.get_or_init(|| Inner); x.go() }\n\
+pub fn p_mutex(m: &Mutex<Inner>) { m.lock().unwrap().go() }\n\
+pub struct G; impl G { pub fn len(&self) -> usize { let _ = std::fs::write(\"/tmp/vb_g\", \"x\"); 0 } }\n\
+pub fn vec_as_ref(v: Vec<G>) -> usize { let s: &[G] = v.as_ref(); s.len() + v.as_slice().len() }\n";
+        let v = scan_fixture("veinb_wrap", src);
+        for name in ["H::refcell", "H::refcell_let", "H::mutex", "H::mutex_let", "H::rw_read", "H::opt",
+                     "H::once", "r568_static", "r568_let_bound", "p_mutex"] {
+            assert_eq!(fixture_effects(&v, name), vec!["Fs".to_string()],
+                       "`{name}`: the accessor yields `Inner`:\n{v:#}");
+        }
+        // KIND, not leaf: `Vec::as_ref` is a slice, so the local `G::len` must not be reached.
+        assert!(fixture_effects(&v, "vec_as_ref").is_empty(), "{v:#}");
+    }
+
+    /// R347's named precondition, now enforced: `unwrap_or_else`'s one-parameter closure receives the
+    /// ERROR (`PoisonError` after `lock()`), never the guarded value. Without the guard, the wrapper
+    /// element typed `x` as `ChildGuard` and `x.into_inner()` charged `Exec` — async-process's
+    /// `Reaper::has_zombies` shape.
+    #[test]
+    fn an_unwrap_or_else_error_closure_is_not_the_guarded_value() {
+        let src = "\
+use std::sync::Mutex;\n\
+pub struct ChildGuard;\n\
+impl ChildGuard {\n\
+    pub fn into_inner(self) -> u8 { let _ = std::process::Command::new(\"true\").status(); 0 }\n\
+    pub fn is_empty(&self) -> bool { true }\n\
+}\n\
+pub struct Reaper { pub zombies: Mutex<ChildGuard> }\n\
+impl Reaper { pub fn has_zombies(&self) -> bool { !self.zombies.lock().unwrap_or_else(|x| x.into_inner()).is_empty() } }\n\
+pub fn ctl(g: ChildGuard) -> u8 { g.into_inner() }\n";
+        let v = scan_fixture("veinb_poison", src);
+        assert_eq!(fixture_effects(&v, "ctl"), vec!["Exec".to_string()], "CALIBRATION:\n{v:#}");
+        assert!(fixture_effects(&v, "Reaper::has_zombies").is_empty(),
+                "the error closure's `x` is a PoisonError, not the guarded ChildGuard:\n{v:#}");
+    }
+
+    /// R197, R733 — a turbofish names a generic return. A bound with no turbofish keeps its dispatch.
+    #[test]
+    fn vein_b_a_turbofish_names_the_generic_return() {
+        let src = "\
+fn mark() { let _ = std::fs::write(\"/tmp/vb_tf\", \"x\"); }\n\
+pub mod net { #[derive(Default)] pub struct Conn; impl Conn { pub fn send(&self) { super::mark() } } pub fn mk<T: Default>() -> T { T::default() } }\n\
+pub fn r197_let() { let c = net::mk::<net::Conn>(); c.send() }\n\
+pub fn r197_chain() { net::mk::<net::Conn>().send() }\n\
+type F = fn() -> i32;\n\
+fn delay_load<T: Copy>(p: *const ()) -> Option<T> { Some(unsafe { std::mem::transmute_copy(&p) }) }\n\
+fn writer() -> i32 { mark(); 1 }\n\
+pub fn r733_turbofish() -> Option<i32> { let f = delay_load::<F>(writer as *const ())?; Some(f()) }\n\
+pub fn r733_annot() -> Option<i32> { let f: F = delay_load(writer as *const ())?; Some(f()) }\n\
+pub trait Doer { fn go(&self); }\n\
+#[derive(Default)] pub struct D1; impl Doer for D1 { fn go(&self) { mark() } }\n\
+#[derive(Default)] pub struct Quiet; impl Doer for Quiet { fn go(&self) {} }\n\
+pub fn mkd<T: Doer + Default>() -> T { T::default() }\n\
+pub fn turbo_d1() { let d = mkd::<D1>(); d.go() }\n\
+pub fn turbo_quiet() { let d = mkd::<Quiet>(); d.go() }\n\
+pub fn bound_only<T: Doer + Default>() { let d: T = mkd(); d.go() }\n";
+        let v = scan_fixture("veinb_turbo", src);
+        for name in ["r197_let", "r197_chain", "turbo_d1", "bound_only"] {
+            assert_eq!(fixture_effects(&v, name), vec!["Fs".to_string()], "`{name}`:\n{v:#}");
+        }
+        for name in ["r733_turbofish", "r733_annot"] {
+            let why: Vec<String> = fn_entry(&v, name)["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w == "callback:unresolved call"),
+                    "`{name}`: invoking a turbofish-typed callable must DISCLOSE:\n{v:#}");
+        }
+        // THE NARROWING, pinned: the turbofish names `Quiet`, whose `go` writes nothing. The bound's
+        // dispatch route charged it `D1::go`'s Fs, a fabrication by the program's own types.
+        assert!(fixture_effects(&v, "turbo_quiet").is_empty(), "{v:#}");
+    }
+
+    /// R542 — a factory returning a collection of concrete elements; a leaf collision withdraws.
+    #[test]
+    fn vein_b_a_factory_collection_yields_its_declared_element() {
+        let src = "\
+pub struct G; impl G { pub fn go(&self) { let _ = std::fs::write(\"/tmp/vb_e\", \"x\"); } }\n\
+pub struct Other; impl Other { pub fn go(&self) {} }\n\
+pub fn mk_conc() -> Vec<G> { vec![G] }\n\
+pub fn conc() { for g in mk_conc() { g.go() } }\n\
+pub fn conc_let() { let v = mk_conc(); for g in v { g.go() } }\n\
+pub struct Reg; impl Reg { pub fn items(&self) -> Vec<G> { vec![G] } }\n\
+pub fn method_items(r: &Reg) { for g in r.items() { g.go() } }\n";
+        let v = scan_fixture("veinb_elem", src);
+        for name in ["conc", "conc_let", "method_items"] {
+            assert_eq!(fixture_effects(&v, name), vec!["Fs".to_string()], "`{name}`:\n{v:#}");
+        }
+    }
+
+    /// R341 — an effect handle consumed as an ARGUMENT, typed by the strict typer, never by spelling.
+    #[test]
+    fn vein_b_a_handle_argument_is_typed_like_a_receiver() {
+        let src = "\
+use std::fs::File; use std::io::{BufRead, Read, Write};\n\
+pub fn a_method(mut f: File) -> String { let mut s = String::new(); f.read_to_string(&mut s).unwrap(); s }\n\
+pub fn b_ufcs(mut f: File) -> String { let mut s = String::new(); Read::read_to_string(&mut f, &mut s).unwrap(); s }\n\
+pub fn c_iocopy(mut f: File) { std::io::copy(&mut f, &mut std::io::sink()).unwrap(); }\n\
+pub fn e_bufreader(f: File) -> usize { std::io::BufReader::new(f).lines().count() }\n\
+pub fn n_ufcs(mut s: std::net::TcpStream) { Write::write_all(&mut s, b\"x\").unwrap(); }\n\
+pub fn cursor_wrap() -> usize { std::io::BufReader::new(std::io::Cursor::new(vec![1u8])).lines().count() }\n\
+pub fn cursor_ufcs() -> String { let mut c = std::io::Cursor::new(vec![b'a']); let mut s = String::new(); Read::read_to_string(&mut c, &mut s).unwrap(); s }\n\
+pub fn copy_cursor_to_file(mut f: File) { let mut c = std::io::Cursor::new(vec![1u8]); std::io::copy(&mut c, &mut f).unwrap(); }\n";
+        let v = scan_fixture("veinb_handle", src);
+        for name in ["a_method", "b_ufcs", "c_iocopy", "e_bufreader", "copy_cursor_to_file"] {
+            assert_eq!(fixture_effects(&v, name), vec!["Fs".to_string()], "`{name}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "n_ufcs").contains(&"Net".to_string()), "{v:#}");
+        for name in ["cursor_wrap", "cursor_ufcs"] {
+            assert!(fixture_effects(&v, name).is_empty(), "`{name}`: an in-memory reader is no handle:\n{v:#}");
+        }
+    }
+
+    /// R861's BOUND spelling — `let p = n.get_parent(); p.visit()` over a dependency's `Node`. The
+    /// crate's own index knows nothing about `dep::Node::get_parent`, so the binding takes the
+    /// provenance the chained join answers: resolved when the report publishes that return, DISCLOSED
+    /// when it does not. Never ABSENT, and never the builder guess (`Node::visit`'s Fs).
+    #[test]
+    fn vein_b_a_method_value_of_a_dependency_discloses_or_resolves() {
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let run = |tag: &str, returns: &str| -> serde_json::Value {
+            let dep = std::env::temp_dir().join(format!("candor-veinb-rep-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dep);
+            std::fs::create_dir_all(&dep).unwrap();
+            std::fs::write(dep.join("report.rdep.scan.json"), format!(r#"{{
+                "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}},
+                "package": "rdep",
+                "typeSurface": {{"returns": {{{returns}}}}},
+                "functions": [
+                  {{"fn": "Other::visit", "inferred": ["Env"], "hash": "rdep#Other::visit"}},
+                  {{"fn": "Node::visit", "inferred": ["Fs"], "hash": "rdep#Node::visit"}}]}}"#)).unwrap();
+            let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+            let _ = std::fs::remove_dir_all(&dep);
+            let d = std::env::temp_dir().join(format!("candor-veinb-app-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"app\"\n[dependencies]\nrdep = \"1\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"),
+                "pub fn let_bound(n: &rdep::Node) { let p = n.get_parent(); p.visit() }\n").unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let _ = std::fs::remove_dir_all(&d);
+            serde_json::from_str(&body.unwrap()).unwrap()
+        };
+        let miss = run("miss", "");
+        let f = fn_entry(&miss, "let_bound");
+        assert_eq!(effs(f), vec!["Unknown".to_string()], "must DISCLOSE, not guess `Node::visit`:\n{miss:#}");
+        let hit = run("hit", r#""rdep#Node::get_parent": "rdep#Other""#);
+        assert!(effs(fn_entry(&hit, "let_bound")).contains(&"Env".to_string()),
+                "a published return resolves the binding:\n{hit:#}");
+    }
+
+    /// VEIN B — the two disclosures the first corpus runs of this change LOST, pinned so they cannot be
+    /// lost again: a turbofish naming the CALLER's generic parameter keeps the bound's dispatch
+    /// (bitflags' `from_str::<B>(input)?.bits()`), and a `Self::new()` inside a blanket impl keeps its
+    /// generic receiver (digest's `new_with_prefix`). Plus the false disclosure it REMOVES on purpose: a
+    /// typed local passed by value is a value, never the free fns that share its name (plotters).
+    #[test]
+    fn vein_b_keeps_a_generic_turbofish_dispatch_and_drops_a_name_collision_hedge() {
+        let src = "\
+pub trait Flags: Sized { fn bits(&self) -> u32; fn from_bits(b: u32) -> Self; }\n\
+pub struct Loud; impl Flags for Loud { fn bits(&self) -> u32 { let _ = std::fs::write(\"/tmp/vb_f\", \"x\"); 0 } fn from_bits(_: u32) -> Self { Loud } }\n\
+pub fn from_str<B: Flags>(_s: &str) -> Result<B, ()> { Ok(B::from_bits(0)) }\n\
+pub fn from_str_truncate<B: Flags>(s: &str) -> Result<u32, ()> { Ok(from_str::<B>(s)?.bits()) }\n\
+pub trait Update { fn update(&mut self, d: &[u8]); }\n\
+pub trait Digest { fn new_with_prefix(d: &[u8]) -> Self; fn update(&mut self, d: &[u8]); }\n\
+impl<D: Update + Default> Digest for D { fn new_with_prefix(data: &[u8]) -> Self { let mut h = Self::default(); h.update(data); h } fn update(&mut self, d: &[u8]) { Update::update(self, d) } }\n\
+pub mod a { pub fn size() -> u32 { 1 } }\n\
+pub mod b { pub fn size() -> u32 { 2 } }\n\
+pub struct Rel(pub f64); impl Rel { pub fn px(&self) -> i32 { self.0 as i32 } }\n\
+pub struct Bound { pub rel: Rel, pub min: Option<i32> }\n\
+impl Bound { pub fn px(&self) -> i32 { let size = self.rel.px(); self.min.map_or(size, |x| x.max(size)) } }\n";
+        let v = scan_fixture("veinb_corpus_pins", src);
+        let f = fn_entry(&v, "from_str_truncate");
+        assert!(f["dispatchesOn"].as_array().into_iter().flatten().any(|k| k.as_str().is_some_and(|k| k.ends_with("Flags::bits"))),
+                "a turbofish naming the caller's `B` keeps `B`'s bound dispatch:\n{v:#}");
+        // digest's shape: with no implementor in the crate the open dispatch DISCLOSES, and refusing
+        // every generic-named constructor answer (this change's first cut) erased the row outright.
+        let d = fn_entry(&v, "D::new_with_prefix");
+        assert!(effs(d).contains(&"Unknown".to_string()),
+                "`Self::default()` in a blanket impl keeps its generic receiver and its disclosure:\n{v:#}");
+        // `size` is a local i32: passing it to `map_or` is not a reference to `a::size`/`b::size`, so
+        // the body (pure std arithmetic) carries no `ambiguous:same-name local defs` hedge any more.
+        assert!(fixture_effects(&v, "Bound::px").is_empty(), "{v:#}");
+    }
+
+    /// VEIN B — the wrapper typing's two FABRICATION controls, both measured on the corpus before they
+    /// were fixed: `Option::as_mut` is not an accessor that yields `T` (async-process `get_mut` was
+    /// charged `Exec` through `Child::unwrap`), and the `LockResult` plumbing after `lock()` is not the
+    /// guarded handle's own method (`lock().is_ok()` is pure; `write_all` must still charge).
+    #[test]
+    fn vein_b_wrapper_plumbing_is_never_the_wrapped_handles_method() {
+        let src = "\
+use std::sync::Mutex; use std::io::Write; use std::os::unix::net::UnixStream;\n\
+pub struct Guard { inner: Option<std::process::Child> }\n\
+impl Guard { pub fn get_mut(&mut self) -> &mut std::process::Child { self.inner.as_mut().unwrap() } }\n\
+pub struct Waker { inner: Mutex<UnixStream> }\n\
+impl Waker {\n\
+    pub fn wake(&self) -> std::io::Result<()> { self.inner.lock().unwrap().write_all(&[0]) }\n\
+    pub fn peer(&self) { let _ = self.inner.lock().unwrap().peer_addr(); }\n\
+    pub fn unwrapped(&self) -> bool { self.inner.lock().is_ok() }\n\
+}\n\
+pub fn param_peer(s: &UnixStream) { let _ = s.peer_addr(); }\n";
+        let v = scan_fixture("veinb_plumbing", src);
+        assert!(fixture_effects(&v, "Guard::get_mut").is_empty(), "a getter spawns nothing:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "Waker::wake"), vec!["Ipc".to_string()], "{v:#}");
+        // The guarded spelling reads exactly what the direct one does — the property, whatever the
+        // handle's own rule says about `peer_addr` — and the bare `LockResult::is_ok` charges nothing.
+        assert_eq!(fixture_effects(&v, "Waker::peer"), fixture_effects(&v, "param_peer"), "{v:#}");
+        assert!(fixture_effects(&v, "Waker::unwrapped").is_empty(), "{v:#}");
     }

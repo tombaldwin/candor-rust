@@ -662,8 +662,36 @@ impl<'a> CallCollector<'a> {
     ///
     /// Wrapping rather than guarding at each of the five call sites is deliberate: five copies of this
     /// test is the §G drift the row exists to remove, one level down.
+    /// VEIN B — whether a call's turbofish names a CONCRETE type for the callee's generic return: `Some(true)`
+    /// for `mk::<Conn>()`, `Some(false)` when the argument is rooted at a generic parameter of this fn or
+    /// impl (`from_str::<B>`, `num_cast::<_, R::Native>`) or at `Self` — a bound, not a type — and `None`
+    /// when no turbofish supplies the return at all.
+    fn turbofish_is_concrete(&self, p: &syn::ExprPath) -> Option<bool> {
+        let leaf = p.path.segments.last()?.ident.to_string();
+        let t = crate::lang::turbofish_return_ty(p, &leaf, self.returns)?;
+        let syn::Type::Path(tp) = t else { return Some(false) };
+        if tp.qself.is_some() {
+            return Some(false);
+        }
+        let head = tp.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+        Some(head != "Self" && !self.generic_bounds.contains_key(&head) && !self.impl_generic_bounds.contains_key(&head))
+    }
+
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
         let ty = ctor_type(expr, &self.uses, self.returns)?;
+        // VEIN B — a TURBOFISH that names a GENERIC PARAMETER of this fn/impl (`from_str::<B>(..)`) types
+        // nothing: `B` is a bound, and its dispatch route (`resolve_recv_traits`) stays the answer — the
+        // pre-change reading, since the callee's generic return was recorded as that bound's sentinel.
+        // Only the turbofish's answer is refused: a `Self::new()` inside `impl<D: ..> Tr for D` keeps the
+        // `D` every older route gave it (measured: refusing every generic-named answer here REMOVED 13
+        // digest rows, `dispatchesOn` and `Unknown` with them).
+        if let syn::Expr::Call(c) = peel_recv(expr) {
+            if let syn::Expr::Path(p) = &*c.func {
+                if self.turbofish_is_concrete(p) == Some(false) {
+                    return None;
+                }
+            }
+        }
         let leaf = ty.rsplit("::").next().unwrap_or(&ty);
         if crate::lang::caps_leaf_shadowed_by_const(leaf, self.static_types) {
             if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
@@ -925,6 +953,180 @@ impl<'a> CallCollector<'a> {
         self.resolve_recv_type_for(expr, "")
     }
 
+    /// VEIN B — THE STRICT EXPRESSION TYPER: the type of `expr` when this crate's own declarations PROVE
+    /// it, and `None` otherwise. `None` is "unknown", never a default, and in particular never the
+    /// builder-chain answer `resolve_recv_type` gives a method call ("a method returns its receiver's
+    /// type"). That answer is a guess, and it is right only for a fluent step: measured, typing a
+    /// `let` through it made `let pool = state.pool_mut(); pool.poll_new_conn()` resolve to a phantom
+    /// `GetConnState::poll_new_conn`, and mysql_async's `get_conn` lost
+    /// `['Clock','Ipc','Net','Rand','Unknown']` outright — the first vein-B probe's REMOVED row.
+    ///
+    /// What it answers, each from a declaration and nothing else:
+    ///   * a name (`vars`, a `static`, a unit-struct literal — `resolve_recv_type`'s `Path` arm, which
+    ///     holds no guess), a field of a typed base, a subscript's element;
+    ///   * a construction or recorded factory (`nominal_ctor_type`), including a turbofish that names a
+    ///     generic return (`mk::<Conn>()`, R197);
+    ///   * a method call ONLY through a fact the receiver's own type declares: `impl T { fn m() -> R }`
+    ///     (`impl_ret_key`), `-> Self` (`impl_self_ret_key`), a std wrapper's accessor yielding its type
+    ///     argument (`wrapper_accessor_type`), an element accessor over a known container, or `clone`.
+    ///     `unwrap`/`expect` pass through, as `?` does, because every one of those facts is already
+    ///     recorded with `Result`/`Option` unwrapped.
+    ///
+    /// The call-site walk (`resolve_recv_type_for`) is deliberately NOT routed through this: it is
+    /// load-bearing for classified EXTERNAL builders (`Command::new(..).arg(..).spawn()`), and ⟨0.40⟩
+    /// already discloses its guess on a dependency chain (R861). This is the answer a BINDER may record,
+    /// because a binding outlives the expression and a wrong type there is consulted by every later call.
+    pub(crate) fn type_of(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Reference(r) => self.type_of(&r.expr),
+            syn::Expr::Paren(p) => self.type_of(&p.expr),
+            syn::Expr::Group(g) => self.type_of(&g.expr),
+            syn::Expr::Try(t) => self.type_of(&t.expr),
+            syn::Expr::Await(a) => self.type_of(&a.base),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.type_of(&u.expr),
+            syn::Expr::Path(_) => self.resolve_recv_type(expr),
+            syn::Expr::Field(f) => {
+                let base = self.type_of(&f.base)?;
+                let key = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.fields.get(base_leaf)?.get(&key).cloned()
+            }
+            syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
+            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            syn::Expr::MethodCall(m) => self.type_of_method(m),
+            // STRICT, unlike the receiver walk's merge: EVERY value branch must type, and to one type. A
+            // branch the typer cannot answer (`None`, a diverging arm aside) makes the whole unknown —
+            // measured, the lenient merge typed rdkafka's `let key = if .. { None } else { Some(..) }` as
+            // the unit struct `None`.
+            syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
+                let mut found: Option<String> = None;
+                for b in crate::lang::merge_value_exprs(expr)? {
+                    let t = self.type_of(b)?;
+                    match &found {
+                        None => found = Some(t),
+                        Some(prev) if *prev == t => {}
+                        Some(_) => return None,
+                    }
+                }
+                found
+            }
+            _ => None,
+        }
+    }
+
+    /// VEIN B — the dependency provenance of a METHOD-CALL value the strict typer cannot type:
+    /// `{dep type}::{method}` when the receiver strictly types to a multi-segment path whose head could be
+    /// a dependency (the head is checked against the manifest at consumption, so a local module of the same
+    /// shape emits an inert marker — the same contract as the `let c = dep::build()` route). A longer
+    /// chain over a dependency value gets a callee that can never join, so it discloses rather than
+    /// joining one step's return type to a later step's method.
+    fn dep_method_provenance(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::MethodCall(m) = peel_recv(expr) else { return None };
+        let mut steps = vec![m.method.to_string()];
+        let mut recv = &*m.receiver;
+        let base = loop {
+            if let Some(t) = self.type_of(recv) {
+                break t;
+            }
+            match peel_recv(recv) {
+                syn::Expr::MethodCall(inner) => {
+                    steps.push(inner.method.to_string());
+                    recv = &inner.receiver;
+                }
+                _ => return None,
+            }
+        };
+        let root = base.split("::").next().unwrap_or("");
+        if !base.contains("::")
+            || base.contains(crate::decls::ALIAS_ALT_SEP)
+            || base.contains('<')
+            || matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
+        {
+            return None;
+        }
+        steps.reverse();
+        Some(if steps.len() == 1 {
+            format!("{base}::{}", steps[0])
+        } else {
+            format!("{base}::<chain>{}", steps.join("."))
+        })
+    }
+
+    /// `type_of` for a method call — see there. The order is the order of evidence: a `dyn` return or a
+    /// known type change declines; a std wrapper's accessor and an element accessor answer from the
+    /// container; otherwise the receiver must type and ITS impl must declare this method's return.
+    fn type_of_method(&self, m: &syn::ExprMethodCall) -> Option<String> {
+        let name = m.method.to_string();
+        if self.returns.get(&name).and_then(|t| ret_dyn_leaves(t)).is_some() || is_recv_type_changing(&name) {
+            return None;
+        }
+        if name == "clone" {
+            return self.type_of(&m.receiver);
+        }
+        let recv = self.type_of(&m.receiver);
+        if let Some(e) = recv.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &name)) {
+            return Some(e);
+        }
+        if crate::lang::is_element_yielding_accessor(&name) {
+            if !self.resolve_elem_trait_leaves(&m.receiver).is_empty() {
+                return None;
+            }
+            if let Some(e) = self.resolve_elem_type(&m.receiver) {
+                return Some(e);
+            }
+        }
+        let base = recv?;
+        if base.contains(crate::decls::ALIAS_ALT_SEP) {
+            return None;
+        }
+        let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+        let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, &name));
+        let same = self.returns.contains_key(&crate::model::impl_self_ret_key(base_leaf, &name));
+        match (ret, same) {
+            (Some(r), false) => Some(r.clone()),
+            (None, true) => Some(base),
+            // Both declared (two same-leaf types disagree) — the index cannot say which: unknown.
+            (Some(_), true) => None,
+            // Nothing declared. `unwrap`/`expect` are the `?` of a method chain, and every fact above
+            // is recorded with `Result`/`Option` already unwrapped, so they pass the receiver's type on.
+            (None, false) => matches!(name.as_str(), "unwrap" | "expect" | "unwrap_unchecked").then_some(base),
+        }
+    }
+
+    /// VEIN B — A STD WRAPPER'S TYPE IS ITS TYPE ARGUMENT, through the accessors that yield it. `kind` is
+    /// the receiver's own type (`vars`/`fields` keep the wrapper, `RefCell`), and the element comes from
+    /// the container index (`elem_of`/`field_elem`, where `elem_type_b` now records the argument of
+    /// these wrappers). Keyed on the wrapper KIND as well as the method, because the method alone is not
+    /// evidence: `Vec::as_ref` yields `&[T]`, not `T`, and a leaf-only rule would type it `T` (R878, R568).
+    fn wrapper_accessor_type(&self, recv: &syn::Expr, kind: &str, method: &str) -> Option<String> {
+        if !crate::lang::is_wrapper_accessor(kind.rsplit("::").next().unwrap_or(kind), method) {
+            return None;
+        }
+        let e = self.resolve_elem_type(recv)?;
+        // A wrapper whose argument is itself a std container or `Option`/`Result` (`Mutex<Option<X>>`)
+        // yields a value this typer can say nothing USEFUL about — `Option` names no method the chain
+        // goes on to call — and answering it replaced the walk's dependency guess, whose ⟨0.40⟩ miss rule
+        // DISCLOSES: measured, mongodb's `inner.lock().await.as_mut().unwrap().cache.invalidate(..)` lost
+        // its `dispatch:` reasons on the chained corpus. Declined, so the walk runs exactly as before.
+        let root = e.split("::").next().unwrap_or("");
+        let leaf = e.rsplit("::").next().unwrap_or(&e);
+        if (matches!(root, "std" | "core" | "alloc") && !candor_classify::is_std_effect_handle(&e))
+            || crate::lang::is_sequence_container(leaf)
+            || crate::lang::is_map_container(leaf)
+            || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
+            || crate::lang::is_value_wrapper(leaf)
+        {
+            return None;
+        }
+        if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+            eprintln!("VEINB_WRAP\t{kind}.{method}");
+        }
+        Some(e)
+    }
+
     /// ⟨0.40⟩ R861 — the method-chain STEPS `resolve_recv_type_for`'s builder-chain walk passes through
     /// (innermost first) and the base type it lands on, when — and only when — every step was taken by
     /// that walk's plain "returns its receiver" assumption. A step any other arm answers (a `dyn` return,
@@ -1003,6 +1205,27 @@ impl<'a> CallCollector<'a> {
                 if is_recv_type_changing(&m.method.to_string()) {
                     return None;
                 }
+                // VEIN B (R878, R568) — a std WRAPPER's accessor (`self.db.borrow_mut()`,
+                // `m.lock()`, `CELL.get_or_init(..)`) yields the wrapper's TYPE ARGUMENT, not the wrapper:
+                // walking through it to the base formed `RefCell::enable_ext`, a key nothing answers, while
+                // the bare leaf was suppressed by the local `Inner::enable_ext` — the caller ABSENT.
+                // Answers only when the receiver is KNOWN to be that wrapper and its argument is indexed;
+                // otherwise the walk below runs exactly as before.
+                // Asked only for a method some wrapper declares — this arm re-types the receiver, and an
+                // unconditional second walk of the receiver per chain step is 2^depth on a long builder
+                // chain (measured: h2-0.4.19 ran >10 min where it had run in under a second).
+                // The receiver is typed ONCE and the walk below reuses it: re-typing it here and again
+                // there is 2^depth on a long chain (measured: h2-0.4.19 ran >10 min, <1s before).
+                let mut walked: Option<Option<String>> = None;
+                if crate::lang::is_any_wrapper_accessor(&m.method.to_string()) {
+                    let k = self.resolve_recv_type_for(&m.receiver, &m.method.to_string());
+                    if let Some(e) =
+                        k.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &m.method.to_string()))
+                    {
+                        return Some(e);
+                    }
+                    walked = Some(k);
+                }
                 // SOUNDNESS R446 — AN ELEMENT-YIELDING ACCESSOR IS NOT A STEP IN A BUILDER CHAIN.
                 // `v.get(0).unwrap().run()` walks `unwrap` -> `get` -> `v` and ends at `vars["v"]`,
                 // which holds nothing for a CONTAINER parameter (its answer lives in `elem_of`), so the
@@ -1064,7 +1287,10 @@ impl<'a> CallCollector<'a> {
                 // the question's subject), then ask whether THAT type's own `m` is declared to return
                 // something else. See `impl_declared_return` for the measurement and for why the fix
                 // R447 filed — declining at the accessor arm — was the wrong one.
-                let base = self.resolve_recv_type_for(&m.receiver, &m.method.to_string())?;
+                let base = match walked {
+                    Some(k) => k?,
+                    None => self.resolve_recv_type_for(&m.receiver, &m.method.to_string())?,
+                };
                 if let Some(ret) = self.impl_declared_return(&base, &m.method.to_string(), outer) {
                     // §E1 REACH COUNTER, on the CHANGED branch: this arm exists only to return a
                     // DIFFERENT answer from the walk below it, so "never fired" and "fired and moved
@@ -1288,8 +1514,22 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Try(t) => self.resolve_elem_type(&t.expr),
             syn::Expr::Await(a) => self.resolve_elem_type(&a.base),
             syn::Expr::Path(p) => {
-                let name = p.path.get_ident()?.to_string();
-                self.elem_of.get(&name).cloned()
+                if let Some(name) = p.path.get_ident().map(|i| i.to_string()) {
+                    if let Some(e) = self.elem_of.get(&name) {
+                        return Some(e.clone());
+                    }
+                }
+                // VEIN B (R568) — a module-level `static`/`const` container or wrapper, under the same
+                // shadowing authority `resolve_recv_type`'s `via_static` arm uses (a name this body binds
+                // is that binding, never the item), bare or module-qualified.
+                if p.qself.is_some() {
+                    return None;
+                }
+                let n = p.path.segments.last()?.ident.to_string();
+                if self.locally_bound(&n) {
+                    return None;
+                }
+                self.static_types.get(&crate::model::static_elem_key(&n)).cloned().flatten()
             }
             syn::Expr::Field(f) => {
                 let base = self.resolve_recv_type(&f.base)?;
@@ -1332,8 +1572,35 @@ impl<'a> CallCollector<'a> {
                     }
                     r
                 } else {
-                    None
+                    // VEIN B (R542) — a method whose receiver's OWN impl declares a collection return
+                    // (`impl Reg { fn items(&self) -> Vec<G> }`): the declared element, keyed on
+                    // (TYPE, method) like `impl_ret_key`, never on the method leaf alone.
+                    let base = self.type_of(&m.receiver)?;
+                    let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                    self.returns
+                        .get(&crate::model::impl_elem_ret_key(base_leaf, &m.method.to_string()))
+                        .cloned()
                 }
+            }
+            // VEIN B (R542) — A FACTORY RETURNING A COLLECTION OF CONCRETE ELEMENTS. `for g in mk_conc()
+            // { g.go() }` over `fn mk_conc() -> Vec<G>` read ABSENT while the `dyn` twin, decoded from the
+            // `<elemdyn>` sentinel, charged: there was no concrete sentinel to decode. The leaf-keyed
+            // `elem_ret_key` is read ONLY beside an unambiguous plain entry for the same leaf — so two
+            // same-named fns returning different types withdraw it, the condition `ctor_type`'s own
+            // recorded-return read already imposes — and never for a std-rooted callee.
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return None };
+                let full = expand(&path_to_string(&p.path), &self.uses);
+                if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
+                    return None;
+                }
+                let leaf = full.rsplit("::").next().unwrap_or(&full);
+                crate::lang::recorded_return_type(leaf, self.returns)?;
+                let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned();
+                if e.is_some() && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                    eprintln!("VEINB_ELEMRET\t{leaf}");
+                }
+                e
             }
             // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
@@ -2301,6 +2568,18 @@ impl<'a> CallCollector<'a> {
                 let syn::Expr::Path(p) = &*c.func else { return Vec::new() };
                 let full = path_to_string(&p.path);
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
+                // VEIN B (R197, R733) — a generic return `fn mk<T: Default>() -> T` is recorded as the
+                // `<dyn>` sentinel of its BOUND, which is right when the caller does not say what `T` is.
+                // A turbofish DOES say: `mk::<Conn>()` is a `Conn`, so the bound's dispatch route is not
+                // this value's — and taking it put `c` in `trait_vars` under `Default`, shadowing the
+                // concrete type `ctor_type` now reads from the same turbofish, and `c.send()` read ABSENT.
+                // …unless the turbofish names the CALLER's own generic (`from_str::<B>(input)?.bits()` under
+                // `B: Flags`, bitflags; `num_cast::<_, R::Native>`, arrow-cast): a bound, not a type, so the
+                // callee's bound sentinel below stays the answer — measured, answering "no dispatch" here
+                // lost bitflags' `dispatch:Flags.bits` disclosure on the first corpus run.
+                if self.turbofish_is_concrete(p) == Some(true) {
+                    return Vec::new();
+                }
                 self.returns.get(leaf).and_then(|t| ret_dyn_leaves(t)).unwrap_or_default()
             }
             // A METHOD factory returning a dispatch trait object (`self.handler().go()` where
@@ -2559,6 +2838,74 @@ impl<'a> CallCollector<'a> {
     ///
     /// Returns nothing: the caller's own push of the written path is unchanged, so every answer the
     /// engine gave before (a default body reached through `Tr::m`) is still given. This only ADDS.
+    /// VEIN B (R341) — AN EFFECT HANDLE CONSUMED AS AN ARGUMENT. Only the RECEIVER position was ever
+    /// typed, so `f.read_to_string(..)` on a `File` parameter charged `Fs` while its UFCS spelling
+    /// `Read::read_to_string(&mut f, ..)` — the identical call — read ABSENT, and so did `io::copy(&mut f,
+    /// sink)`, `BufReader::new(f)` and `serde_json::from_reader(f)`. The discriminator is the argument's
+    /// TYPE, from the one strict typer, never the argument's spelling: a `BufReader::new(cursor)` over an
+    /// in-memory buffer types to nothing here and adds nothing.
+    ///
+    /// Each case emits the typed call the receiver spelling would have produced — `<Handle>::<verb>` —
+    /// so the handle's OWN classifier rule decides the effect, exactly as it does for `f.read(..)`. The
+    /// table is closed and every entry is a std I/O trait or a function that reads/writes the argument by
+    /// its documented contract:
+    ///   * `Read::m(h, ..)` / `Write::m(h, ..)` / `BufRead::m` / `Seek::m` — the UFCS spelling, verb `m`;
+    ///   * `std::io::copy(r, w)` — `r` read, `w` written; `std::io::read_to_string(r)` — `r` read;
+    ///   * `BufReader::{new, with_capacity}` (last arg) read; `BufWriter`/`LineWriter` written — charged
+    ///     at the wrap, which is the one place the handle's type is still visible;
+    ///   * `serde_json::from_reader(r)` read, `serde_json::to_writer{,_pretty}(w, ..)` written — whose
+    ///     reviewed-pure classification assumed the caller had already been charged for OPENING the
+    ///     handle, which a handle arriving as a PARAMETER never was.
+    fn route_handle_args(
+        &mut self,
+        path: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) {
+        let segs: Vec<&str> = path.split("::").collect();
+        let n = segs.len();
+        if n < 2 {
+            return;
+        }
+        let (tr, m) = (segs[n - 2], segs[n - 1]);
+        let io_trait = matches!(tr, "Read" | "Write" | "BufRead" | "Seek")
+            && (path.starts_with("std::io::") || (n == 2 && !self.local_traits.contains_key(tr)));
+        let mut uses: Vec<(usize, &str)> = Vec::new();
+        if io_trait {
+            uses.push((0, m));
+        } else {
+            match path {
+                "std::io::copy" => {
+                    uses.push((0, "read"));
+                    uses.push((1, "write"));
+                }
+                "std::io::read_to_string" => uses.push((0, "read_to_string")),
+                "serde_json::from_reader" => uses.push((0, "read")),
+                "serde_json::to_writer" | "serde_json::to_writer_pretty" => uses.push((0, "write")),
+                _ => {
+                    let wrap = matches!(segs.get(n.wrapping_sub(2)).copied(), Some("BufReader" | "BufWriter" | "LineWriter"))
+                        && path.starts_with("std::io::")
+                        && matches!(m, "new" | "with_capacity");
+                    if wrap && !args.is_empty() {
+                        uses.push((args.len() - 1, if tr == "BufReader" { "read" } else { "write" }));
+                    }
+                }
+            }
+        }
+        for (i, verb) in uses {
+            let Some(a) = args.iter().nth(i) else { continue };
+            let Some(ty) = self.type_of(a) else { continue };
+            if !matches!(ty.as_str(), "std::fs::File" | "std::net::TcpStream" | "std::os::unix::net::UnixStream") {
+                continue;
+            }
+            if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                eprintln!("VEINB_HANDLEARG\t{path}\t{ty}::{verb}");
+            }
+            self.calls.push(Call { argc: 1, entropy_arg: false,
+                path: format!("{ty}::{verb}"), leaf: verb.to_string(), str_arg: None,
+                typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
+        }
+    }
+
     fn route_trait_member_path(
         &mut self,
         p: &syn::ExprPath,
@@ -3167,6 +3514,22 @@ impl<'a> CallCollector<'a> {
                     // itself callable, invoking the result is exactly as opaque. `Src` is frequently
                     // `_` (inferred) and `Dst` is the LAST type argument when both are given, so take
                     // the last rather than assuming position 1.
+                    // VEIN B (R733) — …and the same reading for ANY local fn whose return IS a generic
+                    // parameter the turbofish supplies: `let f = delay_load::<F>(..)?; f()` with
+                    // `type F = fn(..)`. Annotated (`let f: F = delay_load(..)?`) it disclosed
+                    // `callback:unresolved call`; spelled with a turbofish it was ABSENT, with the actual
+                    // DLL entry point invoked unseen. Precise rather than "any callable type argument":
+                    // the argument must be the one the callee's declared return names.
+                    if let Some(last) = p.path.segments.last() {
+                        if crate::lang::turbofish_return_ty(p, &last.ident.to_string(), self.returns)
+                            .is_some_and(|t| is_callable_type(t, &self.generic_bounds, self.callable_aliases))
+                        {
+                            if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                                eprintln!("VEINB_FNTURBO\t{}", last.ident);
+                            }
+                            return true;
+                        }
+                    }
                     if p.path.segments.last().is_some_and(|s| s.ident == "transmute") {
                         if let Some(syn::PathArguments::AngleBracketed(args)) =
                             p.path.segments.last().map(|s| &s.arguments)
@@ -3941,6 +4304,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // SOUNDNESS R570/R776 — a path naming a TRAIT MEMBER also asks the dispatch
                         // authority; the written path below is still pushed, so nothing is withdrawn.
                         self.route_trait_member_path(p, &path, &leaf, &node.args, str_arg.clone());
+                        self.route_handle_args(&path, &node.args);
                         // SOUNDNESS R330 — the arity travels with the call. See `Call::argc`: this is
                         // the ExprCall spelling, so `node.args` INCLUDES the receiver for a UFCS
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the
@@ -4188,7 +4552,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     || candor_classify::is_std_effect_handle(a)
             });
             let _ = (cr, std_path_recv, std_handle_recv);
-            if any_arm_recordable && leaf != "clone" {
+            // VEIN B — `m.lock().unwrap()`: the receiver was typed by a wrapper ACCESSOR, so `ty` is the
+            // guarded `T` and `unwrap` belongs to the `LockResult` around it, not to `T`.
+            // Only where the WRAPPER ARM answered the receiver — `self.get(i).unwrap()` on a local type's
+            // own `get` is not this shape and keeps its typed call exactly as before.
+            let plumbing_on_wrapper = crate::lang::is_result_plumbing(&leaf)
+                && match peel_recv(&node.receiver) {
+                    syn::Expr::MethodCall(r) if crate::lang::is_any_wrapper_accessor(&r.method.to_string()) => self
+                        .resolve_recv_type(&r.receiver)
+                        .is_some_and(|k| self.wrapper_accessor_type(&r.receiver, &k, &r.method.to_string()).is_some()),
+                    _ => false,
+                };
+            if any_arm_recordable && leaf != "clone" && !plumbing_on_wrapper {
                 let path = crate::lang::alias_join(&ty, &[leaf.as_str()]);
                 // SOUNDNESS R330 — `node.args` on an ExprMethodCall EXCLUDES the receiver, so this
                 // count is already the non-receiver arity; `method: true` records which convention it
@@ -4730,9 +5105,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // closure is not typed HERE — it is typed by `elem_binds` below, which knows which parameter is
         // the element. Default-visit the rest; visit the typed closure under scope.
         let elem_ty = if elem_hof { self.resolve_elem_type(&node.receiver) } else { None };
+        // VEIN B — R347's NAMED PRECONDITION for peeling the interior-mutability wrappers: a closure in
+        // the ERROR position is not the element. `unwrap_or_else`'s one-parameter closure exists only on
+        // `Result` (`Option`'s takes none) and receives the `Err` — `PoisonError` after `m.lock()` — so
+        // typing it as the element is what made async-process's `.unwrap_or_else(|x| x.into_inner())`
+        // resolve `x.into_inner()` onto the guarded value and charge `Exec` for asking whether a map is
+        // empty. `map_or_else`'s element closure is the LAST argument; the first is the default/error
+        // handler. Every other adapter keeps its arguments.
+        let elem_arg_ok = |i: usize| match leaf.as_str() {
+            "unwrap_or_else" => false,
+            "map_or_else" => i + 1 == node.args.len(),
+            _ => true,
+        };
         let closure_param = if elem_adapter {
-            node.args.iter().find_map(|a| match a {
-                syn::Expr::Closure(cl) if cl.inputs.len() == 1 => single_pat_ident(cl.inputs.first()?),
+            node.args.iter().enumerate().find_map(|(i, a)| match a {
+                syn::Expr::Closure(cl) if cl.inputs.len() == 1 && elem_arg_ok(i) => single_pat_ident(cl.inputs.first()?),
                 _ => None,
             })
         } else {
@@ -4751,7 +5138,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let elem_tuple = self.resolve_elem_tuple(&node.receiver);
             node.args.iter().enumerate().find_map(|(i, a)| {
                 let syn::Expr::Closure(cl) = a else { return None };
-                if cl.inputs.len() != want {
+                if cl.inputs.len() != want || !elem_arg_ok(i) {
                     return None;
                 }
                 // WHICH parameters are the element. `elem_pair` is tested before `elem_last` so the
@@ -6157,7 +6544,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // three expression shapes — and this site is REMOVED rather than left beside
                             // it, because two paths computing one fact are free to disagree and that is
                             // exactly how this vein opened.)
-                        } else if let syn::Expr::MethodCall(m) = &*init.expr {
+                        } else {
+                        // VEIN B — every route below answers only when the routes above it did not.
+                        let mut typed_here = false;
+                        if let syn::Expr::MethodCall(m) = &*init.expr {
                             // A `.clone()` REBIND is type-preserving — `Clone::clone(&self) -> Self`, so the
                             // binding has the receiver's type: `let b = a.clone(); b.run()` must resolve
                             // `b.run()` through `a`'s type (ctor_type misses this — it doesn't consult `vars`
@@ -6170,6 +6560,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     self.with_pre_bindings(&pre_bindings, |s| s.resolve_recv_type(&m.receiver))
                                 {
                                     self.vars.insert(id.ident.to_string(), t);
+                                    typed_here = true;
                                 }
                             }
                         } else if matches!(&*init.expr, syn::Expr::Reference(_)) {
@@ -6200,7 +6591,48 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     eprintln!("R569HIT\t{}\t{t}", id.ident); // §E1 REACH PROBE
                                 }
                                 self.vars.insert(id.ident.to_string(), t);
+                                typed_here = true;
                             }
+                        }
+                        // VEIN B — THE STRICT TYPER, AS THE BINDER'S LAST ROUTE (R193(b), R877, R878,
+                        // R568, R197). `nominal_ctor_type` types a CONSTRUCTION and nothing else, so
+                        // `let t = m.make()`, `let alias = p`, `let me = self`, `let g = self.db.borrow_mut()`
+                        // and `let x = cell.get_or_init(..)` all left the name untyped — and an untyped
+                        // receiver whose method leaf a local unit also declares is suppressed with no edge
+                        // and no disclosure, so each of those callers read ABSENT under `deny`.
+                        //
+                        // `type_of`, NOT `resolve_recv_type`: the latter's method-call arm assumes a method
+                        // returns its receiver's type, and that guess, recorded on a binding, is what turned
+                        // mysql_async's `let pool = state.pool_mut(); pool.poll_new_conn()` into a phantom
+                        // `GetConnState::poll_new_conn` and REMOVED `get_conn` outright in the first probe.
+                        // `type_of` answers a method call only from a fact the receiver's own impl declares.
+                        //
+                        // LAST, so it can only ADD a type where every older route answered nothing — the
+                        // older routes' answers (including the `clone` and `&expr` arms above, which still
+                        // walk) are unchanged. Inside the self-shadow window (R107) like every RHS read.
+                        if !typed_here {
+                            if let Some(t) = self.with_pre_bindings(&pre_bindings, |s| s.type_of(&init.expr)) {
+                                if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                                    eprintln!("VEINB_LET\t{}\t{t}", id.ident);
+                                }
+                                self.vars.insert(id.ident.to_string(), t);
+                                self.dep_bound_vars.remove(&id.ident.to_string());
+                            } else if let Some(prov) =
+                                self.with_pre_bindings(&pre_bindings, |s| s.dep_method_provenance(&init.expr))
+                            {
+                                // …AND WHERE IT CANNOT TYPE A METHOD CALL ON A DEPENDENCY'S VALUE, IT
+                                // DISCLOSES. `let p = n.get_parent(); p.visit()` with `n: &dep::Node` read
+                                // ABSENT (R861's bound spelling): the crate's own index declares nothing
+                                // about `dep::Node::get_parent`. Recorded as the provenance the call site
+                                // already turns into a `typeSurface.returns` join and, on a miss,
+                                // `dispatch:untyped cross-package receiver` — the chained `let c =
+                                // dep::build()` route, one receiver over.
+                                if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                                    eprintln!("VEINB_DEPPROV\t{}\t{prov}", id.ident);
+                                }
+                                self.dep_bound_vars.insert(id.ident.to_string(), prov);
+                            }
+                        }
                         }
                         // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is

@@ -1496,6 +1496,22 @@ pub(crate) fn collect_static_types(
                     continue;
                 }
                 let name = ident.to_string();
+                // VEIN B (R568) — the ELEMENT of a static wrapper (`static C: OnceLock<Client>`), under a
+                // key no identifier can spell, with the same one-answer-or-refuse rule as the type below.
+                // `C.get_or_init(..).fetch()` needs it: `C`'s type is the WRAPPER.
+                {
+                    let ek = crate::model::static_elem_key(&name);
+                    let e = crate::lang::elem_type(ty, uses);
+                    match out.get(&ek) {
+                        None => {
+                            out.insert(ek, e);
+                        }
+                        Some(prev) if prev == &e => {}
+                        Some(_) => {
+                            out.insert(ek, None);
+                        }
+                    }
+                }
                 let ty = crate::lang::type_path(ty, uses);
                 match out.get(&name) {
                     // First sighting — record it, INCLUDING a `None` for a type we cannot name, so a
@@ -2393,6 +2409,20 @@ pub(crate) fn record_return(
     // a reader that wants the leaf answer.
     impl_key: Option<(&str, &std::collections::HashSet<String>)>,
 ) {
+    // VEIN B (R197) — WHICH generic parameter, if any, the return NAMES. Filed for EVERY fn before any
+    // branch below can return, so a same-leaf fn with a non-generic return (or none) withdraws the fact:
+    // `type_of` reads a turbofish through it only when every contributor agrees.
+    {
+        let pos = match &sig.output {
+            syn::ReturnType::Type(_, ty) => ret_generic_position(sig, unwrap_result_option(ty)),
+            syn::ReturnType::Default => None,
+        };
+        file_decl_fact(
+            rets,
+            crate::model::ret_generic_key(&sig.ident.to_string()),
+            pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
+        );
+    }
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
         // used to `return` before recording anything, so the ambiguity rule below could not see the
@@ -2495,6 +2525,23 @@ pub(crate) fn record_return(
         }
         return;
     }
+    // VEIN B (R542) — the CONCRETE element of a collection return (`-> Vec<G>`, `-> &[G]`), the concrete
+    // twin of the `<elemdyn>` sentinel above, filed before the nominal read below can return (a slice
+    // has no `type_path`). A generic element names no type and is not filed. The leaf-keyed entry is
+    // read only beside an UNAMBIGUOUS plain entry for the same leaf (see `Collector::type_of_call_elem`).
+    {
+        let leaf = sig.ident.to_string();
+        let sig_generic =
+            |n: &str| sig.generics.params.iter().any(|g| matches!(g, syn::GenericParam::Type(t) if t.ident == n));
+        let elem = crate::lang::elem_type(unwrap_result_option(ty), uses)
+            .filter(|e| !sig_generic(e) && !impl_key.is_some_and(|(_, ig)| ig.contains(e)) && e != "Self");
+        if let Some(e) = &elem {
+            file_decl_fact(rets, crate::model::elem_ret_key(&leaf), e.clone());
+            if let Some((impl_ty, _)) = impl_key {
+                file_decl_fact(rets, crate::model::impl_elem_ret_key(impl_ty, &leaf), e.clone());
+            }
+        }
+    }
     let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
     // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
     // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local
@@ -2530,6 +2577,14 @@ pub(crate) fn record_return(
         let tp_leaf = tp.rsplit("::").next().unwrap_or(&tp);
         let is_generic = impl_generics.contains(&tp)
             || sig.generics.params.iter().any(|g| matches!(g, syn::GenericParam::Type(t) if t.ident == tp));
+        // VEIN B — `-> Self` / `-> T` inside `impl T`: the method RETURNS ITS RECEIVER'S TYPE, as a
+        // declared fact, filed under its own key so the refusal described above stands for `impl_ret_key`.
+        // Without it an absent `impl_ret_key` cannot tell "returns its receiver" from "the index knows
+        // nothing" — and reading those two alike is the builder-chain guess (R861, and the mysql_async
+        // `get_conn` cardinal sin the first vein-B probe produced).
+        if !is_generic && tp_leaf == impl_ty {
+            file_decl_fact(rets, crate::model::impl_self_ret_key(impl_ty, &leaf), tp.clone());
+        }
         if !is_generic && tp_leaf != impl_ty {
             let k = crate::model::impl_ret_key(impl_ty, &leaf);
             match rets.get(&k) {
@@ -2559,6 +2614,41 @@ pub(crate) fn record_return(
         }
         _ => {}
     }
+}
+
+/// VEIN B — file a declared-return FACT under a sentinel key with the index's one conflict rule: a first
+/// contributor records, an agreeing one is a no-op, a DISAGREEING one withdraws (`None`) and the
+/// withdrawal is permanent. `cache::merge_decls`' `merge_amb` applies the same rule across files.
+fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: String) {
+    match rets.get(&key) {
+        None => {
+            rets.insert(key, Some(val));
+        }
+        Some(Some(prev)) if *prev != val => {
+            rets.insert(key, None);
+        }
+        _ => {}
+    }
+}
+
+/// VEIN B (R197) — the position, among the fn's OWN type parameters, of the one the (already
+/// `Result`/`Option`-unwrapped) return type IS. `fn mk<T: Default>() -> T` is `Some(0)`; a concrete
+/// return, a reference to a generic, or an impl-level generic (which no call-site turbofish supplies) is
+/// `None`.
+fn ret_generic_position(sig: &syn::Signature, ty: &syn::Type) -> Option<usize> {
+    let syn::Type::Path(p) = ty else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let id = p.path.get_ident()?;
+    sig.generics
+        .params
+        .iter()
+        .filter_map(|g| match g {
+            syn::GenericParam::Type(t) => Some(&t.ident),
+            _ => None,
+        })
+        .position(|t| t == id)
 }
 
 /// SOUNDNESS R182 — file one WITHDRAWN candidate return type under `amb_ret_key`. Only a LOCAL nominal

@@ -423,6 +423,47 @@ pub(crate) fn impl_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("{RET_IMPL}{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// VEIN B — the three DECLARED-RETURN facts `type_of` (collector.rs) needs and `impl_ret_key` does not
+/// carry. Each is a fact about a declaration, never a guess about a call, and each rides the same
+/// angle-bracket key space as `impl_ret_key` so no identifier-keyed reader can address one.
+///
+/// * `impl_self_ret_key` — `impl T { fn m(..) -> Self }` (or `-> T`, `-> &mut Self`, wrapped in
+///   `Result`/`Option`). `impl_ret_key` is written only for a DIFFERENT type, so without this an absent
+///   `impl_ret_key` could not tell "returns its receiver" from "says nothing" — and the builder-chain
+///   walk's whole failure (R861, the mysql_async `get_conn` REMOVED) is reading those two alike.
+/// * `ret_generic_key` — `fn mk<T>() -> T`: the POSITION of the generic parameter the return names, so
+///   a turbofish at the call site (`mk::<Conn>()`) supplies the type (R197). A non-generic contributor
+///   files `RET_GENERIC_NONE` under the same key, so two same-leaf fns that disagree withdraw it.
+/// * `elem_ret_key` / `impl_elem_ret_key` — the CONCRETE element type of a collection a fn returns
+///   (`fn mk() -> Vec<G>`), the concrete twin of the `<elemdyn>` sentinel (R542).
+pub(crate) const RET_IMPL_SELF: &str = "<implself>";
+pub(crate) const RET_GENERIC: &str = "<retgen>";
+pub(crate) const RET_GENERIC_NONE: &str = "-";
+pub(crate) const RET_ELEM: &str = "<retelem>";
+pub(crate) const RET_IMPL_ELEM: &str = "<implelem>";
+
+pub(crate) fn impl_self_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_IMPL_SELF}{type_leaf}\u{1f}{fn_leaf}")
+}
+
+/// VEIN B (R568) — the `static_types` key under which a `static`/`const`'s ELEMENT type is filed
+/// (`static C: OnceLock<Client>` -> `Client`). Angle-bracketed, so no identifier lookup can reach it.
+pub(crate) fn static_elem_key(name: &str) -> String {
+    format!("<elem>{name}")
+}
+
+pub(crate) fn ret_generic_key(fn_leaf: &str) -> String {
+    format!("{RET_GENERIC}{fn_leaf}")
+}
+
+pub(crate) fn elem_ret_key(fn_leaf: &str) -> String {
+    format!("{RET_ELEM}{fn_leaf}")
+}
+
+pub(crate) fn impl_elem_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_IMPL_ELEM}{type_leaf}\u{1f}{fn_leaf}")
+}
+
 /// SOUNDNESS R451 — sentinel prefix AND value for "this type declares a method with this name". The
 /// VALUE is the same constant for every entry, which is what makes these conflict-free under
 /// `merge_amb`'s "two values for one key ⇒ ambiguous" rule; the fact rides entirely in the KEY.
@@ -469,6 +510,12 @@ pub(crate) fn is_impl_fn_key(key: &str) -> bool {
 /// sentinel key inside the other and put an unreachable entry in `ambiguous_return_leaves`.
 pub(crate) fn is_impl_ret_key(key: &str) -> bool {
     key.starts_with(RET_IMPL) || key.starts_with(RET_IMPL_FN)
+        // VEIN B — the declared-return facts above are not fn leaves either; a conflict on one withdraws
+        // it (the merge's `None`) and must never be filed as an `<amb>` candidate.
+        || key.starts_with(RET_IMPL_SELF)
+        || key.starts_with(RET_GENERIC)
+        || key.starts_with(RET_ELEM)
+        || key.starts_with(RET_IMPL_ELEM)
 }
 
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl

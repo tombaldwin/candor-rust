@@ -11,6 +11,46 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ Vein B — one strict expression typer for binders, wrapper accessors, turbofish returns and handle arguments (more effects charged, a few more `Unknown`s; SOUNDNESS R193(b), R197, R733, R568, R542, R341, R861 bound spelling, R877, R878)
+
+candor-scan had no single answer to "what type is this expression": the `let` binder typed only
+constructions, the receiver walk assumed every method returns its receiver's type, and an untyped receiver
+whose method leaf a local unit also declares is suppressed with no edge and no disclosure — so each of these
+callers was ABSENT under `deny`. There is now one STRICT typer (`type_of`) that answers only from a
+declaration — a name's binding, a field, a construction, an impl's declared return (`-> R` or `-> Self`), a
+std wrapper's type argument, a container element, a turbofish naming a generic return — and otherwise says
+unknown, never the builder guess. The binder asks it as its LAST route, so no older answer changes.
+
+- **Resolved (the real effect is now charged):** `let t = m.make(); t.go()` (R193(b)) and the mysql_async
+  `let pool = state.pool_mut(); pool.poll_new_conn()` shape without a shadowing parameter; `let alias = p` /
+  `let me = self` (R877); `self.db.borrow_mut().m()`, `m.lock().unwrap().m()`, `w.read()`, `OnceLock::get_or_init`
+  incl. a `static` cell (R878, R568); `mk::<Conn>()` over `fn mk<T>() -> T` (R197); `for g in mk_conc()` over
+  `-> Vec<G>` and a method's declared collection return (R542); a std `File`/`TcpStream`/`UnixStream` passed
+  as an ARGUMENT — `Read::read_to_string(&mut f, ..)`, `io::copy`, `BufReader::new(f)`,
+  `serde_json::from_reader(f)` (R341).
+- **Disclosed:** `let f = delay_load::<F>(..)?; f()` with a callable `F` (R733,
+  `callback:unresolved call`); `let p = n.get_parent(); p.visit()` over a dependency's value (R861's bound
+  spelling — joined through `typeSurface.returns` when published, else `dispatch:untyped cross-package
+  receiver`).
+- **⚠ Gates that can flip, vs `bad25d4`.** Unchained 1,316-entry corpus (595,285 analysed units):
+  `deny <E>` 0 → 1 on 511 functions across 69 entries (by effect: Log 180, Db 156, Clock 104, Fs 92, Rand 80,
+  Net 21, Env 14, Exec 6, Ipc 4), 77 modules, 3 crates (Rand); `deny Unknown` 0 → 1 on 544 functions
+  (**0.091%** of analysed units, under the lower band), 29 modules, 0 crates. Chained 909-entry corpus
+  (403,300 units): `deny <E>` 0 → 1 by effect Log 134, Db 86, Clock 72, Fs 60, Rand 42, Env 25, Net 22, Exec
+  11, Ipc 3 — 64 modules, 5 crates; `deny Unknown` 0 → 1 on 648 functions (0.161%), 23 modules. `deny
+  Unknown` 1 → 0 on 61 functions unchained / 24 chained, all plotters, where a typed local passed by value
+  (`map_or(size, ..)`) had been read as the free fns named `size` — the bodies are std integer arithmetic.
+  REMOVED 0 and no concrete effect lost in either corpus, and against v0.39.3 the same 73 loss-bearing rows.
+- **Fabrication controls fixed before landing, each pinned by a test:** `unwrap_or_else`'s closure is the
+  ERROR, never the guarded value (R347's named precondition for the wrapper peel); `Option::as_mut().unwrap()`
+  and `lock().unwrap()` plumbing is not the wrapped handle's method; a turbofish naming the caller's own
+  generic keeps the bound's dispatch; a wrapper of a container or `Option` (`Mutex<Option<X>>`) records
+  nothing, so the walk's ⟨0.40⟩ dependency disclosure stands; a rebind to a declared different type replaces the shadowed binding's
+  type (`let x = x.to_b()` no longer charges `A1::go`). **Known residual:** the wrapper/element route reads the
+  leaf-keyed field index, so a same-named struct in a sibling module can lend its field type (R213's class) —
+  measured once on the corpus (async-process `wait::ChildGuard::get_mut` charged `Exec`).
+- Scan-cache schema rev54 → rev55.
+
 ### ⚠ ⟨0.40⟩ row 1 credits an absolute import of the crate's OWN trait (fewer `Unknown`s; SOUNDNESS R887's rule, sharpened)
 
 Row 1 of the Rust permission matched an in-scope trait by NAME, so an import of the crate's OWN trait with

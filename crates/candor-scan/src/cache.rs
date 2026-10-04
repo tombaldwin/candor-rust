@@ -44,6 +44,12 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev55: VEIN B (R193(b), R197, R733, R568, R542, R341, R861, R877, R878). Pass A's `rets` gained FOUR
+    // key spaces (`impl_self_ret_key`, `ret_generic_key`, `elem_ret_key`, `impl_elem_ret_key`) and
+    // `static_types` an element key per static; `elem_type_b` now records the std wrappers' argument,
+    // which changes what `field_elem` RECORDS; and Pass B's `calls` changed (the strict `let` typer, the
+    // wrapper accessors, the turbofish, the handle-argument edges). A rev54 entry deserializes every one
+    // of those as absent and replays, warm, exactly the silences this closes. Mandatory.
     // rev54: ⟨0.40⟩ (SOUNDNESS R843). `FnInfo` gained `ret_proto` and `FileDecls` gained `ts`, the
     // per-file declared-type surface. A rev53 entry deserializes both as EMPTY, which on a warm run would
     // publish no `returnsProtocol` and a `types` manifest built from nothing — and a manifest that is
@@ -343,7 +349,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev54/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev55/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
