@@ -2481,6 +2481,29 @@ pub(crate) fn collect_root_decls(
             }
         }
     }
+    // VEIN A — and a root `use` that binds a name to ANOTHER CRATE (`pub use bson3 as bson;`, mongodb,
+    // `#[cfg]`-duplicated with `bson2`): `crate::bson::RawDocumentBuf` is that crate's type exactly as an
+    // `extern crate` binding's would be. Measured: anchored as a local path it named no body and no
+    // dependency, so the typed `dispatch:RawDocumentBuf.append` hedge — and, chained, the join — vanished
+    // with nothing in its place (35 mongodb rows C3). Only a single-ident target whose head is not a
+    // root-declared name and not `crate`/`self`/`super` qualifies; a path through a local module does not.
+    let declared: std::collections::BTreeSet<String> =
+        out.iter().filter(|n| !n.starts_with(ROOT_EXTERN_MARK)).cloned().collect();
+    for it in items {
+        let syn::Item::Use(u) = it else { continue };
+        if !include_tests && is_cfg_test(&u.attrs) {
+            continue;
+        }
+        let (target, bound) = match &u.tree {
+            syn::UseTree::Rename(r) => (r.ident.to_string(), r.rename.to_string()),
+            syn::UseTree::Name(n) => (n.ident.to_string(), n.ident.to_string()),
+            _ => continue,
+        };
+        if matches!(target.as_str(), "crate" | "self" | "super") || declared.contains(&target) {
+            continue;
+        }
+        out.insert(format!("{ROOT_EXTERN_MARK}{bound}"));
+    }
     out
 }
 
@@ -4066,6 +4089,18 @@ pub(crate) fn collect_use(
         if matches!(full.split("::").next(), Some("self" | "super")) {
             if let Some(a) = anchored_value(full, out) {
                 return a;
+            }
+            // …and `self::X::…` where this module says `extern crate X;` is that EXTERN crate's path,
+            // stored as the crate's own spelling (lazy_static's `core_lazy`: `extern crate spin; use
+            // self::spin::Once;`). Kept `self::`-headed, every later expansion read it as a local path,
+            // the typed `self.0.call_once(..)` named nothing, and the chained join into `spin` went with it.
+            if let Some(rest) = full.strip_prefix("self::") {
+                let head = rest.split("::").next().unwrap_or(rest);
+                if rest.contains("::")
+                    && out.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == head))
+                {
+                    return rest.to_string();
+                }
             }
         }
         // ONLY a `crate::`-rooted re-bind (`use crate::net`) is re-resolved: `crate::X` names the CRATE

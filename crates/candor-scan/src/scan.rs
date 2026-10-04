@@ -1463,6 +1463,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // Must come after the R99 second merge above, which rebuilds `merged` from scratch.
     // R478 joins the ELEMENT route in the same pass and from the SAME bounds half —
     // `field_elem_trait` is `trait_fields`' parallel index and carries the same pending key space.
+    // VEIN A — `merge_decls` lets two crate-anchored spellings of one return-type LEAF agree (rustix's
+    // backends' `ret_owned_fd`, both the one re-exported `OwnedFd`). That is sound only when the leaf
+    // names ONE local type. Where the crate declares the leaf at ≥2 module paths the spellings are
+    // different types and the merge picked one: cap-std's `fs::Dir::read_dir -> fs::ReadDir` and
+    // `fs_utf8::Dir::read_dir -> fs_utf8::ReadDir` typed an unrelated `cap_primitives::fs::read_dir(..)
+    // .map(..)` as `fs_utf8::ReadDir::map`, which named nothing and retired the untyped hedge. Withdraw
+    // exactly those, recording both candidates as an ordinary conflict would.
+    {
+        let mut type_quals: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        for (_, _, fd) in &decls_per_file {
+            for (q, _, _) in &fd.ts.types {
+                type_quals.entry(q.rsplit("::").next().unwrap_or(q)).or_default().insert(q.as_str());
+            }
+        }
+        let mut withdraw: Vec<(String, BTreeSet<String>)> = Vec::new();
+        for (fn_leaf, v) in &merged.rets {
+            let Some(v) = v else { continue };
+            if !v.starts_with("crate::") || crate::model::split_amb_ret_key(fn_leaf).is_some() {
+                continue;
+            }
+            let ty_leaf = v.rsplit("::").next().unwrap_or(v);
+            if type_quals.get(ty_leaf).is_none_or(|q| q.len() < 2) {
+                continue;
+            }
+            let cands: BTreeSet<String> = decls_per_file
+                .iter()
+                .filter_map(|(_, _, fd)| fd.rets.get(fn_leaf).cloned().flatten())
+                .collect();
+            if cands.len() >= 2 {
+                withdraw.push((fn_leaf.clone(), cands));
+            }
+        }
+        for (fn_leaf, cands) in withdraw {
+            for c in &cands {
+                crate::decls::note_amb_ret(&mut merged.rets, &fn_leaf, c);
+            }
+            merged.rets.insert(fn_leaf, None);
+        }
+    }
     crate::decls::resolve_impl_bound_fields(
         &mut merged.trait_fields,
         &mut merged.fields,
@@ -1707,6 +1746,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let vals: BTreeSet<&str> = vs.iter().map(|x| x.split('\u{1f}').nth(1).unwrap_or("")).collect();
                 if files.len() >= 2 && vals.len() >= 2 {
                     out.insert(format!("{leaf}\u{1f}{k}"));
+                    // VEIN A — when every twin's type for this field is CRATE-ANCHORED and shares one LEAF
+                    // (`crate::deflate::window::Window` / `crate::inflate::window::Window`), record that
+                    // leaf: the receiver walk answers with it (see `CallCollector::field_twin_leaf`).
+                    // Per INDEX (`fields` → `\u{1d}`, `field_elem` → `\u{1e}`), because the two hold
+                    // different facts about one field (`Option<Invalidator>` vs `Invalidator`).
+                    for (sep, pick) in [('\u{1d}', 0usize), ('\u{1e}', 1usize)] {
+                        let tv: BTreeSet<&str> = fis.iter().filter_map(|&fi| {
+                            let fd = &decls_per_file[fi].2;
+                            let idx = if pick == 0 { &fd.fields } else { &fd.field_elem };
+                            idx.get(leaf.as_str()).and_then(|m| m.get(k)).map(String::as_str)
+                        }).collect();
+                        let anchored = tv.len() >= 2 && tv.iter().all(|v| v.starts_with("crate::"));
+                        let leaves: BTreeSet<&str> = tv.iter().map(|v| v.rsplit("::").next().unwrap_or(v)).collect();
+                        if anchored && leaves.len() == 1 {
+                            if let Some(l) = leaves.iter().next() {
+                                out.insert(format!("{leaf}\u{1f}{k}{sep}{l}"));
+                            }
+                        }
+                    }
                 }
             }
         }

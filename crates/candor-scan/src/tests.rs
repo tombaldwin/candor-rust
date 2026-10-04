@@ -25737,3 +25737,76 @@ fn veina_enum_qualified_payloads_and_module_extern_crates() {
     assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "value_bag")),
             "`self::value_bag` is the extern crate:\n{row:#}");
 }
+
+/// THE SECOND FIXTURES, round three (the coordinator's merge bar): a `{:?}` of a field whose type is
+/// `crate::`-anchored keeps its formatting edge (a control here; the corpus shape that lost it —
+/// ratatui-core's `Buffer::fmt` → `Rect::fmt`, through `charge_coercion_ty`'s path branch — is pinned by
+/// the corpus edge audit, not by this cell), and two backends' same-named fn returning one
+/// re-exported type through DIFFERENT anchored spellings keeps its return type (rustix's
+/// `ret_owned_fd`, whose construct marker carries the `OwnedFd::drop` edge).
+#[test]
+fn veina_anchored_types_keep_coercion_edges_and_return_types() {
+    let v = scan_src_to_json_multi("veinathird", &[
+        ("src/lib.rs", "pub mod layout;\npub mod buffer;\npub mod fd;\npub mod backend;\n"),
+        ("src/layout.rs", "pub struct Rect;\nimpl std::fmt::Debug for Rect { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { let _ = std::env::var(\"X\"); f.write_str(\"r\") } }\n"),
+        ("src/buffer.rs", "use crate::layout::Rect;\npub struct Buffer { pub area: Rect }\n\
+            impl std::fmt::Debug for Buffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_fmt(format_args!(\"{:?}\", self.area)) } }\n"),
+        ("src/fd.rs", "pub struct OwnedFd(pub i32);\nimpl Drop for OwnedFd { fn drop(&mut self) { let _ = std::fs::remove_file(\"/tmp/x\"); } }\n"),
+        ("src/backend/mod.rs", "pub mod a;\npub mod b;\npub mod fd { pub use crate::fd::OwnedFd; }\n"),
+        ("src/backend/a.rs", "use crate::fd::OwnedFd;\npub fn ret_owned_fd(n: i32) -> OwnedFd { OwnedFd(n) }\npub fn dup(n: i32) { let _f = ret_owned_fd(n); }\n"),
+        ("src/backend/b.rs", "use super::fd::OwnedFd;\npub fn ret_owned_fd(n: i32) -> OwnedFd { OwnedFd(n) }\n"),
+    ]);
+    assert!(veina_row_effs(&v, "buffer::Buffer::fmt").contains(&"Env".to_string()), "debug-of-field edge:\n{v:#}");
+    assert!(veina_row_effs(&v, "backend::a::dup").contains(&"Fs".to_string()), "the dropped OwnedFd's Fs:\n{v:#}");
+}
+
+/// VEIN A — a crate-ROOT `pub use <dep> as <name>;` (mongodb's `#[cfg]`-duplicated `pub use bson3 as
+/// bson;`) makes `crate::<name>::T` THAT dependency's type. Anchoring kept the written `crate::` head on
+/// the field/`use` route, so the typed call named no unit and no dependency and went silent (chained
+/// mongodb: 35 rows C3). Both the field-typed route and the explicitly written path must reach the
+/// dependency's classifier rule.
+#[test]
+fn veina_root_reexport_of_a_dependency_is_that_dependency() {
+    let v = scan_src_to_json_multi("veinafourth", &[
+        ("Cargo.toml", "[package]\nname = \"veinafourth\"\n[dependencies]\nreqwest = \"0.12\"\n"),
+        ("src/lib.rs", "#[cfg(feature = \"a\")]\npub use reqwest as http;\n#[cfg(not(feature = \"a\"))]\npub use reqwest as http;\npub mod app;\n"),
+        ("src/app.rs", "use crate::{http::{Client, Request}};\npub struct App { pub c: Client }\n\
+            impl App { pub async fn go(&self, r: Request) { let _ = self.c.execute(r).await; } }\n\
+            pub async fn direct(c: &crate::http::Client, r: crate::http::Request) { let _ = c.execute(r).await; }\n"),
+    ]);
+    for f in ["app::App::go", "app::direct"] {
+        let e = veina_row_effs(&v, f);
+        assert!(e.iter().any(|x| x == "Net"), "{f}: `crate::http` IS reqwest: {e:?}\n{v:#}");
+    }
+}
+
+/// VEIN A — `extern crate spin; use self::spin::Once;` in a MODULE (lazy_static's `core_lazy`) binds
+/// `Once` to the extern crate's type. `absolutise` refused to anchor it, but the value was then stored
+/// `self::`-headed and every later read took it as a local path: the typed `self.0.call_once(..)` named
+/// nothing and the row went ABSENT (chained, its `callback:` hedge vanished). The extern crate must
+/// surface — here as `invisible`, since `spin` is not chained.
+#[test]
+fn veina_module_extern_crate_use_names_the_extern_crate() {
+    let v = scan_src_to_json_multi("veinafifth", &[
+        ("Cargo.toml", "[package]\nname = \"veinafifth\"\n[dependencies]\nspin = \"0.9\"\n"),
+        ("src/lib.rs", "pub mod core_lazy;\n"),
+        ("src/core_lazy.rs", "extern crate spin;\nuse self::spin::Once;\npub struct Lazy<T: Sync>(Once<T>);\n\
+            impl<T: Sync> Lazy<T> { pub fn get<F: FnOnce() -> T>(&'static self, b: F) -> &T { self.0.call_once(b) } }\n"),
+    ]);
+    let row = fn_entry(&v, "core_lazy::Lazy::get");
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "spin")),
+            "`self::spin` is the extern crate:\n{row:#}");
+}
+
+/// VEIN A — `extern crate alloc as stdalloc;` binds `stdalloc`. hashbrown-0.17 also declares `mod alloc;`
+/// at its root, and with the extern read by its WRITTEN name `crate::alloc::do_alloc` was taken for the
+/// extern crate's path and lost its edge to the local `do_alloc`.
+#[test]
+fn veina_renamed_extern_crate_binds_its_rename() {
+    let v = scan_src_to_json_multi("veinasixth", &[
+        ("src/lib.rs", "extern crate alloc as stdalloc;\nmod alloc;\npub mod raw;\n"),
+        ("src/alloc.rs", "pub(crate) use self::inner::do_alloc;\nmod inner { pub(crate) fn do_alloc() { let _ = std::fs::read(\"/x\"); } }\n"),
+        ("src/raw.rs", "use crate::alloc::do_alloc;\npub fn new_uninitialized() { do_alloc(); }\n"),
+    ]);
+    assert!(veina_row_effs(&v, "raw::new_uninitialized").contains(&"Fs".to_string()), "local do_alloc:\n{v:#}");
+}

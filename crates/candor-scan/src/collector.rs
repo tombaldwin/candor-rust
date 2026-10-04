@@ -1143,6 +1143,24 @@ impl<'a> CallCollector<'a> {
 
     /// Whether the leaf-keyed field index's answer for `base.member` may be a same-named sibling type's
     /// (see `ElemIndexes::ambiguous_type_leaves`).
+    /// VEIN A — the shared LEAF of every twin's crate-anchored type for `member` (the `\u{1d}` entries
+    /// in `scan.rs`'s `ambiguous_type_leaves`), where `field_ambiguous` holds.
+    fn field_twin_leaf(&self, base: &str, member: &syn::Member) -> Option<String> {
+        self.field_twin_leaf_sep(base, member, '\u{1d}')
+    }
+
+    fn field_twin_leaf_sep(&self, base: &str, member: &syn::Member, sep: char) -> Option<String> {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        let key = match member {
+            syn::Member::Named(f) => f.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let prefix = format!("{leaf}\u{1f}{key}{sep}");
+        let mut hits = self.ambiguous_type_leaves.iter().filter_map(|e| e.strip_prefix(&prefix));
+        let one = hits.next()?;
+        hits.next().is_none().then(|| one.to_string())
+    }
+
     fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
         let leaf = base.rsplit("::").next().unwrap_or(base);
         let key = match member {
@@ -1574,6 +1592,20 @@ impl<'a> CallCollector<'a> {
                 if self.is_dependency_type(&base) {
                     return None;
                 }
+                // VEIN A — TWO SAME-LEAF STRUCTS WHOSE FIELD TYPES NOW DIFFER ONLY BY MODULE. `fields` is
+                // leaf-keyed and keeps the LAST twin merged; with zlib-rs's `deflate::State { window:
+                // Window }` and `inflate::State { window: Window }` both spelled `self::window::Window`,
+                // the two values used to compare EQUAL and the call reached a contested tail and was
+                // disclosed. Anchoring made them differ, and `deflate::get_dictionary` was typed with
+                // INFLATE's `Window` — a wrong resolution that withdrew the disclosure. Where every twin's
+                // type is crate-anchored with one shared leaf, answer with that leaf: the module-blind
+                // reading the twins used to share, settled or disclosed downstream, never a pick. (Twins
+                // that disagree on the leaf, or name a dependency type, keep today's answer.)
+                if self.field_ambiguous(&base, &f.member) {
+                    if let Some(l) = self.field_twin_leaf(&base, &f.member) {
+                        return Some(l);
+                    }
+                }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -1665,6 +1697,11 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                // VEIN A — the element twin of `resolve_recv_type`'s twin-field rule (moka's
+                // `sync::`/`future::base_cache::Inner { invalidator: Option<Invalidator> }`).
+                if let Some(l) = self.field_twin_leaf_sep(&base, &f.member, '\u{1e}') {
+                    return Some(l);
+                }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.field_elem.get(base_leaf)?.get(&key).cloned()
             }
@@ -2187,6 +2224,17 @@ impl<'a> CallCollector<'a> {
         // whose tail2 is exactly the dep report's key. If no chained report covers the crate it resolves to
         // nothing, as today.
         let segs: Vec<&str> = ty.split("::").collect();
+        // VEIN A — a crate-ANCHORED type (`crate::layout::Rect`, which a relative spelling used to reach
+        // here as `layout::Rect`) gets the same edge, by its full path: local resolution settles it.
+        // Without this, ratatui's `{:?}` of `self.area` lost its `Rect::fmt` edge.
+        if segs.len() >= 3 && segs[0] == "crate" && !ty.contains(crate::decls::ALIAS_ALT_SEP) {
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                path: format!("{ty}::{method}"),
+                leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                typed: false, method: false, is_macro: false,
+            });
+            return;
+        }
         if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
             self.calls.push(Call { argc: 0, entropy_arg: false,
                 path: format!("{}::{}::{}", segs[0], ty_leaf, method),

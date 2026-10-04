@@ -900,6 +900,10 @@ pub(crate) fn alias_expand_decls(
     if uses.is_empty() {
         return None;
     }
+    // VEIN A — the declaring file's module path too, so a `crate::`-anchored path this re-expansion
+    // rewrites keeps its `crate::` head exactly as Pass A wrote it, instead of being stripped back to
+    // the relative spelling (which then compares unequal to its anchored twin in `merge_decls`).
+    crate::lang::seed_modpath(modpath, &mut uses);
     // A rewritten path, or None when `expand` leaves it alone. An ALIAS-ONLY `uses` map is deliberate:
     // a general `use` map here would re-apply an unrelated file's imports to this file's paths.
     //
@@ -1060,6 +1064,27 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
                     None => {
                         dst.insert(leaf.clone(), Some(tp.clone()));
                     }
+                    // VEIN A — a CRATE-ANCHORED spelling and another local spelling of one LEAF are not a conflict for `rets`.
+                    // Anchoring split what relative spellings used to share: rustix's two backends'
+                    // `ret_owned_fd` return `crate::backend::fd::OwnedFd` and
+                    // `crate::backend::libc::fd::OwnedFd`, which are the same re-exported `OwnedFd`
+                    // (cfg arms of one polyfill); withdrawing the leaf cost R165's construct marker and the
+                    // `OwnedFd::drop` edge in four rustix versions. Every reader of `rets` keys on the
+                    // type's LEAF (`local_type_leaf`, `local_types`), so agreeing on it is agreeing.
+                    Some(Some(prev))
+                        if prev != tp
+                            && record_amb
+                            && (prev.starts_with("crate::") || tp.starts_with("crate::"))
+                            // both MODULE-QUALIFIED local paths — a bare leaf beside an anchored one
+                            // (`CompactString` / `crate::CompactString`) conflicted before anchoring
+                            // existed and still does, so this restores only what anchoring split
+                            && prev.trim_start_matches("crate::").contains("::")
+                            && tp.trim_start_matches("crate::").contains("::")
+                            && !matches!(prev.split("::").next(), Some("std" | "core" | "alloc"))
+                            && !matches!(tp.split("::").next(), Some("std" | "core" | "alloc"))
+                            && !prev.contains(crate::decls::ALIAS_ALT_SEP)
+                            && !tp.contains(crate::decls::ALIAS_ALT_SEP)
+                            && prev.rsplit("::").next() == tp.rsplit("::").next() => {}
                     Some(Some(prev)) if prev != tp => {
                         if plain {
                             let prev = prev.clone();

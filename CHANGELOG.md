@@ -40,9 +40,16 @@ was ABSENT under `deny`. Now:
   extern crate; `crate::X`/`self::X` where `extern crate X` binds it stays extern; a struct's generic parameter
   shadows a same-named import in its field types; an `impl` written on a local type alias is found through the
   alias's target; a pattern that names its enum (`Self::Command(s)`) is typed by that enum's own variant.
+- **Other crates named through this one:** a crate-ROOT `pub use bson3 as bson;` (each `#[cfg]` arm kept) makes
+  `crate::bson::T` that dependency's type, on the field and `use` routes as well as a written path; `extern crate
+  spin; use self::spin::Once;` in a module binds the extern crate's `Once`; and `extern crate alloc as stdalloc;`
+  binds `stdalloc`, so a root `mod alloc` keeps its own `crate::alloc::…` paths. The field route of the first was
+  silent before this change too.
 
-Measured on 1,276 registry entries (unchained, vs `1e11e7f`): no concrete effect lost; the lane report carries the
-REMOVED partition, the new-`Unknown` price and the gate flips. The scan cache schema moves to `rev56`.
+Measured on 1,276 registry entries (unchained, vs `1e11e7f`) and 909 chained: the only concrete losses are 15
+rdkafka rows that existed under a FABRICATED `types::` key (every real key keeps its effect); every removed
+`Unknown` is traced in the lane report, with the new-`Unknown` price and the gate flips. The scan cache schema
+moves to `rev56`.
 
 ### ⚠ Vein B — one strict expression typer for binders, wrapper accessors, turbofish returns and handle arguments (more effects charged, a few more `Unknown`s; SOUNDNESS R193(b), R197, R733, R568, R542, R341, R861 bound spelling, R877, R878)
 

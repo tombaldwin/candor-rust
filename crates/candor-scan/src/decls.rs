@@ -358,7 +358,16 @@ pub(crate) fn declared_item_name(it: &syn::Item, include_tests: bool) -> Option<
         syn::Item::Mod(m) => (&m.attrs, m.ident.to_string()),
         syn::Item::Const(c) => (&c.attrs, c.ident.to_string()),
         syn::Item::Static(s) => (&s.attrs, s.ident.to_string()),
-        syn::Item::ExternCrate(e) => (&e.attrs, e.ident.to_string()),
+        // VEIN A — `extern crate alloc as stdalloc;` binds `stdalloc`, not `alloc` (hashbrown-0.17's root,
+        // which ALSO has `mod alloc;`): read by the written name, `crate::alloc::do_alloc` was taken for
+        // the extern crate and lost its edge to the local module's `do_alloc`. `as _` binds nothing.
+        syn::Item::ExternCrate(e) => {
+            let name = e.rename.as_ref().map_or(&e.ident, |(_, r)| r).to_string();
+            if name == "_" {
+                return None;
+            }
+            (&e.attrs, name)
+        }
         // a `macro_rules! NAME` DEFINITION carries an ident; an item-position INVOCATION does not.
         syn::Item::Macro(m) => (&m.attrs, m.ident.as_ref()?.to_string()),
         _ => return None,
@@ -2405,11 +2414,40 @@ pub(crate) fn fninfo(
         syn::ReturnType::Default => None,
     };
     let ret_proto = crate::typesurf::ret_proto_ref(&sig.output, uses, modpath);
+    // VEIN A — a `crate::<h>::…` call whose `<h>` the crate ROOT binds to ANOTHER crate (`extern crate`,
+    // or `pub use bson3 as bson;` — see `collect_root_decls`) names that crate's item. Types reach a call
+    // path already anchored — through Pass A's field/return indexes and through `use crate::{bson::X}`
+    // values — without passing `absolutise`'s refusal, so the head is dropped here, once, for every call:
+    // left on, mongodb's `command.body.append(..)` named no unit and no dependency and its typed
+    // `dispatch:RawDocumentBuf.append` hedge vanished with nothing in its place.
+    let mut calls = c.calls;
+    for call in &mut calls {
+        if call.path.contains("crate::") {
+            let fixed: Vec<String> = call
+                .path
+                .split(ALIAS_ALT_SEP)
+                .map(|arm| {
+                    let Some(rest) = arm.strip_prefix("crate::") else { return arm.to_string() };
+                    let segs: Vec<&str> = rest.split("::").collect();
+                    if segs.len() < 2 || !crate::lang::root_extern_crate(uses, segs[0]) {
+                        return arm.to_string();
+                    }
+                    // Through the root re-export when one is seeded (`crate::http` → `reqwest`, each
+                    // `#[cfg]` arm kept); bare for an `extern crate`, whose name IS the crate's.
+                    match uses.get(&format!("crate::{}", segs[0])) {
+                        Some(full) => crate::lang::alias_join(full, &segs[1..]),
+                        None => rest.to_string(),
+                    }
+                })
+                .collect();
+            call.path = fixed.join(&ALIAS_ALT_SEP.to_string());
+        }
+    }
     FnInfo {
         qual: qual.to_string(),
         leaf: leaf.to_string(),
         loc: loc.to_string(),
-        calls: c.calls,
+        calls,
         unresolved: c.unresolved,
         unresolved_why: c.unresolved_why.into_iter().collect(),
         ret_idents,
