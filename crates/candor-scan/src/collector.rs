@@ -338,6 +338,17 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) ambiguous_return_leaves: &'a std::collections::HashMap<String, Vec<String>>,
     /// SOUNDNESS R208 — the twinned `macro_rules!` names; see `ElemIndexes::macro_twins`.
     pub(crate) macro_twins: &'a std::collections::HashSet<String>,
+    /// VEIN B — set only while `legacy_recv_type` asks the receiver walk what it answered BEFORE vein B
+    /// (the wrapper arm off), so the call site can keep every disclosure that answer produced.
+    pub(crate) veinb_off: std::cell::Cell<bool>,
+    /// VEIN B — bindings typed ONLY by the strict `let` route, with the type it gave. The by-value
+    /// callable-argument rule (`map_or(size, ..)`) reads "not in `vars`" as "a path to a free fn"; a binding
+    /// vein B typed keeps the pre-change reading there, so no reason that rule contributed is retracted
+    /// (SPEC §6.2). Measured: without this, plotters' and regex-automata's `ambiguous:` hedges on a local
+    /// passed by value went away — false hedges, but retracted rather than resolved.
+    pub(crate) veinb_typed: HashMap<String, String>,
+    /// VEIN B — see `ElemIndexes::ambiguous_type_leaves` (keys are `<leaf>\u{1f}<field>` or `<leaf>\u{1f}*`).
+    pub(crate) ambiguous_type_leaves: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
@@ -987,6 +998,9 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Path(_) => self.resolve_recv_type(expr),
             syn::Expr::Field(f) => {
                 let base = self.type_of(&f.base)?;
+                if self.field_ambiguous(&base, &f.member) {
+                    return None;
+                }
                 let key = match &f.member {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
@@ -1055,6 +1069,52 @@ impl<'a> CallCollector<'a> {
         })
     }
 
+    /// VEIN B — whether the CONTAINER an element/wrapper answer would be read from is a field of a type
+    /// whose leaf this crate declares twice (`ElemIndexes::ambiguous_type_leaves`). The field indexes are
+    /// leaf-keyed, last contributor wins, so the recorded field type may be the OTHER twin's: measured,
+    /// async-process's `wait::ChildGuard { inner: Option<WaitableChild> }` read `signal::ChildGuard`'s
+    /// `Option<std::process::Child>`, and `self.inner.as_mut().unwrap().get_mut()` was charged `Exec`.
+    /// Walks the element-preserving adapters and wrapper accessors down to the field; a name or any other
+    /// root answers `false`, which leaves the route exactly as it was.
+    fn elem_root_ambiguous(&self, expr: &syn::Expr) -> bool {
+        match peel_recv(expr) {
+            syn::Expr::MethodCall(m) => {
+                let n = m.method.to_string();
+                (crate::lang::is_element_preserving_adapter(&n) || crate::lang::is_any_wrapper_accessor(&n)
+                    || crate::lang::is_result_plumbing(&n))
+                    && self.elem_root_ambiguous(&m.receiver)
+            }
+            syn::Expr::Index(i) => self.elem_root_ambiguous(&i.expr),
+            syn::Expr::Field(f) => self.resolve_recv_type(&f.base).is_some_and(|t| self.field_ambiguous(&t, &f.member)),
+            _ => false,
+        }
+    }
+
+    /// Whether the leaf-keyed field index's answer for `base.member` may be a same-named sibling type's
+    /// (see `ElemIndexes::ambiguous_type_leaves`).
+    fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        let key = match member {
+            syn::Member::Named(f) => f.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let hit = self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}{key}"))
+            || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"));
+        if hit && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+            eprintln!("VEINB_AMBFIELD\t{leaf}.{key}");
+        }
+        hit
+    }
+
+    /// VEIN B — the receiver walk's answer with the wrapper arm OFF: what the call site formed before this
+    /// change. Asked only where the two may differ.
+    fn legacy_recv_type(&self, expr: &syn::Expr, outer: &str) -> Option<String> {
+        self.veinb_off.set(true);
+        let t = self.resolve_recv_type_for(expr, outer);
+        self.veinb_off.set(false);
+        t
+    }
+
     /// `type_of` for a method call — see there. The order is the order of evidence: a `dyn` return or a
     /// known type change declines; a std wrapper's accessor and an element accessor answer from the
     /// container; otherwise the receiver must type and ITS impl must declare this method's return.
@@ -1070,7 +1130,7 @@ impl<'a> CallCollector<'a> {
         if let Some(e) = recv.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &name)) {
             return Some(e);
         }
-        if crate::lang::is_element_yielding_accessor(&name) {
+        if crate::lang::is_element_yielding_accessor(&name) && !self.elem_root_ambiguous(&m.receiver) {
             if !self.resolve_elem_trait_leaves(&m.receiver).is_empty() {
                 return None;
             }
@@ -1103,6 +1163,9 @@ impl<'a> CallCollector<'a> {
     /// evidence: `Vec::as_ref` yields `&[T]`, not `T`, and a leaf-only rule would type it `T` (R878, R568).
     fn wrapper_accessor_type(&self, recv: &syn::Expr, kind: &str, method: &str) -> Option<String> {
         if !crate::lang::is_wrapper_accessor(kind.rsplit("::").next().unwrap_or(kind), method) {
+            return None;
+        }
+        if self.elem_root_ambiguous(recv) {
             return None;
         }
         let e = self.resolve_elem_type(recv)?;
@@ -1217,7 +1280,7 @@ impl<'a> CallCollector<'a> {
                 // The receiver is typed ONCE and the walk below reuses it: re-typing it here and again
                 // there is 2^depth on a long chain (measured: h2-0.4.19 ran >10 min, <1s before).
                 let mut walked: Option<Option<String>> = None;
-                if crate::lang::is_any_wrapper_accessor(&m.method.to_string()) {
+                if !self.veinb_off.get() && crate::lang::is_any_wrapper_accessor(&m.method.to_string()) {
                     let k = self.resolve_recv_type_for(&m.receiver, &m.method.to_string());
                     if let Some(e) =
                         k.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &m.method.to_string()))
@@ -4507,6 +4570,40 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // one for `std::fs::File`, and it was applied to both by a test on the crate ROOT.
         // R576(a) — kept for the default-body dispatch below; the typed branch consumes `str_arg`.
         let str_arg_self = if self.trait_self.is_some() { str_arg.clone() } else { None };
+        // VEIN B — SPEC §6.2: a reason is CONTRIBUTED, never retracted. Where the wrapper arm changed the
+        // receiver's type (or the plumbing skip below forms no call), the pre-vein-B answer may have been a
+        // DEPENDENCY type whose call the chained join answers or discloses (`dispatch:<Ty>.<m>`, the
+        // ⟨0.40⟩ chain guess). That call is still formed, exactly as before — union, not replacement — so
+        // every reason it produced survives; a dependency answer adds effects only where the old build
+        // already did. Local legacy answers are NOT re-emitted: those were the builder guess onto this
+        // crate's own units, the fabrication direction.
+        if crate::lang::is_any_wrapper_accessor_chain(&node.receiver) {
+            let legacy = self.legacy_recv_type(&node.receiver, &leaf);
+            let now = self.resolve_recv_type_for(&node.receiver, &leaf);
+            if let Some(lt) = legacy.filter(|lt| Some(lt) != now.as_ref()) {
+                let root = lt.split("::").next().unwrap_or("");
+                if lt.contains("::") && !lt.contains(crate::decls::ALIAS_ALT_SEP)
+                    && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
+                {
+                    if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                        eprintln!("VEINB_LEGACY\t{lt}::{leaf}");
+                    }
+                    self.calls.push(Call { argc: node.args.len().min(255) as u8, entropy_arg: false,
+                        path: crate::lang::alias_join(&lt, &[leaf.as_str()]), leaf: leaf.clone(), str_arg: None,
+                        typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
+                    self.veinb_off.set(true);
+                    let guess = self.chain_steps(&node.receiver);
+                    self.veinb_off.set(false);
+                    if let Some((steps, base)) = guess.filter(|(_, b)| *b == lt) {
+                        let rest = base.split_once("::").map_or("", |(_, r)| r);
+                        self.calls.push(Call { argc: 0, entropy_arg: false,
+                            path: format!("{root}::{CHAIN_GUESS_MARKER}::{}::{rest}::{leaf}", steps.join(".")),
+                            leaf: leaf.clone(), str_arg: None, typed: false, method: false,
+                            is_macro: false, path_lits_partial: false, path_lit2: None });
+                    }
+                }
+            }
+        }
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
@@ -5212,7 +5309,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if let syn::Expr::Path(p) = a {
                     let is_local = p.path.get_ident().is_some_and(|i| {
                         let n = i.to_string();
-                        self.vars.contains_key(&n) || self.closure_vars.contains(&n) || self.fn_typed_vars.contains(&n)
+                        (self.vars.contains_key(&n) && self.vars.get(&n) != self.veinb_typed.get(&n))
+                            || self.closure_vars.contains(&n) || self.fn_typed_vars.contains(&n)
                     });
                     if p.qself.is_none() && !is_local {
                         // R89 — SOUNDNESS: this path head can name a CONCRETE type (`Conn::send`, handled
@@ -6070,6 +6168,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // other binder leaves the name with no entry, i.e. with today's behaviour.
         for n in &bound_names {
             self.mono_recv_traits.remove(n);
+            self.veinb_typed.remove(n);
         }
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
@@ -6615,6 +6714,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                                     eprintln!("VEINB_LET\t{}\t{t}", id.ident);
                                 }
+                                self.veinb_typed.insert(id.ident.to_string(), t.clone());
                                 self.vars.insert(id.ident.to_string(), t);
                                 self.dep_bound_vars.remove(&id.ident.to_string());
                             } else if let Some(prov) =

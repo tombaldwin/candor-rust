@@ -3210,6 +3210,29 @@ pub(crate) fn is_result_plumbing(method: &str) -> bool {
     )
 }
 
+/// VEIN B — whether any step of a method-call RECEIVER chain is a wrapper accessor, i.e. whether the
+/// vein-B wrapper arm can have changed the walk's answer for a call on it.
+pub(crate) fn is_any_wrapper_accessor_chain(expr: &syn::Expr) -> bool {
+    let mut e = expr;
+    loop {
+        match e {
+            syn::Expr::Reference(r) => e = &r.expr,
+            syn::Expr::Paren(p) => e = &p.expr,
+            syn::Expr::Group(g) => e = &g.expr,
+            syn::Expr::Try(t) => e = &t.expr,
+            syn::Expr::Await(a) => e = &a.base,
+            syn::Expr::Field(f) => e = &f.base,
+            syn::Expr::MethodCall(m) => {
+                if is_any_wrapper_accessor(&m.method.to_string()) {
+                    return true;
+                }
+                e = &m.receiver;
+            }
+            _ => return false,
+        }
+    }
+}
+
 pub(crate) fn is_any_wrapper_accessor(method: &str) -> bool {
     ["RefCell", "Mutex", "RwLock", "OnceLock", "LazyLock", "Cell", "Option", "Result"]
         .iter()

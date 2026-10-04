@@ -894,6 +894,12 @@ pub(crate) struct ElemIndexes<'a> {
     /// tokens; see `cache::FileDecls::macro_twins`. Carries names only: it can name no concrete effect,
     /// only turn an order-dependent silence into `Unknown`.
     pub(crate) macro_twins: &'a HashSet<String>,
+    /// VEIN B — `<leaf>\u{1f}<field>` for a field whose type two same-leaf sibling types declare
+    /// DIFFERENTLY (`reaper::signal::ChildGuard.inner` beside `reaper::wait::ChildGuard.inner`), and
+    /// `<leaf>\u{1f}*` when the twins share a file. The field indexes are keyed by leaf and keep the LAST
+    /// contributor (R213's class), so there the recorded type may be the other twin's; the vein-B typing
+    /// routes refuse to answer through one.
+    pub(crate) ambiguous_type_leaves: &'a HashSet<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

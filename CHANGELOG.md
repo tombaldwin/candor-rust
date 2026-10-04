@@ -32,23 +32,26 @@ unknown, never the builder guess. The binder asks it as its LAST route, so no ol
   `callback:unresolved call`); `let p = n.get_parent(); p.visit()` over a dependency's value (R861's bound
   spelling — joined through `typeSurface.returns` when published, else `dispatch:untyped cross-package
   receiver`).
-- **⚠ Gates that can flip, vs `bad25d4`.** Unchained 1,316-entry corpus (595,285 analysed units):
-  `deny <E>` 0 → 1 on 511 functions across 69 entries (by effect: Log 180, Db 156, Clock 104, Fs 92, Rand 80,
-  Net 21, Env 14, Exec 6, Ipc 4), 77 modules, 3 crates (Rand); `deny Unknown` 0 → 1 on 544 functions
-  (**0.091%** of analysed units, under the lower band), 29 modules, 0 crates. Chained 909-entry corpus
-  (403,300 units): `deny <E>` 0 → 1 by effect Log 134, Db 86, Clock 72, Fs 60, Rand 42, Env 25, Net 22, Exec
-  11, Ipc 3 — 64 modules, 5 crates; `deny Unknown` 0 → 1 on 648 functions (0.161%), 23 modules. `deny
-  Unknown` 1 → 0 on 61 functions unchained / 24 chained, all plotters, where a typed local passed by value
-  (`map_or(size, ..)`) had been read as the free fns named `size` — the bodies are std integer arithmetic.
-  REMOVED 0 and no concrete effect lost in either corpus, and against v0.39.3 the same 73 loss-bearing rows.
+- **⚠ Gates that can flip, vs `bad25d4` — only 0 → 1.** Unchained 1,276-entry corpus (575,078 analysed units):
+  `deny <E>` 0 → 1 on 439 functions across 60 entries (by effect: Log 156, Db 142, Fs 92, Clock 78, Rand 45,
+  Net 17, Env 11, Exec 3, Ipc 3), 64 modules, 2 crates (Rand); `deny Unknown` 0 → 1 on 511 functions
+  (**0.089%** of analysed units, under the lower band), 26 modules, 0 crates. Chained 909-entry corpus
+  (403,300 units): `deny <E>` 0 → 1 on 316 functions across 44 entries (Log 133, Db 78, Fs 60, Clock 59, Rand
+  29, Env 25, Net 22, Exec 8, Ipc 3), 58 modules, 5 crates; `deny Unknown` 0 → 1 on 639 functions (0.158%),
+  22 modules. No function loses a concrete effect or `Unknown` in either corpus (REMOVED 0), and no
+  reason-scoped `deny Unknown[<class>]` goes 1 → 0 on any row whose own reasons changed.
 - **Fabrication controls fixed before landing, each pinned by a test:** `unwrap_or_else`'s closure is the
   ERROR, never the guarded value (R347's named precondition for the wrapper peel); `Option::as_mut().unwrap()`
   and `lock().unwrap()` plumbing is not the wrapped handle's method; a turbofish naming the caller's own
   generic keeps the bound's dispatch; a wrapper of a container or `Option` (`Mutex<Option<X>>`) records
   nothing, so the walk's ⟨0.40⟩ dependency disclosure stands; a rebind to a declared different type replaces the shadowed binding's
-  type (`let x = x.to_b()` no longer charges `A1::go`). **Known residual:** the wrapper/element route reads the
-  leaf-keyed field index, so a same-named struct in a sibling module can lend its field type (R213's class) —
-  measured once on the corpus (async-process `wait::ChildGuard::get_mut` charged `Exec`).
+  type (`let x = x.to_b()` no longer charges `A1::go`); a field whose type two same-named sibling types
+  declare DIFFERENTLY (R213's leaf collision — async-process's `signal::ChildGuard.inner` beside
+  `wait::ChildGuard.inner`) is never answered through the leaf-keyed index; and a std wrapper's argument
+  does not enter drop glue (`owned_drops` reads exactly what it did before).
+- **No reason is retracted (SPEC §6.2).** Where the wrapper arm changes a receiver's type, the call the
+  pre-change walk formed on a DEPENDENCY type is still formed, so its join and its `dispatch:` disclosure
+  survive (union, not replacement; local guesses are not re-emitted).
 - Scan-cache schema rev54 → rev55.
 
 ### ⚠ ⟨0.40⟩ row 1 credits an absolute import of the crate's OWN trait (fewer `Unknown`s; SOUNDNESS R887's rule, sharpened)

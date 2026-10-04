@@ -1554,6 +1554,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             for (elem, src) in [(false, fields.get(t)), (true, field_elem.get(t))] {
                 let Some(src) = src else { continue };
                 for (k, ty) in src {
+                    // VEIN B — `field_elem` now records a std WRAPPER's argument (`m: Mutex<G>` -> `G`) for
+                    // the typing routes. Drop glue is a different question with its own model (vein D) and
+                    // this change does not move it: a wrapper-held value contributes exactly what it did
+                    // before vein B, which was nothing.
+                    if elem
+                        && fields
+                            .get(t)
+                            .and_then(|m| m.get(k))
+                            .is_some_and(|w| crate::lang::is_value_wrapper(w.rsplit("::").next().unwrap_or(w)))
+                    {
+                        continue;
+                    }
                     if borrows(t, k, elem) {
                         withdrew(t, k, ty);
                     } else {
@@ -1639,7 +1651,61 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
-    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins };
+    // VEIN B — the (type LEAF, field) pairs the leaf-keyed field indexes cannot answer for: the leaf is
+    // declared at ≥2 distinct module paths AND two of those declarations give the field DIFFERENT types.
+    // A field only one twin declares is unambiguous — `x.f` on the other twin does not compile. Where two
+    // twins sit in ONE file the per-file index has already merged them, so every field of that leaf
+    // counts (`"<leaf>\u{1f}*"`). The ⟨0.40⟩ per-file declared-type surface records every struct by its
+    // module-qualified path; a `#[cfg]` twin of ONE path is one type and does not count.
+    let ambiguous_type_leaves: HashSet<String> = {
+        let mut quals: HashMap<String, BTreeSet<&str>> = HashMap::new();
+        let mut files_of: HashMap<String, Vec<usize>> = HashMap::new();
+        for (fi, (_, _, fd)) in decls_per_file.iter().enumerate() {
+            let mut here: HashMap<&str, usize> = HashMap::new();
+            for (q, _, _) in &fd.ts.types {
+                let leaf = q.rsplit("::").next().unwrap_or(q);
+                quals.entry(leaf.to_string()).or_default().insert(q.as_str());
+                *here.entry(leaf).or_default() += 1;
+            }
+            for (leaf, _) in here {
+                files_of.entry(leaf.to_string()).or_default().push(fi);
+            }
+        }
+        let mut out: HashSet<String> = HashSet::new();
+        for (leaf, qs) in &quals {
+            if qs.len() < 2 {
+                continue;
+            }
+            let fis = files_of.get(leaf).cloned().unwrap_or_default();
+            let same_file = fis.iter().any(|&fi| {
+                decls_per_file[fi].2.ts.types.iter()
+                    .filter(|(q, _, _)| q.rsplit("::").next().unwrap_or(q) == leaf.as_str())
+                    .map(|(q, _, _)| q.as_str()).collect::<BTreeSet<_>>().len() >= 2
+            });
+            if same_file {
+                out.insert(format!("{leaf}\u{1f}*"));
+                continue;
+            }
+            let mut seen: HashMap<&str, BTreeSet<String>> = HashMap::new();
+            for &fi in &fis {
+                let fd = &decls_per_file[fi].2;
+                for idx in [fd.fields.get(leaf.as_str()), fd.field_elem.get(leaf.as_str())].into_iter().flatten() {
+                    for (k, v) in idx {
+                        seen.entry(k.as_str()).or_default().insert(format!("{fi}\u{1f}{v}"));
+                    }
+                }
+            }
+            for (k, vs) in seen {
+                let files: BTreeSet<&str> = vs.iter().map(|x| x.split('\u{1f}').next().unwrap_or("")).collect();
+                let vals: BTreeSet<&str> = vs.iter().map(|x| x.split('\u{1f}').nth(1).unwrap_or("")).collect();
+                if files.len() >= 2 && vals.len() >= 2 {
+                    out.insert(format!("{leaf}\u{1f}{k}"));
+                }
+            }
+        }
+        out
+    };
+    let elems = ElemIndexes { ambiguous_type_leaves: &ambiguous_type_leaves, field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins };
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
