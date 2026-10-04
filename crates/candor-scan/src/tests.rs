@@ -13296,17 +13296,19 @@ trait G {
                    fn via_a(a: A) { match a { A::Same(x) => x.call() } }\n\
                    fn via_b(b: B) { match b { B::Same(f) => f() } }\n";
         let typed = typed_calls_of(src);
-        assert!(!typed.get("via_a").is_some_and(|c| c.iter().any(|p| p == "Foo::call")),
-                "an ambiguous leaf must not resolve to the OTHER enum's shape either: {typed:?}");
+        // VEIN A — `A::Same(x)` NAMES enum `A`, whose own `Same` carries `Foo`, so the binding is typed by
+        // A's variant (the `Enum\u{1e}Variant` key) and `x.call()` reaches `Foo::call` — the program's real
+        // call. What must still never happen is the OTHER enum's shape answering: `via_b` stays untyped.
+        assert!(typed.get("via_a").is_some_and(|c| c.iter().any(|p| p == "Foo::call")),
+                "`A::Same(x)` is A's variant and must reach Foo::call: {typed:?}");
+        assert!(!typed.get("via_b").is_some_and(|c| c.iter().any(|p| p == "Foo::call")),
+                "an ambiguous leaf must not resolve to the OTHER enum's shape: {typed:?}");
         // The critical safety property: `via_a`'s concrete struct payload must NEVER be typed as a
         // callable (`fn_typed_vars`) and invoked with call syntax — that would be a fabricated dispatch
         // resolving through the wrong enum's route. `via_b`'s callable payload correctly stays a target of
         // `f()` in ITS OWN source, so nothing here can silently attribute a WRONG effect to either
         // function. UNCHANGED by R90 — R90 only makes the (still-unresolved) receiver DISCLOSE, below.
         let unres = unresolved_of(src);
-        assert_eq!(unres.get("via_a"), Some(&true),
-                   "R90: via_a's payload lost its type to the collision — it must DISCLOSE Unknown, not \
-                    silently drop the call to Foo::call: {unres:?}");
         assert_eq!(unres.get("via_b"), Some(&true),
                    "R90: via_b's payload lost its type to the collision — it must DISCLOSE Unknown, not \
                     silently drop the call to f(): {unres:?}");
@@ -16265,6 +16267,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // VEIN A bumped it to rev56 (anchored `crate::`/relative/`self::`/`super::` paths change what
+        // Pass A's indexes and Pass B's `calls` record, and the dependency list joins the reuse key).
         // VEIN B bumped it to rev55 (four new `rets` key spaces, a static element key, and what
         // `field_elem` and Pass B's `calls` record — a rev54 entry replays the silences warm).
         // ⟨0.40⟩ (R843) bumped the token to rev54 (`FnInfo` gained `ret_proto` and `FileDecls` gained the
@@ -16282,7 +16286,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16293,7 +16297,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev55/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev56/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -24038,8 +24042,12 @@ pub fn go() {{ imp::doit(); }}
              impl Custom { pub fn call(&self) { std::fs::read(\"/etc/x\").ok(); } }\n\
              pub enum Matcher { Custom(Custom) }\n\
              pub enum PolicyKind { Custom(Box<dyn Fn()>) }\n\
-             pub fn intercept(m: &Matcher) { match m { Matcher::Custom(c) => c.call() } }\n");
-        assert_eq!(why_of(&v, "intercept"), vec!["ambiguous:same-name enum variant `Custom`".to_string()],
+             pub fn intercept(m: &Matcher) { match m { Matcher::Custom(c) => c.call() } }\n\
+             pub mod bare { use super::Matcher::*; pub fn intercept_bare(m: &super::Matcher) { match m { Custom(c) => c.call() } } }\n");
+        // VEIN A — a pattern that NAMES its enum is typed by that enum's own variant now, so nothing is
+        // withdrawn there; the bare pattern (no enum named) still reads the leaf key and still discloses.
+        assert!(effs(fn_entry(&v, "intercept")).contains(&"Fs".to_string()), "`Matcher::Custom(c)` names Matcher:\n{v:#}");
+        assert_eq!(why_of(&v, "bare::intercept_bare"), vec!["ambiguous:same-name enum variant `Custom`".to_string()],
                    "a withdrawn enum-variant payload type is an `ambiguous:` name resolution:\n{v:#}");
         let v = scan_src_to_json("r485ambsv",
             "pub struct Custom;\n\
@@ -24292,17 +24300,44 @@ pub fn go() {{ imp::doit(); }}
         // stopped exercising anything and every assertion below is vacuous.
         assert_eq!(effs(fn_entry(&v, "stream::Stream::wibble")), vec!["Fs".to_string()],
                    "the root's `Stream::wibble` reads a file — without this the fixture proves nothing");
-        for f in ["m::rel", "m::slf", "m::rooted"] {
-            let row = fn_entry(&v, f);
-            let e = effs(row);
+        // VEIN A — the paths are now ANCHORED to the module they are written in, so the three cells are
+        // RESOLVED rather than disclosed, and each to the definition the EXECUTED program reaches:
+        // `rel`/`slf` to `m`'s own pure method (no row: nothing to report), `rooted` to the root's, which
+        // reads a file. The direction argument this test pinned still holds and is still asserted —
+        // `rel`/`slf` must never acquire `Fs` — and the twin below proves the edge REACHES `m`'s method
+        // rather than being dropped, which absence alone could not.
+        let row_effs = |v: &serde_json::Value, f: &str| -> Vec<String> {
+            v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).map(effs).unwrap_or_default()
+        };
+        for f in ["m::rel", "m::slf"] {
+            let e = row_effs(&v, f);
             assert!(!e.iter().any(|x| x == "Fs"),
                     "`{f}` resolves to `m`'s OWN pure `Stream::wibble` (EXECUTED: it returns the path \
-                     length, it opens nothing). An `Fs` here is a FABRICATION from a scope-blind rule — \
-                     the guard asks the CRATE ROOT about a path that is relative to `m`, and the only \
-                     thing that makes that affordable is that its wrong answer UNDER-resolves:\n{row:#}");
-            assert_eq!(e, vec!["Unknown".to_string()],
-                       "`{f}` must be DISCLOSED rather than absent or silently pure — `m::slf` and \
-                        `m::rooted` were ABSENT from functions[] before R186:\n{row:#}");
+                     length, it opens nothing). An `Fs` here is a FABRICATION from a scope-blind rule:\n{v:#}");
+            assert!(e.is_empty(), "`{f}` is resolved to a pure body and needs no hedge: {e:?}");
+        }
+        assert_eq!(effs(fn_entry(&v, "m::rooted")), vec!["Fs".to_string()],
+                   "`m::rooted` names `crate::stream::Stream` — the ROOT's, which EXECUTED reads 63 bytes");
+        // The polarity twin: identical, except `m`'s own `wibble` reads the environment. If the anchored
+        // edge were being dropped rather than followed, `rel`/`slf` would stay empty here too.
+        let twin = scan_src_to_json("r186scope2", "\
+            pub mod stream {\n\
+                pub struct Stream { pub path: String }\n\
+                impl Stream { pub fn wibble(&self) -> usize {\n\
+                    std::fs::read(&self.path).map(|v| v.len()).unwrap_or(0) } }\n\
+            }\n\
+            pub mod m {\n\
+                #[allow(unused_imports)] use std::io::prelude::*;\n\
+                pub mod stream {\n\
+                    pub struct Stream { pub path: String }\n\
+                    impl Stream { pub fn wibble(&self) -> usize { std::env::var(&self.path).map(|v| v.len()).unwrap_or(0) } }\n\
+                }\n\
+                pub fn rel(p: &stream::Stream) -> usize { p.wibble() }\n\
+                pub fn slf(p: &self::stream::Stream) -> usize { p.wibble() }\n\
+            }\n");
+        for f in ["m::rel", "m::slf"] {
+            assert_eq!(row_effs(&twin, f), vec!["Env".to_string()],
+                       "`{f}` must reach `m::stream::Stream::wibble` (Env) and not the root's (Fs):\n{twin:#}");
         }
     }
 
@@ -25343,3 +25378,362 @@ impl Child { pub fn output(self) -> usize { 1 } }\n";
         assert!(f["calls"].as_array().into_iter().flatten().any(|c| c == "Conn::ping"),
                 "…beside the wrapper arm's resolution:\n{v:#}");
     }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// VEIN A — PATH RESOLUTION WITH THE CALLER'S MODULE (R830, R181, R369, R193(a), R862, R863, R633's
+// residual). Every fixture below was compiled and RUN in the lane's scratch (`fx/va`, `fx/vafile`,
+// `fx/gapp`, `fx/vares`, `fx/r856`, `fx/zapp3`): an `e_*` cell wrote its marker file, a `p_*` cell did
+// not. The ONLY variable between an `e_` and a `p_` cell is which same-leaf claimant the written path
+// names, so a rule that guessed would fail one polarity or the other.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn veina_row_effs(v: &serde_json::Value, f: &str) -> Vec<String> {
+    v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).map(effs).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn veina_assert_polarity(v: &serde_json::Value, cells: &[&str], eff: &str) {
+    for c in cells {
+        let leaf = c.rsplit("::").next().unwrap();
+        let k = format!("k_{}", c.replace("::", "_"));
+        for f in [c.to_string(), k] {
+            let e = veina_row_effs(v, &f);
+            if leaf.starts_with("e_") {
+                assert!(e.iter().any(|x| x == eff), "`{f}` EXECUTED performs {eff}; read {e:?}:\n{v:#}");
+            } else {
+                assert!(!e.iter().any(|x| x == eff), "`{f}` EXECUTED performs no {eff}: a charge is a fabrication; read {e:?}");
+            }
+        }
+    }
+}
+
+/// SOUNDNESS R830 (the module half) + R181 — INLINE modules, both polarities, every spelling: relative,
+/// `self::`, `super::`, `super::super::`, `crate::`, a body-local `use self::…`, a module-level
+/// `use super::…`, the root-relative call, and a type alias (single and double) declared in a module.
+/// Before vein A, 22 of 60 cells were ABSENT and 2 more only disclosed.
+#[test]
+fn veina_inline_modules_resolve_both_polarities() {
+    let mut src = String::from("\
+        pub fn wr(p: &str) { let _ = std::fs::write(p, \"x\"); }\n\
+        pub mod a { pub struct Tx; impl Tx { pub fn grab(_p: &str) {} } }\n\
+        pub mod x {\n\
+            pub mod a { pub struct Tx; impl Tx { pub fn grab(p: &str) { crate::wr(p) } } }\n\
+            pub fn e_rel(p: &str) { a::Tx::grab(p) }\n\
+            pub fn e_self(p: &str) { self::a::Tx::grab(p) }\n\
+            pub fn e_use_body(p: &str) { use self::a::Tx; Tx::grab(p) }\n\
+            pub fn p_crate_root(p: &str) { crate::a::Tx::grab(p) }\n\
+            pub fn p_super_root(p: &str) { super::a::Tx::grab(p) }\n\
+            pub fn p_use_body_crate(p: &str) { use crate::a::Tx; Tx::grab(p) }\n\
+            pub mod deep {\n\
+                pub fn e_super(p: &str) { super::a::Tx::grab(p) }\n\
+                pub fn p_supsup(p: &str) { super::super::a::Tx::grab(p) }\n\
+                pub fn e_supsup_x(p: &str) { super::super::x::a::Tx::grab(p) }\n\
+            }\n\
+            pub mod usem { use super::a::Tx; pub fn e_use_mod(p: &str) { Tx::grab(p) } }\n\
+            pub mod usem2 { use crate::a::Tx; pub fn p_use_mod(p: &str) { Tx::grab(p) } }\n\
+        }\n\
+        pub mod y { pub fn e_crate(p: &str) { crate::x::a::Tx::grab(p) } pub fn p_crate(p: &str) { crate::a::Tx::grab(p) } }\n\
+        pub fn p_root_rel(p: &str) { a::Tx::grab(p) }\n\
+        pub fn e_rootx_rel(p: &str) { x::a::Tx::grab(p) }\n\
+        pub mod b { pub struct Rx; impl Rx { pub fn grab(p: &str) { crate::wr(p) } } }\n\
+        pub mod z {\n\
+            pub mod b { pub struct Rx; impl Rx { pub fn grab(_p: &str) {} } }\n\
+            pub fn e_crate(p: &str) { crate::b::Rx::grab(p) }\n\
+            pub fn e_super(p: &str) { super::b::Rx::grab(p) }\n\
+            pub fn p_rel(p: &str) { b::Rx::grab(p) }\n\
+            pub fn p_self(p: &str) { self::b::Rx::grab(p) }\n\
+            pub mod deep { pub fn e_supsup(p: &str) { super::super::b::Rx::grab(p) } pub fn p_super(p: &str) { super::b::Rx::grab(p) } }\n\
+        }\n\
+        pub fn e_root_rel(p: &str) { b::Rx::grab(p) }\n\
+        pub fn e_root_self(p: &str) { self::b::Rx::grab(p) }\n\
+        pub fn p_root_z(p: &str) { z::b::Rx::grab(p) }\n\
+        pub mod f1 { pub fn go(p: &str) { crate::wr(p) } pub fn e_rel(p: &str) { self::go(p) } }\n\
+        pub mod f2 { pub fn go(_p: &str) {} pub fn p_rel(p: &str) { self::go(p) } pub fn e_crate(p: &str) { crate::f1::go(p) } }\n");
+    let cells = ["x::e_rel", "x::e_self", "x::e_use_body", "x::p_crate_root", "x::p_super_root",
+        "x::p_use_body_crate", "x::deep::e_super", "x::deep::p_supsup", "x::deep::e_supsup_x",
+        "x::usem::e_use_mod", "x::usem2::p_use_mod", "y::e_crate", "y::p_crate", "p_root_rel",
+        "e_rootx_rel", "z::e_crate", "z::e_super", "z::p_rel", "z::p_self", "z::deep::e_supsup",
+        "z::deep::p_super", "e_root_rel", "e_root_self", "p_root_z", "f1::e_rel", "f2::p_rel", "f2::e_crate"];
+    for c in cells {
+        src.push_str(&format!("pub fn k_{}(p: &str) {{ {c}(p) }}\n", c.replace("::", "_")));
+    }
+    // R181 — the alias declared IN the module (single, and an alias of that alias).
+    src.push_str("\
+        pub struct Real; impl Real { pub fn go(&self, p: &str) { wr(p) } }\n\
+        pub struct Fake; impl Fake { pub fn go(&self, _p: &str) {} }\n\
+        pub mod am {\n\
+            pub type ModAlias = crate::Real;\n\
+            pub fn e_alias(x: &ModAlias, p: &str) { x.go(p) }\n\
+            pub type DoubleAlias = ModAlias;\n\
+            pub fn e_dalias(x: &DoubleAlias, p: &str) { x.go(p) }\n\
+            pub type PureAlias = crate::Fake;\n\
+            pub fn p_alias(x: &PureAlias, p: &str) { x.go(p) }\n\
+        }\n\
+        pub fn k_am_e_alias(p: &str) { am::e_alias(&Real, p) }\n\
+        pub fn k_am_e_dalias(p: &str) { am::e_dalias(&Real, p) }\n\
+        pub fn k_am_p_alias(p: &str) { am::p_alias(&Fake, p) }\n");
+    let v = scan_src_to_json("veinainline", &src);
+    veina_assert_polarity(&v, &cells, "Fs");
+    veina_assert_polarity(&v, &["am::e_alias", "am::e_dalias", "am::p_alias"], "Fs");
+}
+
+/// SOUNDNESS R830 (FILE modules) — the same two polarities through `mod x;` files, plus the TYPE route:
+/// a parameter and a struct field typed by a relative path (`t: &a::Tx`, `pub t: a::Tx`). Before vein A
+/// the relative/`crate::` cells were ABSENT and the type-route cells only disclosed `Unknown`.
+#[test]
+fn veina_file_modules_resolve_calls_and_types() {
+    let v = scan_src_to_json_multi("veinafile", &[
+        ("src/lib.rs", "pub fn wr(p: &str) { let _ = std::fs::write(p, \"x\"); }\n\
+            pub mod a;\npub mod x;\npub mod b;\npub mod z;\n\
+            pub fn p_root_rel(p: &str) { a::Tx::grab(p) }\n\
+            pub fn p_root_param(t: &a::Tx, p: &str) { t.go(p) }\n\
+            pub fn e_root_rel(p: &str) { b::Rx::grab(p) }\n\
+            pub fn e_root_param(t: &b::Rx, p: &str) { t.go(p) }\n"),
+        ("src/a.rs", "pub struct Tx; impl Tx { pub fn grab(_p: &str) {} pub fn go(&self, _p: &str) {} }\n"),
+        ("src/b.rs", "pub struct Rx; impl Rx { pub fn grab(p: &str) { crate::wr(p) } pub fn go(&self, p: &str) { crate::wr(p) } }\n"),
+        ("src/x.rs", "pub mod a;\npub struct H { pub t: a::Tx }\npub struct HP { pub t: crate::a::Tx }\n\
+            pub fn e_rel(p: &str) { a::Tx::grab(p) }\n\
+            pub fn e_param(t: &a::Tx, p: &str) { t.go(p) }\n\
+            pub fn e_field(h: &H, p: &str) { h.t.go(p) }\n\
+            pub fn p_field(h: &HP, p: &str) { h.t.go(p) }\n\
+            pub fn e_use_body(p: &str) { use self::a::Tx; Tx::grab(p) }\n"),
+        ("src/x/a.rs", "pub struct Tx; impl Tx { pub fn grab(p: &str) { crate::wr(p) } pub fn go(&self, p: &str) { crate::wr(p) } }\n"),
+        ("src/z.rs", "pub mod b;\n\
+            pub fn e_crate(p: &str) { crate::b::Rx::grab(p) }\n\
+            pub fn p_rel(p: &str) { b::Rx::grab(p) }\n\
+            pub fn p_param(r: &b::Rx, p: &str) { r.go(p) }\n\
+            pub fn e_param_crate(r: &crate::b::Rx, p: &str) { r.go(p) }\n"),
+        ("src/z/b.rs", "pub struct Rx; impl Rx { pub fn grab(_p: &str) {} pub fn go(&self, _p: &str) {} }\n"),
+    ]);
+    for (f, want) in [("p_root_rel", false), ("p_root_param", false), ("e_root_rel", true),
+        ("e_root_param", true), ("x::e_rel", true), ("x::e_param", true), ("x::e_field", true),
+        ("x::p_field", false), ("x::e_use_body", true), ("z::e_crate", true), ("z::p_rel", false),
+        ("z::p_param", false), ("z::e_param_crate", true)] {
+        let e = veina_row_effs(&v, f);
+        assert_eq!(e.iter().any(|x| x == "Fs"), want, "`{f}` EXECUTED Fs={want}; read {e:?}:\n{v:#}");
+        if want {
+            assert!(!e.iter().any(|x| x == "Unknown"), "`{f}` is resolved now, not merely disclosed: {e:?}");
+        }
+    }
+}
+
+/// SOUNDNESS R193(a), R830's `libc::*` cell — a std GLOB supplies the name. And the CONTROLS that keep
+/// it from guessing: a module that declares the name itself shadows the glob, a prelude name is never a
+/// glob's, and `std::fs::*` (charged by PREFIX in the classifier) only supplies a name std::fs exports.
+#[test]
+fn veina_a_std_glob_supplies_the_name_and_a_declaration_shadows_it() {
+    let v = scan_src_to_json("veinaglobstd", "\
+        pub mod s1 { use std::fs::*; pub fn e_std_free(p: &str) { let _ = write(p, \"s\"); } }\n\
+        pub mod s2 { use std::fs::*; pub fn e_std_type(p: &str) { let _ = File::create(p); } }\n\
+        pub mod s3 { use std::*; pub fn e_std_mod(p: &str) { let _ = fs::write(p, \"m\"); } }\n\
+        pub mod n2 { use std::fs::*; pub fn p_prelude(p: &str) -> usize { let v: Vec<u8> = Vec::new(); Some(p.len()).unwrap_or(v.len()) } }\n\
+        pub mod n4 { use std::fs::*; pub struct File; impl File { pub fn create(_p: &str) {} } pub fn p_std_shadow(p: &str) { File::create(p) } }\n");
+    for (f, want) in [("s1::e_std_free", true), ("s2::e_std_type", true), ("s3::e_std_mod", true),
+        ("n2::p_prelude", false), ("n4::p_std_shadow", false)] {
+        assert_eq!(veina_row_effs(&v, f).iter().any(|x| x == "Fs"), want, "`{f}`:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R863 — a DEPENDENCY glob: the free-function shape (`carrier()`), the static shape
+/// (`SHARED.ping()`), an associated fn, a body-local glob, two dependency globs, and a crate-local glob
+/// beside a dependency one. Unchained, each discloses the dependency exactly as the named import does;
+/// chained, each charges what the dependency's own report says. A local item shadowing the glob stays
+/// local and pure.
+#[test]
+fn veina_a_dependency_glob_reads_like_the_named_import() {
+    let dep_src = "pub fn carrier(p: &str) { let _ = std::fs::write(p, \"c\"); }\n\
+        pub struct Other;\n\
+        impl Other { pub fn ping(&self, p: &str) { let _ = std::fs::write(p, \"o\"); } }\n\
+        pub static SHARED: Other = Other;\n\
+        pub struct Thing;\n\
+        impl Thing { pub fn make(p: &str) { let _ = std::fs::write(p, \"t\"); } }\n";
+    let app = "pub mod g1 { use gdep::*; pub fn e_free(p: &str) { carrier(p) } }\n\
+        pub mod g2 { use gdep::*; pub fn e_static(p: &str) { SHARED.ping(p) } }\n\
+        pub mod g3 { use gdep::*; pub fn e_assoc(p: &str) { Thing::make(p) } }\n\
+        pub fn e_body_glob(p: &str) { use gdep::*; carrier(p) }\n\
+        pub mod g5 { pub fn helper(_p: &str) {} }\n\
+        pub mod g6 { use super::g5::*; use gdep::*; pub fn e_local_and_dep(p: &str) { carrier(p) } pub fn p_local(p: &str) { helper(p) } }\n\
+        pub mod n1 { use gdep::*; fn carrier(_p: &str) {} pub fn p_local_shadow(p: &str) { carrier(p) } }\n";
+    let unchained = scan_src_with_deps_to_json("veinaglobdep", "gdep = \"1\"", app);
+    for f in ["g1::e_free", "g2::e_static", "g3::e_assoc", "e_body_glob", "g6::e_local_and_dep"] {
+        let row = fn_entry(&unchained, f);
+        assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "gdep")),
+                "`{f}` reaches the dependency and must disclose it unchained:\n{row:#}");
+    }
+    for f in ["g6::p_local", "n1::p_local_shadow"] {
+        assert!(veina_row_effs(&unchained, f).is_empty(), "`{f}` is local and pure:\n{unchained:#}");
+    }
+    let dep = scan_crate_chained("veinaglob", "gdep", "", dep_src, &DepIndex::default());
+    let (idx, dd) = chain("veinaglob", "gdep", &dep);
+    let chained = scan_crate_chained("veinaglob", "gapp", "[dependencies]\ngdep = \"1\"\n", app, &idx);
+    let _ = std::fs::remove_dir_all(&dd);
+    for f in ["g1::e_free", "g2::e_static", "g3::e_assoc", "e_body_glob", "g6::e_local_and_dep"] {
+        assert!(veina_row_effs(&chained, f).iter().any(|x| x == "Fs"), "`{f}` chained must charge Fs:\n{chained:#}");
+    }
+    assert!(!veina_row_effs(&chained, "n1::p_local_shadow").iter().any(|x| x == "Fs"),
+            "a local `carrier` shadows the glob's — charging the dependency's Fs is a fabrication");
+}
+
+/// SOUNDNESS R862 — a DEPENDENCY type's field is not this crate's same-leaf type's field. With a local
+/// `struct Node { parent: LocalP }`, `n.parent.visit()` for `n: &dep::Node` used to read the local pure
+/// `LocalP::visit` and go ABSENT over the dependency's real effect.
+#[test]
+fn veina_a_dependency_field_is_not_the_local_same_leaf_field() {
+    let dep_src = "pub struct Other;\n\
+        impl Other { pub fn visit(&self) { let _ = std::env::var(\"HOME\"); } }\n\
+        pub struct Node { pub parent: Other }\n";
+    let app = "pub struct Node { pub parent: LocalP }\n\
+        pub struct LocalP;\n\
+        impl LocalP { pub fn visit(&self) {} }\n\
+        pub fn c2_collision(n: &rdep::Node) { n.parent.visit() }\n\
+        pub fn local_node(n: &Node) { n.parent.visit() }\n";
+    let unchained = scan_src_with_deps_to_json("veinar862", "rdep = \"1\"", app);
+    let row = fn_entry(&unchained, "c2_collision");
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "rdep")), "{row:#}");
+    let dep = scan_crate_chained("veinar862", "rdep", "", dep_src, &DepIndex::default());
+    let (idx, dd) = chain("veinar862", "rdep", &dep);
+    let chained = scan_crate_chained("veinar862", "rapp", "[dependencies]\nrdep = \"1\"\n", app, &idx);
+    let _ = std::fs::remove_dir_all(&dd);
+    assert!(veina_row_effs(&chained, "c2_collision").iter().any(|x| x == "Env"), "{chained:#}");
+    assert!(veina_row_effs(&chained, "local_node").is_empty(), "the LOCAL node's field is pure:\n{chained:#}");
+}
+
+/// SOUNDNESS R633's vein-A residual — inside `mod inner`, `zdep::Handler` names the EXTERN crate even
+/// though the ROOT declares a `mod zdep`: a root item is not in scope in `inner`. The dispatch on the
+/// dependency's trait used to be CHA'd over the local trait's pure implementor and read `[]`.
+#[test]
+fn veina_a_root_module_spelled_like_a_crate_does_not_capture_a_child_modules_path() {
+    let app = "pub mod zdep { pub trait Handler { fn handle(&self); } }\n\
+        pub struct X;\n\
+        impl zdep::Handler for X { fn handle(&self) {} }\n\
+        pub mod inner { pub fn run_handle(h: &dyn zdep::Handler) { h.handle() } }\n";
+    let v = scan_src_with_deps_to_json("veinar633", "zdep = \"1\"", app);
+    let row = fn_entry(&v, "inner::run_handle");
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "zdep"))
+            || effs(row).contains(&"Unknown".to_string()),
+            "a dispatch on the dependency's trait must be disclosed, not read as the local pure CHA:\n{row:#}");
+}
+
+/// SOUNDNESS R369 — a `#[cfg]`-duplicated `use … as A1` on the TYPE route is the UNION of its arms (SPEC
+/// §4, 2026-09-12 ruling). It read the LAST-WRITTEN arm only: `['Net']` over the unix `Fs` arm.
+#[test]
+fn veina_a_cfg_duplicated_alias_on_the_type_route_is_the_union() {
+    let v = scan_src_to_json("veinar369", "\
+        pub mod fs_arm { pub struct FsR; impl FsR { pub fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"x\"); } } }\n\
+        pub mod net_arm { pub struct NetR; impl NetR { pub fn go(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } } }\n\
+        #[cfg(unix)] use crate::fs_arm::FsR as A1;\n\
+        #[cfg(not(unix))] use crate::net_arm::NetR as A1;\n\
+        pub fn r369_type(x: &A1) { x.go() }\n");
+    let e = veina_row_effs(&v, "r369_type");
+    assert!(e.contains(&"Fs".to_string()) && e.contains(&"Net".to_string()), "both arms: {e:?}");
+}
+
+/// VEIN A — THE RESIDUE: a contested tail no written path settles (a `#[cfg]` arm set re-exported under one
+/// name). Disclosed where a claimant carries something the caller lacks; NOT hedged where every claimant is
+/// pure, or where the caller already has the claimant's effect (the R190(c) flood stays declined).
+#[test]
+fn veina_the_unanchorable_contest_discloses_only_where_it_could_matter() {
+    let v = scan_src_to_json("veinaresidue", "\
+        pub mod zi {\n\
+            #[cfg(unix)] pub mod enabled { pub struct Database; impl Database { pub fn from_env(p: &str) { let _ = std::fs::write(p, \"x\"); } } }\n\
+            #[cfg(not(unix))] pub mod disabled { pub struct Database; impl Database { pub fn from_env(_p: &str) {} } }\n\
+            #[cfg(unix)] pub use enabled::Database;\n\
+            #[cfg(not(unix))] pub use disabled::Database;\n\
+        }\n\
+        pub mod pz {\n\
+            #[cfg(unix)] pub mod enabled { pub struct Db; impl Db { pub fn open(_p: &str) {} } }\n\
+            #[cfg(not(unix))] pub mod disabled { pub struct Db; impl Db { pub fn open(_p: &str) {} } }\n\
+            #[cfg(unix)] pub use enabled::Db;\n\
+            #[cfg(not(unix))] pub use disabled::Db;\n\
+        }\n\
+        pub fn e_reexport_arm(p: &str) { crate::zi::Database::from_env(p) }\n\
+        pub fn k_e_reexport_arm(p: &str) { e_reexport_arm(p) }\n\
+        pub fn p_reexport_pure(p: &str) { crate::pz::Db::open(p) }\n\
+        pub fn e_already_has(p: &str) { let _ = std::fs::write(p, \"y\"); crate::zi::Database::from_env(p) }\n");
+    for f in ["e_reexport_arm", "k_e_reexport_arm"] {
+        assert!(veina_row_effs(&v, f).contains(&"Unknown".to_string()), "`{f}` must disclose:\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "p_reexport_pure").is_empty(), "every claimant is pure — no hedge:\n{v:#}");
+    assert_eq!(veina_row_effs(&v, "e_already_has"), vec!["Fs".to_string()],
+               "the caller already has the claimant's effect — no hedge");
+}
+
+/// THE SECOND FIXTURES, written from the corpus A/B's REMOVED column: four shapes where the first cut
+/// of vein A LOST a real effect, each now pinned.
+///   * `crate::debug!` → `$crate::tracing::implementation::event!` (x11rb, 1,277 rows lost `Log`): a
+///     MACRO path keeps today's resolution (`expand_noanchor`);
+///   * `::smol::net::resolve` inside a module that declares `mod smol` (redis, 37 rows lost `Net`): a
+///     leading `::` names the extern crate;
+///   * `struct Trace<MakeSpan> { make_span: MakeSpan }` beside `use super::MakeSpan` (tower-http): the
+///     struct's generic parameter shadows the import;
+///   * `impl TzifOwned { … }` on a local type alias reached through `use super::TzifOwned` (jiff): the
+///     alias's own units are found under the target's tail.
+#[test]
+fn veina_the_removed_column_shapes_keep_their_effects() {
+    let v = scan_src_to_json_multi("veinasecond", &[
+        ("src/lib.rs", "pub mod tracing;\npub(crate) use crate::tracing::*;\npub mod conn;\npub mod aio;\npub mod trace;\npub mod shared;\n"),
+        ("src/tracing.rs", "pub(crate) mod implementation {\n\
+            macro_rules! event { ( $lvl:expr, $($arg:tt)+ ) => { log::info!($($arg)+) } }\n\
+            pub(crate) use event;\n}\n\
+            macro_rules! debug { ( $($arg:tt)+ ) => { $crate::tracing::implementation::event!(1, $($arg)+) }; }\n\
+            pub(crate) use debug;\n"),
+        ("src/conn.rs", "pub fn discard_reply(n: u32) { crate::debug!(\"discarding {}\", n); }\n"),
+        ("src/aio.rs", "pub mod smol { pub fn resolve(_h: &str) {} }\n\
+            pub fn lookup(h: &str) { let _ = ::std::net::TcpStream::connect(h); ::smol::net::resolve(h); }\n"),
+        ("src/trace/mod.rs", "pub use self::make_span::{DefaultMakeSpan, MakeSpan};\nmod make_span;\npub mod service;\n"),
+        ("src/trace/make_span.rs", "pub trait MakeSpan<B> { fn make_span(&mut self, p: &B); }\n\
+            pub struct DefaultMakeSpan;\n\
+            impl<B> MakeSpan<B> for DefaultMakeSpan { fn make_span(&mut self, _p: &B) { let _ = std::fs::write(\"/tmp/x\", \"x\"); } }\n"),
+        ("src/trace/service.rs", "use super::{DefaultMakeSpan, MakeSpan};\n\
+            pub struct Trace<MakeSpan = DefaultMakeSpan> { pub make_span: MakeSpan }\n\
+            impl<MakeSpanT> Trace<MakeSpanT> where MakeSpanT: MakeSpan<()> { pub fn call(&mut self) { self.make_span.make_span(&()) } }\n"),
+        ("src/shared/mod.rs", "pub struct Tzif<T> { pub t: T }\npub type TzifOwned = Tzif<String>;\npub mod tzif;\n"),
+        ("src/shared/tzif.rs", "use super::TzifOwned;\n\
+            impl TzifOwned {\n\
+                pub fn parse(p: &str) -> TzifOwned { let t = TzifOwned { t: String::new() }; t.parse64(p); t }\n\
+                fn parse64(&self, p: &str) { let _ = std::fs::write(p, \"t\"); }\n\
+            }\n"),
+    ]);
+    assert!(veina_row_effs(&v, "conn::discard_reply").contains(&"Log".to_string()), "macro chain:\n{v:#}");
+    assert!(veina_row_effs(&v, "aio::lookup").contains(&"Net".to_string()), "leading `::`:\n{v:#}");
+    assert!(veina_row_effs(&v, "trace::service::Trace::call").contains(&"Fs".to_string()),
+            "generic shadows import:\n{v:#}");
+    assert!(veina_row_effs(&v, "shared::tzif::TzifOwned::parse").contains(&"Fs".to_string()),
+            "impl on a local alias:\n{v:#}");
+}
+
+/// THE SECOND FIXTURES, round two — the partition of the corpus A/B's lost disclosures found three more
+/// shapes where anchoring alone would have lost an answer, each pinned here:
+///   * two enums' same-named variant carrying DIFFERENT `Status` types, each spelled `super::Status`
+///     (hyper-util socks v4/v5): anchoring made the payloads differ, the leaf key was withdrawn, and
+///     `status.fmt(f)` went untyped and SILENT over an executed write. The enum-qualified key types it;
+///     the contested `Status::fmt` tail then discloses as it did before;
+///   * `extern crate value_bag;` IN a module and `use self::value_bag::ValueBag` (log-0.4.20): `self::X`
+///     names the extern crate, not a child module, and keeps its dependency disclosure.
+#[test]
+fn veina_enum_qualified_payloads_and_module_extern_crates() {
+    let v = scan_src_to_json_multi("veinasecond2", &[
+        ("Cargo.toml", "[package]\nname = \"veinasecond2\"\n[dependencies]\nvalue_bag = \"1\"\n"),
+        ("src/lib.rs", "pub mod socks;\npub mod kv;\n"),
+        ("src/socks/mod.rs", "pub mod v4;\npub mod v5;\n"),
+        ("src/socks/v4/mod.rs", "mod errors;\npub use errors::*;\nmod messages;\nuse messages::*;\n"),
+        ("src/socks/v4/errors.rs", "use super::Status;\npub enum E4 { Command(Status) }\n\
+            impl std::fmt::Display for E4 { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { Self::Command(status) => status.fmt(f) } } }\n"),
+        ("src/socks/v4/messages.rs", "pub enum Status { Ok }\n\
+            impl std::fmt::Display for Status { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { let _ = std::fs::write(\"/tmp/x\", \"x\"); f.write_str(\"ok\") } }\n"),
+        ("src/socks/v5/mod.rs", "mod errors;\npub use errors::*;\nmod messages;\nuse messages::*;\n"),
+        ("src/socks/v5/errors.rs", "use super::Status;\npub enum E5 { Command(Status) }\n\
+            impl std::fmt::Display for E5 { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { Self::Command(status) => status.fmt(f) } } }\n"),
+        ("src/socks/v5/messages.rs", "pub enum Status { Ok }\n\
+            impl std::fmt::Display for Status { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(\"ok\") } }\n"),
+        ("src/kv.rs", "extern crate value_bag;\n\
+            pub fn mk() -> usize { self::value_bag::ValueBag::capture_u64(1).to_u64().unwrap_or(0) as usize }\n"),
+    ]);
+    let e = veina_row_effs(&v, "socks::v4::errors::E4::fmt");
+    assert!(e.iter().any(|x| x == "Fs" || x == "Unknown"), "E4::fmt EXECUTED writes; it must not be silent: {e:?}\n{v:#}");
+    // (ABSENT at 1e11e7f too: R751 already anchored this `self::` path as a child module.)
+    let row = fn_entry(&v, "kv::mk");
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|d| d == "value_bag")),
+            "`self::value_bag` is the extern crate:\n{row:#}");
+}

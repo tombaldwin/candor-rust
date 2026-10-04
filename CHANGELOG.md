@@ -11,6 +11,39 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ Vein A — a written path is resolved against the module it is WRITTEN IN (more effects charged, more `Unknown`/`invisible`; SOUNDNESS R830, R181, R369, R193(a), R862, R863, R633's residual)
+
+candor-scan resolved a call or type path as a string with its scope thrown away: `expand` stripped
+`crate::`/`self::`/`super::`, R751's `absolutise` then refused inline modules, explicit `crate::` heads and
+unprefixed relative paths, and a contested two-segment tail was refused with no disclosure. A glob import
+bound nothing at all. So a caller reaching a same-named type in a nested module, or a name a glob supplied,
+was ABSENT under `deny`. Now:
+
+- **Anchored to the caller's module:** `a::Tx::grab` inside `mod x` that declares `mod a`, `self::`/`super::`
+  inside an INLINE module, an explicit `crate::b::Rx::grab`, a body-local `use self::a::Tx`, a module-level
+  `use super::…` — each becomes the crate-absolute path the source names, and `arm_exact_target`'s exact-qual
+  rule settles the contest (R830; both polarities executed). A type alias declared in a module, single or
+  double, types its parameter (R181). Struct fields and parameters typed by a relative path resolve too.
+- **Globs:** a name no declaration or named import supplies is read through the glob in scope, byte-identical
+  to the named import (`use std::fs::*; File::open`, R193(a); `use libc::*; rmdir`; `use dep::*; carrier()` and
+  `SHARED.ping()`, R863). Exactly one non-local glob rewrites; several (or a local `use super::*` beside a
+  dependency glob) add each candidate BESIDE the written path. Prelude names, primitives, generic parameters,
+  dependency crate names and a module with an item-position macro are never attributed to a glob;
+  `std::fs::*`/`std::env::*` supply only names they really export.
+- **Type identity:** a dependency type's field is not read from the crate's own same-leaf struct (R862); inside a
+  module that does not declare `zdep`, `zdep::Handler` is the extern crate even if the ROOT declares `mod zdep`
+  (R633's residual); a `#[cfg]`-duplicated `use … as A1` types a parameter with the UNION of its arms (R369).
+- **The residue discloses where it could matter:** a contested non-method path no written path settles gains
+  `Unknown` + `ambiguous:same-name local defs` only when a claimant carries an effect (or `Unknown`) the caller
+  lacks — judged on the fixpoint. The general R190(c) hedge stays declined.
+- **Shapes kept from the A/B's REMOVED column:** macro paths keep today's resolution; a leading `::` names the
+  extern crate; `crate::X`/`self::X` where `extern crate X` binds it stays extern; a struct's generic parameter
+  shadows a same-named import in its field types; an `impl` written on a local type alias is found through the
+  alias's target; a pattern that names its enum (`Self::Command(s)`) is typed by that enum's own variant.
+
+Measured on 1,276 registry entries (unchained, vs `1e11e7f`): no concrete effect lost; the lane report carries the
+REMOVED partition, the new-`Unknown` price and the gate flips. The scan cache schema moves to `rev56`.
+
 ### ⚠ Vein B — one strict expression typer for binders, wrapper accessors, turbofish returns and handle arguments (more effects charged, a few more `Unknown`s; SOUNDNESS R193(b), R197, R733, R568, R542, R341, R861 bound spelling, R877, R878)
 
 candor-scan had no single answer to "what type is this expression": the `let` binder typed only

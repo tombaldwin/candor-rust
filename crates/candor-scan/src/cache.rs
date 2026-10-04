@@ -44,6 +44,13 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev56: VEIN A (R830, R181, R369, R193(a), R862, R863, R633's residual). Pass A's `expand` now keeps
+    // a written `crate::` head and anchors a relative path whose head the module declares, and a
+    // `self::`/`super::` `use` value is stored crate-rooted — so `fields`, `rets`, `mod_aliases`,
+    // `foreign_impls` and the rest hold DIFFERENT strings; a struct's generic parameter now shadows a
+    // same-named import in its field types; and Pass B's `calls` changed (anchored paths, glob origins,
+    // the unfollowed-alias reading, the cfg-arm parameter union), with the dependency list folded into
+    // the Pass B reuse key. A rev55 entry replays, warm, exactly the silences this closes. Mandatory.
     // rev55: VEIN B (R193(b), R197, R733, R568, R542, R341, R861, R877, R878). Pass A's `rets` gained FOUR
     // key spaces (`impl_self_ret_key`, `ret_generic_key`, `elem_ret_key`, `impl_elem_ret_key`) and
     // `static_types` an element key per static; `elem_type_b` now records the std wrappers' argument,
@@ -349,7 +356,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev55/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev56/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -573,6 +580,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut uses = HashMap::new();
     // SOUNDNESS R751 — Pass A resolves TYPE paths through `expand` too, so it needs the same fact.
     crate::lang::seed_modpath(modpath, &mut uses);
+    // VEIN A — and what a relative path's head can name in this module, so Pass A's TYPE paths are
+    // anchored by the same rule Pass B's call paths are (`lang::module_declares`).
+    crate::lang::seed_moddecls(items, include_tests, &mut uses);
     let mut fields = HashMap::new();
     let mut field_borrows = HashMap::new();
     let mut field_elem = HashMap::new();

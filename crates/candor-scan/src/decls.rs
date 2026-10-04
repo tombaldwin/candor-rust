@@ -86,6 +86,12 @@ pub(crate) fn scan_items(
     // R140 — the companion collision map travels with `uses` from here to every `fninfo`, and on
     // into the CallCollector, because this is the map a call's path is expanded from.
     let mut use_alts: HashMap<String, Vec<String>> = HashMap::new();
+    // VEIN A — this module's own type-namespace declarations, beside the `MODPATH_KEY` the caller seeded
+    // (the file's in `scan.rs`, the child's in `reseed_child_scope`), BEFORE its `use` items are read so
+    // a `use self::…` value can be anchored against the right module.
+    if uses.contains_key(crate::lang::MODPATH_KEY) {
+        crate::lang::seed_moddecls(items, include_tests, uses);
+    }
     crate::lang::collect_item_uses(items, include_tests, uses, &mut use_alts);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
@@ -127,7 +133,7 @@ pub(crate) fn scan_items(
                 // Self::touch() } }` must produce `inner::Far::touch`, which is exactly what writing
                 // `Far::touch()` produces. `Self` is a reserved word, so this binding can never shadow a
                 // real import (asserted below rather than assumed).
-                let self_alias = tyname.as_deref().map(|t| crate::lang::expand(t, uses));
+                let self_alias = tyname.as_deref().map(|t| crate::lang::expand_noalias(t, uses)); // VEIN A — the impl's OWN written type: its units are keyed under it, so an alias it names (`impl TzifOwned`) must not be followed here; a path through `Self` is still followed by `expand`, and the call site keeps the unfollowed reading beside it
                 if let Some(alias) = &self_alias {
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
@@ -165,6 +171,24 @@ pub(crate) fn scan_items(
                     // The file's imports do NOT reach into an inline module's own declarations — see
                     // `submodule_uses`, and the `mod mine { struct Command }` fabrication it closes.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
+                    reseed_child_scope(uses, &sub, inner, include_tests, &mut subuses);
+                    // SOUNDNESS R181 — A TYPE ALIAS DECLARED IN AN INLINE MODULE IS IN SCOPE THERE BY ITS
+                    // BARE NAME. `seed_mod_aliases` binds the bare name only when the FILE is the declaring
+                    // module, and `submodule_uses` has just removed the name because the module declares
+                    // it — so inside `mod am { pub type ModAlias = crate::Real; fn f(x: &ModAlias) {..} }`
+                    // the receiver resolved to nothing and `f` went ABSENT while the identical alias at
+                    // the crate root charged. The crate-rooted key `crate::am::ModAlias` IS seeded for
+                    // every file, so the declaring module's bare binding is read back from it.
+                    if subuses.contains_key(crate::lang::MODPATH_KEY) {
+                        for it in inner.iter() {
+                            if let syn::Item::Type(t) = it {
+                                let name = t.ident.to_string();
+                                if let Some(v) = uses.get(&format!("crate::{sub}::{name}")).cloned() {
+                                    subuses.insert(name, v);
+                                }
+                            }
+                        }
+                    }
                     // R167 -- an inline `mod` is in the SAME FILE, so it inherits this file's answer,
                     // which is exactly what `fn_locs`' own recursion does with its unchanged `file`.
                     scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, skip_test_fns, &mut subuses, out);
@@ -277,7 +301,35 @@ pub(crate) fn submodule_uses(
     // identifier cannot contain `::`, so the marker can never collide with a real name and `expand`
     // (which matches whole `::`-separated segments) can never match it.
     subuses.insert(SUPER_SCOPE_MARKER.to_string(), String::new());
+    // VEIN A — the PARENT's module path and declaration list are wrong by one level in the child, so
+    // they do not travel. A site that knows the child's own path re-seeds them (`reseed_child_scope`);
+    // one that does not leaves them absent, and `absolutise`/`module_declares` then refuse exactly as an
+    // inline module was refused before.
+    subuses.remove(crate::lang::MODPATH_KEY);
+    subuses.remove(crate::lang::MODDECL_KEY);
+    subuses.remove(crate::lang::MODDECL_ALL_KEY);
+    subuses.remove(crate::lang::MODMACRO_KEY);
+    subuses.remove(crate::lang::MODEXTERN_KEY);
+    // A parent's glob imports do not reach an inline child in rustc (only `use super::*` brings them,
+    // and that is the child's own glob, recorded when the child's `use` items are read).
+    subuses.remove(crate::lang::ALLGLOB_KEY);
     subuses
+}
+
+/// VEIN A — give an inline `mod`'s map ITS OWN module path and declaration list, for a site that knows
+/// the child's path. Only when the parent map was anchoring (carried `MODPATH_KEY`), so a pass that never
+/// seeded one is not switched on by its recursion.
+pub(crate) fn reseed_child_scope(
+    parent: &HashMap<String, String>,
+    sub: &str,
+    inner: &[syn::Item],
+    include_tests: bool,
+    subuses: &mut HashMap<String, String>,
+) {
+    if parent.contains_key(crate::lang::MODPATH_KEY) {
+        crate::lang::seed_modpath(sub, subuses);
+        crate::lang::seed_moddecls(inner, include_tests, subuses);
+    }
 }
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
@@ -1641,7 +1693,18 @@ pub(crate) fn collect_reexports(
                 }
                 if let syn::Type::Path(p) = &*t.ty {
                     if p.qself.is_none() {
-                        let written = path_to_string(&p.path);
+                        let mut written = path_to_string(&p.path);
+                        // SOUNDNESS R181 (the double alias) — `type DoubleAlias = ModAlias;` inside
+                        // `mod am` names `am::ModAlias`, and a bare one-segment target was recorded bare,
+                        // so the chain stopped at a name nothing else binds. When THIS module declares
+                        // the target, record it crate-rooted: the alias seed then re-resolves it through
+                        // `crate::am::ModAlias` exactly like an explicitly written `crate::` path.
+                        if !written.contains("::")
+                            && !modpath.is_empty()
+                            && crate::lang::module_declares(uses, &written) == Some(true)
+                        {
+                            written = format!("crate::{modpath}::{written}");
+                        }
                         if written != "Self" {
                             record_alias(aliases, qualify(modpath, &t.ident.to_string()), expand(&written, uses));
                         }
@@ -1682,7 +1745,8 @@ pub(crate) fn collect_reexports(
                     // The inline module's OWN `use` map — the same shadowing rule `collect_decls` and
                     // `scan_items` apply, so a submodule that declares its own `Command` is not typed
                     // through the enclosing file's import.
-                    let subuses = submodule_uses(uses, inner, include_tests);
+                    let mut subuses = submodule_uses(uses, inner, include_tests);
+                    reseed_child_scope(uses, &sub, inner, include_tests, &mut subuses);
                     collect_reexports(inner, &sub, &dir.join(&name), include_tests, &subuses, out, aliases);
                 }
             }
@@ -2025,9 +2089,33 @@ pub(crate) fn fninfo(
     // disclosed in the ledger exactly as a module-level `use` would disclose it. Never fabrication: it only
     // resolves a name to its already-declared origin — a genuinely-local pure call stays pure.
     let mut local_uses = HashMap::new();
+    // VEIN A — a body-local `use self::a::Tx` is relative to the fn's module, and `collect_use` can only
+    // anchor it if the map it writes into says which module that is. Seeded for the walk and removed
+    // after, so an otherwise-empty body map stays empty for the merge decisions below.
+    let anchoring = uses.contains_key(crate::lang::MODPATH_KEY);
+    if anchoring {
+        crate::lang::seed_modpath(modpath, &mut local_uses);
+        for k in [crate::lang::MODDECL_KEY, crate::lang::MODEXTERN_KEY] {
+            if let Some(d) = uses.get(k) {
+                local_uses.insert(k.to_string(), d.clone());
+            }
+        }
+    }
     {
         let mut c = LocalUseCollector { out: &mut local_uses, include_tests, seen: Default::default() };
         c.visit_block(block);
+    }
+    if anchoring {
+        local_uses.remove(crate::lang::MODPATH_KEY);
+        local_uses.remove(crate::lang::MODDECL_KEY);
+        local_uses.remove(crate::lang::MODEXTERN_KEY);
+    }
+    // VEIN A — a body's own globs ADD to its module's: both are in scope in the body, and the merge
+    // below is `extend`, which would otherwise replace the module's list with the body's.
+    if let (Some(body), Some(module)) =
+        (local_uses.get(crate::lang::ALLGLOB_KEY).cloned(), uses.get(crate::lang::ALLGLOB_KEY))
+    {
+        local_uses.insert(crate::lang::ALLGLOB_KEY.to_string(), format!("{module}\u{1}{body}"));
     }
     // R106 — …and the mirror-image adjustment, which was missing entirely: a name the body DECLARES as
     // an item shadows whatever the file imported under it (`body_shadowed_uses`' doc has the measured
@@ -2114,6 +2202,40 @@ pub(crate) fn fninfo(
     let trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
+    // SOUNDNESS R369 — A `#[cfg]`-DUPLICATED `use` ON THE TYPE ROUTE IS THE UNION OF ITS ARMS. Two
+    // `use … as A1` items under opposite `#[cfg]`s bind one name; `uses` is single-valued, so a parameter
+    // `x: &A1` was typed by whichever arm was WRITTEN LAST and `x.go()` charged that arm alone —
+    // measured `['Net']` over the `Fs` arm a unix build compiles, `deny Fs` exit 0. The path route has
+    // pushed every arm since R140 (`use_alts`), and a multi-arm type is already a shape the typed-call
+    // route carries (`ALIAS_ALT_SEP`, adjudicated per arm in `scan.rs` — R105/R438), so the parameter is
+    // typed with every arm rather than the last one.
+    for arg in &sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        let syn::Pat::Ident(id) = &*pt.pat else { continue };
+        let name = id.ident.to_string();
+        let Some(cur) = vars.get(&name).cloned() else { continue };
+        let mut inner: &syn::Type = &pt.ty;
+        while let syn::Type::Reference(r) = inner {
+            inner = &r.elem;
+        }
+        let syn::Type::Path(tp) = inner else { continue };
+        let Some(head) = tp.path.segments.first().map(|s| s.ident.to_string()) else { continue };
+        let Some(arms) = use_alts.get(&head) else { continue };
+        let mut tys: Vec<String> = Vec::new();
+        for a in arms {
+            let mut u2 = sig_uses.clone();
+            u2.insert(head.clone(), a.clone());
+            if let Some(t) = type_path(&pt.ty, &u2) {
+                if !t.contains(ALIAS_ALT_SEP) && !tys.contains(&t) {
+                    tys.push(t);
+                }
+            }
+        }
+        if tys.len() >= 2 && tys.contains(&cur) {
+            tys.sort();
+            vars.insert(name, tys.join(&ALIAS_ALT_SEP.to_string()));
+        }
+    }
     for k in trait_vars.keys() {
         vars.remove(k);
     }
@@ -2868,6 +2990,29 @@ pub(crate) fn collect_decls(
         }
         match it {
             syn::Item::Struct(s) => {
+                // VEIN A — A STRUCT'S GENERIC PARAMETER SHADOWS AN IMPORT OF THE SAME NAME. tower-http
+                // declares `struct Trace<S, M, MakeSpan = DefaultMakeSpan, ..> { make_span: MakeSpan }`
+                // beside `use super::MakeSpan;` (the TRAIT): the field's type is the PARAMETER, and
+                // typing it through the `use` gave it the trait's path as a concrete type. That only
+                // went unnoticed while the `use` value was the unusable literal `super::MakeSpan`; once
+                // `self::`/`super::` values are anchored it became a real path, shadowed R476's
+                // dispatch join, and `Trace::call` lost its `Log` (measured on the corpus A/B). Typing
+                // the field with the parameter names unbound is what the no-collision spelling already
+                // does, and it is rustc's scoping.
+                let gen_shadowed: Vec<String> = s
+                    .generics
+                    .type_params()
+                    .map(|t| t.ident.to_string())
+                    .filter(|n| uses_ty.contains_key(n))
+                    .collect();
+                let uses_gen_owned = (!gen_shadowed.is_empty()).then(|| {
+                    let mut m = uses_ty.clone();
+                    for n in &gen_shadowed {
+                        m.remove(n);
+                    }
+                    m
+                });
+                let uses_ty: &HashMap<String, String> = uses_gen_owned.as_ref().unwrap_or(uses_ty);
                 // the struct's OWN generic bounds (`struct Pipe<T: Saver>` / `where T: Saver`) — so a field
                 // typed as a bounded param resolves to its trait bound and dispatches (R31).
                 let struct_bounds = generic_bounds_of_generics(&s.generics);
@@ -3255,6 +3400,34 @@ pub(crate) fn collect_decls(
                                     _ => {}
                                 }
                             } else if let Some(tp) = r372_type_path(payload_ty, uses_ty) {
+                                // VEIN A — ALSO under the ENUM-QUALIFIED key (`Enum\u{1e}Variant`), so a
+                                // pattern that names its enum (`Self::Command(s)`, `E4::Command(s)`) is typed
+                                // by ITS enum even when another enum's same-named variant carries a different
+                                // payload and the leaf key below is withdrawn as ambiguous. Measured
+                                // (hyper-util's socks v4/v5 `Command(Status)`): the two payloads only ever
+                                // "agreed" because both were spelled `super::Status`; anchoring that spelling
+                                // made them differ, the leaf was withdrawn, `status.fmt(f)` went untyped and
+                                // the caller ABSENT over an executed write. `\u{1e}` cannot appear in an
+                                // identifier, so this key space cannot meet the leaf keys or R77's
+                                // `Variant::field` struct-variant keys.
+                                // NOT for a payload that is one of the enum's own generic parameters
+                                // (`enum Inner<R> { PassThrough(R) }`): `type_path` returns the useless
+                                // literal `"R"` for it (the R77 note above), and typing the binding with it
+                                // would only replace the leaf route's disclosure with a typed call to
+                                // nothing. Measured on ureq's `CharsetDecoder::read`.
+                                let qk = format!("{}\u{1e}{leaf}", en.ident);
+                                let generic_payload = en.generics.type_params().any(|g| g.ident == tp.as_str());
+                                if generic_payload {
+                                    // fall through to the leaf key only
+                                } else { match enum_tmp.get(&qk) {
+                                    None => {
+                                        enum_tmp.insert(qk, Some(tp.clone()));
+                                    }
+                                    Some(Some(prev)) if *prev != tp => {
+                                        enum_tmp.insert(qk, None);
+                                    }
+                                    _ => {}
+                                } }
                                 match enum_tmp.get(&leaf) {
                                     None => {
                                         enum_tmp.insert(leaf.clone(), Some(tp));

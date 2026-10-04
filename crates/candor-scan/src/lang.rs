@@ -7,6 +7,17 @@ pub(crate) fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
+/// VEIN A — `path_to_string` KEEPING a leading `::`. `::smol::net::resolve` names the EXTERN crate
+/// `smol` even where the writing module declares its own `mod smol` (redis-1.7.0's `aio` does exactly
+/// that, behind a feature), and with the colon dropped the anchoring rule read it as the local module —
+/// measured, 37 redis rows lost a real `Net`. `expand` strips the colon itself and answers such a path
+/// with no vein-A anchoring and no glob reading, which is precisely today's answer for it. Used only at
+/// the sites whose string goes straight into `expand`.
+pub(crate) fn path_to_string_lc(p: &syn::Path) -> String {
+    let s = path_to_string(p);
+    if p.leading_colon.is_some() { format!("::{s}") } else { s }
+}
+
 /// The crate roots whose traits are the LANGUAGE's, not a project dependency's — the explicit carve-out
 /// for the imported-trait CHA (R4, collector.rs) and the crate-qualified dispatch key it emits.
 ///
@@ -816,7 +827,7 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                     }
                 }
             }
-            Some((expand(&path_to_string(&p.path), uses), false))
+            Some((expand(&path_to_string_lc(&p.path), uses), false))
         }
         _ => None,
     }
@@ -1579,7 +1590,21 @@ pub(crate) fn result_err_leaf(output: &syn::ReturnType, uses: &HashMap<String, S
     // The error type leaf — only a concrete nominal path (a local error type). `expand` then strips
     // module qualifiers; we keep just the leaf to match `trait_impls`/`by_tail2` keying.
     let expanded = type_path(err, uses)?;
-    Some(expanded.rsplit("::").next().unwrap_or(&expanded).to_string())
+    let leaf = expanded.rsplit("::").next().unwrap_or(&expanded).to_string();
+    // VEIN A — and the UNFOLLOWED reading beside it, `\u{1}`-joined, when the error type is spelled through
+    // a local type ALIAS: `impl From<X> for ConsumerInfoError` on `type ConsumerInfoError = Error<Kind>`
+    // keys under the alias's name (async-nats), and once `use super::context::ConsumerInfoError` is
+    // anchored the followed leaf is `Error`. `visit_expr_try` charges each leaf a `From` impl exists for.
+    if let syn::Type::Path(tp) = err {
+        if tp.qself.is_none() {
+            let raw = expand_noalias(&path_to_string_lc(&tp.path), uses);
+            let raw_leaf = raw.rsplit("::").next().unwrap_or(&raw).to_string();
+            if raw_leaf != leaf && !raw_leaf.is_empty() {
+                return Some(format!("{leaf}\u{1}{raw_leaf}"));
+            }
+        }
+    }
+    Some(leaf)
 }
 
 /// ⟨typeSurface.returns⟩ The nominal type a caller's BINDING holds for `let x = f()` — the type of the
@@ -1708,6 +1733,37 @@ pub(crate) fn bound_return_type(
 /// `use a::b::Name`, replace it with the full `a::b::Name`. Turns `fs::read` → `std::fs::read`,
 /// `Command::new` → `std::process::Command::new`. `crate`/`self`/`super` prefixes are stripped (local).
 pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
+    expand_with(path, uses, true, true)
+}
+
+/// VEIN A — `expand` without following a MODULE-QUALIFIED alias (`qualified_alias`): the path as the
+/// source names it, made absolute. Asked only by the call site, for the one shape where the two
+/// readings name different units: an `impl` written ON a local type alias (`impl TzifOwned { fn
+/// parse32 }` in jiff) keys its methods under the ALIAS's name, so following `TzifOwned` to its target
+/// `Tzif` finds no `Tzif::parse32` — measured, jiff-0.2.28's `TzifOwned::parse` lost a real `Log`
+/// once `use super::TzifOwned` was anchored and became followable. The caller pushes this reading
+/// BESIDE the followed one; whichever names no unit resolves to nothing.
+pub(crate) fn expand_noalias(path: &str, uses: &HashMap<String, String>) -> String {
+    expand_with(path, uses, true, false)
+}
+
+/// VEIN A — `expand` WITHOUT the two vein-A anchors (a written `crate::` head kept, a module-declared
+/// relative head made absolute), for a MACRO path. A macro is not a value or a type: `crate::debug!` and
+/// `crate::tracing::implementation::event!` name macros, which the engine resolves through its own
+/// leaf-keyed template table (`local_macros`) or the classifier, and both were built against the
+/// stripped spelling. Measured: anchoring macro paths took `Log` off 1,277 x11rb rows whose `crate::debug!`
+/// expands to `$crate::tracing::implementation::event!` → `tracing::event!`. Macro resolution is not
+/// this change's subject, so macro paths keep exactly today's answer.
+pub(crate) fn expand_noanchor(path: &str, uses: &HashMap<String, String>) -> String {
+    expand_with(path, uses, false, true)
+}
+
+fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow: bool) -> String {
+    // A leading `::` (only `path_to_string_lc` produces one) is an EXTERN-crate path: no module anchor
+    // applies to it. Everything else is answered exactly as before the colon was kept.
+    if let Some(rest) = path.strip_prefix("::") {
+        return expand_with(rest, uses, false, follow);
+    }
     let mut segs: Vec<&str> = path.split("::").collect();
     // A path rooted at `crate`/`self`/`super` is EXPLICITLY crate-local — it is NOT subject to the file's
     // `use` aliases, so after stripping the prefix we return it as-is. (Re-applying `uses` here would let
@@ -1717,7 +1773,7 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // below discards it. `abs` is the crate-root-absolute form; the only OUTPUT it changes is this
     // branch's literal fallthrough, which is returned `crate::`-rooted so downstream reads the
     // absoluteness assertion rather than a proxy for it. See `absolutise`.
-    let abs = absolutise(&segs, uses);
+    let abs = if !anchor && segs.first() == Some(&"crate") { None } else { absolutise(&segs, uses) };
     if let Some(a) = &abs {
         segs = a.split("::").collect();
         if std::env::var("CANDOR_R186_DEBUG").is_ok() {
@@ -1758,7 +1814,7 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
             if !joined.contains(crate::decls::ALIAS_ALT_SEP) {
                 if let Some(stripped) = joined.strip_prefix("crate::") {
                     let s2: Vec<&str> = stripped.split("::").collect();
-                    if let Some(q) = qualified_alias(&s2, true, uses) {
+                    if let Some(q) = qualified_alias(&s2, true, uses).filter(|_| follow) {
                         return q;
                     }
                 }
@@ -1770,8 +1826,38 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
         // file that binds the head itself (`use somecrate::facade;`) means ITS `facade`, and answering
         // from the alias map there would attribute the call to the wrong origin. The head is unbound here,
         // so the only thing it can name is a module of this crate.
-        if let Some(full) = qualified_alias(&segs, false, uses) {
+        if let Some(full) = qualified_alias(&segs, false, uses).filter(|_| follow) {
             return full;
+        }
+        // VEIN A — A RELATIVE PATH WHOSE HEAD THE CURRENT MODULE DECLARES NAMES THAT DECLARATION, AND
+        // NOTHING ELSE. `a::Tx::grab` written in `mod x { pub mod a {..} }` is `x::a::Tx::grab` in
+        // rustc: an item declared in the module shadows the extern prelude and every glob, and an
+        // explicit `use` of the same name in the same module is E0255 — so once the `use` lookups above
+        // have missed, a declared head is decisive. Returned crate-rooted, which is the absoluteness
+        // assertion `arm_exact_target` ranks on (R748(i)); without it the path reached `tail2` as
+        // `Tx::grab`, tied with the root's own `a::Tx::grab`, and R830's `x::f_rel` went ABSENT.
+        //
+        // MULTI-SEGMENT ONLY. A one-segment name keeps `by_leaf` (the R751 root rule's reason, and the
+        // value namespace a bare call lives in is not the type namespace `MODDECL_KEY` lists). The head
+        // of a multi-segment path is always a type-namespace name, which is what is seeded.
+        if anchor && segs.len() >= 2 && module_declares(uses, segs[0]) == Some(true) {
+            if let Some(modpath) = uses.get(MODPATH_KEY) {
+                let abs = if modpath.is_empty() {
+                    segs.join("::")
+                } else {
+                    format!("{modpath}::{}", segs.join("::"))
+                };
+                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                    eprintln!("VEINAREL {path} -> crate::{abs}"); // §E1 REACH COUNTER
+                }
+                // The anchored form is the crate-rooted key a module-qualified alias is seeded under
+                // (`seed_mod_aliases`), so ask it exactly as an explicitly written `crate::` path is.
+                let abs_segs: Vec<&str> = abs.split("::").collect();
+                if let Some(q) = qualified_alias(&abs_segs, true, uses).filter(|_| follow) {
+                    return q;
+                }
+                return format!("crate::{abs}");
+            }
         }
         // A BARE qualifier with no `use` binding is NOT glob-rewritten here: it could be a genuine external
         // crate call (`dotenvy::var`) whose crate identity the classifier still needs — rewriting it under a
@@ -1794,7 +1880,7 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // R99 — the MULTI-segment form of exactly that lookup, tried FIRST because it is the more specific
     // key: `crate::facade::Command` names the re-exported item, `crate::facade` only names its module. A
     // `crate::`-rooted path can never be an external-crate call, so this cannot hijack one either.
-    if let Some(full) = qualified_alias(&segs, true, uses) {
+    if let Some(full) = qualified_alias(&segs, true, uses).filter(|_| follow) {
         return full;
     }
     if let Some(full) = uses.get(&format!("crate::{}", segs[0])) {
@@ -1860,7 +1946,26 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // new hole, and the alternative — refusing whenever the root is macro-hidden — would withdraw the
     // rescue that closed the sqlx `PgStream::connect` cardinal sin on evidence we do not have. Under-fire
     // here, never over-fire.
-    match root_glob(uses).or_else(|| unique_glob(uses)) {
+    // VEIN A — a path `absolutise` made crate-rooted FROM `self::`/`super::` names a module chain that IS
+    // this file's own module path (from the file layout) — a real local module, never something a glob
+    // re-exported into the root. Measured: aes-0.8.4's `use super::intrinsics::vaeseq_u8;` in a file
+    // with `use core::arch::aarch64::*;` became `core::arch::aarch64::armv8::intrinsics::vaeseq_u8` once
+    // the `use` value was anchored, because the root's `mod armv8;` sits inside `cfg_if!` and so is not
+    // in `root_decls` — the R186 limit, newly reachable — and the local call edge was lost.
+    if abs.is_some() && matches!(path.split("::").next(), Some("self" | "super")) {
+        return r751_literal(&segs, true);
+    }
+    // VEIN A — a file's OWN glob puts names at the crate ROOT only when the file IS the root. In any
+    // other file, `crate::connection::worker::ConnectionWorker` written beside `pub(crate) use
+    // sqlx_core::connection::*;` (sqlx-sqlite) was attributed to that glob — `sqlx_core::connection::
+    // connection::…` — which no rustc reading allows; it went unnoticed while every consumer read the type
+    // by its leaf, and R862's dependency-type check (rightly) refused a type rooted at a dependency.
+    // Where the map knows its module and that module is not the root, only the seeded ROOT glob applies.
+    let file_glob = match uses.get(MODPATH_KEY) {
+        Some(m) if !m.is_empty() => None,
+        _ => unique_glob(uses),
+    };
+    match root_glob(uses).or(file_glob) {
         // R186 — THE REACH COUNTER (§E1), same shape and same reason as R160's `SELFALIAS` above: an
         // unchanged corpus row is not evidence this code ran, and "0 changed with 0 reaches" is a
         // different claim from "0 changed with 800 reaches". Gated on the cheap glob lookup having already
@@ -2006,6 +2111,209 @@ pub(crate) fn seed_modpath(modpath: &str, uses: &mut HashMap<String, String>) {
     uses.insert(MODPATH_KEY.to_string(), modpath.to_string());
 }
 
+/// VEIN A — the sentinel key under which the TYPE-NAMESPACE names the CURRENT module declares are seeded
+/// (`mod`, `struct`, `enum`, `union`, `type`, `trait`), `\u{1}`-separated. Same escape-free argument as
+/// `MODPATH_KEY`. It is the second half of "which module is this path written in": `MODPATH_KEY` says
+/// WHERE the module is, this says WHAT a relative path's head can name there.
+///
+/// It travels with `MODPATH_KEY` and is only ever read beside it. Both are REMOVED by
+/// `decls::submodule_uses`, because an inline module's map is cloned from its parent's and a parent's
+/// module path or declaration list in a child's map is wrong by one level — the R400 shape. A site that
+/// knows the child's path re-seeds both; a site that does not leaves them absent, and every reader then
+/// refuses exactly as `absolutise` refused an inline module before.
+pub(crate) const MODDECL_KEY: &str = "*moddecls";
+
+/// VEIN A — seed the TYPE-namespace names this module declares (see `MODDECL_KEY`). An item-position
+/// macro invocation declares nothing candor can read, so a name it would declare is absent here and a
+/// path headed by it keeps today's unanchored handling — an under-resolution, never a mis-anchoring.
+pub(crate) fn seed_moddecls(items: &[syn::Item], include_tests: bool, uses: &mut HashMap<String, String>) {
+    let names: Vec<String> = items
+        .iter()
+        .filter(|it| {
+            matches!(
+                it,
+                syn::Item::Mod(_)
+                    | syn::Item::Struct(_)
+                    | syn::Item::Enum(_)
+                    | syn::Item::Union(_)
+                    | syn::Item::Type(_)
+                    | syn::Item::Trait(_)
+                    | syn::Item::TraitAlias(_)
+            )
+        })
+        .filter_map(|it| crate::decls::declared_item_name(it, include_tests))
+        .collect();
+    uses.insert(MODDECL_KEY.to_string(), names.join("\u{1}"));
+    // Every namespace, for the glob question: a module's own `fn read` shadows a glob's `read` exactly
+    // as its own `struct File` shadows a glob's `File`.
+    let all: Vec<String> =
+        items.iter().filter_map(|it| crate::decls::declared_item_name(it, include_tests)).collect();
+    uses.insert(MODDECL_ALL_KEY.to_string(), all.join("\u{1}"));
+    // `extern crate X;` written IN this module binds `X` here to the EXTERN crate (log-0.4.20's
+    // `kv/value.rs`: `extern crate value_bag; use self::value_bag::ValueBag;`) — a `self::X::…` path names
+    // that crate, not a child module, and must not be anchored (`absolutise`).
+    let externs: Vec<String> = items
+        .iter()
+        .filter(|it| matches!(it, syn::Item::ExternCrate(_)))
+        .filter_map(|it| crate::decls::declared_item_name(it, include_tests))
+        .collect();
+    uses.insert(MODEXTERN_KEY.to_string(), externs.join("\u{1}"));
+    // An item-position macro invocation can declare any name, so the module's declaration list is not
+    // complete and a glob cannot be said to be the only possible origin of an undeclared name.
+    let hidden = items.iter().any(|it| matches!(it, syn::Item::Macro(m) if m.mac.path.segments.last()
+        .is_some_and(|s| s.ident != "macro_rules") && m.ident.is_none()));
+    if hidden {
+        uses.insert(MODMACRO_KEY.to_string(), String::new());
+    } else {
+        uses.remove(MODMACRO_KEY);
+    }
+}
+
+/// VEIN A — the names this module binds with `extern crate` (see `seed_moddecls`); same lifecycle.
+pub(crate) const MODEXTERN_KEY: &str = "*modextern";
+/// VEIN A — every-namespace declaration list (see `seed_moddecls`); same lifecycle as `MODDECL_KEY`.
+pub(crate) const MODDECL_ALL_KEY: &str = "*moddeclsall";
+/// VEIN A — present when the module holds an item-position macro invocation (see `seed_moddecls`).
+pub(crate) const MODMACRO_KEY: &str = "*modmacro";
+/// VEIN A — EVERY glob import in scope, as written (`std::fs`, `libc`, `super`, `crate::x`), `\u{1}`-joined.
+/// `GLOB_KEY` records only the external ones and is inherited by inline children for R186's crate-rooted
+/// attribution; this one is the SCOPE's own, so `submodule_uses` strips it and a body's own globs are
+/// appended to its module's (`decls::fninfo`).
+pub(crate) const ALLGLOB_KEY: &str = "*globs";
+/// VEIN A — the manifest's dependency crate names (post `-`→`_`), `\u{1}`-joined, seeded for Pass B.
+pub(crate) const DEPS_KEY: &str = "*deps";
+
+/// VEIN A — seed the manifest dependency names into a file's map (see `DEPS_KEY`).
+pub(crate) fn seed_deps(deps: &std::collections::HashSet<String>, uses: &mut HashMap<String, String>) {
+    let mut v: Vec<&str> = deps.iter().map(String::as_str).collect();
+    v.sort_unstable();
+    uses.insert(DEPS_KEY.to_string(), v.join("\u{1}"));
+}
+
+/// The std prelude's names and the primitive types: a name a glob does NOT supply resolves here, so a
+/// head in this list is never attributed to a glob (an under-resolution if the glob really does shadow
+/// it, which is the status quo).
+const PRELUDE_AND_PRIMS: [&str; 52] = [
+    "Option", "Some", "None", "Result", "Ok", "Err", "Box", "String", "Vec", "ToString", "ToOwned",
+    "Clone", "Copy", "Default", "Drop", "Eq", "PartialEq", "Ord", "PartialOrd", "Iterator",
+    "IntoIterator", "Extend", "FromIterator", "DoubleEndedIterator", "ExactSizeIterator", "AsRef",
+    "AsMut", "From", "Into", "TryFrom", "TryInto", "Fn", "FnMut", "FnOnce", "Send", "Sync", "Sized",
+    "Unpin", "drop", "bool", "char", "str", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16",
+    "i32", "i64",
+];
+const PRIMS_MORE: [&str; 5] = ["i128", "isize", "f32", "f64", "Self"];
+
+/// The public names of the two std modules the classifier charges by PREFIX (`std::fs::` → `Fs`,
+/// `std::env::` → `Env`). Attributing a name to one of those globs is a CHARGE, so it is taken only for a
+/// name the module really exports; a name missing here keeps today's unresolved answer (an
+/// under-resolution, never a fabrication). Every other std/core/alloc glob is classified by exact or
+/// type-anchored rules, where a wrong attribution names nothing and charges nothing.
+const STD_FS_NAMES: [&str; 29] = [
+    "File", "OpenOptions", "Metadata", "DirEntry", "ReadDir", "Permissions", "FileType", "DirBuilder",
+    "FileTimes", "canonicalize", "copy", "create_dir", "create_dir_all", "exists", "hard_link",
+    "metadata", "read", "read_dir", "read_link", "read_to_string", "remove_dir", "remove_dir_all",
+    "remove_file", "rename", "set_permissions", "soft_link", "symlink_metadata", "write", "TryLockError",
+];
+const STD_ENV_NAMES: [&str; 22] = [
+    "args", "args_os", "current_dir", "current_exe", "home_dir", "join_paths", "remove_var",
+    "set_current_dir", "set_var", "split_paths", "temp_dir", "var", "var_os", "vars", "vars_os",
+    "consts", "Args", "ArgsOs", "JoinPathsError", "SplitPaths", "VarError", "Vars",
+];
+
+/// VEIN A — R193(a), R863, R830's `libc::*` cell: WHERE A NAME NO DECLARATION OR NAMED IMPORT SUPPLIES
+/// CAN COME FROM.
+///
+/// `use std::fs::*; File::open(p)` and `use ratescore::*; carrier()` reached resolution as the bare
+/// `File::open` / `carrier`, which names no rule, no local definition and no dependency, so the caller went
+/// ABSENT — while the named-import spelling of the same call charged. rustc's rule decides it: a name is
+/// looked up in the module's own items and explicit imports, then its GLOB imports, then the preludes. So
+/// when (1) the map knows its module's declarations and they are complete (no item-position macro),
+/// (2) no `use` binds the head, and (3) the head is not a dependency crate, a std root, a prelude name, a
+/// primitive or a generic parameter — the name can only come from a glob in scope, and each external glob
+/// is a CANDIDATE origin: `G::<path>`, byte-identical to what `use G::Head;` would have produced.
+///
+/// Returns the candidates and whether they are EXCLUSIVE. Exclusive means exactly one glob is in scope
+/// and it is not crate-local: the candidate IS the name's origin, and the caller may rewrite the path
+/// to it. Otherwise (two external globs; a crate-local glob such as `use super::*` beside an external
+/// one) rustc still resolves the name to exactly ONE of them — a name two globs both supply is E0659 —
+/// but which is not decidable here, so the caller keeps the written path for local resolution and ADDS
+/// each candidate beside it. A candidate the glob does not really export joins nothing and classifies
+/// as nothing, except under the two std modules the classifier charges by PREFIX, which take a name only
+/// from their real export list.
+///
+/// `is_generic` is the caller's own knowledge of the generic parameters in scope (a `T::new()` head).
+pub(crate) fn glob_candidates(
+    segs: &[&str],
+    uses: &HashMap<String, String>,
+    is_generic: &dyn Fn(&str) -> bool,
+) -> Option<(Vec<String>, bool)> {
+    let head = *segs.first()?;
+    let all = uses.get(MODDECL_ALL_KEY)?;
+    if uses.contains_key(MODMACRO_KEY) || all.split('\u{1}').any(|n| n == head) || uses.contains_key(head) {
+        return None;
+    }
+    if matches!(head, "std" | "core" | "alloc" | "proc_macro" | "crate" | "self" | "super")
+        || PRELUDE_AND_PRIMS.contains(&head)
+        || PRIMS_MORE.contains(&head)
+        || is_generic(head)
+        || uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == head))
+    {
+        return None;
+    }
+    let globs = uses.get(ALLGLOB_KEY)?;
+    let mut local = 0usize;
+    let mut external: Vec<String> = Vec::new();
+    for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
+        let groot = g.split("::").next().unwrap_or(g);
+        if matches!(groot, "crate" | "self" | "super")
+            || module_declares(uses, groot) == Some(true)
+            || uses.get(groot).is_some_and(|v| {
+                v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::")
+            })
+        {
+            local += 1; // a crate-local glob: its names are local, and `by_leaf`/`by_tail2` own them
+            continue;
+        }
+        // A glob whose head is bound by a `use` (`use x::prelude; use prelude::*;`) is spelled through it.
+        let g = match uses.get(groot) {
+            Some(v) if !v.is_empty() => alias_join(v, &g.split("::").skip(1).collect::<Vec<_>>()),
+            _ => g.to_string(),
+        };
+        if g.contains(crate::decls::ALIAS_ALT_SEP) {
+            continue;
+        }
+        let charged = match g.as_str() {
+            "std::fs" => Some(&STD_FS_NAMES[..]),
+            "std::env" => Some(&STD_ENV_NAMES[..]),
+            _ => None,
+        };
+        if charged.is_some_and(|names| !names.contains(&head)) {
+            local += 1; // not this glob's name: it cannot be the origin, and it is not exclusive either
+            continue;
+        }
+        if !external.contains(&g) {
+            external.push(g);
+        }
+    }
+    if external.is_empty() {
+        return None;
+    }
+    let exclusive = external.len() == 1 && local == 0;
+    let cands: Vec<String> = external.iter().map(|g| format!("{g}::{}", segs.join("::"))).collect();
+    if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+        eprintln!("VEINAGLOB {} -> {} exclusive={exclusive}", segs.join("::"), cands.join(" | ")); // §E1
+    }
+    Some((cands, exclusive))
+}
+
+
+/// VEIN A — does the module this map describes declare `name` in the TYPE namespace? `None` when the
+/// map carries no declaration list (a pass that does not know which module it is in), which every
+/// caller reads as "cannot say" and answers exactly as before this existed.
+pub(crate) fn module_declares(uses: &HashMap<String, String>, name: &str) -> Option<bool> {
+    uses.get(MODDECL_KEY).map(|list| list.split('\u{1}').any(|n| n == name))
+}
+
 /// SOUNDNESS R751 — **THE CONFLATION ITSELF, NOT A THIRD GUARD OVER ITS SYMPTOMS.**
 ///
 /// `expand` strips `crate`/`self`/`super` in ONE loop and then resolves all three as if crate-rooted, so
@@ -2054,9 +2362,11 @@ pub(crate) fn seed_modpath(modpath: &str, uses: &mut HashMap<String, String>) {
 /// plants `SUPER_SCOPE_MARKER` for precisely this question and `rebound` already consults it; so does
 /// this, and `r751_an_inline_module_is_refused_rather_than_answered_one_level_off` drives it.
 fn absolutise(segs: &[&str], uses: &HashMap<String, String>) -> Option<String> {
-    if uses.contains_key(crate::decls::SUPER_SCOPE_MARKER) {
-        return None; // inline module: `modpath` is the FILE's and is stale by at least one level
-    }
+    // VEIN A — THE INLINE-MODULE REFUSAL IS GONE BECAUSE ITS PREMISE IS. It refused because `modpath`
+    // was the FILE's inside an inline `mod`, one level stale. `decls::submodule_uses` now REMOVES
+    // `MODPATH_KEY` from every child map, and only a site that knows the child's own path
+    // (`scan_items`, `collect_reexports`, `typesurf::walk_items`) puts it back — so a `modpath` present
+    // here is the CURRENT module's, inline or file, and an absent one refuses below exactly as before.
     let modpath = uses.get(MODPATH_KEY)?;
     let mut ups = 0usize;
     let mut i = 0usize;
@@ -2064,9 +2374,20 @@ fn absolutise(segs: &[&str], uses: &HashMap<String, String>) -> Option<String> {
         match *h {
             "self" => {}
             "super" => ups += 1,
-            // An explicitly written `crate::` head is ALREADY absolute and keeps today's handling. Left
-            // alone deliberately: prefixing it too would change every crate-rooted path in every crate,
-            // which is a larger change with its own audit surface, not a tidy-up of this one.
+            // VEIN A — an explicitly written `crate::` head IS absolute, and stripping it (what `expand`
+            // did) made `crate::b::Rx::grab` byte-identical to a module-RELATIVE `b::Rx::grab`, so
+            // `arm_exact_target`'s exact-qual preference — which is licensed by a surviving `crate::`
+            // head and nothing else — could not run on the one spelling that most plainly names its
+            // target. R830's `z::g_crate` was exactly that: the root's `b::Rx::grab` (the exact qual)
+            // tied with `z::b::Rx::grab` (a suffix) and the caller went ABSENT. Returned as the path
+            // after the head; the root-one-segment rule below still applies to it.
+            "crate" if i == 0 => {
+                let rest = &segs[1..];
+                if rest.is_empty() || rest.len() == 1 || root_extern_crate(uses, rest[0]) {
+                    return None;
+                }
+                return Some(rest.join("::"));
+            }
             "crate" => return None,
             // The first non-prefix segment ENDS the prefix run — `break`, never `return`. Writing
             // `return None` here made the whole function inert (`self::pixmap` bails on `pixmap`), and it
@@ -2090,6 +2411,12 @@ fn absolutise(segs: &[&str], uses: &HashMap<String, String>) -> Option<String> {
     }
     let rest = &segs[i..];
     if rest.is_empty() {
+        return None;
+    }
+    // `self::X` where this module says `extern crate X;` names the extern crate (see `MODEXTERN_KEY`).
+    if ups == 0
+        && uses.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == rest[0]))
+    {
         return None;
     }
     // A target that lands at the CRATE ROOT with a ONE-segment name gets no prefix, because the prefix
@@ -2139,10 +2466,34 @@ pub(crate) fn collect_root_decls(
     items: &[syn::Item],
     include_tests: bool,
 ) -> std::collections::BTreeSet<String> {
-    items
+    let mut out: std::collections::BTreeSet<String> = items
         .iter()
         .filter_map(|it| crate::decls::declared_item_name(it, include_tests))
-        .collect()
+        .collect();
+    // VEIN A — and, MARKED, the names the root binds with `extern crate` (`extern crate alloc;`): a
+    // written `crate::alloc::…` names that EXTERN crate, not a module of this one, so `absolutise` must
+    // not anchor it (see `ROOT_EXTERN_MARK`). The mark keeps these out of `root_declares`' plain-name test.
+    for it in items {
+        if let syn::Item::ExternCrate(e) = it {
+            if let Some(name) = crate::decls::declared_item_name(it, include_tests) {
+                let _ = e;
+                out.insert(format!("{ROOT_EXTERN_MARK}{name}"));
+            }
+        }
+    }
+    out
+}
+
+/// VEIN A — the prefix `collect_root_decls` marks an `extern crate` binding with. `\u{2}` cannot appear in
+/// an identifier, so a marked entry never equals a plain declared name.
+pub(crate) const ROOT_EXTERN_MARK: &str = "\u{2}";
+
+/// VEIN A — does the crate root bind `name` with `extern crate`? Measured: hashbrown's `extern crate
+/// alloc;` makes `crate::alloc::alloc::Layout` the STD `Layout`; anchored as a crate path it read as a
+/// local type named `Layout` — harmless there, a fabricated `Drop` wherever a local `Layout` exists.
+pub(crate) fn root_extern_crate(uses: &HashMap<String, String>, name: &str) -> bool {
+    uses.get(&format!("crate::{ROOT_DECL_KEY}"))
+        .is_some_and(|list| list.split('\u{1}').any(|n| n.strip_prefix(ROOT_EXTERN_MARK) == Some(name)))
 }
 
 /// The single crate-ROOT re-export glob (seeded under `crate::` + `GLOB_KEY`), if unambiguous — see
@@ -2492,6 +2843,21 @@ pub(crate) fn single_pat_ident(pat: &syn::Pat) -> Option<String> {
 /// needing to know which. `None` when the pattern isn't a single-field tuple-struct with a single-ident
 /// binding — a multi-field or destructuring payload has no single receiver to type, an honest
 /// under-report. Peels a reference/paren wrapper first (`Some(Variant(x))`-style nesting is rare).
+/// VEIN A — the ENUM segment a single-field tuple-variant pattern names (`Self` in `Self::Cmd(x)`, `E4`
+/// in `E4::Cmd(x)`, the enum in `m::E4::Cmd(x)`); `None` for a bare `Cmd(x)`. Same peeling as
+/// `tuple_variant_binding`.
+pub(crate) fn tuple_variant_enum(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Reference(r) => tuple_variant_enum(&r.pat),
+        syn::Pat::Paren(p) => tuple_variant_enum(&p.pat),
+        syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
+            let n = ts.path.segments.len();
+            (n >= 2).then(|| ts.path.segments[n - 2].ident.to_string())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn tuple_variant_binding(pat: &syn::Pat) -> Option<(String, String)> {
     match pat {
         syn::Pat::Reference(r) => tuple_variant_binding(&r.pat),
@@ -3687,7 +4053,20 @@ pub(crate) fn collect_use(
                     return resolved;
                 }
             }
-            return full.to_string();
+            return anchored_value(full, out).unwrap_or_else(|| full.to_string());
+        }
+        // VEIN A — a `self::`/`super::` VALUE is relative to the module this `use` is written in, and
+        // `out` is that module's own map whenever it carries `MODPATH_KEY` (`submodule_uses` strips the
+        // key from an inherited map, so a present one is never a parent's). Stored crate-ROOTED so it
+        // cannot be re-read against a different module later: an inline child inherits this map by
+        // clone, and a `self::a::Tx` read in the child would name the CHILD's `a`, one level off — the
+        // R400 shape. An absolute value means the same thing from everywhere. Without it,
+        // `fn f_use() { use self::a::Tx; Tx::grab(p) }` stored `self::a::Tx`, which `arm_exact_target`
+        // could only strip to the relative `a::Tx::grab`, tied, and R830's `x::f_use` went ABSENT.
+        if matches!(full.split("::").next(), Some("self" | "super")) {
+            if let Some(a) = anchored_value(full, out) {
+                return a;
+            }
         }
         // ONLY a `crate::`-rooted re-bind (`use crate::net`) is re-resolved: `crate::X` names the CRATE
         // ROOT, where a re-export can bring an external name into scope. `self::`/`super::` are RELATIVE to
@@ -3757,6 +4136,14 @@ pub(crate) fn collect_use(
         // prelude glob (`use sqlx_core::driver_prelude::*; net::connect(..)`) read SILENT-PURE and was
         // disclosed NOWHERE — the cardinal sin (sqlx `PgStream::connect`).
         syn::UseTree::Glob(_) => {
+            // VEIN A — every glob, local or not, for `glob_origin`'s "exactly one, and not local" test.
+            if !prefix.is_empty() {
+                let e = out.entry(ALLGLOB_KEY.to_string()).or_default();
+                if !e.is_empty() {
+                    e.push('\u{1}');
+                }
+                e.push_str(&prefix);
+            }
             let rooted_local = matches!(prefix.split("::").next(), Some("crate" | "self" | "super"));
             if !prefix.is_empty() && !rooted_local {
                 let e = out.entry(GLOB_KEY.to_string()).or_default();
@@ -3770,6 +4157,19 @@ pub(crate) fn collect_use(
             }
         }
     }
+}
+
+/// VEIN A — a `self::`/`super::` `use` value made crate-root-absolute against the module whose map
+/// `out` is, through `expand` so a re-export or alias on the way is followed exactly as for a written
+/// path. `None` when `out` does not know its module (no `MODPATH_KEY`) or the path walks above the
+/// root — the caller then keeps the literal, which is today's answer.
+fn anchored_value(full: &str, out: &HashMap<String, String>) -> Option<String> {
+    let segs: Vec<&str> = full.split("::").collect();
+    absolutise(&segs, out)?;
+    // NOT alias-followed: the value names what the `use` names. Following a local type alias here
+    // would bake the TARGET into the binding and leave no way back to an `impl` written on the alias
+    // itself (see `expand_noalias`); a later `expand` of a path through this binding still follows it.
+    Some(expand_noalias(full, out))
 }
 
 /// The CRATE-ROOT re-exports that a `use crate::name` in ANY file (even another one) resolves through —
@@ -4681,7 +5081,7 @@ pub(crate) fn ctor_leaf_of_expr(
         // A struct LITERAL names its type directly, so the fieldless test above does not apply to it
         // (`Guard { .. }` is a construction precisely because it has fields).
         syn::Expr::Struct(s) => {
-            let full = expand(&path_to_string(&s.path), uses);
+            let full = expand(&path_to_string_lc(&s.path), uses);
             type_from_value_path(&full, uses).as_deref().and_then(local_type_leaf)
         }
         syn::Expr::Path(p) if p.qself.is_none() => {

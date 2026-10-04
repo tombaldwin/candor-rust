@@ -1469,7 +1469,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         &mut merged.field_elem_trait,
         &mut merged.field_elem,
     );
-    let decl_index_hash = decl_index_digest(&merged);
+    // VEIN A — Pass B now reads the manifest's dependency names (`lang::glob_origin`), so a cached
+    // FnInfo set is reusable only under the same dependency list: it is folded into the reuse key.
+    let manifest_deps = cargo_deps(dir).0;
+    let decl_index_hash = {
+        let mut d: Vec<&str> = manifest_deps.iter().map(String::as_str).collect();
+        d.sort_unstable();
+        format!("{}#deps:{}", decl_index_digest(&merged), d.join(","))
+    };
     // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
     let returns: ReturnIndex =
         merged.rets.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
@@ -1799,6 +1806,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // SOUNDNESS R751 — …and this file's own module path, so `expand` can turn a `self::`/`super::`
         // path into a crate-root-ABSOLUTE one instead of collapsing it and losing the module context.
         crate::lang::seed_modpath(&modpath, &mut uses);
+        // VEIN A — and the manifest's dependency names, so a glob is never credited with a name that is
+        // an extern crate (`use sqlx_core::prelude::*; dotenvy::var(..)` keeps `dotenvy`).
+        crate::lang::seed_deps(&manifest_deps, &mut uses);
         // …and the MODULE-QUALIFIED external aliases (R99): a submodule `pub use std::process::Command`, a
         // nominal `pub type Cmd = std::process::Command`, a callable-typed `const`. Same cross-file problem
         // the root re-exports have — the declaring module is usually a DIFFERENT file — and the same answer.
@@ -2029,6 +2039,55 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // VEIN A — AN `impl` WRITTEN ON A LOCAL TYPE ALIAS IS ALSO AN `impl` OF THE ALIAS'S TARGET.
+    // `pub type TzifOwned = Tzif<…>;` + `impl TzifOwned { fn parse64(..) }` (jiff-0.2.28) keys the
+    // method under the ALIAS's name, while a receiver whose type is spelled through the alias resolves to
+    // the TARGET (`expand` follows a module-qualified alias, and once `use super::TzifOwned` is anchored
+    // it is followable): `tzif.parse_indicators(..)` became `Tzif::parse_indicators`, matched nothing,
+    // and `TzifOwned::parse64` lost a real `Log`. The target tail is ADDED only where no definition
+    // already claims it — so this can supply a resolution and can never turn an existing unique one
+    // into an ambiguity.
+    let mut alias_tails: Vec<(String, String)> = Vec::new();
+    for (q, t) in &merged.mod_aliases {
+        if t.contains(crate::decls::ALIAS_ALT_SEP) {
+            continue;
+        }
+        let a_leaf = q.rsplit("::").next().unwrap_or(q);
+        let t_body = t.strip_prefix("crate::").unwrap_or(t);
+        let t_root = t_body.split("::").next().unwrap_or(t_body);
+        if t_body.contains('<') || manifest_deps.contains(t_root) || matches!(t_root, "std" | "core" | "alloc") {
+            continue; // an external target is the classifier's, not an `impl` this crate wrote
+        }
+        let t_leaf = t_body.rsplit("::").next().unwrap_or(t_body);
+        if a_leaf != t_leaf && local_types.contains(a_leaf) {
+            alias_tails.push((a_leaf.to_string(), t_leaf.to_string()));
+        }
+    }
+    alias_tails.sort();
+    alias_tails.dedup();
+    for (a_leaf, t_leaf) in &alias_tails {
+        let adds: Vec<(String, Vec<String>)> = by_tail2
+            .iter()
+            .filter_map(|(k, v)| {
+                let m = k.strip_prefix(&format!("{a_leaf}::"))?;
+                Some((format!("{t_leaf}::{m}"), v.clone()))
+            })
+            .collect();
+        if !adds.is_empty() {
+            // The target is a type this crate declares (`pub struct Tzif<T>`), and a typed call on it is
+            // admitted only for a type in `local_types` — which is built from unit quals, and an alias's
+            // target that only ever receives `impl`s through the alias has none of its own.
+            local_types.insert(t_leaf.clone());
+        }
+        for (k, v) in adds {
+            if let std::collections::hash_map::Entry::Vacant(slot) = by_tail2.entry(k) {
+                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                    eprintln!("VEINAALIASIMPL {} -> {}", slot.key(), v.join(",")); // §E1 REACH COUNTER
+                }
+                slot.insert(v);
+            }
+        }
+    }
     // ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf) -> the in-scope fns that DIRECTLY dispatch
     // there` (see `FnInfo::dispatch`'s doc comment for why this exists and what it does NOT do — it
     // never contributes an effect, only a reachability fact). Built once, from this run's own Pass-B
@@ -2180,6 +2239,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // sweep: `RngSeedGenerator::next_seed` calls `rng.fastrand()` through a lock guard → bare leaf
     // `fastrand` → Rand, propagated to ~14 fns incl `Runtime::new`.)
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+    // VEIN A — contested non-method path calls the written path could not anchor: (caller, claimants).
+    // Judged after the fixpoint (see `veina_contested` below the first `propagate`).
+    let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect`, candor-swift and
     // candor-ts. It must NOT be propagated over call edges: a caller reaching one callee that writes and
@@ -4208,6 +4270,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if let Some(t2) = tail2(&c.path) {
                     if let Some(v) = by_tail2.get(&t2) {
                         let distinct: std::collections::BTreeSet<&String> = v.iter().collect();
+                        if distinct.len() >= 2 && !distinct.contains(&f.qual) {
+                            // VEIN A — the residue: a contested non-method path that `arm_exact_target`
+                            // could not settle even with the written path anchored to its module. Recorded
+                            // for the post-fixpoint judgement below rather than hedged here; see there.
+                            let cl: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
+                            if std::env::var_os("CANDOR_VEINA_RESIDUE").is_some() {
+                                eprintln!("VEINARESIDUE\t{}\t{}\t{}", f.qual, c.path, cl.join(","));
+                            }
+                            veina_contested.push((f.qual.clone(), cl));
+                        }
                         if distinct.len() >= 2 && distinct.contains(&f.qual) {
                             if std::env::var("CANDOR_R186_DEBUG").is_ok() {
                                 eprintln!("R750HEDGE\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
@@ -4645,7 +4717,56 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // (candor-scan/tests/cli.rs) pins as a REQUIRED shape — "the report itself still lists both units,
     // so this is a GATE de-duplication, not a lost entry").
     let all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
-    let inferred = propagate(&direct, &calls, &all);
+    let mut inferred = propagate(&direct, &calls, &all);
+    // ── §4 HONESTY — VEIN A: THE CONTEST NO WRITTEN PATH SETTLES, DISCLOSED WHERE IT COULD MATTER ──────
+    // After anchoring every written path to its module (`lang::expand`), a non-method path call whose
+    // two-segment tail several DISTINCT local definitions claim, and which `arm_exact_target` still
+    // cannot settle, was left with no edge, no `Unknown` and no reason — R830's residue, R190(c)'s
+    // qualified-tail spelling. Hedging all of it is the R190(c) hedge, priced at 4.88-7.02% and DECLINED,
+    // and that ruling stands: over 1,276 registry entries 24,855 such sites remain, in 243 entries,
+    // dominated by bindgen and per-arch twins whose claimants are all pure.
+    //
+    // THE SILENCE IS ONLY A SILENCE WHERE A CLAIMANT CARRIES SOMETHING THE CALLER DOES NOT. The program
+    // runs exactly one claimant (rustc resolves the path statically), so if every claimant's transitive
+    // effects are already in the caller's own set, nothing the call could reach is missing from the
+    // caller and no gate over it can be wrong. Where one claimant carries an effect — or an `Unknown` —
+    // the caller lacks, the caller cannot say which runs, so it discloses: `Unknown` with the
+    // `ambiguous:same-name local defs` reason the R750 hedge above already uses for the same refusal
+    // (§G — one spelling). Judged on the fixpoint, and re-run to a fixpoint, because a hedge raises the
+    // caller and may raise another contested caller above it. Monotone: it only ever adds `Unknown`.
+    //
+    // NOT A RESOLUTION and never a pick: no edge is added, because a union over distinct definitions is
+    // a fabrication (only one runs). Measured reach: 151 sites / 116 callers in 28 entries carry a
+    // claimant effect the caller lacks (`resid/eff.py` in the lane's scratch); the rest are untouched.
+    for _round in 0..8 {
+        let mut hedged = false;
+        for (caller, claimants) in &veina_contested {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            let missing = claimants.iter().any(|c| {
+                c != caller && inferred.get(c).is_some_and(|ce| ce.iter().any(|e| !have.contains(e)))
+            });
+            if missing && !direct.get(caller).is_some_and(|d| d.contains("Unknown"))
+                || missing && !unknown_why.get(caller).is_some_and(|w| w.contains("ambiguous:same-name local defs"))
+            {
+                let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+                let fresh_why = unknown_why
+                    .entry(caller.clone())
+                    .or_default()
+                    .insert("ambiguous:same-name local defs".to_string());
+                if fresh || fresh_why {
+                    hedged = true;
+                    if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                        eprintln!("VEINAHEDGE\t{caller}"); // §E1 REACH COUNTER
+                    }
+                }
+            }
+        }
+        if !hedged {
+            break;
+        }
+        inferred = propagate(&direct, &calls, &all);
+    }
     let hostsacc = propagate_str(&hosts, &calls, &all);
     // `fs` kinds propagate like the literal surfaces; the "?" poison propagates WITH them, which is what
     // makes a caller of an undetermined-kind function inherit the suppression rather than a half-answer.

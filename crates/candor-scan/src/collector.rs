@@ -964,6 +964,54 @@ impl<'a> CallCollector<'a> {
         self.resolve_recv_type_for(expr, "")
     }
 
+    /// SOUNDNESS R862 — is this resolved type path rooted at a MANIFEST dependency (`ratescore::Node`)?
+    /// Read from the dependency list Pass B seeds (`lang::DEPS_KEY`); a map without it answers `false`,
+    /// which is today's behaviour. A local module spelled like a dependency is anchored to `crate::` by
+    /// `expand` wherever the writing module declares it, so it does not reach here as the bare head.
+    fn is_dependency_type(&self, ty: &str) -> bool {
+        let Some((root, _)) = ty.split_once("::") else { return false };
+        self.uses
+            .get(crate::lang::DEPS_KEY)
+            .is_some_and(|d| d.split('\u{1}').any(|n| n == root))
+    }
+
+    /// VEIN A — `expand`, then, where that left the written path untouched, the origin only a glob can
+    /// supply (`lang::glob_origin`): `use std::fs::*; File::open(p)` reads as `std::fs::File::open`,
+    /// byte-identical to the named-import spelling. A generic parameter in scope is never a glob's name.
+    pub(crate) fn expand_scoped(&self, written: &str) -> String {
+        let e = expand(written, &self.uses);
+        if e != written {
+            return e;
+        }
+        let segs: Vec<&str> = written.split("::").collect();
+        let is_generic = |h: &str| {
+            self.generic_bounds.contains_key(h) || self.impl_generic_bounds.contains_key(h)
+                || self.trait_self.as_deref() == Some(h)
+        };
+        match crate::lang::glob_candidates(&segs, &self.uses, &is_generic) {
+            Some((mut c, true)) => c.pop().unwrap_or(e),
+            _ => e,
+        }
+    }
+
+    /// VEIN A — the NON-exclusive glob candidates for a written call path (see `lang::glob_candidates`):
+    /// pushed BESIDE the written path, never instead of it, because a local glob or a second external
+    /// one may be the name's real origin.
+    fn glob_extra_candidates(&self, written: &str) -> Vec<String> {
+        if expand(written, &self.uses) != written {
+            return Vec::new();
+        }
+        let segs: Vec<&str> = written.split("::").collect();
+        let is_generic = |h: &str| {
+            self.generic_bounds.contains_key(h) || self.impl_generic_bounds.contains_key(h)
+                || self.trait_self.as_deref() == Some(h)
+        };
+        match crate::lang::glob_candidates(&segs, &self.uses, &is_generic) {
+            Some((c, false)) => c,
+            _ => Vec::new(),
+        }
+    }
+
     /// VEIN B — THE STRICT EXPRESSION TYPER: the type of `expr` when this crate's own declarations PROVE
     /// it, and `None` otherwise. `None` is "unknown", never a default, and in particular never the
     /// builder-chain answer `resolve_recv_type` gives a method call ("a method returns its receiver's
@@ -1005,6 +1053,9 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                if self.is_dependency_type(&base) {
+                    return None; // R862 — a dependency's field is not this crate's leaf-keyed `fields`
+                }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -1434,7 +1485,7 @@ impl<'a> CallCollector<'a> {
                             && owner != "Self"
                             && segs.iter().all(|s| s.arguments.is_none())
                         {
-                            let full = expand(&path_to_string(&p.path), &self.uses);
+                            let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                             if !full.contains('<') && !full.contains(crate::decls::ALIAS_ALT_SEP) {
                                 probe("R856QUNIT");
                                 return Some(full);
@@ -1497,7 +1548,9 @@ impl<'a> CallCollector<'a> {
                     }
                 }
                 concrete.or(via_static).or_else(|| {
-                    upper_no_underscore.then(|| expand(&name, &self.uses))
+                    // VEIN A — `expand_scoped`: a unit value only a glob can supply (`use dep::*;
+                    // SHARED.ping()`) gets the named-import spelling's reading (R863).
+                    upper_no_underscore.then(|| self.expand_scoped(&name))
                 })
             }
             syn::Expr::Field(f) => {
@@ -1509,6 +1562,18 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                // SOUNDNESS R862 — A DEPENDENCY'S TYPE IS NOT THIS CRATE'S SAME-LEAF TYPE. `fields` is
+                // keyed by the type's LEAF and built from this crate's own source, so with a local
+                // `struct Node { parent: LocalP }`, `n.parent.visit()` for `n: &ratescore::Node` read
+                // the LOCAL struct's field, resolved to the local pure `LocalP::visit`, and the caller
+                // was ABSENT over the dependency's real `Env` (executed; `deny Env` exit 0). The base's
+                // root is the manifest's dependency, so this index cannot be its authority: answering
+                // nothing hands the hop to `dep_value_provenance`, which forms the dependency-field
+                // marker the chained join (⟨0.40⟩ `holds`) answers and an unchained scan discloses —
+                // exactly what the same hop does when no local type shares the leaf.
+                if self.is_dependency_type(&base) {
+                    return None;
+                }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -1653,7 +1718,7 @@ impl<'a> CallCollector<'a> {
             // recorded-return read already imposes — and never for a std-rooted callee.
             syn::Expr::Call(c) => {
                 let syn::Expr::Path(p) = &*c.func else { return None };
-                let full = expand(&path_to_string(&p.path), &self.uses);
+                let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                 if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
                     return None;
                 }
@@ -2870,7 +2935,16 @@ impl<'a> CallCollector<'a> {
         let Some(written) = written else { return false };
         let full = crate::lang::expand(written, &self.uses);
         let Some((root, _)) = full.split_once("::") else { return false };
-        crate::lang::is_dependency_crate_root(root) && !crate::lang::root_declares(&self.uses, root)
+        // VEIN A (R633's residual) — "does the crate ROOT declare this head" is the wrong module to ask.
+        // `mod inner { fn run(h: &dyn zdep::Handler) }` beside a root `mod zdep` names the EXTERN crate
+        // `zdep`: `inner` declares no `zdep`, and a root item is not in scope in `inner`. Where the map
+        // knows its own module, ask that module (a head it declares was already anchored to `crate::`
+        // by `expand`, so this is the same fact read twice); elsewhere keep the root question.
+        let declared_here = match crate::lang::module_declares(&self.uses, root) {
+            Some(d) => d,
+            None => crate::lang::root_declares(&self.uses, root),
+        };
+        crate::lang::is_dependency_crate_root(root) && !declared_here
     }
 
     /// SOUNDNESS R570 / R776 — A PATH CALL THAT NAMES A TRAIT MEMBER ASKS THE DISPATCH AUTHORITY.
@@ -3292,7 +3366,8 @@ impl<'a> CallCollector<'a> {
                         return None;
                     }
                 }
-                let full = expand(&path_to_string(&p.path), &self.uses);
+                // VEIN A — through a glob too (R863): `use dep::*; SHARED.ping()` names `dep::SHARED`.
+                let full = self.expand_scoped(&crate::lang::path_to_string_lc(&p.path));
                 if full.starts_with("::") || full.contains(crate::decls::ALIAS_ALT_SEP) {
                     return None;
                 }
@@ -3304,7 +3379,7 @@ impl<'a> CallCollector<'a> {
                 // (`ratescore::Node::new().parent`): the direct `dep::build().go()` spelling is answered
                 // by the caller's own arm before this function is consulted.
                 syn::Expr::Path(p) => {
-                    let full = expand(&path_to_string(&p.path), &self.uses);
+                    let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                     (full.contains("::") && !full.starts_with("::")
                         && !full.contains(crate::decls::ALIAS_ALT_SEP))
                         .then_some(full)
@@ -3356,7 +3431,17 @@ impl<'a> CallCollector<'a> {
     fn enum_variant_binding(&mut self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
         let (name, leaf) = tuple_variant_binding(pat)?;
         let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
-        let ty = self.enum_variants.get(&leaf).cloned();
+        // VEIN A — a pattern that NAMES its enum is typed by that enum's own variant first (see the
+        // `Enum\u{1e}Variant` key in `decls::collect_decls`); the leaf key is the fallback, unchanged.
+        let qualified = crate::lang::tuple_variant_enum(pat).and_then(|en| {
+            let en = if en == "Self" {
+                self.uses.get(crate::lang::SELF_KEY).map(|t| t.rsplit("::").next().unwrap_or(t).to_string())?
+            } else {
+                en
+            };
+            self.enum_variants.get(&format!("{en}\u{1e}{leaf}")).cloned()
+        });
+        let ty = qualified.or_else(|| self.enum_variants.get(&leaf).cloned());
         // R90 — SOUNDNESS: `leaf` colliding across two unrelated enums makes
         // `drop_cross_ambiguous_enum_leaves` remove it from BOTH indexes rather than guess which enum a
         // pattern meant — so `leaves`/`ty` land empty/`None` here NOT because this payload is genuinely
@@ -3695,7 +3780,7 @@ impl<'a> CallCollector<'a> {
                     // only the same `use_alts` lookup the call site does, with `alias_join` (R375)
                     // rather than `format!` so a joined target cannot lose its suffix.
                     .unwrap_or_else(|| {
-                        let written = expand(&path_to_string(&p.path), &s.uses);
+                        let written = expand(&crate::lang::path_to_string_lc(&p.path), &s.uses);
                         let mut targets = vec![written.clone()];
                         let head = p.path.segments.first().map(|x| x.ident.to_string());
                         let rest: Vec<String> =
@@ -4260,7 +4345,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 if let Some(ts) = self.use_alts.get(&head).cloned() {
                                     let rest: Vec<String> = p.path.segments.iter().skip(1)
                                         .map(|s| s.ident.to_string()).collect();
-                                    let written = expand(&path_to_string(&p.path), &self.uses);
+                                    let written = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                                     for t in ts {
                                         // R375 — `alias_join`, never `format!`. It is the join-aware
                                         // concatenation that distributes a suffix over `ALIAS_ALT_SEP`
@@ -4283,7 +4368,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                         let mut path = aliased
                             .and_then(|ts| ts.into_iter().next())
-                            .unwrap_or_else(|| expand(&path_to_string(&p.path), &self.uses));
+                            .unwrap_or_else(|| {
+                                // A QSELF path's written segments are not its head (the qself type is),
+                                // so only a plain path may be read through a glob.
+                                if p.qself.is_some() {
+                                    expand(&crate::lang::path_to_string_lc(&p.path), &self.uses)
+                                } else {
+                                    let written = crate::lang::path_to_string_lc(&p.path);
+                                    let mut extras = self.glob_extra_candidates(&written);
+                                    let e = self.expand_scoped(&written);
+                                    let unfollowed = crate::lang::expand_noalias(&written, &self.uses);
+                                    if unfollowed != e && unfollowed.starts_with("crate::") {
+                                        extras.push(unfollowed);
+                                    }
+                                    for extra in extras {
+                                        let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
+                                        self.calls.push(Call { argc: 0, entropy_arg: false, path: extra,
+                                            leaf: leaf2, str_arg: None, typed: false, method: false,
+                                            is_macro: false, path_lits_partial: false, path_lit2: None });
+                                    }
+                                    e
+                                }
+                            });
                         // A QSELF call (`<Type>::assoc()` / `<Type as Trait>::m()`) is an ASSOCIATED-fn call
                         // on the qself receiver TYPE, not a free fn — but `path_to_string(&p.path)` DROPS the
                         // qself type (`p.qself.ty`), so an INHERENT-form `<Vec<u8>>::new()` collapses to the
@@ -4467,7 +4573,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             _ => match peel_recv(&node.receiver) {
                 syn::Expr::Call(c) => match &*c.func {
                     syn::Expr::Path(p) => {
-                        let full = expand(&path_to_string(&p.path), &self.uses);
+                        let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                         (full.contains("::") && !full.starts_with("::")).then_some(full)
                     }
                     _ => None,
@@ -6591,7 +6697,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.dep_bound_vars.remove(&id.ident.to_string());
                         if let syn::Expr::Call(c) = peel_recv(&init.expr) {
                             if let syn::Expr::Path(p) = &*c.func {
-                                let full = expand(&path_to_string(&p.path), &self.uses);
+                                let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                                 // A multi-segment path whose head is a plausible crate root. The head is
                                 // checked against the manifest's declared deps at CONSUMPTION in scan.rs,
                                 // so a local module sharing the shape emits an inert marker.
@@ -6894,7 +7000,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
-        let mpath = expand(&path_to_string(&node.path), &self.uses);
+        let mpath = crate::lang::expand_noanchor(&path_to_string(&node.path), &self.uses);
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
         // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
@@ -7090,7 +7196,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // `E2::from` when `E2` is a LOCAL `impl From`. A `?` whose enclosing error type is unknown /
         // std / `Box<dyn Error>` (the overwhelming case) has no `err_ret_leaf` → no edge (no flood).
         if let Some(err_leaf) = self.err_ret_leaf.clone() {
-            self.charge_from(&err_leaf);
+            for l in err_leaf.split('\u{1}') {
+                self.charge_from(l);
+            }
         }
         syn::visit::visit_expr_try(self, node);
     }
@@ -7323,6 +7431,27 @@ pub(crate) fn arm_exact_target<'a>(
             }
         })
         .collect();
+    // VEIN A — THE ANCHOR CAN NAME AN IMPORT, NOT A DECLARATION. `super::aes::hw::Key` in a FILE module
+    // whose parent writes `use super::{aes, gcm};` is anchored to `crate::aead::aes_gcm::aes::hw::Key`, a
+    // path no definition has — the parent IMPORTS `aes`, and a per-file pass cannot see the parent's
+    // imports. Before anchoring, the stripped `aes::hw::Key::…` reached its one claimant by suffix
+    // (ring-0.17.14's `aeshwclmulmovbe::open` lost two edges without this). So when an anchored path
+    // matches NO claimant at all, drop its leading segments one at a time and take the first unique
+    // suffix match — exactly the stripped reading the path had before, and never applied while any
+    // claimant matched the anchored form.
+    if scored.is_empty() && path.starts_with("crate::") {
+        let segs: Vec<&str> = rel.split("::").collect();
+        for k in 1..segs.len().saturating_sub(1) {
+            let tail = segs[k..].join("::");
+            let mut hits = cands.iter().filter(|c| c.as_str() == tail || c.ends_with(&format!("::{tail}")));
+            if let Some(h) = hits.next() {
+                if hits.next().is_none() {
+                    return Some(h);
+                }
+                return None; // a tie refuses, as everywhere in this helper
+            }
+        }
+    }
     let best = scored.iter().map(|(s, _)| *s).max()?;
     let mut top = scored.iter().filter(|(s, _)| *s == best).map(|(_, c)| *c);
     let hit = top.next()?;
