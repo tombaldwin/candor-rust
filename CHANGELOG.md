@@ -11,6 +11,33 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ row 1 credits an absolute import of the crate's OWN trait (fewer `Unknown`s; SOUNDNESS R887's rule, sharpened)
+
+Row 1 of the Rust permission matched an in-scope trait by NAME, so an import of the crate's OWN trait with
+the same leaf as a chained one read as the chained trait in scope. Measured: x11rb-protocol's `use
+crate::x11_utils::Serialize` beside serde's `Serialize::serialize` hedged ~1,000 rows of calls the crate's
+own macro-generated `impl Serialize for u32` answers. An import is now discounted only when it is ABSOLUTE
+(`crate::…`) and its path is EXACTLY the declaration path of a trait this crate declares — a crate path
+names one item. Every other spelling still counts: the dependency's own path, a local re-export, a
+`self::`/`super::`/module-relative import (an over-disclosure, never a silence), any glob of a dependency.
+
+- **⚠ Gates that can flip: 1 → 0 on `deny Unknown` / `deny <E> Unknown`** — 564 functions, 4 modules,
+  0 crates over the 909-entry chained corpus; nothing else moves. REMOVED 905 rows / CHANGED 884 against
+  `61dfea3`, every lost value an `Unknown`, an `unresolved` flag or a `dispatch:<Tr>.<m>` reason; 0 concrete
+  effects lost. An independent classifier (re-parses each file's `use` lines, derives each trait's
+  declaring module from its file path) put 1,046 of 1,050 lost reasons in C1 — the only matching import
+  is the crate's own trait — and 4 in regex-automata hand-checked C1 (its parser misread a module doc
+  block). Seeded with the first cut below, the same classifier flags the C3.
+- **The second fixture was written first, executed** — the shapes where this exclusion could go silent:
+  the dependency's trait imported where the crate also implements its own same-named trait for `u32`, the
+  dependency's trait through a local re-export, a bound on it, its explicit path, and a ROOT re-export
+  (`pub use dep::Ser;` + `use crate::Ser`). All stay disclosed or charged. **A first cut keyed on a path
+  SUFFIX went SILENT on the root re-export** (`deny Env Unknown` 1 → 0 over executed `Env`); this one is
+  exact, and a test pins that shape.
+- **Price now:** against `ad30e26` 8,952 rows newly `Unknown` (2.22%), `deny Unknown` flips 8,463 functions
+  / 640 modules / 12 crates; against `f7f4c08` 6,451 rows (1.60%), 6,087 / 370 / 9; `deny <E>` 0 at every
+  scope.
+
 ### ⚠ ⟨0.40⟩ the Rust permission: an in-scope trait, a followed `Deref`, and an open `Deref` chain discloses (SOUNDNESS R886, R887, R888; conformance PART 95)
 
 The first port (below) read a typed member miss as purity unless an in-scope trait carried the member.

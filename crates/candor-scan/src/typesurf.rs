@@ -1347,9 +1347,23 @@ pub(crate) fn in_scope_publishes(
     idx: &crate::deps::DepIndex,
     file_uses: &[String],
     renames: &HashMap<String, String>,
+    local_traits: &[&str],
     member: &str,
 ) -> Option<String> {
     let owners = idx.members.get(member)?;
+    // A `use` that names THIS crate's OWN trait brings no chained trait into scope, though its LEAF may
+    // equal one (x11rb-protocol's `use crate::x11_utils::Serialize` beside serde's `Serialize::serialize`:
+    // ~1,500 function flips over the corpus, every one answered by the crate's own macro-generated impl
+    // for an integer). Excluded ONLY when the import is ABSOLUTE (`crate::…`) and its path is EXACTLY the
+    // declaration path of a trait this crate declares — a crate path names one item, so that import IS
+    // the local trait. Anything else still counts, including a `self::`/`super::`/module-relative import
+    // (an over-disclosure, never a silence) and a local RE-EXPORT of a dependency trait: a first cut that
+    // excluded any import whose path was a SUFFIX of a local trait's went silent, executed, on
+    // `pub use dep::Ser;` at the crate root imported as `use crate::Ser` beside a local `local::Ser`.
+    let names_local_trait = |u: &str| -> bool {
+        u.strip_prefix("crate::").is_some_and(|tail| local_traits.contains(&tail))
+    };
+    let file_uses: Vec<&String> = file_uses.iter().filter(|u| u.ends_with('*') || !names_local_trait(u)).collect();
     // A glob of a CHAINED package (`use dep::prelude::*`) may bring any of its traits into scope. A
     // std glob brings none of a package's, and a LOCAL glob (`use crate::params::*`, `use super::*`) is
     // this crate's own items: measured, reading it as "every trait anywhere" hedged 584 rows of one crate

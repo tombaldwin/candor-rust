@@ -2907,6 +2907,56 @@ pub struct Plain;
                 "an unknown derive (it may emit a Deref) uncloses every type of its crate:\n{u:#}");
     }
 
+    /// ⟨0.40⟩ ROW 1's EXCLUSION, and the shape that would make it a silence. An ABSOLUTE import of this crate's
+    /// OWN trait (`use crate::local::Bl`, x11rb-protocol's `use crate::x11_utils::Serialize`) does not put a
+    /// chained trait of the same LEAF in scope, so `x.bl()` on a primitive answered by the local
+    /// (macro-generated) impl gains no hedge. The same leaf imported from the DEPENDENCY, through a local
+    /// re-export, or through a ROOT re-export (`pub use dep::Bl;` + `use crate::Bl`) still discloses — the
+    /// last one went SILENT, executed, under a first cut keyed on a path SUFFIX.
+    #[test]
+    fn a_local_trait_import_is_credited_and_a_dependency_import_is_not() {
+        let dep = std::env::temp_dir().join(format!("candor-r843x-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dep.join("report.tdep.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}}, "package": "tdep",
+            "resolves": ["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"],
+            "typeSurface": {{"types": {{"tdep#Bl": {{"kind": "protocol", "supers": []}}}}}},
+            "functions": [{{"fn": "Bl::bl", "inferred": ["Env"], "hash": "tdep#Bl::bl"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let d = std::env::temp_dir().join(format!("candor-r843x-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"app\"\n[dependencies]\ntdep = \"1\"\n").unwrap();
+        let files = [
+            ("lib.rs", "pub mod local;\npub mod reexp { pub use tdep::Bl; }\npub use tdep::Bl;\n\
+                        pub mod a_local;\npub mod b_dep;\npub mod c_reexp;\npub mod d_root;\n"),
+            ("local.rs", "pub trait Bl { fn bl(&self); }\n\
+                          macro_rules! imp { ($t:ty) => { impl Bl for $t { fn bl(&self) {} } }; }\nimp!(u32);\n"),
+            ("a_local.rs", "use crate::local::Bl;\npub fn a(x: &u32) { x.bl() }\n"),
+            ("b_dep.rs", "use tdep::Bl;\npub fn b(x: &u32) { x.bl() }\n"),
+            ("c_reexp.rs", "use crate::reexp::Bl;\npub fn c(x: &u32) { x.bl() }\n"),
+            ("d_root.rs", "use crate::Bl;\npub fn r(x: &u32) { x.bl() }\n"),
+        ];
+        for (n, t) in files { std::fs::write(d.join("src").join(n), t).unwrap(); }
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true, include_tests: false,
+            policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "a_local::a"),
+                "the crate's OWN trait is the one in scope — no hedge:\n{v:#}");
+        for n in ["b_dep::b", "c_reexp::c", "d_root::r"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Unknown".to_string()),
+                    "`{n}` reaches the DEPENDENCY's `Bl` and must keep its disclosure:\n{v:#}");
+        }
+    }
+
     /// One signature may bind the same trait LEAF to two different crates. `trait_quals` is keyed by leaf,
     /// and last-wins made `a.go()` on an `alpha::Handler` form `beta::Handler::go` and inherit BETA's
     /// reported effects — a fabrication on a function that never touches beta.

@@ -1845,6 +1845,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let file_uses: HashMap<&str, &[String]> =
         decls_per_file.iter().map(|(rel, _, fd)| (rel.as_str(), fd.ts.uses.as_slice())).collect();
     let r843_probe = std::env::var_os("CANDOR_R843_PROBE").is_some();
+    // ⟨0.40⟩ this crate's own trait declarations, by module-qualified path — row 1 must not read an import of
+    // one of them as a chained trait in scope (see `typesurf::in_scope_publishes`).
+    let local_trait_quals: Vec<&str> = merged.trait_quals.values().flatten().map(String::as_str).collect();
     // ⟨0.40⟩ SOUNDNESS R888 — this crate's own `Deref` impls whose target is a DEPENDENCY's type.
     let foreign_derefs = {
         let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
@@ -3563,7 +3566,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             Some("<deref chain open>".to_string())
                         } else if w.hits.is_empty() {
                             let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
-                            crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, member)
+                            crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &local_trait_quals, member)
                         } else {
                             None
                         };
@@ -3609,7 +3612,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !deps_idx.crates.contains(cr_real)
             {
                 let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
-                if let Some(tr) = crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &c.leaf) {
+                if let Some(tr) = crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &local_trait_quals, &c.leaf) {
                     let leaf = tr.split_once('#').map_or(tr.as_str(), |(_, q)| q).rsplit("::").next().unwrap_or("").to_string();
                     if r843_probe {
                         eprintln!("R843SCOPE\t{}\t{}\t{tr}", f.qual, c.path);
