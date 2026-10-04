@@ -11,6 +11,48 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ the Rust permission: an in-scope trait, a followed `Deref`, and an open `Deref` chain discloses (SOUNDNESS R886, R887, R888; conformance PART 95)
+
+The first port (below) read a typed member miss as purity unless an in-scope trait carried the member.
+A reviewer executed the counterexample: `w.leak()` through `impl Deref<Target = Inner>` — hand-written or
+`macro_rules!`-generated — read `['Net']`, `deny Env` and `deny Env Unknown` both 0, over a body that reads
+the environment (also on `ad30e26`). SPEC §2 ⟨0.40⟩ now grants Rust a LANGUAGE-SCOPED PERMISSION for a
+receiver typed from source, and this implements its three rows:
+
+- **⚠ Producer: `types` keys carry a `deref` field** — a CLOSED key whose type has a visible `impl Deref`
+  names the target (`"deref": "dep#Inner"`); a closed key without one asserts there is none; a `Deref` to a
+  target the producer cannot key (a generic parameter, a slice, a platform type) leaves the type KIND-ONLY.
+  **serde's `Serialize`/`Deserialize` derives no longer unclose a type**: their impl is LISTED in `supers`
+  (`serde#Serialize`) and `#[serde(...)]` beside them is read as their helper; any other non-std derive
+  still uncloses every type of its crate (`derive_more::Deref` exists). 742 dependency crates: 43,212
+  types, 92.4% kind-only (was 93.1%); the dominant cause is still an item-position macro invocation (411 of
+  909 corpus crates). `functions[]` unchanged unchained (742 crates, 0/0/0).
+- **⚠ Consumer, row 2 (R886):** a visible `Deref` is FOLLOWED — `w.leak()` on `WrapD: Deref<Target =
+  InnerD>` charges `InnerD::leak`'s `Env` (PART 95 `r16_deref`). **R888:** this crate's OWN `impl Deref for
+  Mine { type Target = dep::Inner }` is followed into the dependency the same way, AFTER the local answer
+  is tried (a first cut asked the dependency first and dropped sqlx-mysql's local `Bytes::get_uint_lenenc`
+  edge; the corpus partition caught it and a test pins it).
+- **⚠ Row 3:** a `Deref` chain that cannot be followed — the receiver, or a type the chain reaches, has no key
+  or a KIND-ONLY key in a package whose manifest is trusted — ADDS `Unknown` (`dispatch:<T>.<m>`; PART 95
+  `o15_deref_macro`). A package with no trusted manifest (judged nothing, incomplete, stale) keeps the
+  coverage disclosure (`invisible`) it already gets.
+- **⚠ Row 1, R887:** a typed method call on a std, primitive or local receiver that nothing answered, with a
+  chained TRAIT carrying the member in scope (`use dep::Bl; x.bl()` on `x: &u8`, a blanket impl), ADDS
+  `Unknown`. An untyped receiver is not asked (residual).
+- A CLOSED, `Deref`-free type with no chained trait in scope keeps the purity reading (PART 95
+  `c8_closed_pure`).
+- **Executed fixtures** (the reviewer's, instrumented; unit AND caller): visible and macro `Deref` on a
+  kind-only crate — `deny Env Unknown` 0 → 1; own `Deref` into a dependency (R888) — `deny Env` 0 → 1; a
+  blanket impl on `u8` (R887) and a glob-imported trait method — `deny Env Unknown` 0 → 1.
+- **Price — direction: adds `Unknown` only.** Of the 62,787 structural member misses on source-typed
+  receivers over the 909-entry chained corpus, the three rows still disclose **62,025** (61,833 through an
+  open `Deref` chain, 192 through an in-scope trait); 762 keep the purity reading. Against `f7f4c08`: ADDED
+  5,179 · REMOVED 0 · CHANGED 38,192; 7,150 rows newly `Unknown` of 403,300 analysed units (**1.77%**), 0
+  concrete gains; the only values that moved are 18 `interfaceUnion` rows replaced by the real row now
+  carrying `Unknown`. Gate flips, all 0 → 1: `deny Unknown` 6,651 functions / 374 modules / 9 crates;
+  `deny <E>` 0 at every scope; `deny Unknown[dispatch]` 7,869 / 845 / 30. Against `ad30e26` (both ⟨0.40⟩
+  commits): 9,775 rows (2.42%), `deny Unknown` 9,027 / 644 / 12.
+
 ### ⚠ ⟨0.40⟩ declared types and the dependency's own hierarchy — producer and consumer, resolution only (SOUNDNESS R843; conformance PART 95)
 
 **The engine still declares spec `0.39`.** ⟨0.40⟩ is implemented here and by candor-swift; the declaration

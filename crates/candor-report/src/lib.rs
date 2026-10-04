@@ -635,6 +635,11 @@ pub struct TypeEntry {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supers: Option<Vec<String>>,
+    /// ⟨0.40⟩ Rust only: the `Deref::Target` of a CLOSED key whose type has a visible `impl Deref`, in its
+    /// owner's namespace. A closed key without it asserts there is none — a `Deref` is how a Rust receiver
+    /// reaches members it does not declare, so a closure that omits one is short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deref: Option<String>,
 }
 
 /// Parse a report's function entries, accepting BOTH the v0.2 envelope `{ candor, functions }` and

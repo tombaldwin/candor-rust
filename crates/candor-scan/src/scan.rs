@@ -1845,6 +1845,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let file_uses: HashMap<&str, &[String]> =
         decls_per_file.iter().map(|(rel, _, fd)| (rel.as_str(), fd.ts.uses.as_slice())).collect();
     let r843_probe = std::env::var_os("CANDOR_R843_PROBE").is_some();
+    // ⟨0.40⟩ SOUNDNESS R888 — this crate's own `Deref` impls whose target is a DEPENDENCY's type.
+    let foreign_derefs = {
+        let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
+        let ctx = crate::typesurf::BuildCtx {
+            crate_name: &crate_name, deps: &deps, renames: &dep_renames, chained: &deps_idx.surface,
+            incomplete: false,
+        };
+        crate::typesurf::foreign_derefs(&ctx, &files)
+    };
     // dep crate root -> count of FLOORED call sites into it. Floored only: the tally has to mean the
     // same thing as the crate name beside it — calls whose effects this scan could not see.
     let mut dep_seen: HashMap<String, usize> = HashMap::new();
@@ -3287,6 +3296,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     }
                                     break;
                                 }
+                                // ⟨0.40⟩ SOUNDNESS R888 — AFTER the local attempt above: the target is a CHAINED
+                                // dependency's type, which no local unit answered: ask the dependency through the walk (its supertraits,
+                                // its own `Deref`). A chain that ends OPEN on the dependency's side — an
+                                // unkeyed or kind-only type — discloses (SPEC §2 ⟨0.40⟩ Rust permission, row 3).
+                                if let Some(k) = foreign_derefs.get(&cur) {
+                                    let (rows, w) = crate::typesurf::join_through(deps_idx, k, &c.leaf, false);
+                                    if r843_probe {
+                                        eprintln!("R843OWNDEREF\t{}\t{cur}->{k}::{}\thits={}\topen={}",
+                                            f.qual, c.leaf, w.hits.len(), w.deref_open);
+                                    }
+                                    for de in rows {
+                                        apply_dep_fn(de, &f.qual, DepSink {
+                                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds,
+                                            paths: &mut paths, tables: &mut tables, incomplete: &mut incomplete,
+                                            unknown_why: &mut unknown_why, blind_direct: &mut blind_direct,
+                                            dep_invisible: &mut dep_invisible, unknown_via_dep: &mut unknown_via_dep,
+                                        });
+                                    }
+                                    if w.hits.is_empty() && w.deref_open {
+                                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                        unknown_why.entry(f.qual.clone()).or_default()
+                                            .insert(format!("dispatch:{cur}.{}", c.leaf));
+                                    }
+                                    break;
+                                }
                                 cur = target;
                             }
                         }
@@ -3506,17 +3540,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // type it does not own (`impl PBase for base::Tok`, PART 95 `r8_adds`, SILENT before
                 // this). Every key the walk reaches is ADDED; nothing is withdrawn.
                 //
-                // WHERE THE WALK FINDS NOTHING, the miss stays a purity claim (§2 rule 3) UNLESS a trait
-                // of a chained package that publishes this member is IN SCOPE in this file. Rust resolves
-                // an inherited method only through a trait in scope, so that is the one place an `impl`
-                // the walk could not see (an `adds` withheld, a kind-only node, an unkeyed type) can still
-                // be supplying the body — and `adds` is never complete (PART 95 `o10_adds_partial`).
+                // WHERE THE WALK FINDS NOTHING — SPEC §2 ⟨0.40⟩'s LANGUAGE-SCOPED PERMISSION FOR RUST, for a
+                // receiver typed from this crate's own source. A Rust type's members come from three places
+                // only: its inherent impls, a trait in scope at the call, and its `Deref` target. So the
+                // miss is the producer's purity claim (§2 rule 3) unless one of these says otherwise:
+                //   1. a chained TRAIT carrying the member is in scope in this file (imported, glob-imported,
+                //      re-exported, `as _`) — `adds` is never complete (PART 95 `o10_adds_partial`): ADD
+                //      `Unknown`;
+                //   2. the receiver's key carries `deref` — FOLLOWED inside `join_through`, and whatever it
+                //      reaches is charged (PART 95 `r16_deref`);
+                //   3. the `Deref` chain is OPEN — the receiver, or a type the chain reached, has no key or a
+                //      KIND-ONLY one: ADD `Unknown` (PART 95 `o15_deref_macro`).
+                // A closed, `Deref`-free key with no in-scope trait keeps the purity reading (PART 95
+                // `c8_closed_pure`). Supertype paths that end structurally are NOT a hedge here: a method
+                // a supertrait provides is callable only with that trait in scope, which is row 1.
                 if hit.is_none() && c.method && c.typed && dep_default_path.is_none() {
                     if let Some((tpath, member)) = rel.rsplit_once("::") {
                         let ts = &deps_idx.surface;
                         let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
                         let (rows, w) = crate::typesurf::join_through(deps_idx, &start, member, false);
-                        let in_scope = if w.hits.is_empty() {
+                        let in_scope = if w.hits.is_empty() && w.deref_open {
+                            Some("<deref chain open>".to_string())
+                        } else if w.hits.is_empty() {
                             let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
                             crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, member)
                         } else {
@@ -3526,11 +3571,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R843WALK\t{}\t{start}::{member}\thits={}\tstructural={}\tinscope={}",
                                 f.qual, w.hits.len(), w.structural, in_scope.as_deref().unwrap_or("-"));
                         }
-                        // MEASUREMENT ONLY: a walk that missed STRUCTURALLY (a kind-only or unkeyed node) with
-                        // no in-scope trait carrying the member — what a reading that hedges every structural
-                        // miss on a source-typed receiver would add, and this engine does not.
-                        if r843_probe && w.hits.is_empty() && w.structural && in_scope.is_none() {
-                            eprintln!("R843SMISS\t{}\t{start}::{member}", f.qual);
+                        // MEASUREMENT ONLY: every walk that missed STRUCTURALLY (a kind-only or unkeyed node) —
+                        // the population SPEC §2 ⟨0.40⟩'s default rule would hedge — tagged with which of the
+                        // permission's rows, if any, still discloses it (`deref` = row 3, `scope` = row 1,
+                        // `pure` = the purity reading the permission allows).
+                        if r843_probe && w.hits.is_empty() && w.structural {
+                            let why = if w.deref_open { "deref" } else if in_scope.is_some() { "scope" } else { "pure" };
+                            eprintln!("R843SMISS\t{}\t{start}::{member}\t{why}", f.qual);
                         }
                         for de in rows {
                             apply_dep_fn(de, &f.qual, DepSink {
@@ -3546,6 +3593,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
                         }
                     }
+                }
+            }
+            // ⟨0.40⟩ SOUNDNESS R887 — THE PERMISSION'S FIRST ROW ON A RECEIVER THAT IS NOT A DEPENDENCY'S
+            // TYPE. `use dep::Bl; x.bl()` with `x: &u8` reaches the dependency's blanket `impl<T: ?Sized> Bl
+            // for T`, but the receiver types as `u8`, so no chained key was ever asked and the call read
+            // SILENT (`['Net']`, executed `Env`). A typed method call on a std, primitive or local type that
+            // nothing answered — not classified, not resolved locally — can only be supplied by a trait in
+            // scope; where a chained TRAIT carrying the member is in scope here, ADD `Unknown` (SPEC §2
+            // ⟨0.40⟩: "joined through ⟨0.39⟩'s union, or the consumer MUST ADD `Unknown`"; disclosing keeps
+            // every new answer an `Unknown`, never a charge that an inherent method may shadow). An UNTYPED
+            // receiver is not asked: a bare-leaf twin rides beside every typed call, so it cannot tell a
+            // resolved local method from a missing one.
+            if c.method && c.typed && classified.is_none() && !resolved_local && !suppress_bare_leaf
+                && !deps_idx.crates.contains(cr_real)
+            {
+                let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
+                if let Some(tr) = crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &c.leaf) {
+                    let leaf = tr.split_once('#').map_or(tr.as_str(), |(_, q)| q).rsplit("::").next().unwrap_or("").to_string();
+                    if r843_probe {
+                        eprintln!("R843SCOPE\t{}\t{}\t{tr}", f.qual, c.path);
+                    }
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{}", c.leaf));
                 }
             }
             // SOUNDNESS R223 — WHICH resolution is allowed to silence the classifier. `resolved_local`

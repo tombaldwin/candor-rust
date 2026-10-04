@@ -88,6 +88,9 @@ pub(crate) struct FileSurface {
     /// item, else the owning type's TyRef.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) holds: Vec<(String, String, String, bool)>,
+    /// (self TyRef, `Deref::Target` TyRef or `?`) — Rust's member-forwarding edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) derefs: Vec<(String, String)>,
     /// Why a type of this crate cannot be closed, if anything in this file says so. Non-empty anywhere
     /// in the crate = every type of the crate is KIND-ONLY.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -113,7 +116,7 @@ fn attr_is_builtin(a: &syn::Attribute) -> bool {
 
 /// `cfg_attr(pred, a, b)`: the attributes it may apply, as (path, is a `derive`, the derive names).
 /// Unparseable → a path no builtin list contains, so an unreadable `cfg_attr` counts as a possible macro.
-fn cfg_attr_inner(a: &syn::Attribute) -> Vec<(String, Vec<String>)> {
+fn cfg_attr_inner(a: &syn::Attribute) -> Vec<(String, Vec<syn::Path>)> {
     let parsed = a.parse_args_with(
         syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
     );
@@ -126,8 +129,8 @@ fn cfg_attr_inner(a: &syn::Attribute) -> Vec<(String, Vec<String>)> {
             let derives = match m {
                 syn::Meta::List(l) if l.path.is_ident("derive") => l
                     .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-                    .map(|ps| ps.iter().map(|p| p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()).collect())
-                    .unwrap_or_else(|_| vec!["?".to_string()]),
+                    .map(|ps| ps.into_iter().collect())
+                    .unwrap_or_else(|_| vec![syn::parse_quote!(__unreadable_derive)]),
                 _ => Vec::new(),
             };
             (path, derives)
@@ -135,46 +138,62 @@ fn cfg_attr_inner(a: &syn::Attribute) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-fn derive_names(a: &syn::Attribute) -> Vec<String> {
-    let mut out = Vec::new();
-    let _ = a.parse_nested_meta(|m| {
-        out.push(m.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default());
-        Ok(())
-    });
-    out
+fn derive_paths(a: &syn::Attribute) -> Vec<syn::Path> {
+    a.parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        .map(|ps| ps.into_iter().collect())
+        .unwrap_or_default()
 }
 
-/// (an attribute that may be a macro sits here, a non-std derive sits here).
-fn scan_attrs(attrs: &[syn::Attribute]) -> (bool, bool) {
+/// serde's derives: each adds exactly ONE `impl` of the named serde trait for the annotated type — never a
+/// `Deref`, never a member (SPEC §2 ⟨0.40⟩: "the serde impl is listed"). Their helper attribute is `serde`.
+const SERDE_DERIVES: [&str; 2] = ["Serialize", "Deserialize"];
+
+/// What an item's attributes say: (an attribute that may be a macro sits here, a derive whose output is
+/// not known sits here, the serde derives' paths). A KNOWN derive — the std set, which implements a platform
+/// trait, and serde's two, whose impl is listed — does not unclose the type (SPEC §2 ⟨0.40⟩: "an expansion
+/// whose output the producer KNOWS is visible, and the list fails safe"); any other derive does
+/// (`derive_more::Deref` exists). `serde` is accepted as a helper attribute only beside a serde derive.
+fn scan_attrs(attrs: &[syn::Attribute]) -> (bool, bool, Vec<syn::Path>) {
     let (mut mac, mut derive) = (false, false);
+    let mut serde: Vec<syn::Path> = Vec::new();
+    let take = |ps: Vec<syn::Path>, derive: &mut bool, serde: &mut Vec<syn::Path>| {
+        for p in ps {
+            let leaf = p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            if SERDE_DERIVES.contains(&leaf.as_str()) {
+                serde.push(p);
+            } else if !STD_DERIVES.contains(&leaf.as_str()) {
+                *derive = true;
+            }
+        }
+    };
+    let mut helpers: Vec<String> = Vec::new();
     for a in attrs {
         if a.path().is_ident("derive") {
-            if derive_names(a).iter().any(|d| !STD_DERIVES.contains(&d.as_str())) {
-                derive = true;
-            }
+            take(derive_paths(a), &mut derive, &mut serde);
         } else if a.path().is_ident("cfg_attr") {
             for (inner, derives) in cfg_attr_inner(a) {
                 if inner == "derive" {
-                    if derives.iter().any(|d| !STD_DERIVES.contains(&d.as_str())) {
-                        derive = true;
-                    }
-                    continue;
-                }
-                let segs: Vec<&str> = inner.split("::").collect();
-                let builtin = match segs.as_slice() {
-                    [one] => BUILTIN_ATTRS.contains(one) || one.starts_with("rustc_"),
-                    [root, ..] => TOOL_ATTR_ROOTS.contains(root),
-                    [] => true,
-                };
-                if !builtin {
-                    mac = true;
+                    take(derives, &mut derive, &mut serde);
+                } else {
+                    helpers.push(inner);
                 }
             }
         } else if !attr_is_builtin(a) {
+            helpers.push(path_segs(a.path()).join("::"));
+        }
+    }
+    for inner in helpers {
+        let segs: Vec<&str> = inner.split("::").collect();
+        let builtin = match segs.as_slice() {
+            [one] => BUILTIN_ATTRS.contains(one) || one.starts_with("rustc_") || (*one == "serde" && !serde.is_empty()),
+            [root, ..] => TOOL_ATTR_ROOTS.contains(root),
+            [] => true,
+        };
+        if !builtin {
             mac = true;
         }
     }
-    (mac, derive)
+    (mac, derive, serde)
 }
 
 fn skip_item(attrs: &[syn::Attribute], include_tests: bool) -> bool {
@@ -436,7 +455,7 @@ fn walk_items(
         if skip_item(attrs, include_tests) {
             continue;
         }
-        let (mac, derive) = scan_attrs(attrs);
+        let (mac, derive, serde) = scan_attrs(attrs);
         if mac {
             out.unclosable.push("an attribute macro".to_string());
         }
@@ -447,6 +466,9 @@ fn walk_items(
             syn::Item::Struct(s) => {
                 let q = qual_of(modpath, &s.ident.to_string());
                 out.types.push((q.clone(), KIND_VALUE.to_string(), mac));
+                for p in &serde {
+                    out.impls.push((format!("L:{q}"), path_ref(p, &uses, modpath, None).unwrap_or_else(|| "?".to_string())));
+                }
                 let g = generic_names(&s.generics);
                 let self_ref = format!("L:{q}");
                 for (i, f) in s.fields.iter().enumerate() {
@@ -459,8 +481,18 @@ fn walk_items(
                     }
                 }
             }
-            syn::Item::Enum(e) => out.types.push((qual_of(modpath, &e.ident.to_string()), KIND_VALUE.to_string(), mac)),
-            syn::Item::Union(u) => out.types.push((qual_of(modpath, &u.ident.to_string()), KIND_VALUE.to_string(), mac)),
+            syn::Item::Enum(_) | syn::Item::Union(_) => {
+                let name = match it {
+                    syn::Item::Enum(e) => e.ident.to_string(),
+                    syn::Item::Union(u) => u.ident.to_string(),
+                    _ => unreachable!(),
+                };
+                let q = qual_of(modpath, &name);
+                out.types.push((q.clone(), KIND_VALUE.to_string(), mac));
+                for p in &serde {
+                    out.impls.push((format!("L:{q}"), path_ref(p, &uses, modpath, None).unwrap_or_else(|| "?".to_string())));
+                }
+            }
             syn::Item::Trait(t) => {
                 let q = qual_of(modpath, &t.ident.to_string());
                 out.types.push((q.clone(), KIND_PROTOCOL.to_string(), mac));
@@ -532,6 +564,21 @@ fn walk_items(
                     if let Some(sr) = &self_ref {
                         let tr = path_ref(tp, &uses, modpath, None).unwrap_or_else(|| "?".to_string());
                         out.impls.push((sr.clone(), tr));
+                        // ⟨0.40⟩ Rust's member-forwarding edge: `impl Deref for S { type Target = T; }`.
+                        // Recorded by the trait's LEAF (`Deref`/`ops::Deref`/`std::ops::Deref`); the
+                        // crate-level pass resolves the target, and a target it cannot key (a generic
+                        // parameter, a slice, a platform type) leaves `S` unclosed.
+                        if tp.segments.last().is_some_and(|s| s.ident == "Deref") {
+                            let target = i.items.iter().find_map(|ii| match ii {
+                                syn::ImplItem::Type(t) if t.ident == "Target" => Some(&t.ty),
+                                _ => None,
+                            });
+                            let tref = target
+                                .and_then(|t| decl_ty(t, &uses, modpath, Some(sr), &g))
+                                .filter(|(_, proto)| !proto)
+                                .map_or_else(|| "?".to_string(), |(r, _)| r);
+                            out.derefs.push((sr.clone(), tref));
+                        }
                     }
                 }
                 for ii in &i.items {
@@ -692,13 +739,7 @@ impl BuildCtx<'_> {
     }
 }
 
-/// THE PRODUCER, per crate: the four ⟨0.40⟩ keys, written into `ts` beside ⟨0.23⟩'s `returns`.
-pub(crate) fn build(
-    ctx: &BuildCtx<'_>,
-    files: &[&FileSurface],
-    fns: &[crate::model::FnInfo],
-    ts: &mut candor_report::TypeSurface,
-) {
+fn locals_of(files: &[&FileSurface]) -> Locals {
     let mut locals = Locals { kinds: HashMap::new(), replaced: HashSet::new(), by_leaf: HashMap::new() };
     for f in files {
         for (q, kind, replaced) in &f.types {
@@ -715,6 +756,34 @@ pub(crate) fn build(
         let leaf = q.rsplit("::").next().unwrap_or(q).to_string();
         locals.by_leaf.entry(leaf).or_default().push(q.clone());
     }
+    locals
+}
+
+/// CONSUMER SIDE, SOUNDNESS R888: this crate's OWN `impl Deref for Mine { type Target = dep::Inner }`, by
+/// the local type's LEAF (the key the call loop's auto-deref chase uses) -> the dependency type's wire key.
+/// Only targets owned by ANOTHER package: a local target is the chase's own business.
+pub(crate) fn foreign_derefs(ctx: &BuildCtx<'_>, files: &[&FileSurface]) -> HashMap<String, String> {
+    let locals = locals_of(files);
+    let mut out = HashMap::new();
+    for f in files {
+        for (sr, tr) in &f.derefs {
+            let Res::Local(q) = ctx.resolve(sr, &locals) else { continue };
+            if let Res::Foreign(k) = ctx.resolve(tr, &locals) {
+                out.insert(q.rsplit("::").next().unwrap_or(&q).to_string(), k);
+            }
+        }
+    }
+    out
+}
+
+/// THE PRODUCER, per crate: the four ⟨0.40⟩ keys, written into `ts` beside ⟨0.23⟩'s `returns`.
+pub(crate) fn build(
+    ctx: &BuildCtx<'_>,
+    files: &[&FileSurface],
+    fns: &[crate::model::FnInfo],
+    ts: &mut candor_report::TypeSurface,
+) {
+    let locals = locals_of(files);
     let crate_unclosable = ctx.incomplete || files.iter().any(|f| !f.unclosable.is_empty());
     let is_proto = |q: &str| locals.kinds.get(q).and_then(Option::as_deref) == Some(KIND_PROTOCOL);
 
@@ -764,6 +833,26 @@ pub(crate) fn build(
             }
         }
     }
+    // Rust's `Deref` edges: a type with ONE followable target carries it; any target this producer cannot
+    // key (a generic, a slice, a platform type, two disagreeing `#[cfg]` arms) leaves the type unclosed —
+    // a closed key without `deref` asserts there is none.
+    let mut deref: HashMap<String, Option<String>> = HashMap::new();
+    for f in files {
+        for (sr, tr) in &f.derefs {
+            let Res::Local(q) = ctx.resolve(sr, &locals) else { continue };
+            let t = if tr == "?" { None } else { ctx.key(&ctx.resolve(tr, &locals)) };
+            match (deref.get(&q), t) {
+                (None, Some(t)) => {
+                    deref.insert(q, Some(t));
+                }
+                (Some(Some(prev)), Some(t)) if *prev == t => {}
+                _ => {
+                    deref.insert(q.clone(), None);
+                    open.insert(q);
+                }
+            }
+        }
+    }
     for (q, kind) in &locals.kinds {
         let Some(kind) = kind else { continue };
         if locals.replaced.contains(q) {
@@ -777,7 +866,8 @@ pub(crate) fn build(
             }
             s.into_iter().collect::<Vec<_>>()
         });
-        ts.types.insert(format!("{}#{q}", ctx.crate_name), candor_report::TypeEntry { kind: kind.clone(), supers: sup });
+        let d = sup.as_ref().and_then(|_| deref.get(q).cloned().flatten());
+        ts.types.insert(format!("{}#{q}", ctx.crate_name), candor_report::TypeEntry { kind: kind.clone(), supers: sup, deref: d });
     }
     for (k, v) in adds {
         ts.adds.insert(k, v.into_iter().collect());
@@ -839,12 +929,14 @@ pub(crate) fn build(
 pub(crate) struct TypeInfo {
     pub(crate) kind: Option<&'static str>,
     pub(crate) supers: Option<Vec<String>>,
+    /// Rust's `Deref::Target`, on a closed key only (`None` on a closed key = no `Deref`).
+    pub(crate) deref: Option<String>,
 }
 
 /// Per-package `types` as each TRUSTED copy carried it, before the merge. `None` for a copy = it
 /// publishes no readable `types` (an older producer, `types` not in `resolves`, not an object); an inner
 /// `None` = that key is malformed in that copy.
-type CopyTypes = Option<HashMap<String, Option<(Option<&'static str>, Option<Vec<String>>)>>>;
+type CopyTypes = Option<HashMap<String, Option<(Option<&'static str>, Option<Vec<String>>, Option<String>)>>>;
 
 #[derive(Default)]
 pub(crate) struct SurfaceIdx {
@@ -862,6 +954,11 @@ pub(crate) struct SurfaceIdx {
     /// them is a MISS whatever a trusted copy says beside it.
     pub(crate) distrusted: HashSet<String>,
     copies: HashMap<String, Vec<CopyTypes>>,
+    /// Packages whose merged manifest is TRUSTED and readable — the only ones whose silence about a type's
+    /// `Deref` can be read at all. A package with no such manifest (judged nothing, incomplete, stale, an
+    /// older producer) is the coverage machinery's: its calls carry the κ ledger's `invisible`, exactly
+    /// as an unchained one does (⟨0.21⟩/⟨0.24⟩), and the Rust permission's row 3 does not re-disclose it.
+    pub(crate) manifest_pkgs: HashSet<String>,
     holds_tail: HashMap<String, BTreeSet<String>>,
     holds_tail_n: HashMap<String, usize>,
 }
@@ -954,7 +1051,11 @@ impl SurfaceIdx {
                                 None => None,
                                 Some(s) => Some(strings(s)?),
                             };
-                            Some((kind_of(kind), supers.map(|mut s| { s.sort(); s.dedup(); s })))
+                            let deref = match o.get("deref") {
+                                None => None,
+                                Some(d) => Some(d.as_str()?.to_string()),
+                            };
+                            Some((kind_of(kind), supers.map(|mut s| { s.sort(); s.dedup(); s }), deref))
                         });
                         if parsed.is_none() {
                             malformed = true;
@@ -984,6 +1085,9 @@ impl SurfaceIdx {
             if copies.iter().any(Option::is_none) {
                 continue; // a copy with no readable manifest: every key of the package is absent
             }
+            if !self.distrusted.contains(&pkg) {
+                self.manifest_pkgs.insert(pkg.clone());
+            }
             let tables: Vec<&HashMap<_, _>> = copies.iter().flatten().collect();
             let Some(first) = tables.first() else { continue };
             for (k, e) in first.iter() {
@@ -992,7 +1096,9 @@ impl SurfaceIdx {
                     continue;
                 }
                 let supers = if self.distrusted.contains(&pkg) { None } else { e.1.clone() };
-                self.types.insert(k.clone(), TypeInfo { kind: e.0, supers });
+                // `deref` belongs to a CLOSED key; on a kind-only one there is nothing it can assert.
+                let deref = supers.as_ref().and(e.2.clone());
+                self.types.insert(k.clone(), TypeInfo { kind: e.0, supers, deref });
                 if let Some((p, q)) = k.split_once('#') {
                     let leaf = q.rsplit("::").next().unwrap_or(q).to_string();
                     self.types_by_leaf.entry((p.to_string(), leaf)).or_default().push(k.clone());
@@ -1047,6 +1153,9 @@ pub(crate) struct Walk {
     pub(crate) hits: Vec<(String, bool)>,
     /// A node had no key, a KIND-ONLY key, or sits in a distrusted package.
     pub(crate) structural: bool,
+    /// ⟨0.40⟩ Rust: the `Deref` chain could not be followed to its end — the receiver, or a type the chain
+    /// reached, has no key or a KIND-ONLY one (so whether it has a `Deref`, and to what, is unknown).
+    pub(crate) deref_open: bool,
 }
 
 /// THE WALK (SPEC §2 ⟨0.40⟩ "the walk reads absence as 'may be inherited'"). `present(key, own_only)`
@@ -1173,9 +1282,35 @@ pub(crate) fn join_through<'a>(
     member: &str,
     forced_protocol: bool,
 ) -> (Vec<&'a crate::deps::DepFn>, Walk) {
-    let kind = if forced_protocol { Some(KIND_PROTOCOL) } else { idx.surface.kind(start) };
-    let exact = matches!(kind, Some("value" | "final"));
-    let w = walk(&idx.surface, start, member, exact, &|k, own| present(idx, k, own));
+    // THE WALK, then — where it reaches nothing — Rust's `Deref` edge (SPEC §2 ⟨0.40⟩'s permission, row 2):
+    // the member is looked up on the target, recursively. A node whose manifest cannot say whether it has a
+    // `Deref` (no key, kind-only) ends the chain OPEN, which the source-typed caller discloses (row 3).
+    let mut w = Walk::default();
+    let mut t = start.to_string();
+    let mut chain: HashSet<String> = HashSet::new();
+    let mut first = true;
+    loop {
+        let kind = if forced_protocol && first { Some(KIND_PROTOCOL) } else { idx.surface.kind(&t) };
+        let exact = matches!(kind, Some("value" | "final"));
+        let step = walk(&idx.surface, &t, member, exact, &|k, own| present(idx, k, own));
+        w.structural |= step.structural;
+        w.hits.extend(step.hits);
+        if !w.hits.is_empty() || !chain.insert(t.clone()) || chain.len() > 16 {
+            break;
+        }
+        first = false;
+        match idx.surface.types.get(&t) {
+            Some(TypeInfo { supers: Some(_), deref: None, .. }) => break,
+            Some(TypeInfo { supers: Some(_), deref: Some(d), .. }) => t = d.clone(),
+            _ => {
+                // Only a package whose manifest is TRUSTED can leave a chain open; anything else is
+                // disclosed by coverage (see `manifest_pkgs`).
+                let pkg = t.split_once('#').map_or("", |(p, _)| p);
+                w.deref_open = idx.surface.manifest_pkgs.contains(pkg);
+                break;
+            }
+        }
+    }
     let mut rows: Vec<&crate::deps::DepFn> = Vec::new();
     for (k, own) in &w.hits {
         if let Some(r) = row(idx, k, *own) {
@@ -1246,7 +1381,7 @@ mod unit {
         for (k, kind, sup) in types {
             i.types.insert(
                 k.to_string(),
-                TypeInfo { kind: kind_of(kind), supers: sup.map(|s| s.iter().map(|x| x.to_string()).collect()) },
+                TypeInfo { kind: kind_of(kind), supers: sup.map(|s| s.iter().map(|x| x.to_string()).collect()), deref: None },
             );
         }
         i

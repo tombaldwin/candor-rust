@@ -2777,7 +2777,10 @@ pub fn l2_local_unit_qual() { m::Unit.go() }
               "types": {{"tdep#Ext": {{"kind": "protocol", "supers": []}}, "tdep#Grand": {{"kind": "protocol", "supers": []}},
                 "tdep#L": {{"kind": "value", "supers": ["tdep#Tr"]}}, "tdep#Mid": {{"kind": "value", "supers": ["tdep#Grand"]}},
                 "tdep#Node": {{"kind": "value", "supers": []}}, "tdep#Other": {{"kind": "value", "supers": []}},
-                "tdep#S": {{"kind": "value", "supers": ["tdep#Tr"]}}, "tdep#Tr": {{"kind": "protocol", "supers": []}}}},
+                "tdep#S": {{"kind": "value", "supers": ["tdep#Tr"]}}, "tdep#Tr": {{"kind": "protocol", "supers": []}},
+                "tdep#InnerD": {{"kind": "value", "supers": []}},
+                "tdep#WrapD": {{"kind": "value", "supers": [], "deref": "tdep#InnerD"}},
+                "tdep#Bl": {{"kind": "protocol", "supers": []}}}},
               "adds": {{"tbase#Tok": ["tdep#Ext"]}}}},
             "functions": [
               {{"fn": "Ext::ext", "inferred": ["Fs"], "hash": "tdep#Ext::ext"}},
@@ -2788,7 +2791,9 @@ pub fn l2_local_unit_qual() { m::Unit.go() }
               {{"fn": "Other::visit", "inferred": ["Env"], "hash": "tdep#Other::visit"}},
               {{"fn": "Tok::ext", "inferred": ["Env"], "hash": "tdep#Tok::ext"}},
               {{"fn": "Tr::m", "inferred": ["Fs"], "hash": "tdep#Tr::m"}},
-              {{"fn": "Tr::m", "inferred": ["Env"], "hash": "tdep#Tr::m", "interfaceUnion": true}}]}}"#)).unwrap();
+              {{"fn": "Tr::m", "inferred": ["Env"], "hash": "tdep#Tr::m", "interfaceUnion": true}},
+              {{"fn": "InnerD::leak", "inferred": ["Env"], "hash": "tdep#InnerD::leak"}},
+              {{"fn": "Bl::bl", "inferred": ["Env"], "hash": "tdep#Bl::bl"}}]}}"#)).unwrap();
         std::fs::write(dep.join("report.tbase.scan.json"), format!(r#"{{
             "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.39"}}, "package": "tbase", {rs},
             "typeSurface": {{"types": {{"tbase#Tok": {{"kind": "value", "supers": []}}}}}}, "functions": []}}"#)).unwrap();
@@ -2812,6 +2817,15 @@ pub fn f3_inherit(m: &tdep::Mid) { m.tok() }
 pub fn f4_kindonly(k: &tmac::K) { k.m2() }
 pub fn f5_adds(t: &tbase::Tok) { t.ext() }
 pub fn c1_own(l: &tdep::L) { l.m() }
+pub fn f6_deref(w: &tdep::WrapD) { w.leak() }
+pub struct Mine(pub tdep::InnerD);
+impl std::ops::Deref for Mine { type Target = tdep::InnerD; fn deref(&self) -> &tdep::InnerD { &self.0 } }
+pub fn f7_own_deref(m: &Mine) { m.leak() }
+pub trait LocalExt { fn lx(&self); }
+impl LocalExt for tdep::InnerD { fn lx(&self) { let _ = std::env::var("HOME"); } }
+pub fn f9_own_deref_local_ext(m: &Mine) { m.lx() }
+pub fn f8_blanket(x: &u8) { use tdep::Bl; x.bl() }
+pub fn c2_closed_pure(o: &tdep::Other) { o.pure_one() }
 "#).unwrap();
         let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
@@ -2829,6 +2843,68 @@ pub fn c1_own(l: &tdep::L) { l.m() }
         assert_eq!(e("f5_adds"), s(&["Env"]), "the ADDING package's override runs:\n{v:#}");
         assert_eq!(e("f1_chain"), s(&["Fs", "Unknown"]), "the guess is kept AND hedged:\n{v:#}");
         assert_eq!(e("c1_own"), s(&["Env"]), "an own key answers directly:\n{v:#}");
+        // The RUST PERMISSION (SPEC §2 ⟨0.40⟩): a visible `Deref` is FOLLOWED (row 2); this crate's own
+        // `Deref` into a dependency type is followed too (R888); a blanket impl on a PRIMITIVE receiver with
+        // its trait in scope discloses (row 1, R887); a CLOSED, Deref-free type with no trait in scope keeps
+        // the purity reading (the `c8_closed_pure` cost pin).
+        assert_eq!(e("f6_deref"), s(&["Env"]), "the Deref target's member is charged:\n{v:#}");
+        assert_eq!(e("f7_own_deref"), s(&["Env"]), "R888 — a local Deref into a dependency:\n{v:#}");
+        assert_eq!(e("f8_blanket"), s(&["Unknown"]), "R887 — a trait in scope on a primitive receiver:\n{v:#}");
+        assert_eq!(e("f9_own_deref_local_ext"), s(&["Env"]),
+                   "the LOCAL answer through the same Deref is tried first and kept — measured, the first cut \
+                    asked the dependency before it and dropped sqlx-mysql's `Bytes::get_uint_lenenc` edge:\n{v:#}");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "c2_closed_pure"),
+                "a closed Deref-free miss is the producer's purity claim:\n{v:#}");
+    }
+
+    /// ⟨0.40⟩ PRODUCER — Rust's `deref` field and the KNOWN derives (SPEC §2 ⟨0.40⟩, PART 95 `p6_deref`). A
+    /// visible `impl Deref` is published on a CLOSED key; a `Deref` to a target the producer cannot key leaves
+    /// the type unclosed; serde's derives (and a `serde` helper attribute beside them) do NOT unclose a type,
+    /// and their impl is LISTED; any other derive (`derive_more::Deref` exists) unclones the whole crate.
+    #[test]
+    fn the_producer_publishes_deref_and_reads_known_derives_as_visible() {
+        let scan = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r843p-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\nserde = \"1\"\nderive_more = \"1\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true, include_tests: false,
+                policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &DepIndex::default(),
+                peek_excluded: false,
+            }, &crate::gate::begin_run());
+            let _ = std::fs::remove_dir_all(&d);
+            assert_eq!(rc, 0);
+            serde_json::from_str::<serde_json::Value>(&body.unwrap()).unwrap()["typeSurface"]["types"].clone()
+        };
+        let t = scan("pdref", r#"
+use serde::{Deserialize, Serialize};
+pub struct Inner;
+pub struct Wrap(pub Inner);
+impl std::ops::Deref for Wrap { type Target = Inner; fn deref(&self) -> &Inner { &self.0 } }
+pub struct Gen<T>(pub T);
+impl<T> std::ops::Deref for Gen<T> { type Target = T; fn deref(&self) -> &T { &self.0 } }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cfg { pub a: u8 }
+pub struct Plain;
+"#);
+        assert_eq!(t["pdref#Wrap"]["deref"], "pdref#Inner", "a visible Deref is published:\n{t:#}");
+        assert!(t["pdref#Wrap"]["supers"].is_array(), "…on a CLOSED key:\n{t:#}");
+        assert!(t["pdref#Plain"]["supers"].is_array() && t["pdref#Plain"].get("deref").is_none(),
+                "a closed key without `deref` asserts there is none:\n{t:#}");
+        assert!(t["pdref#Gen"].get("supers").is_none() && t["pdref#Gen"].get("deref").is_none(),
+                "a Deref to a generic target cannot be followed — the type is KIND-ONLY:\n{t:#}");
+        let cfg = &t["pdref#Cfg"]["supers"];
+        assert!(cfg.as_array().is_some_and(|a| a.iter().any(|x| x == "serde#Serialize")
+                    && a.iter().any(|x| x == "serde#Deserialize")),
+                "serde's derives keep the type closed and LIST their impl:\n{t:#}");
+        let u = scan("pdm", "#[derive(derive_more::Deref)]\npub struct W(pub u8);\npub struct Other;\n");
+        assert!(u["pdm#W"].get("supers").is_none() && u["pdm#Other"].get("supers").is_none(),
+                "an unknown derive (it may emit a Deref) uncloses every type of its crate:\n{u:#}");
     }
 
     /// One signature may bind the same trait LEAF to two different crates. `trait_quals` is keyed by leaf,
