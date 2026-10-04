@@ -14652,6 +14652,8 @@ trait G {
             // at the CALL RESOLVER, so a file gaining or losing an item-position macro changes how EVERY
             // other file's crate-local calls into that module resolve.
             macro_modules => |m| { m.macro_modules.insert("blocking".into()); },
+            opaque_include_modules => |m| { m.opaque_include_modules.insert("ffi".into()); },
+            local_globs => |m| { m.local_globs.insert("b\u{1}ffi".into()); },
             // R452: the TYPES declared inside one of those modules, and the `fn` NAMES the unexpanded
             // macro text mentions. Both are read at the CALL RESOLVER — a typed method call on such a
             // type, naming such a fn, hedges `Unknown` instead of vanishing — so a file gaining or losing
@@ -16265,6 +16267,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // VEIN E bumped it to rev56 (R145: `include!` splicing and three new `FileDecls` fields — a
+        // rev55 entry replays the silence warm).
         // VEIN B bumped it to rev55 (four new `rets` key spaces, a static element key, and what
         // `field_elem` and Pass B's `calls` record — a rev54 entry replays the silences warm).
         // ⟨0.40⟩ (R843) bumped the token to rev54 (`FnInfo` gained `ret_proto` and `FileDecls` gained the
@@ -16282,7 +16286,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16293,7 +16297,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev55/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev56/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25343,3 +25347,108 @@ impl Child { pub fn output(self) -> usize { 1 } }\n";
         assert!(f["calls"].as_array().into_iter().flatten().any(|c| c == "Conn::ping"),
                 "…beside the wrapper arm's resolution:\n{v:#}");
     }
+
+    // ── VEIN E — declarations the collector never read: `include!` text (R145). ─────────────────────
+
+    /// The `unknownWhy` reasons a function carries.
+    #[cfg(test)]
+    fn fixture_why(v: &serde_json::Value, name: &str) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some(name))
+            .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// SOUNDNESS R145, RESOLUTION. An out-of-tree `include!` (the build-script convention moved to a
+    /// literal path) and a non-`.rs` in-tree one: both are files the scan CAN read and does not walk, so
+    /// their text is spliced into the invoking module. Pre-fix both callers were ABSENT and `deny Fs`
+    /// exited 0 (EXECUTED: the file is written). The included unit's `loc` names the INCLUDED file.
+    #[test]
+    fn veine_a_readable_include_is_spliced_and_its_effects_reach_the_caller() {
+        let ext = std::env::temp_dir().join(format!("candor-veine-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&ext).unwrap();
+        let gen = ext.join("gen.rs");
+        std::fs::write(&gen, "pub fn generated_write() { let _ = std::fs::write(\"/tmp/g\", \"x\"); }\n").unwrap();
+        let src = format!(
+            "include!({:?});\npub fn caller() {{ generated_write() }}\n\
+             mod tables {{ include!(\"tables.rs.in\"); }}\npub fn uses_table() {{ tables::table_write() }}\n",
+            gen.to_string_lossy());
+        let v = scan_fixture_files("veine_inc", &src, &[(
+            "tables.rs.in", "pub fn table_write() { let _ = std::fs::write(\"/tmp/t\", \"x\"); }\n")]);
+        assert!(fixture_effects(&v, "caller").contains(&"Fs".to_string()), "out-of-tree include:\n{v:#}");
+        assert!(fixture_effects(&v, "uses_table").contains(&"Fs".to_string()), "non-.rs include:\n{v:#}");
+        let loc = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"] == "generated_write").and_then(|f| f["loc"].as_str()).unwrap_or("").to_string();
+        assert!(loc.starts_with(&*gen.canonicalize().unwrap().to_string_lossy()), "loc {loc:?} must name gen.rs");
+        let _ = std::fs::remove_dir_all(&ext);
+    }
+
+    /// The splice must not touch a target the walk already reads: an in-tree `.rs` file is analysed as
+    /// its own module today, and splicing it as well would emit every unit twice.
+    #[test]
+    fn veine_an_include_of_a_walked_file_is_left_to_the_walk() {
+        let v = scan_fixture_files("veine_walked",
+            "mod hidden { include!(\"gen.rs\"); }\n",
+            &[("gen.rs", "pub fn gw() { let _ = std::fs::write(\"/tmp/g\", \"x\"); }\n")]);
+        let n = fixture_names(&v).iter().filter(|n| n.ends_with("gw")).count();
+        assert_eq!(n, 1, "one unit, not two:\n{v:#}");
+    }
+
+    /// SOUNDNESS R145, DISCLOSURE. An `include!` of `env!("OUT_DIR")` cannot be read without a build.
+    /// EXECUTED ground truth (build.rs writes `gen_write` into OUT_DIR and the program calls it through
+    /// every spelling below): pre-fix all five callers were ABSENT and `deny Unknown` exited 0. The
+    /// controls: a caller in a module with NO opaque include calling an unresolved name stays silent
+    /// (this is not "any unresolved call hedges"), and a prelude constructor in the opaque module does
+    /// not hedge either.
+    #[test]
+    fn veine_a_call_an_unreadable_include_could_supply_is_disclosed() {
+        let src = r#"
+include!(concat!(env!("OUT_DIR"), "/gen.rs"));
+pub fn a_bare() { gen_write("/tmp/a") }
+pub mod ffi {
+    include!(concat!(env!("OUT_DIR"), "/gen.rs"));
+    pub fn e_inner() { gen_write("/tmp/e") }
+}
+pub mod b { use crate::ffi::*; pub fn b_glob() { gen_write("/tmp/b") } }
+pub fn c_rel() { ffi::gen_write("/tmp/c") }
+pub fn d_crate() { crate::ffi::gen_write("/tmp/d") }
+pub mod clean { pub fn unrelated(cb: u8) -> Option<u8> { Some(cb) } pub fn other() { mystery() } }
+pub fn prelude_only() -> Option<u8> { Some(1) }
+"#;
+        let v = scan_fixture("veine_outdir", src);
+        for f in ["a_bare", "ffi::e_inner", "b::b_glob", "c_rel", "d_crate"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "{f} must disclose:\n{v:#}");
+            assert!(fixture_why(&v, f).iter().any(|w| w.starts_with("macro:")), "{f}: macro: reason:\n{v:#}");
+        }
+        for f in ["clean::other", "clean::unrelated", "prelude_only"] {
+            assert!(!fixture_effects(&v, f).contains(&"Unknown".to_string()), "{f} must not hedge:\n{v:#}");
+        }
+    }
+
+    /// The cache key covers the included bytes: a warm `--incremental` run after the INCLUDED file
+    /// changes must say what a cold run says, not replay the splice of bytes that are gone.
+    #[test]
+    fn veine_a_warm_run_rereads_a_changed_included_file() {
+        // `incremental_scan` sets and clears the PROCESS-wide fault-injection variable, so it must hold
+        // the same lock as every other caller of it or it clears another test's injection mid-scan.
+        let _lock = abort_injection_lock();
+        let d = std::env::temp_dir().join(format!("candor-veine-warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("gen")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"warm\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "include!(\"../gen/g.in\");\npub fn caller() { g() }\n").unwrap();
+        std::fs::write(d.join("gen/g.in"), "pub fn g() {}\n").unwrap();
+        let policy = d.join("p.policy");
+        std::fs::write(&policy, "deny Fs caller\n").unwrap();
+        let p = policy.to_string_lossy().into_owned();
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+        let (rc1, _) = incremental_scan(&d, &out("o1"), &p, None);
+        assert_eq!(rc1, 0, "the included `g` is pure");
+        std::fs::write(d.join("gen/g.in"), "pub fn g() { let _ = std::fs::write(\"/tmp/x\", \"y\"); }\n").unwrap();
+        let (rc2, v2) = incremental_scan(&d, &out("o2"), &p, None);
+        assert_eq!(rc2, 1, "the included file now writes; a warm run must see it:\n{v2:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+

@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev56: VEIN E (SOUNDNESS R145). `FileDecls` gained `opaque_include_modules`, `local_globs` and
+    // `include_targets`, and a parse now SPLICES a readable `include!` target, which changes what
+    // `fninfos` and every decl field RECORD for an including file. A rev55 entry deserializes the new
+    // fields EMPTY and replays, warm, the silence this closes. Mandatory.
     // rev55: VEIN B (R193(b), R197, R733, R568, R542, R341, R861, R877, R878). Pass A's `rets` gained FOUR
     // key spaces (`impl_self_ret_key`, `ret_generic_key`, `elem_ret_key`, `impl_elem_ret_key`) and
     // `static_types` an element key per static; `elem_type_b` now records the std wrappers' argument,
@@ -349,7 +353,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev55/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev56/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -500,6 +504,19 @@ pub(crate) struct FileDecls {
     /// the field closes, hence the rev bump in `cache_schema`.
     #[serde(default)]
     pub(crate) macro_modules: Vec<String>,
+    /// SOUNDNESS R145 — MODULE QUALS in this file holding an `include!` this scan could NOT read (an
+    /// `env!("OUT_DIR")` path, a missing or unparseable target). A readable target is SPLICED at parse
+    /// time and is not here. See `lang::splice_includes`.
+    #[serde(default)]
+    pub(crate) opaque_include_modules: Vec<String>,
+    /// SOUNDNESS R145 — this file's crate-local GLOB imports, `"<importer>\u{1}<imported module>"`. See
+    /// `lang::collect_local_globs`; closes `opaque_include_modules` under re-export by glob.
+    #[serde(default)]
+    pub(crate) local_globs: Vec<String>,
+    /// SOUNDNESS R145 — every file an `include!` in this file named, as consulted by its last parse. Part
+    /// of the cache key (`lang::include_closure_hash`), never of the decl index.
+    #[serde(default)]
+    pub(crate) include_targets: Vec<String>,
     /// SOUNDNESS R452 — the TYPE names this file declares inside one of `macro_modules`. A typed method
     /// call on such a type resolves to nothing through no fault of the program, so it HEDGES rather than
     /// reading the absence of an `impl` as purity. See `collect_macro_hidden_types` for why this is keyed
@@ -613,6 +630,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // literal so the second cannot be derived from a different module set than the first.
     let mut macro_mods = std::collections::HashSet::new();
     crate::lang::collect_macro_modules(items, modpath, include_tests, &mut macro_mods);
+    // SOUNDNESS R145 — which of those are an `include!` the parse could not read, and the crate-local
+    // globs that carry such a module's names elsewhere.
+    let mut opaque_inc = std::collections::BTreeSet::new();
+    crate::lang::collect_opaque_include_modules(items, modpath, include_tests, &mut opaque_inc);
+    let mut local_globs = std::collections::BTreeSet::new();
+    crate::lang::collect_local_globs(items, modpath, include_tests, &mut local_globs);
     let mut macro_hidden_ty = std::collections::HashSet::new();
     let mut macro_hidden_fn = std::collections::HashSet::new();
     crate::lang::collect_macro_hidden_decls(
@@ -721,6 +744,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // R128 — which of this file's modules had items hidden behind an unexpanded macro invocation.
         // Keyed on the module QUAL (the file's own `modpath` for its top level), which is the same key
         // space a call's resolved `crate::…` path reduces to at the resolver.
+        opaque_include_modules: opaque_inc.into_iter().collect(),
+        local_globs: local_globs.into_iter().collect(),
+        include_targets: Vec::new(),
         macro_modules: {
             let mut v: Vec<String> = macro_mods.iter().cloned().collect();
             v.sort(); // deterministic on the wire — the cache entry is content-hashed
@@ -818,6 +844,10 @@ pub(crate) struct MergedDecls {
     /// macro invocations its decl walk could not read, so "this module declares no such name" is a
     /// statement candor is NOT entitled to make about it. See `collect_macro_modules`.
     pub(crate) macro_modules: std::collections::HashSet<String>,
+    /// SOUNDNESS R145 — every file's `opaque_include_modules`, unioned.
+    pub(crate) opaque_include_modules: std::collections::HashSet<String>,
+    /// SOUNDNESS R145 — every file's `local_globs`, unioned.
+    pub(crate) local_globs: std::collections::HashSet<String>,
     /// R452 — every file's MACRO-HIDDEN TYPE names, unioned. See `FileDecls::macro_hidden_types`.
     pub(crate) macro_hidden_types: std::collections::HashSet<String>,
     /// R452 — every file's MACRO-MENTIONED `fn` names, unioned. See `FileDecls::macro_hidden_fns`.
@@ -1133,6 +1163,12 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.macro_modules {
         acc.macro_modules.insert(n.clone()); // set union — order-independent (R128)
     }
+    for n in &fd.opaque_include_modules {
+        acc.opaque_include_modules.insert(n.clone()); // set union — order-independent (R145)
+    }
+    for n in &fd.local_globs {
+        acc.local_globs.insert(n.clone()); // set union — order-independent (R145)
+    }
     for n in &fd.macro_hidden_types {
         acc.macro_hidden_types.insert(n.clone()); // set union — order-independent (R452)
     }
@@ -1423,6 +1459,20 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(a);
     }
     s.push('\n');
+    // opaque_include_modules + local_globs — SOUNDNESS R145. Read only at the call resolver in `scan.rs`,
+    // which runs every scan, so no cached FnInfo depends on them today; folded in anyway because a
+    // resolver-time fact that moves without moving the digest is the shape this function exists to stop
+    // the day one of them is read in Pass B.
+    for (name, set) in [("opaque_include_modules", &m.opaque_include_modules), ("local_globs", &m.local_globs)] {
+        s.push_str(name);
+        let mut v: Vec<&String> = set.iter().collect();
+        v.sort();
+        for a in v {
+            s.push('|');
+            s.push_str(a);
+        }
+        s.push('\n');
+    }
     // macro_hidden_types — R452, sorted set of type names declared in one of those modules. Read at the
     // CALL RESOLVER for the same reason `macro_modules` is, and with the same cross-file consequence: a
     // file that gains or loses an item-position macro changes which TYPES hedge, everywhere.

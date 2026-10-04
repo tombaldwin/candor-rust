@@ -11,6 +11,35 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ Vein E, `include!` — a readable target is read, an unreadable one is disclosed (SOUNDNESS R145)
+
+`include!` text was never read: a call into an included function was an unresolved bare call and its
+caller read PURE — a unit candor certified (`analyzed` counts it; no `unanalyzed`, no `outOfScope`).
+EXECUTED: an out-of-tree `include!` of a real `fs::write`, `deny Fs caller` exit 0 against an inline control
+at 1; and with `include!(concat!(env!("OUT_DIR"), "/gen.rs"))` (build.rs writes the file, the program runs it)
+the bare, glob-imported, `m::f` and `crate::m::f` spellings were all ABSENT — only `use m::f` was caught (R128).
+
+- **Resolved:** a target the scan can read and does not already walk — an out-of-tree path, a non-`.rs`
+  file (`*.rs.in`, ICU's `*.rs.data`), `concat!(env!("CARGO_MANIFEST_DIR"), ..)` — is SPLICED into the
+  invoking module at parse time, as rustc does: the module's path, its `use` map and the invocation's own
+  `#[cfg]`s. Its units' `loc` names the included file. An in-tree `.rs` target the walk already reads is
+  left alone (it is analysed as its own file today; splicing it too would emit every unit twice).
+- **Disclosed:** a target the scan cannot know (`OUT_DIR` or any env var but `CARGO_MANIFEST_DIR`, a missing
+  or unparseable file) leaves its module marked; a free call nothing resolved whose callee is looked up in
+  such a module — bare in the module itself, through a crate-local glob of it, or qualified with its path —
+  discloses `Unknown` with `macro:items hidden by an include! this scan could not read`. Not covered, and
+  stated: a method or `T::assoc` call on a TYPE the hidden text declares (no module to ask about).
+- **The cache key covers the included bytes:** a warm `--incremental` run after an included file changes
+  re-parses (pinned by a test that fails with the key reverted).
+- **⚠ Gates that can flip, vs `1e11e7f` — only 0 → 1.** Unchained 1,838-entry corpus (757,917 analysed
+  units): ADDED 42 / REMOVED 0 / CHANGED 187; 105 rows newly `Unknown` (**0.014%**, under the lower band),
+  no concrete effect added or lost, no reason withdrawn. Real: openssl-sys/libsqlite3-sys/rustc_version_runtime
+  calls into bindgen/generated `OUT_DIR` code; `deny Unknown` flips at crate scope on rustc_version_runtime.
+  Over-disclosure, stated: 68 of the 105 are aws-lc-sys's `builder/` build-script tree, whose `crate::f` is
+  pre-existingly resolved through `src/lib.rs`'s root glob onto the `OUT_DIR` module. Resolution reach: 292
+  splices in 8 entries (ICU data tables), CHANGED 0 there (pure tables).
+- Scan-cache schema rev55 → rev56.
+
 ### ⚠ Vein B — one strict expression typer for binders, wrapper accessors, turbofish returns and handle arguments (more effects charged, a few more `Unknown`s; SOUNDNESS R193(b), R197, R733, R568, R542, R341, R861 bound spelling, R877, R878)
 
 candor-scan had no single answer to "what type is this expression": the `let` binder typed only

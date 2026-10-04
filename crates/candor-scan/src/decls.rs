@@ -1732,6 +1732,14 @@ pub(crate) fn next_loc(locs: &[String], loc_idx: &mut usize) -> String {
 /// engine's `build.rs:10:1` baselines). The span used is the whole item/method (its first token), not just
 /// the ident, so a `pub fn foo` at column 0 reports col 1, not the column of `foo`.
 pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out: &mut Vec<String>) {
+    fn_locs_labeled(items, file, file, include_tests, out)
+}
+
+/// `fn_locs` with the LABEL a loc is printed under separated from the `file` whose test-target predicate
+/// governs the walk. They differ only for items SPLICED from an `include!` (SOUNDNESS R145): the span's
+/// line is the included file's, so the label must be too — while the skip predicate stays the includer's,
+/// because `scan_items` (which this walk must mirror in lockstep) only ever sees the includer's `rel`.
+fn fn_locs_labeled(items: &[syn::Item], file: &str, label: &str, include_tests: bool, out: &mut Vec<String>) {
     use syn::spanned::Spanned;
     // R167 -- the SAME question `scan_items` is handed as `skip_test_fns`, answered by the SAME predicate
     // over the SAME `rel`: `file` here IS that `rel` (both call sites pass it) and the recursion below
@@ -1739,11 +1747,22 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
     // `next_loc`, so a skip in one that is missing in the other shifts every later `loc` -- which is why
     // the predicate is SHARED rather than re-derived from `modpath` on the other side.
     let skip_test_fns = !crate::lang::is_nonlib_target_file(file);
-    let loc = |sp: proc_macro2::Span| {
+    let loc = |label: &str, sp: proc_macro2::Span| {
         let s = sp.start();
-        format!("{file}:{}:{}", s.line, s.column + 1)
+        format!("{label}:{}:{}", s.line, s.column + 1)
     };
     for it in items {
+        let spliced = match it {
+            syn::Item::Fn(f) => crate::lang::included_label(&f.attrs),
+            syn::Item::Impl(i) => crate::lang::included_label(&i.attrs),
+            syn::Item::Mod(m) => crate::lang::included_label(&m.attrs),
+            syn::Item::Trait(t) => crate::lang::included_label(&t.attrs),
+            syn::Item::Static(x) => crate::lang::included_label(&x.attrs),
+            syn::Item::Const(x) => crate::lang::included_label(&x.attrs),
+            syn::Item::Macro(x) => crate::lang::included_label(&x.attrs),
+            _ => None,
+        };
+        let label = spliced.as_deref().unwrap_or(label);
         match it {
             syn::Item::Fn(f) => {
                 // R167 — MUST mirror `scan_items`' `Item::Fn` arm exactly: these two walks are consumed
@@ -1754,7 +1773,7 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
                 {
                     continue;
                 }
-                out.push(loc(f.span()));
+                out.push(loc(label, f.span()));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -1768,7 +1787,7 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
                         {
                             continue;
                         }
-                        out.push(loc(m.span()));
+                        out.push(loc(label, m.span()));
                     }
                 }
             }
@@ -1777,7 +1796,7 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
-                    fn_locs(inner, file, include_tests, out);
+                    fn_locs_labeled(inner, file, label, include_tests, out);
                 }
             }
             syn::Item::Trait(tr) => {
@@ -1792,7 +1811,7 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
                         if !include_tests && is_cfg_test(&m.attrs) {
                             continue;
                         }
-                        out.push(loc(m.span()));
+                        out.push(loc(label, m.span()));
                     }
                 }
             }
@@ -1801,7 +1820,7 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
         // Mirror the synthetic LAZY-INIT UNIT loc in lockstep with `scan_items` (same `lazy_unit_emitted`
         // predicate, same walk position). The unit's loc is the static item's own span.
         if lazy_unit_emitted(it, include_tests) {
-            out.push(loc(it.span()));
+            out.push(loc(label, it.span()));
         }
     }
 }

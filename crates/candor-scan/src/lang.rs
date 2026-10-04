@@ -7858,3 +7858,347 @@ fn macro_token_impls(ts: proc_macro2::TokenStream, out: &mut Vec<(syn::Path, Vec
         i = k + 1;
     }
 }
+
+
+// ── SOUNDNESS R145 — `include!` TEXT IS READ WHERE IT CAN BE, AND DISCLOSED WHERE IT CANNOT ─────────────
+//
+// THE DEFECT. `collect_decls` skips an item-position macro invocation, so `include!("gen.rs")` contributed
+// no unit and no edge: a call into an included function was an unresolved bare call and the caller read
+// PURE. Measured, EXECUTED (the file is written): an out-of-tree `include!` of a real `fs::write`, with
+// `deny Fs caller` exiting 0 against an inline-write control exiting 1 — on a unit the engine CERTIFIES
+// (`analyzed` counts it, `functions[]` omits it, no `unanalyzed`, no `outOfScope`).
+//
+// TWO ANSWERS, chosen by whether the producer can read the text:
+//   * RESOLUTION — the target is a file this scan can read and does not already walk (an out-of-tree path,
+//     a non-`.rs` extension like ICU's `*.rs.data`, a `concat!(env!("CARGO_MANIFEST_DIR"), ..)` path).
+//     Its items are SPLICED into the invoking module in place of the macro, which is what rustc does: they
+//     get the module's path, its `use` map and the invocation's own `#[cfg]`s, so every existing pass
+//     reads them with no special case. A target the walk ALREADY reads (an in-tree `.rs` file) is left
+//     alone — it is analysed as its own file today, and splicing it as well would emit every unit twice.
+//   * DISCLOSURE — the path is not one this scan can know (`env!("OUT_DIR")`, the build-script convention,
+//     or any env var other than `CARGO_MANIFEST_DIR`), or the file is missing or does not parse. The
+//     invocation stays, tagged `OPAQUE_INCLUDE_ATTR`, and `scan.rs` hedges the calls whose callee that
+//     module's namespace could be supplying (see `opaque_include_scope`).
+
+/// The outer attribute a spliced item carries: the DISPLAY path of the file it came from, so `fn_locs`
+/// can report the included file rather than the includer (the span's line is the included file's).
+pub(crate) const INCLUDED_ATTR: &str = "candor_included";
+/// The outer attribute an `include!` this scan could NOT read is tagged with. See `opaque_include_modules`.
+pub(crate) const OPAQUE_INCLUDE_ATTR: &str = "candor_opaque_include";
+
+fn marker_attr(text: &str) -> Option<syn::Attribute> {
+    use syn::parse::Parser;
+    syn::Attribute::parse_outer.parse_str(text).ok()?.into_iter().next()
+}
+
+pub(crate) fn has_marker(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
+
+/// The display path an `INCLUDED_ATTR` carries, if any.
+pub(crate) fn included_label(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find(|a| a.path().is_ident(INCLUDED_ATTR)).and_then(|a| match &a.meta {
+        syn::Meta::NameValue(nv) => match &nv.value {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(s.value()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn item_attrs_mut(it: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
+    Some(match it {
+        syn::Item::Const(x) => &mut x.attrs,
+        syn::Item::Enum(x) => &mut x.attrs,
+        syn::Item::ExternCrate(x) => &mut x.attrs,
+        syn::Item::Fn(x) => &mut x.attrs,
+        syn::Item::ForeignMod(x) => &mut x.attrs,
+        syn::Item::Impl(x) => &mut x.attrs,
+        syn::Item::Macro(x) => &mut x.attrs,
+        syn::Item::Mod(x) => &mut x.attrs,
+        syn::Item::Static(x) => &mut x.attrs,
+        syn::Item::Struct(x) => &mut x.attrs,
+        syn::Item::Trait(x) => &mut x.attrs,
+        syn::Item::TraitAlias(x) => &mut x.attrs,
+        syn::Item::Type(x) => &mut x.attrs,
+        syn::Item::Union(x) => &mut x.attrs,
+        syn::Item::Use(x) => &mut x.attrs,
+        _ => return None,
+    })
+}
+
+/// Is this macro `include!` (bare, or `std::`/`core::`-qualified)? `include_str!`/`include_bytes!` are
+/// different macros (a VALUE, never code) and are not matched.
+pub(crate) fn is_include_macro(mac: &syn::Macro) -> bool {
+    let segs: Vec<String> = mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    match segs.as_slice() {
+        [one] => one == "include",
+        [root, leaf] => leaf == "include" && (root == "std" || root == "core"),
+        _ => false,
+    }
+}
+
+/// The file an `include!` names, when the scan can know it without building: a string literal (relative
+/// to the INVOKING file's directory, rustc's rule), or `concat!(env!("CARGO_MANIFEST_DIR"), "lit", ..)`.
+/// `None` for anything else — chiefly `env!("OUT_DIR")`, which exists only inside a build.
+pub(crate) fn include_target(mac: &syn::Macro, base_dir: &Path, manifest_dir: &Path) -> Option<std::path::PathBuf> {
+    fn leaf_is(m: &syn::Macro, name: &str) -> bool {
+        m.path.segments.last().is_some_and(|s| s.ident == name)
+    }
+    let e: syn::Expr = mac.parse_body().ok()?;
+    match e {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(base_dir.join(s.value())),
+        syn::Expr::Macro(m) if leaf_is(&m.mac, "concat") => {
+            use syn::punctuated::Punctuated;
+            let parts = m.mac.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated).ok()?;
+            let mut out = String::new();
+            for (i, p) in parts.iter().enumerate() {
+                match p {
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => out.push_str(&s.value()),
+                    syn::Expr::Macro(em) if i == 0 && leaf_is(&em.mac, "env") => {
+                        let v: syn::LitStr = em.mac.parse_body().ok()?;
+                        if v.value() != "CARGO_MANIFEST_DIR" {
+                            return None;
+                        }
+                        out.push_str(manifest_dir.to_str()?);
+                    }
+                    _ => return None,
+                }
+            }
+            let p = std::path::PathBuf::from(out);
+            Some(if p.is_absolute() { p } else { base_dir.join(p) })
+        }
+        _ => None,
+    }
+}
+
+/// What the splice needs to know about the scan, and what it reports back.
+pub(crate) struct IncludeEnv<'a> {
+    /// The scan root — `INCLUDED_ATTR` labels are relative to it when the target lies inside.
+    pub(crate) root: &'a Path,
+    pub(crate) manifest_dir: &'a Path,
+    /// Canonical paths of every file the walk admitted. A target in here is left unspliced.
+    pub(crate) walked: &'a std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) include_tests: bool,
+}
+
+/// Splice every readable item-position `include!` in `items` (and in their inline modules), tag every
+/// unreadable one, and append to `read` the path of every target consulted — so the file's cache entry is
+/// keyed on those bytes too (`include_closure_hash`). `base_dir` is the directory of the file the items
+/// came from. Recursion into an included file's own `include!`s is bounded (depth 8, no cycles).
+pub(crate) fn splice_includes(
+    items: &mut Vec<syn::Item>,
+    base_dir: &Path,
+    env: &IncludeEnv<'_>,
+    stack: &mut Vec<std::path::PathBuf>,
+    read: &mut Vec<String>,
+) {
+    let old = std::mem::take(items);
+    for mut it in old {
+        match &mut it {
+            syn::Item::Mod(m) if m.content.is_some() => {
+                if let Some((_, inner)) = &mut m.content {
+                    splice_includes(inner, base_dir, env, stack, read);
+                }
+                items.push(it);
+            }
+            syn::Item::Macro(m)
+                if m.ident.is_none()
+                    && is_include_macro(&m.mac)
+                    && (env.include_tests || !is_cfg_test(&m.attrs)) =>
+            {
+                let target = include_target(&m.mac, base_dir, env.manifest_dir);
+                let canon = target.as_ref().and_then(|t| t.canonicalize().ok());
+                if let Some(t) = &target {
+                    read.push(canon.as_ref().unwrap_or(t).to_string_lossy().into_owned());
+                }
+                if canon.as_ref().is_some_and(|c| env.walked.contains(c)) {
+                    items.push(it); // read as its own file already — the status quo, see above
+                    continue;
+                }
+                let parsed = canon
+                    .as_ref()
+                    .filter(|c| stack.len() < 8 && !stack.contains(c))
+                    .and_then(|c| std::fs::read_to_string(c).ok().map(|t| (c.clone(), t)))
+                    .and_then(|(c, t)| parse_file_2015_tolerant(&t).map(|(f, _)| (c, f)));
+                match parsed {
+                    Some((c, f)) => {
+                        if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                            eprintln!("VEINE_SPLICE\t{}", c.display()); // §E1 REACH PROBE
+                        }
+                        let label = c
+                            .strip_prefix(env.root.canonicalize().unwrap_or_else(|_| env.root.to_path_buf()))
+                            .map(|r| r.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| c.to_string_lossy().into_owned());
+                        let mut inner = f.items;
+                        stack.push(c.clone());
+                        let dir = c.parent().map(Path::to_path_buf).unwrap_or_default();
+                        splice_includes(&mut inner, &dir, env, stack, read);
+                        stack.pop();
+                        let tag = marker_attr(&format!("#[{INCLUDED_ATTR} = {label:?}]"));
+                        let outer = m.attrs.clone();
+                        for mut x in inner {
+                            if let Some(a) = item_attrs_mut(&mut x) {
+                                // The invocation's own attributes (its `#[cfg]`s) govern every item it
+                                // supplies — `#[cfg(feature = "x")] include!(..)` gates them all.
+                                let mut merged = outer.clone();
+                                merged.extend(tag.clone());
+                                merged.append(a);
+                                *a = merged;
+                            }
+                            items.push(x);
+                        }
+                    }
+                    None => {
+                        if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                            eprintln!("VEINE_OPAQUE\t{}", m.mac.tokens); // §E1 REACH PROBE
+                        }
+                        m.attrs.extend(marker_attr(&format!("#[{OPAQUE_INCLUDE_ATTR}]")));
+                        items.push(it);
+                    }
+                }
+            }
+            _ => items.push(it),
+        }
+    }
+}
+
+/// The cache key of a file whose parse READ other files: its own content hash, extended with the current
+/// bytes (or absence) and walk status of every target its last parse consulted. With no targets this is
+/// the plain hash, so a file with no `include!` keys exactly as before. Any change to an included file —
+/// or a missing one appearing — moves the key and forces a re-parse, which is what keeps a warm
+/// `--incremental` run from replaying a splice of bytes that are no longer there.
+pub(crate) fn include_closure_hash(
+    own: &str,
+    targets: &[String],
+    walked: &std::collections::HashSet<std::path::PathBuf>,
+) -> String {
+    if targets.is_empty() {
+        return own.to_string();
+    }
+    let mut s = own.to_string();
+    for t in targets {
+        let p = Path::new(t);
+        let h = std::fs::read(p).map(|b| crate::cache::fnv1a(&b)).unwrap_or_else(|_| "-".into());
+        let w = p.canonicalize().ok().is_some_and(|c| walked.contains(&c));
+        s.push_str(&format!("\u{1}{t}\u{2}{h}\u{2}{w}"));
+    }
+    crate::cache::fnv1a(s.as_bytes())
+}
+
+/// SOUNDNESS R145 — the modules (by qual) holding an `include!` this scan could NOT read.
+pub(crate) fn collect_opaque_include_modules(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Macro(m) if m.ident.is_none() && has_marker(&m.attrs, OPAQUE_INCLUDE_ATTR) => {
+                out.insert(modpath.to_string());
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                    collect_opaque_include_modules(inner, &sub, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R145 — every CRATE-LOCAL glob import, as `"<importing module>\u{1}<imported module>"`. A
+/// glob of a module whose namespace an unreadable `include!` supplies supplies the same unknown names to
+/// the importer (libsqlite3-sys: `mod bindings { include!(OUT_DIR..) } pub use bindings::*;`). A relative
+/// `use a::*` is recorded under both readings (`<here>::a` and the crate-root `a`), since which one is
+/// meant needs name resolution this pass does not do; the extra reading can only widen the hedge.
+pub(crate) fn collect_local_globs(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    fn walk(t: &syn::UseTree, prefix: &mut Vec<String>, modpath: &str, out: &mut std::collections::BTreeSet<String>) {
+        match t {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                walk(&p.tree, prefix, modpath, out);
+                prefix.pop();
+            }
+            syn::UseTree::Group(g) => {
+                for x in &g.items {
+                    walk(x, prefix, modpath, out);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                let join = |base: &[&str], rest: &[String]| {
+                    base.iter().map(|s| s.to_string()).chain(rest.iter().cloned()).collect::<Vec<_>>().join("::")
+                };
+                let here: Vec<&str> = if modpath.is_empty() { vec![] } else { modpath.split("::").collect() };
+                let mut targets = Vec::new();
+                match prefix.first().map(String::as_str) {
+                    Some("crate") => targets.push(join(&[], &prefix[1..])),
+                    Some("self") => targets.push(join(&here, &prefix[1..])),
+                    Some("super") => {
+                        let mut base = here.clone();
+                        let mut i = 0;
+                        while prefix.get(i).map(String::as_str) == Some("super") {
+                            base.pop();
+                            i += 1;
+                        }
+                        targets.push(join(&base, &prefix[i..]));
+                    }
+                    Some(_) => {
+                        targets.push(join(&here, prefix));
+                        targets.push(join(&[], prefix));
+                    }
+                    None => {}
+                }
+                for tg in targets {
+                    out.insert(format!("{modpath}\u{1}{tg}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    for it in items {
+        match it {
+            syn::Item::Use(u) if include_tests || !is_cfg_test(&u.attrs) => {
+                walk(&u.tree, &mut Vec::new(), modpath, out);
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                    collect_local_globs(inner, &sub, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R145 — the closure of `opaque` under crate-local glob imports: every module whose namespace
+/// may hold a name an unreadable `include!` supplied.
+pub(crate) fn opaque_include_scope(
+    opaque: &std::collections::HashSet<String>,
+    globs: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut scope = opaque.clone();
+    if scope.is_empty() {
+        return scope;
+    }
+    let edges: Vec<(&str, &str)> = globs.iter().filter_map(|g| g.split_once('\u{1}')).collect();
+    loop {
+        let before = scope.len();
+        for (from, to) in &edges {
+            if scope.contains(*to) && !scope.contains(*from) {
+                scope.insert(from.to_string());
+            }
+        }
+        if scope.len() == before {
+            return scope;
+        }
+    }
+}
