@@ -6339,3 +6339,29 @@ fn veinc_an_inherited_dependency_default_method_is_joined() {
     let o = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "overridden");
     assert!(o.is_none_or(|e| !e["inferred"].as_array().unwrap().iter().any(|x| x == "Fs")), "{v}");
 }
+
+/// VEIN C / SPEC §6.2 — a reason is CONTRIBUTED, NEVER RETRACTED, across the chain too. A dependency
+/// entry's `unknownWhy` is direct-only, so the consumer re-derives the transitive reasons from the
+/// entry's published `calls`. That derivation used to run ONLY when the entry had no reason of its own,
+/// so the moment a producer gave `outer` a direct `dispatch:` reason, the `callback:` its callee `inner`
+/// still carries vanished from every consumer — `Unknown` kept, a reason CLASS (`indirect`) withdrawn.
+/// Measured on the 909-crate chained corpus: event-listener's `Event::notify` gaining
+/// `dispatch:IntoNotification.into_notification` withdrew `ambiguous:` from eleven consumers.
+#[test]
+fn veinc_a_chained_entrys_own_reason_does_not_withdraw_its_callees_reasons() {
+    let (dep, rep) = r608_dep_report("vcwhy",
+        "pub trait Zero { fn sink(&self); }\n\
+         pub fn inner(cb: &dyn Fn()) { cb() }\n\
+         pub fn outer(z: &dyn Zero) { z.sink(); inner(&|| {}); }\n");
+    let (app, pol) = r608_consumer("vcwhyapp", "vcwhy",
+        "pub fn use_it(z: &dyn vcwhy::Zero) { vcwhy::outer(z) }\n", "deny Net Unknown[indirect] use_it::\n");
+    let (code, v) = r608_run(&app, &pol, Some(&rep));
+    let _ = std::fs::remove_dir_all(&dep);
+    let _ = std::fs::remove_dir_all(&app);
+    let u = v["functions"].as_array().unwrap().iter().find(|e| e["fn"] == "use_it")
+        .unwrap_or_else(|| panic!("{v}"));
+    let why: Vec<&str> = u["unknownWhy"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+    assert!(why.contains(&"dispatch:Zero.sink"), "the entry's own reason is kept: {v}");
+    assert!(why.contains(&"callback:unresolved call"), "…and its callee's is not withdrawn: {v}");
+    assert_eq!(code, 1, "`deny Net Unknown[indirect]` must still fire: {v}");
+}

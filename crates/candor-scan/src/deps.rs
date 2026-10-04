@@ -570,10 +570,18 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                         break;
                     }
                 }
-                // Keep only the entries this pass ADDS — one whose own tag already answers is untouched,
-                // so the verbatim direct reason still wins and this can only ever fill a blank.
+                // Keep every entry this pass ADDS a reason to. SOUNDNESS (vein C) — THIS USED TO KEEP ONLY
+                // THE BLANK ONES ("one whose own tag already answers is untouched"), which made the chain's
+                // classes CONDITIONAL on the entry having no reason of its own: the day a producer fix gave
+                // `event_listener#Event::notify` its own `dispatch:IntoNotification.into_notification`,
+                // eleven chained consumers (async-lock, isahc, lapin, sqlx, async-process) LOST the
+                // `ambiguous:` reasons the same `calls` chain still carries — `Unknown` kept, class
+                // `dispatch` kept, but the `ambiguous` KIND withdrawn although nothing was resolved. §6.2:
+                // a reason is contributed, never retracted, so ADDING a direct reason must not REMOVE a
+                // transitive one. The own tags are still part of `acc`, so the union below is a superset
+                // of them; an entry whose chain adds nothing is not recorded.
                 for (q, w) in acc {
-                    if !own.contains_key(q) {
+                    if own.get(q).is_none_or(|o| w.len() > o.len()) {
                         chain_why.insert(q.to_string(), w);
                     }
                 }
@@ -717,11 +725,11 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // …and when the entry's own tags say nothing, the reason its published `calls` chain
                 // reaches (the fixpoint above). Still verbatim: these are the dependency's own canonical
                 // §4 strings, moved along an edge the dependency itself published, never re-derived.
-                // Only fills a blank — an entry with a direct tag keeps exactly the bytes it shipped.
-                if de.unknown_why.is_empty() {
-                    if let Some(w) = chain_why.get(qual) {
-                        de.unknown_why = w.clone();
-                    }
+                // UNION, not fill-a-blank (vein C — see the `chain_why` note above): the entry's own tags
+                // are kept byte for byte and the chain's reasons are ADDED beside them, so a producer
+                // gaining a direct reason can no longer withdraw a transitive one from its consumers.
+                if let Some(w) = chain_why.get(qual) {
+                    de.unknown_why.extend(w.iter().cloned());
                 }
                 // sweep [30]: carry masking-incompleteness (mapped to the static effect alphabet).
                 for s in e.get("incomplete").and_then(|x| x.as_array()).into_iter().flatten() {
