@@ -250,7 +250,7 @@
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-            calls: Vec::new(),
+            calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
@@ -303,7 +303,7 @@
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-            calls: Vec::new(),
+            calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
@@ -629,7 +629,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
             ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
-            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
+            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
             dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
@@ -7971,7 +7971,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-                calls: Vec::new(),
+                calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
@@ -8020,7 +8020,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-                calls: Vec::new(),
+                calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
@@ -8046,7 +8046,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-                    calls: Vec::new(),
+                    calls: Vec::new(), body_externs: Default::default(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
@@ -8089,7 +8089,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-            calls: Vec::new(),
+            calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
@@ -8128,7 +8128,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
-                calls: Vec::new(),
+                calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
@@ -14654,6 +14654,8 @@ trait G {
             // at the CALL RESOLVER, so a file gaining or losing an item-position macro changes how EVERY
             // other file's crate-local calls into that module resolve.
             macro_modules => |m| { m.macro_modules.insert("blocking".into()); },
+            opaque_include_modules => |m| { m.opaque_include_modules.insert("ffi".into()); },
+            local_globs => |m| { m.local_globs.insert("b\u{1}ffi".into()); },
             // R452: the TYPES declared inside one of those modules, and the `fn` NAMES the unexpanded
             // macro text mentions. Both are read at the CALL RESOLVER — a typed method call on such a
             // type, naming such a fn, hedges `Unknown` instead of vanishing — so a file gaining or losing
@@ -16267,8 +16269,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // The vein A + vein E merge bumped it to rev58 (both branches had moved from rev55 on their own).
         // VEIN A bumped it to rev56 (anchored `crate::`/relative/`self::`/`super::` paths change what
         // Pass A's indexes and Pass B's `calls` record, and the dependency list joins the reuse key).
+        // VEIN E bumped it to rev57 (R732/R754: `link!` externs and the body-local foreign import
+        // change what the decls and `calls` record) after rev56 (R145: `include!` splicing and three
+        // new `FileDecls` fields) — each older entry replays a silence warm.
         // VEIN B bumped it to rev55 (four new `rets` key spaces, a static element key, and what
         // `field_elem` and Pass B's `calls` record — a rev54 entry replays the silences warm).
         // ⟨0.40⟩ (R843) bumped the token to rev54 (`FnInfo` gained `ret_proto` and `FileDecls` gained the
@@ -16286,7 +16292,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16297,7 +16303,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev56/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev58/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -21001,7 +21007,7 @@ pub fn go() {{ imp::doit(); }}
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
             ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
-            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
+            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
             dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
@@ -25810,3 +25816,208 @@ fn veina_renamed_extern_crate_binds_its_rename() {
     ]);
     assert!(veina_row_effs(&v, "raw::new_uninitialized").contains(&"Fs".to_string()), "local do_alloc:\n{v:#}");
 }
+
+    // ── VEIN E — declarations the collector never read: `link!` (R732), a body-local foreign import
+    //    shadowed by its same-named wrapper (R754), and `include!` text (R145). ─────────────────────────
+
+    /// The `unknownWhy` reasons a function carries.
+    #[cfg(test)]
+    fn fixture_why(v: &serde_json::Value, name: &str) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some(name))
+            .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// SOUNDNESS R732 + R754. The fixture is byte-for-byte the EXECUTED one (each wrapper performs a real
+    /// filesystem syscall through a `link!`-shaped foreign import; run with a local `windows_targets`
+    /// whose `link!` has the real crate's non-raw-dylib expansion). Pre-fix only (A) disclosed: (B) is an
+    /// item-level `link!` no arm read, (C) is windows' own generated shape, (D) is the same self-
+    /// resolution through a REAL `extern` block — the defect is not specific to the macro — and (E) a
+    /// body-local `link!` with a differently-named wrapper. Each wrapper AND each caller must disclose.
+    #[test]
+    fn veine_a_foreign_import_declared_by_link_or_in_a_body_discloses_at_the_wrapper_and_the_caller() {
+        let src = r#"
+use std::os::raw::{c_char, c_int};
+extern "C" { fn creat(p: *const c_char, m: u32) -> c_int; }
+pub fn via_real_extern() { unsafe { creat(b"/tmp/a\0".as_ptr() as *const c_char, 0o644); } }
+windows_targets::link!("c" "C" fn mkdir(p: *const c_char, m: u16) -> c_int);
+pub fn via_macro_extern() { unsafe { mkdir(b"/tmp/b\0".as_ptr() as *const c_char, 0o755); } }
+pub unsafe fn symlink(a: *const c_char, b: *const c_char) -> c_int {
+    windows_targets::link!("c" "C" fn symlink(a: *const c_char, b: *const c_char) -> c_int);
+    symlink(a, b)
+}
+pub fn call_c() { unsafe { symlink(b"/tmp\0".as_ptr() as *const c_char, b"/tmp/c\0".as_ptr() as *const c_char); } }
+pub unsafe fn truncate(p: *const c_char, n: i64) -> c_int {
+    extern "C" { fn truncate(p: *const c_char, n: i64) -> c_int; }
+    truncate(p, n)
+}
+pub fn call_d() { unsafe { truncate(b"/tmp/a\0".as_ptr() as *const c_char, 7); } }
+pub fn via_body_macro_diff() {
+    windows_targets::link!("c" "C" fn chmod(p: *const c_char, m: u16) -> c_int);
+    unsafe { chmod(b"/tmp/a\0".as_ptr() as *const c_char, 0o600); }
+}
+"#;
+        let v = scan_fixture("veine_link", src);
+        for f in ["via_real_extern", "via_macro_extern", "symlink", "call_c", "truncate", "call_d", "via_body_macro_diff"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()),
+                    "{f} performs a foreign call and must not read pure:\n{v:#}");
+        }
+        for f in ["via_real_extern", "via_macro_extern", "symlink", "truncate", "via_body_macro_diff"] {
+            assert!(fixture_why(&v, f).contains(&"native:extern fn".to_string()),
+                    "{f}: the reason must name the native boundary:\n{v:#}");
+        }
+    }
+
+    /// The controls for the above: a macro merely NAMED `link` whose arguments are not a library string
+    /// then `fn NAME` declares nothing foreign, and a body that declares no import keeps its ordinary
+    /// self-recursion answer. A rule keyed on the leaf `link` alone, or one that rebinds every bare call
+    /// in a body, fails one of these.
+    #[test]
+    fn veine_a_link_named_macro_without_the_import_shape_and_an_import_free_body_stay_pure() {
+        let src = r#"
+macro_rules! link { (fn $n:ident) => { pub fn $n() {} } }
+link!(fn helper);
+pub fn calls_helper() { helper() }
+pub fn countdown(n: u32) -> u32 { if n == 0 { 0 } else { countdown(n - 1) } }
+"#;
+        let v = scan_fixture("veine_link_ctl", src);
+        for f in ["calls_helper", "countdown"] {
+            assert!(!fixture_effects(&v, f).contains(&"Unknown".to_string()), "{f} must stay pure:\n{v:#}");
+        }
+    }
+
+    /// R754's scoping: an import declared in a NESTED block shadows only that block, so a same-named
+    /// call OUTSIDE it still means the module item. Promoted only when every occurrence is inside the
+    /// declaring block (the R119 rule) — here one is not, so the outer call keeps its local resolution.
+    #[test]
+    fn veine_a_nested_block_import_does_not_rebind_a_call_outside_its_block() {
+        let src = r#"
+pub fn work() { let _ = std::fs::write("/tmp/w", "x"); }
+pub fn outer() {
+    { extern "C" { fn work(); } }
+    work()
+}
+"#;
+        let v = scan_fixture("veine_nested", src);
+        assert!(fixture_effects(&v, "outer").contains(&"Fs".to_string()),
+                "the call outside the block is the module's `work`, which writes a file:\n{v:#}");
+    }
+
+    /// SOUNDNESS R145, RESOLUTION. An out-of-tree `include!` (the build-script convention moved to a
+    /// literal path) and a non-`.rs` in-tree one: both are files the scan CAN read and does not walk, so
+    /// their text is spliced into the invoking module. Pre-fix both callers were ABSENT and `deny Fs`
+    /// exited 0 (EXECUTED: the file is written). The included unit's `loc` names the INCLUDED file.
+    #[test]
+    fn veine_a_readable_include_is_spliced_and_its_effects_reach_the_caller() {
+        let ext = std::env::temp_dir().join(format!("candor-veine-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&ext).unwrap();
+        let gen = ext.join("gen.rs");
+        std::fs::write(&gen, "pub fn generated_write() { let _ = std::fs::write(\"/tmp/g\", \"x\"); }\n").unwrap();
+        let src = format!(
+            "include!({:?});\npub fn caller() {{ generated_write() }}\n\
+             mod tables {{ include!(\"tables.rs.in\"); }}\npub fn uses_table() {{ tables::table_write() }}\n",
+            gen.to_string_lossy());
+        let v = scan_fixture_files("veine_inc", &src, &[(
+            "tables.rs.in", "pub fn table_write() { let _ = std::fs::write(\"/tmp/t\", \"x\"); }\n")]);
+        assert!(fixture_effects(&v, "caller").contains(&"Fs".to_string()), "out-of-tree include:\n{v:#}");
+        assert!(fixture_effects(&v, "uses_table").contains(&"Fs".to_string()), "non-.rs include:\n{v:#}");
+        let loc = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"] == "generated_write").and_then(|f| f["loc"].as_str()).unwrap_or("").to_string();
+        assert!(loc.starts_with(&*gen.canonicalize().unwrap().to_string_lossy()), "loc {loc:?} must name gen.rs");
+        let _ = std::fs::remove_dir_all(&ext);
+    }
+
+    /// The splice must not touch a target the walk already reads: an in-tree `.rs` file is analysed as
+    /// its own module today, and splicing it as well would emit every unit twice.
+    #[test]
+    fn veine_an_include_of_a_walked_file_is_left_to_the_walk() {
+        let v = scan_fixture_files("veine_walked",
+            "mod hidden { include!(\"gen.rs\"); }\n",
+            &[("gen.rs", "pub fn gw() { let _ = std::fs::write(\"/tmp/g\", \"x\"); }\n")]);
+        let n = fixture_names(&v).iter().filter(|n| n.ends_with("gw")).count();
+        assert_eq!(n, 1, "one unit, not two:\n{v:#}");
+    }
+
+    /// SOUNDNESS R145, DISCLOSURE. An `include!` of `env!("OUT_DIR")` cannot be read without a build.
+    /// EXECUTED ground truth (build.rs writes `gen_write` into OUT_DIR and the program calls it through
+    /// every spelling below): pre-fix all five callers were ABSENT and `deny Unknown` exited 0. The
+    /// controls: a caller in a module with NO opaque include calling an unresolved name stays silent
+    /// (this is not "any unresolved call hedges"), and a prelude constructor in the opaque module does
+    /// not hedge either.
+    #[test]
+    fn veine_a_call_an_unreadable_include_could_supply_is_disclosed() {
+        let src = r#"
+include!(concat!(env!("OUT_DIR"), "/gen.rs"));
+pub fn a_bare() { gen_write("/tmp/a") }
+pub mod ffi {
+    include!(concat!(env!("OUT_DIR"), "/gen.rs"));
+    pub fn e_inner() { gen_write("/tmp/e") }
+}
+pub mod b { use crate::ffi::*; pub fn b_glob() { gen_write("/tmp/b") } }
+pub fn c_rel() { ffi::gen_write("/tmp/c") }
+pub fn d_crate() { crate::ffi::gen_write("/tmp/d") }
+pub mod clean { pub fn unrelated(cb: u8) -> Option<u8> { Some(cb) } pub fn other() { mystery() } }
+pub fn prelude_only() -> Option<u8> { Some(1) }
+"#;
+        let v = scan_fixture("veine_outdir", src);
+        for f in ["a_bare", "ffi::e_inner", "b::b_glob", "c_rel", "d_crate"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "{f} must disclose:\n{v:#}");
+            assert!(fixture_why(&v, f).iter().any(|w| w.starts_with("macro:")), "{f}: macro: reason:\n{v:#}");
+        }
+        for f in ["clean::other", "clean::unrelated", "prelude_only"] {
+            assert!(!fixture_effects(&v, f).contains(&"Unknown".to_string()), "{f} must not hedge:\n{v:#}");
+        }
+    }
+
+    /// The cache key covers the included bytes: a warm `--incremental` run after the INCLUDED file
+    /// changes must say what a cold run says, not replay the splice of bytes that are gone.
+    #[test]
+    fn veine_a_warm_run_rereads_a_changed_included_file() {
+        // `incremental_scan` sets and clears the PROCESS-wide fault-injection variable, so it must hold
+        // the same lock as every other caller of it or it clears another test's injection mid-scan.
+        let _lock = abort_injection_lock();
+        let d = std::env::temp_dir().join(format!("candor-veine-warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("gen")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"warm\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "include!(\"../gen/g.in\");\npub fn caller() { g() }\n").unwrap();
+        std::fs::write(d.join("gen/g.in"), "pub fn g() {}\n").unwrap();
+        let policy = d.join("p.policy");
+        std::fs::write(&policy, "deny Fs caller\n").unwrap();
+        let p = policy.to_string_lossy().into_owned();
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+        let (rc1, _) = incremental_scan(&d, &out("o1"), &p, None);
+        assert_eq!(rc1, 0, "the included `g` is pure");
+        std::fs::write(d.join("gen/g.in"), "pub fn g() { let _ = std::fs::write(\"/tmp/x\", \"y\"); }\n").unwrap();
+        let (rc2, v2) = incremental_scan(&d, &out("o2"), &p, None);
+        assert_eq!(rc2, 1, "the included file now writes; a warm run must see it:\n{v2:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// R754's rebinding must stay in the VALUE namespace. objc2's `os_version/apple.rs` declares
+    /// `extern "C" { fn dlsym(..); }` AND `macro_rules! dlsym` in one body. The first cut rewrote the
+    /// body's shared `use` map, so `dlsym!(..)` no longer found its own template: on this fixture it
+    /// went `['Fs']` (HEAD) -> `['Unknown']` — a CONCRETE EFFECT LOST, which the corpus A/B showed only as
+    /// a vanished `macro:` reason because objc2's template is unreadable anyway. HEAD itself misses the
+    /// import (R106 rebinds `dlsym` to the body-macro sentinel). Both answers must be present.
+    #[test]
+    fn veine_a_body_extern_does_not_shadow_a_same_named_body_macro() {
+        let src = r#"
+pub fn parse() -> usize {
+    extern "C" { fn dlsym(h: usize, s: usize) -> usize; }
+    macro_rules! dlsym {
+        (unsafe fn $name:ident($($p:ident: $t:ty),* $(,)?);) => {{ let _ = std::fs::write("/tmp/ns", "x"); 0 }};
+    }
+    let a = unsafe { dlsym(1, 2) };
+    a + dlsym!(unsafe fn f(x: u8);)
+}
+"#;
+        let v = scan_fixture("veine_ns", src);
+        let e = fixture_effects(&v, "parse");
+        assert!(e.contains(&"Fs".to_string()), "the body macro's template must still expand:\n{v:#}");
+        assert!(e.contains(&"Unknown".to_string()), "the import call must disclose:\n{v:#}");
+        assert!(fixture_why(&v, "parse").contains(&"native:extern fn".to_string()), "{v:#}");
+    }

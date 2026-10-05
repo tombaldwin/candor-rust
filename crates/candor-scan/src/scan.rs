@@ -1298,9 +1298,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
 
     // CONTENT HASHES (cheap parallel reads, no parse). The cached entry for a file is reusable iff its
     // stored content_hash matches the bytes on disk now.
+    // SOUNDNESS R145 — the files the walk admitted, canonical, so an `include!` of one of them is left to
+    // the walk (see `lang::splice_includes`), and the environment the splice resolves paths against.
+    let walked_canon: std::collections::HashSet<std::path::PathBuf> =
+        paths.par_iter().filter_map(|(p, _)| p.canonicalize().ok()).collect();
+    let include_env = crate::lang::IncludeEnv { root, manifest_dir: root, walked: &walked_canon, include_tests };
+    // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
+    // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
         .par_iter()
-        .map(|(p, rel)| (rel.clone(), std::fs::read(p).map(|b| fnv1a(&b)).unwrap_or_default()))
+        .map(|(p, rel)| {
+            let own = std::fs::read(p).map(|b| fnv1a(&b)).unwrap_or_default();
+            let key = match prior.get(rel) {
+                Some(fc) if !fc.decls.include_targets.is_empty() => {
+                    crate::lang::include_closure_hash(&own, &fc.decls.include_targets, &walked_canon)
+                }
+                _ => own,
+            };
+            (rel.clone(), key)
+        })
         .collect();
     let per_file: Vec<(String, String, Option<FileCache>)> = hashes
         .into_iter()
@@ -1319,7 +1335,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // resolved HERE on the parse worker because proc-macro2's span line/col only resolves against the
     // parsing thread's source map (see `fn_locs`/`SendFile`). They ride alongside the moved file so Pass B
     // (single-threaded) can zip them onto each FnInfo without re-resolving a now-dead span.
-    let round1: Vec<Option<ParsedFile>> = per_file
+    // Each parse also returns the `include!` targets it consulted (R145) — the fresh cache key needs them.
+    let round1: Vec<Option<(ParsedFile, Vec<String>)>> = per_file
         .par_iter()
         .map(|(rel, _, cached)| {
             if cached.is_some() {
@@ -1330,11 +1347,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R308 — see `parse_file_2015_tolerant`: a file `syn` rejects gets ONE retry with
             // Rust-2015 bare closure-trait objects normalised, because one elided `dyn` currently drops
             // every function in the file.
-            let (file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
+            let (mut file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
+            // SOUNDNESS R145 — splice readable `include!` text in place, tag the unreadable rest. Done
+            // HERE, on the parsing thread, because the spliced items' spans resolve only against this
+            // thread's source map (see `fn_locs`).
+            let mut read = Vec::new();
+            if text.contains("include!") {
+                let dir = p.parent().unwrap_or(root);
+                crate::lang::splice_includes(&mut file.items, dir, &include_env, &mut Vec::new(), &mut read);
+            }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
-            Some((SendFile(file), locs))
+            Some(((SendFile(file), locs), read))
         })
         .collect();
 
@@ -1417,8 +1442,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
-                let Some((sf, locs)) = r1 else { continue };
-                let fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
+                let Some(((sf, locs), read)) = r1 else { continue };
+                let mut fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
+                // R145 — key the entry on what THIS parse read, not on what the previous one did.
+                let ch = if read.is_empty() {
+                    ch
+                } else {
+                    let own = paths
+                        .iter()
+                        .find(|(_, r)| r == &rel)
+                        .and_then(|(p, _)| std::fs::read(p).ok())
+                        .map(|b| fnv1a(&b))
+                        .unwrap_or_default();
+                    crate::lang::include_closure_hash(&own, &read, &walked_canon)
+                };
+                fd.include_targets = read;
                 decls_per_file.push((rel.clone(), ch, fd));
                 parsed_locs.insert(rel.clone(), locs);
                 parsed_files.insert(rel, sf.0);
@@ -1533,6 +1571,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let field_elem_trait = &merged.field_elem_trait;
     let trait_impls = &merged.trait_impls;
     let trait_decls = &merged.trait_decls;
+    // SOUNDNESS R145 — every module whose namespace an unreadable `include!` may be supplying names to.
+    let opaque_scope = crate::lang::opaque_include_scope(&merged.opaque_include_modules, &merged.local_globs);
     let trait_fields = &merged.trait_fields;
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
@@ -1793,7 +1833,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .find(|(_, r)| r == rel)
                 .and_then(|(p, _)| std::fs::read_to_string(p).ok())
                 // R308 — the round-2 twin of the round-1 parse above.
-                .and_then(|t| crate::lang::parse_file_2015_tolerant(&t).map(|(f, _)| f))
+                .and_then(|t| {
+                    let (mut f, _) = crate::lang::parse_file_2015_tolerant(&t)?;
+                    // R145 — the round-2 twin of the round-1 splice. Its decls are the cached ones, which
+                    // were derived from the same splice of the same bytes (the cache key covers them).
+                    if t.contains("include!") {
+                        let p = paths.iter().find(|(_, r)| r == rel).map(|(p, _)| p.clone())?;
+                        let dir = p.parent().unwrap_or(root).to_path_buf();
+                        crate::lang::splice_includes(&mut f.items, &dir, &include_env, &mut Vec::new(), &mut Vec::new());
+                    }
+                    Some(f)
+                })
                 .map(|file| {
                     // Resolve loc on THIS parse worker (span line/col is thread-local) — same as round 1.
                     let mut locs = Vec::new();
@@ -2417,6 +2467,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // at the hand-off — the only point where candor can see the value at all.
             if c.entropy_arg {
                 direct.entry(f.qual.clone()).or_default().insert("Rand");
+            }
+            // SOUNDNESS R754 — A CALL TO A FOREIGN FUNCTION THIS BODY DECLARED. The collector records a
+            // bare call to a body-local `extern` / `link!` name under `EXTERN_SENTINEL` (see
+            // `body_declared_externs`), so
+            // this path IS the import by Rust's scoping, and it is answered here — before `resolve_target`
+            // can look the bare leaf up crate-wide and find a same-named WRAPPER (windows' own shape),
+            // whose self-edge is then dropped and whose `resolved_local` suppresses every disclosure.
+            // Same answer the item-level `extern` block has always produced: `Unknown`, `native:extern fn`.
+            if !c.is_macro && c.path.starts_with(crate::decls::EXTERN_SENTINEL) {
+                if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                    eprintln!("VEINE_EXTERNCALL\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string());
+                continue;
             }
             // ── R105 — A `#[cfg]`-DUPLICATED ALIAS, ADJUDICATED WHERE THE LEAF IS KNOWN ────────────────
             // `decls::record_alias` keeps EVERY arm of an alias whose declaration is duplicated across
@@ -4508,14 +4573,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             //     item position. Ask `by_leaf` whether ANY unit's qual IS the module-relative target, and
             //     the root case answers itself.
             let rel = c.path.strip_prefix("crate::").unwrap_or(&c.path);
-            if !c.is_macro
+            let r128_fired = !c.is_macro
                 && !c.method
                 && !already_handled
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
                 && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
                 && !local_types.contains(&c.leaf)
-                && macro_hidden_owner(&c.path, 1, &merged.macro_modules)
-            {
+                && macro_hidden_owner(&c.path, 1, &merged.macro_modules);
+            if r128_fired {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 // KIND: `macro:` — SOUNDNESS R270, and the comment this replaces conceded the point
                 // itself: "§4's own text describes `ambiguous:` around the two-same-named-defs case
@@ -4546,6 +4611,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         local_types.contains(&c.leaf),
                         by_leaf.contains_key(&c.leaf));
                 }
+            }
+            // §4 HONESTY — SOUNDNESS R145, A NAME AN UNREADABLE `include!` COULD BE SUPPLYING. A free call
+            // that nothing resolved — no local unit, no classifier rule, no dependency report — whose
+            // callee is looked up in a module holding an `include!` this scan could not read
+            // (`env!("OUT_DIR")`, a missing file), or in a module that glob-imports one. Rust resolves a
+            // bare name against the CALLER's module, and a qualified one against the module its path
+            // names, and in both cases the included text is part of that namespace; candor has not seen
+            // it, so the absence of a definition is a fact about this engine's reading, not the program.
+            // EXECUTED ground truth (build.rs writes the file into OUT_DIR, the program runs it): six
+            // spellings — bare in the including module, bare in a sibling via `use m::*`, `m::f`,
+            // `crate::m::f`, a root-level include — were ABSENT and gate-silent; only `use m::f` was
+            // caught, and by R128.
+            //
+            // WHY THIS DOES NOT FLOOD where "any unresolved bare call hedges" would: the module must be
+            // one with an UNREADABLE include — evidence about THIS crate, the R128 discipline — and the
+            // R128 denylist carries over (a local type's constructor is not a call into hidden code).
+            // The std prelude's free functions and variant constructors are excluded by name: a bare
+            // `Some(x)`/`drop(x)` resolves to the prelude unless the hidden text shadows it, which no
+            // generated binding does. The boundary, stated: a METHOD call on a value of a type the
+            // hidden text declares, and an associated call `T::f()` on such a type, are not covered —
+            // neither path carries a module to ask about (R128's boundaries 1 and 3 again, for the
+            // types this time), and both stay misses.
+            if !r128_fired
+                && !c.is_macro
+                && !c.method
+                && !c.typed
+                && !already_handled
+                && !opaque_scope.is_empty()
+                // a sentinel-rebound name (R106 `<body-item>`, R754 `<body-extern>`) is the BODY's own
+                // declaration, never a name the module's namespace supplies
+                && !c.path.starts_with('<')
+                && !local_types.contains(&c.leaf)
+                && !matches!(c.leaf.as_str(), "Some" | "Ok" | "Err" | "drop" | "size_of" | "size_of_val" | "align_of" | "align_of_val")
+                && opaque_scope_names(&f.qual, &c.path, &local_types, trait_decls, &opaque_scope)
+            {
+                if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                    eprintln!("VEINE_OPAQUECALL\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default()
+                    .insert("macro:items hidden by an include! this scan could not read".to_string());
             }
         }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
@@ -7493,4 +7599,32 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
     scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx, run)
+}
+
+/// SOUNDNESS R145 — does this call's callee get looked up in a module of `scope`? The CALLER's module is
+/// its qual minus the leaf, or minus two segments when the second-to-last names a local type or trait (a
+/// method or trait default). A bare path is looked up there; a qualified one in the module it names,
+/// read both crate-rooted and relative to the caller (the collector has already stripped a written
+/// `crate::`/`self::`/`super::`, so either reading may be the meant one, and both only widen the hedge).
+fn opaque_scope_names(
+    caller: &str,
+    path: &str,
+    local_types: &std::collections::HashSet<String>,
+    trait_decls: &HashMap<String, crate::model::LocalTrait>,
+    scope: &std::collections::HashSet<String>,
+) -> bool {
+    let segs: Vec<&str> = caller.split("::").collect();
+    let n = segs.len();
+    let module = if n >= 2 && (local_types.contains(segs[n - 2]) || trait_decls.contains_key(segs[n - 2])) {
+        segs[..n - 2].join("::")
+    } else {
+        segs[..n.saturating_sub(1)].join("::")
+    };
+    let p = path.strip_prefix("crate::").unwrap_or(path);
+    match p.rsplit_once("::") {
+        None => scope.contains(&module),
+        Some((owner, _)) => {
+            scope.contains(owner) || (!module.is_empty() && scope.contains(&format!("{module}::{owner}")))
+        }
+    }
 }

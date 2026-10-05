@@ -50,6 +50,68 @@ Measured on 1,276 registry entries (unchained, vs `1e11e7f`) and 909 chained: th
 rdkafka rows that existed under a FABRICATED `types::` key (every real key keeps its effect); every removed
 `Unknown` is traced in the lane report, with the new-`Unknown` price and the gate flips. The scan cache schema
 moves to `rev56`.
+### ⚠ Vein E, foreign imports — `link!` is read, and a body-local import is the call it names (SOUNDNESS R732, R754) — ABOVE THE DECLINE BAND, NEEDS A RULING
+
+Two declarations no arm read. `windows_targets::link!("kernel32.dll" "system" fn F(..))` / `windows_link::link!`
+expands to an `extern` block and recorded nothing (R732). And `windows`' generated wrappers declare the
+import INSIDE a same-named function (`pub unsafe fn CreateFileW(..) { link!(.. fn CreateFileW(..)); CreateFileW(..) }`),
+so the inner call resolved to the wrapper ITSELF, the self-edge was dropped and every disclosure skipped
+(R754). The second is not specific to the macro: a REAL `extern "C" { fn truncate(..); }` in a body named
+`truncate` was the same silence. EXECUTED on macOS (each wrapper performs a real filesystem syscall through a
+`link!` with the real crate's non-raw-dylib expansion): five spellings, `deny Unknown` 0 → 1 at wrapper and
+caller; the real item-level `extern` control was 1 throughout.
+
+- **Item-level `link!`** joins `extern_fns`, exactly as an `extern` block does (shape test: a library string
+  first, then `fn NAME` — a crate's own `link!` declaring a bodied fn is not matched).
+- **A body-local import** (`extern` block or `link!`, R119 block scoping) is recorded by the collector under
+  `<body-extern>`, and `scan.rs` answers that call as `Unknown`, `native:extern fn`, before any crate-wide
+  lookup. Carried on the collector, not in the `use` map: the map conflates namespaces, and the first cut
+  that used it LOST a concrete effect when a body declared `extern { fn dlsym }` beside `macro_rules! dlsym`
+  (objc2's shape; pinned by a test).
+- `windows` `CreateFileW`, `CreateProcessW`, `WinSock::connect`, `LoadLibraryExA` read `['Unknown']` with
+  `native:extern fn` (were `[]`, disclosed only by `invisible`, which arms no policy form).
+- **⚠ Gates that can flip, vs `1e11e7f` (both Vein E commits; R145's own share is 105 rows) — only 0 → 1, and this is the PRICE QUESTION.**
+  Unchained 1,838 entries / 757,917 units: 24,774 functions newly `Unknown` (**3.27%**, above the ~2.6% band),
+  of which **20,109 (2.65%) are ONE crate, `windows-0.56.0`** — already 79,932-of-112,200 rows `Unknown` at
+  HEAD; module scope 731 flips (188 in `windows`), crate scope 5 (gethostname ×2, hostname, objc2-app-kit,
+  and R145's rustc_version_runtime). Excluding `windows`, 4,665 (0.62%): objc2-* CoreFoundation/CoreGraphics
+  wrappers, wasi/wasip2/wasip3 imports, windows-core/registry/strings/result. Chained 909 entries / 403,300
+  units: 12,291 (3.05%), `windows` 9,315. REMOVED 0, no concrete effect lost, no reason withdrawn except
+  `ambiguous:same-name local defs` → `native:extern fn` on cfg-twin wrappers (524 rows). Every new charge is
+  a call to a declared foreign import.
+- Not covered, stated: a consumer calling a dependency's foreign import DIRECTLY (`dep::creat(..)`) reads
+  pure when chained — for a real `extern` block as much as for `link!`; the dep publishes no row for a
+  body-less declaration.
+- Scan-cache schema rev56 → rev57.
+
+### ⚠ Vein E, `include!` — a readable target is read, an unreadable one is disclosed (SOUNDNESS R145)
+
+`include!` text was never read: a call into an included function was an unresolved bare call and its
+caller read PURE — a unit candor certified (`analyzed` counts it; no `unanalyzed`, no `outOfScope`).
+EXECUTED: an out-of-tree `include!` of a real `fs::write`, `deny Fs caller` exit 0 against an inline control
+at 1; and with `include!(concat!(env!("OUT_DIR"), "/gen.rs"))` (build.rs writes the file, the program runs it)
+the bare, glob-imported, `m::f` and `crate::m::f` spellings were all ABSENT — only `use m::f` was caught (R128).
+
+- **Resolved:** a target the scan can read and does not already walk — an out-of-tree path, a non-`.rs`
+  file (`*.rs.in`, ICU's `*.rs.data`), `concat!(env!("CARGO_MANIFEST_DIR"), ..)` — is SPLICED into the
+  invoking module at parse time, as rustc does: the module's path, its `use` map and the invocation's own
+  `#[cfg]`s. Its units' `loc` names the included file. An in-tree `.rs` target the walk already reads is
+  left alone (it is analysed as its own file today; splicing it too would emit every unit twice).
+- **Disclosed:** a target the scan cannot know (`OUT_DIR` or any env var but `CARGO_MANIFEST_DIR`, a missing
+  or unparseable file) leaves its module marked; a free call nothing resolved whose callee is looked up in
+  such a module — bare in the module itself, through a crate-local glob of it, or qualified with its path —
+  discloses `Unknown` with `macro:items hidden by an include! this scan could not read`. Not covered, and
+  stated: a method or `T::assoc` call on a TYPE the hidden text declares (no module to ask about).
+- **The cache key covers the included bytes:** a warm `--incremental` run after an included file changes
+  re-parses (pinned by a test that fails with the key reverted).
+- **⚠ Gates that can flip, vs `1e11e7f` — only 0 → 1.** Unchained 1,838-entry corpus (757,917 analysed
+  units): ADDED 42 / REMOVED 0 / CHANGED 187; 105 rows newly `Unknown` (**0.014%**, under the lower band),
+  no concrete effect added or lost, no reason withdrawn. Real: openssl-sys/libsqlite3-sys/rustc_version_runtime
+  calls into bindgen/generated `OUT_DIR` code; `deny Unknown` flips at crate scope on rustc_version_runtime.
+  Over-disclosure, stated: 68 of the 105 are aws-lc-sys's `builder/` build-script tree, whose `crate::f` is
+  pre-existingly resolved through `src/lib.rs`'s root glob onto the `OUT_DIR` module. Resolution reach: 292
+  splices in 8 entries (ICU data tables), CHANGED 0 there (pure tables).
+- Scan-cache schema rev55 → rev56.
 
 ### ⚠ Vein B — one strict expression typer for binders, wrapper accessors, turbofish returns and handle arguments (more effects charged, a few more `Unknown`s; SOUNDNESS R193(b), R197, R733, R568, R542, R341, R861 bound spelling, R877, R878)
 
