@@ -44,6 +44,15 @@ the caller ABSENT (pre-existing, now charged). Census: 0 rows lost an effect; ne
 sentinel connections (`Ipc`, `Net`, previously absent from every sentinel helper), mongodb's SRV poller,
 deadpool's `Object::take` (`Unknown`) and aws-smithy's rate limiter (`Log`), each traced to source.
 
+### ⚠ `to_socket_addrs` on a name receiver is a DNS resolution (SOUNDNESS R950)
+
+`(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT (`deny Net` exit 0);
+only a receiver typed from a `&str` parameter was seen. A string literal, or a tuple whose host slot is a
+literal, a provably string-typed value or an untyped one, is now the std trait call; a literal host is
+published in `hosts`, a runtime one masks. A host slot that provably types to an IP charges nothing.
+Census: `url::Url::socket_addrs`, hyper's and hyper-util's `GaiResolver`, reqwest's and hyper-util's SOCKS
+connect, and aws-smithy's `ResolveDns` gain `Net` (each a real getaddrinfo).
+
 ### ⚠ A dependency's published foreign import is `Unknown` + `native:extern fn` when chained, not pure (SOUNDNESS R894)
 
 A consumer calling a dependency's `extern "C" { pub fn creat(..); }` directly read PURE when chained — ABSENT,

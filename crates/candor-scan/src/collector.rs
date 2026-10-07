@@ -5039,6 +5039,78 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         }
+        // SOUNDNESS R950 — `ToSocketAddrs::to_socket_addrs` ON A RECEIVER THIS FILE CANNOT TYPE. The method is
+        // reached through its receiver's type, and only a typed receiver (a `&str` PARAMETER) formed a path
+        // `classify` knows; a TUPLE (`(h, 80u16).to_socket_addrs()`) or a string LITERAL
+        // (`"evil.example:80".to_socket_addrs()`) left only the bare-leaf twin, which classifies nothing:
+        // the DNS resolution was ABSENT from `functions[]` and `deny Net` exited 0. The name is std's trait
+        // method, so an untyped receiver is recorded as the trait path — what the UFCS spelling
+        // `ToSocketAddrs::to_socket_addrs(&x)` already records. The receiver IS the locator (⟨0.37⟩): a
+        // literal host, or a tuple whose host slot resolves to one, is published as the destination it
+        // names; anything else carries no literal and is masked by `is_net_establishing`.
+        // ONLY A RECEIVER THAT IS PROVABLY A NAME: a string literal, or a tuple whose host slot is a literal or
+        // a provably string-typed value. The first cut took ANY untyped receiver and charged `Net` on the
+        // std/core ADDRESS impls, which resolve nothing — `SocketAddr::V4(*self).to_socket_addrs()` and
+        // `(*a, port).to_socket_addrs()` over an IP in no-std-net and async-std (measured, 7 fabricated
+        // rows). An IP tuple or a `SocketAddr` keeps today's behaviour.
+        let names_a_host = |e: &syn::Expr| {
+            matches!(peel_recv(e), syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. })) || self.is_provably_str(e)
+        };
+        // A TUPLE's host slot that types to NOTHING is read as a name too: std's `(host, port)` impls are a
+        // name (`&str`/`String`) or an IP, and a slot this file cannot type is the one the absence hid —
+        // `url::Url::socket_addrs`'s `(domain, port)` read PURE. Only a slot that PROVABLY types to an IP
+        // is left alone. The price is the IP-variant arm (`IpAddr::V4(a) => (a, port)`), whose payload this
+        // engine does not type: an over-charge inside an address impl, never a silence.
+        let ip_ty = |t: &str| matches!(t, "IpAddr" | "Ipv4Addr" | "Ipv6Addr" | "SocketAddr" | "SocketAddrV4" | "SocketAddrV6");
+        let host_is_ip = |e: &syn::Expr| {
+            self.resolve_recv_type(e).as_deref().is_some_and(|t| ip_ty(t.rsplit("::").next().unwrap_or(t)))
+                // an associated constant of an IP type (`Ipv4Addr::LOCALHOST`, `IpAddr::V4(..)` is a Call)
+                || matches!(peel_recv(e), syn::Expr::Path(p) if p.path.segments.len() >= 2
+                    && ip_ty(&p.path.segments[p.path.segments.len() - 2].ident.to_string()))
+        };
+        let recv_why = match peel_recv(&node.receiver) {
+            syn::Expr::Tuple(t) if t.elems.len() == 2 => t.elems.first().and_then(|h| {
+                if names_a_host(h) {
+                    Some("name")
+                } else if !host_is_ip(h) && !matches!(peel_recv(h), syn::Expr::Call(_) | syn::Expr::MethodCall(_)) {
+                    Some("untyped")
+                } else {
+                    None
+                }
+            }),
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }) => Some("name"),
+            _ => None,
+        };
+        let recv_is_name = recv_why.is_some();
+        if leaf == "to_socket_addrs"
+            && node.args.is_empty()
+            && recv_is_name
+            && self.resolve_recv_type_for(&node.receiver, &leaf).is_none()
+            && self.resolve_recv_traits(&node.receiver).is_empty()
+        {
+            let str_of = |e: &syn::Expr| match peel_recv(e) {
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(l), .. }) => Some(l.value()),
+                other => self.resolve_str_expr(other),
+            };
+            let lit = match peel_recv(&node.receiver) {
+                syn::Expr::Tuple(t) if t.elems.len() == 2 => {
+                    let host = t.elems.first().and_then(str_of);
+                    let port = match t.elems.iter().nth(1) {
+                        Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. })) => Some(i.base10_digits().to_string()),
+                        _ => None,
+                    };
+                    host.map(|h| match port { Some(p) => format!("{h}:{p}"), None => h })
+                }
+                other => str_of(other),
+            };
+            if std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                eprintln!("R950RECV {} lit={lit:?}", recv_why.unwrap_or(""));
+            }
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                                   path: "std::net::ToSocketAddrs::to_socket_addrs".to_string(),
+                                   leaf: leaf.clone(), str_arg: lit, typed: true, method: true,
+                                   is_macro: false, path_lits_partial: false, path_lit2: None });
+        }
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —

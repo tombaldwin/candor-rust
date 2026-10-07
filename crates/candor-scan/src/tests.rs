@@ -9048,6 +9048,49 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn r950_to_socket_addrs_on_an_untyped_receiver() {
+        // SOUNDNESS R950: `(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT
+        // from `functions[]` (`deny Net` exit 0) while `h.to_socket_addrs()` on a `&str` PARAMETER marked —
+        // only a typed receiver formed a path `classify` knows. EXECUTED: the tuple form performs a real
+        // lookup (a nonexistent name fails with getaddrinfo's error).
+        for (tag, body) in [
+            ("tuple", r#"pub fn go(h: &str) { let _ = (h, 80u16).to_socket_addrs(); }"#),
+            ("lit", r#"pub fn go() { let _ = "evil.example:80".to_socket_addrs(); }"#),
+        ] {
+            let src = format!("use std::net::ToSocketAddrs;\n{body}\n");
+            let (rc, v) = r817_run(&format!("r950{tag}"), &src, "deny Net go\n");
+            assert_eq!(rc, 1, "R950 `{tag}`: a DNS resolution must be seen by `deny Net`\n{v:#}");
+        }
+        // Beside a benign literal: a RUNTIME tuple host is masked; a LITERAL receiver is PUBLISHED as the
+        // destination it names, so `allow Net ok.example` fails and `allow Net ok.example evil.example` passes.
+        let rt = r#"use std::net::ToSocketAddrs;
+            pub fn go(h: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = (h, 80u16).to_socket_addrs(); }"#;
+        assert_eq!(r817_both("r950rt", rt, "ok.example"), (1, 1), "a runtime tuple host must not be certified");
+        let lit = r#"use std::net::ToSocketAddrs;
+            pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = ("evil.example", 80u16).to_socket_addrs(); }"#;
+        assert_eq!(r817_both("r950lit", lit, "ok.example"), (1, 1), "the literal resolve reaches evil.example");
+        assert_eq!(r817_both("r950lit2", lit, "ok.example evil.example"), (0, 0), "…and is certified by naming it");
+        // The url-2.5.8 shape: a host slot this file cannot type (`Host::Domain(domain) => (domain, port)`)
+        // — `Url::socket_addrs` read PURE before. An untyped slot is read as a name.
+        let untyped = r#"use std::net::ToSocketAddrs;
+            pub enum Host<S> { Domain(S), Other }
+            pub fn go(h: Host<&str>, port: u16) { if let Host::Domain(domain) = h { let _ = (domain, port).to_socket_addrs(); } }"#;
+        let (rc, v) = r817_run("r950untyped", untyped, "deny Net go\n");
+        assert_eq!(rc, 1, "an untyped tuple host is read as a name\n{v:#}");
+        // CONTROLS — a host slot that PROVABLY types to an IP resolves nothing and charges nothing.
+        for (tag, body) in [
+            ("ipvar", r#"use std::net::ToSocketAddrs; pub fn go(ip: std::net::Ipv4Addr, p: u16) { let _ = (ip, p).to_socket_addrs(); }"#),
+            ("ipconst", r#"use std::net::ToSocketAddrs; pub fn go(p: u16) { let _ = (std::net::Ipv4Addr::LOCALHOST, p).to_socket_addrs(); }"#),
+        ] {
+            let (rc, v) = r817_run(&format!("r950{tag}"), body, "deny Net go\n");
+            assert_eq!(rc, 0, "an IP tuple resolves nothing (`{tag}`)\n{v:#}");
+        }
+        let (_, v) = r817_run("r950hosts", lit, "deny Net go\n");
+        assert!(r817_row(&v, "go")["hosts"].as_array().is_some_and(|h| h.iter().any(|x| x == "evil.example:80")),
+                "the literal receiver is the destination: {}", r817_row(&v, "go"));
+    }
+
+    #[test]
     fn r459_cfg_test_file_module_is_excluded_whatever_its_filename() {
         // SOUNDNESS R459 — THE MIRROR OF R457. A `#[cfg(test)] mod X;` file module whose FILENAME does
         // not match the `tests.rs`/`*_test.rs` convention was scanned as PRODUCTION, so test code was
