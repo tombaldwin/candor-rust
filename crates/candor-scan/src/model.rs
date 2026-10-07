@@ -458,6 +458,21 @@ pub(crate) fn static_elem_key(name: &str) -> String {
     format!("<elem>{name}")
 }
 
+/// SOUNDNESS R979 — `impl<S, O> PollState<S, O> { fn state_mut(&mut self) -> Result<&mut S> }`: the
+/// POSITION, in the impl's written self-type argument list, of the parameter the (unwrapped,
+/// reference-peeled) return names; `RET_GENERIC_NONE` for any other return, so same-leaf twins that
+/// disagree withdraw it. Read with `field_args_key` — the receiver field's written arguments.
+pub(crate) fn impl_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("<implretgen>{type_leaf}\u{1f}{fn_leaf}")
+}
+
+/// SOUNDNESS R979 — a struct field's declared type ARGUMENTS, positionally (`inner: PollState<Box<W>,
+/// u8>` -> `W\u{1}u8`; a lifetime is `'`, an untypable argument `_`), so an accessor whose return is
+/// the impl's type parameter can be typed at the call site. Angle-bracketed: no identifier reaches it.
+pub(crate) fn field_args_key(struct_leaf: &str, field: &str) -> String {
+    format!("<fieldargs>{struct_leaf}\u{1f}{field}")
+}
+
 pub(crate) fn ret_generic_key(fn_leaf: &str) -> String {
     format!("{RET_GENERIC}{fn_leaf}")
 }

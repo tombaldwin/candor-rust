@@ -95,6 +95,12 @@ pub(crate) fn scan_items(
     crate::lang::collect_item_uses(items, include_tests, uses, &mut use_alts);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
+        // SOUNDNESS R977 — an item compiled OUT of the default build (`#[cfg(feature = "aio")] mod aio`,
+        // a feature-gated fn or impl) is still walked and reported; inside it the default-build filter
+        // must keep every nested feature arm, not decide them against a build the item is not part of.
+        // Held for the whole arm, so a `mod`'s own `use` items, an impl's methods and a trait's defaults
+        // are all read under it. See `lang::CfgOffScope`.
+        let _cfg_off = crate::lang::CfgOffScope::enter_if(crate::lang::item_attrs(it));
         match it {
             syn::Item::Fn(f) => {
                 // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
@@ -161,6 +167,7 @@ pub(crate) fn scan_items(
                             // otherwise-production impl
                             continue;
                         }
+                        let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated method
                         let n = m.sig.ident.to_string();
                         let q = match &tyname {
                             Some(t) => qual(&format!("{t}::{n}")),
@@ -220,7 +227,12 @@ pub(crate) fn scan_items(
                             if let syn::Item::Type(t) = it {
                                 let name = t.ident.to_string();
                                 if let Some(v) = uses.get(&format!("crate::{sub}::{name}")).cloned() {
-                                    subuses.insert(name, v);
+                                    subuses.insert(name.clone(), v);
+                                }
+                                // R978 — and the alias's type-only POINTEE key, read back the same way.
+                                let dk = format!("{name}{}", crate::lang::DEREF_ALIAS_SUF);
+                                if let Some(v) = uses.get(&format!("crate::{sub}::{dk}")).cloned() {
+                                    subuses.insert(dk, v);
                                 }
                             }
                         }
@@ -258,6 +270,7 @@ pub(crate) fn scan_items(
                         if !include_tests && is_cfg_test(&m.attrs) {
                             continue;
                         }
+                        let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated default
                         let n = m.sig.ident.to_string();
                         let loc = next_loc(locs, loc_idx);
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
@@ -944,6 +957,8 @@ fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
 pub(crate) struct ModSiteCache {
     parsed: HashMap<std::path::PathBuf, Option<std::rc::Rc<syn::File>>>,
     verdict: HashMap<std::path::PathBuf, (Option<bool>, &'static str)>,
+    /// SOUNDNESS R977 — the memo for `file_module_cfg_off`, beside the test verdict's.
+    cfg_off: HashMap<std::path::PathBuf, bool>,
 }
 
 /// R457 — IS A FILE WHOSE NAME LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
@@ -1142,6 +1157,63 @@ fn compute_file_module_test_verdict(
     (None, "no-declaration-found")
 }
 
+/// SOUNDNESS R977 — is this FILE a module the default build does not compile? True when the file's own
+/// `#![cfg(..)]`, its declaring `mod`'s `#[cfg(..)]` (or an inline `mod` around that declaration), or any
+/// ANCESTOR module's is KNOWN-FALSE under the crate's default features (`lang::is_cfg_inactive`). The
+/// caller opens a `lang::CfgOffScope` for the file's walks, so a nested `#[cfg(feature = ..)]` inside it
+/// keeps every arm instead of being decided against a default build the file is not part of.
+///
+/// The same evidence route as `file_module_test_verdict` — own inner attribute, declaring `mod` site, then
+/// the ancestors — with one difference in the default: no declaration found means `false` (scan with the
+/// filter, today's behaviour), because this verdict only ever WIDENS what is kept.
+///
+/// Must be asked while no `CfgOffScope` is open (the walk, before any pass), or `is_cfg_inactive` answers
+/// `false` and every file reads as default-build — which is the pre-fix behaviour, not a wrong one.
+pub(crate) fn file_module_cfg_off(root: &Path, rel: &Path, cache: &mut ModSiteCache) -> bool {
+    file_module_cfg_off_inner(root, rel, cache, 0)
+}
+
+fn file_module_cfg_off_inner(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
+    if let Some(hit) = cache.cfg_off.get(rel) {
+        return *hit;
+    }
+    if depth > 16 {
+        return false;
+    }
+    let out = compute_file_module_cfg_off(root, rel, cache, depth);
+    cache.cfg_off.insert(rel.to_path_buf(), out);
+    out
+}
+
+fn compute_file_module_cfg_off(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
+    if let Ok(txt) = std::fs::read_to_string(root.join(rel)) {
+        if has_inner_attr_marker(&txt) {
+            if let Ok(f) = syn::parse_file(&txt) {
+                if crate::lang::is_cfg_inactive(&f.attrs) {
+                    return true;
+                }
+            }
+        }
+    }
+    let Some((name, dir)) = module_site(rel) else { return false };
+    let parents = [
+        dir.join("mod.rs"),
+        if dir.as_os_str().is_empty() { std::path::PathBuf::new() } else { dir.with_extension("rs") },
+        dir.join("lib.rs"),
+        dir.join("main.rs"),
+    ];
+    for prel in parents.iter() {
+        if prel.as_os_str().is_empty() || prel == rel {
+            continue;
+        }
+        let Some(f) = parse_module_file(root, prel, cache) else { continue };
+        if let Some(off) = declaring_mod_matches(&f.items, &name, crate::lang::is_cfg_inactive) {
+            return off || file_module_cfg_off_inner(root, prel, cache, depth + 1);
+        }
+    }
+    false
+}
+
 /// `(module name, the directory whose module file declares it)`.
 ///
 /// The `mod.rs` case is the one that matters and the one the R457 code could not express: `a/b/mod.rs`
@@ -1203,14 +1275,21 @@ fn has_inner_attr_marker(txt: &str) -> bool {
 /// A `#[path = "…"]` redirect is matched on the TARGET's file stem, which is what actually names the
 /// file — `#[path = "foo_test.rs"] mod tests;` declares `foo_test.rs`, not `tests.rs`.
 fn declaring_mod_is_cfg_test(items: &[syn::Item], stem: &str) -> Option<bool> {
+    declaring_mod_matches(items, stem, crate::lang::is_cfg_test)
+}
+
+/// `Some(pred(attrs))` for the `mod <stem>;` declaration naming `stem` — `declaring_mod_is_cfg_test`'s
+/// search with the attribute question as a parameter, so the test verdict and R977's cfg-off verdict
+/// cannot find the declaration by two different rules.
+fn declaring_mod_matches(items: &[syn::Item], stem: &str, pred: fn(&[syn::Attribute]) -> bool) -> Option<bool> {
     for it in items {
         let syn::Item::Mod(m) = it else { continue };
         match &m.content {
             // an inline body — recurse; it can hold file-module declarations of its own.
             Some((_, inner)) => {
-                if let Some(v) = declaring_mod_is_cfg_test(inner, stem) {
+                if let Some(v) = declaring_mod_matches(inner, stem, pred) {
                     // An inline `#[cfg(test)] mod foo { mod bar; }` makes `bar` test-only too.
-                    return Some(v || crate::lang::is_cfg_test(&m.attrs));
+                    return Some(v || pred(&m.attrs));
                 }
             }
             None => {
@@ -1226,7 +1305,7 @@ fn declaring_mod_is_cfg_test(items: &[syn::Item], stem: &str) -> Option<bool> {
                         .collect()
                 };
                 if names.iter().any(|n| n == stem) {
-                    return Some(crate::lang::is_cfg_test(&m.attrs));
+                    return Some(pred(&m.attrs));
                 }
             }
         }
@@ -1431,6 +1510,9 @@ pub(crate) const ITEM_SENTINEL: &str = "<body-item>";
 /// decl-index digest requires), and the choice is made in scan.rs's call loop where the leaf is in hand:
 /// identical classifications → charge that one effect; different → `Unknown`, the same honest signal
 /// `drop_cross_ambiguous_enum_leaves`'s R90 collision already earns. Never a pick by position.
+/// SOUNDNESS R986 — the `mod_aliases` key prefix marking a path-redirected module (see `collect_reexports`).
+pub(crate) const REDIRECT_MOD_MARK: &str = "\u{6}redir\u{6}";
+
 pub(crate) fn record_alias(aliases: &mut HashMap<String, String>, key: String, target: String) {
     match aliases.get_mut(&key) {
         None => {
@@ -1754,6 +1836,17 @@ pub(crate) fn collect_reexports(
     aliases: &mut HashMap<String, String>,
 ) {
     let mods = mod_targets(items, modpath, dir, include_tests);
+    // SOUNDNESS R986 — record (and ONLY record) every `mod NAME;` whose file a `#[path]` /
+    // `#[cfg_attr(_, path = ..)]` chooses: this scanner places the file where it SITS, so a call written
+    // through the module's own name (`crate::backend::c::timerfd_create`) can name no unit. The marker key
+    // starts with `REDIRECT_MOD_MARK`, which no path segment can contain, so `expand` never matches it —
+    // a resolution through these aliases was measured and REVERTED (96 effects lost in rustix 0.37.28).
+    for (name, targets) in &mods {
+        let own = qualify(modpath, name);
+        if targets.iter().any(|t| *t != own) {
+            record_alias(aliases, format!("{REDIRECT_MOD_MARK}{own}"), own.clone());
+        }
+    }
     let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
     collect_module_glob(items, modpath, &mods, include_tests, aliases);
     // SOUNDNESS R438 — see `cfg_gated_use_alias_counts`. Taken over the whole module BEFORE any item is
@@ -1856,6 +1949,24 @@ pub(crate) fn collect_reexports(
                         }
                         if written != "Self" {
                             record_alias(aliases, qualify(modpath, &t.ident.to_string()), expand(&written, uses));
+                        }
+                        // SOUNDNESS R978 — `type HouseKeeperArc = Arc<Housekeeper>;` was recorded as the bare
+                        // WRAPPER (`path_to_string` drops the generic argument), so a receiver typed through
+                        // the alias — a parameter, a field, an `if let Some(hk) = &self.housekeeper` binder —
+                        // typed to `std::sync::Arc`, and `hk.run_pending_tasks()` was SILENTLY DROPPED: the
+                        // same call through the written `Arc<Housekeeper>` peels to the pointee and charges.
+                        // The POINTEE is recorded under a TYPE-ONLY key beside the alias (see
+                        // `lang::DEREF_ALIAS_SUF`), so `type_path` can peel it the way it peels the written
+                        // wrapper, while a PATH call (`HouseKeeperArc::new(..)`, which is `Arc::new`) keeps
+                        // resolving to the wrapper exactly as before.
+                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path) {
+                            if let Some(pointee) = crate::lang::type_path(inner, uses) {
+                                record_alias(
+                                    aliases,
+                                    qualify(modpath, &format!("{}{}", t.ident, crate::lang::DEREF_ALIAS_SUF)),
+                                    pointee,
+                                );
+                            }
                         }
                     }
                 }
@@ -3114,6 +3225,125 @@ fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: 
 /// `Result`/`Option`-unwrapped) return type IS. `fn mk<T: Default>() -> T` is `Some(0)`; a concrete
 /// return, a reference to a generic, or an impl-level generic (which no call-site turbofish supplies) is
 /// `None`.
+/// SOUNDNESS R979 — the position in the impl's self-type arguments (`self_args`, `None` where an argument
+/// is not one of the impl's own type parameters) of the parameter `sig`'s return names, after unwrapping
+/// `Result`/`Option` and peeling references and `Box`. A method-level generic of the same name shadows.
+fn impl_return_param_position(sig: &syn::Signature, self_args: &[Option<String>]) -> Option<usize> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return None };
+    let mut t: &syn::Type = crate::lang::unwrap_result_option(ty);
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) => match crate::lang::deref_wrapper_arg(&p.path) {
+                Some(inner) => t = inner,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let id = p.path.get_ident()?.to_string();
+    if sig.generics.type_params().any(|g| g.ident == id) {
+        return None;
+    }
+    self_args.iter().position(|a| a.as_deref() == Some(id.as_str()))
+}
+
+/// SOUNDNESS R979 — a field type's written ARGUMENTS, positionally encoded for `model::field_args_key`,
+/// plus — when the type is a GENERIC `type` alias declared in this same item list — the alias's TARGET
+/// path (the `fields` entry must name `PollState`, not the alias). `Box`/`Arc`/`Rc` and references are
+/// peeled first, as `type_path` peels them. `None` when the type carries no arguments.
+fn field_type_args(
+    ty: &syn::Type,
+    uses_ty: &HashMap<String, String>,
+    items: &[syn::Item],
+) -> Option<(Option<String>, String)> {
+    let mut t = ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) => match crate::lang::deref_wrapper_arg(&p.path) {
+                Some(inner) => t = inner,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let seg = p.path.segments.last()?;
+    let written: Vec<&syn::GenericArgument> = match &seg.arguments {
+        syn::PathArguments::AngleBracketed(a) => a.args.iter().collect(),
+        _ => Vec::new(),
+    };
+    let enc = |a: &syn::GenericArgument, subst: &HashMap<String, String>| -> String {
+        match a {
+            syn::GenericArgument::Lifetime(_) => "'".to_string(),
+            syn::GenericArgument::Type(at) => {
+                if let syn::Type::Path(ap) = at {
+                    if let Some(id) = ap.path.get_ident() {
+                        if let Some(v) = subst.get(&id.to_string()) {
+                            return v.clone();
+                        }
+                    }
+                }
+                crate::lang::type_path(at, uses_ty)
+                    .filter(|v| !v.contains(crate::decls::ALIAS_ALT_SEP))
+                    .unwrap_or_else(|| "_".to_string())
+            }
+            _ => "_".to_string(),
+        }
+    };
+    // A same-item-list `type` alias (generic or not): substitute its parameters with the written arguments.
+    if p.path.segments.len() == 1 {
+        let alias = items.iter().find_map(|it| match it {
+            syn::Item::Type(ta) if ta.ident == seg.ident && (written.is_empty() == ta.generics.type_params().next().is_none()) => Some(ta),
+            _ => None,
+        });
+        if let Some(ta) = alias {
+            let mut subst: HashMap<String, String> = HashMap::new();
+            for (i, gp) in ta.generics.params.iter().enumerate() {
+                if let syn::GenericParam::Type(tp) = gp {
+                    let v = written.get(i).map(|a| enc(a, &HashMap::new())).unwrap_or_else(|| "_".to_string());
+                    subst.insert(tp.ident.to_string(), v);
+                }
+            }
+            let mut tt: &syn::Type = &ta.ty;
+            loop {
+                match tt {
+                    syn::Type::Paren(x) => tt = &x.elem,
+                    syn::Type::Group(x) => tt = &x.elem,
+                    syn::Type::Path(x) => match crate::lang::deref_wrapper_arg(&x.path) {
+                        Some(inner) => tt = inner,
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            let syn::Type::Path(tp) = tt else { return None };
+            let tseg = tp.path.segments.last()?;
+            let syn::PathArguments::AngleBracketed(targs) = &tseg.arguments else { return None };
+            let args: Vec<String> = targs.args.iter().map(|a| enc(a, &subst)).collect();
+            let target = crate::lang::type_path(tt, uses_ty)?;
+            return Some((Some(target), args.join("\u{1}")));
+        }
+    }
+    if written.is_empty() {
+        return None;
+    }
+    let none = HashMap::new();
+    Some((None, written.iter().map(|a| enc(a, &none)).collect::<Vec<_>>().join("\u{1}")))
+}
+
 fn ret_generic_position(sig: &syn::Signature, ty: &syn::Type) -> Option<usize> {
     let syn::Type::Path(p) = ty else { return None };
     if p.qself.is_some() {
@@ -3473,6 +3703,17 @@ pub(crate) fn collect_decls(
                                         .insert(name.to_string(), leaves);
                                 } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                     entry.insert(name.to_string(), ty);
+                                }
+                                // SOUNDNESS R979 — the field's written type ARGUMENTS (through a same-module
+                                // GENERIC alias, which the alias map skips), so `self.f.state_mut()?.go()`
+                                // can type an accessor that returns the impl's type parameter.
+                                if !had_trait_leaves {
+                                    if let Some((target, args)) = field_type_args(&f.ty, uses_ty, items) {
+                                        if let Some(t) = target {
+                                            entry.insert(name.to_string(), t);
+                                        }
+                                        file_decl_fact(rets, crate::model::field_args_key(&s.ident.to_string(), &name.to_string()), args);
+                                    }
                                 }
                                 // SOUNDNESS R238 — A FIELD-HELD CALLBACK IS A CALLBACK. `trait_leaves`
                                 // above already records `handler: Box<dyn Fn()>` (a `Fn*` BOUND is a trait
@@ -4043,8 +4284,35 @@ pub(crate) fn collect_decls(
                         }
                     }
                 }
+                // SOUNDNESS R979 — the impl's written self-type arguments, by position (see
+                // `model::impl_retgen_key`).
+                let self_arg_names: Vec<Option<String>> = match &*im.self_ty {
+                    syn::Type::Path(sp) => match sp.path.segments.last().map(|seg| &seg.arguments) {
+                        Some(syn::PathArguments::AngleBracketed(args)) => args
+                            .args
+                            .iter()
+                            .map(|a| match a {
+                                syn::GenericArgument::Type(syn::Type::Path(ap)) => {
+                                    ap.path.get_ident().map(|i| i.to_string()).filter(|n| impl_generic_params.contains(n))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                };
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
+                        if let (Some(ty), false) = (&impl_key_ty, self_arg_names.is_empty()) {
+                            let pos = impl_return_param_position(&m.sig, &self_arg_names);
+                            let tl = ty.rsplit("::").next().unwrap_or(ty);
+                            file_decl_fact(
+                                rets,
+                                crate::model::impl_retgen_key(tl, &m.sig.ident.to_string()),
+                                pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
+                            );
+                        }
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
                         // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
@@ -4087,6 +4355,9 @@ pub(crate) fn collect_decls(
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
+                    // SOUNDNESS R977 — the same scope `scan_items` opens, so Pass A's decl indexes read an
+                    // inline module the default build does not have with the same `use` arms Pass B does.
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs);
                     // Same shadowing rule as `scan_items` — the DECL indexes (field types, return types)
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.

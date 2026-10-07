@@ -16597,6 +16597,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R986 bumped it to rev66 (path-redirected modules are recorded).
+        // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
+        // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
+        // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
+        // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
+        // type alias records its pointee — a rev61 entry replays both silences warm).
         // R817/R949 bumped it to rev61 (a runtime-string `bind` sets the cached call's `path_lits_partial`;
         // R946 and R950 change Pass B's cached `calls` under the same token — a rev60 entry replays each
         // silence warm).
@@ -16627,7 +16633,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16638,7 +16644,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev61/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev66/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26502,4 +26508,343 @@ fn r893_a_qualified_factory_path_keeps_its_return_beside_a_same_named_twin() {
     for f in ["ctl_fac_b", "ctl_plain_d"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f}: the pure twin's caller was charged\n{v:#}");
     }
+}
+
+/// SOUNDNESS R977 — THE DEFAULT-BUILD FILTER INSIDE CODE THE DEFAULT BUILD DOES NOT HAVE. `mod aio` is
+/// `#[cfg(feature = "aio")]` with `aio` declared and NOT default, yet it is scanned and reported (items are
+/// never dropped by a feature cfg); inside it the nested `#[cfg(feature = "tokio-comp")]` `use` and `let`
+/// were dropped against the default build, so a function that resolves a host in EVERY build that compiles
+/// it read ABSENT (redis-0.27.6 `aio::connection::get_socket_addrs`, `connect_simple`; executed:
+/// `rustagent-rel/f8`, `deny Fs` 0). Every route is here — a FILE module under a gated `mod` (the redis
+/// shape), an INLINE gated module, a gated FREE fn, a gated IMPL METHOD — and the controls pin what must
+/// NOT move: a fn the default build DOES have keeps dropping its inactive arm (the winnow/R140 meaning).
+#[test]
+fn r977_a_feature_gated_item_keeps_every_nested_feature_arm() {
+    let toml = "[package]\nname = \"r977\"\n\n[features]\ndefault = []\naio = []\ninner = []\n";
+    let v = scan_src_to_json_multi("r977", &[
+        ("Cargo.toml", toml),
+        ("src/lib.rs", "\
+#[cfg(feature = \"aio\")]\npub mod aio;\n\
+#[cfg(feature = \"aio\")]\npub mod inl {\n\
+    #[cfg(feature = \"inner\")] use std::fs::read as rd;\n\
+    pub fn e_inline() { #[cfg(feature = \"inner\")] let _x = rd(\"/etc/hosts\"); }\n\
+}\n\
+#[cfg(feature = \"aio\")]\npub fn e_gated_fn() {\n\
+    #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\");\n\
+    #[cfg(not(feature = \"inner\"))] let _x = std::env::var(\"HOME\");\n\
+}\n\
+pub struct S;\nimpl S {\n\
+    #[cfg(feature = \"aio\")]\n    pub fn e_gated_method(&self) { #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\"); }\n\
+}\n\
+pub fn ctl_default_build() { #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\"); }\n"),
+        ("src/aio/mod.rs", "mod connection;\npub use connection::e_file_module;\n"),
+        ("src/aio/connection.rs", "\
+#[cfg(feature = \"inner\")]\nuse std::fs::read as rd;\n\
+pub fn e_file_module() {\n    #[cfg(feature = \"inner\")]\n    let _x = rd(\"/etc/hosts\");\n}\n"),
+    ]);
+    for f in ["aio::connection::e_file_module", "inl::e_inline", "e_gated_fn", "S::e_gated_method"] {
+        let e = veina_row_effs(&v, f);
+        assert!(e.iter().any(|x| x == "Fs"), "`{f}` is compiled only with `aio`, and with `inner` it reads a file: {e:?}\n{v:#}");
+    }
+    // Both arms of the gated fn are kept — the union, as for any undecidable cfg (R287/R369).
+    assert_eq!(veina_row_effs(&v, "e_gated_fn"), vec!["Env".to_string(), "Fs".to_string()], "{v:#}");
+    // The control: `ctl_default_build` IS in the default build, where `inner` is off — the arm stays dropped.
+    assert!(veina_row_effs(&v, "ctl_default_build").is_empty(), "default-build filter must still apply:\n{v:#}");
+}
+
+/// SOUNDNESS R978 — `type HouseKeeperArc = Arc<Housekeeper>;` recorded the bare WRAPPER, so a receiver typed
+/// through the alias typed to `std::sync::Arc` and `hk.run_pending_tasks()` was SILENTLY DROPPED — on every
+/// route: parameter, field, `if let Some(hk) = &self.f` binder, `.map(|hk| ..)` closure (moka-0.12.16
+/// `sync::cache::Cache::run_pending_tasks`; executed `rustagent-rel/m1`, `deny Env` 0) — while the same
+/// code with `Arc<Housekeeper>` written out charged. The controls: `HouseKeeperArc::new(h)` is `Arc::new`
+/// and must NOT inherit `Housekeeper::new`'s effect (the pointee is a TYPE-only fact), and twin aliases in
+/// two modules naming two different pointees must not certify one twin's effect for the other.
+#[test]
+fn r978_a_smart_pointer_type_alias_is_peeled_like_the_written_wrapper() {
+    let v = scan_src_to_json("r978", "\
+        use std::sync::Arc;\n\
+        pub struct Hk;\n\
+        impl Hk { pub fn new() -> Self { let _ = std::fs::read(\"/etc/hosts\"); Hk } pub fn run(&self) { let _ = std::env::var(\"R978\"); } }\n\
+        pub type HkArc = Arc<Hk>;\n\
+        pub type HkBox = Box<Hk>;\n\
+        pub type HkRc = std::rc::Rc<Hk>;\n\
+        pub fn e_param(hk: &HkArc) { hk.run() }\n\
+        pub fn e_box(hk: &HkBox) { hk.run() }\n\
+        pub fn e_rc(hk: HkRc) { hk.run() }\n\
+        pub struct B { pub f: HkArc, pub o: Option<HkArc> }\n\
+        impl B {\n\
+            pub fn e_field(&self) { self.f.run() }\n\
+            pub fn e_iflet(&self) { if let Some(hk) = &self.o { hk.run() } }\n\
+            pub fn e_map(&self) { self.o.as_ref().map(|hk| hk.run()); }\n\
+        }\n\
+        pub fn ctl_wrap(h: Hk) -> HkArc { HkArc::new(h) }\n");
+    for f in ["e_param", "e_box", "e_rc", "B::e_field", "B::e_iflet", "B::e_map"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Env".to_string()], "{f}\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "ctl_wrap").is_empty(), "`HkArc::new` is `Arc::new`, not `Hk::new`:\n{v:#}");
+
+    // Twins: one alias name, one struct name, two modules, two pointees (moka's `sync`/`future` split).
+    let t = scan_src_to_json_multi("r978t", &[
+        ("src/lib.rs", "pub mod common;\npub mod sync;\npub mod future;\n"),
+        ("src/common.rs", "pub struct Hk;\nimpl Hk { pub fn run(&self) { let _ = std::env::var(\"SYNC\"); } }\n"),
+        ("src/sync/mod.rs", "pub mod base;\npub mod cache;\n"),
+        ("src/sync/base.rs", "use std::sync::Arc;\nuse crate::common::Hk;\npub(crate) type HkArc = Arc<Hk>;\npub struct Base { pub(crate) hk: Option<HkArc> }\n"),
+        ("src/sync/cache.rs", "use super::base::Base;\npub struct Cache { pub(crate) base: Base }\nimpl Cache { pub fn run(&self) { if let Some(hk) = &self.base.hk { hk.run() } } }\n"),
+        ("src/future/mod.rs", "pub mod hk;\npub mod base;\n"),
+        ("src/future/hk.rs", "pub struct Hk;\nimpl Hk { pub fn run(&self) { let _ = std::time::SystemTime::now(); } }\n"),
+        ("src/future/base.rs", "use std::sync::Arc;\nuse super::hk::Hk;\npub(crate) type HkArc = Arc<Hk>;\npub struct Base { pub(crate) hk: Option<HkArc> }\n"),
+    ]);
+    let e = veina_row_effs(&t, "sync::cache::Cache::run");
+    assert!(e.iter().any(|x| x == "Env" || x == "Unknown"), "the sync twin runs `Env`: {e:?}\n{t:#}");
+    assert!(!(e.iter().any(|x| x == "Clock") && !e.iter().any(|x| x == "Unknown")),
+            "the FUTURE twin's `Clock`, certified for the sync cache: {e:?}\n{t:#}");
+}
+
+/// SOUNDNESS R979 — an accessor whose return is the IMPL'S TYPE PARAMETER (`impl<S, O> PollState<S, O> {
+/// fn state_mut(&mut self) -> Result<&mut S, ()> }`) was typed by the builder-chain walk as its RECEIVER
+/// (`PollState`), so `self.inner.state_mut()?.advance()` formed `PollState::advance` and vanished — mongodb
+/// 3.9.x `change_stream::ChangeStream::next_if_any` (executed: `rustagent-verify92/fx` B1/B6/B7). Every
+/// spelling: a generic alias field, a plain alias, the written type, `&mut S` with no `Result`, `.unwrap()`.
+/// Controls: the parameter POSITION decides (`first` names the pure `P`, `second` the effectful `W`).
+#[test]
+fn r979_a_generic_accessor_types_to_the_receiver_fields_argument() {
+    let v = scan_src_to_json("r979", "\
+        use std::marker::PhantomData;\n\
+        pub enum PollState<S, O> { Idle(S), Polling(PhantomData<O>) }\n\
+        impl<S, O> PollState<S, O> { pub fn state_mut(&mut self) -> Result<&mut S, ()> { match self { PollState::Idle(s) => Ok(s), _ => Err(()) } } }\n\
+        pub struct Cell<S> { pub s: S }\n\
+        impl<S> Cell<S> { pub fn state_mut(&mut self) -> &mut S { &mut self.s } }\n\
+        pub struct Wrapper;\n\
+        impl Wrapper { pub fn advance(&mut self) { let _ = std::fs::write(\"/tmp/r979\", b\"x\"); } }\n\
+        type StateGen<T> = PollState<Box<Wrapper>, T>;\n\
+        type StateMono = PollState<Box<Wrapper>, u8>;\n\
+        pub struct B1 { pub inner: StateGen<u8> }\n\
+        impl B1 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B2 { pub inner: StateMono }\n\
+        impl B2 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B4 { pub inner: PollState<Wrapper, u8> }\n\
+        impl B4 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B6 { pub inner: Cell<Wrapper> }\n\
+        impl B6 { pub fn go(&mut self) { self.inner.state_mut().advance(); } }\n\
+        pub struct B7 { pub inner: PollState<Wrapper, u8> }\n\
+        impl B7 { pub fn go(&mut self) { self.inner.state_mut().unwrap().advance(); } }\n\
+        pub enum St<A, B> { One(A), Two(PhantomData<B>) }\n\
+        impl<A, B> St<A, B> {\n\
+            pub fn first(&mut self) -> Option<&mut A> { match self { St::One(a) => Some(a), _ => None } }\n\
+            pub fn second(&mut self) -> Option<&mut B> { None }\n\
+        }\n\
+        pub struct Calm; impl Calm { pub fn advance(&mut self) {} }\n\
+        pub struct H { pub s: St<Calm, Wrapper> }\n\
+        impl H { pub fn ctl_first(&mut self) { self.s.first().unwrap().advance() } pub fn e_second(&mut self) { self.s.second().unwrap().advance() } }\n");
+    for f in ["B1::go", "B2::go", "B4::go", "B6::go", "B7::go", "H::e_second"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "H::ctl_first").is_empty(), "position 0 is the pure `Calm`:\n{v:#}");
+}
+
+/// SOUNDNESS R980 — a value PINNED before its method is called (`Pin::new(req).poll(cx)`) typed as `Pin`,
+/// so `Pin::poll` named nothing and the call vanished — reqwest `async_impl::client::Pending::poll`
+/// (executed: `rustagent-verify92/fx` A1). Every sibling spelling: `Pin::new(&mut x)`, a field,
+/// `Box::pin(x).as_mut()`, `pin!(x)`, a `Pin<&mut T>` parameter, and `self.fut.await` on a field whose type
+/// has a local `impl Future`. Controls: a pinned PURE future stays pure, and `let f = mk(); f.await` over an
+/// `async fn mk() -> Req` does NOT charge `Req::poll` (it awaits `mk`'s future, not a `Req`).
+#[test]
+fn r980_a_pinned_receiver_resolves_to_the_pinned_value() {
+    let v = scan_src_to_json("r980", "\
+        use std::future::Future;\n\
+        use std::pin::Pin;\n\
+        use std::task::{Context, Poll};\n\
+        pub struct Req { pub path: String }\n\
+        impl Future for Req { type Output = (); fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> { let _ = std::fs::write(&self.path, b\"x\"); Poll::Ready(()) } }\n\
+        pub struct Calm;\n\
+        impl Future for Calm { type Output = (); fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> { Poll::Ready(()) } }\n\
+        pub fn e_pin_new(r: &mut Req, cx: &mut Context<'_>) -> Poll<()> { Pin::new(r).poll(cx) }\n\
+        pub fn e_pin_new_mut(mut r: Req, cx: &mut Context<'_>) -> Poll<()> { Pin::new(&mut r).poll(cx) }\n\
+        pub fn e_box_pin(r: Req, cx: &mut Context<'_>) -> Poll<()> { Box::pin(r).as_mut().poll(cx) }\n\
+        pub fn e_pin_macro(r: Req, cx: &mut Context<'_>) -> Poll<()> { let p = std::pin::pin!(r); p.poll(cx) }\n\
+        pub fn e_pin_param(p: Pin<&mut Req>, cx: &mut Context<'_>) -> Poll<()> { p.poll(cx) }\n\
+        pub struct Holder { pub fut: Req }\n\
+        impl Holder { pub fn e_field(&mut self, cx: &mut Context<'_>) -> Poll<()> { Pin::new(&mut self.fut).poll(cx) } pub async fn e_await_field(self) { self.fut.await } }\n\
+        pub fn ctl_pin_calm(c: &mut Calm, cx: &mut Context<'_>) -> Poll<()> { Pin::new(c).poll(cx) }\n\
+        pub async fn mk() -> Req { Req { path: String::new() } }\n\
+        pub async fn ctl_await_asyncfn() { let f = mk(); let _r = f.await; }\n");
+    for f in ["e_pin_new", "e_pin_new_mut", "e_box_pin", "e_pin_macro", "e_pin_param", "Holder::e_field", "Holder::e_await_field"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    for f in ["ctl_pin_calm", "ctl_await_asyncfn"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f} must stay pure:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R981 — `self.raw.next().await` on `Raw: futures_core::Stream`, where THIS crate implements
+/// `Stream` (mongodb `BatchBuffer::try_advance` over the local `RawBatchCursor::poll_next`), read `[]` +
+/// `invisible:[futures_core]` — and chaining `futures_core` can never charge it, because the body is here.
+/// Re-hedged with the TRUE reason `dispatch:Stream.next` (no bounded-CHA edge: the receiver is a
+/// monomorphized bound — R551). Controls: a plumbing leaf (`.is_some()`) is not published as a dispatch,
+/// and with NO local implementor the row is unchanged (the dependency's report can answer it).
+#[test]
+fn r981_a_driving_dispatch_on_a_foreign_bound_the_crate_implements_is_disclosed() {
+    let toml = "[package]\nname = \"r981\"\n\n[dependencies]\nfutures-core = \"0.3\"\nfutures-util = \"0.3\"\n";
+    let body = "\
+use futures_core::Stream as AsyncStream;\n\
+use futures_util::stream::StreamExt;\n\
+use std::pin::Pin;\n\
+use std::task::{Context, Poll};\n\
+pub struct Buffer<Raw> { raw: Raw }\n\
+impl<Raw: AsyncStream<Item = u8> + Unpin> Buffer<Raw> {\n\
+    pub async fn advance(&mut self) -> bool { self.raw.next().await.is_some() }\n\
+}\n";
+    let local_impl = "pub struct RawCursor;\n\
+impl AsyncStream for RawCursor { type Item = u8; fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); Poll::Ready(None) } }\n";
+    let v = scan_src_to_json_multi("r981", &[("Cargo.toml", toml), ("src/lib.rs", &format!("{body}{local_impl}"))]);
+    let row = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "Buffer::advance").cloned().unwrap_or_default();
+    assert!(veina_row_effs(&v, "Buffer::advance").contains(&"Unknown".to_string()), "{v:#}");
+    let why: Vec<String> = row["unknownWhy"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    assert!(why.contains(&"dispatch:Stream.next".to_string()), "true reason: {why:?}");
+    assert!(!why.iter().any(|w| w.contains("is_some")), "a plumbing leaf is not a dispatch: {why:?}");
+    // No local implementor: unchanged — the dependency's own report can answer this dispatch.
+    let c = scan_src_to_json_multi("r981c", &[("Cargo.toml", toml), ("src/lib.rs", body)]);
+    assert!(!veina_row_effs(&c, "Buffer::advance").contains(&"Unknown".to_string()), "{c:#}");
+}
+
+/// SOUNDNESS R984 — a call through a FOREIGN or std trait's PATH whose receiver argument is a LOCAL type
+/// with a LOCAL impl (`serde::Serialize::serialize(&self.v, s)`, `<V as serde::Serialize>::serialize`,
+/// `fmt::Display::fmt(v, f)`, `Hash::hash`, `PartialEq::eq`) had no edge to the impl — value-bag's
+/// `OwnedValueBag::serialize` lost its callee's true `Unknown`. Controls: a DEFAULTED std member
+/// (`PartialEq::ne`, the R53 shape) adds no edge, and a pure impl stays pure.
+#[test]
+fn r984_a_trait_path_call_on_a_local_value_edges_to_the_local_impl() {
+    let toml = "[package]\nname = \"r984\"\n\n[dependencies]\nserde = \"1\"\n";
+    let src = "\
+use std::fmt;\n\
+use std::hash::{Hash, Hasher};\n\
+pub struct V;\n\
+impl fmt::Display for V { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); write!(f, \"v\") } }\n\
+impl Hash for V { fn hash<H: Hasher>(&self, _h: &mut H) { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); } }\n\
+impl PartialEq for V { fn eq(&self, _o: &V) -> bool { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); true } }\n\
+impl serde::Serialize for V { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); s.serialize_unit() } }\n\
+pub struct W { pub v: V }\n\
+impl serde::Serialize for W { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serde::Serialize::serialize(&self.v, s) } }\n\
+pub struct W2 { pub v: V }\n\
+impl serde::Serialize for W2 { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { <V as serde::Serialize>::serialize(&self.v, s) } }\n\
+pub fn e_display(v: &V, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(v, f) }\n\
+pub fn e_hash<H: Hasher>(v: &V, h: &mut H) { Hash::hash(v, h) }\n\
+pub fn e_eq(a: &V, b: &V) -> bool { PartialEq::eq(a, b) }\n\
+pub struct P;\n\
+impl PartialEq for P { fn eq(&self, _o: &P) -> bool { true } }\n\
+impl fmt::Display for P { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, \"p\") } }\n\
+pub fn ctl_pure(p: &P, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(p, f) }\n\
+pub struct Q;\n\
+impl Q { pub fn ne(&self, _o: &Q) -> bool { let _ = std::fs::write(\"/tmp/r984q\", b\"x\"); true } }\n\
+impl PartialEq for Q { fn eq(&self, _o: &Q) -> bool { true } }\n\
+pub fn ctl_default_ne(a: &Q, b: &Q) -> bool { PartialEq::ne(a, b) }\n";
+    let v = scan_src_to_json_multi("r984", &[("Cargo.toml", toml), ("src/lib.rs", src)]);
+    for f in ["W::serialize", "W2::serialize", "e_display", "e_hash", "e_eq"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    for f in ["ctl_pure", "ctl_default_ne"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
+    }
+}
+
+#[cfg(test)]
+fn row_why(v: &serde_json::Value, f: &str) -> Vec<String> {
+    v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f)
+        .and_then(|r| r["unknownWhy"].as_array().cloned())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// SOUNDNESS R982 / R985 / R987 / R988 / R989 / R960 — the six mechanisms the release audit found behind
+/// v0.39.3's coincidental `Unknown`s, one shape each, in one crate per manifest they need.
+#[test]
+fn r982_r987_r988_r989_r985_release_audit_shapes() {
+    // R982: a name bound only by a FEATURE-INACTIVE `use`, called inside a feature-gated fn (redis
+    // `create_rustls_config` / `load_native_certs`). Control: a default-build fn keeps the R140 filter.
+    let v = scan_src_to_json_multi("r982", &[
+        ("Cargo.toml", "[package]\nname = \"r982\"\n\n[features]\ndefault = []\ntls = []\n"),
+        ("src/lib.rs", "\
+#[cfg(feature = \"tls\")]\nuse std::fs::read as load_native_certs;\n\
+#[cfg(feature = \"tls\")]\npub fn e_gated() { let _ = load_native_certs(\"/etc/ssl\"); }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&v, "e_gated"), vec!["Fs".to_string()], "{v:#}");
+
+    // R987: `ManuallyDrop::new(x)` / `ptr::read(&x)` are `x` (allocator-api2 `Box::into_inner`).
+    let a = scan_src_to_json("r987", "\
+        use core::{mem, ptr};\n\
+        pub trait Allocator { fn deallocate(&self, p: usize); }\n\
+        pub struct Global;\n\
+        impl Allocator for Global { fn deallocate(&self, _p: usize) { let _ = std::fs::write(\"/tmp/r987\", b\"x\"); } }\n\
+        pub struct Bx<T, A: Allocator = Global>(pub *mut T, pub A);\n\
+        impl<T, A: Allocator> Bx<T, A> {\n\
+            pub fn e_into_inner(b: Self) { let b = mem::ManuallyDrop::new(b); let alloc = unsafe { ptr::read(&b.1) }; alloc.deallocate(0) }\n\
+        }\n");
+    assert_eq!(veina_row_effs(&a, "Bx::e_into_inner"), vec!["Fs".to_string()], "{a:#}");
+
+    // R988: a `pin_project!` struct's fields, through the generated `project()` (tower).
+    let p = scan_src_to_json_multi("r988", &[
+        ("Cargo.toml", "[package]\nname = \"r988\"\n\n[dependencies]\npin-project-lite = \"0.2\"\n"),
+        ("src/lib.rs", "\
+use std::pin::Pin;\nuse std::task::{Context, Poll};\n\
+pub trait Discover { fn poll_discover(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u8>; }\n\
+pub struct Real;\n\
+impl Discover for Real { fn poll_discover(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u8> { let _ = std::fs::write(\"/tmp/r988\", b\"x\"); Poll::Ready(1) } }\n\
+pin_project_lite::pin_project! { pub struct Wrap<D> { #[pin] discover: D, n: u8 } }\n\
+impl<D: Discover> Wrap<D> { pub fn e_project(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u8> { let this = self.project(); this.discover.poll_discover(cx) } }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&p, "Wrap::e_project"), vec!["Fs".to_string()], "{p:#}");
+
+    // R985: a poll on a pinned value that types to nothing is disclosed, not silent.
+    let u = scan_src_to_json_multi("r985", &[
+        ("Cargo.toml", "[package]\nname = \"r985\"\n\n[dependencies]\nsysdep = \"1\"\n"),
+        ("src/lib.rs", "use std::pin::Pin;\nuse std::task::Context;\npub fn e_untyped(cx: &mut Context<'_>) { let mut b = sysdep::mk(); let _ = Pin::new(&mut b).poll_frame(cx); }\n"),
+    ]);
+    assert!(row_why(&u, "e_untyped").iter().any(|w| w.starts_with("dispatch:untyped pinned receiver")), "{u:#}");
+
+    // R989: a glob-imported FFI name in a module that also has an item macro (security-framework).
+    let g = scan_src_to_json_multi("r989", &[
+        ("Cargo.toml", "[package]\nname = \"r989\"\n\n[dependencies]\nsysdep = \"1\"\n"),
+        ("src/lib.rs", "use sysdep::keychain::*;\nmacro_rules! decl { ($n:ident) => { pub struct $n; } }\ndecl!(Thing);\npub fn e_glob() -> i32 { unsafe { SecThingCreate(0) } }\n"),
+    ]);
+    let row = g["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "e_glob").cloned().unwrap_or_default();
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "sysdep")), "the glob origin is named: {g:#}");
+}
+
+/// SOUNDNESS R960 — clang-sys's `link!( pub fn ..; )` foreign declarations are published as
+/// `native:extern fn` units, so a caller (and a chained consumer, bindgen) is not read pure.
+#[test]
+fn r960_link_macro_decls_are_published() {
+    let l = scan_src_to_json("r960", "\
+        macro_rules! link { ($($t:tt)*) => {} }\n\
+        link!(\n    pub fn clang_createIndex(exclude: i32, display: i32) -> *mut u8;\n);\n\
+        pub fn e_wrap() -> *mut u8 { unsafe { clang_createIndex(0, 0) } }\n");
+    let w = row_why(&l, "clang_createIndex");
+    assert!(w.iter().any(|x| x == "native:extern fn"), "the link! declaration is published: {l:#}");
+    assert!(veina_row_effs(&l, "e_wrap").contains(&"Unknown".to_string()), "{l:#}");
+}
+
+/// SOUNDNESS R986 — a call written through a `#[cfg_attr(_, path = ..)]`-selected module (rustix's
+/// `crate::backend::c::timerfd_create`, FFI via `c.rs`'s `pub(crate) use libc::*`) names no unit this
+/// scanner placed; it is disclosed `ambiguous:path-redirected module crate::backend` instead of read pure.
+/// Controls: a RESOLVED call through the same module gets no reason, and a crate with no redirect is unchanged.
+#[test]
+fn r986_an_unresolved_call_through_a_path_redirected_module_is_disclosed() {
+    let files = |redirect: bool| -> Vec<(&'static str, &'static str)> { vec![
+        ("Cargo.toml", "[package]\nname = \"r986\"\n\n[dependencies]\nlibc = \"0.2\"\n"),
+        ("src/lib.rs", if redirect {
+            "#[cfg_attr(not(target_os = \"linux\"), path = \"backend/libc/mod.rs\")]\n#[cfg_attr(target_os = \"linux\", path = \"backend/linux_raw/mod.rs\")]\nmod backend;\npub fn tfd() -> i32 { backend::time::tfd() }\n"
+        } else { "mod backend;\npub fn tfd() -> i32 { backend::time::tfd() }\n" }),
+        ("src/backend/mod.rs", "pub(crate) mod c;\npub(crate) mod time;\n"),
+        ("src/backend/c.rs", "pub(crate) fn pure_helper() -> i32 { 0 }\n"),
+        ("src/backend/libc/mod.rs", "pub(crate) mod c;\npub(crate) mod time;\n"),
+        ("src/backend/libc/c.rs", "pub(crate) use libc::*;\npub(crate) fn pure_helper() -> i32 { 0 }\n"),
+        ("src/backend/libc/time.rs", "use crate::backend::c;\npub(crate) fn tfd() -> i32 { unsafe { c::timerfd_create(0, 0) } }\npub(crate) fn ctl_resolved() -> i32 { c::pure_helper() }\n"),
+        ("src/backend/time.rs", "use crate::backend::c;\npub(crate) fn tfd() -> i32 { c::pure_helper() }\n"),
+        ("src/backend/linux_raw/mod.rs", "pub(crate) mod time;\n"),
+        ("src/backend/linux_raw/time.rs", "pub(crate) fn tfd() -> i32 { 0 }\n"),
+    ] };
+    let v = scan_src_to_json_multi("r986", &files(true));
+    assert!(row_why(&v, "backend::libc::time::tfd").iter().any(|w| w == "ambiguous:path-redirected module crate::backend"), "{v:#}");
+    let c = scan_src_to_json_multi("r986c", &files(false));
+    assert!(c["functions"].as_array().unwrap().iter().all(|r| !r["unknownWhy"].to_string().contains("path-redirected")), "{c:#}");
 }

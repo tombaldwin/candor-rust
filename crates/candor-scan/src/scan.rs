@@ -1137,6 +1137,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // R459 — the mod-site memo, owned by this walk. Parent module files are parsed once each and reused
     // for every file they declare, which is what keeps a per-FILE question from costing a per-file parse.
     let mut modsite = crate::decls::ModSiteCache::default();
+    // SOUNDNESS R977 — the admitted files that sit under a module compiled out of the default build.
+    let mut cfg_off_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     // When peeking, every `continue` below becomes a KEEP and every keep becomes a skip — one flag, one
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
@@ -1259,6 +1261,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if peeking {
             continue;   // an in-scope file is exactly what the peek is NOT about
         }
+        // SOUNDNESS R977 — is this file a module the default build does not compile? Then its walks run
+        // inside a `CfgOffScope` (Pass A and Pass B below), so its nested feature arms are all kept.
+        if crate::decls::file_module_cfg_off(root, rel, &mut modsite) {
+            if crate::lang::reach_debug() {
+                eprintln!("R977CFGOFF {}", rel.display());
+            }
+            cfg_off_files.insert(rel.to_string_lossy().into_owned());
+        }
         paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
 
@@ -1315,6 +1325,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 _ => own,
             };
+            // SOUNDNESS R977 — the cfg-off verdict comes from ANOTHER file (the declaring `mod`), so it is
+            // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
+            let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
             (rel.clone(), key)
         })
         .collect();
@@ -1355,6 +1368,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if text.contains("include!") {
                 let dir = p.parent().unwrap_or(root);
                 crate::lang::splice_includes(&mut file.items, dir, &include_env, &mut Vec::new(), &mut read);
+            }
+            if text.contains("pin_project") || text.contains("link!") {
+                crate::lang::splice_pin_project(&mut file.items); // R988, R960
             }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
@@ -1443,6 +1459,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
                 let Some(((sf, locs), read)) = r1 else { continue };
+                let _cfg_off = crate::lang::CfgOffScope::enter(cfg_off_files.contains(&rel)); // R977
                 let mut fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
                 // R145 — key the entry on what THIS parse read, not on what the previous one did.
                 let ch = if read.is_empty() {
@@ -1454,7 +1471,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         .and_then(|(p, _)| std::fs::read(p).ok())
                         .map(|b| fnv1a(&b))
                         .unwrap_or_default();
-                    crate::lang::include_closure_hash(&own, &read, &walked_canon)
+                    let k = crate::lang::include_closure_hash(&own, &read, &walked_canon);
+                    // R977 — the same suffix the `hashes` key carries, or a warm run never matches it.
+                    if cfg_off_files.contains(&rel) { format!("{k}+cfgoff") } else { k }
                 };
                 fd.include_targets = read;
                 decls_per_file.push((rel.clone(), ch, fd));
@@ -1481,8 +1500,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // actually move, and the first merge stands. `decls_per_file` is NEVER mutated — it is what the
     // cache persists, and an entry is keyed by ONE file's content hash, so baking a crate-wide fact
     // into it would survive an edit to the file that supplied the fact.
+    // SOUNDNESS R978 — kept past the merge: the field-twin check below must compare the twins' field
+    // types AFTER alias expansion, or two twins that both wrote `housekeeper: Option<HouseKeeperArc>`
+    // (one alias per module, two different pointees) read as agreeing and the leaf-keyed index kept the
+    // last file's pointee for both.
+    let mut expanded: Vec<Option<FileDecls>> = Vec::new();
     if !merged.mod_aliases.is_empty() {
-        let expanded: Vec<Option<FileDecls>> = decls_per_file
+        expanded = decls_per_file
             .iter()
             .map(|(rel, _, fd)| {
                 alias_expand_decls(fd, &module_path(Path::new(rel)), &merged.mod_aliases)
@@ -1773,9 +1797,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 out.insert(format!("{leaf}\u{1f}*"));
                 continue;
             }
+            // R978 — the alias-EXPANDED decls where the R99 second merge produced them (see `expanded`).
+            let fd_of = |fi: usize| expanded.get(fi).and_then(Option::as_ref).unwrap_or(&decls_per_file[fi].2);
             let mut seen: HashMap<&str, BTreeSet<String>> = HashMap::new();
             for &fi in &fis {
-                let fd = &decls_per_file[fi].2;
+                let fd = fd_of(fi);
                 for idx in [fd.fields.get(leaf.as_str()), fd.field_elem.get(leaf.as_str())].into_iter().flatten() {
                     for (k, v) in idx {
                         seen.entry(k.as_str()).or_default().insert(format!("{fi}\u{1f}{v}"));
@@ -1794,7 +1820,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // different facts about one field (`Option<Invalidator>` vs `Invalidator`).
                     for (sep, pick) in [('\u{1d}', 0usize), ('\u{1e}', 1usize)] {
                         let tv: BTreeSet<&str> = fis.iter().filter_map(|&fi| {
-                            let fd = &decls_per_file[fi].2;
+                            let fd = fd_of(fi);
                             let idx = if pick == 0 { &fd.fields } else { &fd.field_elem };
                             idx.get(leaf.as_str()).and_then(|m| m.get(k)).map(String::as_str)
                         }).collect();
@@ -1852,6 +1878,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let p = paths.iter().find(|(_, r)| r == rel).map(|(p, _)| p.clone())?;
                         let dir = p.parent().unwrap_or(root).to_path_buf();
                         crate::lang::splice_includes(&mut f.items, &dir, &include_env, &mut Vec::new(), &mut Vec::new());
+                    }
+                    if t.contains("pin_project") || t.contains("link!") {
+                        crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
                     Some(f)
                 })
@@ -1954,6 +1983,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut u = uses.clone();
             // R167's `skip_test_fns` -- from `rel`, the SAME argument `fn_locs` derives it from, so the
             // two lockstep walks cannot disagree about which fns they emit.
+            let _cfg_off = crate::lang::CfgOffScope::enter(cfg_off_files.contains(rel)); // R977
             scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &drop_relevant, !crate::lang::is_nonlib_target_file(rel), &mut u, &mut out);
             (out, idx, u)
         }));
@@ -2195,6 +2225,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // and `TzifOwned::parse64` lost a real `Log`. The target tail is ADDED only where no definition
     // already claims it — so this can supply a resolution and can never turn an existing unique one
     // into an ambiguity.
+    // SOUNDNESS R986 — the crate's path-redirected modules (see `decls::REDIRECT_MOD_MARK`).
+    let redirect_mods: Vec<String> = merged
+        .mod_aliases
+        .keys()
+        .filter_map(|k| k.strip_prefix(crate::decls::REDIRECT_MOD_MARK).map(String::from))
+        .collect();
     let mut alias_tails: Vec<(String, String)> = Vec::new();
     for (q, t) in &merged.mod_aliases {
         if t.contains(crate::decls::ALIAS_ALT_SEP) {
@@ -4253,6 +4289,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // call exactly when its own answer was not itself `Unknown`.
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf
                 || (dep_join_hit && !dep_join_unknown);
+            // ── SOUNDNESS R986 — A CALL THROUGH A PATH-REDIRECTED MODULE THAT RESOLVED TO NOTHING ──────
+            // rustix `#[cfg_attr(libc, path = "backend/libc/mod.rs")] mod backend;`: the crate writes
+            // `crate::backend::c::timerfd_create`, this scanner placed the file at `backend::libc::c`, and
+            // the call — FFI through `c.rs`'s `pub(crate) use libc::*` — formed no edge and no disclosure.
+            // Bounded to calls nothing above handled, under a module the crate itself redirects; name
+            // resolution failed, which is §4's `ambiguous:` kind.
+            if !already_handled && !c.is_macro {
+                let body = c.path.strip_prefix("crate::").unwrap_or(&c.path);
+                if let Some(m) = redirect_mods.iter().find(|m| {
+                    body.strip_prefix(m.as_str()).is_some_and(|r| r.starts_with("::"))
+                }) {
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why
+                        .entry(f.qual.clone())
+                        .or_default()
+                        .insert(format!("ambiguous:path-redirected module crate::{m}"));
+                    if crate::lang::reach_debug() {
+                        eprintln!("R986REDIR\t{}\t{}", f.qual, c.path);
+                    }
+                }
+            }
             // ── §4 HONESTY — SOUNDNESS R452: A TYPED METHOD CALL THAT RESOLVED TO NO UNIT ──────────
             // A receiver-typed `Type::method` call that reached no local definition was dropped with NO
             // edge, NO `Unknown`, NO `unresolved` and NO `unknownWhy` — an affirmative §4 purity claim
@@ -4787,6 +4844,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // where the dispatch is spelled in this crate (`fn go(b: &dyn dep::Backend) { b.size() }`). The
         // chained spelling of this — where the dispatch lives in the DEPENDENCY and reaches here only
         // through `dispatchesOn` — is handled at the dep join above, not here.
+        // SOUNDNESS R981 — a dispatch through a FOREIGN abstraction (`self.raw.next()` with `Raw:
+        // futures_core::Stream`) that THIS CRATE ALSO IMPLEMENTS. The target body may be one of this
+        // crate's own impls (mongodb's `RawBatchCursor::poll_next`, which does the network I/O), and no
+        // report of the dependency can ever contain it: the row read `[]` + `invisible:[futures_core]`,
+        // and chaining `futures_core` could not change that. The receiver is a monomorphized bound, so no
+        // bounded-CHA edge is sound (R551's erasure carve-out) — this is the disclosure §4 names for an
+        // owner that resolves and a body that does not: `dispatch:<trait>.<member>`. The conjunct is the
+        // TRAIT being implemented here (any member), not the member, because an extension method
+        // (`next`) reaches the trait's required members (`poll_next`), which is what the crate implements.
+        for member in &f.foreign_dispatch {
+            let Some((owner, mem)) = member.split_once('#') else { continue };
+            let Some((tq, leaf)) = mem.rsplit_once("::") else { continue };
+            // ONLY a member that DRIVES the abstraction's required methods — the required members
+            // themselves and the extension methods that are defined by calling them (`StreamExt::next`
+            // polls `poll_next`). For those, "the body may be one of this crate's implementors" is true
+            // by construction, so `dispatch:<trait>.<member>` is a TRUE reason. Any other leaf reaching
+            // here is the builder-chain walk carrying a bound onto something the trait does not own —
+            // `.next().await.is_some()`, or a concrete implementor's INHERENT `has_next` typed as the
+            // bound — and naming it a dispatch would publish a false reason (measured on mongodb).
+            if !crate::lang::is_driving_async_member(leaf) {
+                continue;
+            }
+            let prefix = format!("{owner}#{tq}::");
+            let implementors: Vec<&String> = merged
+                .foreign_impls
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .flat_map(|(_, v)| v.iter())
+                .collect();
+            if !implementors.is_empty() {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
+                if crate::lang::reach_debug() {
+                    eprintln!("R981HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
+                }
+            }
+        }
         for member in &f.foreign_dispatch {
             if merged.nested_impl_foreign.contains(member) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");

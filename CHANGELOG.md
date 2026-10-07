@@ -19,6 +19,114 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   new-function rule with the per-crate prefix (SOUNDNESS R932/R933), and bind/listen for `Net` (R817/R949).
   **A gate that passed on 0.39.x can exit 1 on identical bytes** — see candor-spec SPEC §8 ⟨0.40⟩.
 
+### ⚠ A feature-gated item keeps its nested feature arms; a `type A = Arc<T>` alias is peeled like `Arc<T>` (SOUNDNESS R977, R978)
+
+Two PRE-EXISTING silences (present in v0.39.3) that vein A's resolution of `ambiguous:same-name` hedges
+uncovered — the release's monotone check saw `deny … Unknown` go 1 → 0 on rows whose `Unknown` had been
+standing in front of them.
+
+- **R977.** An item compiled OUT of the default build (`#[cfg(feature = "aio")] mod aio;`, a gated fn,
+  impl method or inline module) is still scanned and reported, but inside it the default-build filter
+  dropped every nested `#[cfg(feature = ..)]` `use` and statement — describing a build that cannot exist.
+  redis 0.27.6 `aio::connection::get_socket_addrs` / `connect_simple` (a host lookup in every build that
+  compiles them) read PURE. Inside such an item every feature is now treated as undecidable and every arm is
+  kept (the R287/R369 union); code the default build does have keeps R140's filter. EXECUTED fixture:
+  `deny Fs <fn>` 0 → 1 on four routes (file module, inline module, gated fn, gated method).
+- **R978.** `type HouseKeeperArc = Arc<Housekeeper>;` was recorded as the bare wrapper, so a receiver typed
+  through it (parameter, field, `if let Some(hk) = &self.f`, `.map(|hk| ..)`) typed to `Arc` and the call was
+  dropped silently — moka 0.12.16 `sync::cache::Cache::run_pending_tasks`. The pointee is now recorded under
+  a TYPE-only key; `HouseKeeperArc::new(..)` still resolves to `Arc::new`. The field-twin check now compares
+  twins AFTER alias expansion, so two modules' same-named aliases to different pointees hedge rather than
+  certify one twin's effect for the other.
+- Corpus A/B over the pinned 1,625-crate census against the staged 0.40.0 build: rows ADDED 186, REMOVED 4,
+  CHANGED 826; 0 concrete effects lost; 347 rows gain a concrete effect (feature-arm `Log`/`Net`/`Fs`/`Env`/
+  `Clock` in hyper, redis, mongodb, der, tonic, … — each group traced to its gated source) and 42 gain only
+  `Unknown`. 17 rows lose an `Unknown`, all resolutions onto proven-pure bodies (aws-smithy-types'
+  `convert_headers_0x_1x` arms, rustix's libc `ret_owned_fd`, bumpalo's `boxed::Box::from_iter_in`).
+  Cache schema rev62.
+
+### ⚠ A generic accessor's return and a pinned receiver are typed (SOUNDNESS R979, R980)
+
+Two more PRE-EXISTING dropped edges (silent in v0.39.3 behind a coincidental `Unknown`) found by tracing the
+release check's removed rows.
+
+- **R979.** `impl<S, O> PollState<S, O> { fn state_mut(&mut self) -> Result<&mut S, ()> }` — an accessor
+  returning the impl's TYPE PARAMETER — was typed as its receiver, so `self.inner.state_mut()?.next_if_any()`
+  formed `PollState::next_if_any` and vanished: mongodb 3.9.x `change_stream::ChangeStream::next_if_any` and
+  its sync wrapper read PURE. Pass A now files the parameter's position and each field's written type
+  ARGUMENTS (through a same-module `type` alias, generic or not); the call site types the step from the
+  receiver field's argument. `?`, `.unwrap()` and a bare `&mut S` all reach it; a parameter position that
+  names a pure type stays pure. Residual: the receiver must be a FIELD (a parameter or local of the generic
+  type is not typed this way).
+- **R980.** `Pin::new(req).poll(cx)` typed the receiver as `Pin`, so reqwest
+  `async_impl::client::Pending::poll` read PURE. `Pin::new`/`Pin::new_unchecked`/`Box::pin`/`pin!` now type as
+  the pinned value, a `Pin<P>` parameter peels like `Box<P>`, and `self.fut.await` on a FIELD whose type has a
+  local `impl Future` edges to its `poll`. Residual: `x.await` on a NAME is not edged (a name bound to an
+  `async fn`'s result is typed as that fn's output, which would fabricate — measured, and pinned in the test).
+- EXECUTED fixtures: `deny Fs <fn>` 0 → 1 on 5 R979 shapes and 6 R980 shapes; on the real crates
+  `deny Clock ChangeStream::next_if_any` (async and sync) and `deny Log Pending::poll` (reqwest 0.12/0.13)
+  0 → 1. Corpus A/B against the staged 0.40.0 build, R977–R980 together: rows ADDED 467, REMOVED 4,
+  CHANGED 1,385; 0 concrete effects lost; the only `Unknown` losses are R977's 17 traced resolutions. Cache
+  schema rev63.
+
+### ⚠ A driving dispatch on a foreign bound this crate implements is disclosed; a trait-path call edges to the local impl (SOUNDNESS R981, R984)
+
+- **R981.** `self.raw.next().await` with `Raw: futures_core::Stream`, where this crate itself implements
+  `Stream` (mongodb `BatchBuffer::try_advance` over its own `RawBatchCursor::poll_next`), read `[]` +
+  `invisible:[futures_core]` — and chaining `futures_core` can never charge it, because the body is here. Now
+  `Unknown` with the true reason `dispatch:Stream.next` (a re-hedge, not a resolution: the receiver is a
+  monomorphized bound, so no bounded-CHA edge is sound — R551). Fires only for members that DRIVE the
+  abstraction (`poll_*` and the extension methods defined by calling them) on a trait with a local
+  implementor; `Option`/`Result` plumbing, a concrete implementor's inherent method and `close`/`shutdown`
+  (measured false reasons) are excluded. mongodb `cursor::sync::Cursor::advance`: `deny Net Unknown` 1 (v0.39.3)
+  → 0 (staged) → 1. EXECUTED fixture: `deny Fs Unknown Cursor::advance` 0 → 1.
+- **R984.** `value_bag_serde1::lib::Serialize::serialize(&self.by_ref(), s)` — a call through a FOREIGN or std
+  trait's path (or `<T as Trait>::m`) whose argument is a local type with a local impl — had no edge to that
+  impl, so value-bag `OwnedValueBag::serialize`/`::stream` lost their callees' true `Unknown`. Edged now where
+  `foreign_impls` records the impl block DECLARES the member for that type, or, for a std trait, where the
+  member has no default (`Display`/`Debug::fmt`, `Hash::hash`, `PartialEq::eq`, …) — R53's fabrication needs a
+  defaulted member, and the test pins `PartialEq::ne` as the control. EXECUTED (`Display`, `Hash`,
+  `PartialEq`): `deny Fs` 0 → 1; value-bag `deny Unknown` back to 1.
+- Corpus A/B against the R977–R980 build: rows ADDED 394, REMOVED 0, CHANGED 919; 0 concrete effects lost,
+  0 `Unknown` lost; 601 rows gain only `Unknown` (0.098% of 612,325 post rows) — the R981 reasons by trait
+  (`Stream`, `AsyncRead`/`AsyncWrite`, hyper `rt::Read`/`rt::Write`, …) and their callers. Cache schema rev64.
+
+### ⚠ The release audit's pre-existing silences: resolved or re-hedged (SOUNDNESS R960, R982, R985–R989)
+
+Six mechanisms that v0.39.3 covered only by an unrelated `ambiguous:` `Unknown`:
+
+- **R960** — clang-sys declares libclang through its own `link!( pub fn ..; )`; the declarations are now
+  published as `native:extern fn` units, so bindgen chained over clang-sys reads `Unknown` again
+  (`deny Unknown BindgenContext::new` 1 / 0 / 1 for v0.39.3 / staged / this). Resolution.
+- **R982** — inside a feature-gated item, a name bound only by a feature-inactive `use` of an EXTERNAL item
+  resolves through it (redis `create_rustls_config` → `rustls_native_certs::load_native_certs`, `Fs`). Not
+  for macro names (sea-orm's `debug_print!` twins keep their disclosure) and not for crate-local targets
+  (measured: they withdrew real hedges in time and rustix). Resolution.
+- **R985** — `Pin::new(x).poll_*(cx)` on an `x` that types to nothing (aws-smithy-types' pin-projected
+  `BoxBody` payload) is `Unknown` with the dot-free `dispatch:untyped pinned receiver of `poll_*`` (9 rows,
+  1 / 0 / 1). Re-hedge.
+- **R987** — `ManuallyDrop::new(x)` / `ptr::read(&x)` type as `x`, so allocator-api2 `Box::into_inner` now
+  answers exactly as `Box::drop` does (`dispatchesOn Allocator::deallocate`, CHA over the crate's pure
+  `Global`/`System`). Resolution.
+- **R988** — `pin_project!` structs are spliced so their fields are indexed, and `self.project()` types as
+  the struct: tower `Constant::poll_next` / `PendingRequestsDiscover::poll_next` edge to the blanket
+  `Discover::poll_discover` again. Resolution.
+- **R989** — a glob-imported name in a module that also has an item macro is a NON-exclusive glob
+  candidate (security-framework `SecKeychainCreate` from `security_framework_sys::keychain::*`); chained over
+  security-framework-sys, `deny Unknown CreateOptions::create` 0 / 0 / 1. Resolution.
+- **R986** — a call written through a `#[path]` / `#[cfg_attr(_, path)]`-selected module (rustix's
+  `crate::backend::c::timerfd_create`, libc FFI via `c.rs`'s glob) names no unit this scanner placed, since
+  it places a file where it SITS. When nothing else resolved such a call it is now `Unknown` with
+  `ambiguous:path-redirected module crate::<m>` (rustix 0.38 `timerfd_create`: `deny Unknown` 1 / 0 / 1).
+  Re-hedge, not a resolution: aliasing the module to its path targets was measured to lose 96 concrete
+  effects in rustix 0.37.28 and is not done. A/B against the build before it: ADDED 1,431, REMOVED 0,
+  CHANGED 5,568; 0 effects or `Unknown`s lost; 2,810 rows gain only `Unknown` (0.456%; rustix, socket2,
+  native-tls `imp`, memmap2 `os`, tokio `process::imp`, wasm-bindgen `__rt`). Cache schema rev66.
+- Corpus A/B against `daf9666`: rows ADDED 1,993, REMOVED 7, CHANGED 4,196 on the pre-final build; the only
+  concrete losses are reqwest `Pending::poll`/`PendingRequest::poll` `Log` (6 rows), which came solely from
+  fabricated drop edges to `blocking::InnerClientHandle::drop` and `wasm::AbortGuard::drop` (neither type is
+  in scope there). Cache schema rev65.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the

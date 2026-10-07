@@ -698,6 +698,11 @@ impl<'a> CallCollector<'a> {
     }
 
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
+        // R980/R987 — `Pin::new(x)` / `ManuallyDrop::new(x)` / `ptr::read(&x)` is `x`'s type, not the
+        // wrapper's: typed as `ManuallyDrop`, allocator-api2's `boxed.1` named no field.
+        if let Some(a) = pinned_arg(expr) {
+            return self.type_of(a).or_else(|| self.resolve_recv_type(a));
+        }
         let ty = ctor_type(expr, &self.uses, self.returns)?;
         // VEIN B — a TURBOFISH that names a GENERIC PARAMETER of this fn/impl (`from_str::<B>(..)`) types
         // nothing: `B` is a bound, and its dispatch route (`resolve_recv_traits`) stays the answer — the
@@ -979,6 +984,54 @@ impl<'a> CallCollector<'a> {
     /// either way. **A/B over 1,561 registry crates: ADDED 1,297 · REMOVED 0 · CHANGED 2,254**, reach
     /// 5,560 corrections across 328 crates; 0 of the changed rows lose an effect, and 8 of the 121
     /// hard-effect gains were read against source with 0 fabrications.
+    /// SOUNDNESS R979 — `self.inner.state_mut()?.next_if_any()` where `impl<S, O> PollState<S, O> {
+    /// fn state_mut(&mut self) -> Result<&mut S> }` and `inner: PollState<Box<CursorWrapper>, ..>` (or a
+    /// generic alias for it): the accessor returns the impl's type PARAMETER, so the builder-chain walk's
+    /// "returns its receiver" answer (`PollState`) formed `PollState::next_if_any`, which names nothing, and
+    /// the call vanished (mongodb `ChangeStream::next_if_any`, executed fixture B1/B6/B7). Typed from two
+    /// declarations only: the parameter's POSITION (`impl_retgen_key`) and the receiver FIELD's written
+    /// argument at that position (`field_args_key`). Same second gate as `impl_declared_return` — the
+    /// outer method must resolve on the answer — except through `Result`/`Option` plumbing, which the next
+    /// step types.
+    fn impl_generic_return(&self, recv: &syn::Expr, base: &str, leaf: &str, outer: &str) -> Option<String> {
+        let base_leaf = base.rsplit("::").next().unwrap_or(base);
+        let pos: usize = self.returns.get(&crate::model::impl_retgen_key(base_leaf, leaf))?.parse().ok()?;
+        let mut r = recv;
+        loop {
+            match r {
+                syn::Expr::Reference(x) => r = &x.expr,
+                syn::Expr::Paren(x) => r = &x.expr,
+                syn::Expr::Group(x) => r = &x.expr,
+                _ => break,
+            }
+        }
+        let syn::Expr::Field(f) = r else { return None };
+        let owner = self.resolve_recv_type(&f.base)?;
+        if self.field_ambiguous(&owner, &f.member) || self.is_dependency_type(&owner) {
+            return None;
+        }
+        let key = match &f.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+        let args = self.returns.get(&crate::model::field_args_key(owner_leaf, &key))?;
+        let ret = args.split('\u{1}').nth(pos)?;
+        if ret == "_" || ret == "'" || ret.is_empty() {
+            return None;
+        }
+        if !outer.is_empty() && !crate::lang::is_result_plumbing(outer) {
+            let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
+            if !self.returns.contains_key(&crate::model::impl_fn_key(ret_leaf, outer)) {
+                return None;
+            }
+        }
+        if crate::lang::reach_debug() {
+            eprintln!("R979RET {base_leaf}::{leaf} -> {ret}");
+        }
+        Some(ret.to_string())
+    }
+
     fn impl_declared_return(&self, base: &str, leaf: &str, outer: &str) -> Option<String> {
         let base_leaf = base.rsplit("::").next().unwrap_or(base);
         let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, leaf))?;
@@ -1113,6 +1166,8 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
+            syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
+            syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => self.type_of(&pin_macro_arg(&mm.mac)?), // R980
             syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
             syn::Expr::MethodCall(m) => self.type_of_method(m),
@@ -1249,6 +1304,20 @@ impl<'a> CallCollector<'a> {
         if name == "clone" {
             return self.type_of(&m.receiver);
         }
+        // SOUNDNESS R988 — `let this = self.project()` (pin-project's generated projection): the
+        // projection's fields are the struct's own fields by name (wrapped in `Pin<&mut _>` / `&mut _`,
+        // which every field route already peels), so `this.inner` reads the struct's field types. Untyped,
+        // `this.discover.poll_discover(cx)` (tower `PendingRequestsDiscover::poll_next`) and
+        // `Pin::new(this.inner).poll_discover(cx)` (`Constant::poll_next`) formed no edge. Only where the
+        // crate does not itself declare `project` for that type — a hand-written one answers as declared.
+        if matches!(name.as_str(), "project" | "project_ref") {
+            if let Some(t) = self.type_of(&m.receiver) {
+                let leaf = t.rsplit("::").next().unwrap_or(&t);
+                if !self.returns.contains_key(&crate::model::impl_fn_key(leaf, &name)) {
+                    return Some(t);
+                }
+            }
+        }
         let recv = self.type_of(&m.receiver);
         if let Some(e) = recv.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &name)) {
             return Some(e);
@@ -1264,6 +1333,9 @@ impl<'a> CallCollector<'a> {
         let base = recv?;
         if base.contains(crate::decls::ALIAS_ALT_SEP) {
             return None;
+        }
+        if let Some(g) = self.impl_generic_return(&m.receiver, &base, &name, "") {
+            return Some(g); // R979
         }
         let base_leaf = base.rsplit("::").next().unwrap_or(&base);
         let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, &name));
@@ -1477,6 +1549,9 @@ impl<'a> CallCollector<'a> {
                     Some(k) => k?,
                     None => self.resolve_recv_type_for(&m.receiver, &m.method.to_string())?,
                 };
+                if let Some(ret) = self.impl_generic_return(&m.receiver, &base, &m.method.to_string(), outer) {
+                    return Some(ret);
+                }
                 if let Some(ret) = self.impl_declared_return(&base, &m.method.to_string(), outer) {
                     // §E1 REACH COUNTER, on the CHANGED branch: this arm exists only to return a
                     // DIFFERENT answer from the walk below it, so "never fired" and "fired and moved
@@ -1687,6 +1762,17 @@ impl<'a> CallCollector<'a> {
                     return None;
                 }
                 self.fields.get(base_leaf)?.get(&key).cloned()
+            }
+            // SOUNDNESS R980 — `Pin::new(x)`, `Pin::new_unchecked(x)`, `Box::pin(x)` and `pin!(x)` pin a value
+            // whose methods are still `x`'s (`Pin<P>` derefs to `P::Target`; `Future::poll` takes the
+            // pinned receiver). Typed as the `Pin` itself, `Pin::new(req).poll(cx)` formed `Pin::poll` and
+            // the call vanished — reqwest `async_impl::client::Pending::poll`, executed fixture A1.
+            syn::Expr::Call(c) if pinned_arg(expr).is_some() => {
+                let _ = c;
+                self.resolve_recv_type_for(pinned_arg(expr)?, outer)
+            }
+            syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => {
+                self.resolve_recv_type_for(&pin_macro_arg(&mm.mac)?, outer)
             }
             syn::Expr::Call(_) => self.nominal_ctor_type(expr),
             // `S {..}.method()` / `for _ in (S {..})` — an inline struct literal names its type directly
@@ -2358,6 +2444,53 @@ impl<'a> CallCollector<'a> {
     /// LOCAL impl body, carrying its (possibly effectful) effects to this fn. `method=false`/`typed=false`
     /// like the iterator/lazy edges. The CALLER owns the resolve-or-skip gate (the type must be a concrete
     /// local `impl <trait>`), so this never fabricates.
+    /// SOUNDNESS R984 — `value_bag_serde1::lib::Serialize::serialize(&self.by_ref(), s)`: a call through a
+    /// FOREIGN trait's path (or `<T as dep::Trait>::m(x)`) whose receiver argument is a LOCAL type with a
+    /// LOCAL impl of that trait got no edge to the impl, so `OwnedValueBag::serialize` lost the true
+    /// `Unknown` its callee `ValueBag::serialize` carries (`deny Unknown` 1 -> 0). The edge is added only
+    /// where `foreign_impls` records that THIS impl block DECLARES the member for THAT type — R53's
+    /// fabrication (an inherent `m` shadowing a trait DEFAULT, both keyed `T::m`) needs a default, and a
+    /// declared member is not one. Additive: the written path is still pushed by the arm below.
+    fn edge_ufcs_foreign_trait(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() < 2 {
+            return;
+        }
+        let method = &segs[segs.len() - 1];
+        let tr = &segs[segs.len() - 2];
+        if !tr.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return;
+        }
+        let ty = match &p.qself {
+            Some(q) => crate::lang::type_path(&q.ty, &self.uses),
+            // The STRICT typer: the builder-chain walk answers `x.by_ref()` with `x`'s own type, which
+            // would edge `OwnedValueBag::serialize` back to itself (measured).
+            None => args.first().and_then(|a| self.type_of(a)),
+        };
+        let Some(ty) = ty else { return };
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) {
+            return;
+        }
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+        let want = format!("{ty_leaf}::{method}");
+        let tail = format!("{tr}::{method}");
+        let hit = self.foreign_impls.iter().any(|(k, v)| {
+            let member = k.split_once('#').map_or(k.as_str(), |(_, m)| m);
+            (member == tail || member.ends_with(&format!("::{tail}"))) && v.contains(&want)
+        })
+            // The std half: `foreign_impls` does not record std traits, so for a std trait the evidence is
+            // a local `impl Tr for T` (`trait_impls`) and a member the trait REQUIRES — a required member
+            // has no default for an inherent `m` to shadow, which is the whole of R53's fabrication.
+            || (std_required_member(tr, method)
+                && self.trait_impls.get(tr.as_str()).is_some_and(|v| v.contains(&ty_leaf)));
+        if hit {
+            if crate::lang::reach_debug() {
+                eprintln!("R984UFCS {tr}::{method} -> {want}");
+            }
+            self.push_coercion_edge(&ty_leaf, method);
+        }
+    }
+
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -3008,6 +3141,10 @@ impl<'a> CallCollector<'a> {
             return Vec::new();
         }
         match expr {
+            // R980/R987 — a pinning or transparent wrapper constructor carries its argument's dispatch.
+            syn::Expr::Call(_) if pinned_arg(expr).is_some() => {
+                pinned_arg(expr).map(|a| self.resolve_recv_traits(a)).unwrap_or_default()
+            }
             syn::Expr::Reference(r) => self.resolve_recv_traits(&r.expr),
             syn::Expr::Paren(p) => self.resolve_recv_traits(&p.expr),
             syn::Expr::Group(g) => self.resolve_recv_traits(&g.expr),
@@ -4623,6 +4760,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 _ => break,
             }
         }
+        if let syn::Expr::Path(p) = func {
+            self.edge_ufcs_foreign_trait(p, &node.args);
+        }
         match func {
             syn::Expr::Path(p) => {
                 let ident = p.path.get_ident().map(|id| id.to_string());
@@ -4858,8 +4998,51 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         syn::visit::visit_expr_call(self, node);
     }
+    /// SOUNDNESS R980 (the `.await` sibling) — `x.await` drives `<T as Future>::poll` for a value of a
+    /// LOCAL type `T` that implements `Future`, exactly as `Pin::new(&mut x).poll(cx)` does, and nothing
+    /// edged to it. Charged through the same implicit-call edge `charge_coercion_ty` gives `{}` →
+    /// `Display::fmt`, only where the crate has a local `impl Future for T`. Restricted to a FIELD
+    /// operand, whose type is DECLARED: a name may be bound to an `async fn`'s result, which the return
+    /// index records as the fn's OUTPUT type, so `let f = mk(); f.await` (with `async fn mk() -> Req`)
+    /// charged `Req::poll` — MEASURED, fixture `rustagent-rel/p2` `ctl_await_asyncfn`. A name or a call
+    /// operand stays a stated residual.
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        let mut b = &*node.base;
+        while let syn::Expr::Paren(p) = b {
+            b = &p.expr;
+        }
+        if matches!(b, syn::Expr::Field(_)) {
+            if let Some(ty) = self.resolve_recv_type(b) {
+                let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                if self.trait_impls.get("Future").is_some_and(|v| v.contains(&ty_leaf)) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R980AWAIT {ty_leaf}");
+                    }
+                    self.push_coercion_edge(&ty_leaf, "poll");
+                }
+            }
+        }
+        syn::visit::visit_expr_await(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
+        // SOUNDNESS R985 — `Pin::new(x).poll_*(cx)` where `x` types to NOTHING (aws-smithy-types'
+        // `match inner.get_mut() { BoxBody::HttpBody04(b) => Pin::new(b).poll_trailers(cx) }` behind a
+        // pin-projection): a value is pinned to drive a `Future`/`Stream`/`Body` poll, and with no type the
+        // call formed no edge at all — silent. The owner cannot be formed, so the disclosure is the
+        // dot-free `dispatch:` detail SPEC §4 reserves for exactly that state. A typed pinned value is
+        // R980's resolution and never reaches here.
+        if leaf.starts_with("poll") {
+            if let Some(arg) = pinned_arg(&node.receiver) {
+                if self.resolve_recv_type(arg).is_none() && self.resolve_recv_traits(arg).is_empty() {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R985PIN {leaf}");
+                    }
+                    self.mark_unresolved(format!("dispatch:untyped pinned receiver of `{leaf}`"));
+                }
+            }
+        }
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
         // `post(format!("{}/x", API_BASE))` / `post(url)` recover a statically-known host (SPEC §1). The
         // resolved literal flows through the SAME Net/Llm/Db host refinement in scan.rs as an inline one.
@@ -7441,7 +7624,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
-        let mpath = crate::lang::expand_noanchor(&path_to_string(&node.path), &self.uses);
+        let mpath = crate::lang::expand_noanchor_macro(&path_to_string(&node.path), &self.uses);
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
         // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
@@ -8462,4 +8645,62 @@ impl syn::parse::Parse for CfgIfArms {
         }
         Ok(CfgIfArms(blocks))
     }
+}
+
+
+/// SOUNDNESS R980 — the pinned VALUE of a pinning constructor (`Pin::new(x)`, `Pin::new_unchecked(x)`,
+/// `Box::pin(x)`, `pin!(x)` / `std::pin::pin!(x)`), or `None` for any other expression. The leaf is the
+/// test, with `Pin`/`Box` as the type segment, exactly as the `Box::new` peel in `lang::ctor_type` keys.
+fn pinned_arg(expr: &syn::Expr) -> Option<&syn::Expr> {
+    match expr {
+        syn::Expr::Call(c) if c.args.len() == 1 => {
+            let syn::Expr::Path(p) = &*c.func else { return None };
+            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let n = segs.len();
+            if n < 2 {
+                return None;
+            }
+            match (segs[n - 2].as_str(), segs[n - 1].as_str()) {
+                ("Pin", "new" | "new_unchecked") | ("Box", "pin") => c.args.first(),
+                // SOUNDNESS R987 — the same transparency for `ManuallyDrop::new(x)` (derefs to `x`) and
+                // `ptr::read(&x)` (a bitwise copy of `x`): allocator-api2 `Box::into_inner` reads its
+                // allocator out with `ptr::read(&boxed.1)` from a `ManuallyDrop`, and the value typed to
+                // nothing, so `alloc.deallocate(..)` published nothing while `Box::drop`'s
+                // `self.1.deallocate(..)` publishes `dispatchesOn Allocator::deallocate`.
+                ("ManuallyDrop", "new") => c.args.first(),
+                ("ptr", "read" | "read_unaligned" | "read_volatile") => c.args.first(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// R980 — the argument of a `pin!(x)` / `std::pin::pin!(x)` / `core::pin::pin!(x)` invocation.
+fn pin_macro_arg(mac: &syn::Macro) -> Option<syn::Expr> {
+    if mac.path.segments.last().is_none_or(|s| s.ident != "pin") {
+        return None;
+    }
+    mac.parse_body::<syn::Expr>().ok()
+}
+
+/// R984 — a std trait member with NO default body (so `Trait::m(&t)` over a local `impl Trait for T` can
+/// only run that impl's `m`).
+fn std_required_member(tr: &str, m: &str) -> bool {
+    matches!(
+        (tr, m),
+        ("Display" | "Debug" | "LowerHex" | "UpperHex" | "Binary" | "Octal" | "Pointer", "fmt")
+            | ("Hash", "hash")
+            | ("PartialEq", "eq")
+            | ("PartialOrd", "partial_cmp")
+            | ("Ord", "cmp")
+            | ("Clone", "clone")
+            | ("Iterator", "next")
+            | ("Future", "poll")
+            | ("Read", "read")
+            | ("Write", "write" | "flush")
+            | ("Deref", "deref")
+            | ("DerefMut", "deref_mut")
+            | ("Drop", "drop")
+    )
 }
