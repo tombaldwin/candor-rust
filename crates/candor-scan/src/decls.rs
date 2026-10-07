@@ -176,6 +176,28 @@ pub(crate) fn scan_items(
                 uses.remove(SELF_KEY);
                 uses.remove(IMPL_ARGS_KEY);
             }
+            // SOUNDNESS R894 — A PUBLISHED FOREIGN DECLARATION IS A UNIT THE REPORT MUST ANSWER FOR. Its body
+            // is in another language, so in-crate analysis already answers a call to it with `Unknown` +
+            // `native:extern fn` (`extern_fns`). The REPORT, though, had no row and no call-graph node for
+            // it, so a consumer chained onto this crate read `dep::creat(..)` as PURE — ABSENT, `deny Fs` and
+            // `deny Unknown` both 0, executed — a name SPEC §2 `analyzed` says was never analysed. Emitting
+            // the unit publishes the same answer the in-crate route gives, reason and all, so the chained
+            // arm is neither stronger nor weaker than the single-tree one.
+            syn::Item::ForeignMod(fm) => {
+                for f in published_foreign_fns(fm, include_tests) {
+                    let n = f.sig.ident.to_string();
+                    let loc = next_loc(locs, loc_idx);
+                    let block = syn::Block { brace_token: Default::default(), stmts: Vec::new() };
+                    let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                    info.unresolved = true;
+                    info.unresolved_why = vec!["native:extern fn".to_string()];
+                    info.extern_decl = true;
+                    if std::env::var_os("CANDOR_R894_INSTR").is_some() {
+                        eprintln!("R894UNIT\t{}", info.qual); // §E1 reach: the units this arm publishes
+                    }
+                    out.push(info);
+                }
+            }
             syn::Item::Mod(m) => {
                 if !include_tests && is_cfg_test(&m.attrs) {
                     continue; // a #[cfg(test)] module — its effects are the tests', not the crate's
@@ -1990,6 +2012,12 @@ fn fn_locs_labeled(items: &[syn::Item], file: &str, label: &str, include_tests: 
                     fn_locs_labeled(inner, file, label, include_tests, out);
                 }
             }
+            // SOUNDNESS R894 — in lockstep with `scan_items`' ForeignMod arm.
+            syn::Item::ForeignMod(fm) => {
+                for f in published_foreign_fns(fm, include_tests) {
+                    out.push(loc(label, f.span()));
+                }
+            }
             syn::Item::Trait(tr) => {
                 if !include_tests && is_cfg_test(&tr.attrs) {
                     continue;
@@ -2706,7 +2734,28 @@ pub(crate) fn fninfo(
         refusals: c.refusals.into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
+        extern_decl: false,
     }
+}
+
+/// SOUNDNESS R894 — the foreign-function declarations of an `extern` block that a CONSUMER can call:
+/// `pub` ones, outside `#[cfg(test)]`. ONE predicate for `scan_items` (which emits a unit for each) and
+/// `fn_locs` (which must emit a loc for each, in lockstep).
+pub(crate) fn published_foreign_fns(fm: &syn::ItemForeignMod, include_tests: bool) -> Vec<&syn::ForeignItemFn> {
+    if !include_tests && is_cfg_test(&fm.attrs) {
+        return Vec::new();
+    }
+    fm.items
+        .iter()
+        .filter_map(|fi| match fi {
+            syn::ForeignItem::Fn(f)
+                if matches!(f.vis, syn::Visibility::Public(_)) && (include_tests || !is_cfg_test(&f.attrs)) =>
+            {
+                Some(f)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Collect the nominal-type IDENTS of a `syn::Type` (`Result<Compress, E>` → `[Result, Compress, E]`),

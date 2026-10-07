@@ -4384,6 +4384,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // like net-class/reason-scoped above), so it emits `false` — claim no signal rather
                     // than a misleading partial. The stable candor-scan backend carries it.
                     interface_union: false,
+                    // R894 — the deep engine publishes no declaration units.
+                    declaration: false,
                     // ⟨0.39⟩ same posture, and it is an ABSENCE rather than a claim: this backend runs no
                     // dispatch-site pass, so it publishes no `dispatchesOn`. §4's "absence keeps its
                     // meaning" is about the PURITY claim a row's absence makes; an EMPTY `dispatchesOn` on

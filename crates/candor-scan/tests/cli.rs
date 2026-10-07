@@ -6478,3 +6478,117 @@ fn p15d_n5_a_different_build_sibling_is_exit_2_not_a_wave() {
     assert_eq!(rc, Some(2), "{stdout}{stderr}");
     assert!(!format!("{stdout}{stderr}").contains("[AS-EFF-005]"));
 }
+
+/// SOUNDNESS R894 — a consumer calling a dependency's FOREIGN IMPORT directly (`xdep::creat(..)`, a
+/// `pub fn` in an `extern "C"` block) read PURE when chained: the dependency published no row and no
+/// call-graph node for a declaration without a body, so the name was in NEITHER of its sets, and the
+/// consumer's crate-level coverage turned that into a purity claim (ABSENT; `deny Unknown direct` 0,
+/// executed — the program creates the file). The producer now publishes a unit for each `pub` foreign
+/// declaration with the answer in-crate analysis already gives it — `Unknown` + `native:extern fn` — so
+/// the chained arm carries the same class as the single-tree one (`deny Unknown[native]` too). Controls:
+/// the safe wrapper is unchanged; a NON-pub declaration publishes nothing; the dependency's in-crate
+/// caller is unchanged; a pure function, a tuple-struct constructor, an enum variant and a macro stay pure.
+#[test]
+fn r894_a_dependencys_published_foreign_import_is_unknown_native_when_chained() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r894-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("xdep/src")).unwrap();
+    std::fs::create_dir_all(d.join("app/src")).unwrap();
+    // A DECLARATIONS-ONLY crate (the FFI `-sys` shape): extern items plus a re-export. Before R894 it
+    // judged nothing and every call into it disclosed `invisible`; publishing its declarations must not
+    // turn it COVERED, or the re-export reads pure (measured: inotify-sys's `pub use libc::{close, ..}`).
+    std::fs::create_dir_all(d.join("xsys/src")).unwrap();
+    std::fs::write(d.join("xsys/Cargo.toml"), "[package]\nname = \"xsys\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("xsys/src/lib.rs"), "extern \"C\" { pub fn sys_open(p: *const u8) -> i32; }\npub use std::fs::remove_file as rmf;\n").unwrap();
+    // A WRAPPERS-ONLY crate: every unit's only call is a foreign one, so every row is shape-identical to a
+    // declaration row (`Unknown` + `native:extern fn`, no callees) — but it IS analysed code and COVERED.
+    std::fs::create_dir_all(d.join("xwrap/src")).unwrap();
+    std::fs::write(d.join("xwrap/Cargo.toml"), "[package]\nname = \"xwrap\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("xwrap/src/lib.rs"), "extern \"C\" { fn w_raw() -> i32; }\npub fn w() -> i32 { unsafe { w_raw() } }\npub use std::fs::remove_file as rmf;\n").unwrap();
+    std::fs::write(d.join("xdep/Cargo.toml"), "[package]\nname = \"xdep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("xdep/src/lib.rs"), "\
+        extern \"C\" { pub fn creat(path: *const u8, mode: u32) -> i32; fn hidden(x: i32) -> i32; }\n\
+        #[cfg(unix)] extern \"C\" { pub fn twin(x: i32) -> i32; }\n\
+        #[cfg(not(unix))] extern \"C\" { pub fn twin(x: i32) -> i32; }\n\
+        #[cfg(unix)] pub mod shimmed { extern \"C\" { pub fn raw(x: i32); } }\n\
+        #[cfg(not(unix))] pub mod shimmed { pub fn raw(_x: i32) {} }\n\
+        pub mod sys { extern \"C\" { pub fn unlink(path: *const u8) -> i32; } }\n\
+        pub fn wrapped(p: *const u8) -> i32 { unsafe { creat(p, 0o644) + hidden(0) } }\n\
+        pub fn pure_fn(a: u32) -> u32 { a }\n\
+        pub struct Wrap(pub u32);\n\
+        pub enum E { V(u32), U }\n\
+        #[macro_export]\nmacro_rules! mk { ($e:expr) => { $e } }\n").unwrap();
+    std::fs::write(d.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nxdep = { path = \"../xdep\" }\nxsys = { path = \"../xsys\" }\nxwrap = { path = \"../xwrap\" }\n").unwrap();
+    std::fs::write(d.join("app/src/lib.rs"), "\
+        pub fn direct() { unsafe { xdep::creat(b\"/tmp/r894\\0\".as_ptr(), 0o644); } }\n\
+        pub fn direct_mod() { unsafe { xdep::sys::unlink(b\"/tmp/r894\\0\".as_ptr()); } }\n\
+        pub fn via_wrapper() { xdep::wrapped(b\"/tmp/r894w\\0\".as_ptr()); }\n\
+        pub fn c_pure() -> u32 { xdep::pure_fn(1) }\n\
+        pub fn c_tuple() -> u32 { xdep::Wrap(1).0 }\n\
+        pub fn c_variant() -> bool { matches!(xdep::E::V(1), xdep::E::U) }\n\
+        pub fn c_macro() -> u32 { xdep::mk!(1) }\n\
+        pub fn sys_direct() { unsafe { xsys::sys_open(b\"/x\\0\".as_ptr()); } }\n\
+        pub fn sys_reexport() { let _ = xsys::rmf(\"/tmp/r894-nope\"); }\n\
+        pub fn wrap_reexport() { let _ = xwrap::rmf(\"/tmp/r894-nope\"); }\n").unwrap();
+    let rep = d.join("rep");
+    std::fs::create_dir_all(&rep).unwrap();
+    let st = Command::new(bin()).arg(d.join("xdep").to_string_lossy().as_ref())
+        .args(["--out", rep.join("x").to_string_lossy().as_ref()])
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .status().unwrap();
+    assert!(st.success());
+    let st = Command::new(bin()).arg(d.join("xwrap").to_string_lossy().as_ref())
+        .args(["--out", rep.join("w").to_string_lossy().as_ref()])
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .status().unwrap();
+    assert!(st.success());
+    let st = Command::new(bin()).arg(d.join("xsys").to_string_lossy().as_ref())
+        .args(["--out", rep.join("s").to_string_lossy().as_ref()])
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .status().unwrap();
+    assert!(st.success());
+    let row = |v: &serde_json::Value, n: &str| -> Option<(Vec<String>, Vec<String>)> {
+        v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == n).map(|f| {
+            let s = |k: &str| f[k].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)).collect();
+            (s("inferred"), s("unknownWhy"))
+        })
+    };
+    let dep: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rep.join("x.xdep.scan.json")).unwrap()).unwrap();
+    let sidecar_nodes = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+        &std::fs::read_to_string(rep.join("x.xdep.scan.callgraph.json")).unwrap()).unwrap().len();
+    let out = Command::new(bin()).arg(d.join("app").to_string_lossy().as_ref()).arg("--json")
+        .env("CANDOR_DEPS", rep.to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .output().unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON");
+    let native = Some((vec!["Unknown".to_string()], vec!["native:extern fn".to_string()]));
+    // the producer: one row per PUB declaration, none for the private one; the wrapper unchanged
+    assert_eq!(row(&dep, "creat"), native, "{dep:#}");
+    assert_eq!(row(&dep, "sys::unlink"), native, "{dep:#}");
+    assert_eq!(row(&dep, "hidden"), None, "a non-pub declaration is not callable from outside: {dep:#}");
+    assert_eq!(row(&dep, "wrapped"), native, "the in-crate caller is unchanged: {dep:#}");
+    // (a) one row per qual, and `analyzed.count` == the sidecar's node count: cfg-twin declarations are one
+    // unit, and a declaration twinned with a Rust shim is folded into the shim's row.
+    let quals: Vec<&str> = dep["functions"].as_array().unwrap().iter().map(|f| f["fn"].as_str().unwrap()).collect();
+    let mut uniq = quals.clone(); uniq.sort(); uniq.dedup();
+    assert_eq!(quals.len(), uniq.len(), "duplicate rows: {quals:?}");
+    assert_eq!(dep["analyzed"]["count"].as_u64().unwrap() as usize, sidecar_nodes, "count must equal the node set");
+    assert_eq!(row(&dep, "twin"), native, "{dep:#}");
+    assert_eq!(row(&dep, "shimmed::raw"), native, "the declaration arm is folded into the shim's row: {dep:#}");
+    // the consumer
+    assert_eq!(row(&v, "direct"), native, "{v:#}");
+    assert_eq!(row(&v, "direct_mod"), native, "{v:#}");
+    assert_eq!(row(&v, "via_wrapper"), native, "unchanged: {v:#}");
+    for pure in ["c_pure", "c_tuple", "c_variant", "c_macro"] {
+        assert_eq!(row(&v, pure), None, "{pure} must stay pure: {v:#}");
+    }
+    assert_eq!(row(&v, "sys_direct"), native, "a declarations-only crate's declaration still joins: {v:#}");
+    let reexp = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "sys_reexport");
+    assert!(reexp.is_some_and(|f| f["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "xsys"))),
+        "the re-export of a declarations-only crate keeps its `invisible` disclosure: {v:#}");
+    // (b) a WRAPPERS-only crate stays COVERED: its re-export reads as before (no new `invisible`).
+    let wr = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "wrap_reexport");
+    assert!(!wr.is_some_and(|f| f["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "xwrap"))),
+        "a wrappers-only crate is analysed code and must stay covered: {v:#}");
+}

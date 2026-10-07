@@ -11,6 +11,47 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ A dependency's published foreign import is `Unknown` + `native:extern fn` when chained, not pure (SOUNDNESS R894)
+
+A consumer calling a dependency's `extern "C" { pub fn creat(..); }` directly read PURE when chained — ABSENT,
+`deny Fs` and `deny Unknown` both 0, executed — because the dependency published no row and no call-graph
+node for a declaration without a body, and crate-level coverage turned that missing name into a purity
+claim. In-crate, the same call has always been `Unknown` + `native:extern fn`.
+
+- **The producer publishes a unit per `pub` foreign declaration** (not `#[cfg(test)]`), answering exactly
+  what in-crate analysis answers — `Unknown`, `native:extern fn` — so the chained arm carries the same class
+  (`deny Unknown[native]` fires too). The unit stays out of in-crate resolution: callers inside the crate are
+  unchanged. Non-`pub` declarations publish nothing. `link!` declarations are not covered yet.
+- **One row per declaration qual.** `#[cfg]` twins of a declaration are one unit, and a declaration twinned
+  with a Rust shim under another `#[cfg]` is folded into the shim's row (SPEC §4's union over one qual), so
+  `analyzed.count` still equals the call-graph node count (libc 7,800 = 7,800, web-sys 20,444 = 20,444; over
+  the 1,648 dependency reports the duplicate-row and count≠nodes totals are identical to before).
+- **A report whose every unit is a declaration still grants no coverage** (a `-sys` crate of `extern`
+  blocks plus `pub use libc::{close, read}`): before this change it judged nothing, and becoming COVERED made
+  its re-exports read pure — measured, inotify-0.11.5's `Inotify::close` lost its `invisible: [inotify_sys]`
+  (11 rows REMOVED on the first corpus run). Its declarations still join. Decided by a new report key,
+  `"declaration": true` on each such unit (an extra key, tolerated like `interfaceUnion`), NOT by the row's
+  shape: a crate of foreign-call WRAPPERS is shape-identical, and the shape-based first cut uncovered 7
+  wrapper crates (objc2-core-graphics, cloudabi, …). Over 1,648 dependencies the key-based rule matches 6
+  crates, all of which judged nothing before.
+- Rejected first design, recorded so it is not re-tried: having the consumer disclose every chained key in
+  neither the report nor the sidecar node set. On the chained corpus it fired 27,900 times in 544 entries,
+  mostly on keys the CONSUMER guessed (enum variants of re-exported foreign types, glob candidates,
+  builder-chain receiver typings), which name nothing in the dependency.
+
+Direction: adds `Unknown`, and new declaration rows. Chained corpus (876 registry entries, each chained on
+its own Cargo.lock's 1,648 locally present dependencies; 305,118 analysed consumer units): REMOVED 0, no
+concrete effect lost, 0 rows gaining `invisible`; 1,801 consumer units newly `Unknown` (**0.59%**) in 61
+entries, 1,342 of them carrying `native:extern fn` — `deny Unknown` flips 1,801 functions / 233 modules / 4
+crates. One row loses a reason and keeps its `Unknown`: diesel's `SqliteCallbackError::emit` drops
+`ambiguous:same-name local defs` because vein A's post-fixpoint hedge fires only where a contested claimant
+(`Error::fmt`) carries an effect the caller lacks, and the caller now carries that `Unknown` through a resolved
+edge (`context_error_str` → the published `sqlite3_result_error`); the hedge compares effects, not classes. Unchained (1,275
+entries): 104,412 new declaration rows (aws-lc-sys and web-sys dominate), `deny Unknown` crate flips 9 (the
+`-sys` crates' own reports, plus wasm-bindgen-macro's scanned ui-tests), module flips 2,804; 13 changed rows
+(12 a `loc` move, 1 a `#[cfg]`-twin union), 1 added (`termios::ffi::cfmakeraw`, a cfg twin). Scan-cache
+schema rev59 → rev60.
+
 ### ⚠ ⟨0.40⟩ AS-EFF-005 no longer exempts a function absent from the baseline — candor-scan and the lint (SOUNDNESS R932, R933; closes R811)
 
 The baseline guard skipped every function absent from the baseline as "new code, reviewed normally", and

@@ -167,6 +167,12 @@ pub(crate) struct FnInfo {
     /// rev35).
     #[serde(rename = "fd", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign_dispatch: Vec<String>,
+    /// SOUNDNESS R894 — a SYNTHETIC unit for a `pub` foreign-function DECLARATION (`extern "C" { pub fn
+    /// creat(..); }`), so the report publishes what in-crate analysis already answers for that name:
+    /// `Unknown` + `native:extern fn`. Kept out of the local resolution indexes (`by_leaf`/`by_tail2`):
+    /// in-crate calls keep answering through `extern_fns`, unchanged.
+    #[serde(rename = "xd", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) extern_decl: bool,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
