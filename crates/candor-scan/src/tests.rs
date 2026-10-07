@@ -16597,6 +16597,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R986 bumped it to rev66 (path-redirected modules are recorded).
         // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
         // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
         // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
@@ -16632,7 +16633,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16643,7 +16644,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev65/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev66/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26820,4 +26821,30 @@ fn r960_link_macro_decls_are_published() {
     let w = row_why(&l, "clang_createIndex");
     assert!(w.iter().any(|x| x == "native:extern fn"), "the link! declaration is published: {l:#}");
     assert!(veina_row_effs(&l, "e_wrap").contains(&"Unknown".to_string()), "{l:#}");
+}
+
+/// SOUNDNESS R986 — a call written through a `#[cfg_attr(_, path = ..)]`-selected module (rustix's
+/// `crate::backend::c::timerfd_create`, FFI via `c.rs`'s `pub(crate) use libc::*`) names no unit this
+/// scanner placed; it is disclosed `ambiguous:path-redirected module crate::backend` instead of read pure.
+/// Controls: a RESOLVED call through the same module gets no reason, and a crate with no redirect is unchanged.
+#[test]
+fn r986_an_unresolved_call_through_a_path_redirected_module_is_disclosed() {
+    let files = |redirect: bool| -> Vec<(&'static str, &'static str)> { vec![
+        ("Cargo.toml", "[package]\nname = \"r986\"\n\n[dependencies]\nlibc = \"0.2\"\n"),
+        ("src/lib.rs", if redirect {
+            "#[cfg_attr(not(target_os = \"linux\"), path = \"backend/libc/mod.rs\")]\n#[cfg_attr(target_os = \"linux\", path = \"backend/linux_raw/mod.rs\")]\nmod backend;\npub fn tfd() -> i32 { backend::time::tfd() }\n"
+        } else { "mod backend;\npub fn tfd() -> i32 { backend::time::tfd() }\n" }),
+        ("src/backend/mod.rs", "pub(crate) mod c;\npub(crate) mod time;\n"),
+        ("src/backend/c.rs", "pub(crate) fn pure_helper() -> i32 { 0 }\n"),
+        ("src/backend/libc/mod.rs", "pub(crate) mod c;\npub(crate) mod time;\n"),
+        ("src/backend/libc/c.rs", "pub(crate) use libc::*;\npub(crate) fn pure_helper() -> i32 { 0 }\n"),
+        ("src/backend/libc/time.rs", "use crate::backend::c;\npub(crate) fn tfd() -> i32 { unsafe { c::timerfd_create(0, 0) } }\npub(crate) fn ctl_resolved() -> i32 { c::pure_helper() }\n"),
+        ("src/backend/time.rs", "use crate::backend::c;\npub(crate) fn tfd() -> i32 { c::pure_helper() }\n"),
+        ("src/backend/linux_raw/mod.rs", "pub(crate) mod time;\n"),
+        ("src/backend/linux_raw/time.rs", "pub(crate) fn tfd() -> i32 { 0 }\n"),
+    ] };
+    let v = scan_src_to_json_multi("r986", &files(true));
+    assert!(row_why(&v, "backend::libc::time::tfd").iter().any(|w| w == "ambiguous:path-redirected module crate::backend"), "{v:#}");
+    let c = scan_src_to_json_multi("r986c", &files(false));
+    assert!(c["functions"].as_array().unwrap().iter().all(|r| !r["unknownWhy"].to_string().contains("path-redirected")), "{c:#}");
 }

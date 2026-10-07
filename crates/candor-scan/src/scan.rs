@@ -2225,6 +2225,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // and `TzifOwned::parse64` lost a real `Log`. The target tail is ADDED only where no definition
     // already claims it — so this can supply a resolution and can never turn an existing unique one
     // into an ambiguity.
+    // SOUNDNESS R986 — the crate's path-redirected modules (see `decls::REDIRECT_MOD_MARK`).
+    let redirect_mods: Vec<String> = merged
+        .mod_aliases
+        .keys()
+        .filter_map(|k| k.strip_prefix(crate::decls::REDIRECT_MOD_MARK).map(String::from))
+        .collect();
     let mut alias_tails: Vec<(String, String)> = Vec::new();
     for (q, t) in &merged.mod_aliases {
         if t.contains(crate::decls::ALIAS_ALT_SEP) {
@@ -4283,6 +4289,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // call exactly when its own answer was not itself `Unknown`.
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf
                 || (dep_join_hit && !dep_join_unknown);
+            // ── SOUNDNESS R986 — A CALL THROUGH A PATH-REDIRECTED MODULE THAT RESOLVED TO NOTHING ──────
+            // rustix `#[cfg_attr(libc, path = "backend/libc/mod.rs")] mod backend;`: the crate writes
+            // `crate::backend::c::timerfd_create`, this scanner placed the file at `backend::libc::c`, and
+            // the call — FFI through `c.rs`'s `pub(crate) use libc::*` — formed no edge and no disclosure.
+            // Bounded to calls nothing above handled, under a module the crate itself redirects; name
+            // resolution failed, which is §4's `ambiguous:` kind.
+            if !already_handled && !c.is_macro {
+                let body = c.path.strip_prefix("crate::").unwrap_or(&c.path);
+                if let Some(m) = redirect_mods.iter().find(|m| {
+                    body.strip_prefix(m.as_str()).is_some_and(|r| r.starts_with("::"))
+                }) {
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why
+                        .entry(f.qual.clone())
+                        .or_default()
+                        .insert(format!("ambiguous:path-redirected module crate::{m}"));
+                    if crate::lang::reach_debug() {
+                        eprintln!("R986REDIR\t{}\t{}", f.qual, c.path);
+                    }
+                }
+            }
             // ── §4 HONESTY — SOUNDNESS R452: A TYPED METHOD CALL THAT RESOLVED TO NO UNIT ──────────
             // A receiver-typed `Type::method` call that reached no local definition was dropped with NO
             // edge, NO `Unknown`, NO `unresolved` and NO `unknownWhy` — an affirmative §4 purity claim

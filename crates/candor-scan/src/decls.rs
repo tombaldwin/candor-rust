@@ -1510,6 +1510,9 @@ pub(crate) const ITEM_SENTINEL: &str = "<body-item>";
 /// decl-index digest requires), and the choice is made in scan.rs's call loop where the leaf is in hand:
 /// identical classifications → charge that one effect; different → `Unknown`, the same honest signal
 /// `drop_cross_ambiguous_enum_leaves`'s R90 collision already earns. Never a pick by position.
+/// SOUNDNESS R986 — the `mod_aliases` key prefix marking a path-redirected module (see `collect_reexports`).
+pub(crate) const REDIRECT_MOD_MARK: &str = "\u{6}redir\u{6}";
+
 pub(crate) fn record_alias(aliases: &mut HashMap<String, String>, key: String, target: String) {
     match aliases.get_mut(&key) {
         None => {
@@ -1833,6 +1836,17 @@ pub(crate) fn collect_reexports(
     aliases: &mut HashMap<String, String>,
 ) {
     let mods = mod_targets(items, modpath, dir, include_tests);
+    // SOUNDNESS R986 — record (and ONLY record) every `mod NAME;` whose file a `#[path]` /
+    // `#[cfg_attr(_, path = ..)]` chooses: this scanner places the file where it SITS, so a call written
+    // through the module's own name (`crate::backend::c::timerfd_create`) can name no unit. The marker key
+    // starts with `REDIRECT_MOD_MARK`, which no path segment can contain, so `expand` never matches it —
+    // a resolution through these aliases was measured and REVERTED (96 effects lost in rustix 0.37.28).
+    for (name, targets) in &mods {
+        let own = qualify(modpath, name);
+        if targets.iter().any(|t| *t != own) {
+            record_alias(aliases, format!("{REDIRECT_MOD_MARK}{own}"), own.clone());
+        }
+    }
     let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
     collect_module_glob(items, modpath, &mods, include_tests, aliases);
     // SOUNDNESS R438 — see `cfg_gated_use_alias_counts`. Taken over the whole module BEFORE any item is

@@ -91,7 +91,7 @@ release check's removed rows.
   0 `Unknown` lost; 601 rows gain only `Unknown` (0.098% of 612,325 post rows) — the R981 reasons by trait
   (`Stream`, `AsyncRead`/`AsyncWrite`, hyper `rt::Read`/`rt::Write`, …) and their callers. Cache schema rev64.
 
-### ⚠ The release audit's pre-existing silences: resolved or re-hedged (SOUNDNESS R960, R982, R985, R987, R988, R989)
+### ⚠ The release audit's pre-existing silences: resolved or re-hedged (SOUNDNESS R960, R982, R985–R989)
 
 Six mechanisms that v0.39.3 covered only by an unrelated `ambiguous:` `Unknown`:
 
@@ -114,9 +114,14 @@ Six mechanisms that v0.39.3 covered only by an unrelated `ambiguous:` `Unknown`:
 - **R989** — a glob-imported name in a module that also has an item macro is a NON-exclusive glob
   candidate (security-framework `SecKeychainCreate` from `security_framework_sys::keychain::*`); chained over
   security-framework-sys, `deny Unknown CreateOptions::create` 0 / 0 / 1. Resolution.
-- **R986 (rustix `c::timerfd_create` through a `#[cfg_attr(_, path)]`-selected backend) is NOT fixed.** The
-  attempted resolution (aliasing the written module to its path targets) lost 96 concrete effects in
-  rustix 0.37.28 on the A/B and was reverted.
+- **R986** — a call written through a `#[path]` / `#[cfg_attr(_, path)]`-selected module (rustix's
+  `crate::backend::c::timerfd_create`, libc FFI via `c.rs`'s glob) names no unit this scanner placed, since
+  it places a file where it SITS. When nothing else resolved such a call it is now `Unknown` with
+  `ambiguous:path-redirected module crate::<m>` (rustix 0.38 `timerfd_create`: `deny Unknown` 1 / 0 / 1).
+  Re-hedge, not a resolution: aliasing the module to its path targets was measured to lose 96 concrete
+  effects in rustix 0.37.28 and is not done. A/B against the build before it: ADDED 1,431, REMOVED 0,
+  CHANGED 5,568; 0 effects or `Unknown`s lost; 2,810 rows gain only `Unknown` (0.456%; rustix, socket2,
+  native-tls `imp`, memmap2 `os`, tokio `process::imp`, wasm-bindgen `__rt`). Cache schema rev66.
 - Corpus A/B against `daf9666`: rows ADDED 1,993, REMOVED 7, CHANGED 4,196 on the pre-final build; the only
   concrete losses are reqwest `Pending::poll`/`PendingRequest::poll` `Log` (6 rows), which came solely from
   fabricated drop edges to `blocking::InnerClientHandle::drop` and `wasm::AbortGuard::drop` (neither type is
