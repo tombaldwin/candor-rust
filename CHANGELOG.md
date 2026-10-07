@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; `SPEC_VERSION` and its two literal canaries in
+  candor-report move together. candor-scan implements all three ⟨0.40⟩ halves: the type surface and the
+  language-scoped Rust permission (`holds`/`returnsProtocol`/`types`/`adds`, `Deref` followed), the AS-EFF-005
+  new-function rule with the per-crate prefix (SOUNDNESS R932/R933), and bind/listen for `Net` (R817/R949).
+  **A gate that passed on 0.39.x can exit 1 on identical bytes** — see candor-spec SPEC §8 ⟨0.40⟩.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the
