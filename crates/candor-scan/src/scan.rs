@@ -1545,6 +1545,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         &mut merged.fields,
         &mut merged.field_elem_trait,
         &mut merged.field_elem,
+        &mut merged.unbound_gen_fields,
     );
     // VEIN A — Pass B now reads the manifest's dependency names (`lang::glob_origin`), so a cached
     // FnInfo set is reusable only under the same dependency list: it is folded into the reuse key.
@@ -1577,7 +1578,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,
-                       impl_members: &merged.impl_members };
+                       impl_members: &merged.impl_members, unbound_gen_fields: &merged.unbound_gen_fields };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -1797,7 +1798,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             let idx = if pick == 0 { &fd.fields } else { &fd.field_elem };
                             idx.get(leaf.as_str()).and_then(|m| m.get(k)).map(String::as_str)
                         }).collect();
-                        let anchored = tv.len() >= 2 && tv.iter().all(|v| v.starts_with("crate::"));
+                        // SOUNDNESS R898 — a BARE single-segment spelling of a type this crate declares is
+                        // the same crate-local claim as an anchored one. Twins spelled one each way
+                        // (`use super::Connection` anchored in hyper's `client::conn::http1::upgrades`, the
+                        // server twin's own bare `Connection`) were ambiguous with no twin leaf, so the
+                        // leaf-keyed `field_elem` kept the LAST file's entry and the server's
+                        // `self.inner.map(|c| c.into_parts())` read the CLIENT's `['Fs']` while running the
+                        // server's `Env` (`deny Env` 0). PRE-EXISTING for a FILE-module twin (708ce46,
+                        // `rustagent-resid/fx/r898twinf`); R898 anchoring inline modules reached it in
+                        // hyper itself, and the corpus A/B is what showed it.
+                        let anchored = tv.len() >= 2
+                            && tv.iter().all(|v| v.starts_with("crate::") || (!v.contains("::") && quals.contains_key(*v)));
                         let leaves: BTreeSet<&str> = tv.iter().map(|v| v.rsplit("::").next().unwrap_or(v)).collect();
                         if anchored && leaves.len() == 1 {
                             if let Some(l) = leaves.iter().next() {

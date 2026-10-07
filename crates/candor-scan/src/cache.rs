@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev59: SOUNDNESS R898 — Pass A now re-seeds an INLINE module's own path and declarations, so `fields`,
+    // `rets` and the rest RECORD the anchored type for a `use self::…`/`use super::…` there instead of the raw
+    // relative string; a rev58 entry replays the unanchored string and the silence it caused. Mandatory.
+    // R810, R879 and R899 change what Pass B's walk RECORDS in the cached `FnInfo` (`calls`, `str_arg`) too.
     // rev58: the merge of VEIN A (rev56 on its branch) and VEIN E (rev56/rev57 on its branch) — both
     // lanes bumped from rev55 independently, so neither branch's token names the merged content. Mandatory.
     // rev56: VEIN A (R830, R181, R369, R193(a), R862, R863, R633's residual). Pass A's `expand` now keeps
@@ -365,7 +369,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev58/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev59/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -820,6 +824,10 @@ pub(crate) struct MergedDecls {
     pub(crate) trait_fields: TraitFieldIndex,
     /// SOUNDNESS R562 — see `FileDecls::dyn_trait_fields`.
     pub(crate) dyn_trait_fields: TraitFieldIndex,
+    /// SOUNDNESS R897 — the generic-typed fields the impl-bound join found NO impl-level bound for
+    /// (struct leaf -> field -> `<position>\u{1f}<param>`), kept so a METHOD's own `where` clause can
+    /// bound them inside that method (`decls::resolve_impl_bound_fields`).
+    pub(crate) unbound_gen_fields: TraitFieldIndex,
     pub(crate) prim_aliases: std::collections::HashSet<String>,
     pub(crate) extern_fns: std::collections::HashSet<String>,
     pub(crate) drop_types: std::collections::HashSet<String>,
@@ -1469,6 +1477,8 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // SOUNDNESS R562 — the dyn-only twin changes which receivers CHA, so it must invalidate too.
     s.push_str("dyn_trait_fields");
     nested_tf(&mut s, &m.dyn_trait_fields);
+    s.push_str("unbound_gen_fields");
+    nested_tf(&mut s, &m.unbound_gen_fields);
     // prim_aliases — sorted set of non-nominal alias names (resolution skips local `Alias::assoc`).
     s.push_str("prim_aliases");
     let mut pak: Vec<&String> = m.prim_aliases.iter().collect();

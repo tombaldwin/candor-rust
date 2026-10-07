@@ -138,6 +138,19 @@ pub(crate) fn scan_items(
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
                 }
+                // SOUNDNESS R897 — the self type's generic arguments IN ORDER, lifetimes included,
+                // because the struct's parameter positions (`TF_GEN_FIELD`) count them too.
+                if let syn::Type::Path(tp) = &*im.self_ty {
+                    if let Some(syn::PathArguments::AngleBracketed(ab)) = tp.path.segments.last().map(|s| &s.arguments) {
+                        let args: Vec<String> = ab.args.iter().map(|a| match a {
+                            syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => {
+                                t.path.get_ident().map(|i| i.to_string()).unwrap_or_else(|| "_".into())
+                            }
+                            _ => "_".into(),
+                        }).collect();
+                        uses.insert(IMPL_ARGS_KEY.to_string(), args.join(","));
+                    }
+                }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
                         if !include_tests
@@ -161,6 +174,7 @@ pub(crate) fn scan_items(
                 // not inherit it. (`impl_type_name` yields None for a non-nominal self type — `impl Trait
                 // for &[u8]` — and then nothing was inserted and nothing is removed: an honest miss.)
                 uses.remove(SELF_KEY);
+                uses.remove(IMPL_ARGS_KEY);
             }
             syn::Item::Mod(m) => {
                 if !include_tests && is_cfg_test(&m.attrs) {
@@ -331,6 +345,11 @@ pub(crate) fn reseed_child_scope(
         crate::lang::seed_moddecls(inner, include_tests, subuses);
     }
 }
+
+/// SOUNDNESS R897 — the reserved `uses` key under which `scan_items` records the CURRENT impl block's
+/// self-type generic arguments, comma-separated in order (`impl<B, A> W<'a, A, B>` -> `'a,A,B`; a
+/// non-identifier argument is `_`). `*` cannot appear in a path segment, so no import can bind it.
+pub(crate) const IMPL_ARGS_KEY: &str = "*implargs";
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
 /// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
@@ -2027,6 +2046,104 @@ pub(crate) fn bound_idents(sig: &syn::Signature, block: &syn::Block) -> std::col
     v.0
 }
 
+/// SOUNDNESS R810 — how this body can CHANGE a binding after its `let`, by name, body-wide.
+///
+/// `str_locals` records a binding's literal at its `let` and reads it back at every later use, so it
+/// is only true if nothing in between replaced or edited the value. `let mut p = "/tmp/benign"; p = user;
+/// fs::write(p, ..)` published `/tmp/benign` with no `incomplete`, and `allow Fs /tmp/benign` passed
+/// while the program wrote to `user` (EXECUTED). The deep engine reads MIR and never had this problem.
+///
+/// Rust confines every way of changing a by-value binding to a `mut` one, and each is visible in the
+/// body's text: an assignment or compound assignment to a place rooted at the name, a `&mut` borrow of
+/// it (a callee may assign through it), or a method call on it (`push`, `push_str`, `set_file_name`
+/// take `&mut self`). A macro's arguments are parsed as expressions and searched the same way, and
+/// `write!`/`writeln!` count as a method call on their first argument. FLOW-INSENSITIVE ON PURPOSE: a
+/// loop-carried reassignment comes lexically AFTER the use it changes, so "was it assigned before this
+/// point" is the wrong question.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct MutUses {
+    /// Assigned, compound-assigned, or `&mut`-borrowed somewhere in the body.
+    pub(crate) assigned: std::collections::HashSet<String>,
+    /// The methods called with the bare name as the receiver.
+    pub(crate) recv: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+}
+
+pub(crate) fn mut_uses(block: &syn::Block) -> MutUses {
+    /// The binding a place expression is rooted at: `p`, `*p`, `p.f`, `p[i]`, `(p)`.
+    fn root(e: &syn::Expr) -> Option<String> {
+        match e {
+            syn::Expr::Path(p) if p.qself.is_none() => p.path.get_ident().map(|i| i.to_string()),
+            syn::Expr::Paren(p) => root(&p.expr),
+            syn::Expr::Group(g) => root(&g.expr),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => root(&u.expr),
+            syn::Expr::Field(f) => root(&f.base),
+            syn::Expr::Index(i) => root(&i.expr),
+            _ => None,
+        }
+    }
+    struct V(MutUses);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+            if let Some(n) = root(&node.left) {
+                self.0.assigned.insert(n);
+            }
+            syn::visit::visit_expr_assign(self, node);
+        }
+        fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+            use syn::BinOp::*;
+            if matches!(
+                node.op,
+                AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_) | BitXorAssign(_)
+                    | BitAndAssign(_) | BitOrAssign(_) | ShlAssign(_) | ShrAssign(_)
+            ) {
+                if let Some(n) = root(&node.left) {
+                    self.0.assigned.insert(n);
+                }
+            }
+            syn::visit::visit_expr_binary(self, node);
+        }
+        fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+            if node.mutability.is_some() {
+                if let Some(n) = root(&node.expr) {
+                    self.0.assigned.insert(n);
+                }
+            }
+            syn::visit::visit_expr_reference(self, node);
+        }
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if let Some(n) = root(&node.receiver) {
+                self.0.recv.entry(n).or_default().insert(node.method.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            use syn::parse::Parser;
+            let parsed = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                // `respan_call_site`, NEVER the raw tokens: this runs on the collector thread over a
+                // body parsed on a rayon worker, and syn's parser JOINS spans against a thread-local
+                // source map (`model::respan_call_site` says why). Measured here first-hand: without it
+                // getrandom's `use_file` module vanished from the report on 16 of 20 runs under load.
+                .parse2(crate::model::respan_call_site(node.tokens.clone()));
+            if let Ok(args) = parsed {
+                let leaf = node.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                if matches!(leaf.as_str(), "write" | "writeln") {
+                    if let Some(n) = args.first().and_then(root) {
+                        self.0.recv.entry(n).or_default().insert("write_fmt".to_string());
+                    }
+                }
+                for a in &args {
+                    self.visit_expr(a);
+                }
+            }
+            syn::visit::visit_macro(self, node);
+        }
+    }
+    use syn::visit::Visit;
+    let mut v = V(MutUses::default());
+    v.visit_block(block);
+    v.0
+}
+
 /// R100 — the idents ONE pattern binds. Same `Pat::Ident` funnel as `bound_idents` above, narrowed to a
 /// single pattern: `visit_local` needs the names THIS statement binds so it can walk the statement's own
 /// RHS under the state that was live before the binding took effect.
@@ -2431,6 +2548,7 @@ pub(crate) fn fninfo(
         written_trait_quals: traits.written_quals,
         fields,
         trait_fields: traits.fields,
+        unbound_gen_fields: traits.unbound_gen_fields,
         dyn_trait_fields: traits.dyn_fields,
         trait_impls: traits.impls,
         local_traits: traits.decls,
@@ -2493,6 +2611,8 @@ pub(crate) fn fninfo(
         // Empty at entry: filled as body-level `use` items are visited (`visit_item_use`).
         local_uses: std::collections::HashMap::new(),
         bound_names: bound_idents(sig, block),
+        // SOUNDNESS R810 — which `mut` bindings this body can change after their `let`.
+        mut_uses: mut_uses(block),
         dispatch_sites: std::collections::BTreeSet::new(),
         foreign_dispatch_sites: std::collections::BTreeSet::new(),
         unresolved_why: std::collections::BTreeSet::new(),
@@ -2702,6 +2822,12 @@ pub(crate) fn record_return(
     // a reader that wants the leaf answer.
     impl_key: Option<(&str, &std::collections::HashSet<String>)>,
 ) {
+    // SOUNDNESS R893 — the crate-anchored qual of a FREE fn, when this pass knows its module (Pass A seeds
+    // `MODPATH_KEY` for every file and, since R898, every inline module).
+    let free_qual: Option<String> = (self_ty.is_none() && impl_key.is_none())
+        .then(|| uses.get(crate::lang::MODPATH_KEY))
+        .flatten()
+        .map(|m| if m.is_empty() { format!("crate::{}", sig.ident) } else { format!("crate::{m}::{}", sig.ident) });
     // VEIN B (R197) — WHICH generic parameter, if any, the return NAMES. Filed for EVERY fn before any
     // branch below can return, so a same-leaf fn with a non-generic return (or none) withdraws the fact:
     // `type_of` reads a turbofish through it only when every contributor agrees.
@@ -2830,6 +2956,9 @@ pub(crate) fn record_return(
             .filter(|e| !sig_generic(e) && !impl_key.is_some_and(|(_, ig)| ig.contains(e)) && e != "Self");
         if let Some(e) = &elem {
             file_decl_fact(rets, crate::model::elem_ret_key(&leaf), e.clone());
+            if let Some(q) = &free_qual {
+                file_decl_fact(rets, crate::model::qual_elem_ret_key(q), e.clone());
+            }
             if let Some((impl_ty, _)) = impl_key {
                 file_decl_fact(rets, crate::model::impl_elem_ret_key(impl_ty, &leaf), e.clone());
             }
@@ -2849,6 +2978,14 @@ pub(crate) fn record_return(
         }
     }
     let leaf = sig.ident.to_string();
+    // SOUNDNESS R893 — and the QUALIFIED twin for a free fn, unless the return names one of the fn's own
+    // type parameters (a bound, not a type — the turbofish route owns that).
+    if let Some(q) = &free_qual {
+        let generic = sig.generics.params.iter().any(|g| matches!(g, syn::GenericParam::Type(t) if t.ident == tp));
+        if !generic {
+            file_decl_fact(rets, crate::model::qual_ret_key(q), tp.clone());
+        }
+    }
     // SOUNDNESS R451 — FILE THE IMPL-QUALIFIED TWIN. `resolve_recv_type` walks a method CHAIN to the base
     // receiver's type on the builder-chain assumption, and for a method the crate itself declares to
     // return a DIFFERENT type that assumption FABRICATES: `impl Cfg { fn get(&self,k) -> Calm; fn
@@ -3109,7 +3246,19 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Static(s) if include_tests || !is_cfg_test(&s.attrs) => {
-                if let Some(v) = const_str_value(&s.expr) {
+                // SOUNDNESS R810's item-level twin: a `static mut` is assigned at run time
+                // (`unsafe { P = user }`), so its initialiser is not its value at a use. Measured: the
+                // initialiser was published as the write's path with no `incomplete`.
+                let value = match s.mutability {
+                    syn::StaticMutability::Mut(_) => {
+                        if std::env::var_os("CANDOR_R810_DEBUG").is_some() && const_str_value(&s.expr).is_some() {
+                            eprintln!("R810STATICMUT");
+                        }
+                        None
+                    }
+                    _ => const_str_value(&s.expr),
+                };
+                if let Some(v) = value {
                     const_strings.insert(s.ident.to_string(), v);
                 }
                 if static_holds_callable(&s.ty, callable_aliases) {
@@ -3893,6 +4042,15 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
+                    // SOUNDNESS R898 — the child's OWN module path and declarations, as Pass B's
+                    // `scan_items` has given it since vein A. Without them an inline module's
+                    // `use self::ydep::Conn` / `use super::ydep::Conn` stayed the raw relative string in
+                    // `fields` (`self::ydep::Conn`), named no type, and `h.c.send()` was ABSENT
+                    // (executed, `deny Fs` 0) while a PARAMETER of the same type, typed in Pass B, charged.
+                    if let Some(parent) = uses.get(crate::lang::MODPATH_KEY).cloned() {
+                        let sub = if parent.is_empty() { m.ident.to_string() } else { format!("{parent}::{}", m.ident) };
+                        reseed_child_scope(uses, &sub, inner, include_tests, &mut subuses);
+                    }
                     collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, dyn_trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, macro_twins, blanket_methods, callable_statics, callable_aliases, field_borrows);
                 }
             }
@@ -3969,6 +4127,7 @@ pub(crate) fn resolve_impl_bound_fields(
     fields: &mut crate::model::FieldIndex,
     fet: &mut crate::model::FieldElemTraitIndex,
     field_elem: &mut crate::model::FieldIndex,
+    unbound: &mut crate::model::TraitFieldIndex,
 ) {
     // The BOUNDS half, for every type, taken BEFORE any join strips it: `trait_fields` is the only
     // place an impl block records it, and both routes read it.
@@ -3985,8 +4144,8 @@ pub(crate) fn resolve_impl_bound_fields(
             }
         }
     }
-    join_impl_bound_pending(tf, fields, &by_ty, "R476JOIN");
-    join_impl_bound_pending(fet, field_elem, &by_ty, "R478JOIN");
+    join_impl_bound_pending(tf, fields, &by_ty, "R476JOIN", Some(unbound));
+    join_impl_bound_pending(fet, field_elem, &by_ty, "R478JOIN", None);
 }
 
 /// One join, run over `trait_fields`/`fields` (R476, the field's OWN type) and over
@@ -3997,6 +4156,7 @@ fn join_impl_bound_pending(
     concrete: &mut crate::model::FieldIndex,
     by_ty: &HashMap<String, HashMap<usize, Vec<String>>>,
     tag: &str,
+    mut unbound: Option<&mut crate::model::TraitFieldIndex>,
 ) {
     for (ty_leaf, m) in idx.iter_mut() {
         if !m.keys().any(|k| crate::model::split_tf_gen_field_key(k).is_some()) {
@@ -4033,8 +4193,16 @@ fn join_impl_bound_pending(
                 .cloned()
                 .collect();
             if leaves.is_empty() {
-                continue; // an UNBOUNDED generic field stays exactly as silent as it was — R217's
-                          // +1,697-row over-charge shape is not what this row buys
+                // an UNBOUNDED generic field stays exactly as silent as it was HERE — R217's
+                // +1,697-row over-charge shape is not what this row buys. SOUNDNESS R897: but a METHOD
+                // may bound the parameter in its own `where` clause (`impl<S> W<S> { fn run(&self)
+                // where S: Sink { self.s.emit() } }`), and inside that method the field dispatches.
+                // The positions are kept so the collector can ask THAT method's bounds — never the
+                // crate's — which keeps the bound scoped exactly as Rust scopes it.
+                if let Some(u) = unbound.as_deref_mut() {
+                    u.entry(ty_leaf.clone()).or_default().insert(field.clone(), positions.clone());
+                }
+                continue;
             }
             leaves.sort();
             leaves.dedup();

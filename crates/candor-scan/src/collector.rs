@@ -223,6 +223,8 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R897 — see `cache::MergedDecls::unbound_gen_fields`.
+    pub(crate) unbound_gen_fields: &'a TraitFieldIndex,
     /// SOUNDNESS R562 — see `TraitIndexes::dyn_fields`.
     pub(crate) dyn_trait_fields: &'a TraitFieldIndex,
     /// SOUNDNESS R551 — ⟨0.39⟩ obligation 2's key set (`<owner>#<qualified trait>::<member>` → local
@@ -427,6 +429,9 @@ pub(crate) struct CallCollector<'a> {
     /// Flow-INSENSITIVE and body-wide, matching `vars`' existing discipline: a false shadow costs a
     /// forcing edge (a miss), where a missed shadow charges a static's effect to a local (a fabrication).
     pub(crate) bound_names: std::collections::HashSet<String>,
+    /// SOUNDNESS R810 — how this body changes a binding after its `let` (`decls::mut_uses`). A `mut`
+    /// binding it changes never carries a literal in `str_locals`.
+    pub(crate) mut_uses: crate::decls::MutUses,
     /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn DISPATCHES on through a
     /// receiver whose concrete implementor(s) are resolved by LOCAL bounded CHA — recorded whenever the
     /// dispatch is attempted, REGARDLESS of how many local implementors are visible (0, 1..12, >12) or
@@ -714,7 +719,52 @@ impl<'a> CallCollector<'a> {
             }
             return None;
         }
-        Some(ty)
+        // SOUNDNESS R899 — `Backend::new()` where `Backend` is a `#[cfg]`-duplicated `use … as Backend`
+        // typed as whichever arm was written LAST, so `let b = Backend::new(); b.go()` and the chain
+        // `Backend::new().go()` charged the inactive arm (executed: `['Env']` over a body that writes,
+        // `deny Fs` 0). The parameter route has unioned the arms since R369; this is the same rule.
+        let head = ctor_written_head(expr);
+        Some(match head {
+            Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
+            None => ty,
+        })
+    }
+
+    /// SOUNDNESS R369/R899 — a type answer `cur` for something written with the head `head`, widened to
+    /// the UNION of every `#[cfg]` arm that binds `head` (`use_alts`), joined with `ALIAS_ALT_SEP` for
+    /// `scan.rs` to adjudicate per arm. `resolve` re-asks the same question with the use map pinned to
+    /// one arm. The rule is the parameter route's (`decls::fninfo`), so the positions cannot disagree:
+    /// only an answer that already exists is widened, and only when the arms give two or more distinct
+    /// types that include it. One arm, or arms that agree, return `cur` unchanged.
+    pub(crate) fn union_over_arms(
+        &self,
+        head: &str,
+        cur: String,
+        resolve: impl Fn(&HashMap<String, String>) -> Option<String>,
+    ) -> String {
+        let Some(arms) = self.use_alts.get(head).filter(|a| a.len() >= 2) else { return cur };
+        if cur.contains(crate::decls::ALIAS_ALT_SEP) {
+            return cur;
+        }
+        let mut tys: Vec<String> = Vec::new();
+        for a in arms {
+            let mut u2: HashMap<String, String> = (*self.uses).clone();
+            u2.insert(head.to_string(), a.clone());
+            if let Some(t) = resolve(&u2) {
+                if !t.contains(crate::decls::ALIAS_ALT_SEP) && !tys.contains(&t) {
+                    tys.push(t);
+                }
+            }
+        }
+        if tys.len() >= 2 && tys.contains(&cur) {
+            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                eprintln!("R899UNION");
+            }
+            tys.sort();
+            tys.join(&crate::decls::ALIAS_ALT_SEP.to_string())
+        } else {
+            cur
+        }
     }
 
     pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
@@ -1501,8 +1551,23 @@ impl<'a> CallCollector<'a> {
                     if p.qself.is_none() && segs.len() >= 2 {
                         let leaf = segs[segs.len() - 1].ident.to_string();
                         let owner = segs[segs.len() - 2].ident.to_string();
+                        // SOUNDNESS R879 — the ALL-CAPS refusal was wider than its reason. It exists so a
+                        // dependency's `dep::SHARED` keeps R856's disclosure (a dependency's name cannot
+                        // say static or struct); but it also refused this crate's OWN `pub struct U;`
+                        // reached as `m::U.go()` (and `m::UB`, `m::IO` — any leaf with no lowercase
+                        // letter), which then had no route at all: ABSENT, `deny Fs` 0, executed. A caps
+                        // leaf now types when the path is anchored in THIS crate (`expand` gave it a
+                        // `crate::` head) and the crate declares no `const`/`static` of that leaf — the
+                        // two facts a dependency path cannot supply. Measured on the first cut, which
+                        // also typed dependency paths: `libc::EPOLLOUT | libc::EPOLLHUP` formed an
+                        // operator call on a "type" and gained `invisible: [libc]` on 41 corpus rows.
+                        let caps_ok = !crate::lang::caps_value_leaf(&leaf)
+                            || !self.static_types.contains_key(&leaf);
+                        let caps_local = !crate::lang::caps_value_leaf(&leaf)
+                            || expand(&crate::lang::path_to_string_lc(&p.path), &self.uses).starts_with("crate::");
                         if crate::lang::is_type_ident(&leaf)
-                            && !crate::lang::caps_value_leaf(&leaf)
+                            && caps_ok
+                            && caps_local
                             && !crate::lang::is_type_ident(&owner)
                             && owner != "Self"
                             && segs.iter().all(|s| s.arguments.is_none())
@@ -1510,6 +1575,9 @@ impl<'a> CallCollector<'a> {
                             let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                             if !full.contains('<') && !full.contains(crate::decls::ALIAS_ALT_SEP) {
                                 probe("R856QUNIT");
+                                if crate::lang::caps_value_leaf(&leaf) {
+                                    probe("R879CAPS"); // the CHANGED branch: a caps leaf R856 refused
+                                }
                                 return Some(full);
                             }
                         }
@@ -1611,6 +1679,13 @@ impl<'a> CallCollector<'a> {
                     }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R897 — the `fields` entry of an UNBOUNDED generic field is the struct
+                // parameter's own NAME (`"S"`), which names no type; where THIS method bounds the
+                // parameter, the dispatch route in `resolve_recv_traits` answers and this must not
+                // shadow it (the same shadow R476 removes for an impl-level bound).
+                if !self.method_bound_gen_field(&f.base, base_leaf, &key).is_empty() {
+                    return None;
+                }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) => self.nominal_ctor_type(expr),
@@ -1764,8 +1839,24 @@ impl<'a> CallCollector<'a> {
                     return None;
                 }
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
-                crate::lang::recorded_return_type(leaf, self.returns)?;
-                let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned();
+                // SOUNDNESS R893 — two same-named factories withdrew the leaf's answer (both `-> Vec<_>`
+                // agree on the container and disagree on the element, so it is the ELEMENT entry that
+                // goes); the written path names one of them (`for g in a::mkv()` beside a `b::mkv`), so
+                // its crate-anchored qualified entry answers. Asked only once the leaf route declines.
+                let qual_elem = || {
+                    if !full.starts_with("crate::") {
+                        return None;
+                    }
+                    let e = self.returns.get(&crate::model::qual_elem_ret_key(&full)).cloned();
+                    if e.is_some() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                        eprintln!("R893QUALELEM {full}");
+                    }
+                    e
+                };
+                if crate::lang::recorded_return_type(leaf, self.returns).is_none() {
+                    return qual_elem();
+                }
+                let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned().or_else(qual_elem);
                 if e.is_some() && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                     eprintln!("VEINB_ELEMRET\t{leaf}");
                 }
@@ -2498,6 +2589,54 @@ impl<'a> CallCollector<'a> {
     /// the commonest Exec spelling there is — because `status` and `unwrap` are not builders. A guard
     /// that masks the fully-determined case is the over-charge this fix's own control forbids, and it
     /// showed up on the benign arm of the fixture rather than in review.
+    /// SOUNDNESS R810 — whether a `mut` binding initialised from `init` still holds that value at every
+    /// use, given how this body changes it (`decls::mut_uses`). An assignment or a `&mut` borrow always
+    /// disqualifies. A method call disqualifies unless it cannot rewrite what `str_locals` records:
+    ///  - on a `Command` built by `Command::new(..)` the recorded value is the PROGRAM, and no method on a
+    ///    `Command` renames it (R460's premise) — so `let mut c = Command::new("git"); c.arg(x);
+    ///    c.status()`, the dominant Exec spelling, keeps its head;
+    ///  - on a string or path it is the VALUE, and `push`/`push_str`/`set_file_name`/`write!` rewrite it.
+    ///    Only the methods below, which take `&self` or `self` on `str`/`String`/`Path`/`PathBuf`/
+    ///    `OsStr`, are known not to; anything else disqualifies. An ALLOWLIST of the harmless, so a
+    ///    method nobody listed costs a disclosure rather than a false literal.
+    fn literal_survives(&self, name: &str, init: &syn::Expr) -> bool {
+        if self.mut_uses.assigned.contains(name) {
+            return false;
+        }
+        let Some(methods) = self.mut_uses.recv.get(name) else { return true };
+        let mut head = peel_recv(init);
+        while let syn::Expr::MethodCall(m) = head {
+            head = peel_recv(&m.receiver);
+        }
+        let is_command = match head {
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    segs.len() >= 2 && segs[segs.len() - 2] == "Command" && segs[segs.len() - 1] == "new"
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_command {
+            return true;
+        }
+        methods.iter().all(|m| {
+            matches!(
+                m.as_str(),
+                "as_str" | "as_path" | "as_os_str" | "as_ref" | "as_bytes" | "borrow" | "clone"
+                    | "to_owned" | "to_string" | "to_str" | "to_string_lossy" | "to_path_buf"
+                    | "display" | "len" | "is_empty" | "exists" | "try_exists" | "is_file" | "is_dir"
+                    | "is_symlink" | "is_absolute" | "is_relative" | "starts_with" | "ends_with"
+                    | "contains" | "join" | "with_extension" | "with_file_name" | "parent"
+                    | "file_name" | "file_stem" | "extension" | "components" | "iter" | "chars"
+                    | "bytes" | "trim" | "lines" | "split" | "eq" | "ne" | "cmp" | "partial_cmp"
+                    | "metadata" | "symlink_metadata" | "canonicalize" | "read_dir" | "read_link"
+                    | "into_os_string" | "into_boxed_path" | "into_bytes" | "into_string" | "into"
+            )
+        })
+    }
+
     fn resolve_cmd_recv(&self, expr: &syn::Expr) -> Option<String> {
         match peel_recv(expr) {
             syn::Expr::MethodCall(m) => self.resolve_cmd_recv(&m.receiver),
@@ -2654,6 +2793,44 @@ impl<'a> CallCollector<'a> {
     /// would have short-circuited and the walk nevertheless produced an answer — i.e. on the rows this
     /// change can move and on no others. Counts HITS, not distinct sites: the walk recurses through
     /// this wrapper, so one nested resolution counts at each level it answers at.
+    /// SOUNDNESS R897 — the trait leaves of `self.<field>` where the field's type is a struct generic
+    /// parameter with NO impl-level bound, but THIS method bounds the impl's parameter at that position in
+    /// its own `where` clause or generics. `impl<S> W<S> { fn run(&self) where S: Sink { self.s.emit() } }`
+    /// was ABSENT (executed, `deny Fs` 0) while the same bound on the impl, or a parameter `s: &S` under
+    /// the same method bound, charged. The position — not the name — maps the struct's parameter to the
+    /// impl's (`impl<B, A> W<A, B>` is legal), read off the impl's own self-type arguments
+    /// (`decls::IMPL_ARGS_KEY`). Only on `self` (the receiver whose type IS the impl's self type), and only
+    /// from this method's bounds, so a bound can never leak to a method that does not state it.
+    fn method_bound_gen_field(&self, base: &syn::Expr, base_leaf: &str, field: &str) -> Vec<String> {
+        if self.unbound_gen_fields.is_empty() || self.generic_bounds.is_empty() {
+            return Vec::new();
+        }
+        let syn::Expr::Path(p) = peel_value(base) else { return Vec::new() };
+        if !p.path.is_ident("self") {
+            return Vec::new();
+        }
+        let Some(positions) = self.unbound_gen_fields.get(base_leaf).and_then(|m| m.get(field)) else {
+            return Vec::new();
+        };
+        let Some(args) = self.uses.get(crate::decls::IMPL_ARGS_KEY) else { return Vec::new() };
+        let args: Vec<&str> = args.split(',').collect();
+        let mut out: Vec<String> = Vec::new();
+        for p in positions {
+            let Some((i, _)) = p.split_once('\u{1f}') else { continue };
+            let Some(i) = i.parse::<usize>().ok() else { continue };
+            let Some(arg) = args.get(i) else { continue };
+            for l in self.generic_bounds.get(*arg).into_iter().flatten() {
+                if !out.contains(l) {
+                    out.push(l.clone());
+                }
+            }
+        }
+        if !out.is_empty() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            eprintln!("R897WHERE {base_leaf}.{field} {out:?}");
+        }
+        out
+    }
+
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
         let old_guard_would_skip =
             self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return;
@@ -2719,7 +2896,9 @@ impl<'a> CallCollector<'a> {
             && !self.has_dyn_return
             && self.elem_trait_of.is_empty()
             && self.field_elem_trait.is_empty()
-            && self.callable_statics.is_empty();
+            && self.callable_statics.is_empty()
+            // SOUNDNESS R897 — the Field arm's `method_bound_gen_field` reads these two.
+            && (self.unbound_gen_fields.is_empty() || self.generic_bounds.is_empty());
         // `has_dyn_return` is the `returns`-index half of this condition and covers all four dispatch
         // sentinels (R540b) — the arms gated here read `returns` only through `ret_dyn_leaves` /
         // `ret_dispatch_leaves`, so a crate with none of them can answer nothing from it.
@@ -2819,7 +2998,10 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
-                self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()).unwrap_or_default()
+                match self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()) {
+                    Some(l) => l,
+                    None => self.method_bound_gen_field(&f.base, base_leaf, &key),
+                }
             }
             // `xs[i].method()` / `self.handlers[0].method()` — the receiver is the indexed BASE's
             // ELEMENT; mirrors `resolve_recv_type`'s own `Index` arm (its concrete-type counterpart,
@@ -6501,6 +6683,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
                 } else if let Some(ty) = type_path(&pt.ty, &self.uses) {
+                    // SOUNDNESS R899 — the annotated `let b: Backend = …` gets the parameter's union.
+                    let ty = match crate::lang::type_written_head(&pt.ty) {
+                        Some(h) => self.union_over_arms(&h, ty, |u| type_path(&pt.ty, u)),
+                        None => ty,
+                    };
                     self.vars.insert(id.ident.to_string(), ty);
                 }
                 // A COLLECTION-typed let (`let xs: Vec<Sender> = ..`) — record its element type so a
@@ -6660,7 +6847,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if let Some(init) = &node.init {
                 let resolved = const_str_value(&init.expr)
                     .or_else(|| self.with_pre_bindings(&pre_bindings, |s| s.resolve_str_expr(&init.expr)));
-                if let Some(v) = resolved {
+                // SOUNDNESS R810 — a `mut` binding this body changes after the `let` does not still hold
+                // the `let`'s literal at its uses (see `decls::mut_uses`). Not recording it leaves the use
+                // unresolved, which is exactly the inline-runtime-value answer: `incomplete`, no literal.
+                let changed = id.mutability.is_some() && !self.literal_survives(&name, &init.expr);
+                // REACH probe for the A/B (§E1): a literal this rule WITHHELD. Env-gated, stderr only.
+                if changed && resolved.is_some() && std::env::var_os("CANDOR_R810_DEBUG").is_some() {
+                    eprintln!("R810WITHHELD {} {}", self.modpath, name);
+                }
+                if let Some(v) = resolved.filter(|_| !changed) {
                     self.str_locals.insert(name, v);
                 }
             }
@@ -7316,6 +7511,22 @@ pub(crate) fn peel_value(expr: &syn::Expr) -> &syn::Expr {
 /// `{x}`, `x?`, `x.await`. Mirrors the peeling `resolve_recv_type` does, so the untyped-dep-receiver
 /// disclosure sees `deplib::build()` through `(&deplib::build())`, `deplib::build()?` and
 /// `deplib::build().await` exactly as it sees the bare spelling.
+/// SOUNDNESS R899 — the FIRST written segment of the path a constructor expression is spelled with
+/// (`Backend` in `Backend::new()`, `Backend { .. }`, `Backend`, and through a method chain on any of
+/// them), which is the name a `#[cfg]`-duplicated `use` binds.
+pub(crate) fn ctor_written_head(expr: &syn::Expr) -> Option<String> {
+    match peel_recv(expr) {
+        syn::Expr::Call(c) => match &*c.func {
+            syn::Expr::Path(p) if p.qself.is_none() => p.path.segments.first().map(|s| s.ident.to_string()),
+            _ => None,
+        },
+        syn::Expr::Struct(s) if s.qself.is_none() => s.path.segments.first().map(|s| s.ident.to_string()),
+        syn::Expr::Path(p) if p.qself.is_none() => p.path.segments.first().map(|s| s.ident.to_string()),
+        syn::Expr::MethodCall(m) => ctor_written_head(&m.receiver),
+        _ => None,
+    }
+}
+
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {
     let mut e = expr;
     loop {

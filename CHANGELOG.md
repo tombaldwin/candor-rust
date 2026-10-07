@@ -11,6 +11,42 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ Residual silences outside the veins: literals, qualified caps values, cfg-alias routes, inline-module fields, method `where` bounds, twin factories (SOUNDNESS R810, R879, R893 part, R897, R898, R899)
+
+Each cell below was compiled and run (a file is written or an env var read), and each caller was ABSENT, or
+certified a literal the program does not use, with `deny`/`allow` exiting 0. Now:
+
+- **R810 — a changed `mut` binding carries no literal.** `let mut p = "/tmp/benign"; p = user;
+  fs::write(p, ..)` published `/tmp/benign` with no `incomplete`, so `allow Fs /tmp/benign` passed. A `mut`
+  binding that the body assigns, `&mut`-borrows or calls a non-read-only method on (`push`, `set_file_name`,
+  `write!`) no longer records its literal; the dominant `let mut c = Command::new("git"); c.arg(..)` keeps its
+  head (no `Command` method renames the program). A `static mut` initialiser is no longer a literal either.
+  The loop-carried spelling (reassignment after the use) is covered. `allow` 0 → 1 on all eight cells.
+- **R879 — `m::U.go()` for this crate's own all-caps unit struct** (`U`, `UB`, `IO`; the variable is "no
+  lowercase", not "one letter") types like `m::Ub.go()`. Only for a `crate::`-anchored path with no
+  same-leaf `const`/`static`, so a dependency's `dep::SHARED` keeps R856's disclosure and `libc::EPOLLOUT`
+  is not read as a type.
+- **R899 — a `#[cfg]`-duplicated `use … as Backend` is the union of its arms on the `let b: Backend`,
+  `let b = Backend::new()` and `Backend::new().go()` routes** (the parameter, field and return routes
+  already were).
+- **R898 — an inline module's `use self::dep::T` / `use super::dep::T` types its struct FIELDS.** Pass A
+  now re-seeds the child module's path, as Pass B already did. Its corpus A/B exposed a pre-existing twin
+  defect (two same-leaf structs, one field spelled anchored and one bare, kept the last file's element type —
+  hyper's server `UpgradeableConnection::into_parts` read the client's body); twins spelled that way now
+  share one leaf, so the ambiguity discloses as before.
+- **R897 — a struct generic field bounded only in a METHOD's `where` clause dispatches in that method**
+  (`impl<S> W<S> { fn run(&self) where S: Sink { self.s.emit() } }`), mapped by position, never leaking to a
+  method that does not state the bound. Live in mongodb's `CursorWrapper::next_if_any`.
+- **R893 (two-factory half) — `a::mkv()` beside a same-named `b::mkv()`** keeps its declared return and
+  element through a crate-anchored qualified key. The `Mutex<Vec<G>>` / `Option<Vec<G>>` field half stays open.
+
+Direction: resolutions plus a few consistency `Unknown`s. Corpus A/B vs 708ce46 (1,275 pinned entries,
+288,270 rows): ADDED 14 · REMOVED 0 · CHANGED 81; no concrete effect lost; 21 rows gain a concrete effect
+(sampled four, all genuine, gates 0 → 1: sqlx-sqlite `root_block_columns` Db, dylint_internal
+`cargo_dylint` Exec, mongodb `CursorWrapper::next_if_any` Env, tempfile `SpooledTempFile::roll` Fs);
+8 rows newly `Unknown`-only (0.003%). Three tempfile rows lose their `fs: ["write"]` kind (kind now
+undetermined; `Fs` kept). Scan-cache schema rev58 → rev59.
+
 ### ⚠ Vein A — a written path is resolved against the module it is WRITTEN IN (more effects charged, more `Unknown`/`invisible`; SOUNDNESS R830, R181, R369, R193(a), R862, R863, R633's residual)
 
 candor-scan resolved a call or type path as a string with its scope thrown away: `expand` stripped
