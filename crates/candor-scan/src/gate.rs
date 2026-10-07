@@ -208,6 +208,32 @@ pub(crate) enum BaselineOutcome {
 /// members share one direct-path baseline value must not repeat the identical note per member.
 static NOTED_ABSENT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
 
+/// ⟨0.40⟩ SPEC §3 (SOUNDNESS R933) — some OTHER package's report under the `--out` prefix `value`
+/// (`<value>.<pkg>.scan.json`, never a `.callgraph.json` sidecar), which makes the prefix PRESENT for the
+/// run. Sorted, so the file read for the build check is deterministic.
+fn prefix_sibling_report(value: &str) -> Option<String> {
+    let p = Path::new(value);
+    let base = p.file_name()?.to_str()?;
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let head = format!("{base}.");
+    let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_str()?.to_string();
+            (n.starts_with(&head) && n.ends_with(".scan.json") && !n.ends_with(".callgraph.json")
+                && !n[head.len()..n.len() - ".scan.json".len()].is_empty())
+                .then(|| e.path())
+        })
+        .filter(|p| p.is_file())
+        .collect();
+    hits.sort();
+    hits.into_iter().next().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// The AS-EFF-005 baseline regression guard (candor-spec §7 item 5) — the stable scanner's arm of the
 /// family-wide MUST, with candor-java's `checkBaseline` as the exact model. `value` is the
 /// `CANDOR_BASELINE` env / config `baseline` value: a report PREFIX (the `--out` form —
@@ -269,7 +295,14 @@ pub(crate) fn check_baseline(
     } else {
         format!("{value}.{crate_name}.scan.json")
     };
-    if !Path::new(&file).is_file() {
+    // ⟨0.40⟩ SPEC §3 (SOUNDNESS R933) — a PREFIX is PRESENT for the run when any report file it resolves
+    // to, for any package, exists. A package with no file under a present prefix is a package ABSENT
+    // from a present baseline, and every function in it is absent: compared against ∅, not skipped.
+    // Measured at 708ce46: a workspace baseline recorded with member `a`, a tree adding member `b` with a
+    // `Net` function — "baseline …b.scan.json does not exist — the regression guard is not active",
+    // exit 0. The field report behind ⟨0.40⟩ was exactly this, a whole new package under a green gate.
+    let sibling = if Path::new(&file).is_file() { None } else { prefix_sibling_report(value) };
+    if !Path::new(&file).is_file() && sibling.is_none() {
         // A CHECKED-IN DECLARATION IS NOT THE SAME ABSENCE. `.candor/config` naming a baseline says this
         // repo HAS one, so a missing file was deleted or never committed and the guard passing green
         // over it is the gateless-green class — measured by an adopter review as the second-likeliest
@@ -293,6 +326,22 @@ pub(crate) fn check_baseline(
         return BaselineOutcome::Inactive;
     }
     let regen = format!("regenerate it with this build: candor-scan {dir} --out {value}");
+    // The package-absent case reads a SIBLING package's report for the two facts a baseline must
+    // establish before anything is compared — that it parses and that THIS build produced it (§2.1: a
+    // different-build baseline exits 2, so an upgrader re-records before the new rule can fire) — and
+    // then compares this package against an EMPTY baseline with no sidecar (`origin:"unknown"`).
+    let package_absent = sibling.is_some();
+    let file = match sibling {
+        Some(s) => {
+            eprintln!(
+                "candor-scan: baseline prefix {value} is present (e.g. {s}) but has no file for package \
+                 `{crate_name}` ({file}) — every function in it is ABSENT from the baseline and is \
+                 compared against nothing (⟨0.40⟩)"
+            );
+            s
+        }
+        None => file,
+    };
     let Ok(text) = std::fs::read_to_string(&file) else {
         eprintln!("candor-scan: baseline {file} exists but could not be read — failing (exit 2), guard NOT evaluated; {regen}");
         return BaselineOutcome::Invalid;
@@ -332,8 +381,10 @@ pub(crate) fn check_baseline(
         Some(_) => {}
     }
     let mut base: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for e in entries {
-        base.entry(e.func).or_default().extend(e.inferred);
+    if !package_absent {
+        for e in entries {
+            base.entry(e.func).or_default().extend(e.inferred);
+        }
     }
     // ⟨0.16⟩ Existence keys on the baseline callgraph sidecar when present (SPEC §7 item 5): the
     // sidecar lists PURE leaves the report omits, so a formerly-pure fn is a graph node and no longer
@@ -342,7 +393,9 @@ pub(crate) fn check_baseline(
     let cg_file = file.strip_suffix(".json").map(|s| format!("{s}.callgraph.json")).unwrap_or_else(|| format!("{file}.callgraph.json"));
     // The set of names present in the baseline callgraph (callers AND callees) — the same node set
     // candor-query's `gain_origin` treats as "existing". `None` == no sidecar (degrade to report-only).
-    let cg_nodes: Option<BTreeSet<String>> = if Path::new(&cg_file).is_file() {
+    let cg_nodes: Option<BTreeSet<String>> = if package_absent {
+        None // no file for this package at all: nothing can say "existing", nor "new" (⟨0.12⟩)
+    } else if Path::new(&cg_file).is_file() {
         let Ok(cg_text) = std::fs::read_to_string(&cg_file) else {
             eprintln!(
                 "candor-scan: baseline callgraph {cg_file} exists but could not be read — failing (exit 2), \
@@ -374,10 +427,11 @@ pub(crate) fn check_baseline(
         let noted = NOTED_ABSENT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
         if noted.lock().unwrap().insert(cg_file.clone()) {
             eprintln!(
-                "candor-scan: baseline callgraph sidecar {cg_file} is absent — the guard degrades to \
-                 report-only existence (a formerly-PURE fn that turns effectful reads as new code and \
-                 ESCAPES; widening on already-effectful fns is still caught). Regenerate the baseline \
-                 with this build to record the sidecar: candor-scan {dir} --out {value}"
+                "candor-scan: baseline callgraph sidecar {cg_file} is absent — every gain still fires \
+                 (⟨0.40⟩: a function absent from the baseline is compared against nothing), but a \
+                 function absent from the baseline REPORT is labelled `origin:\"unknown\"` rather than \
+                 new or existing. Regenerate the baseline with this build to record the sidecar: \
+                 candor-scan {dir} --out {value}"
             );
         }
         None
@@ -386,16 +440,21 @@ pub(crate) fn check_baseline(
     let empty_base: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
     let mut unknown_only: Vec<String> = Vec::new(); // ⟨0.16⟩ advisory: gained ONLY Unknown
+    let mut absent_unknown_only: Vec<String> = Vec::new(); // ⟨0.40⟩ advisory, named separately
     for q in all {
-        // Existence: in the baseline report, OR (⟨0.16⟩) a baseline-callgraph node — a
-        // baseline-pure leaf has no report entry but IS a graph node, so its baseline effect set is ∅
-        // and ANY current effect is a gain. A fn in neither is genuinely new and stays exempt.
+        // ⟨0.40⟩ SPEC §3 (SOUNDNESS R932): `prior = baseline[q] ?? ∅`. Until ⟨0.40⟩ a function in
+        // neither the report nor the sidecar was skipped as "new code, reviewed normally" — and code
+        // review does not read effects. Measured at 708ce46: a same-build baseline of `keep` (Fs) and a
+        // tree adding `fresh` (Net) exited 0 printing "baseline guard ✓". The sidecar now decides only
+        // the LABEL (⟨0.12⟩ `origin`), never whether the guard fires.
         let in_cg = cg_nodes.as_ref().is_some_and(|n| n.contains(q));
-        let prior = match base.get(q) {
-            Some(p) => p,
-            None if in_cg => &empty_base, // baseline-pure callgraph node: ∅ baseline effects
-            None => continue,             // new function — not a regression
+        let (prior, origin) = match base.get(q) {
+            Some(p) => (p, "existing"),
+            None if in_cg => (&empty_base, "existing"), // baseline-pure callgraph node: ∅ baseline effects
+            None if cg_nodes.is_some() => (&empty_base, "new"), // absent under this key, sidecar loaded
+            None => (&empty_base, "unknown"),           // absent from the report, no sidecar to decide
         };
+        let absent = !base.contains_key(q);
         let gained: Vec<&str> =
             inferred.get(q).unwrap_or(&empty).iter().copied().filter(|e| !prior.contains(*e)).collect();
         if gained.is_empty() {
@@ -419,6 +478,7 @@ pub(crate) fn check_baseline(
                     rule: "AS-EFF-005".into(),
                     func: q.clone(),
                     hash: format!("{crate_name}#{q}"),   // ⟨0.32⟩ SPEC §2 — every verdict row
+                    origin: origin.to_string(),
                     effects: vec!["Unknown".to_string()],
                     detail: format!(
                         "`{q}` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot \
@@ -426,23 +486,49 @@ pub(crate) fn check_baseline(
                     ),
                     ..Default::default()
                 });
+            } else if absent && origin != "existing" {
+                absent_unknown_only.push(q.clone());
             } else {
                 unknown_only.push(q.clone());
             }
             continue;
         }
+        // The message for a function ABSENT from the baseline says so: `origin:"new"` means absent under
+        // this key, not proof of new code (a renamed key reads as absent), and the remedy leads with
+        // REVIEW — re-recording re-blesses everything else that moved.
+        let detail = if absent && origin != "existing" {
+            format!(
+                "`{q}` is ABSENT FROM THE BASELINE and performs {{ {} }} — compared against nothing \
+                 (⟨0.40⟩: no function is exempt). New code, or a function whose key changed (a rename \
+                 reads as absent). Review what moved: candor diff <this run's report> {file} — then, if \
+                 intended, re-record: candor-scan {dir} --out {value}",
+                real.join(", ")
+            )
+        } else {
+            format!(
+                "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \
+                 started performing a new effect",
+                real.join(", ")
+            )
+        };
         out.push(GateViolation {
             rule: "AS-EFF-005".into(),
             func: q.clone(),
             hash: format!("{crate_name}#{q}"),   // ⟨0.32⟩ SPEC §2 — every verdict row
+            origin: origin.to_string(),
             effects: real.iter().map(|s| s.to_string()).collect(),
-            detail: format!(
-                "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \
-                 started performing a new effect",
-                real.join(", ")
-            ),
+            detail,
             ..Default::default()
         });
+    }
+    if !absent_unknown_only.is_empty() {
+        absent_unknown_only.sort();
+        eprintln!(
+            "candor-scan: note — {} new function(s) carry only Unknown (absent from the baseline; \
+             advisory, NOT a regression): {}",
+            absent_unknown_only.len(),
+            absent_unknown_only.join(", ")
+        );
     }
     if !unknown_only.is_empty() {
         unknown_only.sort();

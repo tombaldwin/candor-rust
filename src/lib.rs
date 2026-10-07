@@ -470,6 +470,11 @@ impl Candor {
     /// GUARD-UNAVAILABLE sentinel is a NOT-EVALUATED signal, not a violation, so it never becomes a
     /// verdict record (the verdict itself is withheld in that case — see `check_crate_post`).
     fn record_violation(&self, code: &str, func: &str, effects: &[&str], detail: &str) {
+        self.record_violation_origin(code, func, effects, detail, "")
+    }
+
+    /// `record_violation` with the ⟨0.40⟩ AS-EFF-005 `origin` label on the verdict record.
+    fn record_violation_origin(&self, code: &str, func: &str, effects: &[&str], detail: &str, origin: &str) {
         use std::io::Write;
         if let Some(path) = &self.violations_sink {
             match std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -490,6 +495,7 @@ impl Candor {
             func: func.to_string(),
             effects: effects.iter().map(|s| s.to_string()).collect(),
             detail: detail.to_string(),
+            origin: origin.to_string(),
             ..Default::default()   // ⟨0.19⟩ reasonClass is populated by the stable gate; the lint has no reason map
         };
         let Ok(line) = serde_json::to_string(&rec) else { return };
@@ -4176,6 +4182,39 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             Err(_) => None,
         };
+        // ⟨0.40⟩ (SOUNDNESS R932/R811) — the baseline's callgraph sidecar, read ONLY to label an
+        // AS-EFF-005 row's `origin` (⟨0.12⟩): `Some(nodes)` when present and parseable, `None` when absent.
+        // A PRESENT-but-corrupt sidecar fails closed exactly like an unloadable baseline.
+        let baseline_nodes: Option<BTreeSet<String>> = match (&baseline, std::env::var("CANDOR_BASELINE")) {
+            (Some(_), Ok(prefix)) => {
+                let cg = format!("{prefix}.{krate}.{kinds}.callgraph.json");
+                if std::path::Path::new(&cg).is_file() {
+                    match std::fs::read_to_string(&cg).ok().and_then(|t| serde_json::from_str::<std::collections::BTreeMap<String, Vec<String>>>(&t).ok()) {
+                        Some(map) => {
+                            let mut n: BTreeSet<String> = BTreeSet::new();
+                            for (k, v) in map {
+                                n.insert(k);
+                                n.extend(v);
+                            }
+                            Some(n)
+                        }
+                        None => {
+                            eprintln!(
+                                "candor: baseline callgraph {cg:?} exists but could not be parsed — the \
+                                 regression guard CANNOT evaluate this crate (fail closed)"
+                            );
+                            self.record_violation("GUARD-UNAVAILABLE", &cg, &[], "");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        // ⟨0.40⟩ functions ABSENT from the baseline whose only effect is `Unknown`: advisory, but named.
+        let mut absent_unknown_only: Vec<String> = Vec::new();
         let any_enforce = strict_var.is_some()
             || no_ambient_var.is_some()
             || baseline.is_some()
@@ -4448,21 +4487,54 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 }
             }
 
-            // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved
-            // report. New functions (absent from the baseline) are not flagged — they're
-            // new code, reviewed normally; the guard is for *regressions* in existing fns.
-            if let Some(base) = &baseline
-                && let Some(prior) = base.get(&name)
-            {
-                let gained = gained_effects(effs, prior);
-                if !gained.is_empty() {
-                    let detail = format!(
-                        "`{name}` gained effect {{ {} }} not present in the baseline; \
-                         an existing function started performing a new effect",
-                        gained.join(", ")
-                    );
-                    self.record_violation("AS-EFF-005", &name, &gained, &detail);
-                    span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+            // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved report.
+            //
+            // ⟨0.40⟩ SPEC §3 *baseline guard* (SOUNDNESS R932, R811): `prior = baseline[name] ?? ∅`. A
+            // function ABSENT from the baseline used to be skipped as "new code, reviewed normally" —
+            // and code review does not read effects. The baseline omits PURE functions too, so the
+            // skip also hid a pure function turning effectful: `Self-guard` could not see `Env` seeded
+            // into `candor_classify::is_net_binding` (R811, measured on main: exit 0, no line). Now an
+            // absent function with a real effect fires; an absent pure one passes; an absent
+            // `Unknown`-only one is advisory and named in the note below.
+            if let Some(base) = &baseline {
+                match base.get(&name) {
+                    Some(prior) => {
+                        let gained = gained_effects(effs, prior);
+                        if !gained.is_empty() {
+                            let detail = format!(
+                                "`{name}` gained effect {{ {} }} not present in the baseline; \
+                                 an existing function started performing a new effect",
+                                gained.join(", ")
+                            );
+                            self.record_violation_origin("AS-EFF-005", &name, &gained, &detail, "existing");
+                            span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+                        }
+                    }
+                    None => {
+                        let real: Vec<&str> = effs.iter().copied().filter(|e| *e != UNKNOWN).collect();
+                        if real.is_empty() {
+                            if effs.contains(UNKNOWN) {
+                                absent_unknown_only.push(name.clone());
+                            }
+                        } else {
+                            let origin = match &baseline_nodes {
+                                Some(n) if n.contains(&name) => "existing",
+                                Some(_) => "new",
+                                None => "unknown",
+                            };
+                            let prefix = std::env::var("CANDOR_BASELINE").unwrap_or_default();
+                            let detail = format!(
+                                "`{name}` is ABSENT FROM THE BASELINE and performs {{ {} }} — compared against \
+                                 nothing (⟨0.40⟩: no function is exempt). New code, or a function whose key \
+                                 changed (a rename reads as absent). Review what moved: candor diff \
+                                 <this run's report> {prefix}.{krate}.{kinds}.json — then, if intended, \
+                                 re-record: cargo candor snapshot {prefix}",
+                                real.join(", ")
+                            );
+                            self.record_violation_origin("AS-EFF-005", &name, &real, &detail, origin);
+                            span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+                        }
+                    }
                 }
             }
 
@@ -4613,6 +4685,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     ),
                 );
             }
+        }
+
+        if !absent_unknown_only.is_empty() {
+            absent_unknown_only.sort();
+            eprintln!(
+                "candor: note — {} new function(s) carry only Unknown (absent from the baseline; advisory, \
+                 NOT a regression): {}",
+                absent_unknown_only.len(),
+                absent_unknown_only.join(", ")
+            );
         }
 
         if let Some(prefix) = &json_path {

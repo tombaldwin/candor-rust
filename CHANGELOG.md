@@ -11,6 +11,38 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ AS-EFF-005 no longer exempts a function absent from the baseline — candor-scan and the lint (SOUNDNESS R932, R933; closes R811)
+
+The baseline guard skipped every function absent from the baseline as "new code, reviewed normally", and
+code review does not read effects. Measured at 708ce46: a baseline of `keep` (Fs) and a tree adding `fresh`
+(Net) exited 0 printing "baseline guard ✓"; a workspace member added under a recorded `--out` prefix printed
+"the regression guard is not active" and exited 0; and `Self-guard` could not see `Env` seeded into the
+pure `candor_classify::is_net_binding`. Now, on both routes:
+
+- **`prior(fn) = baseline[fn] ?? ∅`.** An absent function with a real effect (`inferred` minus `Unknown`)
+  is an `[AS-EFF-005]` violation, exit 1, and the line says it is ABSENT FROM THE BASELINE (a renamed key
+  reads as absent), leading with `candor diff <this run's report> <baseline>` before the re-record command.
+  A new pure function passes; a new `Unknown`-only function stays advisory and is named in its own note
+  (under `unknown-ratchet` it fails, prior ∅).
+- **Every AS-EFF-005 verdict row carries `origin`** (`existing` / `new` / `unknown`, the ⟨0.12⟩ rule). The
+  callgraph sidecar now decides only that label; without it an absent function still fires, as `unknown`.
+  A present-but-corrupt sidecar still exits 2 (the lint now reads its sidecar too, and treats a corrupt
+  one as `GUARD-UNAVAILABLE`).
+- **candor-scan: a `--out` prefix is PRESENT when any `<prefix>.<crate>.scan.json` exists**, so a crate
+  with no file of its own is absent from a present baseline and every function in it is compared against
+  ∅ (R933). The sibling file's build is checked first: a different-build baseline still exits 2, so
+  upgrading flips nothing. A prefix with no file for any crate keeps the absent-baseline note (exit 0), and
+  a `.candor/config`-declared one stays exit 2.
+- **`.candor/baseline` spliced, not refreshed.** The new rule fired 14 times on candor's own unchanged
+  tree: 13 effectful functions the committed baseline never recorded (e.g. `candor_classify::classify`
+  Env, `policy::discover_config` Env+Fs, `Candor::write_gate_verdict` Fs), which the old rule let pass,
+  plus this change's own `Candor::record_violation_origin` (Fs). Their entries — and the four candor-crate
+  rows that inherit `classify`'s Env through the trusted sibling baseline — were taken from the engine's
+  own current report and inserted; nothing else in the baseline moved.
+
+Direction: adds AS-EFF-005 firings (0 → 1), never removes one. No flip at upgrade: a different-build
+baseline exits 2 first.
+
 ### ⚠ Residual silences outside the veins: literals, qualified caps values, cfg-alias routes, inline-module fields, method `where` bounds, twin factories (SOUNDNESS R810, R879, R893 part, R897, R898, R899)
 
 Each cell below was compiled and run (a file is written or an env var read), and each caller was ABSENT, or

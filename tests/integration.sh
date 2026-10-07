@@ -74,6 +74,21 @@ PY
 out=$(dl "$G" env CANDOR_BASELINE="$G/.candor/base")
 want "AS-EFF-005 flags touches_net gaining Net" "$out" '[AS-EFF-005] `touches_net`'
 
+# ⟨0.40⟩ SPEC §3 (SOUNDNESS R932, R811): a function ABSENT from the baseline is compared against ∅.
+# Same baseline (touches_net recorded pure), the tree adds `fresh_net` (Net), `tidy` (pure) and
+# `opaque_new` (Unknown only). fresh_net fires with origin "new" (the CANDOR_JSON sidecar is present
+# and lacks it); tidy passes; opaque_new is named in the advisory note. Before ⟨0.40⟩ only touches_net
+# fired — the lint skipped every name absent from the baseline report (R811: Self-guard could not see
+# `Env` seeded into a pure fn).
+printf 'fn touches_net() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }\nfn fresh_net() { let _ = std::net::TcpStream::connect("127.0.0.1:2"); }\nfn tidy(a: u32) -> u32 { a + 1 }\nfn opaque_new(f: fn() -> u32) -> u32 { f() }\nfn main() { touches_net(); fresh_net(); tidy(1); opaque_new(|| 1); }\n' > "$G/src/main.rs"
+out=$(dl "$G" env CANDOR_BASELINE="$G/.candor/base" CANDOR_GATE_JSON="$G/gate.json")
+want   "AS-EFF-005 fires on a NEW effectful fn (⟨0.40⟩)"  "$out" '[AS-EFF-005] `fresh_net` is ABSENT FROM THE BASELINE'
+absent "a NEW pure fn passes (⟨0.40⟩)"                    "$out" '[AS-EFF-005] `tidy`'
+absent "a NEW Unknown-only fn is not a violation"         "$out" '[AS-EFF-005] `opaque_new`'
+want   "a NEW Unknown-only fn is named in the note"       "$out" 'carry only Unknown'
+gj=$(python3 -c "import json;r={v['fn']:v.get('origin','') for v in json.load(open('$G/gate.json'))['violations'] if v['rule']=='AS-EFF-005'};print('fresh_net=%s touches_net=%s' % (r.get('fresh_net'), r.get('touches_net')))" 2>&1)
+want   "verdict rows carry origin (new / existing)"       "$gj" "fresh_net=new touches_net=existing"
+
 # ── 4. Cross-crate effect propagation: a bin inherits its lib's effect (CRITIQUE §8) ──
 echo "== cross-crate effect inheritance (lib+bin) =="
 X=$(mktemp -d)/xc; mkdir -p "$X/src" "$X/.candor"
@@ -269,7 +284,7 @@ printf 'pub fn go() { let _ = std::fs::read("/x"); std::process::Command::new("s
 rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
 if [ "$rc" = 1 ]; then echo "  ok   scan guard: a gained effect exits 1"; pass=$((pass+1)); else echo "  FAIL scan guard: gain exited $rc (want 1)"; fail=$((fail+1)); fi
 want   "scan guard: AS-EFF-005 names the fn + gained effect" "$out" '[AS-EFF-005] `go` gained effect { Exec }'
-absent "scan guard: a NEW fn is exempt (reviewed as new code)" "$out" '[AS-EFF-005] `newbie`'
+want "scan guard: a NEW effectful fn fires — compared against nothing (⟨0.40⟩, R932)" "$out" '[AS-EFF-005] `newbie` is ABSENT FROM THE BASELINE'
 # absent baseline → note + exit unchanged (guard inactive)
 rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/nosuch" "$SCAN" "$SB" 2>&1) || rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   scan guard: absent baseline leaves exit 0"; pass=$((pass+1)); else echo "  FAIL scan guard: absent baseline exited $rc (want 0)"; fail=$((fail+1)); fi

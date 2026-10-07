@@ -6812,7 +6812,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if v.is_empty() {
                     eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (syntactic floor: resolution-heavy code can under-report silently; see `candor blindspots`)");
                 } else {
-                    eprintln!("candor-scan: {} baseline regression(s) — an existing function gained an effect (AS-EFF-005)", v.len());
+                    eprintln!("candor-scan: {} baseline regression(s) — a function gained an effect versus the baseline, or is absent from it and performs one (AS-EFF-005)", v.len());
                     guard_code = 1;
                 }
             }

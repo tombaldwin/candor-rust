@@ -14129,7 +14129,7 @@ trait G {
         let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
         inferred.insert("a".into(), ["Fs", "Exec"].into_iter().collect()); // gains Exec vs baseline
         inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
-        inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
+        inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — ⟨0.40⟩ prior ∅
         let report = |ver: &str| format!(
             r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec": "0.23"}},
                 "functions":[{{"fn":"a","inferred":["Fs"]}},
@@ -14141,19 +14141,26 @@ trait G {
         let pre = d.join("base").to_string_lossy().into_owned();
         match check_baseline(&pre, ".", "mycrate", &all, &inferred, false, false) {
             BaselineOutcome::Checked(v) => {
-                assert_eq!(v.len(), 1, "only the real gain flags: {v:?}",
-                    v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
-                assert_eq!(v[0].rule, "AS-EFF-005");
-                assert_eq!(v[0].func, "a");
-                assert_eq!(v[0].effects, vec!["Exec".to_string()]);
-                assert!(v[0].detail.contains("`a` gained effect { Exec }"), "{}", v[0].detail);
+                // ⟨0.40⟩ (R932) — `newfn`, absent from the baseline, is compared against ∅ and fires too;
+                // until ⟨0.40⟩ this assertion pinned it as exempt.
+                let mut got: Vec<(String, Vec<String>, String)> =
+                    v.iter().map(|x| (x.func.clone(), x.effects.clone(), x.origin.clone())).collect();
+                got.sort();
+                assert_eq!(got, vec![
+                    ("a".to_string(), vec!["Exec".to_string()], "existing".to_string()),
+                    ("newfn".to_string(), vec!["Db".to_string()], "unknown".to_string()),
+                ]);
+                let a = v.iter().find(|x| x.func == "a").unwrap();
+                assert!(a.detail.contains("`a` gained effect { Exec }"), "{}", a.detail);
+                let n = v.iter().find(|x| x.func == "newfn").unwrap();
+                assert!(n.detail.contains("ABSENT FROM THE BASELINE"), "{}", n.detail);
             }
             _ => panic!("a valid same-build baseline must be evaluated"),
         }
         // direct-file form resolves the same way
         let direct = d.join("base.mycrate.scan.json").to_string_lossy().into_owned();
         assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred, false, false),
-            BaselineOutcome::Checked(v) if v.len() == 1));
+            BaselineOutcome::Checked(v) if v.len() == 2));
         // version mismatch / missing provenance / empty value → Invalid (exit 2, never evaluated)
         std::fs::write(d.join("stale.mycrate.scan.json"), report("scan-0.0.1")).unwrap();
         let stale = d.join("stale").to_string_lossy().into_owned();

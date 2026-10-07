@@ -5,5 +5,94 @@
     "spec": "0.7"
   },
   "package": "candor_classify",
-  "functions": []
+  "functions": [
+    {
+      "fn": "classify",
+      "loc": "crates/candor-classify/src/lib.rs:484:1: 484:70",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "b980b641c851786896279481bf615e7b"
+    },
+    {
+      "fn": "password_hash_explicit_salt",
+      "loc": "crates/candor-classify/src/lib.rs:3707:1: 3707:97",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "b980b641c8517868a87b5b2b0f4f6485"
+    },
+    {
+      "fn": "policy::discover_config",
+      "loc": "crates/candor-classify/src/policy.rs:442:1: 442:88",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "b980b641c85178687f78906f5e9697f7",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "policy::refuse_unevaluable"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::discover_config_text",
+      "loc": "crates/candor-classify/src/policy.rs:387:1: 387:71",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "b980b641c8517868e29b7b23c1a0e7b3",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "policy::discover_config"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    }
+  ]
 }

@@ -1670,9 +1670,10 @@ fn a_baseline_regression_beside_an_unparseable_file_still_reaches_the_verdict() 
 }
 
 #[test]
-fn baseline_guard_clean_compare_exits_0_and_new_fns_are_exempt() {
-    // No gains → exit 0 with the guard-✓ receipt; and a NEW effectful fn (absent from the baseline)
-    // is exempt — the guard is for regressions in EXISTING functions, new code is reviewed as new code.
+fn baseline_guard_clean_compare_exits_0_and_a_new_effectful_fn_fires() {
+    // No gains → exit 0 with the guard-✓ receipt. ⟨0.40⟩ (SOUNDNESS R932): a NEW effectful fn (absent
+    // from the baseline) is NO LONGER exempt — its prior is ∅, so it is an AS-EFF-005 gain, exit 1. This
+    // test pinned the old exemption ("new code is reviewed as new code") until the rung reversed it.
     let d = make_crate("blclean", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
     let pre = d.join("base");
     let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
@@ -1681,13 +1682,15 @@ fn baseline_guard_clean_compare_exits_0_and_new_fns_are_exempt() {
     let (rc, _, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
     assert_eq!(rc, Some(0), "an unchanged crate passes the ratchet: {stderr}");
     assert!(stderr.contains("baseline guard ✓"), "the clean guard prints its receipt: {stderr}");
-    // (b) a brand-new effectful fn: exempt, still exit 0, no AS-EFF-005.
+    // (b) a brand-new effectful fn: compared against ∅ — exit 1, and the line says it is ABSENT.
     std::fs::write(d.join("src/lib.rs"),
         "pub fn go() { let _ = std::fs::read(\"/x\"); }\npub fn newbie() { std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
     let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
     let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(rc, Some(0), "a new fn is not a regression: {stderr}");
-    assert!(!format!("{stdout}{stderr}").contains("AS-EFF-005"), "no violation for new code: {stdout}{stderr}");
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(1), "a new effectful fn is compared against nothing (⟨0.40⟩): {all}");
+    assert!(all.contains("[AS-EFF-005] `newbie` is ABSENT FROM THE BASELINE"), "{all}");
+    assert!(all.contains("candor diff"), "the remedy leads with review: {all}");
 }
 
 #[test]
@@ -1781,10 +1784,10 @@ fn baseline_guard_sidecar_present_flags_pure_to_effectful_transition_exit_1() {
 }
 
 #[test]
-fn baseline_guard_sidecar_absent_degrades_to_report_only_with_a_note_exit_0() {
-    // Delete the sidecar: existence degrades to pre-⟨0.16⟩ report-only, so the formerly-pure fn reads as
-    // exempt "new" and ESCAPES (exit 0), with a one-time stderr note that the guard is weaker. This is a
-    // degradation, not a failure — a baseline recorded by an older build simply has no sidecar.
+fn baseline_guard_sidecar_absent_still_fires_with_origin_unknown_exit_1() {
+    // Delete the sidecar. Before ⟨0.40⟩ the formerly-pure fn read as exempt "new" and ESCAPED (exit 0).
+    // ⟨0.40⟩ (R932): the sidecar decides only the LABEL — the fn is absent from the baseline report,
+    // its prior is ∅, it fires (exit 1), labelled `origin:"unknown"`, with a note saying why.
     let d = make_crate("blcgabsent", PROBE_SRC);
     let pre = d.join("base");
     let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
@@ -1796,10 +1799,10 @@ fn baseline_guard_sidecar_absent_degrades_to_report_only_with_a_note_exit_0() {
     let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
     let _ = std::fs::remove_dir_all(&d);
     let all = format!("{stdout}{stderr}");
-    assert_eq!(rc, Some(0), "an absent sidecar degrades, it does not fail: {all}");
-    assert!(!all.contains("[AS-EFF-005]"), "the pure→effectful fn escapes under report-only existence: {all}");
-    assert!(stderr.contains("sidecar") && stderr.contains("degrades to"),
-        "the note discloses the weakened guard: {stderr}");
+    assert_eq!(rc, Some(1), "an absent sidecar no longer lets the gain escape: {all}");
+    assert!(all.contains("[AS-EFF-005] `util::fmt` is ABSENT FROM THE BASELINE"), "{all}");
+    assert!(stderr.contains("sidecar") && stderr.contains("origin:\"unknown\""),
+        "the note says what the missing sidecar costs — the label: {stderr}");
 }
 
 #[test]
@@ -6364,4 +6367,114 @@ fn veinc_a_chained_entrys_own_reason_does_not_withdraw_its_callees_reasons() {
     assert!(why.contains(&"dispatch:Zero.sink"), "the entry's own reason is kept: {v}");
     assert!(why.contains(&"callback:unresolved call"), "…and its callee's is not withdrawn: {v}");
     assert_eq!(code, 1, "`deny Net Unknown[indirect]` must still fire: {v}");
+}
+
+
+// ── ⟨0.40⟩ SPEC §3 baseline guard: a function ABSENT from the baseline is compared against ∅ ──────────
+// PART 15d's rust cells n1–n5 (candor-spec, staged), pinned here so this engine's own suite owns them.
+// SOUNDNESS R932 (the key) and R933 (the per-crate prefix). Each FAILS on candor-scan 708ce46.
+
+const NF_KEEP: &str = "pub fn keep() { let _ = std::fs::read(\"/x\"); }";
+
+/// Record a baseline of `keep` (Fs) for crate `nf`, write `after` as the tree, and gate it with
+/// `--gate-json`. Returns (exit, stdout+stderr, the verdict's AS-EFF-005 rows as (fn, effects, origin)).
+/// One AS-EFF-005 verdict row as (fn, effects, origin).
+type NfRow = (String, Vec<String>, String);
+
+fn nf_cell(tag: &str, after: &str) -> (Option<i32>, String, Vec<NfRow>) {
+    let d = make_crate(&format!("nf{tag}"), NF_KEEP);
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    std::fs::write(d.join("src/lib.rs"), after).unwrap();
+    let gj = d.join("gate.json");
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()),
+        &["--out", d.join("after").to_string_lossy().as_ref(), "--gate-json", gj.to_string_lossy().as_ref()]);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&gj).unwrap_or_default()).unwrap_or_default();
+    let rows = v["violations"].as_array().into_iter().flatten()
+        .filter(|r| r["rule"] == "AS-EFF-005")
+        .map(|r| (r["fn"].as_str().unwrap_or("").to_string(),
+                  r["effects"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)).collect(),
+                  r["origin"].as_str().unwrap_or("").to_string()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&d);
+    (rc, format!("{stdout}{stderr}"), rows)
+}
+
+#[test]
+fn p15d_n1_a_new_effectful_fn_fires_with_origin_new() {
+    let (rc, all, rows) = nf_cell("n1", &format!("{NF_KEEP}\npub fn fresh() {{ let _ = std::net::TcpStream::connect(\"h:80\"); }}\n"));
+    assert_eq!(rc, Some(1), "{all}");
+    assert!(all.contains("[AS-EFF-005]"), "{all}");
+    assert_eq!(rows, vec![("fresh".to_string(), vec!["Net".to_string()], "new".to_string())], "{all}");
+}
+
+#[test]
+fn p15d_n2_a_new_pure_fn_passes() {
+    let (rc, all, rows) = nf_cell("n2", &format!("{NF_KEEP}\npub fn tidy(a: u32) -> u32 {{ a + 1 }}\n"));
+    assert_eq!(rc, Some(0), "{all}");
+    assert!(rows.is_empty() && !all.contains("[AS-EFF-005]"), "{all}");
+}
+
+#[test]
+fn p15d_n3_a_new_unknown_only_fn_is_advisory_and_named() {
+    let (rc, all, rows) = nf_cell("n3", &format!("{NF_KEEP}\npub fn helper() -> usize {{ 0 }}\npub fn opaquenew() -> usize {{ let g: fn() -> usize = helper; g() }}\n"));
+    assert_eq!(rc, Some(0), "Unknown-only stays advisory: {all}");
+    assert!(rows.is_empty() && !all.contains("[AS-EFF-005]"), "{all}");
+    assert!(all.lines().any(|l| l.contains("opaquenew") && l.contains("Unknown") && l.contains("new function")),
+        "the new Unknown-only function is NAMED, separately from existing ones: {all}");
+}
+
+#[test]
+fn p15d_n4_an_existing_gain_carries_origin_existing() {
+    let (rc, all, rows) = nf_cell("n4", "pub fn keep() { let _ = std::fs::read(\"/x\"); let _ = std::net::TcpStream::connect(\"h:80\"); }\n");
+    assert_eq!(rc, Some(1), "{all}");
+    assert_eq!(rows, vec![("keep".to_string(), vec!["Net".to_string()], "existing".to_string())], "{all}");
+}
+
+/// R933 — a workspace member with NO file under a PRESENT `--out` prefix is a package absent from a
+/// present baseline. At 708ce46 it printed "the regression guard is not active" and exited 0.
+#[test]
+fn p15d_n5_a_new_crate_under_a_present_prefix_fires() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-nfn5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    for (ws, members) in [("ws_base", "[\"a\"]"), ("ws_n5", "[\"a\", \"b\"]")] {
+        std::fs::create_dir_all(d.join(ws).join("a/src")).unwrap();
+        std::fs::write(d.join(ws).join("Cargo.toml"), format!("[workspace]\nmembers = {members}\nresolver = \"2\"\n")).unwrap();
+        std::fs::write(d.join(ws).join("a/Cargo.toml"), "[package]\nname = \"a\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(d.join(ws).join("a/src/lib.rs"), NF_KEEP).unwrap();
+    }
+    std::fs::create_dir_all(d.join("ws_n5/b/src")).unwrap();
+    std::fs::write(d.join("ws_n5/b/Cargo.toml"), "[package]\nname = \"b\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("ws_n5/b/src/lib.rs"), "pub fn fresh() { let _ = std::net::TcpStream::connect(\"h:80\"); }\n").unwrap();
+    let pre = d.join("wsbase");
+    let (rc, _, _) = scan_with_baseline(&d.join("ws_base"), None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    assert!(d.join("wsbase.a.scan.json").is_file() && !d.join("wsbase.b.scan.json").exists());
+    let gj = d.join("n5.gate.json");
+    let (rc, stdout, stderr) = scan_with_baseline(&d.join("ws_n5"), Some(pre.to_string_lossy().as_ref()),
+        &["--out", d.join("after").to_string_lossy().as_ref(), "--gate-json", gj.to_string_lossy().as_ref()]);
+    let verdict = std::fs::read_to_string(&gj).unwrap_or_default();
+    // CONTROL beside it: a prefix with NO file for any package is still the absent-baseline note.
+    let (rc_absent, _, stderr_absent) = scan_with_baseline(&d.join("ws_n5"), Some(d.join("nosuch").to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(1), "{all}");
+    assert!(all.contains("[AS-EFF-005] `fresh` is ABSENT FROM THE BASELINE"), "{all}");
+    assert!(verdict.contains("\"fresh\"") && verdict.contains("AS-EFF-005"), "{verdict}");
+    assert_eq!(rc_absent, Some(0), "a wholly absent prefix keeps its posture: {stderr_absent}");
+    assert!(stderr_absent.contains("not active"), "{stderr_absent}");
+}
+
+/// A present prefix whose sibling report came from ANOTHER build is a different-build baseline: exit 2,
+/// never an evaluation (§2.1) — so the R933 rule cannot fire a wave at an engine upgrade.
+#[test]
+fn p15d_n5_a_different_build_sibling_is_exit_2_not_a_wave() {
+    let d = make_crate("nfn5ver", "pub fn fresh() { let _ = std::net::TcpStream::connect(\"h:80\"); }");
+    std::fs::write(d.join("base.other.scan.json"),
+        r#"{"candor":{"version":"scan-0.0.1","toolchain":"stable","spec":"0.23"},"functions":[]}"#).unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(d.join("base").to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "{stdout}{stderr}");
+    assert!(!format!("{stdout}{stderr}").contains("[AS-EFF-005]"));
 }
