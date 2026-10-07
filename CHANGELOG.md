@@ -49,7 +49,10 @@ deadpool's `Object::take` (`Unknown`) and aws-smithy's rate limiter (`Log`), eac
 `(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT (`deny Net` exit 0);
 only a receiver typed from a `&str` parameter was seen. A string literal, or a tuple whose host slot is a
 literal, a provably string-typed value or an untyped one, is now the std trait call; a literal host is
-published in `hosts`, a runtime one masks. A host slot that provably types to an IP charges nothing.
+published in `hosts`, a runtime one masks. A host slot that provably types to an IP charges nothing. The
+UFCS spellings — `ToSocketAddrs::to_socket_addrs(&"h:80")`, `<&str as ToSocketAddrs>::…`, `<str as …>`,
+`(&("h", 80))` — failed closed instead of publishing the name (PART 96 `g_litdiscard`); the borrowed and
+tuple literal is now read in both engines, and the deep engine publishes the method-receiver literal too.
 Census: `url::Url::socket_addrs`, hyper's and hyper-util's `GaiResolver`, reqwest's and hyper-util's SOCKS
 connect, and aws-smithy's `ResolveDns` gain `Net` (each a real getaddrinfo).
 

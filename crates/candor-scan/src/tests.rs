@@ -9085,6 +9085,20 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             let (rc, v) = r817_run(&format!("r950{tag}"), body, "deny Net go\n");
             assert_eq!(rc, 0, "an IP tuple resolves nothing (`{tag}`)\n{v:#}");
         }
+        // R950 (UFCS) — the same resolve spelled through the trait path, with the name BORROWED and/or in a
+        // tuple: it failed closed (`incomplete`) instead of publishing what it resolves, while the method
+        // spelling published it. PART 96 `g_litdiscard` is the first of these.
+        for (tag, call) in [
+            ("ufcs", r#"std::net::ToSocketAddrs::to_socket_addrs(&"evil.example:80")"#),
+            ("qref", r#"<&str as std::net::ToSocketAddrs>::to_socket_addrs(&"evil.example:80")"#),
+            ("qstr", r#"<str as std::net::ToSocketAddrs>::to_socket_addrs("evil.example:80")"#),
+            ("utup", r#"std::net::ToSocketAddrs::to_socket_addrs(&("evil.example", 80))"#),
+        ] {
+            let body = format!(r#"pub fn go() {{ let _ = std::net::TcpStream::connect("ok.example:80"); let _ = {call}; }}"#);
+            assert_eq!(r817_both(&format!("r950{tag}a"), &body, "ok.example"), (1, 1), "`{tag}` reaches evil.example");
+            assert_eq!(r817_both(&format!("r950{tag}b"), &body, "ok.example evil.example"), (0, 0),
+                       "`{tag}`: the resolved literal is published, so naming it certifies");
+        }
         let (_, v) = r817_run("r950hosts", lit, "deny Net go\n");
         assert!(r817_row(&v, "go")["hosts"].as_array().is_some_and(|h| h.iter().any(|x| x == "evil.example:80")),
                 "the literal receiver is the destination: {}", r817_row(&v, "go"));

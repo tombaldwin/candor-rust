@@ -1773,6 +1773,29 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R950 — the DETERMINED name a `ToSocketAddrs` value resolves: a string literal (or a const
+    /// the string resolver answers), or a 2-tuple `(host, port)` whose host is one (`host:port` when the port
+    /// is an integer literal). Peels `&`/parens, so the METHOD receiver (`"h:80".to_socket_addrs()`) and the
+    /// UFCS argument (`ToSocketAddrs::to_socket_addrs(&"h:80")`, `&("h", 80)`) are one answer.
+    fn socket_name_lit(&self, e: &syn::Expr) -> Option<String> {
+        let str_of = |e: &syn::Expr| match peel_recv(e) {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(l), .. }) => Some(l.value()),
+            other => self.resolve_str_expr(other),
+        };
+        match peel_recv(e) {
+            syn::Expr::Tuple(t) if t.elems.len() == 2 => {
+                let host = t.elems.first().and_then(str_of)?;
+                let port = match t.elems.iter().nth(1) {
+                    Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. })) => Some(i.base10_digits().to_string()),
+                    _ => None,
+                };
+                Some(match port { Some(p) => format!("{host}:{p}"), None => host })
+            }
+            other => str_of(other),
+        }
+        .filter(|v| !v.trim().is_empty())
+    }
+
     /// SOUNDNESS R946 — the type of the PAYLOAD a `Some(x)`/`Ok(x)` pattern binds out of `expr`, for the four
     /// refutable binders (`if let`, `while let`, let-else, a `match` arm).
     ///
@@ -4732,7 +4755,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             .or_else(|| if candor_classify::is_net_host_arg1(&leaf) {
                                 positional_str_lit(&node.args, 1)
                             } else { None })
-                            .or_else(|| self.resolve_host_arg(&node.args));
+                            .or_else(|| self.resolve_host_arg(&node.args))
+                            // SOUNDNESS R950 (UFCS) — `ToSocketAddrs::to_socket_addrs(&"evil.example:80")`
+                            // and `<&str as ToSocketAddrs>::to_socket_addrs(&("evil.example", 80))`: the
+                            // locator is the borrowed argument, which `positional_str_lit` (no `&` peel,
+                            // no tuple) never read, so the resolved name failed closed instead of being
+                            // published — the method-receiver spelling already publishes it.
+                            .or_else(|| if leaf == "to_socket_addrs" {
+                                let l = node.args.first().and_then(|a| self.socket_name_lit(a));
+                                if l.is_some() && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                                    eprintln!("R950UFCS lit={l:?}");
+                                }
+                                l
+                            } else { None });
                         // (R53 UFCS-dispatch edge REVERTED after code review: pushing a typed `T::method` edge
                         // from a UFCS `Trait::method(&t)` / `<T as Trait>::method` could resolve to T's
                         // *inherent* `method` when the call actually runs the trait method — candor keys both
@@ -5088,21 +5123,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             && self.resolve_recv_type_for(&node.receiver, &leaf).is_none()
             && self.resolve_recv_traits(&node.receiver).is_empty()
         {
-            let str_of = |e: &syn::Expr| match peel_recv(e) {
-                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(l), .. }) => Some(l.value()),
-                other => self.resolve_str_expr(other),
-            };
-            let lit = match peel_recv(&node.receiver) {
-                syn::Expr::Tuple(t) if t.elems.len() == 2 => {
-                    let host = t.elems.first().and_then(str_of);
-                    let port = match t.elems.iter().nth(1) {
-                        Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. })) => Some(i.base10_digits().to_string()),
-                        _ => None,
-                    };
-                    host.map(|h| match port { Some(p) => format!("{h}:{p}"), None => h })
-                }
-                other => str_of(other),
-            };
+            let lit = self.socket_name_lit(&node.receiver);
             if std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
                 eprintln!("R950RECV {} lit={lit:?}", recv_why.unwrap_or(""));
             }

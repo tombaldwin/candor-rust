@@ -549,6 +549,34 @@ out=$(dl "$BL" env CANDOR_POLICY="$BL/policy")
 want   "⟨0.40⟩ calibration: bl_rtbind fails under a host it does not name"                  "$out" '`bl_rtbind`'
 rm -rf "$(dirname "$BL")"
 
+# ── 9a-R950. A resolved LITERAL name is a destination, in every spelling (deep engine) ──
+# SOUNDNESS R950 (UFCS): `ToSocketAddrs::to_socket_addrs(&"evil.example:80")`, the tuple and the method
+# spellings failed CLOSED here (the borrowed/tuple/receiver literal was never read) instead of publishing
+# the name they resolve. Under `allow Net ok.example evil.example` they must certify; the runtime one not.
+echo "== resolved literal names are published (R950) =="
+RS=$(mktemp -d)/rs; mkdir -p "$RS/src"
+printf '[package]\nname="rs"\nversion="0.1.0"\nedition="2021"\n' > "$RS/Cargo.toml"
+cat > "$RS/src/main.rs" <<'RS'
+use std::net::{TcpStream, ToSocketAddrs};
+pub fn rs_ufcs() { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&"evil.example:80"); }
+pub fn rs_tuple() { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&("evil.example", 80)); }
+pub fn rs_method() { let _ = TcpStream::connect("ok.example:80"); let _ = "evil.example:80".to_socket_addrs(); }
+pub fn rs_runtime(h: &str) { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&(h, 80)); }
+fn main() { if std::env::args().count() > 99 { rs_ufcs(); rs_tuple(); rs_method(); rs_runtime("x"); } }
+RS
+echo "allow Net ok.example evil.example" > "$RS/policy"
+out=$(dl "$RS" env CANDOR_POLICY="$RS/policy")
+absent "R950: the UFCS borrowed literal is published and certifies (rs_ufcs)"              "$out" '`rs_ufcs`'
+absent "R950: the UFCS tuple literal is published and certifies (rs_tuple)"                "$out" '`rs_tuple`'
+absent "R950: the method-receiver literal is published and certifies (rs_method)"          "$out" '`rs_method`'
+want   "R950: a runtime tuple host still fails closed (rs_runtime)"                         "$out" '[AS-EFF-008] `rs_runtime`'
+# CALIBRATION — the three absences can fail: without evil.example in the policy they fire.
+echo "allow Net ok.example" > "$RS/policy"
+out=$(dl "$RS" env CANDOR_POLICY="$RS/policy")
+want   "R950 calibration: rs_ufcs fails when evil.example is not allowed"                   "$out" '`rs_ufcs`'
+want   "R950 calibration: rs_tuple fails when evil.example is not allowed"                  "$out" '`rs_tuple`'
+rm -rf "$(dirname "$RS")"
+
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
 LY=$(mktemp -d)/ly; mkdir -p "$LY/src"

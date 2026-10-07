@@ -2322,6 +2322,42 @@ fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
                 out.insert(host);
             }
     }
+    // SOUNDNESS R950 (UFCS) — `ToSocketAddrs::to_socket_addrs(&"evil.example:80")` /
+    // `(&("evil.example", 80))`: the name is BORROWED, and a tuple carries it in slot 0. Read only for
+    // this method, whose single argument IS the resolved name; without it the resolve failed closed
+    // instead of publishing what it resolves (candor-scan publishes it).
+    // …and the METHOD spelling `"evil.example:80".to_socket_addrs()`, whose name is the RECEIVER.
+    let resolved_name: Option<&Expr<'_>> = match expr.kind {
+        ExprKind::Call(f, _) => match f.kind {
+            ExprKind::Path(rustc_hir::QPath::Resolved(_, p))
+                if p.segments.last().is_some_and(|s| s.ident.name.as_str() == "to_socket_addrs") => args.first(),
+            ExprKind::Path(rustc_hir::QPath::TypeRelative(_, seg))
+                if seg.ident.name.as_str() == "to_socket_addrs" => args.first(),
+            _ => None,
+        },
+        ExprKind::MethodCall(seg, recv, ..) if seg.ident.name.as_str() == "to_socket_addrs" => Some(recv),
+        _ => None,
+    };
+    if out.is_empty() && let Some(a) = resolved_name {
+        let mut e = a;
+        while let ExprKind::AddrOf(_, _, inner) = e.kind {
+            e = inner;
+        }
+        let str_lit = |x: &Expr<'_>| match &x.kind {
+            ExprKind::Lit(l) => match l.node { LitKind::Str(sym, _) => Some(sym.as_str().to_string()), _ => None },
+            _ => None,
+        };
+        let name = match e.kind {
+            ExprKind::Tup(elems) if elems.len() == 2 => str_lit(&elems[0]).map(|h| match &elems[1].kind {
+                ExprKind::Lit(l) => match l.node { LitKind::Int(n, _) => format!("{h}:{}", n.get()), _ => h },
+                _ => h,
+            }),
+            _ => str_lit(e),
+        };
+        if let Some(host) = name.as_deref().and_then(net_host_literal) {
+            out.insert(host);
+        }
+    }
     out
 }
 
