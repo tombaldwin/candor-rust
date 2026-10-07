@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.0] — 2026-10-07
+
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; `SPEC_VERSION` and its two literal canaries in
   candor-report move together. candor-scan implements all three ⟨0.40⟩ halves: the type surface and the
   language-scoped Rust permission (`holds`/`returnsProtocol`/`types`/`adds`, `Deref` followed), the AS-EFF-005
