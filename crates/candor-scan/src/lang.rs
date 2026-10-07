@@ -840,10 +840,73 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                     }
                 }
             }
-            Some((expand(&path_to_string_lc(&p.path), uses), false))
+            let written = path_to_string_lc(&p.path);
+            let t = expand(&written, uses);
+            // SOUNDNESS R978 — the same peel, through a `type A = Arc<T>;` alias. See `DEREF_ALIAS_SUF`.
+            if is_deref_wrapper_leaf(&t)
+                && p.path.segments.last().is_some_and(|s| matches!(s.arguments, syn::PathArguments::None))
+            {
+                if let Some(pointee) = deref_alias_target(&written, uses) {
+                    if reach_debug() {
+                        eprintln!("R978PEEL {written} -> {pointee}"); // §E1 reach, `CANDOR_R977_DEBUG=1`
+                    }
+                    return Some((pointee, false));
+                }
+            }
+            Some((t, false))
         }
         _ => None,
     }
+}
+
+/// SOUNDNESS R978 — the suffix of the TYPE-ONLY key under which a `type A = Box<T>|Arc<T>|Rc<T>;` alias
+/// records its POINTEE `T`, beside the ordinary `A` -> wrapper entry. `\u{4}` cannot appear in a Rust path,
+/// so the key collides with no name; it rides the module-alias map (`seed_mod_aliases`,
+/// `alias_expand_decls`) under exactly the spellings the alias itself is seeded under, and only
+/// `type_path` and `alias_expand_decls` ever read it — never a call path, so `A::new(..)` stays `Arc::new`.
+pub(crate) const DEREF_ALIAS_SUF: &str = "\u{4}deref";
+
+/// The single type argument of a written `Box<T>` / `Arc<T>` / `Rc<T>` — the three wrappers `type_path_b`
+/// peels (owned, `Deref<Target = T>`). `None` for anything else.
+pub(crate) fn deref_wrapper_arg(p: &syn::Path) -> Option<&syn::Type> {
+    let seg = p.segments.last()?;
+    if !matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc") {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// Does an EXPANDED type path name one of `deref_wrapper_arg`'s wrappers (by leaf, the same test the peel
+/// applies to a written one)?
+pub(crate) fn is_deref_wrapper_leaf(t: &str) -> bool {
+    matches!(t.rsplit("::").next(), Some("Box" | "Arc" | "Rc"))
+}
+
+/// R978 — the pointee recorded for the wrapper alias spelled `written`, under the keys `seed_mod_aliases`
+/// binds: the spelling itself (bare in the declaring module, relative from an ancestor), its `crate::`
+/// form, and — for a name brought in by `use` — the import's target in both forms. A multi-arm (`#[cfg]`
+/// twinned) value is refused, as `alias_expand_decls` refuses one: a decl type has no call site to
+/// adjudicate at.
+pub(crate) fn deref_alias_target(written: &str, uses: &HashMap<String, String>) -> Option<String> {
+    let mut bases: Vec<String> = vec![written.to_string()];
+    if let Some(v) = uses.get(written) {
+        bases.push(v.clone());
+    }
+    let mut keys: Vec<String> = Vec::new();
+    for b in &bases {
+        keys.push(format!("{b}{DEREF_ALIAS_SUF}"));
+        if !b.starts_with("crate::") {
+            keys.push(format!("crate::{b}{DEREF_ALIAS_SUF}"));
+        }
+    }
+    keys.iter()
+        .find_map(|k| uses.get(k))
+        .filter(|v| !v.contains(crate::decls::ALIAS_ALT_SEP))
+        .cloned()
 }
 
 /// SOUNDNESS R454 — the SEQUENCE containers whose FIRST type argument is the element, and the MAP
@@ -3322,11 +3385,87 @@ pub(crate) fn cfg_eval(m: &syn::meta::ParseNestedMeta, active: &std::collections
     })
 }
 
+thread_local! {
+    /// SOUNDNESS R977 — how many enclosing items/modules of the code being walked are themselves
+    /// compiled OUT of the default build. Non-zero ⇒ `is_cfg_inactive` answers `false`. See `CfgOffScope`.
+    static CFG_OFF_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// SOUNDNESS R977 — THE DEFAULT-BUILD FILTER HAS NO MEANING INSIDE CODE THE DEFAULT BUILD DOES NOT HAVE.
+///
+/// `is_cfg_inactive` drops a `use` (`use_item_applies`) or a statement (`stmt_cfg_inactive`) whose
+/// `#[cfg(feature = "x")]` is declared-but-inactive, on the argument that its effects "are not the crate's
+/// default behaviour". ITEMS are never dropped that way — a `#[cfg(feature = "aio")] mod aio;` or a
+/// `#[cfg(feature = "outer")] fn` is scanned and reported. So inside such an item the engine described a
+/// build that cannot exist: the item ON, and every nested feature arm OFF. redis 0.27.6:
+///
+///     #[cfg(feature = "aio")] pub mod aio;                       // lib.rs — not default, still scanned
+///     #[cfg(feature = "tokio-comp")] use ::tokio::net::lookup_host;      // aio/connection.rs
+///     async fn get_socket_addrs(..) {
+///         #[cfg(feature = "tokio-comp")] let socket_addrs = lookup_host((host, port)).await?;
+///         #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
+///         let socket_addrs = (host, port).to_socket_addrs().await?;
+///
+/// Both arms were dropped, so `get_socket_addrs` — which resolves a host name in EVERY build that compiles
+/// it — read PURE (ABSENT, `deny Net` 0), and with it `connect_simple` and `ClusterClientBuilder::open`.
+/// v0.39.3 hid the silence behind an unrelated `ambiguous:same-name` `Unknown` that ⟨0.40⟩ vein A resolved.
+///
+/// Inside an item whose own cfg is known-false, every feature is a free variable of the build being
+/// described, so a nested feature cfg is UNDECIDABLE, exactly as `unix`/`windows` are — and the engine's
+/// rule for an undecidable cfg is to keep every arm (the union; R287/R369). Entering such an item opens a
+/// scope in which `is_cfg_inactive` answers `false`. Outside one, nothing changes: the default-build filter
+/// keeps its R140 / winnow meaning for code that really is in the default build.
+///
+/// A thread-local depth rather than a parameter: `is_cfg_inactive` is reached from five call sites in
+/// three passes, and threading a flag through every one is the shape that left R373's sixth and seventh
+/// site unasked. Every walk that can enter an item is single-threaded per file (Pass A in the merge loop,
+/// Pass B in its sequential loop), and the guard is RAII, so an unwind out of `catch_unwind` restores it.
+pub(crate) struct CfgOffScope(bool);
+
+/// `CANDOR_R977_DEBUG` set? Read once — the R977/R978 reach markers sit on hot paths.
+pub(crate) fn reach_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CANDOR_R977_DEBUG").is_some())
+}
+
+impl CfgOffScope {
+    /// Open a scope iff `attrs` carry a cfg that is KNOWN-FALSE in the default build. Inside an already
+    /// open scope `is_cfg_inactive` answers `false`, so nesting opens nothing — which is right: the outer
+    /// scope already suspended the filter.
+    pub(crate) fn enter_if(attrs: &[syn::Attribute]) -> Self {
+        let on = is_cfg_inactive(attrs);
+        if on && reach_debug() {
+            eprintln!("R977ITEM"); // §E1 reach, `CANDOR_R977_DEBUG=1` — an item-level scope opened
+        }
+        Self::enter(on)
+    }
+    /// Open a scope iff `on` — the FILE-level entry, where the evidence is the declaring `mod`'s cfg (or
+    /// an ancestor's), found by `decls::file_module_cfg_off`.
+    pub(crate) fn enter(on: bool) -> Self {
+        if on {
+            CFG_OFF_DEPTH.with(|c| c.set(c.get() + 1));
+        }
+        CfgOffScope(on)
+    }
+}
+
+impl Drop for CfgOffScope {
+    fn drop(&mut self) {
+        if self.0 {
+            CFG_OFF_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+        }
+    }
+}
+
 /// True if an item/stmt's `#[cfg(...)]` is KNOWN-FALSE under the active feature set (compiled out, so its
 /// effects are not the crate's default behaviour). Multiple cfg attrs are AND-ed (any false ⇒ skip).
+/// Always `false` inside a `CfgOffScope` (SOUNDNESS R977).
 pub(crate) fn is_cfg_inactive(attrs: &[syn::Attribute]) -> bool {
     if !attrs.iter().any(|a| a.path().is_ident("cfg")) {
         return false; // fast path: no cfg attrs (the overwhelming majority of items/stmts)
+    }
+    if CFG_OFF_DEPTH.with(|c| c.get()) > 0 {
+        return false; // R977 — inside an item the default build does not have: every arm is kept
     }
     let guard = cfg_cell().read().unwrap();
     let (active, declared) = &*guard;
@@ -4601,6 +4740,7 @@ pub(crate) fn collect_foreign_trait_impls(
             }
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                     // The inner module's OWN imports on top of this scope's — the same widening
                     // `collect_decls` does for a nested module, so an `impl` written beside its own
                     // `use` resolves the same way it would at file level.
@@ -4705,6 +4845,7 @@ pub(crate) fn collect_local_impl_members(
             }
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                     // The inner module's OWN imports on top of this scope's — the same widening
                     // `collect_foreign_trait_impls` does, and for the same reason: an `impl` written
                     // beside its own `use` must classify the way it would at file level (R652).
@@ -4769,6 +4910,7 @@ pub(crate) fn collect_block_nested_trait_impls(
                 continue;
             }
             if let Some((_, inner)) = &m.content {
+                let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                 // The inner module's OWN imports on top of this scope's — the same widening
                 // `collect_foreign_trait_impls` does, so one `impl` keys identically from both walks.
                 let mut sub = uses.clone();
@@ -4842,6 +4984,7 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
             return;
         }
         let Some((_, inner)) = &m.content else { return };
+        let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
         let mut sub = self.uses.clone();
         let mut alts = HashMap::new();
         collect_item_uses(inner, self.include_tests, &mut sub, &mut alts);
@@ -8144,6 +8287,7 @@ pub(crate) fn collect_opaque_trait_impls(
         match it {
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                     let mut sub = uses.clone();
                     let mut alts = HashMap::new();
                     collect_item_uses(inner, include_tests, &mut sub, &mut alts);
@@ -8422,6 +8566,28 @@ pub(crate) fn included_label(attrs: &[syn::Attribute]) -> Option<String> {
         },
         _ => None,
     })
+}
+
+/// An item's outer attributes, read-only — `item_attrs_mut`'s twin, for SOUNDNESS R977's `CfgOffScope`.
+pub(crate) fn item_attrs(it: &syn::Item) -> &[syn::Attribute] {
+    match it {
+        syn::Item::Const(x) => &x.attrs,
+        syn::Item::Enum(x) => &x.attrs,
+        syn::Item::ExternCrate(x) => &x.attrs,
+        syn::Item::Fn(x) => &x.attrs,
+        syn::Item::ForeignMod(x) => &x.attrs,
+        syn::Item::Impl(x) => &x.attrs,
+        syn::Item::Macro(x) => &x.attrs,
+        syn::Item::Mod(x) => &x.attrs,
+        syn::Item::Static(x) => &x.attrs,
+        syn::Item::Struct(x) => &x.attrs,
+        syn::Item::Trait(x) => &x.attrs,
+        syn::Item::TraitAlias(x) => &x.attrs,
+        syn::Item::Type(x) => &x.attrs,
+        syn::Item::Union(x) => &x.attrs,
+        syn::Item::Use(x) => &x.attrs,
+        _ => &[],
+    }
 }
 
 fn item_attrs_mut(it: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {

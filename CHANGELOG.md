@@ -19,6 +19,32 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   new-function rule with the per-crate prefix (SOUNDNESS R932/R933), and bind/listen for `Net` (R817/R949).
   **A gate that passed on 0.39.x can exit 1 on identical bytes** — see candor-spec SPEC §8 ⟨0.40⟩.
 
+### ⚠ A feature-gated item keeps its nested feature arms; a `type A = Arc<T>` alias is peeled like `Arc<T>` (SOUNDNESS R977, R978)
+
+Two PRE-EXISTING silences (present in v0.39.3) that vein A's resolution of `ambiguous:same-name` hedges
+uncovered — the release's monotone check saw `deny … Unknown` go 1 → 0 on rows whose `Unknown` had been
+standing in front of them.
+
+- **R977.** An item compiled OUT of the default build (`#[cfg(feature = "aio")] mod aio;`, a gated fn,
+  impl method or inline module) is still scanned and reported, but inside it the default-build filter
+  dropped every nested `#[cfg(feature = ..)]` `use` and statement — describing a build that cannot exist.
+  redis 0.27.6 `aio::connection::get_socket_addrs` / `connect_simple` (a host lookup in every build that
+  compiles them) read PURE. Inside such an item every feature is now treated as undecidable and every arm is
+  kept (the R287/R369 union); code the default build does have keeps R140's filter. EXECUTED fixture:
+  `deny Fs <fn>` 0 → 1 on four routes (file module, inline module, gated fn, gated method).
+- **R978.** `type HouseKeeperArc = Arc<Housekeeper>;` was recorded as the bare wrapper, so a receiver typed
+  through it (parameter, field, `if let Some(hk) = &self.f`, `.map(|hk| ..)`) typed to `Arc` and the call was
+  dropped silently — moka 0.12.16 `sync::cache::Cache::run_pending_tasks`. The pointee is now recorded under
+  a TYPE-only key; `HouseKeeperArc::new(..)` still resolves to `Arc::new`. The field-twin check now compares
+  twins AFTER alias expansion, so two modules' same-named aliases to different pointees hedge rather than
+  certify one twin's effect for the other.
+- Corpus A/B over the pinned 1,625-crate census against the staged 0.40.0 build: rows ADDED 186, REMOVED 4,
+  CHANGED 826; 0 concrete effects lost; 347 rows gain a concrete effect (feature-arm `Log`/`Net`/`Fs`/`Env`/
+  `Clock` in hyper, redis, mongodb, der, tonic, … — each group traced to its gated source) and 42 gain only
+  `Unknown`. 17 rows lose an `Unknown`, all resolutions onto proven-pure bodies (aws-smithy-types'
+  `convert_headers_0x_1x` arms, rustix's libc `ret_owned_fd`, bumpalo's `boxed::Box::from_iter_in`).
+  Cache schema rev62.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the

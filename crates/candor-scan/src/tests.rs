@@ -16597,6 +16597,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
+        // type alias records its pointee — a rev61 entry replays both silences warm).
         // R817/R949 bumped it to rev61 (a runtime-string `bind` sets the cached call's `path_lits_partial`;
         // R946 and R950 change Pass B's cached `calls` under the same token — a rev60 entry replays each
         // silence warm).
@@ -16627,7 +16629,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16638,7 +16640,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev61/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev62/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26502,4 +26504,94 @@ fn r893_a_qualified_factory_path_keeps_its_return_beside_a_same_named_twin() {
     for f in ["ctl_fac_b", "ctl_plain_d"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f}: the pure twin's caller was charged\n{v:#}");
     }
+}
+
+/// SOUNDNESS R977 — THE DEFAULT-BUILD FILTER INSIDE CODE THE DEFAULT BUILD DOES NOT HAVE. `mod aio` is
+/// `#[cfg(feature = "aio")]` with `aio` declared and NOT default, yet it is scanned and reported (items are
+/// never dropped by a feature cfg); inside it the nested `#[cfg(feature = "tokio-comp")]` `use` and `let`
+/// were dropped against the default build, so a function that resolves a host in EVERY build that compiles
+/// it read ABSENT (redis-0.27.6 `aio::connection::get_socket_addrs`, `connect_simple`; executed:
+/// `rustagent-rel/f8`, `deny Fs` 0). Every route is here — a FILE module under a gated `mod` (the redis
+/// shape), an INLINE gated module, a gated FREE fn, a gated IMPL METHOD — and the controls pin what must
+/// NOT move: a fn the default build DOES have keeps dropping its inactive arm (the winnow/R140 meaning).
+#[test]
+fn r977_a_feature_gated_item_keeps_every_nested_feature_arm() {
+    let toml = "[package]\nname = \"r977\"\n\n[features]\ndefault = []\naio = []\ninner = []\n";
+    let v = scan_src_to_json_multi("r977", &[
+        ("Cargo.toml", toml),
+        ("src/lib.rs", "\
+#[cfg(feature = \"aio\")]\npub mod aio;\n\
+#[cfg(feature = \"aio\")]\npub mod inl {\n\
+    #[cfg(feature = \"inner\")] use std::fs::read as rd;\n\
+    pub fn e_inline() { #[cfg(feature = \"inner\")] let _x = rd(\"/etc/hosts\"); }\n\
+}\n\
+#[cfg(feature = \"aio\")]\npub fn e_gated_fn() {\n\
+    #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\");\n\
+    #[cfg(not(feature = \"inner\"))] let _x = std::env::var(\"HOME\");\n\
+}\n\
+pub struct S;\nimpl S {\n\
+    #[cfg(feature = \"aio\")]\n    pub fn e_gated_method(&self) { #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\"); }\n\
+}\n\
+pub fn ctl_default_build() { #[cfg(feature = \"inner\")] let _x = std::fs::read(\"/etc/hosts\"); }\n"),
+        ("src/aio/mod.rs", "mod connection;\npub use connection::e_file_module;\n"),
+        ("src/aio/connection.rs", "\
+#[cfg(feature = \"inner\")]\nuse std::fs::read as rd;\n\
+pub fn e_file_module() {\n    #[cfg(feature = \"inner\")]\n    let _x = rd(\"/etc/hosts\");\n}\n"),
+    ]);
+    for f in ["aio::connection::e_file_module", "inl::e_inline", "e_gated_fn", "S::e_gated_method"] {
+        let e = veina_row_effs(&v, f);
+        assert!(e.iter().any(|x| x == "Fs"), "`{f}` is compiled only with `aio`, and with `inner` it reads a file: {e:?}\n{v:#}");
+    }
+    // Both arms of the gated fn are kept — the union, as for any undecidable cfg (R287/R369).
+    assert_eq!(veina_row_effs(&v, "e_gated_fn"), vec!["Env".to_string(), "Fs".to_string()], "{v:#}");
+    // The control: `ctl_default_build` IS in the default build, where `inner` is off — the arm stays dropped.
+    assert!(veina_row_effs(&v, "ctl_default_build").is_empty(), "default-build filter must still apply:\n{v:#}");
+}
+
+/// SOUNDNESS R978 — `type HouseKeeperArc = Arc<Housekeeper>;` recorded the bare WRAPPER, so a receiver typed
+/// through the alias typed to `std::sync::Arc` and `hk.run_pending_tasks()` was SILENTLY DROPPED — on every
+/// route: parameter, field, `if let Some(hk) = &self.f` binder, `.map(|hk| ..)` closure (moka-0.12.16
+/// `sync::cache::Cache::run_pending_tasks`; executed `rustagent-rel/m1`, `deny Env` 0) — while the same
+/// code with `Arc<Housekeeper>` written out charged. The controls: `HouseKeeperArc::new(h)` is `Arc::new`
+/// and must NOT inherit `Housekeeper::new`'s effect (the pointee is a TYPE-only fact), and twin aliases in
+/// two modules naming two different pointees must not certify one twin's effect for the other.
+#[test]
+fn r978_a_smart_pointer_type_alias_is_peeled_like_the_written_wrapper() {
+    let v = scan_src_to_json("r978", "\
+        use std::sync::Arc;\n\
+        pub struct Hk;\n\
+        impl Hk { pub fn new() -> Self { let _ = std::fs::read(\"/etc/hosts\"); Hk } pub fn run(&self) { let _ = std::env::var(\"R978\"); } }\n\
+        pub type HkArc = Arc<Hk>;\n\
+        pub type HkBox = Box<Hk>;\n\
+        pub type HkRc = std::rc::Rc<Hk>;\n\
+        pub fn e_param(hk: &HkArc) { hk.run() }\n\
+        pub fn e_box(hk: &HkBox) { hk.run() }\n\
+        pub fn e_rc(hk: HkRc) { hk.run() }\n\
+        pub struct B { pub f: HkArc, pub o: Option<HkArc> }\n\
+        impl B {\n\
+            pub fn e_field(&self) { self.f.run() }\n\
+            pub fn e_iflet(&self) { if let Some(hk) = &self.o { hk.run() } }\n\
+            pub fn e_map(&self) { self.o.as_ref().map(|hk| hk.run()); }\n\
+        }\n\
+        pub fn ctl_wrap(h: Hk) -> HkArc { HkArc::new(h) }\n");
+    for f in ["e_param", "e_box", "e_rc", "B::e_field", "B::e_iflet", "B::e_map"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Env".to_string()], "{f}\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "ctl_wrap").is_empty(), "`HkArc::new` is `Arc::new`, not `Hk::new`:\n{v:#}");
+
+    // Twins: one alias name, one struct name, two modules, two pointees (moka's `sync`/`future` split).
+    let t = scan_src_to_json_multi("r978t", &[
+        ("src/lib.rs", "pub mod common;\npub mod sync;\npub mod future;\n"),
+        ("src/common.rs", "pub struct Hk;\nimpl Hk { pub fn run(&self) { let _ = std::env::var(\"SYNC\"); } }\n"),
+        ("src/sync/mod.rs", "pub mod base;\npub mod cache;\n"),
+        ("src/sync/base.rs", "use std::sync::Arc;\nuse crate::common::Hk;\npub(crate) type HkArc = Arc<Hk>;\npub struct Base { pub(crate) hk: Option<HkArc> }\n"),
+        ("src/sync/cache.rs", "use super::base::Base;\npub struct Cache { pub(crate) base: Base }\nimpl Cache { pub fn run(&self) { if let Some(hk) = &self.base.hk { hk.run() } } }\n"),
+        ("src/future/mod.rs", "pub mod hk;\npub mod base;\n"),
+        ("src/future/hk.rs", "pub struct Hk;\nimpl Hk { pub fn run(&self) { let _ = std::time::SystemTime::now(); } }\n"),
+        ("src/future/base.rs", "use std::sync::Arc;\nuse super::hk::Hk;\npub(crate) type HkArc = Arc<Hk>;\npub struct Base { pub(crate) hk: Option<HkArc> }\n"),
+    ]);
+    let e = veina_row_effs(&t, "sync::cache::Cache::run");
+    assert!(e.iter().any(|x| x == "Env" || x == "Unknown"), "the sync twin runs `Env`: {e:?}\n{t:#}");
+    assert!(!(e.iter().any(|x| x == "Clock") && !e.iter().any(|x| x == "Unknown")),
+            "the FUTURE twin's `Clock`, certified for the sync cache: {e:?}\n{t:#}");
 }

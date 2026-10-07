@@ -624,6 +624,7 @@ fn walk_items(
             syn::Item::Fn(f) => nested(out, &|v| syn::visit::Visit::visit_block(v, &f.block)),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                     let sub = crate::decls::submodule_uses(&uses, inner, include_tests);
                     walk_items(inner, &qual_of(modpath, &m.ident.to_string()), include_tests, sub, out);
                 }

@@ -95,6 +95,12 @@ pub(crate) fn scan_items(
     crate::lang::collect_item_uses(items, include_tests, uses, &mut use_alts);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
+        // SOUNDNESS R977 — an item compiled OUT of the default build (`#[cfg(feature = "aio")] mod aio`,
+        // a feature-gated fn or impl) is still walked and reported; inside it the default-build filter
+        // must keep every nested feature arm, not decide them against a build the item is not part of.
+        // Held for the whole arm, so a `mod`'s own `use` items, an impl's methods and a trait's defaults
+        // are all read under it. See `lang::CfgOffScope`.
+        let _cfg_off = crate::lang::CfgOffScope::enter_if(crate::lang::item_attrs(it));
         match it {
             syn::Item::Fn(f) => {
                 // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
@@ -161,6 +167,7 @@ pub(crate) fn scan_items(
                             // otherwise-production impl
                             continue;
                         }
+                        let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated method
                         let n = m.sig.ident.to_string();
                         let q = match &tyname {
                             Some(t) => qual(&format!("{t}::{n}")),
@@ -220,7 +227,12 @@ pub(crate) fn scan_items(
                             if let syn::Item::Type(t) = it {
                                 let name = t.ident.to_string();
                                 if let Some(v) = uses.get(&format!("crate::{sub}::{name}")).cloned() {
-                                    subuses.insert(name, v);
+                                    subuses.insert(name.clone(), v);
+                                }
+                                // R978 — and the alias's type-only POINTEE key, read back the same way.
+                                let dk = format!("{name}{}", crate::lang::DEREF_ALIAS_SUF);
+                                if let Some(v) = uses.get(&format!("crate::{sub}::{dk}")).cloned() {
+                                    subuses.insert(dk, v);
                                 }
                             }
                         }
@@ -258,6 +270,7 @@ pub(crate) fn scan_items(
                         if !include_tests && is_cfg_test(&m.attrs) {
                             continue;
                         }
+                        let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated default
                         let n = m.sig.ident.to_string();
                         let loc = next_loc(locs, loc_idx);
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
@@ -944,6 +957,8 @@ fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
 pub(crate) struct ModSiteCache {
     parsed: HashMap<std::path::PathBuf, Option<std::rc::Rc<syn::File>>>,
     verdict: HashMap<std::path::PathBuf, (Option<bool>, &'static str)>,
+    /// SOUNDNESS R977 — the memo for `file_module_cfg_off`, beside the test verdict's.
+    cfg_off: HashMap<std::path::PathBuf, bool>,
 }
 
 /// R457 — IS A FILE WHOSE NAME LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
@@ -1142,6 +1157,63 @@ fn compute_file_module_test_verdict(
     (None, "no-declaration-found")
 }
 
+/// SOUNDNESS R977 — is this FILE a module the default build does not compile? True when the file's own
+/// `#![cfg(..)]`, its declaring `mod`'s `#[cfg(..)]` (or an inline `mod` around that declaration), or any
+/// ANCESTOR module's is KNOWN-FALSE under the crate's default features (`lang::is_cfg_inactive`). The
+/// caller opens a `lang::CfgOffScope` for the file's walks, so a nested `#[cfg(feature = ..)]` inside it
+/// keeps every arm instead of being decided against a default build the file is not part of.
+///
+/// The same evidence route as `file_module_test_verdict` — own inner attribute, declaring `mod` site, then
+/// the ancestors — with one difference in the default: no declaration found means `false` (scan with the
+/// filter, today's behaviour), because this verdict only ever WIDENS what is kept.
+///
+/// Must be asked while no `CfgOffScope` is open (the walk, before any pass), or `is_cfg_inactive` answers
+/// `false` and every file reads as default-build — which is the pre-fix behaviour, not a wrong one.
+pub(crate) fn file_module_cfg_off(root: &Path, rel: &Path, cache: &mut ModSiteCache) -> bool {
+    file_module_cfg_off_inner(root, rel, cache, 0)
+}
+
+fn file_module_cfg_off_inner(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
+    if let Some(hit) = cache.cfg_off.get(rel) {
+        return *hit;
+    }
+    if depth > 16 {
+        return false;
+    }
+    let out = compute_file_module_cfg_off(root, rel, cache, depth);
+    cache.cfg_off.insert(rel.to_path_buf(), out);
+    out
+}
+
+fn compute_file_module_cfg_off(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
+    if let Ok(txt) = std::fs::read_to_string(root.join(rel)) {
+        if has_inner_attr_marker(&txt) {
+            if let Ok(f) = syn::parse_file(&txt) {
+                if crate::lang::is_cfg_inactive(&f.attrs) {
+                    return true;
+                }
+            }
+        }
+    }
+    let Some((name, dir)) = module_site(rel) else { return false };
+    let parents = [
+        dir.join("mod.rs"),
+        if dir.as_os_str().is_empty() { std::path::PathBuf::new() } else { dir.with_extension("rs") },
+        dir.join("lib.rs"),
+        dir.join("main.rs"),
+    ];
+    for prel in parents.iter() {
+        if prel.as_os_str().is_empty() || prel == rel {
+            continue;
+        }
+        let Some(f) = parse_module_file(root, prel, cache) else { continue };
+        if let Some(off) = declaring_mod_matches(&f.items, &name, crate::lang::is_cfg_inactive) {
+            return off || file_module_cfg_off_inner(root, prel, cache, depth + 1);
+        }
+    }
+    false
+}
+
 /// `(module name, the directory whose module file declares it)`.
 ///
 /// The `mod.rs` case is the one that matters and the one the R457 code could not express: `a/b/mod.rs`
@@ -1203,14 +1275,21 @@ fn has_inner_attr_marker(txt: &str) -> bool {
 /// A `#[path = "…"]` redirect is matched on the TARGET's file stem, which is what actually names the
 /// file — `#[path = "foo_test.rs"] mod tests;` declares `foo_test.rs`, not `tests.rs`.
 fn declaring_mod_is_cfg_test(items: &[syn::Item], stem: &str) -> Option<bool> {
+    declaring_mod_matches(items, stem, crate::lang::is_cfg_test)
+}
+
+/// `Some(pred(attrs))` for the `mod <stem>;` declaration naming `stem` — `declaring_mod_is_cfg_test`'s
+/// search with the attribute question as a parameter, so the test verdict and R977's cfg-off verdict
+/// cannot find the declaration by two different rules.
+fn declaring_mod_matches(items: &[syn::Item], stem: &str, pred: fn(&[syn::Attribute]) -> bool) -> Option<bool> {
     for it in items {
         let syn::Item::Mod(m) = it else { continue };
         match &m.content {
             // an inline body — recurse; it can hold file-module declarations of its own.
             Some((_, inner)) => {
-                if let Some(v) = declaring_mod_is_cfg_test(inner, stem) {
+                if let Some(v) = declaring_mod_matches(inner, stem, pred) {
                     // An inline `#[cfg(test)] mod foo { mod bar; }` makes `bar` test-only too.
-                    return Some(v || crate::lang::is_cfg_test(&m.attrs));
+                    return Some(v || pred(&m.attrs));
                 }
             }
             None => {
@@ -1226,7 +1305,7 @@ fn declaring_mod_is_cfg_test(items: &[syn::Item], stem: &str) -> Option<bool> {
                         .collect()
                 };
                 if names.iter().any(|n| n == stem) {
-                    return Some(crate::lang::is_cfg_test(&m.attrs));
+                    return Some(pred(&m.attrs));
                 }
             }
         }
@@ -1856,6 +1935,24 @@ pub(crate) fn collect_reexports(
                         }
                         if written != "Self" {
                             record_alias(aliases, qualify(modpath, &t.ident.to_string()), expand(&written, uses));
+                        }
+                        // SOUNDNESS R978 — `type HouseKeeperArc = Arc<Housekeeper>;` was recorded as the bare
+                        // WRAPPER (`path_to_string` drops the generic argument), so a receiver typed through
+                        // the alias — a parameter, a field, an `if let Some(hk) = &self.housekeeper` binder —
+                        // typed to `std::sync::Arc`, and `hk.run_pending_tasks()` was SILENTLY DROPPED: the
+                        // same call through the written `Arc<Housekeeper>` peels to the pointee and charges.
+                        // The POINTEE is recorded under a TYPE-ONLY key beside the alias (see
+                        // `lang::DEREF_ALIAS_SUF`), so `type_path` can peel it the way it peels the written
+                        // wrapper, while a PATH call (`HouseKeeperArc::new(..)`, which is `Arc::new`) keeps
+                        // resolving to the wrapper exactly as before.
+                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path) {
+                            if let Some(pointee) = crate::lang::type_path(inner, uses) {
+                                record_alias(
+                                    aliases,
+                                    qualify(modpath, &format!("{}{}", t.ident, crate::lang::DEREF_ALIAS_SUF)),
+                                    pointee,
+                                );
+                            }
                         }
                     }
                 }
@@ -4087,6 +4184,9 @@ pub(crate) fn collect_decls(
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
+                    // SOUNDNESS R977 — the same scope `scan_items` opens, so Pass A's decl indexes read an
+                    // inline module the default build does not have with the same `use` arms Pass B does.
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs);
                     // Same shadowing rule as `scan_items` — the DECL indexes (field types, return types)
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
