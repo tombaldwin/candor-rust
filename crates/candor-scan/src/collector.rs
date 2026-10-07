@@ -1740,6 +1740,39 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// ⟨0.40⟩ SOUNDNESS R949 — whether `e` is PROVABLY a runtime string: a `&str`/`String`-typed name, a
+    /// `format!`, a `+` concatenation onto one, `.to_string()`/`.as_str()`, `String::from`/`String::new`, or a
+    /// tuple whose host slot is one. A string LITERAL is not (a literal bind is withheld and marks nothing);
+    /// anything this cannot prove — a `SocketAddr`, an IP tuple, an untyped name — answers `false`.
+    fn is_provably_str(&self, e: &syn::Expr) -> bool {
+        match e {
+            syn::Expr::Reference(r) => self.is_provably_str(&r.expr),
+            syn::Expr::Paren(p) => self.is_provably_str(&p.expr),
+            syn::Expr::Group(g) => self.is_provably_str(&g.expr),
+            syn::Expr::Macro(m) => m.mac.path.segments.last().is_some_and(|s| s.ident == "format"),
+            syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::Add(_)) => self.is_provably_str(&b.left),
+            syn::Expr::MethodCall(m) => match m.method.to_string().as_str() {
+                "to_string" | "as_str" => true,
+                "to_owned" | "clone" => self.is_provably_str(&m.receiver),
+                _ => false,
+            },
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    matches!(segs.as_slice(), [.., t, f] if t == "String" && matches!(f.as_str(), "from" | "new"))
+                }
+                _ => false,
+            },
+            syn::Expr::Tuple(t) => t.elems.first().is_some_and(|h| self.is_provably_str(h)),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.is_provably_str(&u.expr),
+            syn::Expr::Path(_) | syn::Expr::Field(_) => matches!(
+                self.resolve_recv_type(e).as_deref(),
+                Some("str" | "String" | "std::string::String" | "alloc::string::String")
+            ),
+            _ => false,
+        }
+    }
+
     /// The ELEMENT type of an expression that evaluates to a COLLECTION — a collection var/param (via
     /// `elem_of`), a collection FIELD (`self.senders`, via `field_elem`), an iterator adapter that
     /// preserves the element (`.iter()`/`.into_iter()`/`.iter_mut()`/`.clone()`), or another subscript
@@ -4673,7 +4706,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let two_path = candor_classify::is_fs_path_arg(&leaf)
                             && candor_classify::fs_path_arity(&leaf) == 2;
                         let path_lit2 = if two_path { positional_str_lit(&node.args, 1) } else { None };
-                        let path_lits_partial = two_path && path_lit2.is_none();
+                        // ⟨0.40⟩ SOUNDNESS R949 — `path_lits_partial` also carries the Net-bind fact "argument 0
+                        // is a RUNTIME STRING". A bind marks nothing AS A BIND, but std's `impl ToSocketAddrs
+                        // for str` RESOLVES a string (getaddrinfo) — a Net reach whose locator is the name.
+                        // Only a PROVABLY string-typed argument (`is_provably_str`); a `SocketAddr`, an IP
+                        // tuple or an untyped name marks nothing, which is the hedge-every-bind cost ⟨0.40⟩
+                        // removed. Adjudicated in scan.rs, where the call is known to be a Net bind.
+                        let runtime_name = leaf == "bind"
+                            && str_arg.is_none()
+                            && node.args.first().is_some_and(|a| self.is_provably_str(a));
+                        let path_lits_partial = (two_path && path_lit2.is_none()) || runtime_name;
                         // DROP-GLUE, spelling 1 of 3: a CALL that constructs. `Guard::new()` (the
                         // assoc-fn form scan.rs used to key on directly) and `Guard(f)` / `E::V(f)`
                         // (the tuple-struct form, which had NO route at all — it is a single-segment

@@ -8871,6 +8871,129 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         assert_eq!(both("r807cal", litdst, "Net", "other.example.com"), (1, 1), "…and fail on another host");
     }
 
+    /// Shared by the ⟨0.40⟩ bind/listen tests (R817, R949) and the binder/receiver rows found beside them
+    /// (R946, R950): scan a one-file crate under `policy`, returning (exit, report).
+    fn r817_run(name: &str, src: &str, policy: &str) -> (i32, serde_json::Value) {
+        let d = std::env::temp_dir().join(format!("candor-r817-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!(
+            "[package]\nname = \"{name}\"\n[dependencies]\nlibc = \"0.2\"\ntokio = \"1\"\nreqwest = \"0.12\"\n"
+        )).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let pp = d.join("candor.policy");
+        std::fs::write(&pp, policy).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let idx = load_dep_reports(None);
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, json) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false,
+            policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        (rc, serde_json::from_str(&json.unwrap()).unwrap())
+    }
+
+    fn r817_row(v: &serde_json::Value, f: &str) -> serde_json::Value {
+        v["functions"].as_array().unwrap().iter()
+            .find(|r| r["fn"].as_str().unwrap_or("").rsplit("::").next() == Some(f))
+            .cloned().unwrap_or(serde_json::Value::Null)
+    }
+
+    /// (unit gate, caller gate) for `allow Net in go|caller <lit>`. `deny Net go` runs first, so every exit
+    /// 0 is shown to come from a gate that could fail on the same bytes (PART 96's reach check, inlined).
+    fn r817_both(name: &str, body: &str, lit: &str) -> (i32, i32) {
+        // The caller passes through whatever `go` takes; each body declares one of these shapes.
+        let caller = if body.contains("go(l: &std::net::TcpListener)") {
+            "pub fn caller(l: &std::net::TcpListener) { go(l) }"
+        } else if body.contains("go(l: &tokio::net::TcpListener)") {
+            "pub async fn caller(l: &tokio::net::TcpListener) { go(l).await }"
+        } else if body.contains("go(fd: i32)") {
+            "pub fn caller(fd: i32) { go(fd) }"
+        } else if body.contains("go(a: std::net::SocketAddr)") {
+            "pub fn caller(a: std::net::SocketAddr) { go(a) }"
+        } else if body.contains("go(h: String)") {
+            "pub fn caller(x: String) { go(x) }"
+        } else if body.contains("go(h: &str)") || body.contains("go(d: &str)") {
+            "pub fn caller(x: &str) { go(x) }"
+        } else {
+            "pub fn caller() { go() }"
+        };
+        let src = format!("{body}\n{caller}\n");
+        let (deny, v) = r817_run(&format!("{name}d"), &src, "deny Net go\n");
+        assert_eq!(deny, 1, "{name}: `deny Net` must fire — the fixture must reach a Net call");
+        assert!(r817_row(&v, "go")["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Net")),
+                "{name}: `go` must carry Net: {}", r817_row(&v, "go"));
+        (r817_run(&format!("{name}u"), &src, &format!("allow Net in go {lit}\n")).0,
+         r817_run(&format!("{name}c"), &src, &format!("allow Net in caller {lit}\n")).0)
+    }
+
+    #[test]
+    fn bind_listen_r817_accept_r949_runtime_name() {
+        // ⟨0.40⟩ SPEC §2 — A BIND OR LISTEN ADDRESS IS WHERE THE PROCESS LISTENS (never `hosts`, and a bind
+        // marks nothing AS A BIND); A UNIT THAT ACCEPTS A CONNECTION … ITS `Net` SURFACE IS INCOMPLETE.
+        // PART 96's rust arms verbatim, then the other accept spellings, then R949's runtime-name binds.
+        //
+        // SOUNDNESS R817 (rust half): `accept`/`incoming` sat in `is_net_binding`, which withholds and
+        // marks nothing, so beside a benign `connect("ok.example:80")` `allow Net ok.example` exited 0 over
+        // a server writing to whoever connected — EXECUTED, a local client received the bytes.
+        // SOUNDNESS R949: a bind handed a runtime STRING resolves it (`impl ToSocketAddrs for str` →
+        // getaddrinfo) — EXECUTED, `bind("<nonexistent>:0")` fails with a lookup error.
+        let both = r817_both;
+        let run = r817_run;
+        let row = r817_row;
+        // ── PART 96, rust bodies verbatim (fn renamed `f` → `go`).
+        let a_litbind = r#"pub fn go() { let _ = std::net::UdpSocket::bind("10.0.0.5:9"); }"#;
+        assert_eq!(both("a", a_litbind, "10.0.0.5"), (1, 1), "a_litbind: a literal bind is not a destination");
+        let (_, v) = run("a2", a_litbind, "deny Net go\n");
+        assert!(row(&v, "go")["hosts"].as_array().is_none_or(|h| h.iter().all(|x| !x.as_str().unwrap_or("").starts_with("10.0.0.5"))),
+                "a_litbind: the bind address must not enter `hosts`: {}", row(&v, "go"));
+        assert!(row(&v, "go")["incomplete"].is_null(), "a bind marks nothing: {}", row(&v, "go"));
+        let b_rtbind = r#"pub fn go(a: std::net::SocketAddr) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind(a); }"#;
+        assert_eq!(both("b", b_rtbind, "ok.example"), (0, 0), "b_rtbind CONTROL: a SocketAddr bind that never accepts marks nothing");
+        let c_accept = r#"pub fn go(l: &std::net::TcpListener) { let _ = std::net::TcpStream::connect("ok.example:80"); if let Ok((mut s, _)) = l.accept() { use std::io::Write; let _ = s.write_all(b"hi"); } }"#;
+        assert_eq!(both("c", c_accept, "ok.example"), (1, 1), "c_accept: the accept's peers are unseen — R817");
+        let d_ephemeral = r#"pub fn go() { let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap(); let _ = s.send_to(b"x", "10.9.9.9:53"); }"#;
+        assert_eq!(both("d", d_ephemeral, "10.9.9.9"), (0, 0), "d_ephemeral CONTROL: the send carries the locator");
+        // CALIBRATION — the two exit-0 controls can fail on another host, so their 0 is a certification.
+        assert_eq!(both("dcal", d_ephemeral, "10.9.9.8"), (1, 1), "d_ephemeral must fail under another host");
+        assert_eq!(both("bcal", b_rtbind, "ok2.example"), (1, 1), "b_rtbind must fail under another host");
+
+        // ── The other accept spellings (`is_net_accepting`), each beside the same benign literal.
+        for (tag, body) in [
+            ("unwrap", r#"pub fn go(l: &std::net::TcpListener) { let _ = std::net::TcpStream::connect("ok.example:80"); let (mut s, _) = l.accept().unwrap(); use std::io::Write; let _ = s.write_all(b"hi"); }"#),
+            ("incoming", r#"pub fn go(l: &std::net::TcpListener) { let _ = std::net::TcpStream::connect("ok.example:80"); for s in l.incoming() { use std::io::Write; let _ = s.unwrap().write_all(b"hi"); } }"#),
+            ("ufcs", r#"pub fn go(l: &std::net::TcpListener) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::TcpListener::accept(l); }"#),
+            ("bound", r#"pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let l = std::net::TcpListener::bind("0.0.0.0:8080").unwrap(); let _ = l.accept(); }"#),
+            ("tokio", r#"pub async fn go(l: &tokio::net::TcpListener) { let _ = tokio::net::TcpStream::connect("ok.example:80").await; let _ = l.accept().await; }"#),
+            ("libc", r#"pub fn go(fd: i32) { let _ = std::net::TcpStream::connect("ok.example:80"); unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()); } }"#),
+        ] {
+            assert_eq!(both(&format!("acc{tag}"), body, "ok.example"), (1, 1), "accept spelling `{tag}` must fail closed");
+        }
+        // CONTROL — a DATAGRAM receive is not an accept (SPEC: the reply's peer is fixed at its own send_to).
+        let recv = r#"pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let s = std::net::UdpSocket::bind("0.0.0.0:5353").unwrap(); let mut b = [0u8; 9]; let _ = s.recv_from(&mut b); }"#;
+        assert_eq!(both("recv", recv, "ok.example"), (0, 0), "a datagram receive must not be read as an accept");
+
+
+        // ── R949: a bind whose address is a PROVABLY string-typed runtime value resolves that name.
+        for (tag, body) in [
+            ("str", r#"pub fn go(h: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind(h); }"#),
+            ("string", r#"pub fn go(h: String) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::TcpListener::bind(h); }"#),
+            ("fmt", r#"pub fn go(h: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind(format!("{}:0", h)); }"#),
+            ("tuple", r#"pub fn go(h: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind((h, 0u16)); }"#),
+        ] {
+            assert_eq!(both(&format!("r949{tag}"), body, "ok.example"), (1, 1), "R949 runtime-name bind `{tag}` must fail closed");
+        }
+        // CONTROLS — what is not provably a string marks nothing: a literal (withheld), an IP tuple.
+        for (tag, body) in [
+            ("lit", r#"pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind("0.0.0.0:0"); }"#),
+            ("littuple", r#"pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind(("0.0.0.0", 0u16)); }"#),
+            ("ip", r#"pub fn go() { let _ = std::net::TcpStream::connect("ok.example:80"); let _ = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0u16)); }"#),
+        ] {
+            assert_eq!(both(&format!("r949{tag}"), body, "ok.example"), (0, 0), "R949 control `{tag}` must still certify");
+        }
+    }
+
     #[test]
     fn r459_cfg_test_file_module_is_excluded_whatever_its_filename() {
         // SOUNDNESS R459 — THE MIRROR OF R457. A `#[cfg(test)] mod X;` file module whose FILENAME does
@@ -16364,6 +16487,9 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R817/R949 bumped it to rev61 (a runtime-string `bind` sets the cached call's `path_lits_partial`;
+        // R946 and R950 change Pass B's cached `calls` under the same token — a rev60 entry replays each
+        // silence warm).
         // R894 bumped it to rev60 (Pass B publishes a unit per `pub` foreign declaration; a rev59 entry
         // replays the file without it).
         // R810/R879/R898/R899 bumped it to rev59 (Pass A anchors an inline module's types; Pass B's `calls`
@@ -16391,7 +16517,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16402,7 +16528,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev60/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev61/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

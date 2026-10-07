@@ -3478,7 +3478,7 @@ pub fn is_net_establishing(method: &str) -> bool {
     // so a denylist masks essentially everything in one — `cap-std` 66 rows, `hickory-net` 44. The
     // triggers it added were conversions, accessors and combinators (`into` 24, `from_std` 20,
     // `as_socket` 15, `setsockopt` 32, `map_err` 7, `ok` 5, `try_clone` 4) — none of which hides a
-    // host. Worse, it masked **`bind` (31)**, which this very file has `is_net_local_bind` to exclude
+    // host. Worse, it masked **`bind` (31)**, which this very file has `is_net_binding` to exclude
     // because a bind address is where the process LISTENS, never a destination it reaches. So here the
     // allowlist is the precise side and the denylist is the leaky one, exactly as recorded for Exec.
     //
@@ -3507,27 +3507,6 @@ pub fn is_net_establishing(method: &str) -> bool {
         )
 }
 
-/// ⟨0.29⟩ A LOCAL BIND/LISTEN VERB — the address it names is where the process LISTENS, never a
-/// destination it reaches.
-///
-/// **MEASURED, and it is a false all-clear rather than a naming quibble.** `UdpSocket::bind("0.0.0.0:0")`
-/// put `0.0.0.0:0` into `hosts`, the DESTINATION surface `allow Net` gates on (§2), and — because a
-/// literal had been captured — nothing marked the surface incomplete. So:
-///
-/// ```text
-/// let s = UdpSocket::bind("0.0.0.0:0")?;   // local
-/// s.send_to(b"secrets", dst);              // destination is a RUNTIME value
-/// allow Net 0.0.0.0   ->   policy ✓, exit 0
-/// ```
-///
-/// A local listen address certified a send to an endpoint nobody can see. That is the masking evasion
-/// AS-EFF-008 exists to close, reached through a verb whose literal is not a destination at all.
-///
-/// **A BIND CANNOT BE CERTIFIED, EVER**, which is why this marks the surface incomplete rather than
-/// merely withholding the literal: a server that binds and accepts talks to whoever connects, so its
-/// destination set is not statically knowable even in principle. candor-java already behaves this way —
-/// it publishes the bind address AND hedges — and matching the reference engine keeps the informative
-/// half (an operator can still see what the service listens on) while making it non-certifying.
 /// ⟨0.29⟩ The Net verbs whose LOCATOR is at argument **1**, not 0 — the rust analogue of candor-ts's
 /// `NET_URL_ARG1_MEMBERS`.
 ///
@@ -3552,8 +3531,66 @@ pub fn is_net_host_arg1(method: &str) -> bool {
     matches!(method, "request" | "send_to")
 }
 
+/// ⟨0.29⟩ / ⟨0.40⟩ A LOCAL BIND/LISTEN VERB — the address it names is where the process LISTENS, never a
+/// destination it reaches (SPEC §2 ⟨0.40⟩ *A BIND OR LISTEN ADDRESS IS WHERE THE PROCESS LISTENS*, PART 96
+/// `a_litbind`). Its literal never enters `hosts`.
+///
+/// **MEASURED, and it is a false all-clear rather than a naming quibble.** `UdpSocket::bind("0.0.0.0:0")`
+/// put `0.0.0.0:0` into `hosts`, the DESTINATION surface `allow Net` gates on (§2), and — because a
+/// literal had been captured — nothing marked the surface incomplete. So:
+///
+/// ```text
+/// let s = UdpSocket::bind("0.0.0.0:0")?;   // local
+/// s.send_to(b"secrets", dst);              // destination is a RUNTIME value
+/// allow Net 0.0.0.0   ->   policy ✓, exit 0
+/// ```
+///
+/// A local listen address certified a send to an endpoint nobody can see. That is the masking evasion
+/// AS-EFF-008 exists to close, reached through a verb whose literal is not a destination at all.
+///
+/// **A BIND MARKS NOTHING** (⟨0.40⟩). This doc used to say *"A BIND CANNOT BE CERTIFIED, EVER, which is
+/// why this marks the surface incomplete"*, and that has been false since `16fb46f` dropped the hedge:
+/// neither rust engine marks a bind, and both only withhold its literal. ⟨0.40⟩ makes the withholding the
+/// rule — an ephemeral client's own `send_to`/`connect` carries its locator under `is_net_establishing`,
+/// so hedging the bind as well made every UDP client uncertifiable while adding nothing a gate could use;
+/// and a bind with nothing beside it still fails `allow Net` closed on its EMPTY literal surface. The
+/// half of the old sentence that WAS right — *a server that binds and accepts talks to whoever connects*
+/// — belongs to the ACCEPT, not the bind, and lives in `is_net_accepting`, which is why `accept` and
+/// `incoming` are no longer members here.
 pub fn is_net_binding(method: &str) -> bool {
-    matches!(method, "bind" | "listen" | "bind_to_device" | "incoming" | "accept")
+    matches!(method, "bind" | "listen" | "bind_to_device")
+}
+
+/// ⟨0.40⟩ A CALL THAT ACCEPTS CONNECTIONS — its peers are chosen by whoever connects, so no literal can name
+/// them, and the unit's `Net` surface is INCOMPLETE (SPEC §2 ⟨0.40⟩ *A UNIT THAT ACCEPTS A CONNECTION …*,
+/// AS-EFF-008, SEMANTICS §6 `masked_Net`; PART 96 `c_accept`). Both rust engines mark `incomplete` on a
+/// `Net`-classified call this answers, WHETHER OR NOT a literal was captured (a server bootstrap's literal is
+/// a LISTEN address, withheld like a bind's), and contribute no `hosts` entry for it.
+///
+/// **SOUNDNESS R817 — `accept`/`incoming` WERE MEMBERS OF `is_net_binding`, WHICH WITHHOLDS AND NEVER
+/// MARKS**, so they were read exactly like a use-verb. `pub fn f(l: &TcpListener) { let _ =
+/// TcpStream::connect("ok.example:80"); if let Ok((mut s, _)) = l.accept() { s.write_all(b"hi") } }`
+/// reported `hosts: ["ok.example:80"]`, no `incomplete`, and `allow Net in f ok.example` exited **0** over a
+/// server writing to whoever connected — EXECUTED: a client on 127.0.0.1 received the bytes.
+///
+/// The membership, by spelling (`path` is the resolved call path, `leaf` its last segment):
+///   * `accept`, `accept4` (libc/nix/rustix), `poll_accept` (tokio's poll form), `incoming` and
+///     `into_incoming` (std's iterator forms) — exact LEAF. `accept_bi`/`accept_uni` (quinn) are NOT here:
+///     they accept a STREAM on a connection whose peer was already fixed by the endpoint's `accept`.
+///   * tonic's `Router::serve`/`Router::serve_with_shutdown` and `TcpIncoming::new`, the server bootstraps
+///     `classify` already charges `Net` — each binds a listener and begins accepting on it (classify's own
+///     tonic arm cites the source lines). By PATH, because `serve`/`new` are not accept verbs anywhere else.
+///
+/// A wrong `true` over-masks and fails CLOSED, saying so; a wrong `false` is the benign-sibling-literal
+/// bypass this row closed. An exact `accept` leaf also matches a TLS/WebSocket acceptor wrapping a stream
+/// that was already accepted (`TlsAcceptor::accept(stream)`, `tungstenite::accept`) — whose peer is likewise
+/// whoever connected, so the mark is redundant there, never false.
+pub fn is_net_accepting(path: &str, leaf: &str) -> bool {
+    matches!(leaf, "accept" | "accept4" | "poll_accept" | "incoming" | "into_incoming")
+        || (path.starts_with("tonic::")
+            && (path.ends_with("::Router::serve")
+                || path.ends_with("::Router::serve_with_shutdown")
+                || path.ends_with("::TcpIncoming::new")))
 }
 
 /// The masking guard (AS-EFF-008), the `Fs` analog of `is_net_establishing`: whether an `Fs`-classified
@@ -5543,6 +5580,47 @@ mod tests {
         }
     }
 
+    /// ⟨0.40⟩ SOUNDNESS R817 — an ACCEPT is not a BIND. The two lists answer different questions and must
+    /// not share a member: a binding verb's literal is withheld and marks nothing, an accepting verb marks
+    /// the surface incomplete. `accept`/`incoming` used to be binding verbs, which is the defect.
+    #[test]
+    fn r817_accepting_is_not_binding() {
+        for (path, leaf) in [
+            ("std::net::TcpListener::accept", "accept"),
+            ("std::net::TcpListener::incoming", "incoming"),
+            ("std::net::TcpListener::into_incoming", "into_incoming"),
+            ("tokio::net::TcpListener::accept", "accept"),
+            ("tokio::net::TcpListener::poll_accept", "poll_accept"),
+            ("libc::accept", "accept"),
+            ("libc::accept4", "accept4"),
+            ("quinn::Endpoint::accept", "accept"),
+            ("tonic::transport::server::Router::serve", "serve"),
+            ("tonic::transport::server::Router::serve_with_shutdown", "serve_with_shutdown"),
+            ("tonic::transport::server::TcpIncoming::new", "new"),
+        ] {
+            assert!(is_net_accepting(path, leaf), "`{path}` accepts connections: its peers are unseen");
+            assert!(!is_net_binding(leaf), "`{leaf}` must not be a binding verb — binding withholds and marks nothing");
+        }
+        // CONTROLS — binds mark nothing; a stream accepted on an ESTABLISHED connection (quinn) has a peer
+        // fixed at the endpoint's accept; a datagram receive is not an accept; `serve`/`new` elsewhere are
+        // not accepts.
+        for (path, leaf) in [
+            ("std::net::UdpSocket::bind", "bind"),
+            ("std::net::TcpListener::bind", "bind"),
+            ("libc::listen", "listen"),
+            ("quinn::Connection::accept_bi", "accept_bi"),
+            ("quinn::Connection::accept_uni", "accept_uni"),
+            ("std::net::UdpSocket::recv_from", "recv_from"),
+            ("tonic::transport::server::Server::serve_with_shutdown", "serve_with_shutdown"),
+            ("reqwest::Client::new", "new"),
+        ] {
+            assert!(!is_net_accepting(path, leaf), "`{path}` does not accept a connection");
+        }
+        for m in ["bind", "listen", "bind_to_device"] {
+            assert!(is_net_binding(m), "`{m}` names a LOCAL address");
+        }
+    }
+
     /// R379 — WHY THIS STAYS AN ALLOWLIST, which is NOT this family's usual direction.
     ///
     /// `candor-denylist-over-allowlist` says narrow a sound over-approximation with a denylist, and
@@ -5554,7 +5632,7 @@ mod tests {
     /// and combinators that hide no host.
     ///
     /// These are the measured leaks, pinned so the inversion cannot be re-attempted without meeting
-    /// them. `bind` is the sharpest: this file has `is_net_local_bind` precisely because a bind address
+    /// them. `bind` is the sharpest: this file has `is_net_binding` precisely because a bind address
     /// is where the process LISTENS, never a destination it reaches.
     #[test]
     fn the_rejected_denylist_leaks_are_not_establishing() {

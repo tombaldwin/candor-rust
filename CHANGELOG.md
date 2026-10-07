@@ -11,6 +11,27 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
+
+Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the
+connection certified `allow Net ok.example` at exit 0 — EXECUTED, a client on 127.0.0.1 received the bytes.
+`accept`/`incoming` were members of `is_net_binding`, which withholds a literal and marks nothing.
+
+- **An accepting call marks `Net` incomplete** in both rust engines (`candor_classify::is_net_accepting`:
+  `accept`, `accept4`, `poll_accept`, `incoming`, `into_incoming`, and tonic's `Router::serve*` /
+  `TcpIncoming::new`), whatever literal was captured; its literal is never published. PART 96 `c_accept`
+  goes 0 → 1. A datagram receive is not an accept. Over the pinned 1,625-crate rust census: 30 accept sites
+  in 21 crates, every one an accept (nix, rustix, cap-std, axum, hyper's `AddrIncoming`, tokio-stream,
+  hickory's QUIC server, mio); three are TLS acceptors wrapping an already-accepted stream (redundant, never
+  false).
+- **A bind marks nothing AS A BIND** (unchanged, and now what the doc says — it claimed binds were hedged,
+  stale since `16fb46f`) — **except** a `bind` whose address is a PROVABLY string-typed runtime value
+  (`&str`/`String`, `format!`, a concatenation, `(h, port)` with such an `h`): std resolves it through
+  `impl ToSocketAddrs for str` (getaddrinfo, EXECUTED — a nonexistent name fails with the lookup error), so
+  it marks `Net` incomplete in both engines. A `SocketAddr`, an IP tuple, a literal or an untyped/generic
+  argument marks nothing. Census reach: 0 of the 49 non-literal Net binds outside test code are
+  string-typed, so no registry row moves.
+
 ### ⚠ A dependency's published foreign import is `Unknown` + `native:extern fn` when chained, not pure (SOUNDNESS R894)
 
 A consumer calling a dependency's `extern "C" { pub fn creat(..); }` directly read PURE when chained — ABSENT,

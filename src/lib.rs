@@ -2272,6 +2272,40 @@ fn net_host_literal(s: &str) -> Option<String> {
 /// Extract literal Net hosts from a call expr's arguments (not the receiver — that's the client/socket,
 /// not the address). Scans string-literal args through `net_host_literal`. Called only for a call
 /// already classified `Net`, so the literal we find is the endpoint, not an unrelated string.
+/// ⟨0.40⟩ SOUNDNESS R949 — whether argument 0 of a bind is a RUNTIME string (or a tuple whose host slot
+/// is one): `&str`, `String`, or `&String`, and not a literal. A `SocketAddr`, an IP, or a generic
+/// `A: ToSocketAddrs` is not — the ruling marks only a provably string-typed address.
+fn bind_arg_is_runtime_str<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
+    let first = match expr.kind {
+        ExprKind::Call(_, args) => args.first(),
+        ExprKind::MethodCall(_, _, args, _) => args.first(),
+        _ => None,
+    };
+    let Some(a) = first else { return false };
+    fn is_lit(e: &Expr<'_>) -> bool {
+        match e.kind {
+            ExprKind::Lit(_) => true,
+            ExprKind::AddrOf(_, _, inner) => is_lit(inner),
+            ExprKind::Tup(elems) => elems.first().is_some_and(is_lit),
+            _ => false,
+        }
+    }
+    if is_lit(a) {
+        return false;
+    }
+    let str_like = |t: rustc_middle::ty::Ty<'tcx>| {
+        let t = t.peel_refs();
+        t.is_str()
+            || matches!(t.kind(), rustc_middle::ty::Adt(d, _)
+                if matches!(cx.tcx.def_path_str(d.did()).as_str(), "std::string::String" | "alloc::string::String" | "String"))
+    };
+    let ty = cx.typeck_results().expr_ty(a).peel_refs();
+    match ty.kind() {
+        rustc_middle::ty::Tuple(fields) => fields.first().is_some_and(|f| str_like(*f)),
+        _ => str_like(ty),
+    }
+}
+
 fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
     use rustc_ast::LitKind;
     let args: &[Expr<'_>] = match expr.kind {
@@ -3134,8 +3168,26 @@ impl Candor {
                 // Withhold the literal and add no hedge, exactly as the floor does: a Net function with
                 // no captured host fails closed on its own, and a sibling runtime destination
                 // (`s.send_to(buf, dst)`) is masked by its own establishing verb below.
-                if candor_classify::is_net_binding(path.rsplit("::").next().unwrap_or("")) {
+                let net_leaf = path.rsplit("::").next().unwrap_or("");
+                if candor_classify::is_net_binding(net_leaf) {
                     hosts.clear();
+                    // ⟨0.40⟩ SOUNDNESS R949 — a bind marks nothing AS A BIND, but a bind handed a RUNTIME
+                    // STRING resolves that name (`impl ToSocketAddrs for str` → getaddrinfo): a Net reach
+                    // whose locator nobody can see. Typed here from rustc, not from syntax; candor-scan
+                    // asks the same question of a provably string-typed argument.
+                    if builtin == Some("Net") && net_leaf == "bind" && bind_arg_is_runtime_str(cx, expr) {
+                        self.incomplete_direct.entry(caller).or_default().insert("Net");
+                    }
+                }
+                // ⟨0.40⟩ SOUNDNESS R817 — an ACCEPT's peer is chosen by whoever connects, so no literal
+                // names it: mark the surface incomplete whether or not a literal was captured, and
+                // publish none (a server bootstrap's literal is its LISTEN address). `accept`/`incoming`
+                // used to sit in `is_net_binding`, which withholds and marks nothing — a benign sibling
+                // literal then certified the server. The one predicate candor-scan asks too.
+                let accepting = builtin == Some("Net") && candor_classify::is_net_accepting(&path, net_leaf);
+                if accepting {
+                    hosts.clear();
+                    self.incomplete_direct.entry(caller).or_default().insert("Net");
                 }
                 let dotless_ollama: Vec<String> =
                     hosts.iter().filter(|h| is_ollama_dotless(h)).cloned().collect();

@@ -508,6 +508,47 @@ absent "R809: the bind address is not published as a reached destination"       
 want   "R809: …and the same fn still fails closed under the other host (r809_bind)"          "$out" '[AS-EFF-008] `r809_bind`'
 rm -rf "$(dirname "$SM")"
 
+# ── 9a-R817. ⟨0.40⟩ an ACCEPT's peers are unseen; a bind marks nothing (PART 96's arms, deep engine) ──
+# SOUNDNESS R817: `accept`/`incoming` were members of `is_net_binding`, which withholds and marks nothing,
+# so beside a benign `connect("ok.example:80")` `allow Net ok.example` certified a server writing to whoever
+# connected (EXECUTED: a local client received the bytes). The binding controls must still certify — a
+# bind that never accepts, and an ephemeral client whose own `send_to` carries the destination. The R946
+# arm is candor-scan's binder defect; rustc types the `if let` payload, so here it is a no-regression pin.
+# SOUNDNESS R949: a bind handed a runtime STRING resolves the name (getaddrinfo), so it marks; a
+# `SocketAddr` bind does not.
+echo "== bind/listen ⟨0.40⟩ in the deep engine (R817 accept, R946 binder) =="
+BL=$(mktemp -d)/bl; mkdir -p "$BL/src"
+printf '[package]\nname="bl"\nversion="0.1.0"\nedition="2021"\n' > "$BL/Cargo.toml"
+cat > "$BL/src/main.rs" <<'RS'
+use std::io::Write;
+use std::net::{TcpListener, TcpStream, UdpSocket};
+pub fn bl_accept(l: &TcpListener) { let _ = TcpStream::connect("ok.example:80"); if let Ok((mut s, _)) = l.accept() { let _ = s.write_all(b"hi"); } }
+pub fn bl_incoming(l: &TcpListener) { let _ = TcpStream::connect("ok.example:80"); for s in l.incoming() { let _ = s.map(|mut s| s.write_all(b"hi")); } }
+pub fn bl_rtbind(a: std::net::SocketAddr) { let _ = TcpStream::connect("ok.example:80"); let _ = UdpSocket::bind(a); }
+pub fn bl_rtname(h: &str) { let _ = TcpStream::connect("ok.example:80"); let _ = UdpSocket::bind(h); }
+pub fn bl_recv() { let _ = TcpStream::connect("ok.example:80"); if let Ok(s) = UdpSocket::bind("0.0.0.0:5353") { let mut b = [0u8; 4]; let _ = s.recv_from(&mut b); } }
+pub fn bl_iflet(d: &str) { let _ = TcpStream::connect("ok.example:80"); if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { let _ = s.send_to(b"x", d); } }
+fn main() {
+    if std::env::args().count() > 99 {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        bl_accept(&l); bl_incoming(&l); bl_rtbind("0.0.0.0:0".parse().unwrap()); bl_rtname("0.0.0.0:0"); bl_recv(); bl_iflet("127.0.0.1:9");
+    }
+}
+RS
+echo "allow Net ok.example" > "$BL/policy"
+out=$(dl "$BL" env CANDOR_POLICY="$BL/policy")
+want   "R817: an accept beside a benign literal fails closed (bl_accept)"                    "$out" '[AS-EFF-008] `bl_accept`'
+want   "R817: the incoming spelling (bl_incoming)"                                          "$out" '[AS-EFF-008] `bl_incoming`'
+want   "R946 pin: an if-let-bound socket's runtime send_to fails closed (bl_iflet)"           "$out" '[AS-EFF-008] `bl_iflet`'
+want   "R949: a bind handed a runtime STRING resolves the name (bl_rtname)"                   "$out" '[AS-EFF-008] `bl_rtname`'
+absent "⟨0.40⟩ CONTROL: a SocketAddr bind that never accepts marks nothing (bl_rtbind)"         "$out" '[AS-EFF-008] `bl_rtbind`'
+absent "⟨0.40⟩ CONTROL: a datagram receive is not an accept (bl_recv)"                       "$out" '[AS-EFF-008] `bl_recv`'
+# CALIBRATION — the two absences above can fail: under a host the controls do not name, they fire.
+echo "allow Net ok2.example" > "$BL/policy"
+out=$(dl "$BL" env CANDOR_POLICY="$BL/policy")
+want   "⟨0.40⟩ calibration: bl_rtbind fails under a host it does not name"                  "$out" '`bl_rtbind`'
+rm -rf "$(dirname "$BL")"
+
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
 LY=$(mktemp -d)/ly; mkdir -p "$LY/src"

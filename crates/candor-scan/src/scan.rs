@@ -4095,7 +4095,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // excludes build-then-execute terminals (`fetch_all`/`load`/`all`) and lifecycle ops
                         // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
                         incomplete.entry(f.qual.clone()).or_default().insert("Db");
-                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok()
+                        // R817 — an accept is marked just below, outside this arm; not "let through".
+                        && !(eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf))
+                    {
                         // THE INVERSE PROBE (R379/R381 follow-on, diagnostic only — no behaviour).
                         // R379 was found because a verb `classify` calls Net was absent from the
                         // masking ALLOWLIST, and `allow Net <benign literal>` then certified a runtime
@@ -4126,7 +4129,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `connect("api.example.com:443")` — could not be certified by `allow Net api.example.com`
                 // even though its destination is right there. `UdpSocket` has no constructor but `bind`,
                 // so that is every UDP client. Withhold the literal; add no hedge.
+                //
+                // ⟨0.40⟩ SOUNDNESS R817 — …and an ACCEPT is not a bind. `accept`/`incoming` sat on the
+                // binding list, so they were withheld and marked nothing, exactly like a use-verb: beside a
+                // benign `connect("ok.example:80")`, `allow Net ok.example` certified a server writing to
+                // whoever connected. The peer of an accept is chosen by the connecting side, so no literal
+                // can name it: mark `Net` incomplete whether or not a literal was captured (a server
+                // bootstrap's literal is its LISTEN address, withheld like a bind's). The shared predicate
+                // is asked by the deep engine too (src/lib.rs).
+                if eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf) {
+                    if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        eprintln!("R817ACCEPT {} :: {}", f.qual, path_real);
+                    }
+                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                    continue;
+                }
                 if eff == "Net" && candor_classify::is_net_binding(&c.leaf) {
+                    // ⟨0.40⟩ SOUNDNESS R949 — …EXCEPT the name a runtime STRING makes it resolve. The
+                    // collector sets `path_lits_partial` on a `bind` whose argument 0 is a provably
+                    // string-typed runtime value: std resolves it through `impl ToSocketAddrs for str`
+                    // (getaddrinfo), a Net reach whose locator nobody can see, so a benign sibling literal
+                    // must not certify it. A `SocketAddr` or untyped argument marks nothing.
+                    if c.path_lits_partial {
+                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                            eprintln!("R949NAME {} :: {}", f.qual, path_real);
+                        }
+                        incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                    }
                     continue;
                 }
                 if let Some(s) = &c.str_arg {
