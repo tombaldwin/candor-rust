@@ -789,6 +789,19 @@ pub(crate) fn generic_bounds_of_generics(generics: &syn::Generics) -> HashMap<St
 /// The (use-expanded) type path of a `syn::Type`, ignoring references and generic args:
 /// `&reqwest::Client` -> `reqwest::Client`, `Pool<Postgres>` -> `sqlx::Pool` (via `uses`). `None` for
 /// non-nameable types (impl Trait, tuples, …) where there's nothing to classify a method against.
+/// SOUNDNESS R899 — the first written segment of a type's path under references (`&Backend`,
+/// `&mut m::T` -> `Backend`, `m`): the name a `#[cfg]`-duplicated `use` binds.
+pub(crate) fn type_written_head(ty: &syn::Type) -> Option<String> {
+    let mut t = ty;
+    while let syn::Type::Reference(r) = t {
+        t = &r.elem;
+    }
+    match t {
+        syn::Type::Path(tp) if tp.qself.is_none() => tp.path.segments.first().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
     type_path_b(ty, uses).map(|(t, _)| t)
 }
@@ -1351,7 +1364,7 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             if let Some(t) = turbofish_return(p, leaf, uses, returns) {
                 return Some(t);
             }
-            recorded_return_type(leaf, returns)
+            recorded_return_type(leaf, returns).or_else(|| qual_recorded_return(&full, uses, returns))
         }
         // `let s = S {..};` — a struct literal names its type directly.
         syn::Expr::Struct(s) => type_from_value_path(&path_to_string(&s.path), uses),
@@ -1409,6 +1422,22 @@ pub(crate) fn turbofish_return(
 /// R165 drop-glue route) cannot answer it differently. They HAD to, before: the drop marker's binder-keyed
 /// predecessor consulted this index and the position-independent rewrite that replaced it did not, so a
 /// free-function constructor stopped being a construction at all.
+/// SOUNDNESS R893 — the declared return of the FREE fn a written call path names, by its crate-anchored
+/// qual (`model::qual_ret_key`). Consulted only after the leaf-keyed answer declines (two same-named fns
+/// withdrew it), and only for a path `expand` anchors in this crate: a dependency's `dep::mk()` has no
+/// entry here by construction, and a bare `mk()` stays the leaf route's question.
+pub(crate) fn qual_recorded_return(written: &str, uses: &HashMap<String, String>, returns: &ReturnIndex) -> Option<String> {
+    let full = expand(written, uses);
+    if !full.starts_with("crate::") {
+        return None;
+    }
+    let t = returns.get(&crate::model::qual_ret_key(&full))?;
+    if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+        eprintln!("R893QUALRET {full}");
+    }
+    Some(t.clone())
+}
+
 pub(crate) fn recorded_return_type(leaf: &str, returns: &ReturnIndex) -> Option<String> {
     returns
         .get(leaf)
@@ -2935,11 +2964,40 @@ pub(crate) fn struct_variant_field_bindings(pat: &syn::Pat) -> Vec<(String, Stri
     }
 }
 
+/// SOUNDNESS R946 — whether `pat` is std's `Some(x)`/`Ok(x)`: bare, or qualified through `Option`/`Result`
+/// (`Option::Some`, `std::result::Result::Ok`). A LOCAL enum's variant that happens to be named `Some`/`Ok`
+/// (`ArchivedRcWeak::Some(r)`) is not, and its payload type is the variant's, not the scrutinee's.
+pub(crate) fn std_some_ok_pat(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Reference(r) => std_some_ok_pat(&r.pat),
+        syn::Pat::Paren(p) => std_some_ok_pat(&p.pat),
+        syn::Pat::TupleStruct(ts) => {
+            let segs: Vec<String> = ts.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            match segs.as_slice() {
+                [v] => v == "Some" || v == "Ok",
+                [.., o, v] => {
+                    let head_ok = segs[..segs.len() - 2].iter().all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result"));
+                    head_ok && ((o == "Option" && v == "Some") || (o == "Result" && v == "Ok"))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// The single-ident binding of a `Some(x)` / `Ok(x)` pattern (the payload of an `if let`/`let-else`
 /// unwrap of an `Option`/`Result`) — so `if let Some(d) = o { d.go() }` over an `Option<Box<dyn T>>`
 /// types `d` for dispatch. `None` for any other pattern (a `None`/`Err` arm, a multi-field or
 /// non-single-ident payload — an honest under-report). Peels reference/paren wrappers.
 pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
+    // SOUNDNESS R946 (second fixture) — std's `Some`/`Ok` ONLY. This matched the LAST SEGMENT, so a local
+    // enum's `W::Some(r)` was claimed as an Option payload and never reached the R77 enum-variant route:
+    // `if let W::Some(r) = self { r.go() }` read the caller ABSENT (measured, before this change too), and
+    // with R946's construction fallback `match self { W::Some(r) => r.go() }` typed `r` as `W` itself.
+    if !std_some_ok_pat(pat) {
+        return None;
+    }
     match pat {
         syn::Pat::Reference(r) => some_ok_binding(&r.pat),
         syn::Pat::Paren(p) => some_ok_binding(&p.pat),

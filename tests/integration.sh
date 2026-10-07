@@ -74,6 +74,21 @@ PY
 out=$(dl "$G" env CANDOR_BASELINE="$G/.candor/base")
 want "AS-EFF-005 flags touches_net gaining Net" "$out" '[AS-EFF-005] `touches_net`'
 
+# ⟨0.40⟩ SPEC §3 (SOUNDNESS R932, R811): a function ABSENT from the baseline is compared against ∅.
+# Same baseline (touches_net recorded pure), the tree adds `fresh_net` (Net), `tidy` (pure) and
+# `opaque_new` (Unknown only). fresh_net fires with origin "new" (the CANDOR_JSON sidecar is present
+# and lacks it); tidy passes; opaque_new is named in the advisory note. Before ⟨0.40⟩ only touches_net
+# fired — the lint skipped every name absent from the baseline report (R811: Self-guard could not see
+# `Env` seeded into a pure fn).
+printf 'fn touches_net() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }\nfn fresh_net() { let _ = std::net::TcpStream::connect("127.0.0.1:2"); }\nfn tidy(a: u32) -> u32 { a + 1 }\nfn opaque_new(f: fn() -> u32) -> u32 { f() }\nfn main() { touches_net(); fresh_net(); tidy(1); opaque_new(|| 1); }\n' > "$G/src/main.rs"
+out=$(dl "$G" env CANDOR_BASELINE="$G/.candor/base" CANDOR_GATE_JSON="$G/gate.json")
+want   "AS-EFF-005 fires on a NEW effectful fn (⟨0.40⟩)"  "$out" '[AS-EFF-005] `fresh_net` is ABSENT FROM THE BASELINE'
+absent "a NEW pure fn passes (⟨0.40⟩)"                    "$out" '[AS-EFF-005] `tidy`'
+absent "a NEW Unknown-only fn is not a violation"         "$out" '[AS-EFF-005] `opaque_new`'
+want   "a NEW Unknown-only fn is named in the note"       "$out" 'carry only Unknown'
+gj=$(python3 -c "import json;r={v['fn']:v.get('origin','') for v in json.load(open('$G/gate.json'))['violations'] if v['rule']=='AS-EFF-005'};print('fresh_net=%s touches_net=%s' % (r.get('fresh_net'), r.get('touches_net')))" 2>&1)
+want   "verdict rows carry origin (new / existing)"       "$gj" "fresh_net=new touches_net=existing"
+
 # ── 4. Cross-crate effect propagation: a bin inherits its lib's effect (CRITIQUE §8) ──
 echo "== cross-crate effect inheritance (lib+bin) =="
 X=$(mktemp -d)/xc; mkdir -p "$X/src" "$X/.candor"
@@ -269,7 +284,7 @@ printf 'pub fn go() { let _ = std::fs::read("/x"); std::process::Command::new("s
 rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
 if [ "$rc" = 1 ]; then echo "  ok   scan guard: a gained effect exits 1"; pass=$((pass+1)); else echo "  FAIL scan guard: gain exited $rc (want 1)"; fail=$((fail+1)); fi
 want   "scan guard: AS-EFF-005 names the fn + gained effect" "$out" '[AS-EFF-005] `go` gained effect { Exec }'
-absent "scan guard: a NEW fn is exempt (reviewed as new code)" "$out" '[AS-EFF-005] `newbie`'
+want "scan guard: a NEW effectful fn fires — compared against nothing (⟨0.40⟩, R932)" "$out" '[AS-EFF-005] `newbie` is ABSENT FROM THE BASELINE'
 # absent baseline → note + exit unchanged (guard inactive)
 rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/nosuch" "$SCAN" "$SB" 2>&1) || rc=$?
 if [ "$rc" = 0 ]; then echo "  ok   scan guard: absent baseline leaves exit 0"; pass=$((pass+1)); else echo "  FAIL scan guard: absent baseline exited $rc (want 0)"; fail=$((fail+1)); fi
@@ -492,6 +507,75 @@ out=$(dl "$SM" env CANDOR_POLICY="$SM/policy")
 absent "R809: the bind address is not published as a reached destination"                  "$out" 'reaches { 10.0.0.5:9 }'
 want   "R809: …and the same fn still fails closed under the other host (r809_bind)"          "$out" '[AS-EFF-008] `r809_bind`'
 rm -rf "$(dirname "$SM")"
+
+# ── 9a-R817. ⟨0.40⟩ an ACCEPT's peers are unseen; a bind marks nothing (PART 96's arms, deep engine) ──
+# SOUNDNESS R817: `accept`/`incoming` were members of `is_net_binding`, which withholds and marks nothing,
+# so beside a benign `connect("ok.example:80")` `allow Net ok.example` certified a server writing to whoever
+# connected (EXECUTED: a local client received the bytes). The binding controls must still certify — a
+# bind that never accepts, and an ephemeral client whose own `send_to` carries the destination. The R946
+# arm is candor-scan's binder defect; rustc types the `if let` payload, so here it is a no-regression pin.
+# SOUNDNESS R949: a bind handed a runtime STRING resolves the name (getaddrinfo), so it marks; a
+# `SocketAddr` bind does not.
+echo "== bind/listen ⟨0.40⟩ in the deep engine (R817 accept, R946 binder) =="
+BL=$(mktemp -d)/bl; mkdir -p "$BL/src"
+printf '[package]\nname="bl"\nversion="0.1.0"\nedition="2021"\n' > "$BL/Cargo.toml"
+cat > "$BL/src/main.rs" <<'RS'
+use std::io::Write;
+use std::net::{TcpListener, TcpStream, UdpSocket};
+pub fn bl_accept(l: &TcpListener) { let _ = TcpStream::connect("ok.example:80"); if let Ok((mut s, _)) = l.accept() { let _ = s.write_all(b"hi"); } }
+pub fn bl_incoming(l: &TcpListener) { let _ = TcpStream::connect("ok.example:80"); for s in l.incoming() { let _ = s.map(|mut s| s.write_all(b"hi")); } }
+pub fn bl_rtbind(a: std::net::SocketAddr) { let _ = TcpStream::connect("ok.example:80"); let _ = UdpSocket::bind(a); }
+pub fn bl_rtname(h: &str) { let _ = TcpStream::connect("ok.example:80"); let _ = UdpSocket::bind(h); }
+pub fn bl_recv() { let _ = TcpStream::connect("ok.example:80"); if let Ok(s) = UdpSocket::bind("0.0.0.0:5353") { let mut b = [0u8; 4]; let _ = s.recv_from(&mut b); } }
+pub fn bl_iflet(d: &str) { let _ = TcpStream::connect("ok.example:80"); if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { let _ = s.send_to(b"x", d); } }
+fn main() {
+    if std::env::args().count() > 99 {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        bl_accept(&l); bl_incoming(&l); bl_rtbind("0.0.0.0:0".parse().unwrap()); bl_rtname("0.0.0.0:0"); bl_recv(); bl_iflet("127.0.0.1:9");
+    }
+}
+RS
+echo "allow Net ok.example" > "$BL/policy"
+out=$(dl "$BL" env CANDOR_POLICY="$BL/policy")
+want   "R817: an accept beside a benign literal fails closed (bl_accept)"                    "$out" '[AS-EFF-008] `bl_accept`'
+want   "R817: the incoming spelling (bl_incoming)"                                          "$out" '[AS-EFF-008] `bl_incoming`'
+want   "R946 pin: an if-let-bound socket's runtime send_to fails closed (bl_iflet)"           "$out" '[AS-EFF-008] `bl_iflet`'
+want   "R949: a bind handed a runtime STRING resolves the name (bl_rtname)"                   "$out" '[AS-EFF-008] `bl_rtname`'
+absent "⟨0.40⟩ CONTROL: a SocketAddr bind that never accepts marks nothing (bl_rtbind)"         "$out" '[AS-EFF-008] `bl_rtbind`'
+absent "⟨0.40⟩ CONTROL: a datagram receive is not an accept (bl_recv)"                       "$out" '[AS-EFF-008] `bl_recv`'
+# CALIBRATION — the two absences above can fail: under a host the controls do not name, they fire.
+echo "allow Net ok2.example" > "$BL/policy"
+out=$(dl "$BL" env CANDOR_POLICY="$BL/policy")
+want   "⟨0.40⟩ calibration: bl_rtbind fails under a host it does not name"                  "$out" '`bl_rtbind`'
+rm -rf "$(dirname "$BL")"
+
+# ── 9a-R950. A resolved LITERAL name is a destination, in every spelling (deep engine) ──
+# SOUNDNESS R950 (UFCS): `ToSocketAddrs::to_socket_addrs(&"evil.example:80")`, the tuple and the method
+# spellings failed CLOSED here (the borrowed/tuple/receiver literal was never read) instead of publishing
+# the name they resolve. Under `allow Net ok.example evil.example` they must certify; the runtime one not.
+echo "== resolved literal names are published (R950) =="
+RS=$(mktemp -d)/rs; mkdir -p "$RS/src"
+printf '[package]\nname="rs"\nversion="0.1.0"\nedition="2021"\n' > "$RS/Cargo.toml"
+cat > "$RS/src/main.rs" <<'RS'
+use std::net::{TcpStream, ToSocketAddrs};
+pub fn rs_ufcs() { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&"evil.example:80"); }
+pub fn rs_tuple() { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&("evil.example", 80)); }
+pub fn rs_method() { let _ = TcpStream::connect("ok.example:80"); let _ = "evil.example:80".to_socket_addrs(); }
+pub fn rs_runtime(h: &str) { let _ = TcpStream::connect("ok.example:80"); let _ = ToSocketAddrs::to_socket_addrs(&(h, 80)); }
+fn main() { if std::env::args().count() > 99 { rs_ufcs(); rs_tuple(); rs_method(); rs_runtime("x"); } }
+RS
+echo "allow Net ok.example evil.example" > "$RS/policy"
+out=$(dl "$RS" env CANDOR_POLICY="$RS/policy")
+absent "R950: the UFCS borrowed literal is published and certifies (rs_ufcs)"              "$out" '`rs_ufcs`'
+absent "R950: the UFCS tuple literal is published and certifies (rs_tuple)"                "$out" '`rs_tuple`'
+absent "R950: the method-receiver literal is published and certifies (rs_method)"          "$out" '`rs_method`'
+want   "R950: a runtime tuple host still fails closed (rs_runtime)"                         "$out" '[AS-EFF-008] `rs_runtime`'
+# CALIBRATION — the three absences can fail: without evil.example in the policy they fire.
+echo "allow Net ok.example" > "$RS/policy"
+out=$(dl "$RS" env CANDOR_POLICY="$RS/policy")
+want   "R950 calibration: rs_ufcs fails when evil.example is not allowed"                   "$out" '`rs_ufcs`'
+want   "R950 calibration: rs_tuple fails when evil.example is not allowed"                  "$out" '`rs_tuple`'
+rm -rf "$(dirname "$RS")"
 
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="

@@ -364,6 +364,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     detail: format!("`{disp_q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
                     reason_class,
                     net_class,
+                    origin: String::new(),
                 });
             }
         }

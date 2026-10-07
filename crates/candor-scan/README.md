@@ -75,9 +75,12 @@ curated-pure crates**. It still
 catches every boundary crossing the scan *can* see, deterministically, with zero extra install.
 
 **The baseline guard floor (AS-EFF-005).** `CANDOR_BASELINE=<saved report path or --out prefix>` (or
-the `.candor/config` `baseline` key) turns the scan into a regression ratchet: any *existing* function
-that **gained** an effect vs the saved report is one `[AS-EFF-005]` violation → exit 1 (violations
-join the `--gate-json` verdict); new functions are exempt. No baseline file → a stderr note, guard
+the `.candor/config` `baseline` key) turns the scan into a regression ratchet: any function that
+**gained** an effect vs the saved report is one `[AS-EFF-005]` violation → exit 1 (violations join the
+`--gate-json` verdict, each with `origin`). ⟨0.40⟩ a function ABSENT from the baseline is compared
+against ∅ — new effectful code fails, new pure code passes, a new `Unknown`-only function is named in a
+note — and under a `--out` prefix a crate with no file of its own beside other crates' files is absent
+from a present baseline (SOUNDNESS R932/R933). No baseline file → a stderr note, guard
 inactive; a baseline that is unparseable or was produced by a **different scanner build** (the
 envelope `candor.version`) → exit 2 *without* evaluating — a stale baseline is invalid gate input
 (spec §2.1), never a silent skip, never a stale compare. Record one: `candor-scan <dir> --out

@@ -1545,6 +1545,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         &mut merged.fields,
         &mut merged.field_elem_trait,
         &mut merged.field_elem,
+        &mut merged.unbound_gen_fields,
     );
     // VEIN A — Pass B now reads the manifest's dependency names (`lang::glob_origin`), so a cached
     // FnInfo set is reusable only under the same dependency list: it is folded into the reuse key.
@@ -1577,7 +1578,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,
-                       impl_members: &merged.impl_members };
+                       impl_members: &merged.impl_members, unbound_gen_fields: &merged.unbound_gen_fields };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -1797,7 +1798,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             let idx = if pick == 0 { &fd.fields } else { &fd.field_elem };
                             idx.get(leaf.as_str()).and_then(|m| m.get(k)).map(String::as_str)
                         }).collect();
-                        let anchored = tv.len() >= 2 && tv.iter().all(|v| v.starts_with("crate::"));
+                        // SOUNDNESS R898 — a BARE single-segment spelling of a type this crate declares is
+                        // the same crate-local claim as an anchored one. Twins spelled one each way
+                        // (`use super::Connection` anchored in hyper's `client::conn::http1::upgrades`, the
+                        // server twin's own bare `Connection`) were ambiguous with no twin leaf, so the
+                        // leaf-keyed `field_elem` kept the LAST file's entry and the server's
+                        // `self.inner.map(|c| c.into_parts())` read the CLIENT's `['Fs']` while running the
+                        // server's `Env` (`deny Env` 0). PRE-EXISTING for a FILE-module twin (708ce46,
+                        // `rustagent-resid/fx/r898twinf`); R898 anchoring inline modules reached it in
+                        // hyper itself, and the corpus A/B is what showed it.
+                        let anchored = tv.len() >= 2
+                            && tv.iter().all(|v| v.starts_with("crate::") || (!v.contains("::") && quals.contains_key(*v)));
                         let leaves: BTreeSet<&str> = tv.iter().map(|v| v.rsplit("::").next().unwrap_or(v)).collect();
                         if anchored && leaves.len() == 1 {
                             if let Some(l) = leaves.iter().next() {
@@ -2063,6 +2074,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // So a `Type::method`/`mod::fn` call matches the qualified tail (keeping `RequestBuilder::new` distinct
     // from `Body::new`) and a bare free call matches the leaf — BOTH only when the match is UNAMBIGUOUS
     // (exactly one def), under-reporting rather than fabricating. See `resolve_target` + the module doc.
+    // SOUNDNESS R894 — ONE UNIT PER PUBLISHED DECLARATION QUAL. `#[cfg]` twins of a foreign declaration
+    // (libc's `unix::usleep`, `pthread_once`; 28 quals in web-sys) are one name with one answer, and a
+    // second unit is a DUPLICATE ROW that breaks `analyzed.count == |callgraph nodes|` (measured: libc
+    // 7802 vs 7800, web-sys 20472 vs 20444; 0 duplicates before R894). And where a REAL unit carries the
+    // same qual (a Rust shim under one `#[cfg]`, the declaration under the other — termios'
+    // `ffi::cfmakeraw`), the declaration is folded INTO it: SPEC §4's union over the units of one qual,
+    // carried by one row, so the shim's callers inherit the arm that is a foreign call.
+    {
+        let real: std::collections::HashSet<String> =
+            fns.iter().filter(|f| !f.extern_decl).map(|f| f.qual.clone()).collect();
+        let folded: std::collections::HashSet<String> =
+            fns.iter().filter(|f| f.extern_decl && real.contains(&f.qual)).map(|f| f.qual.clone()).collect();
+        let mut kept_decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        fns.retain(|f| !f.extern_decl || (!real.contains(&f.qual) && kept_decls.insert(f.qual.clone())));
+        for f in fns.iter_mut().filter(|f| folded.contains(&f.qual)) {
+            f.unresolved = true;
+            if !f.unresolved_why.iter().any(|w| w == "native:extern fn") {
+                f.unresolved_why.push("native:extern fn".to_string());
+            }
+        }
+    }
+    // The surviving declaration units, for the report's `declaration` key (R894).
+    let decl_quals: std::collections::HashSet<String> =
+        fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
@@ -2075,6 +2110,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // sharing the static's NAME would see an ambiguous leaf and stop resolving (a spurious
         // under-report on unrelated code). Their tail2 (`<lazy>::NAME`) is unique and the forcing edge
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
+        // SOUNDNESS R894 — a published foreign declaration's unit is for the REPORT; in-crate calls keep
+        // answering through `extern_fns`, so it joins neither local resolution index.
+        if f.extern_decl {
+            continue;
+        }
         let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);
         if !is_lazy_unit {
             // SOUNDNESS R222/R129 — these buckets are the input to a UNIQUENESS test, so they must hold
@@ -4055,7 +4095,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // excludes build-then-execute terminals (`fetch_all`/`load`/`all`) and lifecycle ops
                         // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
                         incomplete.entry(f.qual.clone()).or_default().insert("Db");
-                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok()
+                        // R817 — an accept is marked just below, outside this arm; not "let through".
+                        && !(eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf))
+                    {
                         // THE INVERSE PROBE (R379/R381 follow-on, diagnostic only — no behaviour).
                         // R379 was found because a verb `classify` calls Net was absent from the
                         // masking ALLOWLIST, and `allow Net <benign literal>` then certified a runtime
@@ -4086,7 +4129,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `connect("api.example.com:443")` — could not be certified by `allow Net api.example.com`
                 // even though its destination is right there. `UdpSocket` has no constructor but `bind`,
                 // so that is every UDP client. Withhold the literal; add no hedge.
+                //
+                // ⟨0.40⟩ SOUNDNESS R817 — …and an ACCEPT is not a bind. `accept`/`incoming` sat on the
+                // binding list, so they were withheld and marked nothing, exactly like a use-verb: beside a
+                // benign `connect("ok.example:80")`, `allow Net ok.example` certified a server writing to
+                // whoever connected. The peer of an accept is chosen by the connecting side, so no literal
+                // can name it: mark `Net` incomplete whether or not a literal was captured (a server
+                // bootstrap's literal is its LISTEN address, withheld like a bind's). The shared predicate
+                // is asked by the deep engine too (src/lib.rs).
+                if eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf) {
+                    if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        eprintln!("R817ACCEPT {} :: {}", f.qual, path_real);
+                    }
+                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                    continue;
+                }
                 if eff == "Net" && candor_classify::is_net_binding(&c.leaf) {
+                    // ⟨0.40⟩ SOUNDNESS R949 — …EXCEPT the name a runtime STRING makes it resolve. The
+                    // collector sets `path_lits_partial` on a `bind` whose argument 0 is a provably
+                    // string-typed runtime value: std resolves it through `impl ToSocketAddrs for str`
+                    // (getaddrinfo), a Net reach whose locator nobody can see, so a benign sibling literal
+                    // must not certify it. A `SocketAddr` or untyped argument marks nothing.
+                    if c.path_lits_partial {
+                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                            eprintln!("R949NAME {} :: {}", f.qual, path_real);
+                        }
+                        incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                    }
                     continue;
                 }
                 if let Some(s) = &c.str_arg {
@@ -5494,6 +5563,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 Vec::new()
             },
             interface_union: false,
+            declaration: decl_quals.contains(q),
             dispatches_on: dispatches,
         });
     }
@@ -6801,7 +6871,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if v.is_empty() {
                     eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (syntactic floor: resolution-heavy code can under-report silently; see `candor blindspots`)");
                 } else {
-                    eprintln!("candor-scan: {} baseline regression(s) — an existing function gained an effect (AS-EFF-005)", v.len());
+                    eprintln!("candor-scan: {} baseline regression(s) — a function gained an effect versus the baseline, or is absent from it and performs one (AS-EFF-005)", v.len());
                     guard_code = 1;
                 }
             }

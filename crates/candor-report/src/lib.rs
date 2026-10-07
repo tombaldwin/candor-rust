@@ -291,6 +291,14 @@ pub struct ReportEntry {
     /// lets a consumer chained onto an effectful implementor see the effect at all.
     #[serde(default, rename = "interfaceUnion", skip_serializing_if = "std::ops::Not::not")]
     pub interface_union: bool,
+    /// SOUNDNESS R894 — True on the unit candor-scan publishes for a `pub` FOREIGN-FUNCTION DECLARATION
+    /// (`extern "C" { pub fn creat(..); }`): a name with no body, answered `Unknown` + `native:extern fn`.
+    /// It is the one fact a chained consumer cannot recover from the row's shape (a function whose only
+    /// call is a foreign one looks identical), and it decides whether a report whose every unit is a
+    /// declaration grants coverage (it does not — see candor-scan `deps.rs`). An extra key, tolerated by
+    /// §2's forward-compatibility rule exactly as `interfaceUnion` is. Omitted when false.
+    #[serde(default, rename = "declaration", skip_serializing_if = "std::ops::Not::not")]
+    pub declaration: bool,
     /// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction members this function DISPATCHES on, transitively,
     /// spelled `Iface::method` in this report's own package namespace (so a consumer forms the interface-union
     /// key as `<this package>#<member>` with no second spelling rule).
@@ -1270,6 +1278,13 @@ pub struct GateViolation {
     /// security gate bit. Empty/omitted otherwise (SPEC §6.2, NET-DESTINATION-CLASS-DESIGN.md).
     #[serde(rename = "netClass", default, skip_serializing_if = "Vec::is_empty")]
     pub net_class: Vec<String>,
+    /// ⟨0.40⟩ SPEC §3 *baseline guard* — on every AS-EFF-005 row, the ⟨0.12⟩ existence label of the
+    /// function in the baseline: `"existing"` (in the baseline report or a node of its callgraph
+    /// sidecar), `"new"` (in neither, with the sidecar present and loaded), `"unknown"` (absent from the
+    /// baseline report and no sidecar to decide). `"new"` means ABSENT UNDER THIS KEY, not proof of new
+    /// code — a renamed key reads as absent. Omitted on every other rule.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin: String,
 }
 
 /// Serialize the §3.3 gate verdict `{ spec, ok, violations }` — the machine analog of the `AS-EFF`

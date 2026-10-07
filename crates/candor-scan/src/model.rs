@@ -167,6 +167,12 @@ pub(crate) struct FnInfo {
     /// rev35).
     #[serde(rename = "fd", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign_dispatch: Vec<String>,
+    /// SOUNDNESS R894 — a SYNTHETIC unit for a `pub` foreign-function DECLARATION (`extern "C" { pub fn
+    /// creat(..); }`), so the report publishes what in-crate analysis already answers for that name:
+    /// `Unknown` + `native:extern fn`. Kept out of the local resolution indexes (`by_leaf`/`by_tail2`):
+    /// in-crate calls keep answering through `extern_fns`, unchanged.
+    #[serde(rename = "xd", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) extern_decl: bool,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
@@ -454,6 +460,21 @@ pub(crate) fn static_elem_key(name: &str) -> String {
 
 pub(crate) fn ret_generic_key(fn_leaf: &str) -> String {
     format!("{RET_GENERIC}{fn_leaf}")
+}
+
+/// SOUNDNESS R893 — a FREE fn's declared return, keyed by its crate-anchored QUALIFIED path
+/// (`crate::a::mkv`), beside the leaf-keyed entry. Two same-named factories in different modules
+/// (`a::mkv -> Vec<G>`, `b::mkv -> Vec<H>`) withdraw the leaf entry, which is right for a bare call and
+/// wrong for a call whose written path names one of them — vein A already anchors that path.
+pub(crate) const RET_QUAL: &str = "<retqual>";
+pub(crate) const RET_QUAL_ELEM: &str = "<retqualelem>";
+
+pub(crate) fn qual_ret_key(qual: &str) -> String {
+    format!("{RET_QUAL}{qual}")
+}
+
+pub(crate) fn qual_elem_ret_key(qual: &str) -> String {
+    format!("{RET_QUAL_ELEM}{qual}")
 }
 
 pub(crate) fn elem_ret_key(fn_leaf: &str) -> String {
@@ -840,6 +861,8 @@ pub(crate) struct TraitIndexes<'a> {
     /// reader: `route_trait_member_path`, which must not edge a UFCS call to `Ty::m` when `impl Tr for
     /// Ty` does not declare `m` — `Ty::m` is then an INHERENT method the call does not run (R53).
     pub(crate) impl_members: &'a std::collections::HashSet<String>,
+    /// SOUNDNESS R897 — see `cache::MergedDecls::unbound_gen_fields`.
+    pub(crate) unbound_gen_fields: &'a TraitFieldIndex,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

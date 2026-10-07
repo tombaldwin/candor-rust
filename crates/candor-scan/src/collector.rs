@@ -223,6 +223,8 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) bound_trait_leaves: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R897 — see `cache::MergedDecls::unbound_gen_fields`.
+    pub(crate) unbound_gen_fields: &'a TraitFieldIndex,
     /// SOUNDNESS R562 — see `TraitIndexes::dyn_fields`.
     pub(crate) dyn_trait_fields: &'a TraitFieldIndex,
     /// SOUNDNESS R551 — ⟨0.39⟩ obligation 2's key set (`<owner>#<qualified trait>::<member>` → local
@@ -427,6 +429,9 @@ pub(crate) struct CallCollector<'a> {
     /// Flow-INSENSITIVE and body-wide, matching `vars`' existing discipline: a false shadow costs a
     /// forcing edge (a miss), where a missed shadow charges a static's effect to a local (a fabrication).
     pub(crate) bound_names: std::collections::HashSet<String>,
+    /// SOUNDNESS R810 — how this body changes a binding after its `let` (`decls::mut_uses`). A `mut`
+    /// binding it changes never carries a literal in `str_locals`.
+    pub(crate) mut_uses: crate::decls::MutUses,
     /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn DISPATCHES on through a
     /// receiver whose concrete implementor(s) are resolved by LOCAL bounded CHA — recorded whenever the
     /// dispatch is attempted, REGARDLESS of how many local implementors are visible (0, 1..12, >12) or
@@ -714,7 +719,52 @@ impl<'a> CallCollector<'a> {
             }
             return None;
         }
-        Some(ty)
+        // SOUNDNESS R899 — `Backend::new()` where `Backend` is a `#[cfg]`-duplicated `use … as Backend`
+        // typed as whichever arm was written LAST, so `let b = Backend::new(); b.go()` and the chain
+        // `Backend::new().go()` charged the inactive arm (executed: `['Env']` over a body that writes,
+        // `deny Fs` 0). The parameter route has unioned the arms since R369; this is the same rule.
+        let head = ctor_written_head(expr);
+        Some(match head {
+            Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
+            None => ty,
+        })
+    }
+
+    /// SOUNDNESS R369/R899 — a type answer `cur` for something written with the head `head`, widened to
+    /// the UNION of every `#[cfg]` arm that binds `head` (`use_alts`), joined with `ALIAS_ALT_SEP` for
+    /// `scan.rs` to adjudicate per arm. `resolve` re-asks the same question with the use map pinned to
+    /// one arm. The rule is the parameter route's (`decls::fninfo`), so the positions cannot disagree:
+    /// only an answer that already exists is widened, and only when the arms give two or more distinct
+    /// types that include it. One arm, or arms that agree, return `cur` unchanged.
+    pub(crate) fn union_over_arms(
+        &self,
+        head: &str,
+        cur: String,
+        resolve: impl Fn(&HashMap<String, String>) -> Option<String>,
+    ) -> String {
+        let Some(arms) = self.use_alts.get(head).filter(|a| a.len() >= 2) else { return cur };
+        if cur.contains(crate::decls::ALIAS_ALT_SEP) {
+            return cur;
+        }
+        let mut tys: Vec<String> = Vec::new();
+        for a in arms {
+            let mut u2: HashMap<String, String> = (*self.uses).clone();
+            u2.insert(head.to_string(), a.clone());
+            if let Some(t) = resolve(&u2) {
+                if !t.contains(crate::decls::ALIAS_ALT_SEP) && !tys.contains(&t) {
+                    tys.push(t);
+                }
+            }
+        }
+        if tys.len() >= 2 && tys.contains(&cur) {
+            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                eprintln!("R899UNION");
+            }
+            tys.sort();
+            tys.join(&crate::decls::ALIAS_ALT_SEP.to_string())
+        } else {
+            cur
+        }
     }
 
     pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
@@ -1501,8 +1551,23 @@ impl<'a> CallCollector<'a> {
                     if p.qself.is_none() && segs.len() >= 2 {
                         let leaf = segs[segs.len() - 1].ident.to_string();
                         let owner = segs[segs.len() - 2].ident.to_string();
+                        // SOUNDNESS R879 — the ALL-CAPS refusal was wider than its reason. It exists so a
+                        // dependency's `dep::SHARED` keeps R856's disclosure (a dependency's name cannot
+                        // say static or struct); but it also refused this crate's OWN `pub struct U;`
+                        // reached as `m::U.go()` (and `m::UB`, `m::IO` — any leaf with no lowercase
+                        // letter), which then had no route at all: ABSENT, `deny Fs` 0, executed. A caps
+                        // leaf now types when the path is anchored in THIS crate (`expand` gave it a
+                        // `crate::` head) and the crate declares no `const`/`static` of that leaf — the
+                        // two facts a dependency path cannot supply. Measured on the first cut, which
+                        // also typed dependency paths: `libc::EPOLLOUT | libc::EPOLLHUP` formed an
+                        // operator call on a "type" and gained `invisible: [libc]` on 41 corpus rows.
+                        let caps_ok = !crate::lang::caps_value_leaf(&leaf)
+                            || !self.static_types.contains_key(&leaf);
+                        let caps_local = !crate::lang::caps_value_leaf(&leaf)
+                            || expand(&crate::lang::path_to_string_lc(&p.path), &self.uses).starts_with("crate::");
                         if crate::lang::is_type_ident(&leaf)
-                            && !crate::lang::caps_value_leaf(&leaf)
+                            && caps_ok
+                            && caps_local
                             && !crate::lang::is_type_ident(&owner)
                             && owner != "Self"
                             && segs.iter().all(|s| s.arguments.is_none())
@@ -1510,6 +1575,9 @@ impl<'a> CallCollector<'a> {
                             let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                             if !full.contains('<') && !full.contains(crate::decls::ALIAS_ALT_SEP) {
                                 probe("R856QUNIT");
+                                if crate::lang::caps_value_leaf(&leaf) {
+                                    probe("R879CAPS"); // the CHANGED branch: a caps leaf R856 refused
+                                }
                                 return Some(full);
                             }
                         }
@@ -1611,6 +1679,13 @@ impl<'a> CallCollector<'a> {
                     }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R897 — the `fields` entry of an UNBOUNDED generic field is the struct
+                // parameter's own NAME (`"S"`), which names no type; where THIS method bounds the
+                // parameter, the dispatch route in `resolve_recv_traits` answers and this must not
+                // shadow it (the same shadow R476 removes for an impl-level bound).
+                if !self.method_bound_gen_field(&f.base, base_leaf, &key).is_empty() {
+                    return None;
+                }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) => self.nominal_ctor_type(expr),
@@ -1663,6 +1738,105 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// ⟨0.40⟩ SOUNDNESS R949 — whether `e` is PROVABLY a runtime string: a `&str`/`String`-typed name, a
+    /// `format!`, a `+` concatenation onto one, `.to_string()`/`.as_str()`, `String::from`/`String::new`, or a
+    /// tuple whose host slot is one. A string LITERAL is not (a literal bind is withheld and marks nothing);
+    /// anything this cannot prove — a `SocketAddr`, an IP tuple, an untyped name — answers `false`.
+    fn is_provably_str(&self, e: &syn::Expr) -> bool {
+        match e {
+            syn::Expr::Reference(r) => self.is_provably_str(&r.expr),
+            syn::Expr::Paren(p) => self.is_provably_str(&p.expr),
+            syn::Expr::Group(g) => self.is_provably_str(&g.expr),
+            syn::Expr::Macro(m) => m.mac.path.segments.last().is_some_and(|s| s.ident == "format"),
+            syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::Add(_)) => self.is_provably_str(&b.left),
+            syn::Expr::MethodCall(m) => match m.method.to_string().as_str() {
+                "to_string" | "as_str" => true,
+                "to_owned" | "clone" => self.is_provably_str(&m.receiver),
+                _ => false,
+            },
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    matches!(segs.as_slice(), [.., t, f] if t == "String" && matches!(f.as_str(), "from" | "new"))
+                }
+                _ => false,
+            },
+            syn::Expr::Tuple(t) => t.elems.first().is_some_and(|h| self.is_provably_str(h)),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.is_provably_str(&u.expr),
+            syn::Expr::Path(_) | syn::Expr::Field(_) => matches!(
+                self.resolve_recv_type(e).as_deref(),
+                Some("str" | "String" | "std::string::String" | "alloc::string::String")
+            ),
+            _ => false,
+        }
+    }
+
+    /// SOUNDNESS R950 — the DETERMINED name a `ToSocketAddrs` value resolves: a string literal (or a const
+    /// the string resolver answers), or a 2-tuple `(host, port)` whose host is one (`host:port` when the port
+    /// is an integer literal). Peels `&`/parens, so the METHOD receiver (`"h:80".to_socket_addrs()`) and the
+    /// UFCS argument (`ToSocketAddrs::to_socket_addrs(&"h:80")`, `&("h", 80)`) are one answer.
+    fn socket_name_lit(&self, e: &syn::Expr) -> Option<String> {
+        let str_of = |e: &syn::Expr| match peel_recv(e) {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(l), .. }) => Some(l.value()),
+            other => self.resolve_str_expr(other),
+        };
+        match peel_recv(e) {
+            syn::Expr::Tuple(t) if t.elems.len() == 2 => {
+                let host = t.elems.first().and_then(str_of)?;
+                let port = match t.elems.iter().nth(1) {
+                    Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. })) => Some(i.base10_digits().to_string()),
+                    _ => None,
+                };
+                Some(match port { Some(p) => format!("{host}:{p}"), None => host })
+            }
+            other => str_of(other),
+        }
+        .filter(|v| !v.trim().is_empty())
+    }
+
+    /// SOUNDNESS R946 — the type of the PAYLOAD a `Some(x)`/`Ok(x)` pattern binds out of `expr`, for the four
+    /// refutable binders (`if let`, `while let`, let-else, a `match` arm).
+    ///
+    /// Those binders asked only `resolve_elem_type`, which answers for an Option/Result-typed CONTAINER (a
+    /// field, a param, an adapter over one — R185/R345) and for nothing that is CONSTRUCTED there. So
+    /// `if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { s.send_to(b"x", d) }` left `s` untyped, the `send_to`
+    /// reached no rule and no masking arm, and beside a benign `connect("ok.example:80")` `allow Net in <fn>
+    /// ok.example` exited **0** over a datagram to a caller-chosen address — while `let s =
+    /// UdpSocket::bind(..).unwrap()` and `?` typed `s` and failed closed. The class is the BINDER, not the
+    /// socket: `if let Ok(c) = reqwest::blocking::Client::builder().build() { c.get(d).send() }` was the
+    /// same bypass over an HTTP request, and `.ok()` + `if let Some(s)` the same again.
+    ///
+    /// The fallback is the plain `let`'s CONSTRUCTION route, `nominal_ctor_type`, because `if let Ok(s) = E`
+    /// binds exactly what `let s = E.unwrap()` binds and `ctor_type` already passes `?`/`.unwrap()`/`.ok()`
+    /// through to the chain root. `resolve_elem_type` stays first, so every answer it gave is unchanged and
+    /// this can only ADD a type where there was none. Two guards, both measured on the first corpus A/B:
+    ///
+    ///   * THE PATTERN MUST BE std's `Some`/`Ok`. `some_ok_binding` matches on the last segment, so a LOCAL
+    ///     enum's `ArchivedRcWeak::Some(r)` qualified too; with the fallback the arm typed `r` as the
+    ///     scrutinee's own enum and pre-empted `visit_arm`'s variant-payload route — rkyv 0.7.46's
+    ///     `ArchivedRcWeak::deserialize` LOST its `Unknown` row (a disclosure gone, nothing replacing it).
+    ///   * THE SCRUTINEE MUST BE A CONSTRUCTION, never a bare name. The first cut also asked the strict
+    ///     `type_of`, which answers a NAME with the name's own type — right for `let r = bind(..); if let
+    ///     Ok(s) = r` and wrong for `match self { Some(x) => .. }` inside `impl … for Option<L>`, where it
+    ///     typed the payload as `Option`. A name cannot say whether its recorded type was unwrapped, so
+    ///     it is not asked; that spelling stays as it was (see the test's residual note).
+    fn resolve_payload_type(&self, pat: &syn::Pat, expr: &syn::Expr) -> Option<String> {
+        if let Some(e) = self.resolve_elem_type(expr) {
+            return Some(e);
+        }
+        if !crate::lang::std_some_ok_pat(pat) || matches!(peel_recv(expr), syn::Expr::Path(_)) {
+            return None;
+        }
+        let t = self.nominal_ctor_type(expr);
+        // §E1 REACH PROBE, on the ADDED branch only — an unchanged corpus row is not evidence it ran.
+        if let Some(t) = &t {
+            if std::env::var_os("CANDOR_R946_INSTR").is_some() {
+                eprintln!("R946PAYLOAD\t{t}");
+            }
+        }
+        t
     }
 
     /// The ELEMENT type of an expression that evaluates to a COLLECTION — a collection var/param (via
@@ -1764,8 +1938,24 @@ impl<'a> CallCollector<'a> {
                     return None;
                 }
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
-                crate::lang::recorded_return_type(leaf, self.returns)?;
-                let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned();
+                // SOUNDNESS R893 — two same-named factories withdrew the leaf's answer (both `-> Vec<_>`
+                // agree on the container and disagree on the element, so it is the ELEMENT entry that
+                // goes); the written path names one of them (`for g in a::mkv()` beside a `b::mkv`), so
+                // its crate-anchored qualified entry answers. Asked only once the leaf route declines.
+                let qual_elem = || {
+                    if !full.starts_with("crate::") {
+                        return None;
+                    }
+                    let e = self.returns.get(&crate::model::qual_elem_ret_key(&full)).cloned();
+                    if e.is_some() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                        eprintln!("R893QUALELEM {full}");
+                    }
+                    e
+                };
+                if crate::lang::recorded_return_type(leaf, self.returns).is_none() {
+                    return qual_elem();
+                }
+                let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned().or_else(qual_elem);
                 if e.is_some() && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                     eprintln!("VEINB_ELEMRET\t{leaf}");
                 }
@@ -2498,6 +2688,54 @@ impl<'a> CallCollector<'a> {
     /// the commonest Exec spelling there is — because `status` and `unwrap` are not builders. A guard
     /// that masks the fully-determined case is the over-charge this fix's own control forbids, and it
     /// showed up on the benign arm of the fixture rather than in review.
+    /// SOUNDNESS R810 — whether a `mut` binding initialised from `init` still holds that value at every
+    /// use, given how this body changes it (`decls::mut_uses`). An assignment or a `&mut` borrow always
+    /// disqualifies. A method call disqualifies unless it cannot rewrite what `str_locals` records:
+    ///  - on a `Command` built by `Command::new(..)` the recorded value is the PROGRAM, and no method on a
+    ///    `Command` renames it (R460's premise) — so `let mut c = Command::new("git"); c.arg(x);
+    ///    c.status()`, the dominant Exec spelling, keeps its head;
+    ///  - on a string or path it is the VALUE, and `push`/`push_str`/`set_file_name`/`write!` rewrite it.
+    ///    Only the methods below, which take `&self` or `self` on `str`/`String`/`Path`/`PathBuf`/
+    ///    `OsStr`, are known not to; anything else disqualifies. An ALLOWLIST of the harmless, so a
+    ///    method nobody listed costs a disclosure rather than a false literal.
+    fn literal_survives(&self, name: &str, init: &syn::Expr) -> bool {
+        if self.mut_uses.assigned.contains(name) {
+            return false;
+        }
+        let Some(methods) = self.mut_uses.recv.get(name) else { return true };
+        let mut head = peel_recv(init);
+        while let syn::Expr::MethodCall(m) = head {
+            head = peel_recv(&m.receiver);
+        }
+        let is_command = match head {
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    segs.len() >= 2 && segs[segs.len() - 2] == "Command" && segs[segs.len() - 1] == "new"
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_command {
+            return true;
+        }
+        methods.iter().all(|m| {
+            matches!(
+                m.as_str(),
+                "as_str" | "as_path" | "as_os_str" | "as_ref" | "as_bytes" | "borrow" | "clone"
+                    | "to_owned" | "to_string" | "to_str" | "to_string_lossy" | "to_path_buf"
+                    | "display" | "len" | "is_empty" | "exists" | "try_exists" | "is_file" | "is_dir"
+                    | "is_symlink" | "is_absolute" | "is_relative" | "starts_with" | "ends_with"
+                    | "contains" | "join" | "with_extension" | "with_file_name" | "parent"
+                    | "file_name" | "file_stem" | "extension" | "components" | "iter" | "chars"
+                    | "bytes" | "trim" | "lines" | "split" | "eq" | "ne" | "cmp" | "partial_cmp"
+                    | "metadata" | "symlink_metadata" | "canonicalize" | "read_dir" | "read_link"
+                    | "into_os_string" | "into_boxed_path" | "into_bytes" | "into_string" | "into"
+            )
+        })
+    }
+
     fn resolve_cmd_recv(&self, expr: &syn::Expr) -> Option<String> {
         match peel_recv(expr) {
             syn::Expr::MethodCall(m) => self.resolve_cmd_recv(&m.receiver),
@@ -2654,6 +2892,44 @@ impl<'a> CallCollector<'a> {
     /// would have short-circuited and the walk nevertheless produced an answer — i.e. on the rows this
     /// change can move and on no others. Counts HITS, not distinct sites: the walk recurses through
     /// this wrapper, so one nested resolution counts at each level it answers at.
+    /// SOUNDNESS R897 — the trait leaves of `self.<field>` where the field's type is a struct generic
+    /// parameter with NO impl-level bound, but THIS method bounds the impl's parameter at that position in
+    /// its own `where` clause or generics. `impl<S> W<S> { fn run(&self) where S: Sink { self.s.emit() } }`
+    /// was ABSENT (executed, `deny Fs` 0) while the same bound on the impl, or a parameter `s: &S` under
+    /// the same method bound, charged. The position — not the name — maps the struct's parameter to the
+    /// impl's (`impl<B, A> W<A, B>` is legal), read off the impl's own self-type arguments
+    /// (`decls::IMPL_ARGS_KEY`). Only on `self` (the receiver whose type IS the impl's self type), and only
+    /// from this method's bounds, so a bound can never leak to a method that does not state it.
+    fn method_bound_gen_field(&self, base: &syn::Expr, base_leaf: &str, field: &str) -> Vec<String> {
+        if self.unbound_gen_fields.is_empty() || self.generic_bounds.is_empty() {
+            return Vec::new();
+        }
+        let syn::Expr::Path(p) = peel_value(base) else { return Vec::new() };
+        if !p.path.is_ident("self") {
+            return Vec::new();
+        }
+        let Some(positions) = self.unbound_gen_fields.get(base_leaf).and_then(|m| m.get(field)) else {
+            return Vec::new();
+        };
+        let Some(args) = self.uses.get(crate::decls::IMPL_ARGS_KEY) else { return Vec::new() };
+        let args: Vec<&str> = args.split(',').collect();
+        let mut out: Vec<String> = Vec::new();
+        for p in positions {
+            let Some((i, _)) = p.split_once('\u{1f}') else { continue };
+            let Some(i) = i.parse::<usize>().ok() else { continue };
+            let Some(arg) = args.get(i) else { continue };
+            for l in self.generic_bounds.get(*arg).into_iter().flatten() {
+                if !out.contains(l) {
+                    out.push(l.clone());
+                }
+            }
+        }
+        if !out.is_empty() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            eprintln!("R897WHERE {base_leaf}.{field} {out:?}");
+        }
+        out
+    }
+
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
         let old_guard_would_skip =
             self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return;
@@ -2719,7 +2995,9 @@ impl<'a> CallCollector<'a> {
             && !self.has_dyn_return
             && self.elem_trait_of.is_empty()
             && self.field_elem_trait.is_empty()
-            && self.callable_statics.is_empty();
+            && self.callable_statics.is_empty()
+            // SOUNDNESS R897 — the Field arm's `method_bound_gen_field` reads these two.
+            && (self.unbound_gen_fields.is_empty() || self.generic_bounds.is_empty());
         // `has_dyn_return` is the `returns`-index half of this condition and covers all four dispatch
         // sentinels (R540b) — the arms gated here read `returns` only through `ret_dyn_leaves` /
         // `ret_dispatch_leaves`, so a crate with none of them can answer nothing from it.
@@ -2819,7 +3097,10 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
-                self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()).unwrap_or_default()
+                match self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()) {
+                    Some(l) => l,
+                    None => self.method_bound_gen_field(&f.base, base_leaf, &key),
+                }
             }
             // `xs[i].method()` / `self.handlers[0].method()` — the receiver is the indexed BASE's
             // ELEMENT; mirrors `resolve_recv_type`'s own `Index` arm (its concrete-type counterpart,
@@ -4474,7 +4755,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             .or_else(|| if candor_classify::is_net_host_arg1(&leaf) {
                                 positional_str_lit(&node.args, 1)
                             } else { None })
-                            .or_else(|| self.resolve_host_arg(&node.args));
+                            .or_else(|| self.resolve_host_arg(&node.args))
+                            // SOUNDNESS R950 (UFCS) — `ToSocketAddrs::to_socket_addrs(&"evil.example:80")`
+                            // and `<&str as ToSocketAddrs>::to_socket_addrs(&("evil.example", 80))`: the
+                            // locator is the borrowed argument, which `positional_str_lit` (no `&` peel,
+                            // no tuple) never read, so the resolved name failed closed instead of being
+                            // published — the method-receiver spelling already publishes it.
+                            .or_else(|| if leaf == "to_socket_addrs" {
+                                let l = node.args.first().and_then(|a| self.socket_name_lit(a));
+                                if l.is_some() && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                                    eprintln!("R950UFCS lit={l:?}");
+                                }
+                                l
+                            } else { None });
                         // (R53 UFCS-dispatch edge REVERTED after code review: pushing a typed `T::method` edge
                         // from a UFCS `Trait::method(&t)` / `<T as Trait>::method` could resolve to T's
                         // *inherent* `method` when the call actually runs the trait method — candor keys both
@@ -4491,7 +4784,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let two_path = candor_classify::is_fs_path_arg(&leaf)
                             && candor_classify::fs_path_arity(&leaf) == 2;
                         let path_lit2 = if two_path { positional_str_lit(&node.args, 1) } else { None };
-                        let path_lits_partial = two_path && path_lit2.is_none();
+                        // ⟨0.40⟩ SOUNDNESS R949 — `path_lits_partial` also carries the Net-bind fact "argument 0
+                        // is a RUNTIME STRING". A bind marks nothing AS A BIND, but std's `impl ToSocketAddrs
+                        // for str` RESOLVES a string (getaddrinfo) — a Net reach whose locator is the name.
+                        // Only a PROVABLY string-typed argument (`is_provably_str`); a `SocketAddr`, an IP
+                        // tuple or an untyped name marks nothing, which is the hedge-every-bind cost ⟨0.40⟩
+                        // removed. Adjudicated in scan.rs, where the call is known to be a Net bind.
+                        let runtime_name = leaf == "bind"
+                            && str_arg.is_none()
+                            && node.args.first().is_some_and(|a| self.is_provably_str(a));
+                        let path_lits_partial = (two_path && path_lit2.is_none()) || runtime_name;
                         // DROP-GLUE, spelling 1 of 3: a CALL that constructs. `Guard::new()` (the
                         // assoc-fn form scan.rs used to key on directly) and `Guard(f)` / `E::V(f)`
                         // (the tuple-struct form, which had NO route at all — it is a single-segment
@@ -4771,6 +5073,64 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                 }
             }
+        }
+        // SOUNDNESS R950 — `ToSocketAddrs::to_socket_addrs` ON A RECEIVER THIS FILE CANNOT TYPE. The method is
+        // reached through its receiver's type, and only a typed receiver (a `&str` PARAMETER) formed a path
+        // `classify` knows; a TUPLE (`(h, 80u16).to_socket_addrs()`) or a string LITERAL
+        // (`"evil.example:80".to_socket_addrs()`) left only the bare-leaf twin, which classifies nothing:
+        // the DNS resolution was ABSENT from `functions[]` and `deny Net` exited 0. The name is std's trait
+        // method, so an untyped receiver is recorded as the trait path — what the UFCS spelling
+        // `ToSocketAddrs::to_socket_addrs(&x)` already records. The receiver IS the locator (⟨0.37⟩): a
+        // literal host, or a tuple whose host slot resolves to one, is published as the destination it
+        // names; anything else carries no literal and is masked by `is_net_establishing`.
+        // ONLY A RECEIVER THAT IS PROVABLY A NAME: a string literal, or a tuple whose host slot is a literal or
+        // a provably string-typed value. The first cut took ANY untyped receiver and charged `Net` on the
+        // std/core ADDRESS impls, which resolve nothing — `SocketAddr::V4(*self).to_socket_addrs()` and
+        // `(*a, port).to_socket_addrs()` over an IP in no-std-net and async-std (measured, 7 fabricated
+        // rows). An IP tuple or a `SocketAddr` keeps today's behaviour.
+        let names_a_host = |e: &syn::Expr| {
+            matches!(peel_recv(e), syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. })) || self.is_provably_str(e)
+        };
+        // A TUPLE's host slot that types to NOTHING is read as a name too: std's `(host, port)` impls are a
+        // name (`&str`/`String`) or an IP, and a slot this file cannot type is the one the absence hid —
+        // `url::Url::socket_addrs`'s `(domain, port)` read PURE. Only a slot that PROVABLY types to an IP
+        // is left alone. The price is the IP-variant arm (`IpAddr::V4(a) => (a, port)`), whose payload this
+        // engine does not type: an over-charge inside an address impl, never a silence.
+        let ip_ty = |t: &str| matches!(t, "IpAddr" | "Ipv4Addr" | "Ipv6Addr" | "SocketAddr" | "SocketAddrV4" | "SocketAddrV6");
+        let host_is_ip = |e: &syn::Expr| {
+            self.resolve_recv_type(e).as_deref().is_some_and(|t| ip_ty(t.rsplit("::").next().unwrap_or(t)))
+                // an associated constant of an IP type (`Ipv4Addr::LOCALHOST`, `IpAddr::V4(..)` is a Call)
+                || matches!(peel_recv(e), syn::Expr::Path(p) if p.path.segments.len() >= 2
+                    && ip_ty(&p.path.segments[p.path.segments.len() - 2].ident.to_string()))
+        };
+        let recv_why = match peel_recv(&node.receiver) {
+            syn::Expr::Tuple(t) if t.elems.len() == 2 => t.elems.first().and_then(|h| {
+                if names_a_host(h) {
+                    Some("name")
+                } else if !host_is_ip(h) && !matches!(peel_recv(h), syn::Expr::Call(_) | syn::Expr::MethodCall(_)) {
+                    Some("untyped")
+                } else {
+                    None
+                }
+            }),
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }) => Some("name"),
+            _ => None,
+        };
+        let recv_is_name = recv_why.is_some();
+        if leaf == "to_socket_addrs"
+            && node.args.is_empty()
+            && recv_is_name
+            && self.resolve_recv_type_for(&node.receiver, &leaf).is_none()
+            && self.resolve_recv_traits(&node.receiver).is_empty()
+        {
+            let lit = self.socket_name_lit(&node.receiver);
+            if std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                eprintln!("R950RECV {} lit={lit:?}", recv_why.unwrap_or(""));
+            }
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                                   path: "std::net::ToSocketAddrs::to_socket_addrs".to_string(),
+                                   leaf: leaf.clone(), str_arg: lit, typed: true, method: true,
+                                   is_macro: false, path_lits_partial: false, path_lit2: None });
         }
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
@@ -5620,7 +5980,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // named `elem_type`. Adding `Option` to `elem_type` ALONE moves nothing: this arm
                 // returns early only for dispatch, so the concrete answer had no route to the binding.
                 // Both halves are needed, and only measuring showed it.
-                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
                     self.visit_expr(&el.expr);
                     self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.then_branch));
                     if let Some((_, else_b)) = &node.else_branch {
@@ -5690,7 +6050,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R185 — the while-let twin of the concrete fallthrough added to
                 // `visit_expr_if`. Same defect, same fix; kept beside its sibling so the pair cannot
                 // drift, which is how the dispatch half of this arm came to exist without it.
-                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
                     self.visit_expr(&el.expr);
                     self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.body));
                     return;
@@ -5756,7 +6116,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // arm payload as nothing: `match &self.o { Some(h) => h.run(), None => {} }` over an
         // `Option<Guard>` read the caller ABSENT. `visit_arm` cannot fix this on its own — it never
         // sees the scrutinee — which is why it belongs here beside the dispatch route rather than there.
-        if let Some(elem) = self.resolve_elem_type(&node.expr) {
+        // R946 — the payload fallback is asked through a std `Some`/`Ok` arm (`some_ok_binding` now admits
+        // no other); with none, `resolve_elem_type` answers exactly as before.
+        let payload = match node.arms.iter().find(|a| some_ok_binding(&a.pat).is_some()) {
+            Some(a) => self.resolve_payload_type(&a.pat, &node.expr),
+            None => self.resolve_elem_type(&node.expr),
+        };
+        if let Some(elem) = payload {
             if node.arms.iter().any(|a| some_ok_binding(&a.pat).is_some()) {
                 self.visit_expr(&node.expr);
                 for arm in &node.arms {
@@ -6364,7 +6730,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.vars.remove(&binding);
                     self.trait_vars.insert(binding, leaves);
                 } else if let Some(elem) =
-                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr))
+                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_payload_type(&node.pat, &init.expr))
                 {
                     // SOUNDNESS R185 — the let-else twin. The comment above notes "a concrete payload
                     // yields no leaves" and stops there; the concrete payload then had no route at all,
@@ -6501,6 +6867,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
                 } else if let Some(ty) = type_path(&pt.ty, &self.uses) {
+                    // SOUNDNESS R899 — the annotated `let b: Backend = …` gets the parameter's union.
+                    let ty = match crate::lang::type_written_head(&pt.ty) {
+                        Some(h) => self.union_over_arms(&h, ty, |u| type_path(&pt.ty, u)),
+                        None => ty,
+                    };
                     self.vars.insert(id.ident.to_string(), ty);
                 }
                 // A COLLECTION-typed let (`let xs: Vec<Sender> = ..`) — record its element type so a
@@ -6660,7 +7031,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if let Some(init) = &node.init {
                 let resolved = const_str_value(&init.expr)
                     .or_else(|| self.with_pre_bindings(&pre_bindings, |s| s.resolve_str_expr(&init.expr)));
-                if let Some(v) = resolved {
+                // SOUNDNESS R810 — a `mut` binding this body changes after the `let` does not still hold
+                // the `let`'s literal at its uses (see `decls::mut_uses`). Not recording it leaves the use
+                // unresolved, which is exactly the inline-runtime-value answer: `incomplete`, no literal.
+                let changed = id.mutability.is_some() && !self.literal_survives(&name, &init.expr);
+                // REACH probe for the A/B (§E1): a literal this rule WITHHELD. Env-gated, stderr only.
+                if changed && resolved.is_some() && std::env::var_os("CANDOR_R810_DEBUG").is_some() {
+                    eprintln!("R810WITHHELD {} {}", self.modpath, name);
+                }
+                if let Some(v) = resolved.filter(|_| !changed) {
                     self.str_locals.insert(name, v);
                 }
             }
@@ -7316,6 +7695,22 @@ pub(crate) fn peel_value(expr: &syn::Expr) -> &syn::Expr {
 /// `{x}`, `x?`, `x.await`. Mirrors the peeling `resolve_recv_type` does, so the untyped-dep-receiver
 /// disclosure sees `deplib::build()` through `(&deplib::build())`, `deplib::build()?` and
 /// `deplib::build().await` exactly as it sees the bare spelling.
+/// SOUNDNESS R899 — the FIRST written segment of the path a constructor expression is spelled with
+/// (`Backend` in `Backend::new()`, `Backend { .. }`, `Backend`, and through a method chain on any of
+/// them), which is the name a `#[cfg]`-duplicated `use` binds.
+pub(crate) fn ctor_written_head(expr: &syn::Expr) -> Option<String> {
+    match peel_recv(expr) {
+        syn::Expr::Call(c) => match &*c.func {
+            syn::Expr::Path(p) if p.qself.is_none() => p.path.segments.first().map(|s| s.ident.to_string()),
+            _ => None,
+        },
+        syn::Expr::Struct(s) if s.qself.is_none() => s.path.segments.first().map(|s| s.ident.to_string()),
+        syn::Expr::Path(p) if p.qself.is_none() => p.path.segments.first().map(|s| s.ident.to_string()),
+        syn::Expr::MethodCall(m) => ctor_written_head(&m.receiver),
+        _ => None,
+    }
+}
+
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {
     let mut e = expr;
     loop {

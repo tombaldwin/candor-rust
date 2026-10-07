@@ -470,6 +470,11 @@ impl Candor {
     /// GUARD-UNAVAILABLE sentinel is a NOT-EVALUATED signal, not a violation, so it never becomes a
     /// verdict record (the verdict itself is withheld in that case — see `check_crate_post`).
     fn record_violation(&self, code: &str, func: &str, effects: &[&str], detail: &str) {
+        self.record_violation_origin(code, func, effects, detail, "")
+    }
+
+    /// `record_violation` with the ⟨0.40⟩ AS-EFF-005 `origin` label on the verdict record.
+    fn record_violation_origin(&self, code: &str, func: &str, effects: &[&str], detail: &str, origin: &str) {
         use std::io::Write;
         if let Some(path) = &self.violations_sink {
             match std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -490,6 +495,7 @@ impl Candor {
             func: func.to_string(),
             effects: effects.iter().map(|s| s.to_string()).collect(),
             detail: detail.to_string(),
+            origin: origin.to_string(),
             ..Default::default()   // ⟨0.19⟩ reasonClass is populated by the stable gate; the lint has no reason map
         };
         let Ok(line) = serde_json::to_string(&rec) else { return };
@@ -2266,6 +2272,40 @@ fn net_host_literal(s: &str) -> Option<String> {
 /// Extract literal Net hosts from a call expr's arguments (not the receiver — that's the client/socket,
 /// not the address). Scans string-literal args through `net_host_literal`. Called only for a call
 /// already classified `Net`, so the literal we find is the endpoint, not an unrelated string.
+/// ⟨0.40⟩ SOUNDNESS R949 — whether argument 0 of a bind is a RUNTIME string (or a tuple whose host slot
+/// is one): `&str`, `String`, or `&String`, and not a literal. A `SocketAddr`, an IP, or a generic
+/// `A: ToSocketAddrs` is not — the ruling marks only a provably string-typed address.
+fn bind_arg_is_runtime_str<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
+    let first = match expr.kind {
+        ExprKind::Call(_, args) => args.first(),
+        ExprKind::MethodCall(_, _, args, _) => args.first(),
+        _ => None,
+    };
+    let Some(a) = first else { return false };
+    fn is_lit(e: &Expr<'_>) -> bool {
+        match e.kind {
+            ExprKind::Lit(_) => true,
+            ExprKind::AddrOf(_, _, inner) => is_lit(inner),
+            ExprKind::Tup(elems) => elems.first().is_some_and(is_lit),
+            _ => false,
+        }
+    }
+    if is_lit(a) {
+        return false;
+    }
+    let str_like = |t: rustc_middle::ty::Ty<'tcx>| {
+        let t = t.peel_refs();
+        t.is_str()
+            || matches!(t.kind(), rustc_middle::ty::Adt(d, _)
+                if matches!(cx.tcx.def_path_str(d.did()).as_str(), "std::string::String" | "alloc::string::String" | "String"))
+    };
+    let ty = cx.typeck_results().expr_ty(a).peel_refs();
+    match ty.kind() {
+        rustc_middle::ty::Tuple(fields) => fields.first().is_some_and(|f| str_like(*f)),
+        _ => str_like(ty),
+    }
+}
+
 fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
     use rustc_ast::LitKind;
     let args: &[Expr<'_>] = match expr.kind {
@@ -2281,6 +2321,42 @@ fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
             {
                 out.insert(host);
             }
+    }
+    // SOUNDNESS R950 (UFCS) — `ToSocketAddrs::to_socket_addrs(&"evil.example:80")` /
+    // `(&("evil.example", 80))`: the name is BORROWED, and a tuple carries it in slot 0. Read only for
+    // this method, whose single argument IS the resolved name; without it the resolve failed closed
+    // instead of publishing what it resolves (candor-scan publishes it).
+    // …and the METHOD spelling `"evil.example:80".to_socket_addrs()`, whose name is the RECEIVER.
+    let resolved_name: Option<&Expr<'_>> = match expr.kind {
+        ExprKind::Call(f, _) => match f.kind {
+            ExprKind::Path(rustc_hir::QPath::Resolved(_, p))
+                if p.segments.last().is_some_and(|s| s.ident.name.as_str() == "to_socket_addrs") => args.first(),
+            ExprKind::Path(rustc_hir::QPath::TypeRelative(_, seg))
+                if seg.ident.name.as_str() == "to_socket_addrs" => args.first(),
+            _ => None,
+        },
+        ExprKind::MethodCall(seg, recv, ..) if seg.ident.name.as_str() == "to_socket_addrs" => Some(recv),
+        _ => None,
+    };
+    if out.is_empty() && let Some(a) = resolved_name {
+        let mut e = a;
+        while let ExprKind::AddrOf(_, _, inner) = e.kind {
+            e = inner;
+        }
+        let str_lit = |x: &Expr<'_>| match &x.kind {
+            ExprKind::Lit(l) => match l.node { LitKind::Str(sym, _) => Some(sym.as_str().to_string()), _ => None },
+            _ => None,
+        };
+        let name = match e.kind {
+            ExprKind::Tup(elems) if elems.len() == 2 => str_lit(&elems[0]).map(|h| match &elems[1].kind {
+                ExprKind::Lit(l) => match l.node { LitKind::Int(n, _) => format!("{h}:{}", n.get()), _ => h },
+                _ => h,
+            }),
+            _ => str_lit(e),
+        };
+        if let Some(host) = name.as_deref().and_then(net_host_literal) {
+            out.insert(host);
+        }
     }
     out
 }
@@ -3128,8 +3204,26 @@ impl Candor {
                 // Withhold the literal and add no hedge, exactly as the floor does: a Net function with
                 // no captured host fails closed on its own, and a sibling runtime destination
                 // (`s.send_to(buf, dst)`) is masked by its own establishing verb below.
-                if candor_classify::is_net_binding(path.rsplit("::").next().unwrap_or("")) {
+                let net_leaf = path.rsplit("::").next().unwrap_or("");
+                if candor_classify::is_net_binding(net_leaf) {
                     hosts.clear();
+                    // ⟨0.40⟩ SOUNDNESS R949 — a bind marks nothing AS A BIND, but a bind handed a RUNTIME
+                    // STRING resolves that name (`impl ToSocketAddrs for str` → getaddrinfo): a Net reach
+                    // whose locator nobody can see. Typed here from rustc, not from syntax; candor-scan
+                    // asks the same question of a provably string-typed argument.
+                    if builtin == Some("Net") && net_leaf == "bind" && bind_arg_is_runtime_str(cx, expr) {
+                        self.incomplete_direct.entry(caller).or_default().insert("Net");
+                    }
+                }
+                // ⟨0.40⟩ SOUNDNESS R817 — an ACCEPT's peer is chosen by whoever connects, so no literal
+                // names it: mark the surface incomplete whether or not a literal was captured, and
+                // publish none (a server bootstrap's literal is its LISTEN address). `accept`/`incoming`
+                // used to sit in `is_net_binding`, which withholds and marks nothing — a benign sibling
+                // literal then certified the server. The one predicate candor-scan asks too.
+                let accepting = builtin == Some("Net") && candor_classify::is_net_accepting(&path, net_leaf);
+                if accepting {
+                    hosts.clear();
+                    self.incomplete_direct.entry(caller).or_default().insert("Net");
                 }
                 let dotless_ollama: Vec<String> =
                     hosts.iter().filter(|h| is_ollama_dotless(h)).cloned().collect();
@@ -4176,6 +4270,39 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             Err(_) => None,
         };
+        // ⟨0.40⟩ (SOUNDNESS R932/R811) — the baseline's callgraph sidecar, read ONLY to label an
+        // AS-EFF-005 row's `origin` (⟨0.12⟩): `Some(nodes)` when present and parseable, `None` when absent.
+        // A PRESENT-but-corrupt sidecar fails closed exactly like an unloadable baseline.
+        let baseline_nodes: Option<BTreeSet<String>> = match (&baseline, std::env::var("CANDOR_BASELINE")) {
+            (Some(_), Ok(prefix)) => {
+                let cg = format!("{prefix}.{krate}.{kinds}.callgraph.json");
+                if std::path::Path::new(&cg).is_file() {
+                    match std::fs::read_to_string(&cg).ok().and_then(|t| serde_json::from_str::<std::collections::BTreeMap<String, Vec<String>>>(&t).ok()) {
+                        Some(map) => {
+                            let mut n: BTreeSet<String> = BTreeSet::new();
+                            for (k, v) in map {
+                                n.insert(k);
+                                n.extend(v);
+                            }
+                            Some(n)
+                        }
+                        None => {
+                            eprintln!(
+                                "candor: baseline callgraph {cg:?} exists but could not be parsed — the \
+                                 regression guard CANNOT evaluate this crate (fail closed)"
+                            );
+                            self.record_violation("GUARD-UNAVAILABLE", &cg, &[], "");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        // ⟨0.40⟩ functions ABSENT from the baseline whose only effect is `Unknown`: advisory, but named.
+        let mut absent_unknown_only: Vec<String> = Vec::new();
         let any_enforce = strict_var.is_some()
             || no_ambient_var.is_some()
             || baseline.is_some()
@@ -4345,6 +4472,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // like net-class/reason-scoped above), so it emits `false` — claim no signal rather
                     // than a misleading partial. The stable candor-scan backend carries it.
                     interface_union: false,
+                    // R894 — the deep engine publishes no declaration units.
+                    declaration: false,
                     // ⟨0.39⟩ same posture, and it is an ABSENCE rather than a claim: this backend runs no
                     // dispatch-site pass, so it publishes no `dispatchesOn`. §4's "absence keeps its
                     // meaning" is about the PURITY claim a row's absence makes; an EMPTY `dispatchesOn` on
@@ -4448,21 +4577,54 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 }
             }
 
-            // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved
-            // report. New functions (absent from the baseline) are not flagged — they're
-            // new code, reviewed normally; the guard is for *regressions* in existing fns.
-            if let Some(base) = &baseline
-                && let Some(prior) = base.get(&name)
-            {
-                let gained = gained_effects(effs, prior);
-                if !gained.is_empty() {
-                    let detail = format!(
-                        "`{name}` gained effect {{ {} }} not present in the baseline; \
-                         an existing function started performing a new effect",
-                        gained.join(", ")
-                    );
-                    self.record_violation("AS-EFF-005", &name, &gained, &detail);
-                    span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+            // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved report.
+            //
+            // ⟨0.40⟩ SPEC §3 *baseline guard* (SOUNDNESS R932, R811): `prior = baseline[name] ?? ∅`. A
+            // function ABSENT from the baseline used to be skipped as "new code, reviewed normally" —
+            // and code review does not read effects. The baseline omits PURE functions too, so the
+            // skip also hid a pure function turning effectful: `Self-guard` could not see `Env` seeded
+            // into `candor_classify::is_net_binding` (R811, measured on main: exit 0, no line). Now an
+            // absent function with a real effect fires; an absent pure one passes; an absent
+            // `Unknown`-only one is advisory and named in the note below.
+            if let Some(base) = &baseline {
+                match base.get(&name) {
+                    Some(prior) => {
+                        let gained = gained_effects(effs, prior);
+                        if !gained.is_empty() {
+                            let detail = format!(
+                                "`{name}` gained effect {{ {} }} not present in the baseline; \
+                                 an existing function started performing a new effect",
+                                gained.join(", ")
+                            );
+                            self.record_violation_origin("AS-EFF-005", &name, &gained, &detail, "existing");
+                            span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+                        }
+                    }
+                    None => {
+                        let real: Vec<&str> = effs.iter().copied().filter(|e| *e != UNKNOWN).collect();
+                        if real.is_empty() {
+                            if effs.contains(UNKNOWN) {
+                                absent_unknown_only.push(name.clone());
+                            }
+                        } else {
+                            let origin = match &baseline_nodes {
+                                Some(n) if n.contains(&name) => "existing",
+                                Some(_) => "new",
+                                None => "unknown",
+                            };
+                            let prefix = std::env::var("CANDOR_BASELINE").unwrap_or_default();
+                            let detail = format!(
+                                "`{name}` is ABSENT FROM THE BASELINE and performs {{ {} }} — compared against \
+                                 nothing (⟨0.40⟩: no function is exempt). New code, or a function whose key \
+                                 changed (a rename reads as absent). Review what moved: candor diff \
+                                 <this run's report> {prefix}.{krate}.{kinds}.json — then, if intended, \
+                                 re-record: cargo candor snapshot {prefix}",
+                                real.join(", ")
+                            );
+                            self.record_violation_origin("AS-EFF-005", &name, &real, &detail, origin);
+                            span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
+                        }
+                    }
                 }
             }
 
@@ -4613,6 +4775,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     ),
                 );
             }
+        }
+
+        if !absent_unknown_only.is_empty() {
+            absent_unknown_only.sort();
+            eprintln!(
+                "candor: note — {} new function(s) carry only Unknown (absent from the baseline; advisory, \
+                 NOT a regression): {}",
+                absent_unknown_only.len(),
+                absent_unknown_only.join(", ")
+            );
         }
 
         if let Some(prefix) = &json_path {

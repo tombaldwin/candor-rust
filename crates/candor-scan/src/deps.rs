@@ -208,9 +208,9 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
     }
 }
 
-/// The CANDOR_DEPS index: `crate#leaf`, `crate#tail2` and `crate#<full qual>` keys (UNAMBIGUOUS only
-/// — a key two dep functions share is dropped, the same under-report-don't-guess rule as
-/// `resolve_target`), plus
+/// The CANDOR_DEPS index: `crate#leaf`, `crate#tail2` and `crate#<full qual>` keys — two entries under
+/// one key are UNIONED, never dropped (ENTRY-COLLISION-DECISION.md; see the insertion loop in
+/// `load_dep_reports`: withdrawal made the caller read pure) — plus
 /// the covered crate set. A report whose producing version differs from this binary's is
 /// DOWNGRADED to `Unknown` rather than silently trusted (spec §2.1).
 #[derive(Default)]
@@ -479,7 +479,24 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // precedence lives in one place, `cover`'s branch order. Keyed on the INTEGER and never on
         // `fns.is_empty()` — the two are the same shape on the wire and only the count separates a facade
         // from a legitimately all-pure crate; `fns` enters ONLY as SPEC §2's manifest-less third row.
-        let judged_nothing = candor_report::claims_to_have_judged_nothing(&v, !fns.is_empty());
+        // SOUNDNESS R894 — …AND A REPORT WHOSE EVERY UNIT IS A FOREIGN DECLARATION judged nothing about
+        // the rest of its names either. Before R894 such a crate (an FFI `-sys` crate: `extern` blocks plus
+        // `pub use libc::{close, read}`) published no unit, `analyzed.count` was 0, and every call into it
+        // disclosed `invisible`. Publishing its declarations made it COVERED, and coverage made its
+        // RE-EXPORTS read pure: measured on the chained corpus, inotify-0.11.5's `Inotify::close` (calls
+        // `inotify_sys::close`, i.e. `libc::close`) lost its `invisible: [inotify_sys]` and left the
+        // report — 11 rows, the disclosure a fix must not delete. The declarations still JOIN (`crates` is
+        // untouched); only the crate's silence keeps meaning nothing.
+        //
+        // READ FROM THE PRODUCER'S `declaration` KEY, NEVER FROM THE ROW'S SHAPE. The first cut inferred
+        // it (every row exactly `Unknown` + `native:extern fn`, no callees) and a crate of foreign-call
+        // WRAPPERS is shape-identical: measured, 7 of its 13 matches over 1,648 dependencies were wrapper
+        // crates COVERED before (objc2-core-graphics 1,008 units, objc2-system-configuration 308, cloudabi
+        // 49, …), and their consumers gained `invisible`. Only the producer knows a unit has no body.
+        let decls_only = !fns.is_empty()
+            && v.pointer("/analyzed/count").and_then(|c| c.as_u64()) == Some(fns.len() as u64)
+            && fns.iter().all(|e| e.get("declaration").and_then(|x| x.as_bool()) == Some(true));
+        let judged_nothing = candor_report::claims_to_have_judged_nothing(&v, !fns.is_empty()) || decls_only;
         // ⟨0.40⟩ the declared-type surface. A stale or judged-nothing copy is no more trusted than its
         // entries: it contributes only a MISS for its package. An incomplete one never read some of its own
         // source, so no `supers` it publishes can be complete.
@@ -889,7 +906,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         names.sort_unstable();
         eprintln!(
             "candor-scan: {} chained dependency report(s) judged NOTHING (⟨0.24⟩ `analyzed.count` is 0, \
-             absent-with-no-functions, or unreadable) — they grant NO coverage, so a call into them \
+             absent-with-no-functions, unreadable, or only foreign declarations) — they grant NO coverage, so a call into them \
              discloses exactly as if the report had not been chained at all. Usually a facade or \
              re-export-only crate: scan what it re-exports: {}",
             names.len(),

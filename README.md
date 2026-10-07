@@ -309,9 +309,14 @@ CANDOR_BASELINE=.candor/baseline candor-scan .    # 2. in CI: exit 1 if a functi
 Or check it in once — the `.candor/config` `baseline` key (below) activates the guard on every scan.
 Semantics follow the reference engine (candor-java) exactly: a function that **gained** an effect vs
 its baseline set → one `[AS-EFF-005]` line per function + exit 1, and the violations join the
-`--gate-json` verdict; **new** functions are exempt (reviewed as new code — the guard is for
-regressions in existing functions); **no baseline file** → a stderr note, guard inactive, exit
-unchanged; a baseline that is **unparseable or produced by a different scanner build** (the envelope
+`--gate-json` verdict; ⟨0.40⟩ a function **absent from the baseline** is compared against nothing
+(SPEC §3, SOUNDNESS R932) — if it performs a real effect it is an `[AS-EFF-005]` violation too, the line
+says it is ABSENT FROM THE BASELINE, and every verdict row carries `origin` (`existing`/`new`/`unknown`;
+"new" means absent under this key, so a rename reads as absent); a new pure function passes and a new
+`Unknown`-only one is named in an advisory note. Under a `--out` prefix, a crate with no file under a
+prefix that has files for other crates is a crate absent from the baseline (R933). Before ⟨0.40⟩ new
+functions were exempt ("reviewed as new code"), and code review does not read effects. **No baseline
+file** (and no file under the prefix for any crate) → a stderr note, guard inactive, exit unchanged; a baseline that is **unparseable or produced by a different scanner build** (the envelope
 `candor.version`) → exit 2 *without evaluating* — a stale baseline is invalid gate input (spec §2.1):
 never a silent skip, never a stale compare. The same advisory-floor caveat as the scan policy gate
 applies: the syntactic backend under-reports, so a clean ratchet is necessary, never sufficient — the
@@ -602,12 +607,13 @@ exit-code contracts (0/1/2) with fail-closed negatives. Pre-1.0: minor versions 
 always in the soundness-increasing direction (see [CHANGELOG.md](CHANGELOG.md)).
 
 candor also **guards itself**: CI runs candor over candor against `.candor/baseline`. Its effectful
-surface — five functions in the lint (config / baseline / cross-report reads + the report write, all
-`Env`/`Fs`), plus `candor-report`'s `report_files` (`Fs`) and the build script (`Exec`/`Fs`) — can't
-gain a *new* effect unnoticed. Note the guard's stated scope: per AS-EFF-005's design it flags
-*regressions in existing functions*, not brand-new functions (those are reviewed as new code), so a
-newly-added effectful function wouldn't trip it. Refresh with `cargo candor snapshot .candor/baseline`
-when a new effect is intended.
+surface — the lint's config / baseline / cross-report reads and report writes, `candor-report`'s report
+I/O, `candor-classify`'s config discovery and debug-env reads (all `Env`/`Fs`), and the build script
+(`Exec`/`Fs`) — can't gain a *new* effect unnoticed. ⟨0.40⟩ that now includes a function ABSENT from the
+baseline (a newly added one, or a formerly pure one the baseline omits): it is compared against nothing,
+so `Env` seeded into a pure `candor-classify` function fails the guard (SOUNDNESS R811, which the old
+"new code is exempt" rule left open). Review with `cargo candor diff .candor/baseline`, then refresh with
+`cargo candor snapshot .candor/baseline` when a new effect is intended.
 
 ## License
 

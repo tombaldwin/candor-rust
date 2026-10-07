@@ -11,6 +11,160 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
+
+Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the
+connection certified `allow Net ok.example` at exit 0 — EXECUTED, a client on 127.0.0.1 received the bytes.
+`accept`/`incoming` were members of `is_net_binding`, which withholds a literal and marks nothing.
+
+- **An accepting call marks `Net` incomplete** in both rust engines (`candor_classify::is_net_accepting`:
+  `accept`, `accept4`, `poll_accept`, `incoming`, `into_incoming`, and tonic's `Router::serve*` /
+  `TcpIncoming::new`), whatever literal was captured; its literal is never published. PART 96 `c_accept`
+  goes 0 → 1. A datagram receive is not an accept. Over the pinned 1,625-crate rust census: 30 accept sites
+  in 21 crates, every one an accept (nix, rustix, cap-std, axum, hyper's `AddrIncoming`, tokio-stream,
+  hickory's QUIC server, mio); three are TLS acceptors wrapping an already-accepted stream (redundant, never
+  false).
+- **A bind marks nothing AS A BIND** (unchanged, and now what the doc says — it claimed binds were hedged,
+  stale since `16fb46f`) — **except** a `bind` whose address is a PROVABLY string-typed runtime value
+  (`&str`/`String`, `format!`, a concatenation, `(h, port)` with such an `h`): std resolves it through
+  `impl ToSocketAddrs for str` (getaddrinfo, EXECUTED — a nonexistent name fails with the lookup error), so
+  it marks `Net` incomplete in both engines. A `SocketAddr`, an IP tuple, a literal or an untyped/generic
+  argument marks nothing. Census reach: 0 of the 49 non-literal Net binds outside test code are
+  string-typed, so no registry row moves.
+
+### ⚠ The refutable binders type a CONSTRUCTED payload; a local enum's `Some` variant is not std's (SOUNDNESS R946)
+
+`if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { s.send_to(b, d) }` — and the let-else, `match` and
+`.ok()` + `Some` spellings — left `s` untyped, so the `send_to` to a caller-chosen address was never seen and
+a benign sibling literal certified it (EXECUTED: the datagram arrived). The class is the binder, not the
+socket: an HTTP client built under `if let Ok(c) = Client::builder().build()` was the same bypass. The four
+binders now fall back to the plain `let`'s construction route. `some_ok_binding` now admits only std's
+`Some`/`Ok` — it matched the last segment, so `if let W::Some(r) = self { r.go() }` over a LOCAL enum read
+the caller ABSENT (pre-existing, now charged). Census: 0 rows lost an effect; new charges include redis's
+sentinel connections (`Ipc`, `Net`, previously absent from every sentinel helper), mongodb's SRV poller,
+deadpool's `Object::take` (`Unknown`) and aws-smithy's rate limiter (`Log`), each traced to source.
+
+### ⚠ `to_socket_addrs` on a name receiver is a DNS resolution (SOUNDNESS R950)
+
+`(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT (`deny Net` exit 0);
+only a receiver typed from a `&str` parameter was seen. A string literal, or a tuple whose host slot is a
+literal, a provably string-typed value or an untyped one, is now the std trait call; a literal host is
+published in `hosts`, a runtime one masks. A host slot that provably types to an IP charges nothing. The
+UFCS spellings — `ToSocketAddrs::to_socket_addrs(&"h:80")`, `<&str as ToSocketAddrs>::…`, `<str as …>`,
+`(&("h", 80))` — failed closed instead of publishing the name (PART 96 `g_litdiscard`); the borrowed and
+tuple literal is now read in both engines, and the deep engine publishes the method-receiver literal too.
+Census: `url::Url::socket_addrs`, hyper's and hyper-util's `GaiResolver`, reqwest's and hyper-util's SOCKS
+connect, and aws-smithy's `ResolveDns` gain `Net` (each a real getaddrinfo).
+
+### ⚠ A dependency's published foreign import is `Unknown` + `native:extern fn` when chained, not pure (SOUNDNESS R894)
+
+A consumer calling a dependency's `extern "C" { pub fn creat(..); }` directly read PURE when chained — ABSENT,
+`deny Fs` and `deny Unknown` both 0, executed — because the dependency published no row and no call-graph
+node for a declaration without a body, and crate-level coverage turned that missing name into a purity
+claim. In-crate, the same call has always been `Unknown` + `native:extern fn`.
+
+- **The producer publishes a unit per `pub` foreign declaration** (not `#[cfg(test)]`), answering exactly
+  what in-crate analysis answers — `Unknown`, `native:extern fn` — so the chained arm carries the same class
+  (`deny Unknown[native]` fires too). The unit stays out of in-crate resolution: callers inside the crate are
+  unchanged. Non-`pub` declarations publish nothing. `link!` declarations are not covered yet.
+- **One row per declaration qual.** `#[cfg]` twins of a declaration are one unit, and a declaration twinned
+  with a Rust shim under another `#[cfg]` is folded into the shim's row (SPEC §4's union over one qual), so
+  `analyzed.count` still equals the call-graph node count (libc 7,800 = 7,800, web-sys 20,444 = 20,444; over
+  the 1,648 dependency reports the duplicate-row and count≠nodes totals are identical to before).
+- **A report whose every unit is a declaration still grants no coverage** (a `-sys` crate of `extern`
+  blocks plus `pub use libc::{close, read}`): before this change it judged nothing, and becoming COVERED made
+  its re-exports read pure — measured, inotify-0.11.5's `Inotify::close` lost its `invisible: [inotify_sys]`
+  (11 rows REMOVED on the first corpus run). Its declarations still join. Decided by a new report key,
+  `"declaration": true` on each such unit (an extra key, tolerated like `interfaceUnion`), NOT by the row's
+  shape: a crate of foreign-call WRAPPERS is shape-identical, and the shape-based first cut uncovered 7
+  wrapper crates (objc2-core-graphics, cloudabi, …). Over 1,648 dependencies the key-based rule matches 6
+  crates, all of which judged nothing before.
+- Rejected first design, recorded so it is not re-tried: having the consumer disclose every chained key in
+  neither the report nor the sidecar node set. On the chained corpus it fired 27,900 times in 544 entries,
+  mostly on keys the CONSUMER guessed (enum variants of re-exported foreign types, glob candidates,
+  builder-chain receiver typings), which name nothing in the dependency.
+
+Direction: adds `Unknown`, and new declaration rows. Chained corpus (876 registry entries, each chained on
+its own Cargo.lock's 1,648 locally present dependencies; 305,118 analysed consumer units): REMOVED 0, no
+concrete effect lost, 0 rows gaining `invisible`; 1,801 consumer units newly `Unknown` (**0.59%**) in 61
+entries, 1,342 of them carrying `native:extern fn` — `deny Unknown` flips 1,801 functions / 233 modules / 4
+crates. One row loses a reason and keeps its `Unknown`: diesel's `SqliteCallbackError::emit` drops
+`ambiguous:same-name local defs` because vein A's post-fixpoint hedge fires only where a contested claimant
+(`Error::fmt`) carries an effect the caller lacks, and the caller now carries that `Unknown` through a resolved
+edge (`context_error_str` → the published `sqlite3_result_error`); the hedge compares effects, not classes. Unchained (1,275
+entries): 104,412 new declaration rows (aws-lc-sys and web-sys dominate), `deny Unknown` crate flips 9 (the
+`-sys` crates' own reports, plus wasm-bindgen-macro's scanned ui-tests), module flips 2,804; 13 changed rows
+(12 a `loc` move, 1 a `#[cfg]`-twin union), 1 added (`termios::ffi::cfmakeraw`, a cfg twin). Scan-cache
+schema rev59 → rev60.
+
+### ⚠ ⟨0.40⟩ AS-EFF-005 no longer exempts a function absent from the baseline — candor-scan and the lint (SOUNDNESS R932, R933; closes R811)
+
+The baseline guard skipped every function absent from the baseline as "new code, reviewed normally", and
+code review does not read effects. Measured at 708ce46: a baseline of `keep` (Fs) and a tree adding `fresh`
+(Net) exited 0 printing "baseline guard ✓"; a workspace member added under a recorded `--out` prefix printed
+"the regression guard is not active" and exited 0; and `Self-guard` could not see `Env` seeded into the
+pure `candor_classify::is_net_binding`. Now, on both routes:
+
+- **`prior(fn) = baseline[fn] ?? ∅`.** An absent function with a real effect (`inferred` minus `Unknown`)
+  is an `[AS-EFF-005]` violation, exit 1, and the line says it is ABSENT FROM THE BASELINE (a renamed key
+  reads as absent), leading with `candor diff <this run's report> <baseline>` before the re-record command.
+  A new pure function passes; a new `Unknown`-only function stays advisory and is named in its own note
+  (under `unknown-ratchet` it fails, prior ∅).
+- **Every AS-EFF-005 verdict row carries `origin`** (`existing` / `new` / `unknown`, the ⟨0.12⟩ rule). The
+  callgraph sidecar now decides only that label; without it an absent function still fires, as `unknown`.
+  A present-but-corrupt sidecar still exits 2 (the lint now reads its sidecar too, and treats a corrupt
+  one as `GUARD-UNAVAILABLE`).
+- **candor-scan: a `--out` prefix is PRESENT when any `<prefix>.<crate>.scan.json` exists**, so a crate
+  with no file of its own is absent from a present baseline and every function in it is compared against
+  ∅ (R933). The sibling file's build is checked first: a different-build baseline still exits 2, so
+  upgrading flips nothing. A prefix with no file for any crate keeps the absent-baseline note (exit 0), and
+  a `.candor/config`-declared one stays exit 2.
+- **`.candor/baseline` spliced, not refreshed.** The new rule fired 14 times on candor's own unchanged
+  tree: 13 effectful functions the committed baseline never recorded (e.g. `candor_classify::classify`
+  Env, `policy::discover_config` Env+Fs, `Candor::write_gate_verdict` Fs), which the old rule let pass,
+  plus this change's own `Candor::record_violation_origin` (Fs). Their entries — and the four candor-crate
+  rows that inherit `classify`'s Env through the trusted sibling baseline — were taken from the engine's
+  own current report and inserted; nothing else in the baseline moved.
+
+Direction: adds AS-EFF-005 firings (0 → 1), never removes one. No flip at upgrade: a different-build
+baseline exits 2 first.
+
+### ⚠ Residual silences outside the veins: literals, qualified caps values, cfg-alias routes, inline-module fields, method `where` bounds, twin factories (SOUNDNESS R810, R879, R893 part, R897, R898, R899)
+
+Each cell below was compiled and run (a file is written or an env var read), and each caller was ABSENT, or
+certified a literal the program does not use, with `deny`/`allow` exiting 0. Now:
+
+- **R810 — a changed `mut` binding carries no literal.** `let mut p = "/tmp/benign"; p = user;
+  fs::write(p, ..)` published `/tmp/benign` with no `incomplete`, so `allow Fs /tmp/benign` passed. A `mut`
+  binding that the body assigns, `&mut`-borrows or calls a non-read-only method on (`push`, `set_file_name`,
+  `write!`) no longer records its literal; the dominant `let mut c = Command::new("git"); c.arg(..)` keeps its
+  head (no `Command` method renames the program). A `static mut` initialiser is no longer a literal either.
+  The loop-carried spelling (reassignment after the use) is covered. `allow` 0 → 1 on all eight cells.
+- **R879 — `m::U.go()` for this crate's own all-caps unit struct** (`U`, `UB`, `IO`; the variable is "no
+  lowercase", not "one letter") types like `m::Ub.go()`. Only for a `crate::`-anchored path with no
+  same-leaf `const`/`static`, so a dependency's `dep::SHARED` keeps R856's disclosure and `libc::EPOLLOUT`
+  is not read as a type.
+- **R899 — a `#[cfg]`-duplicated `use … as Backend` is the union of its arms on the `let b: Backend`,
+  `let b = Backend::new()` and `Backend::new().go()` routes** (the parameter, field and return routes
+  already were).
+- **R898 — an inline module's `use self::dep::T` / `use super::dep::T` types its struct FIELDS.** Pass A
+  now re-seeds the child module's path, as Pass B already did. Its corpus A/B exposed a pre-existing twin
+  defect (two same-leaf structs, one field spelled anchored and one bare, kept the last file's element type —
+  hyper's server `UpgradeableConnection::into_parts` read the client's body); twins spelled that way now
+  share one leaf, so the ambiguity discloses as before.
+- **R897 — a struct generic field bounded only in a METHOD's `where` clause dispatches in that method**
+  (`impl<S> W<S> { fn run(&self) where S: Sink { self.s.emit() } }`), mapped by position, never leaking to a
+  method that does not state the bound. Live in mongodb's `CursorWrapper::next_if_any`.
+- **R893 (two-factory half) — `a::mkv()` beside a same-named `b::mkv()`** keeps its declared return and
+  element through a crate-anchored qualified key. The `Mutex<Vec<G>>` / `Option<Vec<G>>` field half stays open.
+
+Direction: resolutions plus a few consistency `Unknown`s. Corpus A/B vs 708ce46 (1,275 pinned entries,
+288,270 rows): ADDED 14 · REMOVED 0 · CHANGED 81; no concrete effect lost; 21 rows gain a concrete effect
+(sampled four, all genuine, gates 0 → 1: sqlx-sqlite `root_block_columns` Db, dylint_internal
+`cargo_dylint` Exec, mongodb `CursorWrapper::next_if_any` Env, tempfile `SpooledTempFile::roll` Fs);
+8 rows newly `Unknown`-only (0.003%). Three tempfile rows lose their `fs: ["write"]` kind (kind now
+undetermined; `Fs` kept). Scan-cache schema rev58 → rev59.
+
 ### ⚠ Vein A — a written path is resolved against the module it is WRITTEN IN (more effects charged, more `Unknown`/`invisible`; SOUNDNESS R830, R181, R369, R193(a), R862, R863, R633's residual)
 
 candor-scan resolved a call or type path as a string with its scope thrown away: `expand` stripped

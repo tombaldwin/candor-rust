@@ -73,8 +73,11 @@ code can under-report silently. (The dylint lint is the family's ORACLE instrume
 it writes a pre-⟨0.21⟩ report that `candor-query gate` answers with "re-scan with a current engine" —
 SOUNDNESS R456.) The same floor applies to the AS-EFF-005 regression guard: with
 `CANDOR_BASELINE=<saved report path or --out prefix>` (or the `.candor/config` `baseline` key) a
-function that *gained* an effect vs the saved report exits 1; no baseline file → a note, guard
-inactive; a baseline from a **different scanner build** (or unparseable) → exit 2 without
+function that *gained* an effect vs the saved report exits 1 — ⟨0.40⟩ and so does a function ABSENT
+from it that performs a real effect (its prior is ∅; the row's `origin` says `new`/`unknown`, and a
+renamed key reads as absent — review with `candor diff <this run's report> <baseline>` before
+re-recording); a new pure function passes, a new `Unknown`-only one is named in a note; no baseline
+file → a note, guard inactive; a baseline from a **different scanner build** (or unparseable) → exit 2 without
 evaluating — never a stale compare, never a silent skip.
 
 **Path B — clone + build the deep engine** (first build downloads a pinned nightly — expect a few

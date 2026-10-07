@@ -45,6 +45,129 @@
       "incomplete": [
         "Fs"
       ]
+    },
+    {
+      "fn": "refusal_marker_for",
+      "loc": "crates/candor-report/src/lib.rs:87:1: 87:66",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "274f91e406d26bd41ff65a60f7b80c36",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "refusal_marker_for::parse"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "refusal_marker_for::parse",
+      "loc": "crates/candor-report/src/lib.rs:88:5: 88:51",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "274f91e406d26bd419e869337f594fa3",
+      "fs": [
+        "read"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "resolve_sink_artifact",
+      "loc": "crates/candor-report/src/lib.rs:702:1: 702:64",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "274f91e406d26bd490969404e64efddf",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "same_artifact",
+      "loc": "crates/candor-report/src/lib.rs:739:1: 739:47",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "274f91e406d26bd4dc6499148f9175bf",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "resolve_sink_artifact",
+        "same_artifact::resolve"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "same_artifact::resolve",
+      "loc": "crates/candor-report/src/lib.rs:743:5: 743:54",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "274f91e406d26bd4716036e2a48655ee",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
     }
   ]
 }

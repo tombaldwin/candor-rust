@@ -82,13 +82,20 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_expr",
-      "loc": "src/lib.rs:2305:5: 2305:77",
+      "loc": "src/lib.rs:3742:5: 3742:77",
       "inferred": [
+        "Env",
         "Unknown"
       ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
       "unresolved": true,
-      "hash": "7db9109f0371c9d744b477a7644d3ad6",
+      "hash": "38481128b905ae50ce042ebcba732b05",
       "calls": [
+        "Candor::record_resolved_call",
         "generic_callee_local_edges",
         "return_type_driver_local_edge",
         "std_driver_local_edges"
@@ -513,6 +520,206 @@
       ],
       "incomplete": [
         "Fs"
+      ]
+    },
+    {
+      "fn": "<Candor as std::default::Default>::default",
+      "loc": "src/lib.rs:341:5: 341:25",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50321941b01553ab37",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "Candor::new"
+      ],
+      "invisible": [
+        "candor_classify"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::compute_layer_violations",
+      "loc": "src/lib.rs:3472:5: 3473:78",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50e429cdd9b839c01b",
+      "fs": [
+        "write"
+      ],
+      "calls": [
+        "propagate",
+        "write_layer_reach"
+      ],
+      "invisible": [
+        "candor_classify",
+        "rustc_hashes",
+        "rustc_middle",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::write_gate_verdict",
+      "loc": "src/lib.rs:3652:5: 3652:58",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50e0bcd3f8a47e6a09",
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::write_report_files",
+      "loc": "src/lib.rs:3548:5: 3550:77",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50ca3c47bdceba56a8",
+      "invisible": [
+        "candor_report",
+        "rustc_middle",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::record_violation_origin",
+      "loc": "src/lib.rs:477:5: 477:108",
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "38481128b905ae50a568e333abbc6352",
+      "unknownWhy": [
+        "dispatch:Write.write_fmt"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::record_resolved_call",
+      "loc": "src/lib.rs:3065:5: 3066:95",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50fe596e7cb6c3a0fc",
+      "calls": [
+        "is_real_sysroot_frontier"
+      ],
+      "invisible": [
+        "candor_classify",
+        "rustc_hashes",
+        "rustc_hir",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "mir_spike::facts_for",
+      "loc": "src/mir_spike.rs:48:1: 48:58",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae50e95532cbabec5800",
+      "invisible": [
+        "candor_classify",
+        "rustc_index",
+        "rustc_middle",
+        "rustc_span"
+      ]
+    },
+    {
+      "fn": "mir_spike::run",
+      "loc": "src/mir_spike.rs:370:1: 370:28",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "38481128b905ae503b76e55c49d184f1",
+      "calls": [
+        "mir_spike::facts_for"
+      ],
+      "invisible": [
+        "candor_classify",
+        "rustc_index",
+        "rustc_middle",
+        "rustc_span"
       ]
     }
   ]
