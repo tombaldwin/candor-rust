@@ -4811,6 +4811,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // where the dispatch is spelled in this crate (`fn go(b: &dyn dep::Backend) { b.size() }`). The
         // chained spelling of this — where the dispatch lives in the DEPENDENCY and reaches here only
         // through `dispatchesOn` — is handled at the dep join above, not here.
+        // SOUNDNESS R981 — a dispatch through a FOREIGN abstraction (`self.raw.next()` with `Raw:
+        // futures_core::Stream`) that THIS CRATE ALSO IMPLEMENTS. The target body may be one of this
+        // crate's own impls (mongodb's `RawBatchCursor::poll_next`, which does the network I/O), and no
+        // report of the dependency can ever contain it: the row read `[]` + `invisible:[futures_core]`,
+        // and chaining `futures_core` could not change that. The receiver is a monomorphized bound, so no
+        // bounded-CHA edge is sound (R551's erasure carve-out) — this is the disclosure §4 names for an
+        // owner that resolves and a body that does not: `dispatch:<trait>.<member>`. The conjunct is the
+        // TRAIT being implemented here (any member), not the member, because an extension method
+        // (`next`) reaches the trait's required members (`poll_next`), which is what the crate implements.
+        for member in &f.foreign_dispatch {
+            let Some((owner, mem)) = member.split_once('#') else { continue };
+            let Some((tq, leaf)) = mem.rsplit_once("::") else { continue };
+            // ONLY a member that DRIVES the abstraction's required methods — the required members
+            // themselves and the extension methods that are defined by calling them (`StreamExt::next`
+            // polls `poll_next`). For those, "the body may be one of this crate's implementors" is true
+            // by construction, so `dispatch:<trait>.<member>` is a TRUE reason. Any other leaf reaching
+            // here is the builder-chain walk carrying a bound onto something the trait does not own —
+            // `.next().await.is_some()`, or a concrete implementor's INHERENT `has_next` typed as the
+            // bound — and naming it a dispatch would publish a false reason (measured on mongodb).
+            if !crate::lang::is_driving_async_member(leaf) {
+                continue;
+            }
+            let prefix = format!("{owner}#{tq}::");
+            let implementors: Vec<&String> = merged
+                .foreign_impls
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .flat_map(|(_, v)| v.iter())
+                .collect();
+            if !implementors.is_empty() {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
+                if crate::lang::reach_debug() {
+                    eprintln!("R981HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
+                }
+            }
+        }
         for member in &f.foreign_dispatch {
             if merged.nested_impl_foreign.contains(member) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");

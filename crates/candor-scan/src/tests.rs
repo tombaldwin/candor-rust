@@ -16597,6 +16597,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
         // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
         // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
         // type alias records its pointee — a rev61 entry replays both silences warm).
@@ -16630,7 +16631,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16641,7 +16642,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev63/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev64/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26670,5 +26671,76 @@ fn r980_a_pinned_receiver_resolves_to_the_pinned_value() {
     }
     for f in ["ctl_pin_calm", "ctl_await_asyncfn"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f} must stay pure:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R981 — `self.raw.next().await` on `Raw: futures_core::Stream`, where THIS crate implements
+/// `Stream` (mongodb `BatchBuffer::try_advance` over the local `RawBatchCursor::poll_next`), read `[]` +
+/// `invisible:[futures_core]` — and chaining `futures_core` can never charge it, because the body is here.
+/// Re-hedged with the TRUE reason `dispatch:Stream.next` (no bounded-CHA edge: the receiver is a
+/// monomorphized bound — R551). Controls: a plumbing leaf (`.is_some()`) is not published as a dispatch,
+/// and with NO local implementor the row is unchanged (the dependency's report can answer it).
+#[test]
+fn r981_a_driving_dispatch_on_a_foreign_bound_the_crate_implements_is_disclosed() {
+    let toml = "[package]\nname = \"r981\"\n\n[dependencies]\nfutures-core = \"0.3\"\nfutures-util = \"0.3\"\n";
+    let body = "\
+use futures_core::Stream as AsyncStream;\n\
+use futures_util::stream::StreamExt;\n\
+use std::pin::Pin;\n\
+use std::task::{Context, Poll};\n\
+pub struct Buffer<Raw> { raw: Raw }\n\
+impl<Raw: AsyncStream<Item = u8> + Unpin> Buffer<Raw> {\n\
+    pub async fn advance(&mut self) -> bool { self.raw.next().await.is_some() }\n\
+}\n";
+    let local_impl = "pub struct RawCursor;\n\
+impl AsyncStream for RawCursor { type Item = u8; fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); Poll::Ready(None) } }\n";
+    let v = scan_src_to_json_multi("r981", &[("Cargo.toml", toml), ("src/lib.rs", &format!("{body}{local_impl}"))]);
+    let row = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "Buffer::advance").cloned().unwrap_or_default();
+    assert!(veina_row_effs(&v, "Buffer::advance").contains(&"Unknown".to_string()), "{v:#}");
+    let why: Vec<String> = row["unknownWhy"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    assert!(why.contains(&"dispatch:Stream.next".to_string()), "true reason: {why:?}");
+    assert!(!why.iter().any(|w| w.contains("is_some")), "a plumbing leaf is not a dispatch: {why:?}");
+    // No local implementor: unchanged — the dependency's own report can answer this dispatch.
+    let c = scan_src_to_json_multi("r981c", &[("Cargo.toml", toml), ("src/lib.rs", body)]);
+    assert!(!veina_row_effs(&c, "Buffer::advance").contains(&"Unknown".to_string()), "{c:#}");
+}
+
+/// SOUNDNESS R984 — a call through a FOREIGN or std trait's PATH whose receiver argument is a LOCAL type
+/// with a LOCAL impl (`serde::Serialize::serialize(&self.v, s)`, `<V as serde::Serialize>::serialize`,
+/// `fmt::Display::fmt(v, f)`, `Hash::hash`, `PartialEq::eq`) had no edge to the impl — value-bag's
+/// `OwnedValueBag::serialize` lost its callee's true `Unknown`. Controls: a DEFAULTED std member
+/// (`PartialEq::ne`, the R53 shape) adds no edge, and a pure impl stays pure.
+#[test]
+fn r984_a_trait_path_call_on_a_local_value_edges_to_the_local_impl() {
+    let toml = "[package]\nname = \"r984\"\n\n[dependencies]\nserde = \"1\"\n";
+    let src = "\
+use std::fmt;\n\
+use std::hash::{Hash, Hasher};\n\
+pub struct V;\n\
+impl fmt::Display for V { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); write!(f, \"v\") } }\n\
+impl Hash for V { fn hash<H: Hasher>(&self, _h: &mut H) { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); } }\n\
+impl PartialEq for V { fn eq(&self, _o: &V) -> bool { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); true } }\n\
+impl serde::Serialize for V { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { let _ = std::fs::write(\"/tmp/r984\", b\"x\"); s.serialize_unit() } }\n\
+pub struct W { pub v: V }\n\
+impl serde::Serialize for W { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serde::Serialize::serialize(&self.v, s) } }\n\
+pub struct W2 { pub v: V }\n\
+impl serde::Serialize for W2 { fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { <V as serde::Serialize>::serialize(&self.v, s) } }\n\
+pub fn e_display(v: &V, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(v, f) }\n\
+pub fn e_hash<H: Hasher>(v: &V, h: &mut H) { Hash::hash(v, h) }\n\
+pub fn e_eq(a: &V, b: &V) -> bool { PartialEq::eq(a, b) }\n\
+pub struct P;\n\
+impl PartialEq for P { fn eq(&self, _o: &P) -> bool { true } }\n\
+impl fmt::Display for P { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, \"p\") } }\n\
+pub fn ctl_pure(p: &P, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(p, f) }\n\
+pub struct Q;\n\
+impl Q { pub fn ne(&self, _o: &Q) -> bool { let _ = std::fs::write(\"/tmp/r984q\", b\"x\"); true } }\n\
+impl PartialEq for Q { fn eq(&self, _o: &Q) -> bool { true } }\n\
+pub fn ctl_default_ne(a: &Q, b: &Q) -> bool { PartialEq::ne(a, b) }\n";
+    let v = scan_src_to_json_multi("r984", &[("Cargo.toml", toml), ("src/lib.rs", src)]);
+    for f in ["W::serialize", "W2::serialize", "e_display", "e_hash", "e_eq"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    for f in ["ctl_pure", "ctl_default_ne"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
     }
 }

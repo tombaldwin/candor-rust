@@ -2425,6 +2425,53 @@ impl<'a> CallCollector<'a> {
     /// LOCAL impl body, carrying its (possibly effectful) effects to this fn. `method=false`/`typed=false`
     /// like the iterator/lazy edges. The CALLER owns the resolve-or-skip gate (the type must be a concrete
     /// local `impl <trait>`), so this never fabricates.
+    /// SOUNDNESS R984 — `value_bag_serde1::lib::Serialize::serialize(&self.by_ref(), s)`: a call through a
+    /// FOREIGN trait's path (or `<T as dep::Trait>::m(x)`) whose receiver argument is a LOCAL type with a
+    /// LOCAL impl of that trait got no edge to the impl, so `OwnedValueBag::serialize` lost the true
+    /// `Unknown` its callee `ValueBag::serialize` carries (`deny Unknown` 1 -> 0). The edge is added only
+    /// where `foreign_impls` records that THIS impl block DECLARES the member for THAT type — R53's
+    /// fabrication (an inherent `m` shadowing a trait DEFAULT, both keyed `T::m`) needs a default, and a
+    /// declared member is not one. Additive: the written path is still pushed by the arm below.
+    fn edge_ufcs_foreign_trait(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() < 2 {
+            return;
+        }
+        let method = &segs[segs.len() - 1];
+        let tr = &segs[segs.len() - 2];
+        if !tr.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return;
+        }
+        let ty = match &p.qself {
+            Some(q) => crate::lang::type_path(&q.ty, &self.uses),
+            // The STRICT typer: the builder-chain walk answers `x.by_ref()` with `x`'s own type, which
+            // would edge `OwnedValueBag::serialize` back to itself (measured).
+            None => args.first().and_then(|a| self.type_of(a)),
+        };
+        let Some(ty) = ty else { return };
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) {
+            return;
+        }
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+        let want = format!("{ty_leaf}::{method}");
+        let tail = format!("{tr}::{method}");
+        let hit = self.foreign_impls.iter().any(|(k, v)| {
+            let member = k.split_once('#').map_or(k.as_str(), |(_, m)| m);
+            (member == tail || member.ends_with(&format!("::{tail}"))) && v.contains(&want)
+        })
+            // The std half: `foreign_impls` does not record std traits, so for a std trait the evidence is
+            // a local `impl Tr for T` (`trait_impls`) and a member the trait REQUIRES — a required member
+            // has no default for an inherent `m` to shadow, which is the whole of R53's fabrication.
+            || (std_required_member(tr, method)
+                && self.trait_impls.get(tr.as_str()).is_some_and(|v| v.contains(&ty_leaf)));
+        if hit {
+            if crate::lang::reach_debug() {
+                eprintln!("R984UFCS {tr}::{method} -> {want}");
+            }
+            self.push_coercion_edge(&ty_leaf, method);
+        }
+    }
+
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -4689,6 +4736,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 syn::Expr::Group(g) => func = &g.expr,
                 _ => break,
             }
+        }
+        if let syn::Expr::Path(p) = func {
+            self.edge_ufcs_foreign_trait(p, &node.args);
         }
         match func {
             syn::Expr::Path(p) => {
@@ -8586,4 +8636,25 @@ fn pin_macro_arg(mac: &syn::Macro) -> Option<syn::Expr> {
         return None;
     }
     mac.parse_body::<syn::Expr>().ok()
+}
+
+/// R984 — a std trait member with NO default body (so `Trait::m(&t)` over a local `impl Trait for T` can
+/// only run that impl's `m`).
+fn std_required_member(tr: &str, m: &str) -> bool {
+    matches!(
+        (tr, m),
+        ("Display" | "Debug" | "LowerHex" | "UpperHex" | "Binary" | "Octal" | "Pointer", "fmt")
+            | ("Hash", "hash")
+            | ("PartialEq", "eq")
+            | ("PartialOrd", "partial_cmp")
+            | ("Ord", "cmp")
+            | ("Clone", "clone")
+            | ("Iterator", "next")
+            | ("Future", "poll")
+            | ("Read", "read")
+            | ("Write", "write" | "flush")
+            | ("Deref", "deref")
+            | ("DerefMut", "deref_mut")
+            | ("Drop", "drop")
+    )
 }

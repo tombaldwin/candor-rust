@@ -69,6 +69,28 @@ release check's removed rows.
   CHANGED 1,385; 0 concrete effects lost; the only `Unknown` losses are R977's 17 traced resolutions. Cache
   schema rev63.
 
+### ⚠ A driving dispatch on a foreign bound this crate implements is disclosed; a trait-path call edges to the local impl (SOUNDNESS R981, R984)
+
+- **R981.** `self.raw.next().await` with `Raw: futures_core::Stream`, where this crate itself implements
+  `Stream` (mongodb `BatchBuffer::try_advance` over its own `RawBatchCursor::poll_next`), read `[]` +
+  `invisible:[futures_core]` — and chaining `futures_core` can never charge it, because the body is here. Now
+  `Unknown` with the true reason `dispatch:Stream.next` (a re-hedge, not a resolution: the receiver is a
+  monomorphized bound, so no bounded-CHA edge is sound — R551). Fires only for members that DRIVE the
+  abstraction (`poll_*` and the extension methods defined by calling them) on a trait with a local
+  implementor; `Option`/`Result` plumbing, a concrete implementor's inherent method and `close`/`shutdown`
+  (measured false reasons) are excluded. mongodb `cursor::sync::Cursor::advance`: `deny Net Unknown` 1 (v0.39.3)
+  → 0 (staged) → 1. EXECUTED fixture: `deny Fs Unknown Cursor::advance` 0 → 1.
+- **R984.** `value_bag_serde1::lib::Serialize::serialize(&self.by_ref(), s)` — a call through a FOREIGN or std
+  trait's path (or `<T as Trait>::m`) whose argument is a local type with a local impl — had no edge to that
+  impl, so value-bag `OwnedValueBag::serialize`/`::stream` lost their callees' true `Unknown`. Edged now where
+  `foreign_impls` records the impl block DECLARES the member for that type, or, for a std trait, where the
+  member has no default (`Display`/`Debug::fmt`, `Hash::hash`, `PartialEq::eq`, …) — R53's fabrication needs a
+  defaulted member, and the test pins `PartialEq::ne` as the control. EXECUTED (`Display`, `Hash`,
+  `PartialEq`): `deny Fs` 0 → 1; value-bag `deny Unknown` back to 1.
+- Corpus A/B against the R977–R980 build: rows ADDED 394, REMOVED 0, CHANGED 919; 0 concrete effects lost,
+  0 `Unknown` lost; 601 rows gain only `Unknown` (0.098% of 612,325 post rows) — the R981 reasons by trait
+  (`Stream`, `AsyncRead`/`AsyncWrite`, hyper `rt::Read`/`rt::Write`, …) and their callers. Cache schema rev64.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the

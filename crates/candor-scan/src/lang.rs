@@ -8888,3 +8888,25 @@ pub(crate) fn opaque_include_scope(
         }
     }
 }
+
+/// SOUNDNESS R981 — the members of the async abstractions (`futures_core::Stream`/`TryStream`,
+/// `Future`, `futures_io`/`tokio::io` `AsyncRead`/`AsyncWrite`/`AsyncBufRead`) that RUN the abstraction:
+/// the required `poll_*` members, and the extension-trait methods defined by calling them. A dispatch
+/// through one of these on a bound the crate itself implements may land in the crate's own impl.
+pub(crate) fn is_driving_async_member(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "poll" | "poll_next" | "poll_read" | "poll_write" | "poll_flush" | "poll_close" | "poll_shutdown"
+            | "poll_fill_buf" | "poll_write_vectored" | "poll_read_buf" | "try_poll" | "try_poll_next"
+            | "poll_unpin" | "poll_next_unpin" | "try_poll_unpin" | "try_poll_next_unpin" | "now_or_never"
+            | "next" | "try_next" | "collect" | "try_collect" | "for_each" | "try_for_each"
+            | "for_each_concurrent" | "try_for_each_concurrent" | "fold" | "try_fold" | "count" | "forward"
+            | "select_next_some" | "concat" | "into_future"
+            | "read" | "read_exact" | "read_to_end" | "read_to_string" | "read_buf" | "read_line"
+            | "read_until" | "fill_buf" | "write" | "write_all" | "write_vectored" | "write_buf"
+            | "write_all_buf" | "flush"
+    )
+    // NOT `close`/`shutdown`: on a lock/channel the builder-chain walk carries the bound through
+    // `self.inner.lock().close()` and named `dispatch:RawMutex.close` (futures-intrusive, measured) — a
+    // false reason. `poll_close`/`poll_shutdown` above are the members those extension methods drive.
+}
