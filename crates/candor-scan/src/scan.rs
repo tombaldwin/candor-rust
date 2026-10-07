@@ -1369,6 +1369,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let dir = p.parent().unwrap_or(root);
                 crate::lang::splice_includes(&mut file.items, dir, &include_env, &mut Vec::new(), &mut read);
             }
+            if text.contains("pin_project") || text.contains("link!") {
+                crate::lang::splice_pin_project(&mut file.items); // R988, R960
+            }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -1875,6 +1878,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let p = paths.iter().find(|(_, r)| r == rel).map(|(p, _)| p.clone())?;
                         let dir = p.parent().unwrap_or(root).to_path_buf();
                         crate::lang::splice_includes(&mut f.items, &dir, &include_env, &mut Vec::new(), &mut Vec::new());
+                    }
+                    if t.contains("pin_project") || t.contains("link!") {
+                        crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
                     Some(f)
                 })

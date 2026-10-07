@@ -16597,6 +16597,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
         // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
         // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
         // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
@@ -16631,7 +16632,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16642,7 +16643,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev64/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev65/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26743,4 +26744,80 @@ pub fn ctl_default_ne(a: &Q, b: &Q) -> bool { PartialEq::ne(a, b) }\n";
     for f in ["ctl_pure", "ctl_default_ne"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
     }
+}
+
+#[cfg(test)]
+fn row_why(v: &serde_json::Value, f: &str) -> Vec<String> {
+    v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f)
+        .and_then(|r| r["unknownWhy"].as_array().cloned())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// SOUNDNESS R982 / R985 / R987 / R988 / R989 / R960 — the six mechanisms the release audit found behind
+/// v0.39.3's coincidental `Unknown`s, one shape each, in one crate per manifest they need.
+#[test]
+fn r982_r987_r988_r989_r985_release_audit_shapes() {
+    // R982: a name bound only by a FEATURE-INACTIVE `use`, called inside a feature-gated fn (redis
+    // `create_rustls_config` / `load_native_certs`). Control: a default-build fn keeps the R140 filter.
+    let v = scan_src_to_json_multi("r982", &[
+        ("Cargo.toml", "[package]\nname = \"r982\"\n\n[features]\ndefault = []\ntls = []\n"),
+        ("src/lib.rs", "\
+#[cfg(feature = \"tls\")]\nuse std::fs::read as load_native_certs;\n\
+#[cfg(feature = \"tls\")]\npub fn e_gated() { let _ = load_native_certs(\"/etc/ssl\"); }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&v, "e_gated"), vec!["Fs".to_string()], "{v:#}");
+
+    // R987: `ManuallyDrop::new(x)` / `ptr::read(&x)` are `x` (allocator-api2 `Box::into_inner`).
+    let a = scan_src_to_json("r987", "\
+        use core::{mem, ptr};\n\
+        pub trait Allocator { fn deallocate(&self, p: usize); }\n\
+        pub struct Global;\n\
+        impl Allocator for Global { fn deallocate(&self, _p: usize) { let _ = std::fs::write(\"/tmp/r987\", b\"x\"); } }\n\
+        pub struct Bx<T, A: Allocator = Global>(pub *mut T, pub A);\n\
+        impl<T, A: Allocator> Bx<T, A> {\n\
+            pub fn e_into_inner(b: Self) { let b = mem::ManuallyDrop::new(b); let alloc = unsafe { ptr::read(&b.1) }; alloc.deallocate(0) }\n\
+        }\n");
+    assert_eq!(veina_row_effs(&a, "Bx::e_into_inner"), vec!["Fs".to_string()], "{a:#}");
+
+    // R988: a `pin_project!` struct's fields, through the generated `project()` (tower).
+    let p = scan_src_to_json_multi("r988", &[
+        ("Cargo.toml", "[package]\nname = \"r988\"\n\n[dependencies]\npin-project-lite = \"0.2\"\n"),
+        ("src/lib.rs", "\
+use std::pin::Pin;\nuse std::task::{Context, Poll};\n\
+pub trait Discover { fn poll_discover(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u8>; }\n\
+pub struct Real;\n\
+impl Discover for Real { fn poll_discover(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u8> { let _ = std::fs::write(\"/tmp/r988\", b\"x\"); Poll::Ready(1) } }\n\
+pin_project_lite::pin_project! { pub struct Wrap<D> { #[pin] discover: D, n: u8 } }\n\
+impl<D: Discover> Wrap<D> { pub fn e_project(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u8> { let this = self.project(); this.discover.poll_discover(cx) } }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&p, "Wrap::e_project"), vec!["Fs".to_string()], "{p:#}");
+
+    // R985: a poll on a pinned value that types to nothing is disclosed, not silent.
+    let u = scan_src_to_json_multi("r985", &[
+        ("Cargo.toml", "[package]\nname = \"r985\"\n\n[dependencies]\nsysdep = \"1\"\n"),
+        ("src/lib.rs", "use std::pin::Pin;\nuse std::task::Context;\npub fn e_untyped(cx: &mut Context<'_>) { let mut b = sysdep::mk(); let _ = Pin::new(&mut b).poll_frame(cx); }\n"),
+    ]);
+    assert!(row_why(&u, "e_untyped").iter().any(|w| w.starts_with("dispatch:untyped pinned receiver")), "{u:#}");
+
+    // R989: a glob-imported FFI name in a module that also has an item macro (security-framework).
+    let g = scan_src_to_json_multi("r989", &[
+        ("Cargo.toml", "[package]\nname = \"r989\"\n\n[dependencies]\nsysdep = \"1\"\n"),
+        ("src/lib.rs", "use sysdep::keychain::*;\nmacro_rules! decl { ($n:ident) => { pub struct $n; } }\ndecl!(Thing);\npub fn e_glob() -> i32 { unsafe { SecThingCreate(0) } }\n"),
+    ]);
+    let row = g["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "e_glob").cloned().unwrap_or_default();
+    assert!(row["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "sysdep")), "the glob origin is named: {g:#}");
+}
+
+/// SOUNDNESS R960 — clang-sys's `link!( pub fn ..; )` foreign declarations are published as
+/// `native:extern fn` units, so a caller (and a chained consumer, bindgen) is not read pure.
+#[test]
+fn r960_link_macro_decls_are_published() {
+    let l = scan_src_to_json("r960", "\
+        macro_rules! link { ($($t:tt)*) => {} }\n\
+        link!(\n    pub fn clang_createIndex(exclude: i32, display: i32) -> *mut u8;\n);\n\
+        pub fn e_wrap() -> *mut u8 { unsafe { clang_createIndex(0, 0) } }\n");
+    let w = row_why(&l, "clang_createIndex");
+    assert!(w.iter().any(|x| x == "native:extern fn"), "the link! declaration is published: {l:#}");
+    assert!(veina_row_effs(&l, "e_wrap").contains(&"Unknown".to_string()), "{l:#}");
 }

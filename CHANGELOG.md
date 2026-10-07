@@ -91,6 +91,37 @@ release check's removed rows.
   0 `Unknown` lost; 601 rows gain only `Unknown` (0.098% of 612,325 post rows) — the R981 reasons by trait
   (`Stream`, `AsyncRead`/`AsyncWrite`, hyper `rt::Read`/`rt::Write`, …) and their callers. Cache schema rev64.
 
+### ⚠ The release audit's pre-existing silences: resolved or re-hedged (SOUNDNESS R960, R982, R985, R987, R988, R989)
+
+Six mechanisms that v0.39.3 covered only by an unrelated `ambiguous:` `Unknown`:
+
+- **R960** — clang-sys declares libclang through its own `link!( pub fn ..; )`; the declarations are now
+  published as `native:extern fn` units, so bindgen chained over clang-sys reads `Unknown` again
+  (`deny Unknown BindgenContext::new` 1 / 0 / 1 for v0.39.3 / staged / this). Resolution.
+- **R982** — inside a feature-gated item, a name bound only by a feature-inactive `use` of an EXTERNAL item
+  resolves through it (redis `create_rustls_config` → `rustls_native_certs::load_native_certs`, `Fs`). Not
+  for macro names (sea-orm's `debug_print!` twins keep their disclosure) and not for crate-local targets
+  (measured: they withdrew real hedges in time and rustix). Resolution.
+- **R985** — `Pin::new(x).poll_*(cx)` on an `x` that types to nothing (aws-smithy-types' pin-projected
+  `BoxBody` payload) is `Unknown` with the dot-free `dispatch:untyped pinned receiver of `poll_*`` (9 rows,
+  1 / 0 / 1). Re-hedge.
+- **R987** — `ManuallyDrop::new(x)` / `ptr::read(&x)` type as `x`, so allocator-api2 `Box::into_inner` now
+  answers exactly as `Box::drop` does (`dispatchesOn Allocator::deallocate`, CHA over the crate's pure
+  `Global`/`System`). Resolution.
+- **R988** — `pin_project!` structs are spliced so their fields are indexed, and `self.project()` types as
+  the struct: tower `Constant::poll_next` / `PendingRequestsDiscover::poll_next` edge to the blanket
+  `Discover::poll_discover` again. Resolution.
+- **R989** — a glob-imported name in a module that also has an item macro is a NON-exclusive glob
+  candidate (security-framework `SecKeychainCreate` from `security_framework_sys::keychain::*`); chained over
+  security-framework-sys, `deny Unknown CreateOptions::create` 0 / 0 / 1. Resolution.
+- **R986 (rustix `c::timerfd_create` through a `#[cfg_attr(_, path)]`-selected backend) is NOT fixed.** The
+  attempted resolution (aliasing the written module to its path targets) lost 96 concrete effects in
+  rustix 0.37.28 on the A/B and was reverted.
+- Corpus A/B against `daf9666`: rows ADDED 1,993, REMOVED 7, CHANGED 4,196 on the pre-final build; the only
+  concrete losses are reqwest `Pending::poll`/`PendingRequest::poll` `Log` (6 rows), which came solely from
+  fabricated drop edges to `blocking::InnerClientHandle::drop` and `wasm::AbortGuard::drop` (neither type is
+  in scope there). Cache schema rev65.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the

@@ -698,6 +698,11 @@ impl<'a> CallCollector<'a> {
     }
 
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
+        // R980/R987 — `Pin::new(x)` / `ManuallyDrop::new(x)` / `ptr::read(&x)` is `x`'s type, not the
+        // wrapper's: typed as `ManuallyDrop`, allocator-api2's `boxed.1` named no field.
+        if let Some(a) = pinned_arg(expr) {
+            return self.type_of(a).or_else(|| self.resolve_recv_type(a));
+        }
         let ty = ctor_type(expr, &self.uses, self.returns)?;
         // VEIN B — a TURBOFISH that names a GENERIC PARAMETER of this fn/impl (`from_str::<B>(..)`) types
         // nothing: `B` is a bound, and its dispatch route (`resolve_recv_traits`) stays the answer — the
@@ -1298,6 +1303,20 @@ impl<'a> CallCollector<'a> {
         }
         if name == "clone" {
             return self.type_of(&m.receiver);
+        }
+        // SOUNDNESS R988 — `let this = self.project()` (pin-project's generated projection): the
+        // projection's fields are the struct's own fields by name (wrapped in `Pin<&mut _>` / `&mut _`,
+        // which every field route already peels), so `this.inner` reads the struct's field types. Untyped,
+        // `this.discover.poll_discover(cx)` (tower `PendingRequestsDiscover::poll_next`) and
+        // `Pin::new(this.inner).poll_discover(cx)` (`Constant::poll_next`) formed no edge. Only where the
+        // crate does not itself declare `project` for that type — a hand-written one answers as declared.
+        if matches!(name.as_str(), "project" | "project_ref") {
+            if let Some(t) = self.type_of(&m.receiver) {
+                let leaf = t.rsplit("::").next().unwrap_or(&t);
+                if !self.returns.contains_key(&crate::model::impl_fn_key(leaf, &name)) {
+                    return Some(t);
+                }
+            }
         }
         let recv = self.type_of(&m.receiver);
         if let Some(e) = recv.as_deref().and_then(|k| self.wrapper_accessor_type(&m.receiver, k, &name)) {
@@ -3122,6 +3141,10 @@ impl<'a> CallCollector<'a> {
             return Vec::new();
         }
         match expr {
+            // R980/R987 — a pinning or transparent wrapper constructor carries its argument's dispatch.
+            syn::Expr::Call(_) if pinned_arg(expr).is_some() => {
+                pinned_arg(expr).map(|a| self.resolve_recv_traits(a)).unwrap_or_default()
+            }
             syn::Expr::Reference(r) => self.resolve_recv_traits(&r.expr),
             syn::Expr::Paren(p) => self.resolve_recv_traits(&p.expr),
             syn::Expr::Group(g) => self.resolve_recv_traits(&g.expr),
@@ -5004,6 +5027,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
+        // SOUNDNESS R985 — `Pin::new(x).poll_*(cx)` where `x` types to NOTHING (aws-smithy-types'
+        // `match inner.get_mut() { BoxBody::HttpBody04(b) => Pin::new(b).poll_trailers(cx) }` behind a
+        // pin-projection): a value is pinned to drive a `Future`/`Stream`/`Body` poll, and with no type the
+        // call formed no edge at all — silent. The owner cannot be formed, so the disclosure is the
+        // dot-free `dispatch:` detail SPEC §4 reserves for exactly that state. A typed pinned value is
+        // R980's resolution and never reaches here.
+        if leaf.starts_with("poll") {
+            if let Some(arg) = pinned_arg(&node.receiver) {
+                if self.resolve_recv_type(arg).is_none() && self.resolve_recv_traits(arg).is_empty() {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R985PIN {leaf}");
+                    }
+                    self.mark_unresolved(format!("dispatch:untyped pinned receiver of `{leaf}`"));
+                }
+            }
+        }
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
         // `post(format!("{}/x", API_BASE))` / `post(url)` recover a statically-known host (SPEC §1). The
         // resolved literal flows through the SAME Net/Llm/Db host refinement in scan.rs as an inline one.
@@ -7585,7 +7624,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
-        let mpath = crate::lang::expand_noanchor(&path_to_string(&node.path), &self.uses);
+        let mpath = crate::lang::expand_noanchor_macro(&path_to_string(&node.path), &self.uses);
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
         // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
@@ -8623,6 +8662,13 @@ fn pinned_arg(expr: &syn::Expr) -> Option<&syn::Expr> {
             }
             match (segs[n - 2].as_str(), segs[n - 1].as_str()) {
                 ("Pin", "new" | "new_unchecked") | ("Box", "pin") => c.args.first(),
+                // SOUNDNESS R987 — the same transparency for `ManuallyDrop::new(x)` (derefs to `x`) and
+                // `ptr::read(&x)` (a bitwise copy of `x`): allocator-api2 `Box::into_inner` reads its
+                // allocator out with `ptr::read(&boxed.1)` from a `ManuallyDrop`, and the value typed to
+                // nothing, so `alloc.deallocate(..)` published nothing while `Box::drop`'s
+                // `self.1.deallocate(..)` publishes `dispatchesOn Allocator::deallocate`.
+                ("ManuallyDrop", "new") => c.args.first(),
+                ("ptr", "read" | "read_unaligned" | "read_volatile") => c.args.first(),
                 _ => None,
             }
         }
