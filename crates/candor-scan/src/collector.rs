@@ -979,6 +979,54 @@ impl<'a> CallCollector<'a> {
     /// either way. **A/B over 1,561 registry crates: ADDED 1,297 · REMOVED 0 · CHANGED 2,254**, reach
     /// 5,560 corrections across 328 crates; 0 of the changed rows lose an effect, and 8 of the 121
     /// hard-effect gains were read against source with 0 fabrications.
+    /// SOUNDNESS R979 — `self.inner.state_mut()?.next_if_any()` where `impl<S, O> PollState<S, O> {
+    /// fn state_mut(&mut self) -> Result<&mut S> }` and `inner: PollState<Box<CursorWrapper>, ..>` (or a
+    /// generic alias for it): the accessor returns the impl's type PARAMETER, so the builder-chain walk's
+    /// "returns its receiver" answer (`PollState`) formed `PollState::next_if_any`, which names nothing, and
+    /// the call vanished (mongodb `ChangeStream::next_if_any`, executed fixture B1/B6/B7). Typed from two
+    /// declarations only: the parameter's POSITION (`impl_retgen_key`) and the receiver FIELD's written
+    /// argument at that position (`field_args_key`). Same second gate as `impl_declared_return` — the
+    /// outer method must resolve on the answer — except through `Result`/`Option` plumbing, which the next
+    /// step types.
+    fn impl_generic_return(&self, recv: &syn::Expr, base: &str, leaf: &str, outer: &str) -> Option<String> {
+        let base_leaf = base.rsplit("::").next().unwrap_or(base);
+        let pos: usize = self.returns.get(&crate::model::impl_retgen_key(base_leaf, leaf))?.parse().ok()?;
+        let mut r = recv;
+        loop {
+            match r {
+                syn::Expr::Reference(x) => r = &x.expr,
+                syn::Expr::Paren(x) => r = &x.expr,
+                syn::Expr::Group(x) => r = &x.expr,
+                _ => break,
+            }
+        }
+        let syn::Expr::Field(f) = r else { return None };
+        let owner = self.resolve_recv_type(&f.base)?;
+        if self.field_ambiguous(&owner, &f.member) || self.is_dependency_type(&owner) {
+            return None;
+        }
+        let key = match &f.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+        let args = self.returns.get(&crate::model::field_args_key(owner_leaf, &key))?;
+        let ret = args.split('\u{1}').nth(pos)?;
+        if ret == "_" || ret == "'" || ret.is_empty() {
+            return None;
+        }
+        if !outer.is_empty() && !crate::lang::is_result_plumbing(outer) {
+            let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
+            if !self.returns.contains_key(&crate::model::impl_fn_key(ret_leaf, outer)) {
+                return None;
+            }
+        }
+        if crate::lang::reach_debug() {
+            eprintln!("R979RET {base_leaf}::{leaf} -> {ret}");
+        }
+        Some(ret.to_string())
+    }
+
     fn impl_declared_return(&self, base: &str, leaf: &str, outer: &str) -> Option<String> {
         let base_leaf = base.rsplit("::").next().unwrap_or(base);
         let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, leaf))?;
@@ -1113,6 +1161,8 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
+            syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
+            syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => self.type_of(&pin_macro_arg(&mm.mac)?), // R980
             syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
             syn::Expr::MethodCall(m) => self.type_of_method(m),
@@ -1264,6 +1314,9 @@ impl<'a> CallCollector<'a> {
         let base = recv?;
         if base.contains(crate::decls::ALIAS_ALT_SEP) {
             return None;
+        }
+        if let Some(g) = self.impl_generic_return(&m.receiver, &base, &name, "") {
+            return Some(g); // R979
         }
         let base_leaf = base.rsplit("::").next().unwrap_or(&base);
         let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, &name));
@@ -1477,6 +1530,9 @@ impl<'a> CallCollector<'a> {
                     Some(k) => k?,
                     None => self.resolve_recv_type_for(&m.receiver, &m.method.to_string())?,
                 };
+                if let Some(ret) = self.impl_generic_return(&m.receiver, &base, &m.method.to_string(), outer) {
+                    return Some(ret);
+                }
                 if let Some(ret) = self.impl_declared_return(&base, &m.method.to_string(), outer) {
                     // §E1 REACH COUNTER, on the CHANGED branch: this arm exists only to return a
                     // DIFFERENT answer from the walk below it, so "never fired" and "fired and moved
@@ -1687,6 +1743,17 @@ impl<'a> CallCollector<'a> {
                     return None;
                 }
                 self.fields.get(base_leaf)?.get(&key).cloned()
+            }
+            // SOUNDNESS R980 — `Pin::new(x)`, `Pin::new_unchecked(x)`, `Box::pin(x)` and `pin!(x)` pin a value
+            // whose methods are still `x`'s (`Pin<P>` derefs to `P::Target`; `Future::poll` takes the
+            // pinned receiver). Typed as the `Pin` itself, `Pin::new(req).poll(cx)` formed `Pin::poll` and
+            // the call vanished — reqwest `async_impl::client::Pending::poll`, executed fixture A1.
+            syn::Expr::Call(c) if pinned_arg(expr).is_some() => {
+                let _ = c;
+                self.resolve_recv_type_for(pinned_arg(expr)?, outer)
+            }
+            syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => {
+                self.resolve_recv_type_for(&pin_macro_arg(&mm.mac)?, outer)
             }
             syn::Expr::Call(_) => self.nominal_ctor_type(expr),
             // `S {..}.method()` / `for _ in (S {..})` — an inline struct literal names its type directly
@@ -4858,6 +4925,33 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         syn::visit::visit_expr_call(self, node);
     }
+    /// SOUNDNESS R980 (the `.await` sibling) — `x.await` drives `<T as Future>::poll` for a value of a
+    /// LOCAL type `T` that implements `Future`, exactly as `Pin::new(&mut x).poll(cx)` does, and nothing
+    /// edged to it. Charged through the same implicit-call edge `charge_coercion_ty` gives `{}` →
+    /// `Display::fmt`, only where the crate has a local `impl Future for T`. Restricted to a FIELD
+    /// operand, whose type is DECLARED: a name may be bound to an `async fn`'s result, which the return
+    /// index records as the fn's OUTPUT type, so `let f = mk(); f.await` (with `async fn mk() -> Req`)
+    /// charged `Req::poll` — MEASURED, fixture `rustagent-rel/p2` `ctl_await_asyncfn`. A name or a call
+    /// operand stays a stated residual.
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        let mut b = &*node.base;
+        while let syn::Expr::Paren(p) = b {
+            b = &p.expr;
+        }
+        if matches!(b, syn::Expr::Field(_)) {
+            if let Some(ty) = self.resolve_recv_type(b) {
+                let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                if self.trait_impls.get("Future").is_some_and(|v| v.contains(&ty_leaf)) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R980AWAIT {ty_leaf}");
+                    }
+                    self.push_coercion_edge(&ty_leaf, "poll");
+                }
+            }
+        }
+        syn::visit::visit_expr_await(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
@@ -8462,4 +8556,34 @@ impl syn::parse::Parse for CfgIfArms {
         }
         Ok(CfgIfArms(blocks))
     }
+}
+
+
+/// SOUNDNESS R980 — the pinned VALUE of a pinning constructor (`Pin::new(x)`, `Pin::new_unchecked(x)`,
+/// `Box::pin(x)`, `pin!(x)` / `std::pin::pin!(x)`), or `None` for any other expression. The leaf is the
+/// test, with `Pin`/`Box` as the type segment, exactly as the `Box::new` peel in `lang::ctor_type` keys.
+fn pinned_arg(expr: &syn::Expr) -> Option<&syn::Expr> {
+    match expr {
+        syn::Expr::Call(c) if c.args.len() == 1 => {
+            let syn::Expr::Path(p) = &*c.func else { return None };
+            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let n = segs.len();
+            if n < 2 {
+                return None;
+            }
+            match (segs[n - 2].as_str(), segs[n - 1].as_str()) {
+                ("Pin", "new" | "new_unchecked") | ("Box", "pin") => c.args.first(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// R980 — the argument of a `pin!(x)` / `std::pin::pin!(x)` / `core::pin::pin!(x)` invocation.
+fn pin_macro_arg(mac: &syn::Macro) -> Option<syn::Expr> {
+    if mac.path.segments.last().is_none_or(|s| s.ident != "pin") {
+        return None;
+    }
+    mac.parse_body::<syn::Expr>().ok()
 }

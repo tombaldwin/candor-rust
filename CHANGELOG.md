@@ -45,6 +45,30 @@ standing in front of them.
   `convert_headers_0x_1x` arms, rustix's libc `ret_owned_fd`, bumpalo's `boxed::Box::from_iter_in`).
   Cache schema rev62.
 
+### ⚠ A generic accessor's return and a pinned receiver are typed (SOUNDNESS R979, R980)
+
+Two more PRE-EXISTING dropped edges (silent in v0.39.3 behind a coincidental `Unknown`) found by tracing the
+release check's removed rows.
+
+- **R979.** `impl<S, O> PollState<S, O> { fn state_mut(&mut self) -> Result<&mut S, ()> }` — an accessor
+  returning the impl's TYPE PARAMETER — was typed as its receiver, so `self.inner.state_mut()?.next_if_any()`
+  formed `PollState::next_if_any` and vanished: mongodb 3.9.x `change_stream::ChangeStream::next_if_any` and
+  its sync wrapper read PURE. Pass A now files the parameter's position and each field's written type
+  ARGUMENTS (through a same-module `type` alias, generic or not); the call site types the step from the
+  receiver field's argument. `?`, `.unwrap()` and a bare `&mut S` all reach it; a parameter position that
+  names a pure type stays pure. Residual: the receiver must be a FIELD (a parameter or local of the generic
+  type is not typed this way).
+- **R980.** `Pin::new(req).poll(cx)` typed the receiver as `Pin`, so reqwest
+  `async_impl::client::Pending::poll` read PURE. `Pin::new`/`Pin::new_unchecked`/`Box::pin`/`pin!` now type as
+  the pinned value, a `Pin<P>` parameter peels like `Box<P>`, and `self.fut.await` on a FIELD whose type has a
+  local `impl Future` edges to its `poll`. Residual: `x.await` on a NAME is not edged (a name bound to an
+  `async fn`'s result is typed as that fn's output, which would fabricate — measured, and pinned in the test).
+- EXECUTED fixtures: `deny Fs <fn>` 0 → 1 on 5 R979 shapes and 6 R980 shapes; on the real crates
+  `deny Clock ChangeStream::next_if_any` (async and sync) and `deny Log Pending::poll` (reqwest 0.12/0.13)
+  0 → 1. Corpus A/B against the staged 0.40.0 build, R977–R980 together: rows ADDED 467, REMOVED 4,
+  CHANGED 1,385; 0 concrete effects lost; the only `Unknown` losses are R977's 17 traced resolutions. Cache
+  schema rev63.
+
 ### ⚠ ⟨0.40⟩ bind/listen: an ACCEPT fails `allow Net` closed, and a bind handed a runtime STRING resolves a name (SOUNDNESS R817 rust half, R949)
 
 Beside a benign `connect("ok.example:80")`, a function that `accept`s on a listener and writes to the

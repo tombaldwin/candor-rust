@@ -829,7 +829,9 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
             // duct + crates: it dropped duct's whole public-API Exec). Mirrors elem_type's wrapper-peel.
             // Only these three (owned, Deref-to-T); Mutex/RefCell need an explicit .lock()/.borrow().
             if let Some(seg) = p.path.segments.last() {
-                if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc") {
+                // SOUNDNESS R980 — and `Pin<P>`, which derefs to `P::Target`: a `p: Pin<&mut Req>`
+                // parameter's `p.poll(cx)` is `Req::poll` (fixture `rustagent-rel/p1` `e_pin_param`).
+                if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                         if let Some(inner) = args.args.iter().find_map(|a| match a {
                             syn::GenericArgument::Type(t) => Some(t),

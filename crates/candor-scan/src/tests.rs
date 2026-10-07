@@ -16597,6 +16597,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
         // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
         // type alias records its pointee — a rev61 entry replays both silences warm).
         // R817/R949 bumped it to rev61 (a runtime-string `bind` sets the cached call's `path_lits_partial`;
@@ -16629,7 +16630,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16640,7 +16641,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev62/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev63/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26594,4 +26595,80 @@ fn r978_a_smart_pointer_type_alias_is_peeled_like_the_written_wrapper() {
     assert!(e.iter().any(|x| x == "Env" || x == "Unknown"), "the sync twin runs `Env`: {e:?}\n{t:#}");
     assert!(!(e.iter().any(|x| x == "Clock") && !e.iter().any(|x| x == "Unknown")),
             "the FUTURE twin's `Clock`, certified for the sync cache: {e:?}\n{t:#}");
+}
+
+/// SOUNDNESS R979 — an accessor whose return is the IMPL'S TYPE PARAMETER (`impl<S, O> PollState<S, O> {
+/// fn state_mut(&mut self) -> Result<&mut S, ()> }`) was typed by the builder-chain walk as its RECEIVER
+/// (`PollState`), so `self.inner.state_mut()?.advance()` formed `PollState::advance` and vanished — mongodb
+/// 3.9.x `change_stream::ChangeStream::next_if_any` (executed: `rustagent-verify92/fx` B1/B6/B7). Every
+/// spelling: a generic alias field, a plain alias, the written type, `&mut S` with no `Result`, `.unwrap()`.
+/// Controls: the parameter POSITION decides (`first` names the pure `P`, `second` the effectful `W`).
+#[test]
+fn r979_a_generic_accessor_types_to_the_receiver_fields_argument() {
+    let v = scan_src_to_json("r979", "\
+        use std::marker::PhantomData;\n\
+        pub enum PollState<S, O> { Idle(S), Polling(PhantomData<O>) }\n\
+        impl<S, O> PollState<S, O> { pub fn state_mut(&mut self) -> Result<&mut S, ()> { match self { PollState::Idle(s) => Ok(s), _ => Err(()) } } }\n\
+        pub struct Cell<S> { pub s: S }\n\
+        impl<S> Cell<S> { pub fn state_mut(&mut self) -> &mut S { &mut self.s } }\n\
+        pub struct Wrapper;\n\
+        impl Wrapper { pub fn advance(&mut self) { let _ = std::fs::write(\"/tmp/r979\", b\"x\"); } }\n\
+        type StateGen<T> = PollState<Box<Wrapper>, T>;\n\
+        type StateMono = PollState<Box<Wrapper>, u8>;\n\
+        pub struct B1 { pub inner: StateGen<u8> }\n\
+        impl B1 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B2 { pub inner: StateMono }\n\
+        impl B2 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B4 { pub inner: PollState<Wrapper, u8> }\n\
+        impl B4 { pub fn go(&mut self) -> Result<(), ()> { self.inner.state_mut()?.advance(); Ok(()) } }\n\
+        pub struct B6 { pub inner: Cell<Wrapper> }\n\
+        impl B6 { pub fn go(&mut self) { self.inner.state_mut().advance(); } }\n\
+        pub struct B7 { pub inner: PollState<Wrapper, u8> }\n\
+        impl B7 { pub fn go(&mut self) { self.inner.state_mut().unwrap().advance(); } }\n\
+        pub enum St<A, B> { One(A), Two(PhantomData<B>) }\n\
+        impl<A, B> St<A, B> {\n\
+            pub fn first(&mut self) -> Option<&mut A> { match self { St::One(a) => Some(a), _ => None } }\n\
+            pub fn second(&mut self) -> Option<&mut B> { None }\n\
+        }\n\
+        pub struct Calm; impl Calm { pub fn advance(&mut self) {} }\n\
+        pub struct H { pub s: St<Calm, Wrapper> }\n\
+        impl H { pub fn ctl_first(&mut self) { self.s.first().unwrap().advance() } pub fn e_second(&mut self) { self.s.second().unwrap().advance() } }\n");
+    for f in ["B1::go", "B2::go", "B4::go", "B6::go", "B7::go", "H::e_second"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "H::ctl_first").is_empty(), "position 0 is the pure `Calm`:\n{v:#}");
+}
+
+/// SOUNDNESS R980 — a value PINNED before its method is called (`Pin::new(req).poll(cx)`) typed as `Pin`,
+/// so `Pin::poll` named nothing and the call vanished — reqwest `async_impl::client::Pending::poll`
+/// (executed: `rustagent-verify92/fx` A1). Every sibling spelling: `Pin::new(&mut x)`, a field,
+/// `Box::pin(x).as_mut()`, `pin!(x)`, a `Pin<&mut T>` parameter, and `self.fut.await` on a field whose type
+/// has a local `impl Future`. Controls: a pinned PURE future stays pure, and `let f = mk(); f.await` over an
+/// `async fn mk() -> Req` does NOT charge `Req::poll` (it awaits `mk`'s future, not a `Req`).
+#[test]
+fn r980_a_pinned_receiver_resolves_to_the_pinned_value() {
+    let v = scan_src_to_json("r980", "\
+        use std::future::Future;\n\
+        use std::pin::Pin;\n\
+        use std::task::{Context, Poll};\n\
+        pub struct Req { pub path: String }\n\
+        impl Future for Req { type Output = (); fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> { let _ = std::fs::write(&self.path, b\"x\"); Poll::Ready(()) } }\n\
+        pub struct Calm;\n\
+        impl Future for Calm { type Output = (); fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> { Poll::Ready(()) } }\n\
+        pub fn e_pin_new(r: &mut Req, cx: &mut Context<'_>) -> Poll<()> { Pin::new(r).poll(cx) }\n\
+        pub fn e_pin_new_mut(mut r: Req, cx: &mut Context<'_>) -> Poll<()> { Pin::new(&mut r).poll(cx) }\n\
+        pub fn e_box_pin(r: Req, cx: &mut Context<'_>) -> Poll<()> { Box::pin(r).as_mut().poll(cx) }\n\
+        pub fn e_pin_macro(r: Req, cx: &mut Context<'_>) -> Poll<()> { let p = std::pin::pin!(r); p.poll(cx) }\n\
+        pub fn e_pin_param(p: Pin<&mut Req>, cx: &mut Context<'_>) -> Poll<()> { p.poll(cx) }\n\
+        pub struct Holder { pub fut: Req }\n\
+        impl Holder { pub fn e_field(&mut self, cx: &mut Context<'_>) -> Poll<()> { Pin::new(&mut self.fut).poll(cx) } pub async fn e_await_field(self) { self.fut.await } }\n\
+        pub fn ctl_pin_calm(c: &mut Calm, cx: &mut Context<'_>) -> Poll<()> { Pin::new(c).poll(cx) }\n\
+        pub async fn mk() -> Req { Req { path: String::new() } }\n\
+        pub async fn ctl_await_asyncfn() { let f = mk(); let _r = f.await; }\n");
+    for f in ["e_pin_new", "e_pin_new_mut", "e_box_pin", "e_pin_macro", "e_pin_param", "Holder::e_field", "Holder::e_await_field"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    for f in ["ctl_pin_calm", "ctl_await_asyncfn"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f} must stay pure:\n{v:#}");
+    }
 }

@@ -3211,6 +3211,125 @@ fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: 
 /// `Result`/`Option`-unwrapped) return type IS. `fn mk<T: Default>() -> T` is `Some(0)`; a concrete
 /// return, a reference to a generic, or an impl-level generic (which no call-site turbofish supplies) is
 /// `None`.
+/// SOUNDNESS R979 — the position in the impl's self-type arguments (`self_args`, `None` where an argument
+/// is not one of the impl's own type parameters) of the parameter `sig`'s return names, after unwrapping
+/// `Result`/`Option` and peeling references and `Box`. A method-level generic of the same name shadows.
+fn impl_return_param_position(sig: &syn::Signature, self_args: &[Option<String>]) -> Option<usize> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return None };
+    let mut t: &syn::Type = crate::lang::unwrap_result_option(ty);
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) => match crate::lang::deref_wrapper_arg(&p.path) {
+                Some(inner) => t = inner,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let id = p.path.get_ident()?.to_string();
+    if sig.generics.type_params().any(|g| g.ident == id) {
+        return None;
+    }
+    self_args.iter().position(|a| a.as_deref() == Some(id.as_str()))
+}
+
+/// SOUNDNESS R979 — a field type's written ARGUMENTS, positionally encoded for `model::field_args_key`,
+/// plus — when the type is a GENERIC `type` alias declared in this same item list — the alias's TARGET
+/// path (the `fields` entry must name `PollState`, not the alias). `Box`/`Arc`/`Rc` and references are
+/// peeled first, as `type_path` peels them. `None` when the type carries no arguments.
+fn field_type_args(
+    ty: &syn::Type,
+    uses_ty: &HashMap<String, String>,
+    items: &[syn::Item],
+) -> Option<(Option<String>, String)> {
+    let mut t = ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) => match crate::lang::deref_wrapper_arg(&p.path) {
+                Some(inner) => t = inner,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let seg = p.path.segments.last()?;
+    let written: Vec<&syn::GenericArgument> = match &seg.arguments {
+        syn::PathArguments::AngleBracketed(a) => a.args.iter().collect(),
+        _ => Vec::new(),
+    };
+    let enc = |a: &syn::GenericArgument, subst: &HashMap<String, String>| -> String {
+        match a {
+            syn::GenericArgument::Lifetime(_) => "'".to_string(),
+            syn::GenericArgument::Type(at) => {
+                if let syn::Type::Path(ap) = at {
+                    if let Some(id) = ap.path.get_ident() {
+                        if let Some(v) = subst.get(&id.to_string()) {
+                            return v.clone();
+                        }
+                    }
+                }
+                crate::lang::type_path(at, uses_ty)
+                    .filter(|v| !v.contains(crate::decls::ALIAS_ALT_SEP))
+                    .unwrap_or_else(|| "_".to_string())
+            }
+            _ => "_".to_string(),
+        }
+    };
+    // A same-item-list `type` alias (generic or not): substitute its parameters with the written arguments.
+    if p.path.segments.len() == 1 {
+        let alias = items.iter().find_map(|it| match it {
+            syn::Item::Type(ta) if ta.ident == seg.ident && (written.is_empty() == ta.generics.type_params().next().is_none()) => Some(ta),
+            _ => None,
+        });
+        if let Some(ta) = alias {
+            let mut subst: HashMap<String, String> = HashMap::new();
+            for (i, gp) in ta.generics.params.iter().enumerate() {
+                if let syn::GenericParam::Type(tp) = gp {
+                    let v = written.get(i).map(|a| enc(a, &HashMap::new())).unwrap_or_else(|| "_".to_string());
+                    subst.insert(tp.ident.to_string(), v);
+                }
+            }
+            let mut tt: &syn::Type = &ta.ty;
+            loop {
+                match tt {
+                    syn::Type::Paren(x) => tt = &x.elem,
+                    syn::Type::Group(x) => tt = &x.elem,
+                    syn::Type::Path(x) => match crate::lang::deref_wrapper_arg(&x.path) {
+                        Some(inner) => tt = inner,
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            let syn::Type::Path(tp) = tt else { return None };
+            let tseg = tp.path.segments.last()?;
+            let syn::PathArguments::AngleBracketed(targs) = &tseg.arguments else { return None };
+            let args: Vec<String> = targs.args.iter().map(|a| enc(a, &subst)).collect();
+            let target = crate::lang::type_path(tt, uses_ty)?;
+            return Some((Some(target), args.join("\u{1}")));
+        }
+    }
+    if written.is_empty() {
+        return None;
+    }
+    let none = HashMap::new();
+    Some((None, written.iter().map(|a| enc(a, &none)).collect::<Vec<_>>().join("\u{1}")))
+}
+
 fn ret_generic_position(sig: &syn::Signature, ty: &syn::Type) -> Option<usize> {
     let syn::Type::Path(p) = ty else { return None };
     if p.qself.is_some() {
@@ -3570,6 +3689,17 @@ pub(crate) fn collect_decls(
                                         .insert(name.to_string(), leaves);
                                 } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                     entry.insert(name.to_string(), ty);
+                                }
+                                // SOUNDNESS R979 — the field's written type ARGUMENTS (through a same-module
+                                // GENERIC alias, which the alias map skips), so `self.f.state_mut()?.go()`
+                                // can type an accessor that returns the impl's type parameter.
+                                if !had_trait_leaves {
+                                    if let Some((target, args)) = field_type_args(&f.ty, uses_ty, items) {
+                                        if let Some(t) = target {
+                                            entry.insert(name.to_string(), t);
+                                        }
+                                        file_decl_fact(rets, crate::model::field_args_key(&s.ident.to_string(), &name.to_string()), args);
+                                    }
                                 }
                                 // SOUNDNESS R238 — A FIELD-HELD CALLBACK IS A CALLBACK. `trait_leaves`
                                 // above already records `handler: Box<dyn Fn()>` (a `Fn*` BOUND is a trait
@@ -4140,8 +4270,35 @@ pub(crate) fn collect_decls(
                         }
                     }
                 }
+                // SOUNDNESS R979 — the impl's written self-type arguments, by position (see
+                // `model::impl_retgen_key`).
+                let self_arg_names: Vec<Option<String>> = match &*im.self_ty {
+                    syn::Type::Path(sp) => match sp.path.segments.last().map(|seg| &seg.arguments) {
+                        Some(syn::PathArguments::AngleBracketed(args)) => args
+                            .args
+                            .iter()
+                            .map(|a| match a {
+                                syn::GenericArgument::Type(syn::Type::Path(ap)) => {
+                                    ap.path.get_ident().map(|i| i.to_string()).filter(|n| impl_generic_params.contains(n))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                };
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
+                        if let (Some(ty), false) = (&impl_key_ty, self_arg_names.is_empty()) {
+                            let pos = impl_return_param_position(&m.sig, &self_arg_names);
+                            let tl = ty.rsplit("::").next().unwrap_or(ty);
+                            file_decl_fact(
+                                rets,
+                                crate::model::impl_retgen_key(tl, &m.sig.ident.to_string()),
+                                pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
+                            );
+                        }
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
                         // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
