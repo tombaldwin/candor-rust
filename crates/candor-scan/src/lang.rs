@@ -2964,11 +2964,40 @@ pub(crate) fn struct_variant_field_bindings(pat: &syn::Pat) -> Vec<(String, Stri
     }
 }
 
+/// SOUNDNESS R946 — whether `pat` is std's `Some(x)`/`Ok(x)`: bare, or qualified through `Option`/`Result`
+/// (`Option::Some`, `std::result::Result::Ok`). A LOCAL enum's variant that happens to be named `Some`/`Ok`
+/// (`ArchivedRcWeak::Some(r)`) is not, and its payload type is the variant's, not the scrutinee's.
+pub(crate) fn std_some_ok_pat(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Reference(r) => std_some_ok_pat(&r.pat),
+        syn::Pat::Paren(p) => std_some_ok_pat(&p.pat),
+        syn::Pat::TupleStruct(ts) => {
+            let segs: Vec<String> = ts.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            match segs.as_slice() {
+                [v] => v == "Some" || v == "Ok",
+                [.., o, v] => {
+                    let head_ok = segs[..segs.len() - 2].iter().all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result"));
+                    head_ok && ((o == "Option" && v == "Some") || (o == "Result" && v == "Ok"))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// The single-ident binding of a `Some(x)` / `Ok(x)` pattern (the payload of an `if let`/`let-else`
 /// unwrap of an `Option`/`Result`) — so `if let Some(d) = o { d.go() }` over an `Option<Box<dyn T>>`
 /// types `d` for dispatch. `None` for any other pattern (a `None`/`Err` arm, a multi-field or
 /// non-single-ident payload — an honest under-report). Peels reference/paren wrappers.
 pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
+    // SOUNDNESS R946 (second fixture) — std's `Some`/`Ok` ONLY. This matched the LAST SEGMENT, so a local
+    // enum's `W::Some(r)` was claimed as an Option payload and never reached the R77 enum-variant route:
+    // `if let W::Some(r) = self { r.go() }` read the caller ABSENT (measured, before this change too), and
+    // with R946's construction fallback `match self { W::Some(r) => r.go() }` typed `r` as `W` itself.
+    if !std_some_ok_pat(pat) {
+        return None;
+    }
     match pat {
         syn::Pat::Reference(r) => some_ok_binding(&r.pat),
         syn::Pat::Paren(p) => some_ok_binding(&p.pat),

@@ -32,6 +32,18 @@ connection certified `allow Net ok.example` at exit 0 — EXECUTED, a client on 
   argument marks nothing. Census reach: 0 of the 49 non-literal Net binds outside test code are
   string-typed, so no registry row moves.
 
+### ⚠ The refutable binders type a CONSTRUCTED payload; a local enum's `Some` variant is not std's (SOUNDNESS R946)
+
+`if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { s.send_to(b, d) }` — and the let-else, `match` and
+`.ok()` + `Some` spellings — left `s` untyped, so the `send_to` to a caller-chosen address was never seen and
+a benign sibling literal certified it (EXECUTED: the datagram arrived). The class is the binder, not the
+socket: an HTTP client built under `if let Ok(c) = Client::builder().build()` was the same bypass. The four
+binders now fall back to the plain `let`'s construction route. `some_ok_binding` now admits only std's
+`Some`/`Ok` — it matched the last segment, so `if let W::Some(r) = self { r.go() }` over a LOCAL enum read
+the caller ABSENT (pre-existing, now charged). Census: 0 rows lost an effect; new charges include redis's
+sentinel connections (`Ipc`, `Net`, previously absent from every sentinel helper), mongodb's SRV poller,
+deadpool's `Object::take` (`Unknown`) and aws-smithy's rate limiter (`Log`), each traced to source.
+
 ### ⚠ A dependency's published foreign import is `Unknown` + `native:extern fn` when chained, not pure (SOUNDNESS R894)
 
 A consumer calling a dependency's `extern "C" { pub fn creat(..); }` directly read PURE when chained — ABSENT,

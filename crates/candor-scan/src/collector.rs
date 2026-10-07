@@ -1773,6 +1773,49 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R946 — the type of the PAYLOAD a `Some(x)`/`Ok(x)` pattern binds out of `expr`, for the four
+    /// refutable binders (`if let`, `while let`, let-else, a `match` arm).
+    ///
+    /// Those binders asked only `resolve_elem_type`, which answers for an Option/Result-typed CONTAINER (a
+    /// field, a param, an adapter over one — R185/R345) and for nothing that is CONSTRUCTED there. So
+    /// `if let Ok(s) = UdpSocket::bind("0.0.0.0:0") { s.send_to(b"x", d) }` left `s` untyped, the `send_to`
+    /// reached no rule and no masking arm, and beside a benign `connect("ok.example:80")` `allow Net in <fn>
+    /// ok.example` exited **0** over a datagram to a caller-chosen address — while `let s =
+    /// UdpSocket::bind(..).unwrap()` and `?` typed `s` and failed closed. The class is the BINDER, not the
+    /// socket: `if let Ok(c) = reqwest::blocking::Client::builder().build() { c.get(d).send() }` was the
+    /// same bypass over an HTTP request, and `.ok()` + `if let Some(s)` the same again.
+    ///
+    /// The fallback is the plain `let`'s CONSTRUCTION route, `nominal_ctor_type`, because `if let Ok(s) = E`
+    /// binds exactly what `let s = E.unwrap()` binds and `ctor_type` already passes `?`/`.unwrap()`/`.ok()`
+    /// through to the chain root. `resolve_elem_type` stays first, so every answer it gave is unchanged and
+    /// this can only ADD a type where there was none. Two guards, both measured on the first corpus A/B:
+    ///
+    ///   * THE PATTERN MUST BE std's `Some`/`Ok`. `some_ok_binding` matches on the last segment, so a LOCAL
+    ///     enum's `ArchivedRcWeak::Some(r)` qualified too; with the fallback the arm typed `r` as the
+    ///     scrutinee's own enum and pre-empted `visit_arm`'s variant-payload route — rkyv 0.7.46's
+    ///     `ArchivedRcWeak::deserialize` LOST its `Unknown` row (a disclosure gone, nothing replacing it).
+    ///   * THE SCRUTINEE MUST BE A CONSTRUCTION, never a bare name. The first cut also asked the strict
+    ///     `type_of`, which answers a NAME with the name's own type — right for `let r = bind(..); if let
+    ///     Ok(s) = r` and wrong for `match self { Some(x) => .. }` inside `impl … for Option<L>`, where it
+    ///     typed the payload as `Option`. A name cannot say whether its recorded type was unwrapped, so
+    ///     it is not asked; that spelling stays as it was (see the test's residual note).
+    fn resolve_payload_type(&self, pat: &syn::Pat, expr: &syn::Expr) -> Option<String> {
+        if let Some(e) = self.resolve_elem_type(expr) {
+            return Some(e);
+        }
+        if !crate::lang::std_some_ok_pat(pat) || matches!(peel_recv(expr), syn::Expr::Path(_)) {
+            return None;
+        }
+        let t = self.nominal_ctor_type(expr);
+        // §E1 REACH PROBE, on the ADDED branch only — an unchanged corpus row is not evidence it ran.
+        if let Some(t) = &t {
+            if std::env::var_os("CANDOR_R946_INSTR").is_some() {
+                eprintln!("R946PAYLOAD\t{t}");
+            }
+        }
+        t
+    }
+
     /// The ELEMENT type of an expression that evaluates to a COLLECTION — a collection var/param (via
     /// `elem_of`), a collection FIELD (`self.senders`, via `field_elem`), an iterator adapter that
     /// preserves the element (`.iter()`/`.into_iter()`/`.iter_mut()`/`.clone()`), or another subscript
@@ -5844,7 +5887,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // named `elem_type`. Adding `Option` to `elem_type` ALONE moves nothing: this arm
                 // returns early only for dispatch, so the concrete answer had no route to the binding.
                 // Both halves are needed, and only measuring showed it.
-                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
                     self.visit_expr(&el.expr);
                     self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.then_branch));
                     if let Some((_, else_b)) = &node.else_branch {
@@ -5914,7 +5957,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R185 — the while-let twin of the concrete fallthrough added to
                 // `visit_expr_if`. Same defect, same fix; kept beside its sibling so the pair cannot
                 // drift, which is how the dispatch half of this arm came to exist without it.
-                if let Some(elem) = self.resolve_elem_type(&el.expr) {
+                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
                     self.visit_expr(&el.expr);
                     self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.body));
                     return;
@@ -5980,7 +6023,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // arm payload as nothing: `match &self.o { Some(h) => h.run(), None => {} }` over an
         // `Option<Guard>` read the caller ABSENT. `visit_arm` cannot fix this on its own — it never
         // sees the scrutinee — which is why it belongs here beside the dispatch route rather than there.
-        if let Some(elem) = self.resolve_elem_type(&node.expr) {
+        // R946 — the payload fallback is asked through a std `Some`/`Ok` arm (`some_ok_binding` now admits
+        // no other); with none, `resolve_elem_type` answers exactly as before.
+        let payload = match node.arms.iter().find(|a| some_ok_binding(&a.pat).is_some()) {
+            Some(a) => self.resolve_payload_type(&a.pat, &node.expr),
+            None => self.resolve_elem_type(&node.expr),
+        };
+        if let Some(elem) = payload {
             if node.arms.iter().any(|a| some_ok_binding(&a.pat).is_some()) {
                 self.visit_expr(&node.expr);
                 for arm in &node.arms {
@@ -6588,7 +6637,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.vars.remove(&binding);
                     self.trait_vars.insert(binding, leaves);
                 } else if let Some(elem) =
-                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr))
+                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_payload_type(&node.pat, &init.expr))
                 {
                     // SOUNDNESS R185 — the let-else twin. The comment above notes "a concrete payload
                     // yields no leaves" and stops there; the concrete payload then had no route at all,

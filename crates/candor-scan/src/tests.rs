@@ -8995,6 +8995,59 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn r946_refutable_binders_type_a_constructed_payload() {
+        // SOUNDNESS R946: `if let Ok(s) = UdpSocket::bind(..)` (and let-else, `match`, `.ok()` + `Some`)
+        // left `s` untyped, so its `send_to(b, d)` was never seen — EXECUTED, the datagram arrived at the
+        // caller's address while `allow Net in <fn> ok.example` answered 0.
+        let both = r817_both;
+        let run = r817_run;
+        // ── R946: the four refutable binders over a bound socket, a runtime destination.
+        for (tag, body) in [
+            ("iflet", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") { let _ = s.send_to(b"x", d); } }"#),
+            ("letelse", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") else { return }; let _ = s.send_to(b"x", d); }"#),
+            ("match", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); match std::net::UdpSocket::bind("0.0.0.0:0") { Ok(s) => { let _ = s.send_to(b"x", d); } Err(_) => {} } }"#),
+            ("some", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); if let Some(s) = std::net::UdpSocket::bind("0.0.0.0:0").ok() { let _ = s.send_to(b"x", d); } }"#),
+            // The class is the BINDER, not the socket: an HTTP client built under the same binder.
+            ("reqwest", r#"pub fn go(d: &str) { let _ = reqwest::blocking::get("https://ok.example/"); if let Ok(c) = reqwest::blocking::Client::builder().build() { let _ = c.get(d).send(); } }"#),
+        ] {
+            assert_eq!(both(&format!("r946{tag}"), body, "ok.example"), (1, 1), "R946 binder `{tag}` must not hide the destination");
+        }
+        // OVER-CHARGE CONTROL — the same binder over a LITERAL destination certifies by it (before the fix
+        // this was exit 1: the send was never seen and the bind's literal is withheld) …
+        let lit = r#"pub fn go() { if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") { let _ = s.send_to(b"x", "10.9.9.9:53"); } }"#;
+        assert_eq!(both("r946lit", lit, "10.9.9.9"), (0, 0), "a literal destination under if-let certifies");
+        // … and CALIBRATION: it can fail.
+        assert_eq!(both("r946cal", lit, "10.9.9.8"), (1, 1), "…and fails under another host");
+
+        // THE SECOND FIXTURE, from the first corpus A/B: a LOCAL enum whose variant is NAMED `Some`, matched
+        // on `self`, with the payload's method sharing the enclosing method's name. A fallback that reads
+        // `W::Some(r)` as std's `Some` types `r` as `W` and resolves `r.go()` to `W::go` — itself — and the
+        // file write vanishes (rkyv 0.7.46 `ArchivedRcWeak::deserialize` lost its row exactly so). The
+        // `if let` arm (`go2`) was ABSENT BEFORE this change too: `some_ok_binding` claimed `W::Some` by its
+        // last segment and the R77 enum-variant route never ran — closed here by admitting std's only.
+        let local_some = r#"
+            pub struct Inner;
+            impl Inner { pub fn go(&self) { let _ = std::fs::write("/tmp/r946", b"x"); } }
+            pub enum W { None, Some(Inner) }
+            impl W { pub fn go(&self) { match self { W::Some(r) => r.go(), W::None => {} } } }
+            impl W { pub fn go2(&self) { if let W::Some(r) = self { r.go() } } }
+            impl W { pub fn go3(&self) { let W::Some(r) = self else { return }; r.go() } }
+        "#;
+        let (_, v) = run("r946local", local_some, "deny Net\n");
+        for f in ["go", "go2", "go3"] {
+            let hit = v["functions"].as_array().unwrap().iter().any(|r| {
+                r["fn"].as_str().unwrap_or("").ends_with(&format!("W::{f}"))
+                    && r["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Fs"))
+            });
+            assert!(hit, "a local enum's `Some` variant must keep its payload route: W::{f} lost Fs\n{v:#}");
+        }
+        // RESIDUAL, pinned so it is not mistaken for covered: a Result held in a NAME and destructured later
+        // (`let r = UdpSocket::bind(..); if let Ok(s) = r`) is not typed by this fix — a name cannot say
+        // whether its recorded type was unwrapped (`match self` in `impl … for Option<L>` is the
+        // counter-example). See the report for the measured reach of this spelling.
+    }
+
+    #[test]
     fn r459_cfg_test_file_module_is_excluded_whatever_its_filename() {
         // SOUNDNESS R459 — THE MIRROR OF R457. A `#[cfg(test)] mod X;` file module whose FILENAME does
         // not match the `tests.rs`/`*_test.rs` convention was scanned as PRODUCTION, so test code was
