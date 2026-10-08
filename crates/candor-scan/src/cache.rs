@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev69: SOUNDNESS R962/R963/R982 — Pass B's cached `calls` change (a held Result's payload, a struct-
+    // pattern binding, a provably-string `let`, a renamed inactive local `use`); a rev68 entry replays the
+    // silences warm. Mandatory.
     // rev68: SOUNDNESS R1004 — a file's item-position invocations of its own `macro_rules!` are expanded and
     // the functions they declare spliced in before Pass A; a rev67 entry lacks those units. Mandatory.
     // rev67: `field_elem`/`elem_of`/`static_types`/the element returns now record a std wrapper's
@@ -395,7 +398,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev68/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev69/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

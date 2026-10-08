@@ -1920,10 +1920,22 @@ fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow:
             // `crate::backend::conv::ret`) lands in cfg-selected local modules this scanner resolves
             // poorly, and MEASURED it withdrew the `ambiguous:` hedge that stood over real FFI / clock
             // reads (time `UtcOffset::local_offset_at`, rustix `try_close`) for nothing in its place.
+            // SOUNDNESS R982 (residual) — …EXCEPT a RENAMED one (`use crate::imp::deep::eff2 as renamed;`). The
+            // exclusion above is about a crate-local name that ALSO resolves some other way — by its leaf, or
+            // to an `ambiguous:` hedge when two modules define it (`call_bare` below) — so dropping the
+            // binding left an answer standing. A rename has no leaf of its own: nothing else can name the
+            // target, and `renamed()` read ABSENT under `#[cfg(feature = "x")]` (executed with the feature: it
+            // writes a file). The measured losses (time `local_offset_at`, rustix `try_close`) are both
+            // non-renamed and stay excluded.
             None if cfg_off_active() => {
-                off = uses
-                    .get(&format!("{CFG_OFF_USE_PREFIX}{}", segs[0]))
-                    .filter(|v| !v.starts_with("crate::") && !v.starts_with("self::") && !v.starts_with("super::"));
+                off = uses.get(&format!("{CFG_OFF_USE_PREFIX}{}", segs[0])).filter(|v| {
+                    let local = v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::");
+                    let renamed = v.rsplit("::").next() != Some(segs[0]) && !v.contains(crate::decls::ALIAS_ALT_SEP);
+                    if local && renamed && std::env::var_os("CANDOR_R982_INSTR").is_some() {
+                        eprintln!("R982RENAMED\t{}", v);
+                    }
+                    !local || renamed
+                });
                 off
             }
             None => None,

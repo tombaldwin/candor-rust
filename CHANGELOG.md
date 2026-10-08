@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A renamed, feature-inactive crate-local `use` resolves inside the gated item that needs it (SOUNDNESS R982
+  residual).** `#[cfg(feature = "x")] use crate::imp::deep::eff2 as renamed;` + `#[cfg(feature = "x")] pub fn f() {
+  renamed() }` read ABSENT (executed with the feature: it writes a file). R982's fix resolved only EXTERNAL targets
+  through an inactive `use`, because crate-local ones withdrew real hedges (time, rustix); those were non-renamed
+  names that still resolve by their leaf. A rename has no leaf of its own, so it now resolves through the `use`.
+  Still open: the UNGATED call to a name bound only by an inactive `use` (`fx-lookup`), which does not compile in the
+  default build this scanner describes. Cache schema rev69 (also covers R962/R963).
 - ⚠ **Two more `to_socket_addrs` receivers are typed (SOUNDNESS R963, R950's residual).** A struct-pattern binding
   (`let B { address, .. } = self;` over `address: T` under `T: ToSocketAddrs` — mysql's `MyTcpBuilder::connect`)
   and a `format!`-built local (`let address = format!("{h}:80")`) left the receiver untyped, so the resolution was

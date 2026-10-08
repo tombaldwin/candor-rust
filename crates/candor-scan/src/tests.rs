@@ -16777,7 +16777,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16788,7 +16788,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev68/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev69/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -27005,6 +27005,22 @@ fn r982_r987_r988_r989_r985_release_audit_shapes() {
 #[cfg(feature = \"tls\")]\npub fn e_gated() { let _ = load_native_certs(\"/etc/ssl\"); }\n"),
     ]);
     assert_eq!(veina_row_effs(&v, "e_gated"), vec!["Fs".to_string()], "{v:#}");
+
+    // R982 (residual) — a CRATE-LOCAL target under a RENAME: nothing else names it, so it resolves through
+    // the inactive `use` (EXECUTED with the feature, scratchpad `rustagent-v041/fx982`: it writes). The
+    // non-renamed crate-local spelling keeps its `ambiguous:` hedge — the measured exclusion stands.
+    let v = scan_src_to_json_multi("r982local", &[
+        ("Cargo.toml", "[package]\nname = \"r982local\"\n\n[features]\ndefault = []\nx = []\n"),
+        ("src/lib.rs", "\
+pub mod imp { pub fn eff() { let _ = std::fs::write(\"/tmp/r982\", \"x\"); } pub mod deep { pub fn eff2() { let _ = std::fs::write(\"/tmp/r982\", \"x\"); } } }\n\
+pub mod other { pub fn eff() {} }\n\
+#[cfg(feature = \"x\")]\nuse crate::imp::eff;\n\
+#[cfg(feature = \"x\")]\nuse crate::imp::deep::eff2 as renamed;\n\
+#[cfg(feature = \"x\")]\npub fn e_renamed() { renamed() }\n\
+#[cfg(feature = \"x\")]\npub fn e_bare() { eff() }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&v, "e_renamed"), vec!["Fs".to_string()], "{v:#}");
+    assert_eq!(row_why(&v, "e_bare"), vec!["ambiguous:same-name local defs".to_string()], "{v:#}");
 
     // R987: `ManuallyDrop::new(x)` / `ptr::read(&x)` are `x` (allocator-api2 `Box::into_inner`).
     let a = scan_src_to_json("r987", "\
