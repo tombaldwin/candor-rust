@@ -11,6 +11,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `std::ops::Bound` payload is typed.** `match start { Bound::Included(ref v) | Bound::Excluded(ref v) =>
+  v.to_sql(), .. }` over a `Bound<&T>` (`T: ToSql`) left `v` untyped and the dispatch formed no edge (diesel's
+  `ranges::to_sql`, executed fixture writes a file). Its 0.40.0 `Unknown` came from the R1034 collision; it now
+  dispatches over `ToSql`. Or-patterns of payload variants bind when every case binds the same name.
 - ⚠ **An associated fn called through its trait dispatches over the trait, not over its first argument's type.**
   `FromV::from_v(v)` (no receiver) was resolved to the impl for `v`'s type (`v: &Value` → `Value::from_v`), but the
   implementor is chosen by the return type: redis's `from_redis_value::<T>` read pure that way (executed fixture

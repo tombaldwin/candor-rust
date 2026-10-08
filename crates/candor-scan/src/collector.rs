@@ -9245,7 +9245,7 @@ fn some_or_ok_kind(pat: &syn::Pat) -> Option<crate::lang::LayerBinder> {
         syn::Pat::Paren(p) => some_or_ok_kind(&p.pat),
         syn::Pat::TupleStruct(ts) if crate::lang::std_some_ok_pat(pat) => {
             match ts.path.segments.last()?.ident.to_string().as_str() {
-                "Some" => Some(crate::lang::LayerBinder::Some),
+                "Some" | "Included" | "Excluded" => Some(crate::lang::LayerBinder::Some),
                 "Ok" => Some(crate::lang::LayerBinder::Ok),
                 _ => None,
             }

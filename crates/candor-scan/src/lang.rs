@@ -1058,7 +1058,7 @@ fn elem_type_b_plain(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(
                 // `if let Ok(h) = &self.r` binds `h: &T`, and `for h in &self.r` is legal Rust too.
                 // The error type is deliberately not reachable here: nothing binds a name out of it
                 // through any of this function's callers.
-                "Option" | "Result" | "IoResult" => type_path_b(first_ty, uses),
+                "Option" | "Result" | "IoResult" | "Bound" => type_path_b(first_ty, uses),
                 // VEIN B (R878, R568) — a std interior-mutability / lazy-init WRAPPER holds exactly one
                 // value of its type argument, the same shape as `Option`. Recorded here so the wrapper
                 // accessors (`is_wrapper_accessor`) can answer `self.db.borrow_mut()` with `T`.
@@ -1195,6 +1195,9 @@ pub(crate) fn elem_trait_leaves(
                 // leaves let `o.map(|d| d.go())` / `for d in o` / `o.iter().for_each(..)` dispatch. (if-let /
                 // `.unwrap()` are separate binding sites handled at their pattern.)
                 "Option" | "Result" => dispatch(first_ty),
+                // SOUNDNESS R1034 residue — `std::ops::Bound<&T>`, whose `Included`/`Excluded` payload is a `T`
+                // (diesel's `ranges::to_sql` dispatches `value.to_sql(..)` on it, `T: ToSql`).
+                "Bound" => dispatch(first_ty),
                 // A MAP's VALUE (2nd type arg) — a `.values()`/`for v in m.values()` iteration of
                 // trait-object values (`HashMap<String, Box<dyn Handler>>`, the keyed-registry shape).
                 // R454 — the list is shared with `elem_type`, which did not have this arm at all.
@@ -3104,13 +3107,22 @@ pub(crate) fn std_some_ok_pat(pat: &syn::Pat) -> bool {
     match pat {
         syn::Pat::Reference(r) => std_some_ok_pat(&r.pat),
         syn::Pat::Paren(p) => std_some_ok_pat(&p.pat),
+        // An or-pattern of payload variants (`Bound::Included(v) | Bound::Excluded(v)`).
+        syn::Pat::Or(o) => !o.cases.is_empty() && o.cases.iter().all(std_some_ok_pat),
         syn::Pat::TupleStruct(ts) => {
             let segs: Vec<String> = ts.path.segments.iter().map(|s| s.ident.to_string()).collect();
             match segs.as_slice() {
                 [v] => v == "Some" || v == "Ok",
                 [.., o, v] => {
-                    let head_ok = segs[..segs.len() - 2].iter().all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result"));
-                    head_ok && ((o == "Option" && v == "Some") || (o == "Result" && v == "Ok"))
+                    let head_ok = segs[..segs.len() - 2]
+                        .iter()
+                        .all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result" | "ops"));
+                    head_ok
+                        && ((o == "Option" && v == "Some")
+                            || (o == "Result" && v == "Ok")
+                            // R1034 residue — `std::ops::Bound`'s two payload variants, spelled through
+                            // the enum (bare `Included` names nothing std exports).
+                            || (o == "Bound" && (v == "Included" || v == "Excluded")))
                 }
                 _ => false,
             }
@@ -3136,11 +3148,17 @@ pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
         syn::Pat::Paren(p) => some_ok_binding(&p.pat),
         syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
             let variant = ts.path.segments.last()?.ident.to_string();
-            if variant == "Some" || variant == "Ok" {
+            if matches!(variant.as_str(), "Some" | "Ok" | "Included" | "Excluded") {
                 single_pat_ident(ts.elems.first()?)
             } else {
                 None
             }
+        }
+        // Every case binds the SAME single name, or none is taken.
+        syn::Pat::Or(o) => {
+            let mut names = o.cases.iter().map(some_ok_binding);
+            let first = names.next()??;
+            names.all(|n| n.as_deref() == Some(first.as_str())).then_some(first)
         }
         _ => None,
     }
