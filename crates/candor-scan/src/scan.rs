@@ -1541,6 +1541,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
+    // `lang::NONPATH_RECV_TAILS`; installed here, after the last merge and before any Pass B collection.
+    {
+        let tails: HashSet<String> = merged
+            .nonpath_receivers
+            .iter()
+            .filter_map(|e| e.split('\u{1f}').next())
+            .filter(|t2| t2.starts_with('[') || t2.starts_with('('))
+            .map(str::to_string)
+            .collect();
+        *crate::lang::nonpath_recv_cell().write().unwrap() = tails;
+    }
     // SOUNDNESS R529c — JOIN THE BLOCK-LOCAL STRUCTS' FIELDS. A struct declared inside a fn body was in no
     // `fields` entry, so `h.c.go()` through it typed to nothing and the caller read PURE over a module-level
     // `Inner::go` that writes. The entries are keyed `<body-item>H` (R106's sentinel — the spelling the body's

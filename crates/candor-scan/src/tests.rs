@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev78/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev79/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26086,6 +26086,39 @@ pub fn via_str(s: &str) -> u8 { s.enc() }\n";
         assert_eq!(fixture_effects(&v, "via_str"), vec!["Unknown".to_string()],
                    "a merged qual is disclosed, never charged with the sibling's Fs:\n{v:#}");
         assert!(fixture_why(&v, "via_str").iter().any(|w| w == "ambiguous:same-name local methods"), "{v:#}");
+    }
+
+    /// SOUNDNESS R1056 — a SLICE / ARRAY / TUPLE receiver was never typed, so `b.enc()` over `impl Enc for
+    /// &[u8]` (and the array and tuple twins) read ABSENT over a write (EXECUTED, scratchpad
+    /// `rustagent-v043/fx1034b`). Over-charge controls, executed first (`fx1056ctl`, none wrote): a local
+    /// `len` on `&[u8]` is NOT what `b.len()` runs (std's inherent method wins), and a tuple impl merged with
+    /// a slice impl under one qual discloses rather than charging the slice impl's write.
+    #[test]
+    fn r1056_a_slice_array_or_tuple_receiver_reaches_its_impl() {
+        let src = "\
+pub trait Enc { fn enc(&self) -> u8; }\n\
+impl<'a> Enc for &'a [u8] { fn enc(&self) -> u8 { std::fs::write(\"/tmp/a\", b\"x\").ok(); 1 } }\n\
+pub fn via_bytes(b: &[u8]) -> u8 { b.enc() }\n\
+pub mod t { pub trait Pr { fn pr(&self) -> u8; }\n\
+  impl Pr for (u8, u8) { fn pr(&self) -> u8 { std::fs::write(\"/tmp/b\", b\"x\").ok(); 3 } }\n\
+  pub fn via_tup(t: (u8, u8)) -> u8 { t.pr() } }\n\
+pub mod a { pub trait Ar { fn ar(&self) -> u8; }\n\
+  impl Ar for [u8; 4] { fn ar(&self) -> u8 { std::fs::write(\"/tmp/c\", b\"x\").ok(); 4 } }\n\
+  pub fn via_arr(a: [u8; 4]) -> u8 { a.ar() } }\n\
+pub mod l { pub trait Ln { fn len(&self) -> usize; }\n\
+  impl<'a> Ln for &'a [u8] { fn len(&self) -> usize { std::fs::write(\"/tmp/d\", b\"x\").ok(); 9 } }\n\
+  pub fn inherent_len(b: &[u8]) -> usize { b.len() } }\n\
+pub mod m { pub trait Mx { fn mx(&self) -> u8; }\n\
+  impl<'a> Mx for &'a [u8] { fn mx(&self) -> u8 { std::fs::write(\"/tmp/e\", b\"x\").ok(); 1 } }\n\
+  impl Mx for (u8, u8) { fn mx(&self) -> u8 { 2 } }\n\
+  pub fn merged_tup(t: (u8, u8)) -> u8 { t.mx() } }\n";
+        let v = scan_fixture("r1056recv", src);
+        for f in ["via_bytes", "t::via_tup", "a::via_arr"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "l::inherent_len").is_empty(), "std's inherent `len` wins:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "m::merged_tup"), vec!["Unknown".to_string()],
+                   "a merged qual discloses, never charges the slice impl's Fs:\n{v:#}");
     }
 
     /// SOUNDNESS R1004 (impl residual) — an INHERENT impl generated by a local `macro_rules!` is spliced, so

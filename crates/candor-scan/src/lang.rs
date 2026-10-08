@@ -3356,6 +3356,18 @@ pub(crate) fn cfg_cell() -> &'static std::sync::RwLock<FeatureSets> {
     CFG_FEATURES.get_or_init(|| std::sync::RwLock::new((Default::default(), Default::default())))
 }
 
+/// SOUNDNESS R1056 — the `{key}::{method}` tails of the crate's impls on a SLICE / ARRAY / TUPLE self type
+/// (`[u8]::enc`, `[u8;_]::ar`, `(u8,u8)::pr`), installed once per `scan_one` before Pass B, which reads it
+/// to type a receiver the collector otherwise leaves untyped (see `CallCollector::nonpath_recv_calls`).
+/// Crate-wide on purpose, the same way `CFG_FEATURES` is: it is read deep inside the collector, and the
+/// decl-index digest already folds `nonpath_receivers` in, so a warm Pass B cannot replay a stale answer.
+pub(crate) static NONPATH_RECV_TAILS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn nonpath_recv_cell() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    NONPATH_RECV_TAILS.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
 /// Install the active/declared feature sets for the crate about to be scanned (called once per `scan_one`,
 /// which runs sequentially per workspace member, before its parallel Pass B reads them).
 pub(crate) fn set_cfg_features(f: FeatureSets) {
@@ -9101,6 +9113,31 @@ pub(crate) fn collect_nonpath_receivers(
                         syn::Type::Group(g) => &g.elem,
                         _ => break,
                     };
+                }
+                // SOUNDNESS R1056 — a SLICE / ARRAY / TUPLE referent is keyed the way `impl_unit_type_name`
+                // spells it (`[u8]`, `[u8;_]`, `(u8,u8)`), which is also what the collector builds from a
+                // receiver's element / per-position types. A key naming one of the impl's OWN parameters
+                // (`impl<T: Tr> Tr for [T]`) is a forwarder over T's implementors, not a receiver, and is skipped.
+                if matches!(t, syn::Type::Slice(_) | syn::Type::Array(_) | syn::Type::Tuple(_)) {
+                    let Some(key) = impl_unit_type_name(t, &im.generics) else { continue };
+                    let own = |k: &str| im.generics.type_params().any(|p| {
+                        let id = p.ident.to_string();
+                        k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
+                    });
+                    if own(&key) {
+                        continue;
+                    }
+                    for ii in &im.items {
+                        if let syn::ImplItem::Fn(f) = ii {
+                            if !include_tests && is_cfg_test(&f.attrs) {
+                                continue;
+                            }
+                            let m = f.sig.ident.to_string();
+                            let shared = if shared_count(&m) > 1 { "1" } else { "0" };
+                            out.insert(format!("{key}::{m}\u{1f}{}\u{1f}{shared}", crate::decls::qualify(modpath, &m)));
+                        }
+                    }
+                    continue;
                 }
                 let syn::Type::Path(tp) = t else { continue };
                 if tp.qself.is_some() {

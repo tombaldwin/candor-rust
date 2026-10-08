@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A slice, array or tuple receiver reaches the crate's own impl for it (SOUNDNESS R1056).** `b.enc()` on `b: &[u8]`
+  over `impl Enc for &[u8]` (and the `[u8; 4]` / `(u8, u8)` twins) left the receiver untyped and the caller read pure
+  over a write (executed). Typed only where the crate implements that exact key and method; a std inherent slice
+  method name (`len`, `iter`, …) is never redirected.
+- ⚠ **classify() names four more families (coverage-gate refresh).** rusqlite `Transaction`/`Savepoint`/`pragma*` →
+  Db; redis `Connection::{send_packed_command, recv_response}`, `PubSub::get_message` → Net; lettre's SMTP
+  connection layer → Net; rustls `KeyLogFile::log` → Fs. A consumer calling these without chaining the dependency's
+  report now sees the effect.
 - ⚠ **A tuple-struct constructor names its type (SOUNDNESS R1055).** `let t = Tw(x); t.run()`, `Tw(x).run()` and
   `t.0.go()` left the receiver untyped and the caller read pure over `Tw::run`'s write (executed). A call whose path
   names a local struct with that many positional fields now types as it; a same-leaf enum variant (qualified, or a
