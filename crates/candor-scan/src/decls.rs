@@ -116,7 +116,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -174,7 +174,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -195,7 +195,7 @@ pub(crate) fn scan_items(
                     let n = f.sig.ident.to_string();
                     let loc = next_loc(locs, loc_idx);
                     let block = syn::Block { brace_token: Default::default(), stmts: Vec::new() };
-                    let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                    let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                     info.unresolved = true;
                     info.unresolved_why = vec!["native:extern fn".to_string()];
                     info.extern_decl = true;
@@ -278,6 +278,7 @@ pub(crate) fn scan_items(
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
                             Some(&tname),
                             None, // R549 impl_generics — a trait-DEFAULT body has no impl block
+                            None, // R1024 impl_self — nor a written self type
                             include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
@@ -299,7 +300,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -2442,6 +2443,9 @@ pub(crate) fn fninfo(
     // to `bound_trait_leaves`. `sig` alone cannot see it, which is why the trait-name index missed the
     // commonest way a bound is written. `None` for a free fn or a trait-default body.
     impl_generics: Option<&syn::Generics>,
+    // SOUNDNESS R1024 — the enclosing `impl`'s WRITTEN self type, so `self` is seeded by the same
+    // authority a parameter of that type is (`seed_elem_of`). `None` for a free fn or a trait default.
+    impl_self: Option<&syn::Type>,
     // SOUNDNESS R373 — threaded so the two BODY-LOCAL `use` sites can ask `use_item_applies` the
     // question every module-level site already asks. `collect_root_reexports` was once "the one site
     // of the five that could not even express the question"; these were the sixth and seventh, and
@@ -2641,7 +2645,47 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
+    #[allow(unused_mut)]
+    let (mut elem_of, tuple_of, mut elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
+    // SOUNDNESS R1024 — `self` IS A PARAMETER OF THE IMPL'S SELF TYPE, and it was the one parameter not
+    // seeded by `seed_elem_of`. `vars["self"]` is the bare leaf the impl's units are KEYED under
+    // (`Option` for `impl Run for Option<L>`), which says nothing about what a binder over `self` yields:
+    // `match self { Some(x) => x.go() }`, `if let Ok(x) = self`, `for x in self`, `self[0]` all bound an
+    // untyped name and the edge to `L::go` never formed — executed, the impl's unit had no callees and
+    // the trait's union row was published `[]`. A parameter `o: &Option<L>` written in the same body
+    // already resolved, through `elem_type`; `self` now asks that same function of the type the impl
+    // WROTE. `vars["self"]` is unchanged, so a method call ON `self` still keys the impl's own units.
+    // The element TRAIT leaves likewise, under the impl's bounds (`impl<T: Doer> Doer for Vec<T>`).
+    if let Some(st) = impl_self {
+        if !elem_of.contains_key("self") {
+            if let Some(e) = elem_type(st, sig_uses) {
+                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                    eprintln!("R1024SELF\t{qual}\t{e}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                }
+                elem_of.insert("self".to_string(), e);
+            }
+        }
+        if !elem_trait_of.contains_key("self") {
+            let mut gb = generic_bounds_of(sig);
+            if let Some(g) = impl_generics {
+                for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                    let e = gb.entry(k).or_default();
+                    for l in v {
+                        if !e.contains(&l) {
+                            e.push(l);
+                        }
+                    }
+                }
+            }
+            let leaves = elem_trait_leaves(st, &gb, elems.callable_aliases);
+            if !leaves.is_empty() {
+                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                    eprintln!("R1024SELF\t{qual}\t{leaves:?}");
+                }
+                elem_trait_of.insert("self".to_string(), leaves);
+            }
+        }
+    }
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),

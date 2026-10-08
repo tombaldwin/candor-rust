@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **`self` in an `impl` for a std container, `Option` or `Result` is typed like a parameter of that type (SOUNDNESS
+  R1024).** `impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }` formed no
+  edge — `self` was keyed by the impl's bare leaf (`Option`), which says nothing about what a binder over it yields —
+  so the impl's unit had no callees and the trait's union row `Run::run` was published `[]`, a pure-only union a
+  chained consumer reads as *implementors exist and are pure*. Executed (every arm writes a file): `match self`,
+  `if let Some(x) = self`, `self.as_ref()`, `for x in self` / `self[0]` over `impl … for Vec<L>`, `if let Ok(x) =
+  self` over `Result<L, ()>`, and `for x in self { x.go() }` in `impl<T: Doer> Vd for Vec<T>` (dispatch) were ABSENT
+  on v0.40.0 and now charge `Fs`. Cache schema rev70.
 - ⚠ **A renamed, feature-inactive crate-local `use` resolves inside the gated item that needs it (SOUNDNESS R982
   residual).** `#[cfg(feature = "x")] use crate::imp::deep::eff2 as renamed;` + `#[cfg(feature = "x")] pub fn f() {
   renamed() }` read ABSENT (executed with the feature: it writes a file). R982's fix resolved only EXTERNAL targets
