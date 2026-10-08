@@ -252,7 +252,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -305,7 +305,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -631,7 +631,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), ctor_bound: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
@@ -7985,7 +7985,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -8033,7 +8033,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -8059,7 +8059,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(), body_externs: Default::default(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -8103,7 +8103,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -8142,7 +8142,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -9053,10 +9053,51 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             });
             assert!(hit, "a local enum's `Some` variant must keep its payload route: W::{f} lost Fs\n{v:#}");
         }
-        // RESIDUAL, pinned so it is not mistaken for covered: a Result held in a NAME and destructured later
-        // (`let r = UdpSocket::bind(..); if let Ok(s) = r`) is not typed by this fix — a name cannot say
-        // whether its recorded type was unwrapped (`match self` in `impl … for Option<L>` is the
-        // counter-example). See the report for the measured reach of this spelling.
+        // The Result held in a NAME and destructured later was this fix's residual — R962, below.
+    }
+
+    #[test]
+    fn r962_a_result_held_in_a_name_types_its_payload() {
+        // SOUNDNESS R962 (R946's residual): `let r = UdpSocket::bind(..); if let Ok(s) = r { s.send_to(b, d) }`
+        // left `s` untyped — EXECUTED (scratchpad `rustagent-v041/fx962`), the datagram arrived at the
+        // caller's address while `allow Net in <fn> ok.example` answered 0, in all four binder spellings.
+        for (tag, body) in [
+            ("iflet", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); if let Ok(s) = r { let _ = s.send_to(b"x", d); } }"#),
+            ("letelse", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); let Ok(s) = r else { return }; let _ = s.send_to(b"x", d); }"#),
+            ("match", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); match r { Ok(s) => { let _ = s.send_to(b"x", d); } Err(_) => {} } }"#),
+            ("some", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0").ok(); if let Some(s) = r { let _ = s.send_to(b"x", d); } }"#),
+        ] {
+            assert_eq!(r817_both(&format!("r962{tag}"), body, "ok.example"), (1, 1), "R962 held `{tag}` must not hide the destination");
+        }
+        // THE COUNTER-EXAMPLE R946 REFUSED THE NAME FOR, kept refused: `self` inside `impl … for Option<L>`
+        // is typed as the impl's own type, which no construction wrote, so it is not in `ctor_bound`. Built
+        // so that the refused reading FABRICATES: typing `x` as `Option` resolves `x.go()` to the effectful
+        // `<Option<L> as G>::go` instead of the pure `L::go` it really calls.
+        let selfopt = r#"
+            pub struct L;
+            impl L { pub fn go(&self) {} }
+            pub trait G { fn go(&self); }
+            impl G for Option<L> { fn go(&self) { let _ = std::fs::write("/tmp/r962", b"x"); } }
+            pub trait Run { fn run(&self); }
+            impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }
+        "#;
+        let (_, v) = r817_run("r962self", selfopt, "deny Net\n");
+        let fs_on_run = v["functions"].as_array().unwrap().iter().any(|r| {
+            r["fn"].as_str().is_some_and(|f| f.ends_with("::run"))
+                && r["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Fs"))
+        });
+        assert!(!fs_on_run, "`x` is an `L`, whose `go` is pure — never `Option`'s:\n{v:#}");
+        // A REBIND by another route reads as absent, not stale: `r` is re-bound by a closure parameter, so
+        // its payload is unknown there and nothing is charged from the outer construction.
+        let shadow = r#"
+            pub struct Q;
+            impl Q { pub fn send_to(&self, _b: &[u8], _d: &str) { let _ = std::fs::write("/tmp/r962q", b"x"); } }
+            pub fn go(d: &str) { let r = std::net::UdpSocket::bind("0.0.0.0:0"); let _ = r; let f = |r: Option<Q>| { if let Some(s) = r { s.send_to(b"x", d); } }; f(None); }
+        "#;
+        let (_, v) = r817_run("r962shadow", shadow, "deny Net\n");
+        let go = r817_row(&v, "go");
+        assert!(!go["incomplete"].as_array().into_iter().flatten().any(|e| e == "Net"),
+                "the closure's `s` is a Q, not the outer socket:\n{v:#}");
     }
 
     #[test]
@@ -21421,7 +21462,7 @@ pub fn go() {{ imp::doit(); }}
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), ctor_bound: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),

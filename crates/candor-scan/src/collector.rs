@@ -296,6 +296,12 @@ pub(crate) struct CallCollector<'a> {
     /// format change. Deliberately NOT "untyped receiver" (pervasive, and hedging on it is the 8-25%
     /// false-uncertainty flood measured in COVERAGE-GRANULARITY-FINDING.md) — only the conjunction.
     pub(crate) dep_bound_vars: HashMap<String, String>,
+    /// SOUNDNESS R962 — names a plain `let` bound to a CONSTRUCTION (`let r = UdpSocket::bind(..)`), with the
+    /// type `nominal_ctor_type` gave them — the same string written to `vars`. A std `Ok(s)`/`Some(s)`
+    /// pattern over such a name binds that type (the pattern proves the name is the `Result`/`Option` the
+    /// construction returned). Trusted only while `vars` still holds the same string for the name, so a
+    /// rebind by any other route reads as absent rather than stale. See `resolve_payload_type`.
+    pub(crate) ctor_bound: HashMap<String, String>,
     /// locals aliased to a free-FUNCTION path (`let g = eff;` where `eff` is a visible fn): a later `g()`
     /// resolves to the aliased path, so its effect (and whole transitive chain) is not silently dropped
     /// (sweep [6]). Keyed by the local name → the expanded callee paths.
@@ -1920,8 +1926,24 @@ impl<'a> CallCollector<'a> {
         if let Some(e) = raw {
             return Some(e);
         }
-        if !crate::lang::std_some_ok_pat(pat) || matches!(peel_recv(expr), syn::Expr::Path(_)) {
+        if !crate::lang::std_some_ok_pat(pat) {
             return None;
+        }
+        if let syn::Expr::Path(p) = peel_recv(expr) {
+            // SOUNDNESS R962 — a NAME is asked only for what a `let` CONSTRUCTION bound it to
+            // (`let r = UdpSocket::bind(..); if let Ok(s) = r`), and only while `vars` still holds that
+            // binding. The bare-name `type_of` R946 refused stays refused: `match self { Some(x) => .. }`
+            // inside `impl … for Option<L>` has `self` typed as the IMPL'S type, which no construction
+            // wrote, so it is not in `ctor_bound` and answers nothing here.
+            let n = p.path.get_ident()?.to_string();
+            let t = self.ctor_bound.get(&n)?;
+            if self.vars.get(&n) != Some(t) || self.elem_of.contains_key(&n) {
+                return None;
+            }
+            if std::env::var_os("CANDOR_R962_INSTR").is_some() {
+                eprintln!("R962NAME\t{t}");
+            }
+            return Some(t.clone());
         }
         let t = self.nominal_ctor_type(expr);
         // §E1 REACH PROBE, on the ADDED branch only — an unchanged corpus row is not evidence it ran.
@@ -7447,6 +7469,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                         if let Some(ty) = self.nominal_ctor_type(&init.expr) {
                             self.vars.insert(id.ident.to_string(), ty.clone());
+                            self.ctor_bound.insert(id.ident.to_string(), ty.clone()); // R962
                             // It typed after all — the provenance marker is redundant and must not fire.
                             // SOUNDNESS R856 — EXCEPT for an all-caps dependency VALUE (`let s =
                             // &ratescore::SHARED;`), which `ctor_type` types as a struct named `SHARED`

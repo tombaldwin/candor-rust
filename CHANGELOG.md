@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `Result`/`Option` held in a name, then destructured, types its payload (SOUNDNESS R962, R946's residual).**
+  `let r = UdpSocket::bind(..); if let Ok(s) = r { s.send_to(b, d) }` (and let-else, `match`, `.ok()` + `Some`) left
+  `s` untyped, so beside a benign `connect("ok.example:80")` `allow Net in <fn> ok.example` exited 0 over a datagram
+  sent to a caller-chosen address (executed). A std `Ok`/`Some` pattern over a name now binds what a plain `let`
+  CONSTRUCTION bound that name to, and only while that binding still stands; `self` in `impl … for Option<L>`
+  (R946's counter-example) was never bound by a construction and is unchanged.
 - ⚠ **A renamed re-export is a unit a chained consumer can call (SOUNDNESS R959).** `pub use inner::eff as reff;`
   published nothing under `reff`, so a consumer chained onto the crate read `ydep::reff()` as PURE (ABSENT,
   `deny Fs` 0) over a call that executed writes a file, while the un-renamed `pub use` beside it resolved by its

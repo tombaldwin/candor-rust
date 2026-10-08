@@ -2735,6 +2735,7 @@ pub(crate) fn fninfo(
         fn_typed_vars,
         // Empty at entry: filled as `let`s are visited (DEP-RECEIVER-TYPING-DESIGN.md half 1).
         dep_bound_vars: HashMap::new(),
+        ctor_bound: HashMap::new(),
         fn_alias: std::collections::HashMap::new(),
         lazy_statics,
         forced_lazies: std::collections::HashSet::new(),
