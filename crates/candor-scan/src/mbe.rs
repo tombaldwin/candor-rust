@@ -25,9 +25,14 @@
 //! `$( .. ) sep? * + ?` with nested depth, `$crate` → `crate`. Anything outside that — a definition this
 //! file spells twice (`#[cfg]` twins), a `stmt` fragment, a matcher or transcriber this module cannot
 //! read, an expansion that does not parse as items, a recursion deeper than `MAX_DEPTH` — leaves the
-//! invocation EXACTLY as it was, so R128's evidence and hedge still apply to it. An invocation whose
-//! macro is defined in ANOTHER file is not expanded either: the per-file cache keys on this file's bytes
-//! alone, so a definition read from elsewhere could go stale under it.
+//! invocation EXACTLY as it was, so R128's evidence and hedge still apply to it.
+//!
+//! A macro defined in ANOTHER file of the crate (`#[macro_use] mod mac;`) is expanded too, when the crate
+//! defines that name once — identically in every file that defines it (`CrateMacros`) — and the invoking
+//! file does not define it. That was the residual of R1004: a bare call to the generated `fn` from inside
+//! the invoking module had no unit and read ABSENT, while its `super::`/`crate::` spellings disclosed
+//! `macro:`. The per-file cache keys on one file's bytes, so the table's digest is folded into every file's
+//! key (`scan.rs`) — a definition read from elsewhere cannot go stale under a warm entry.
 
 use proc_macro2::{Delimiter, Group, Ident, Spacing, TokenStream, TokenTree};
 use std::collections::HashMap;
@@ -504,26 +509,122 @@ fn collect_defs(items: &[syn::Item], defs: &mut HashMap<String, Option<TokenStre
     }
 }
 
-struct Ctx {
+/// SOUNDNESS R1004 (the cross-file residual) — the crate's `macro_rules!` definitions by name, as token
+/// TEXT (a `TokenStream` is not `Send`, and the round-1 parse is parallel): `Some` when every file that
+/// defines the name defines it identically, `None` when two differ (cfg twins across files, a textual
+/// redefinition — which one an invocation sees depends on order and configuration, so it is refused).
+pub(crate) type CrateMacros = HashMap<String, Option<String>>;
+
+/// This file's definitions, for `merge_crate_macros`.
+pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String>)> {
+    let mut defs = HashMap::new();
+    collect_defs(items, &mut defs);
+    defs.into_iter().map(|(k, v)| (k, v.map(|t| t.to_string()))).collect()
+}
+
+pub(crate) fn merge_crate_macros(per_file: impl IntoIterator<Item = Vec<(String, Option<String>)>>) -> CrateMacros {
+    let mut out: CrateMacros = HashMap::new();
+    for defs in per_file {
+        for (name, body) in defs {
+            match out.get(&name) {
+                None => {
+                    out.insert(name, body);
+                }
+                Some(prev) if *prev == body => {}
+                Some(_) => {
+                    out.insert(name, None);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A stable digest of the table, folded into every file's cache key when it is non-empty: a file's
+/// expansion now depends on bytes in ANOTHER file, which the per-file content hash alone cannot see.
+pub(crate) fn crate_macros_digest(m: &CrateMacros) -> String {
+    let mut keys: Vec<&String> = m.keys().collect();
+    keys.sort();
+    let mut s = String::new();
+    for k in keys {
+        s.push_str(k);
+        s.push('\u{1f}');
+        s.push_str(m[k].as_deref().unwrap_or("\u{0}"));
+        s.push('\u{1e}');
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Every token of `ts` re-spanned to `span` (an expansion from a definition parsed out of another file's
+/// TEXT carries spans into that text; re-spanning to the invocation makes its units' locations the
+/// invocation's, and keeps every span on this thread's source map).
+fn respan_to(ts: TokenStream, span: proc_macro2::Span) -> TokenStream {
+    ts.into_iter()
+        .map(|tt| match tt {
+            TokenTree::Group(g) => {
+                let mut ng = Group::new(g.delimiter(), respan_to(g.stream(), span));
+                ng.set_span(span);
+                TokenTree::Group(ng)
+            }
+            TokenTree::Ident(mut t) => {
+                t.set_span(span);
+                TokenTree::Ident(t)
+            }
+            TokenTree::Punct(mut t) => {
+                t.set_span(span);
+                TokenTree::Punct(t)
+            }
+            TokenTree::Literal(mut t) => {
+                t.set_span(span);
+                TokenTree::Literal(t)
+            }
+        })
+        .collect()
+}
+
+struct Ctx<'x> {
     arms: HashMap<String, Option<std::rc::Rc<Vec<Arm>>>>,
     defs: HashMap<String, Option<TokenStream>>,
+    /// R1004 — the crate-wide table, consulted only for a name THIS file does not define.
+    xdefs: &'x CrateMacros,
     budget: usize,
 }
 
-impl Ctx {
+impl Ctx<'_> {
     fn arms_of(&mut self, name: &str) -> Option<std::rc::Rc<Vec<Arm>>> {
         if let Some(a) = self.arms.get(name) {
             return a.clone();
         }
-        let a = self.defs.get(name).cloned().flatten().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
+        let local = self.defs.get(name).cloned().flatten();
+        let def = match local {
+            Some(t) => Some(t),
+            // R1004 — a definition from ANOTHER file, re-read from its text on THIS thread.
+            None if !self.defs.contains_key(name) => {
+                self.xdefs.get(name).cloned().flatten().and_then(|s| s.parse::<TokenStream>().ok())
+            }
+            None => None,
+        };
+        let a = def.and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
         self.arms.insert(name.to_string(), a.clone());
         a
     }
 
-    /// The invocation's macro, when it is a bare name this file defines once.
+    /// The invocation's macro, when it is a bare name this file defines once — or, R1004, a name this
+    /// file does not define at all and the CRATE defines once (identically everywhere it is defined).
     fn local_name(&self, mac: &syn::Macro) -> Option<String> {
         let id = mac.path.get_ident()?.to_string();
-        (id != "macro_rules" && self.defs.get(&id).is_some_and(|d| d.is_some())).then_some(id)
+        if id == "macro_rules" {
+            return None;
+        }
+        match self.defs.get(&id) {
+            Some(d) => d.is_some().then_some(id),
+            None => self.xdefs.get(&id).is_some_and(|d| d.is_some()).then_some(id),
+        }
     }
 
     fn expand_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::Item>> {
@@ -531,11 +632,37 @@ impl Ctx {
             return None;
         }
         let name = self.local_name(mac)?;
+        let cross_file = !self.defs.contains_key(&name);
         let arms = self.arms_of(&name)?;
         let ts = expand(&arms, &mac.tokens)?;
+        let ts = if cross_file {
+            if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                eprintln!("R1004XFILE\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
+            }
+            respan_to(ts, mac.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site))
+        } else {
+            ts
+        };
         let mut file = syn::parse2::<syn::File>(ts).ok()?;
         if !file.attrs.is_empty() {
             return None; // an inner attribute at expansion top level is not something items carry
+        }
+        // A CONFIGURATION macro from another file (tokio's `cfg_rt! { .. }` / `cfg_not_rt! { .. }`, which
+        // stamp `#[cfg(..)]` onto every item they wrap) is REFUSED. Its arms are split across invocations
+        // of DIFFERENT macros, and this splice keeps only the `fn`s of each: `cfg_not_taskdump! { fn
+        // trace_leaf() {} }` became a unit while its twin `cfg_taskdump! { use …::trace_leaf; }` (a `use`)
+        // did not, so `crate::trace::trace_leaf()` resolved to the stub alone — one cfg arm where the engine
+        // answers with the UNION (SPEC §4). Measured on the first cut's corpus A/B: tokio lost `Log` on 86
+        // rows that way. Refused, the invocation reads exactly as before (R128's `macro:` evidence).
+        if cross_file
+            && file.items.iter().any(|it| {
+                crate::lang::item_attrs(it).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
+            })
+        {
+            if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                eprintln!("R1004XCFG\t{name}");
+            }
+            return None;
         }
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
@@ -598,13 +725,13 @@ impl Ctx {
 
 /// Splice, beside every item-position invocation of a `macro_rules!` this file defines exactly once, the
 /// free functions and `extern` blocks it expands to. See the module doc for what is refused.
-pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>) {
+pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
     let mut defs = HashMap::new();
     collect_defs(items, &mut defs);
-    if defs.values().all(|d| d.is_none()) {
+    if defs.values().all(|d| d.is_none()) && xdefs.values().all(|d| d.is_none()) {
         return;
     }
-    let mut cx = Ctx { arms: HashMap::new(), defs, budget: MAX_EXPANSIONS };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS };
     cx.splice(items, 0);
 }
 
@@ -615,7 +742,7 @@ mod tests {
     fn exp(def: &str, call: &str) -> Option<String> {
         let f: syn::File = syn::parse_str(&format!("{def}\n{call}")).unwrap();
         let mut items = f.items;
-        splice_local_macros(&mut items);
+        splice_local_macros(&mut items, &CrateMacros::new());
         let names: Vec<String> = items
             .iter()
             .filter_map(|i| match i {

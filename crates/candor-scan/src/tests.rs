@@ -6912,8 +6912,12 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (attack A — a test that cannot discriminate is worse than no test). With the hedge disabled all
         // three lines appear in the failure.
         let mut wrong: Vec<String> = Vec::new();
-        let defit = ("macros.rs", "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
-                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n");
+        // R1004 (cross-file) — a macro defined in another file is now expanded too; what stays unexpanded is
+        // a name with two DIFFERENT definitions (`#[cfg]` twins), whose expansion depends on configuration.
+        let defit = ("macros.rs", "#[cfg(unix)] macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n\
+                      #[cfg(not(unix))] macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::fs::write(p, \"x\").is_ok() } } }\n");
         for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[defit][..]),
                                    ("r128incl", included, &[gen][..])] {
             let v = scan_fixture_files(name, src, extra);
@@ -7078,8 +7082,11 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                    mod hidden { m!(); }\n\
                    use crate::hidden::spawn;\n\
                    pub fn go(p: &str) -> bool { spawn(p) }\n";
-        let mac = ("macros.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
-                     std::process::Command::new(p).status().is_ok() } }; }\n");
+        // …and since R1004's cross-file half, a cross-file definition is expanded: `#[cfg]` twins are not.
+        let mac = ("macros.rs", "#[cfg(unix)] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n\
+                     #[cfg(not(unix))] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::fs::write(p, \"x\").is_ok() } }; }\n");
         let v = scan_fixture_files("r270e2e", src, &[mac]);
         let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some("go"))
@@ -7150,7 +7157,10 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // `local_types`), in a module that also carries an unexpandable item macro.
         // R1004 — every `noise!` below is defined in ANOTHER file (`noise_files`): a macro this file
         // defines is now expanded, and its `hidden_*` would be a visible unit rather than R128's evidence.
-        let noise_files = [("macros.rs", "macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n")];
+        // …and since R1004's cross-file half, as `#[cfg]` TWINS with different bodies: a single cross-file
+        // definition is now expanded too.
+        let noise_files = [("macros.rs", "#[cfg(unix)] macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n\
+                            #[cfg(not(unix))] macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() { let _ = 1; } } }\n")];
         let ctor = "#[macro_use] mod macros;\n\
                     pub mod m { noise!();\n\
                       pub struct Wrap(pub u8);\n\
@@ -16832,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16843,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev71/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev72/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25871,6 +25881,77 @@ pub fn c_param_alias(x: u8) -> u8 { Param::<Pure>::plain_inner(x) }\n";
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Scoped's body:\n{v:#}");
         }
         assert!(fixture_effects(&v, "c_param_alias").is_empty(), "an alias to its own parameter names nothing:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1004, THE CROSS-FILE RESIDUAL — a macro defined in ANOTHER file (`#[macro_use] mod mac;`)
+    /// was not expanded, so a BARE call to the `fn` it generates from inside the invoking module had no
+    /// unit and read ABSENT (`deny Fs hidden::bare` exit 0) while the `super::`/`crate::` spellings
+    /// disclosed `macro:`. EXECUTED (scratchpad `rustagent-v042/fx1004y`, `fx1004x`): each caller wrote the
+    /// marker. A name with two DIFFERENT definitions (`#[cfg]` twins) stays unexpanded and keeps R128's
+    /// `macro:` hedge, and a WARM incremental scan must not replay an expansion of a definition that changed
+    /// in the other file (the per-file content hash cannot see it).
+    #[test]
+    fn r1004_a_function_a_macro_from_another_file_declares_is_a_unit() {
+        let mac = ("mac.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                    std::fs::write(p, \"x\").is_ok() } }; }\n\
+                   macro_rules! gen2 { ($n:ident) => { pub fn $n() { let _ = std::fs::write(\"/tmp/r1004x\", \"x\"); } }; }\n");
+        let src = "#[macro_use] mod mac;\n\
+                   pub mod hidden { m!(); pub fn bare(p: &str) -> bool { spawn(p) } }\n\
+                   pub mod other { gen2!(made); pub fn call_made() { made() } }\n\
+                   pub fn via_crate() -> bool { crate::hidden::spawn(\"x\") }\n";
+        let v = scan_fixture_files("r1004xfile", src, &[mac]);
+        for f in ["hidden::bare", "other::call_made", "via_crate", "hidden::spawn"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        // The declined shape: `#[cfg]` twins with different bodies still hedge, on the caller.
+        let twin = ("mac.rs", "#[cfg(unix)] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n\
+                     #[cfg(not(unix))] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::fs::write(p, \"x\").is_ok() } }; }\n");
+        let src2 = "#[macro_use] mod mac;\nmod hidden { m!(); }\nuse crate::hidden::spawn;\n\
+                    pub fn go(p: &str) -> bool { spawn(p) }\n";
+        let v = scan_fixture_files("r1004xtwin", src2, &[twin]);
+        assert_eq!(fixture_effects(&v, "go"), vec!["Unknown".to_string()], "cfg twins are not expanded:\n{v:#}");
+        // …nor a CONFIGURATION macro (tokio's `cfg_*!`), whose arms are split across DIFFERENT macros: the
+        // splice keeps only `fn`s, so expanding `cfg_off! { fn leaf() {} }` while its twin `cfg_on! { use
+        // …::leaf; }` stays opaque resolved `t::leaf()` to the stub alone — one arm where the engine answers
+        // the union. Measured on tokio's `trace::trace_leaf`: `Log` lost on 86 rows in the first cut's A/B.
+        let cfgm = ("mac.rs", "macro_rules! cfg_on { ($($i:item)*) => { $( #[cfg(feature = \"on\")] $i )* } }\n\
+                    macro_rules! cfg_off { ($($i:item)*) => { $( #[cfg(not(feature = \"on\"))] $i )* } }\n");
+        let src3 = "#[macro_use] mod mac;\n\
+                    pub mod real { pub fn leaf() { let _ = std::fs::write(\"/tmp/r1004c\", \"x\"); } }\n\
+                    pub mod t { cfg_on! { pub use crate::real::leaf; } cfg_off! { pub fn leaf() {} } }\n\
+                    pub fn caller() { t::leaf() }\n";
+        let v = scan_fixture_files("r1004xcfg", src3, &[cfgm]);
+        assert!(fixture_effects(&v, "caller") != Vec::<String>::new(),
+                "a configuration macro's one arm must not be resolved as the whole answer:\n{v:#}");
+
+        // WARM: the definition changes in mac.rs; lib.rs's bytes do not. The change is in the generated fn's
+        // RETURN TYPE, a Pass A fact cached with lib.rs: a body-only change is re-derived anyway (every
+        // macro body is in the decl index's `local_macros`, so Pass B re-runs), a declaration is not.
+        // Measured: without the digest in lib.rs's key, the warm run reads `h::bare` ABSENT.
+        // `incremental_scan` sets and clears the process-wide fault-injection variable: serialise with every
+        // other test that does (`abort_injection_lock`), or this one clears another's injected fault mid-run.
+        let _lock = abort_injection_lock();
+        let d = std::env::temp_dir().join(format!("candor-r1004warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r1004warm\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "#[macro_use] mod mac;\n\
+                       pub struct G; impl G { pub fn go(&self) {} }\n\
+                       pub struct H; impl H { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1004w\", \"x\"); } }\n\
+                       pub mod h { m!(); pub fn bare() { let x = mk(); x.go() } }\n").unwrap();
+        std::fs::write(d.join("src/mac.rs"), "macro_rules! m { () => { pub fn mk() -> crate::G { crate::G } }; }\n").unwrap();
+        let policy = d.join("policy");
+        std::fs::write(&policy, "deny Fs h::bare\n").unwrap();
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy.to_string_lossy(), None);
+        assert_eq!(rc1, 0, "cold: `mk()` is a G, whose go is pure:\n{v1:#}");
+        std::fs::write(d.join("src/mac.rs"), "macro_rules! m { () => { pub fn mk() -> crate::H { crate::H } }; }\n").unwrap();
+        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy.to_string_lossy(), None);
+        assert_eq!(rc2, 1, "warm: lib.rs's bytes did not change, its expansion did — a cached entry must not \
+                            replay the old declaration:\n{v2:#}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,

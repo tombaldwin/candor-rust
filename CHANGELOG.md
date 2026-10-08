@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `macro_rules!` defined in ANOTHER file of the crate is expanded too (SOUNDNESS R1004, the cross-file
+  residual).** `#[macro_use] mod mac;` + `pub mod hidden { m!(); pub fn bare(p: &str) -> bool { spawn(p) } }`, with
+  `m!` generating an effectful `spawn`, read `hidden::bare` ABSENT (`deny Fs hidden::bare` exit 0; executed, it
+  writes a file) while the `super::`/`crate::` spellings disclosed `macro:`. The crate's definitions are now one
+  table (a name defined twice with different bodies — `#[cfg]` twins — is refused and keeps R128's `macro:` hedge),
+  used for any name the invoking file does not define, and the table's digest joins every file's cache key. A
+  CONFIGURATION macro (one that stamps `#[cfg]` on what it wraps, tokio's `cfg_*!`) is not expanded across files:
+  its arms live in different macros and only one would be spliced.
+  Callers of such functions now carry the real effect where they carried `macro:` before. Cache schema rev72.
 - ⚠ **A call through a GENERIC type alias resolves (SOUNDNESS R1025).** `type Closure<T> = ScopedClosure<'static, T>;`
   then `Closure::<T>::wrap_maybe_aborting::<true>(x)` (wasm-bindgen's `ScopedClosure::once`) formed no edge: Pass A
   recorded only non-generic aliases, because their target "carries parameters this map cannot substitute" — but the

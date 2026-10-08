@@ -1313,6 +1313,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let walked_canon: std::collections::HashSet<std::path::PathBuf> =
         paths.par_iter().filter_map(|(p, _)| p.canonicalize().ok()).collect();
     let include_env = crate::lang::IncludeEnv { root, manifest_dir: root, walked: &walked_canon, include_tests };
+    // SOUNDNESS R1004 (the cross-file residual) — the crate's `macro_rules!` definitions, so an item-position
+    // invocation of a macro defined in ANOTHER file (`#[macro_use] mod mac;`) is expanded like a same-file
+    // one (`mbe::CrateMacros`). Read from every walked file that names `macro_rules`, cached or not: a warm
+    // file's expansion depends on these bytes, so their digest joins every file's key below.
+    let xmacros: crate::mbe::CrateMacros = crate::mbe::merge_crate_macros(
+        paths
+            .par_iter()
+            .filter_map(|(p, _)| {
+                let text = std::fs::read_to_string(p).ok()?;
+                if !text.contains("macro_rules") {
+                    return None;
+                }
+                let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
+                Some(crate::mbe::file_macro_defs(&file.items))
+            })
+            .collect::<Vec<_>>(),
+    );
+    let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
     // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
     // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
@@ -1328,6 +1346,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R977 — the cfg-off verdict comes from ANOTHER file (the declaring `mod`), so it is
             // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
             let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
+            let key = match &xmacros_key { Some(x) => format!("{key}+xmac{x}"), None => key };
             (rel.clone(), key)
         })
         .collect();
@@ -1372,8 +1391,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if text.contains("pin_project") || text.contains("link!") {
                 crate::lang::splice_pin_project(&mut file.items); // R988, R960
             }
-            if text.contains("macro_rules") {
-                crate::mbe::splice_local_macros(&mut file.items); // R1004
+            if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) {
+                crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
@@ -1891,8 +1910,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t.contains("pin_project") || t.contains("link!") {
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
-                    if t.contains("macro_rules") {
-                        crate::mbe::splice_local_macros(&mut f.items); // R1004 — the round-2 twin
+                    if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) {
+                        crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
                     Some(f)
                 })
