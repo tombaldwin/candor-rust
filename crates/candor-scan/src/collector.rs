@@ -3928,7 +3928,7 @@ impl<'a> CallCollector<'a> {
                     // The first argument may NAME the implementor (`Dsl::limit(&s1)`): only a plain
                     // binding is read, from `vars` alone — never a typed expression, so no inference
                     // this engine does elsewhere (the builder assumption) can mis-name it.
-                    // SOUNDNESS R1034 (the masked twin; row id pending) — ONLY for a member with a RECEIVER. An associated fn's implementor is
+                    // SOUNDNESS R1049 (R1034's masked twin) — ONLY for a member with a RECEIVER. An associated fn's implementor is
                     // chosen by the caller's TYPE CONTEXT (`FromRedisValue::from_redis_value(v)` returns `T`),
                     // never by its first argument, which is merely an input (`v: &Value`): reading it as the
                     // implementor resolved redis's generic `from_redis_value::<T>` to `Value::from_redis_value`

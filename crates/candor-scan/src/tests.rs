@@ -26141,7 +26141,7 @@ pub fn call_proj() -> u8 { via_proj::<S1>(1) }\n\
         }
     }
 
-    /// R1034's masked twin (row id pending) — `FromV::from_v(v)`, an ASSOCIATED fn called through the trait,
+    /// SOUNDNESS R1049 (R1034's masked twin) — `FromV::from_v(v)`, an ASSOCIATED fn called through the trait,
     /// was resolved to the impl of its first ARGUMENT's type (`v: &Value` → `Value::from_v`, pure), while the
     /// implementor is chosen by the return type `T`. redis's `from_redis_value::<T>` read pure that way once
     /// R1034 stopped merging it with the `[T; N]` impl's methods. EXECUTED (scratchpad `rustagent-v042/
