@@ -735,7 +735,10 @@ impl<'a> CallCollector<'a> {
         if let Some(a) = pinned_arg(expr) {
             return self.type_of(a).or_else(|| self.resolve_recv_type(a));
         }
-        let ty = ctor_type(expr, &self.uses, self.returns)?;
+        let ty = match ctor_type(expr, &self.uses, self.returns) {
+            Some(t) => t,
+            None => self.tuple_struct_ctor_type(expr)?,
+        };
         // VEIN B — a TURBOFISH that names a GENERIC PARAMETER of this fn/impl (`from_str::<B>(..)`) types
         // nothing: `B` is a bound, and its dispatch route (`resolve_recv_traits`) stays the answer — the
         // pre-change reading, since the callee's generic return was recorded as that bound's sentinel.
@@ -765,6 +768,62 @@ impl<'a> CallCollector<'a> {
             Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
             None => ty,
         })
+    }
+
+    /// SOUNDNESS R1055 — A TUPLE-STRUCT CONSTRUCTOR NAMES ITS TYPE. `let t = Tw(x); t.run()` and `Tw(x).run()`
+    /// typed nothing: `ctor_type` reads a `Type::ctor(..)` path or a recorded FUNCTION return, and a tuple
+    /// struct's constructor is neither, so the receiver had no type and the caller read PURE over
+    /// `Tw::run`'s write (executed). The struct's own declaration is the authority: a call whose expanded
+    /// path names a LOCAL struct that has a POSITIONAL field (`fields[leaf]["0"]`) constructs that struct.
+    ///
+    /// Refused, so it cannot guess: a written or expanded path whose PENULTIMATE segment is type-like
+    /// (`Enum::Var(x)`, an `Assoc::f(x)`, a `use Enum::*` variant) — an enum variant is not the struct of the
+    /// same leaf; a path rooted in a dependency or std/core/alloc (`fields` is this crate's leaf-keyed index,
+    /// R862); and a leaf with no positional field entry at all.
+    fn tuple_struct_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Call(c) = peel_recv(expr) else { return None };
+        let syn::Expr::Path(p) = &*c.func else { return None };
+        if p.qself.is_some() {
+            return None;
+        }
+        let type_like = |seg: &str| seg.trim_start_matches(crate::decls::ITEM_SENTINEL).chars().next().is_some_and(|ch| ch.is_uppercase());
+        let written = path_to_string(&p.path);
+        let wsegs: Vec<&str> = written.split("::").collect();
+        if wsegs.len() >= 2 && type_like(wsegs[wsegs.len() - 2]) {
+            return None;
+        }
+        let full = self.expand_scoped(&written);
+        let segs: Vec<&str> = full.split("::").collect();
+        let leaf = *segs.last()?;
+        if !type_like(leaf) || (segs.len() >= 2 && type_like(segs[segs.len() - 2])) {
+            return None;
+        }
+        if matches!(segs[0], "std" | "core" | "alloc") || self.is_dependency_type(&full) {
+            return None;
+        }
+        // The struct's POSITIONAL ARITY must be the call's (a `#[cfg]`'d position is not in `fields`, so it
+        // can only refuse), and the leaf must not ALSO be a local enum variant's: a glob-imported
+        // `use E::*; V(1)` leaves the written `V` unexpanded, and it is the variant, not the struct.
+        let fm = self.fields.get(leaf)?;
+        let positional = fm.keys().filter(|k| k.parse::<usize>().is_ok()).count();
+        if positional == 0 || positional != fm.len() || positional != c.args.len() {
+            return None;
+        }
+        let bare = leaf.trim_start_matches(crate::decls::ITEM_SENTINEL);
+        let variant_suffix = format!("\u{1e}{bare}");
+        // Asked of a SINGLE-SEGMENT written name only: a module-qualified `a::V(1)` names the item the module
+        // declares, and the glob case this guards is the unexpanded bare name.
+        if wsegs.len() == 1 && (self.enum_variants.contains_key(bare)
+            || self.enum_variant_traits.contains_key(bare)
+            || self.ambiguous_enum_leaves.contains(bare)
+            || self.enum_variants.keys().any(|k| k.ends_with(&variant_suffix)))
+        {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R1055_INSTR").is_some() {
+            eprintln!("R1055CTOR\t{full}"); // §E1 REACH PROBE
+        }
+        Some(full)
     }
 
     /// SOUNDNESS R369/R899 — a type answer `cur` for something written with the head `head`, widened to

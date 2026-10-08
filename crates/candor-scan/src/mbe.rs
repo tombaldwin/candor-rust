@@ -687,7 +687,15 @@ impl Ctx<'_> {
                         // unchanged for whatever the expansion declared besides functions.
                         let mut fns: Vec<syn::Item> = gen
                             .into_iter()
-                            .filter(|g| matches!(g, syn::Item::Fn(_) | syn::Item::ForeignMod(_)))
+                            .filter(|g| match g {
+                                syn::Item::Fn(_) | syn::Item::ForeignMod(_) => true,
+                                // SOUNDNESS R1004 (impl residual) — an INHERENT impl: its methods are
+                                // reached BY PATH (`W::touch(&w)`) and by a typed receiver, exactly as a
+                                // free fn is, and no dispatch universe holds them, so splicing it cannot
+                                // move a CHA fan-out. A TRAIT impl stays unexpanded (see above).
+                                syn::Item::Impl(i) => i.trait_.is_none(),
+                                _ => false,
+                            })
                             .collect();
                         if !fns.is_empty() && std::env::var_os("CANDOR_R1004_INSTR").is_some() {
                             eprintln!(
@@ -699,6 +707,18 @@ impl Ctx<'_> {
                         // The invocation's own outer attributes (`#[cfg(..)]` on `foo!(..);`) govern every
                         // item it expands to.
                         for g in &mut fns {
+                            // A `$t:ty` fragment transcribes as an invisible-delimited GROUP, which no
+                            // written impl has; peel it so the impl's units are keyed under the type
+                            // (`W::touch`) exactly as the hand-written impl's are.
+                            if let syn::Item::Impl(i) = g {
+                                if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                                    eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
+                                }
+                                while let syn::Type::Group(gr) = &*i.self_ty {
+                                    let inner = (*gr.elem).clone();
+                                    *i.self_ty = inner;
+                                }
+                            }
                             if let Some(a) = crate::lang::item_attrs_mut(g) {
                                 let mut na = m.attrs.clone();
                                 na.append(a);
