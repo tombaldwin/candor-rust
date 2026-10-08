@@ -6912,8 +6912,12 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (attack A — a test that cannot discriminate is worse than no test). With the hedge disabled all
         // three lines appear in the failure.
         let mut wrong: Vec<String> = Vec::new();
-        let defit = ("macros.rs", "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
-                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n");
+        // R1004 (cross-file) — a macro defined in another file is now expanded too; what stays unexpanded is
+        // a name with two DIFFERENT definitions (`#[cfg]` twins), whose expansion depends on configuration.
+        let defit = ("macros.rs", "#[cfg(unix)] macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n\
+                      #[cfg(not(unix))] macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::fs::write(p, \"x\").is_ok() } } }\n");
         for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[defit][..]),
                                    ("r128incl", included, &[gen][..])] {
             let v = scan_fixture_files(name, src, extra);
@@ -7078,8 +7082,11 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                    mod hidden { m!(); }\n\
                    use crate::hidden::spawn;\n\
                    pub fn go(p: &str) -> bool { spawn(p) }\n";
-        let mac = ("macros.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
-                     std::process::Command::new(p).status().is_ok() } }; }\n");
+        // …and since R1004's cross-file half, a cross-file definition is expanded: `#[cfg]` twins are not.
+        let mac = ("macros.rs", "#[cfg(unix)] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n\
+                     #[cfg(not(unix))] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::fs::write(p, \"x\").is_ok() } }; }\n");
         let v = scan_fixture_files("r270e2e", src, &[mac]);
         let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some("go"))
@@ -7150,7 +7157,10 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // `local_types`), in a module that also carries an unexpandable item macro.
         // R1004 — every `noise!` below is defined in ANOTHER file (`noise_files`): a macro this file
         // defines is now expanded, and its `hidden_*` would be a visible unit rather than R128's evidence.
-        let noise_files = [("macros.rs", "macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n")];
+        // …and since R1004's cross-file half, as `#[cfg]` TWINS with different bodies: a single cross-file
+        // definition is now expanded too.
+        let noise_files = [("macros.rs", "#[cfg(unix)] macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n\
+                            #[cfg(not(unix))] macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() { let _ = 1; } } }\n")];
         let ctor = "#[macro_use] mod macros;\n\
                     pub mod m { noise!();\n\
                       pub struct Wrap(pub u8);\n\
@@ -7949,8 +7959,8 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         let mut ti = TraitImplIndex::new();
         ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
-        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() });
-        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() }); // no impl in sight
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![], assoc_types: Default::default(), assoc: Default::default() });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![], assoc_types: Default::default(), assoc: Default::default() }); // no impl in sight
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
@@ -13471,12 +13481,38 @@ trait G {
         // `an_unwrap_or_else_error_closure_is_not_the_guarded_value`).
         // R893 — …and a wrapper of a CONTAINER records the container's element MARKED, never bare (a bare
         // `Sender` would say the guard IS one).
-        let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
-        assert_eq!(elem_type(&mx, &u), Some(crate::lang::mark_wrapped("Sender")),
-                   "R893: a wrapper of a CONTAINER records its element, marked");
-        for nested in ["Mutex<Option<Sender>>", "Mutex<Vec<Vec<Sender>>>", "Mutex<Vec<String>>"] {
+        // R1023 — the mark is now the LAYER LIST, outermost first, so a second level is recorded too.
+        // A layer is read by its leaf unless this module declares the name itself (R482's control).
+        for (nested, want) in [
+            ("std::sync::Mutex<Vec<Sender>>", Some(crate::lang::with_layers("Sender", "MC"))),
+            ("std::sync::Mutex<Option<Sender>>", Some(crate::lang::with_layers("Sender", "MO"))),
+            ("std::sync::Mutex<Vec<Vec<Sender>>>", Some(crate::lang::with_layers("Sender", "MCC"))),
+            ("Option<Vec<Sender>>", Some(crate::lang::with_layers("Sender", "OC"))),
+            ("std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u8, Sender>>>",
+             Some(crate::lang::with_layers("Sender", "MK"))),
+            // a non-nominal leaf records nothing layered: the one-level answer stands
+            ("std::sync::Mutex<Vec<String>>", None),
+            ("Option<Vec<String>>", Some("Vec".to_string())),
+            // a bare `Mutex` is read by its leaf, as the one-level route reads it (a module-declared one
+            // is refused — see `layer_path_is_std`; R482's control pins that end to end)
+            ("Mutex<Option<Sender>>", Some(crate::lang::with_layers("Sender", "MO"))),
+        ] {
             let t: syn::Type = syn::parse_str(nested).unwrap();
-            assert_eq!(elem_type(&t, &u), None, "{nested}: one container level onto a nominal element only");
+            // Compared as (element, layer codes): a non-std layer's written path rides after the codes.
+            let got = elem_type(&t, &u);
+            let key = |e: &Option<String>| e.as_deref().map(|e| (crate::lang::strip_wrapped(e).to_string(),
+                                                                  crate::lang::wrapped_layers(e).to_string()));
+            assert_eq!(key(&got), key(&want), "{nested}");
+        }
+        // …and that path is what a binder peeling to the layer types the binding with (redis's ahash map).
+        let t: syn::Type = syn::parse_str("Vec<ahash::HashMap<u8, Vec<Sender>>>").unwrap();
+        let e = elem_type(&t, &u).unwrap();
+        match crate::lang::layer_bind(&e, crate::lang::LayerBinder::For, "") {
+            Some(crate::lang::Layered::Elem { entry, outer }) => {
+                assert_eq!(crate::lang::wrapped_layers(&entry), "KC");
+                assert_eq!(outer.as_deref(), Some("ahash::HashMap"));
+            }
+            other => panic!("a `for` over Vec<ahash::HashMap<..>> binds the map: {other:?}"),
         }
         let rc: syn::Type = syn::parse_str("RefCell<Sender>").unwrap();
         assert_eq!(elem_type(&rc, &u).as_deref(), Some("Sender"));
@@ -16806,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16817,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev69/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev77/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -17370,7 +17406,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let src = concat!(
             "pub trait ToConnection<'a> { fn to_connection(self) -> ConnLike<'a>; }\n",
             "pub struct Pool;\n",
-            "impl<'a> ToConnection<'a> for &'a Pool { fn to_connection(self) -> ConnLike<'a> { ConnLike(std::marker::PhantomData) } }\n",
+            "impl<'a> ToConnection<'a> for &'a Pool { fn to_connection(self) -> ConnLike<'a> { let _ = std::fs::write(\"/tmp/r88\", \"x\"); ConnLike(std::marker::PhantomData) } }\n",
             "pub struct ConnLike<'a>(std::marker::PhantomData<&'a ()>);\n",
             "impl<'a> ConnLike<'a> { pub fn resolve(self) -> Result<Conn, ()> { Ok(Conn) } }\n",
             "pub struct Conn;\n",
@@ -17379,9 +17415,19 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "impl<Q> Query for Q { fn run<'a, C: ToConnection<'a>>(self, conn: C) -> Result<(), ()> { \
                  let mut conn = conn.to_connection().resolve()?; conn.raw_query(); Ok(()) } }\n",
         );
+        // SOUNDNESS R1034 — the "pre-existing behaviour" this reproducer leaned on was the reference-type impl
+        // having NO key (it read as an opaque `Unknown`). It is keyed `&Pool` now and the dispatch RESOLVES,
+        // so the impl's body carries a real effect and the guard asks the R88 question directly: `run` must
+        // keep what the OUTER `conn`'s dispatch reaches — the effect, or an honest `Unknown` — never vanish.
+        let v = scan_src_to_json("r88shadow", src);
+        let run = fn_entry(&v, "Q::run");
+        assert!(
+            effs(run).contains(&"Fs".to_string()) || run["unresolved"] == serde_json::json!(true),
+            "R88 self-shadow regression: `Q::run` must keep the outer binding's reach (Fs, or Unknown): {v:#}"
+        );
         let unres = unresolved_of(src);
         assert_eq!(
-            unres.get("Q::run"), Some(&true),
+            unres.get("Q::run").map(|_| true), Some(true),
             "R88 self-shadow regression: `Q::run`'s self-shadowing `let mut conn = conn.to_connection()\
              .resolve()?;` must stay in the report with its pre-existing honest `unresolved` disclosure, \
              not vanish entirely (zero calls, zero unresolved) — the rebind's OWN RHS must resolve \
@@ -25689,6 +25735,448 @@ pub fn c_local_len() -> usize { let m = Mutex::new(vec![G]); let n = m.lock().un
             assert!(fixture_effects(&v, f).is_empty(),
                     "`{f}` asks the CONTAINER, never a G — executed, it writes nothing:\n{v:#}");
         }
+    }
+
+    /// SOUNDNESS R1023 (R893's second level) — a std layer around a std layer around `G`: `Mutex<Option<G>>`,
+    /// `Option<Vec<G>>`, `Vec<Vec<G>>`, `Vec<Option<G>>`, `HashMap<_, Vec<G>>`, `RefCell<Option<G>>`,
+    /// `Mutex<Option<Vec<G>>>`. One-bit marking could not say which layer was on top, so none of them recorded
+    /// an element and every arm below read ABSENT. EXECUTED (scratchpad `rustagent-v042/fx1023`): each `a_` arm
+    /// wrote the marker, each `c_` control did not — and `G` declares `len`/`is_some`/`is_empty`, so a binder
+    /// that peeled the WRONG layer (typing the guard, the payload `Vec` or the `Option` as `G`) charges a control.
+    #[test]
+    fn r1023_a_second_std_layer_is_peeled_one_layer_per_binder() {
+        let src = "\
+use std::cell::RefCell;\n\
+use std::collections::HashMap;\n\
+use std::sync::Mutex;\n\
+pub struct G;\n\
+fn mark() { let _ = std::fs::write(\"/tmp/fx1023_mark\", \"x\"); }\n\
+impl G {\n\
+    pub fn go(&self) { mark() }\n\
+    pub fn len(&self) -> usize { mark(); 0 }\n\
+    pub fn is_some(&self) -> bool { mark(); true }\n\
+    pub fn is_empty(&self) -> bool { mark(); true }\n\
+}\n\
+pub struct H {\n\
+    pub ov: Option<Vec<G>>,\n\
+    pub vv: Vec<Vec<G>>,\n\
+    pub vo: Vec<Option<G>>,\n\
+    pub hv: HashMap<String, Vec<G>>,\n\
+    pub mo: Mutex<Option<G>>,\n\
+    pub ro: RefCell<Option<G>>,\n\
+    pub mov: Mutex<Option<Vec<G>>>,\n\
+}\n\
+impl H {\n\
+    // effectful arms\n\
+    pub fn a_ov_unwrap(&self) { for g in self.ov.as_ref().unwrap().iter() { g.go() } }\n\
+    pub fn a_ov_flatten(&self) { for g in self.ov.iter().flatten() { g.go() } }\n\
+    pub fn a_ov_idx(&self) { if let Some(v) = self.ov.as_ref() { v[0].go() } }\n\
+    pub fn a_ov_match(&self) { match &self.ov { Some(v) => { for g in v { g.go() } } None => {} } }\n\
+    pub fn a_vv_nested(&self) { for row in &self.vv { for g in row { g.go() } } }\n\
+    pub fn a_vv_idx(&self) { self.vv[0][0].go() }\n\
+    pub fn a_vo_iflet(&self) { for o in &self.vo { if let Some(g) = o { g.go() } } }\n\
+    pub fn a_vo_flatten(&self) { self.vo.iter().flatten().for_each(|g| g.go()) }\n\
+    pub fn a_hv_values(&self) { for v in self.hv.values() { for g in v { g.go() } } }\n\
+    pub fn a_hv_get(&self) { self.hv.get(\"k\").unwrap()[0].go() }\n\
+    pub fn a_ro_borrow(&self) { if let Some(g) = self.ro.borrow().as_ref() { g.go() } }\n\
+    pub fn a_mo_match(&self) { match &*self.mo.lock().unwrap() { Some(g) => g.go(), None => {} } }\n\
+    pub fn a_mov(&self) { if let Some(v) = self.mov.lock().unwrap().as_ref() { for g in v.iter() { g.go() } } }\n\
+    pub fn a_mo_map(&self) { self.mo.lock().unwrap().as_ref().map(|g| g.go()); }\n\
+    // controls: nothing effectful runs; G::len/is_some/is_empty write if wrongly reached\n\
+    pub fn c_ov_map_len(&self) -> usize { self.ov.as_ref().map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_ov_iflet_len(&self) -> usize { if let Some(v) = &self.ov { v.len() } else { 0 } }\n\
+    pub fn c_vv_row_len(&self) -> usize { let mut n = 0; for row in &self.vv { n += row.len(); } n }\n\
+    pub fn c_mo_is_some(&self) -> bool { self.mo.lock().unwrap().is_some() }\n\
+    pub fn c_mo_ok_guard(&self) -> bool { if let Ok(g) = self.mo.lock() { g.is_some() } else { false } }\n\
+    pub fn c_vo_is_some(&self) -> usize { let mut n = 0; for o in &self.vo { if o.is_some() { n += 1 } } n }\n\
+    pub fn c_hv_get_len(&self) -> usize { self.hv.get(\"k\").map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_mov_len(&self) -> usize { if let Some(v) = self.mov.lock().unwrap().as_ref() { v.len() } else { 0 } }\n\
+    pub fn c_ro_is_some(&self) -> bool { self.ro.borrow().is_some() }\n\
+    pub fn c_vv_first_empty(&self) -> bool { self.vv.first().map(|r| r.is_empty()).unwrap_or(true) }\n\
+}\n\
+";
+        let v = scan_fixture("r1023layer", src);
+        for f in ["H::a_ov_unwrap", "H::a_ov_flatten", "H::a_ov_idx", "H::a_ov_match", "H::a_vv_nested",
+                  "H::a_vv_idx", "H::a_vo_iflet", "H::a_vo_flatten", "H::a_hv_values", "H::a_hv_get",
+                  "H::a_ro_borrow", "H::a_mo_match", "H::a_mov", "H::a_mo_map"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches G::go:\n{v:#}");
+        }
+        for f in ["H::c_ov_map_len", "H::c_ov_iflet_len", "H::c_vv_row_len", "H::c_mo_is_some", "H::c_mo_ok_guard",
+                  "H::c_vo_is_some", "H::c_hv_get_len", "H::c_mov_len", "H::c_ro_is_some", "H::c_vv_first_empty"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` asks a std layer, never a G — executed, it writes nothing:\n{v:#}");
+        }
+        // R1023's own three spellings (the row's fixture), and a parameter of the same type.
+        let src2 = "\
+use std::sync::Mutex;\n\
+pub struct G;\n\
+impl G { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1023\", \"x\"); } }\n\
+pub struct H { pub mo: Mutex<Option<G>>, pub ov: Option<Vec<G>> }\n\
+impl H {\n\
+    pub fn mo_some(&self) { if let Some(g) = self.mo.lock().unwrap().as_ref() { g.go() } }\n\
+    pub fn ov_some(&self) { if let Some(v) = &self.ov { for g in v { g.go() } } }\n\
+}\n\
+pub fn param_mo(m: &Mutex<Option<G>>) { if let Some(g) = &*m.lock().unwrap() { g.go() } }\n";
+        let v = scan_fixture("r1023row", src2);
+        for f in ["H::mo_some", "H::ov_some", "param_mo"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1024 — `self` in an impl for a std container, `Option` or `Result` is a parameter of that
+    /// type, and was the one parameter `seed_elem_of` never saw: every binder over it bound an untyped name,
+    /// the impl's unit had no callees and the trait's union row was published `[]`. EXECUTED (scratchpad
+    /// `rustagent-v042/fxself2`, `fxbox`): every arm wrote the marker. R962's mirror control — an effectful
+    /// `Option`-level method beside a pure `L::go` — must stay pure: `x` is `L`, never the self type.
+    #[test]
+    fn r1024_self_in_an_impl_for_a_std_container_binds_its_element() {
+        let src = "\
+pub struct L;\n\
+impl L { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1024\", b\"x\"); } }\n\
+pub trait RunA { fn ra(&self); }\n\
+pub trait RunB { fn rb(&self); }\n\
+pub trait RunD { fn rd(&self); }\n\
+pub trait RunE { fn re(&self); }\n\
+pub trait RunG { fn rg(&self); }\n\
+pub trait Doer { fn dgo(&self); }\n\
+impl Doer for L { fn dgo(&self) { let _ = std::fs::write(\"/tmp/r1024\", b\"x\"); } }\n\
+pub trait Vd { fn vd(&self); }\n\
+impl RunA for Option<L> { fn ra(&self) { match self { Some(x) => x.go(), None => {} } } }\n\
+impl RunB for Option<L> { fn rb(&self) { if let Some(x) = self.as_ref() { x.go() } } }\n\
+impl RunD for Vec<L> { fn rd(&self) { for x in self { x.go() } } }\n\
+impl RunE for Vec<L> { fn re(&self) { self[0].go() } }\n\
+impl RunG for Result<L, ()> { fn rg(&self) { if let Ok(x) = self { x.go() } } }\n\
+impl<T: Doer> Vd for Vec<T> { fn vd(&self) { for x in self { x.dgo() } } }\n";
+        let v = scan_fixture("r1024self", src);
+        for f in ["Option::ra", "Option::rb", "Vec::rd", "Vec::re", "Result::rg", "Vec::vd", "RunA::ra", "RunD::rd"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches L::go:\n{v:#}");
+        }
+        // R962's control, mirrored: `x` binds `L`, so the effectful method on the impl's OWN type is not
+        // reached through it.
+        let src2 = "\
+pub struct L;\n\
+impl L { pub fn go(&self) {} }\n\
+pub trait G { fn go(&self); }\n\
+impl G for Option<L> { fn go(&self) { let _ = std::fs::write(\"/tmp/r1024c\", b\"x\"); } }\n\
+pub trait Run { fn run(&self); }\n\
+impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }\n";
+        let v = scan_fixture("r1024ctl", src2);
+        assert!(fixture_effects(&v, "Option::run").is_empty(), "`x` is an L, whose go is pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1025 — a call through a GENERIC type alias (`type Alias<T> = Scoped<'static, T>`) formed no
+    /// edge: Pass A recorded only non-generic aliases, so `Alias::<T>::wrap_inner::<true>(x)` (wasm-bindgen's
+    /// `ScopedClosure::once` → `Closure::wrap_maybe_aborting`) and `Alias::<u8>::plain_inner(x)` named
+    /// `Alias::…`, which no unit is keyed under. The row read the method's TURBOFISH as the cause; the
+    /// `plain_inner` arm (no turbofish) is silent the same way, so it is the alias's own generics. EXECUTED
+    /// (scratchpad `rustagent-v042/fxalias`): every arm wrote the marker.
+    #[test]
+    fn r1025_a_call_through_a_generic_type_alias_resolves() {
+        let src = "\
+pub struct Scoped<'a, T> { pub v: &'a T }\n\
+pub type Alias<T> = Scoped<'static, T>;\n\
+impl<T> Scoped<'static, T> {\n\
+    fn wrap_inner<const B: bool>(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/r1025\", \"x\"); x }\n\
+    fn plain_inner(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/r1025\", \"x\"); x }\n\
+    pub fn via_alias(x: u8) -> u8 { Alias::<T>::wrap_inner::<true>(x) }\n\
+    pub fn via_alias_bare(x: u8) -> u8 { Alias::<T>::plain_inner(x) }\n\
+}\n\
+pub fn free_generic_alias(x: u8) -> u8 { Alias::<u8>::plain_inner(x) }\n\
+pub type Param<T> = T;\n\
+pub struct Pure;\n\
+impl Pure { pub fn plain_inner(x: u8) -> u8 { x } }\n\
+pub fn c_param_alias(x: u8) -> u8 { Param::<Pure>::plain_inner(x) }\n";
+        let v = scan_fixture("r1025alias", src);
+        for f in ["Scoped::via_alias", "Scoped::via_alias_bare", "free_generic_alias"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Scoped's body:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "c_param_alias").is_empty(), "an alias to its own parameter names nothing:\n{v:#}");
+        // THE RECEIVER HALF. An `impl` written ON an alias keys its methods under the alias, a receiver typed
+        // through it expands to the target. EXECUTED (scratchpad `rustagent-v042/fxlcp`): every caller wrote
+        // the marker. At 15ef1d1 `via_field` (generic alias, unrecorded) and `via_ret_plain` (non-generic
+        // alias, declared return: R451's gate refused the target) were ABSENT; recording generic aliases
+        // alone moved `via_ret` from charged to ABSENT, which is what this half closes.
+        let src2 = "\
+pub struct Managed<P> { pub p: P }\n\
+pub type LcPtr<T> = Managed<*mut T>;\n\
+pub type Plain = Managed<*mut u8>;\n\
+pub struct Evp;\n\
+impl LcPtr<Evp> { pub fn agree(&self) { let _ = std::fs::write(\"/tmp/r1025b\", \"x\"); } }\n\
+impl Plain { pub fn agree2(&self) { let _ = std::fs::write(\"/tmp/r1025b\", \"x\"); } }\n\
+pub struct K { pub k: LcPtr<Evp>, pub q: Plain }\n\
+impl K {\n\
+    pub fn get(&self) -> &LcPtr<Evp> { &self.k }\n\
+    pub fn getq(&self) -> &Plain { &self.q }\n\
+    pub fn via_ret(&self) { self.get().agree() }\n\
+    pub fn via_field(&self) { self.k.agree() }\n\
+    pub fn via_ret_plain(&self) { self.getq().agree2() }\n\
+    pub fn via_field_plain(&self) { self.q.agree2() }\n\
+}\n\
+pub fn via_param(p: &LcPtr<Evp>) { p.agree() }\n";
+        let v = scan_fixture("r1025recv", src2);
+        for f in ["K::via_ret", "K::via_field", "K::via_ret_plain", "K::via_field_plain", "via_param"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches the alias's impl:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1004, THE CROSS-FILE RESIDUAL — a macro defined in ANOTHER file (`#[macro_use] mod mac;`)
+    /// was not expanded, so a BARE call to the `fn` it generates from inside the invoking module had no
+    /// unit and read ABSENT (`deny Fs hidden::bare` exit 0) while the `super::`/`crate::` spellings
+    /// disclosed `macro:`. EXECUTED (scratchpad `rustagent-v042/fx1004y`, `fx1004x`): each caller wrote the
+    /// marker. A name with two DIFFERENT definitions (`#[cfg]` twins) stays unexpanded and keeps R128's
+    /// `macro:` hedge, and a WARM incremental scan must not replay an expansion of a definition that changed
+    /// in the other file (the per-file content hash cannot see it).
+    #[test]
+    fn r1004_a_function_a_macro_from_another_file_declares_is_a_unit() {
+        let mac = ("mac.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                    std::fs::write(p, \"x\").is_ok() } }; }\n\
+                   macro_rules! gen2 { ($n:ident) => { pub fn $n() { let _ = std::fs::write(\"/tmp/r1004x\", \"x\"); } }; }\n");
+        let src = "#[macro_use] mod mac;\n\
+                   pub mod hidden { m!(); pub fn bare(p: &str) -> bool { spawn(p) } }\n\
+                   pub mod other { gen2!(made); pub fn call_made() { made() } }\n\
+                   pub fn via_crate() -> bool { crate::hidden::spawn(\"x\") }\n";
+        let v = scan_fixture_files("r1004xfile", src, &[mac]);
+        for f in ["hidden::bare", "other::call_made", "via_crate", "hidden::spawn"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        // The declined shape: `#[cfg]` twins with different bodies still hedge, on the caller.
+        let twin = ("mac.rs", "#[cfg(unix)] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n\
+                     #[cfg(not(unix))] macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::fs::write(p, \"x\").is_ok() } }; }\n");
+        let src2 = "#[macro_use] mod mac;\nmod hidden { m!(); }\nuse crate::hidden::spawn;\n\
+                    pub fn go(p: &str) -> bool { spawn(p) }\n";
+        let v = scan_fixture_files("r1004xtwin", src2, &[twin]);
+        assert_eq!(fixture_effects(&v, "go"), vec!["Unknown".to_string()], "cfg twins are not expanded:\n{v:#}");
+        // …nor a CONFIGURATION macro (tokio's `cfg_*!`), whose arms are split across DIFFERENT macros: the
+        // splice keeps only `fn`s, so expanding `cfg_off! { fn leaf() {} }` while its twin `cfg_on! { use
+        // …::leaf; }` stays opaque resolved `t::leaf()` to the stub alone — one arm where the engine answers
+        // the union. Measured on tokio's `trace::trace_leaf`: `Log` lost on 86 rows in the first cut's A/B.
+        let cfgm = ("mac.rs", "macro_rules! cfg_on { ($($i:item)*) => { $( #[cfg(feature = \"on\")] $i )* } }\n\
+                    macro_rules! cfg_off { ($($i:item)*) => { $( #[cfg(not(feature = \"on\"))] $i )* } }\n");
+        let src3 = "#[macro_use] mod mac;\n\
+                    pub mod real { pub fn leaf() { let _ = std::fs::write(\"/tmp/r1004c\", \"x\"); } }\n\
+                    pub mod t { cfg_on! { pub use crate::real::leaf; } cfg_off! { pub fn leaf() {} } }\n\
+                    pub fn caller() { t::leaf() }\n";
+        let v = scan_fixture_files("r1004xcfg", src3, &[cfgm]);
+        assert!(fixture_effects(&v, "caller") != Vec::<String>::new(),
+                "a configuration macro's one arm must not be resolved as the whole answer:\n{v:#}");
+
+        // WARM: the definition changes in mac.rs; lib.rs's bytes do not. The change is in the generated fn's
+        // RETURN TYPE, a Pass A fact cached with lib.rs: a body-only change is re-derived anyway (every
+        // macro body is in the decl index's `local_macros`, so Pass B re-runs), a declaration is not.
+        // Measured: without the digest in lib.rs's key, the warm run reads `h::bare` ABSENT.
+        // `incremental_scan` sets and clears the process-wide fault-injection variable: serialise with every
+        // other test that does (`abort_injection_lock`), or this one clears another's injected fault mid-run.
+        let _lock = abort_injection_lock();
+        let d = std::env::temp_dir().join(format!("candor-r1004warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r1004warm\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "#[macro_use] mod mac;\n\
+                       pub struct G; impl G { pub fn go(&self) {} }\n\
+                       pub struct H; impl H { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1004w\", \"x\"); } }\n\
+                       pub mod h { m!(); pub fn bare() { let x = mk(); x.go() } }\n").unwrap();
+        std::fs::write(d.join("src/mac.rs"), "macro_rules! m { () => { pub fn mk() -> crate::G { crate::G } }; }\n").unwrap();
+        let policy = d.join("policy");
+        std::fs::write(&policy, "deny Fs h::bare\n").unwrap();
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy.to_string_lossy(), None);
+        assert_eq!(rc1, 0, "cold: `mk()` is a G, whose go is pure:\n{v1:#}");
+        std::fs::write(d.join("src/mac.rs"), "macro_rules! m { () => { pub fn mk() -> crate::H { crate::H } }; }\n").unwrap();
+        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy.to_string_lossy(), None);
+        assert_eq!(rc2, 1, "warm: lib.rs's bytes did not change, its expansion did — a cached entry must not \
+                            replay the old declaration:\n{v2:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// SOUNDNESS R1034 — an impl for a NON-PATH self type (`&[u8]`, `&str`) had no type key, so its methods
+    /// were filed as the FREE fn `encode::encode` and merged with wasm-bindgen-backend's `pub fn encode`
+    /// (Env/Fs): every `Encode::encode` dispatch charged Env/Fs, while the `&str` impl that really writes a
+    /// file was reachable by no call. EXECUTED (scratchpad `rustagent-v042/fxkey`): `via_str` wrote the
+    /// marker (ABSENT before), the rest wrote nothing. The second half is the fabrication control, written
+    /// FIRST: the free fn keeps its own Env/Fs, and no dispatcher inherits the free fn's Env.
+    #[test]
+    fn r1034_an_impl_for_a_reference_type_has_its_own_key() {
+        let src = "\
+pub mod encode {\n\
+    pub fn encode(p: &str) -> usize { let _ = std::env::var(\"X\"); let _ = std::fs::read(p); 1 }\n\
+    pub struct Encoder;\n\
+    pub trait Encode { fn encode(&self, dst: &mut Encoder); }\n\
+    impl Encode for u32 { fn encode(&self, _dst: &mut Encoder) {} }\n\
+    impl<'a> Encode for &'a [u8] { fn encode(&self, _dst: &mut Encoder) {} }\n\
+    impl<'a> Encode for &'a str { fn encode(&self, _dst: &mut Encoder) { let _ = std::fs::write(\"/tmp/fxkey\", \"x\"); } }\n\
+    impl<T: Encode> Encode for Option<T> {\n\
+        fn encode(&self, dst: &mut Encoder) { if let Some(t) = self { t.encode(dst) } }\n\
+    }\n\
+    pub fn call_free() -> usize { encode(\"/tmp/none\") }\n\
+    pub fn via_str(s: &str) { let mut e = Encoder; s.encode(&mut e) }\n\
+    pub fn via_bytes(b: &[u8]) { let mut e = Encoder; b.encode(&mut e) }\n\
+    pub fn via_gen<T: Encode>(t: &T) { let mut e = Encoder; t.encode(&mut e) }\n\
+    pub fn via_gen_bytes() { via_gen(&(&b\"ab\"[..])) }\n\
+}\n\
+";
+        let v = scan_fixture("r1034key", src);
+        assert_eq!(fixture_effects(&v, "encode::encode"), vec!["Env".to_string(), "Fs".to_string()],
+                   "the free fn keeps its own effects:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "encode::via_str"), vec!["Fs".to_string()], "the &str impl is reached:\n{v:#}");
+        assert!(fixture_effects(&v, "encode::via_bytes").is_empty(), "the &[u8] impl is pure:\n{v:#}");
+        for f in ["encode::via_gen", "encode::Option::encode"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "`{f}` dispatches over the implementors (the &str one writes), never the free fn's Env:\n{v:#}");
+        }
+        let rows = v["functions"].as_array().unwrap().iter().filter(|f| f["fn"] == "encode::encode").count();
+        assert_eq!(rows, 1, "one free fn, one row — the impl bodies no longer merge into it:\n{v:#}");
+        // jni's shape: an impl over the impl's OWN parameters (`(C, M)`) with an effect of its own reaches the
+        // CHA through the module-level qual it shares with the `&str` impl. Keying every non-path impl (the
+        // first cut) dropped it — 34 jni rows lost `Log` in the A/B — so only an impl whose qual a FREE fn
+        // also claims is re-keyed, and this module declares none.
+        let src2 = "\
+pub trait Desc { fn lookup(self) -> u8; }\n\
+impl<C, M> Desc for (C, M) { fn lookup(self) -> u8 { let _ = std::fs::write(\"/tmp/r1034t\", \"x\"); 1 } }\n\
+impl<'a> Desc for &'a str { fn lookup(self) -> u8 { 0 } }\n\
+pub fn via<T: Desc>(t: T) -> u8 { t.lookup() }\n";
+        let v = scan_fixture("r1034tuple", src2);
+        assert!(fixture_effects(&v, "via").contains(&"Fs".to_string()), "the tuple impl stays a candidate:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1038 — `Box::<u32>::deserialize(d)` names no std fn: the body that runs is the DEPENDENCY's
+    /// `impl Deserialize for Box<T>`, which drives the caller's `d`. The written path read as a pure std
+    /// call, the edge vanished, and portable-atomic-util published `serde#de::Deserialize::deserialize` as a
+    /// pure-only union (its 0.40.0 `Unknown` there was a `macro:` hedge with the wrong reason, which the
+    /// same-file macro expansion correctly removed). EXECUTED (scratchpad `rustagent-v042/fxserde`): the
+    /// local deserializer's write happens through `read_wrap`/`read_opt`. Chaining serde's report answers the
+    /// call pure, so the disclosure must be the callback, not the edge alone.
+    #[test]
+    fn r1038_a_dependency_trait_member_on_a_std_type_is_disclosed() {
+        let src = "\
+use serde::de::{Deserialize, Deserializer, Visitor};\n\
+pub struct Wrap(pub u32);\n\
+impl<'de> Deserialize<'de> for Wrap {\n\
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n\
+        Box::<u32>::deserialize(d).map(|b| Wrap(*b))\n\
+    }\n\
+}\n\
+pub struct Opt(pub Option<u32>);\n\
+impl<'de> Deserialize<'de> for Opt {\n\
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n\
+        Option::<u32>::deserialize(d).map(Opt)\n\
+    }\n\
+}\n\
+pub struct EffDe;\n\
+impl<'de> Deserializer<'de> for EffDe {\n\
+    type Error = serde::de::value::Error;\n\
+    fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {\n\
+        let _ = std::fs::write(\"/tmp/fxserde\", \"x\");\n\
+        v.visit_u32(7)\n\
+    }\n\
+    serde::forward_to_deserialize_any! { bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier ignored_any }\n\
+}\n\
+pub fn read_wrap() -> u32 { Wrap::deserialize(EffDe).map(|w| w.0).unwrap_or(0) }\n\
+pub fn read_opt() -> u32 { Opt::deserialize(EffDe).ok().and_then(|o| o.0).unwrap_or(0) }\n\
+";
+        let v = scan_fixture_raw("r1038serde", src, "serde = \"1\"", "");
+        for f in ["Wrap::deserialize", "Opt::deserialize", "read_wrap", "read_opt", "de::Deserialize::deserialize"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()),
+                    "`{f}` hands the caller's deserializer to serde — never pure:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1036 — the POINTEE of a deref wrapper. `**self` / `self.as_ref()` in an impl for `Box<T>` /
+    /// `Arc<T>` (the forwarding impl every trait-object user writes) formed no edge, and neither did a call on
+    /// a fn's returned lock GUARD (`get().write()` over `-> MutexGuard<'static, Runtime>`, snapbox's
+    /// `Data::write_to`). EXECUTED (scratchpad `rustagent-v042/fxbox`, `fxguard`): every arm wrote the marker;
+    /// `c_count` (the guard's pure method) wrote nothing and stays pure.
+    #[test]
+    fn r1036_a_deref_wrappers_pointee_is_the_receiver() {
+        let v = scan_fixture("r1036box", "\
+pub struct L;\n\
+pub trait Doer { fn go(&self); }\n\
+impl Doer for L { fn go(&self) { let _ = std::fs::write(\"/tmp/fxbox_mark\", b\"x\"); } }\n\
+impl<T: Doer + ?Sized> Doer for Box<T> { fn go(&self) { (**self).go() } }\n\
+pub trait Arcer { fn ga(&self); }\n\
+impl<T: Doer + ?Sized> Arcer for std::sync::Arc<T> { fn ga(&self) { self.as_ref().go() } }\n\
+pub trait Bx { fn bx(&self); }\n\
+impl Bx for Box<L> { fn bx(&self) { self.go() } }\n\
+pub trait Vd { fn vd(&self); }\n\
+impl<T: Doer> Vd for Vec<T> { fn vd(&self) { for x in self { x.go() } } }\n\
+pub fn use_box(b: Box<dyn Doer>) { b.go() }\n\
+pub fn use_vd(v: Vec<L>) { v.vd() }\n\
+");
+        for f in ["Box::go", "Box::bx", "Arc::ga"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches L::go:\n{v:#}");
+        }
+        let v = scan_fixture("r1036guard", "\
+pub struct Runtime;\n\
+impl Runtime { pub fn write(&mut self) { let _ = std::fs::write(\"/tmp/fxguard\", \"x\"); } pub fn count(&mut self) -> usize { 0 } }\n\
+static RT: std::sync::Mutex<Runtime> = std::sync::Mutex::new(Runtime);\n\
+pub fn get() -> std::sync::MutexGuard<'static, Runtime> { RT.lock().unwrap() }\n\
+pub fn write_to() { get().write() }\n\
+pub fn c_count() -> usize { get().count() }\n\
+");
+        assert_eq!(fixture_effects(&v, "write_to"), vec!["Fs".to_string()], "the guard derefs to Runtime:\n{v:#}");
+        assert!(fixture_effects(&v, "c_count").is_empty(), "the guard's pure method stays pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1037 — a member called on an ASSOCIATED-TYPE PROJECTION (`S::Tf::conv(x)`, `<S::Tf as
+    /// Conv>::conv(x)` under `S: Std`, `type Tf: Conv`) formed no edge; palette's `Rgb::into_linear` calls
+    /// `S::TransferFn::into_linear(..)` this way. EXECUTED (scratchpad `rustagent-v042/fxproj`): both arms wrote.
+    /// It dispatches over the associated type's DECLARED bound only: `Loud`'s same-named `Other::conv` (which
+    /// writes) is never a candidate.
+    #[test]
+    fn r1037_a_projection_call_dispatches_over_the_associated_types_bound() {
+        let v = scan_fixture("r1037proj", "\
+pub trait Conv { fn conv(x: u8) -> u8; }\n\
+pub struct Eff;\n\
+impl Conv for Eff { fn conv(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/fxproj\", \"x\"); x } }\n\
+pub trait Std { type Tf: Conv; }\n\
+pub struct S1;\n\
+impl Std for S1 { type Tf = Eff; }\n\
+pub fn via_proj<S: Std>(x: u8) -> u8 { S::Tf::conv(x) }\n\
+pub fn via_qself<S: Std>(x: u8) -> u8 { <S::Tf as Conv>::conv(x) }\n\
+pub fn call_proj() -> u8 { via_proj::<S1>(1) }\n\
+");
+        for f in ["via_proj", "via_qself"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Eff::conv:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1049 (R1034's masked twin) — `FromV::from_v(v)`, an ASSOCIATED fn called through the trait,
+    /// was resolved to the impl of its first ARGUMENT's type (`v: &Value` → `Value::from_v`, pure), while the
+    /// implementor is chosen by the return type `T`. redis's `from_redis_value::<T>` read pure that way once
+    /// R1034 stopped merging it with the `[T; N]` impl's methods. EXECUTED (scratchpad `rustagent-v042/
+    /// fxassoc`): `from_v::<Loud>` writes the marker; ABSENT on v0.40.0.
+    #[test]
+    fn an_associated_fn_through_its_trait_dispatches_on_the_trait_not_the_argument() {
+        let v = scan_fixture("r1034assoc", "\
+pub struct Value;\n\
+pub trait FromV: Sized { fn from_v(v: &Value) -> Option<Self>; }\n\
+impl FromV for Value { fn from_v(_v: &Value) -> Option<Self> { Some(Value) } }\n\
+pub struct Loud;\n\
+impl FromV for Loud { fn from_v(_v: &Value) -> Option<Self> { let _ = std::fs::write(\"/tmp/fxassoc\", \"x\"); Some(Loud) } }\n\
+pub fn from_v<T: FromV>(v: &Value) -> Option<T> { FromV::from_v(v) }\n\
+pub fn get_loud() -> bool { from_v::<Loud>(&Value).is_some() }\n\
+");
+        assert_eq!(fixture_effects(&v, "from_v"), vec!["Fs".to_string()], "dispatches over FromV's impls:\n{v:#}");
+    }
+
+    /// R1034's residue (diesel `pg::types::ranges::to_sql`) — `Bound::Included(ref v) | Bound::Excluded(ref v)`
+    /// over a `Bound<&T>`, `T: ToSql`: the payload was untyped and `v.to_sql()` formed no edge. Its 0.40.0
+    /// `Unknown` came from the tuple impl's body merged into the free fn's unit (the R1034 collision);
+    /// splitting them left the free fn silent. EXECUTED (scratchpad `rustagent-v042/fxbound`): the write happens.
+    #[test]
+    fn a_std_bound_payload_dispatches_on_its_type_parameter() {
+        let v = scan_fixture("r1034bound", "\
+use std::ops::Bound;\n\
+pub trait ToSql { fn to_sql(&self) -> u8; }\n\
+pub struct Loud;\n\
+impl ToSql for Loud { fn to_sql(&self) -> u8 { let _ = std::fs::write(\"/tmp/fxbound\", \"x\"); 1 } }\n\
+fn to_sql<T: ToSql>(start: Bound<&T>) -> u8 {\n\
+    match start { Bound::Included(ref value) | Bound::Excluded(ref value) => value.to_sql(), Bound::Unbounded => 0 }\n\
+}\n\
+pub fn go() -> u8 { to_sql(Bound::Included(&Loud)) }\n\
+");
+        assert_eq!(fixture_effects(&v, "to_sql"), vec!["Fs".to_string()], "`value.to_sql()` dispatches:\n{v:#}");
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,

@@ -235,14 +235,14 @@ refuse_sink_over_input() {
 arm_gate_sink() {
   refusal_doc "the gate did not complete — this document was written when the run STARTED and was never replaced by a verdict" > "$1" \
     || { echo "candor: cannot write --gate-json $1 — failing closed (exit 2)." >&2; exit 2; }
-  rm -f "$1.parts"
+  rm -f "$1.parts" "$1.zm"
 }
 
 # Every exit-2 after the sink block: the FILE sink already holds the armed refusal document; the STREAM
 # form cannot be armed, so the document is printed here as stdout's only content. $1 = reason.
 gate_exit2() {
   [ "${gjson:-}" = "-" ] && refusal_doc "$1"
-  [ -n "${gate_target:-}" ] && rm -f "$gate_target.parts" 2>/dev/null
+  [ -n "${gate_target:-}" ] && rm -f "$gate_target.parts" "$gate_target.zm" 2>/dev/null
   exit 2
 }
 
@@ -589,7 +589,7 @@ case "$cmd" in
         [ -n "$CFG_FILE" ] && refuse_sink_over_input "$gjson" "$CFG_FILE" "the .candor/config"
       fi
       gtmp="$(mktemp -d)"
-      if [ "$gjson" = "-" ]; then gate_target="$gtmp/gate.json"; rm -f "$gate_target.parts"
+      if [ "$gjson" = "-" ]; then gate_target="$gtmp/gate.json"; rm -f "$gate_target.parts" "$gate_target.zm"
       else gate_target="$gjson"; arm_gate_sink "$gate_target"; fi
     fi
     if [ -n "$usage_err" ]; then
@@ -662,7 +662,7 @@ case "$cmd" in
         # refusal, not a truncated verdict a naive reader could half-parse.
         query gate-verdict "$gate_target.parts" "$gate_target" \
           || { arm_gate_sink "$gate_target"; echo "candor: --gate-json verdict could not be written to $gate_target — failing closed (the sink holds the refusal document)." >&2; exit 2; }
-        rm -f "$gate_target.parts"
+        rm -f "$gate_target.parts" "$gate_target.zm"
       fi
     fi
     if [ -s "$vio" ]; then
@@ -1018,7 +1018,7 @@ case "$cmd" in
     vio="$tmp/violations"; : > "$vio"
     # The FILE sink was exemption-checked and ARMED right after the parse (top of this verb); only the
     # stream form's engine-side temp target is assigned here, once $tmp exists.
-    if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; rm -f "$gate_target.parts"; fi
+    if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; rm -f "$gate_target.parts" "$gate_target.zm"; fi
     rc=0
     out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
@@ -1047,7 +1047,7 @@ case "$cmd" in
         # refusal, not a truncated verdict a naive reader could half-parse.
         query gate-verdict "$gate_target.parts" "$gate_target" --policy "$pol" \
           || { arm_gate_sink "$gate_target"; echo "candor: --gate-json verdict could not be written to $gate_target — failing closed (the sink holds the refusal document)." >&2; exit 2; }
-        rm -f "$gate_target.parts"
+        rm -f "$gate_target.parts" "$gate_target.zm"
       fi
     fi
     if [ -s "$vio" ]; then

@@ -116,13 +116,14 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
                     continue; // a `#[cfg(test)] impl` block — test-only
                 }
-                let tyname = impl_type_name(&im.self_ty);
+                // SOUNDNESS R1034 — a non-path self type gets its own key (see `impl_unit_type_name`).
+                let tyname = crate::lang::impl_key_avoiding_free_fns(im, items);
                 // SOUNDNESS R160 — `Self` IS the enclosing impl's type, and nothing told the resolver so.
                 // Every path in a body reaches `lang::expand` through this one `uses` map, so binding
                 // `Self` HERE makes `Self::assoc()`, `Self::CONST`, `Self::Variant(..)`, `Self { .. }` and
@@ -174,7 +175,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -195,7 +196,7 @@ pub(crate) fn scan_items(
                     let n = f.sig.ident.to_string();
                     let loc = next_loc(locs, loc_idx);
                     let block = syn::Block { brace_token: Default::default(), stmts: Vec::new() };
-                    let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                    let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                     info.unresolved = true;
                     info.unresolved_why = vec!["native:extern fn".to_string()];
                     info.extern_decl = true;
@@ -278,6 +279,7 @@ pub(crate) fn scan_items(
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
                             Some(&tname),
                             None, // R549 impl_generics — a trait-DEFAULT body has no impl block
+                            None, // R1024 impl_self — nor a written self type
                             include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
@@ -299,7 +301,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -1927,14 +1929,26 @@ pub(crate) fn collect_reexports(
             // exactly as `use x::Foo;` already does today. Converging on the `use` route means inheriting
             // its residual, deliberately, rather than opening a second one.
             //
-            // Generic aliases (`type R<T> = Result<T, E>`) are skipped: their target carries parameters
-            // this map has no way to substitute.
-            syn::Item::Type(t) if t.generics.params.is_empty() && !is_non_nominal_type(&t.ty) => {
+            // SOUNDNESS R1025 — GENERIC aliases too (`type Closure<T> = ScopedClosure<'static, T>`). They were
+            // skipped because "their target carries parameters this map has no way to substitute" — but this
+            // map answers a PATH question, and `Closure::<T>::wrap(..)` names `ScopedClosure::wrap` whatever
+            // `T` is: the generic arguments are on the type, never in the path the call resolves through.
+            // Skipping them left every call through one with no edge (wasm-bindgen's `ScopedClosure::once` →
+            // `Closure::wrap_maybe_aborting::<true>`, executed: ABSENT). What DOES depend on the substitution
+            // is refused: a target that IS one of the alias's own parameters (`type P<T> = T`), and the R978
+            // pointee below when it is one (`type A<T> = Arc<T>`).
+            syn::Item::Type(t) if !is_non_nominal_type(&t.ty) => {
                 if !include_tests && is_cfg_test(&t.attrs) {
                     continue;
                 }
+                let own_param = |p: &syn::Path| {
+                    p.get_ident().is_some_and(|i| t.generics.type_params().any(|tp| tp.ident == *i))
+                };
                 if let syn::Type::Path(p) = &*t.ty {
-                    if p.qself.is_none() {
+                    if p.qself.is_none() && !own_param(&p.path) {
+                        if !t.generics.params.is_empty() && std::env::var_os("CANDOR_R1025_INSTR").is_some() {
+                            eprintln!("R1025ALIAS\t{}", t.ident); // §E1 REACH COUNTER, CHANGED branch only
+                        }
                         let mut written = path_to_string(&p.path);
                         // SOUNDNESS R181 (the double alias) — `type DoubleAlias = ModAlias;` inside
                         // `mod am` names `am::ModAlias`, and a bare one-segment target was recorded bare,
@@ -1959,7 +1973,9 @@ pub(crate) fn collect_reexports(
                         // `lang::DEREF_ALIAS_SUF`), so `type_path` can peel it the way it peels the written
                         // wrapper, while a PATH call (`HouseKeeperArc::new(..)`, which is `Arc::new`) keeps
                         // resolving to the wrapper exactly as before.
-                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path) {
+                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path).filter(|i| {
+                            !matches!(i, syn::Type::Path(ip) if ip.qself.is_none() && own_param(&ip.path))
+                        }) {
                             if let Some(pointee) = crate::lang::type_path(inner, uses) {
                                 record_alias(
                                     aliases,
@@ -2442,6 +2458,9 @@ pub(crate) fn fninfo(
     // to `bound_trait_leaves`. `sig` alone cannot see it, which is why the trait-name index missed the
     // commonest way a bound is written. `None` for a free fn or a trait-default body.
     impl_generics: Option<&syn::Generics>,
+    // SOUNDNESS R1024 — the enclosing `impl`'s WRITTEN self type, so `self` is seeded by the same
+    // authority a parameter of that type is (`seed_elem_of`). `None` for a free fn or a trait default.
+    impl_self: Option<&syn::Type>,
     // SOUNDNESS R373 — threaded so the two BODY-LOCAL `use` sites can ask `use_item_applies` the
     // question every module-level site already asks. `collect_root_reexports` was once "the one site
     // of the five that could not even express the question"; these were the sixth and seventh, and
@@ -2593,7 +2612,7 @@ pub(crate) fn fninfo(
     // Dispatch-typing WINS where both could apply: `x: X` under `X: Store` also looks like a
     // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
     // the CHA route with a meaningless receiver type.
-    let trait_vars = seed_trait_vars(sig);
+    let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
     // SOUNDNESS R369 — A `#[cfg]`-DUPLICATED `use` ON THE TYPE ROUTE IS THE UNION OF ITS ARMS. Two
@@ -2641,7 +2660,82 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
+    #[allow(unused_mut)]
+    let (mut elem_of, tuple_of, mut elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
+    // SOUNDNESS R1024 — `self` IS A PARAMETER OF THE IMPL'S SELF TYPE, and it was the one parameter not
+    // seeded by `seed_elem_of`. `vars["self"]` is the bare leaf the impl's units are KEYED under
+    // (`Option` for `impl Run for Option<L>`), which says nothing about what a binder over `self` yields:
+    // `match self { Some(x) => x.go() }`, `if let Ok(x) = self`, `for x in self`, `self[0]` all bound an
+    // untyped name and the edge to `L::go` never formed — executed, the impl's unit had no callees and
+    // the trait's union row was published `[]`. A parameter `o: &Option<L>` written in the same body
+    // already resolved, through `elem_type`; `self` now asks that same function of the type the impl
+    // WROTE. `vars["self"]` is unchanged, so a method call ON `self` still keys the impl's own units.
+    // The element TRAIT leaves likewise, under the impl's bounds (`impl<T: Doer> Doer for Vec<T>`).
+    if let Some(st) = impl_self {
+        if !elem_of.contains_key("self") {
+            if let Some(e) = elem_type(st, sig_uses) {
+                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                    eprintln!("R1024SELF\t{qual}\t{e}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                }
+                elem_of.insert("self".to_string(), e);
+            }
+        }
+        if !elem_trait_of.contains_key("self") {
+            let mut gb = generic_bounds_of(sig);
+            if let Some(g) = impl_generics {
+                for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                    let e = gb.entry(k).or_default();
+                    for l in v {
+                        if !e.contains(&l) {
+                            e.push(l);
+                        }
+                    }
+                }
+            }
+            let leaves = elem_trait_leaves(st, &gb, elems.callable_aliases);
+            if !leaves.is_empty() {
+                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                    eprintln!("R1024SELF\t{qual}\t{leaves:?}");
+                }
+                elem_trait_of.insert("self".to_string(), leaves);
+            }
+        }
+    }
+    // SOUNDNESS R1036 — `self` in an impl for a DEREF wrapper (`Box<X>`/`Arc<X>`/`Rc<X>`/`Pin<X>`): what
+    // `**self` / `self.as_ref()` / `self.deref()` evaluate to is the POINTEE, and `vars["self"]` (the
+    // wrapper leaf the impl's units are keyed under) cannot say so. `impl<T: Doer + ?Sized> Doer for Box<T> {
+    // fn go(&self) { (**self).go() } }` — the forwarding impl every trait-object user writes — formed no edge,
+    // and neither did `impl<T: Doer> Arcer for Arc<T> { self.as_ref().go() }` (executed, fxbox: both write).
+    // A parameter `b: Box<L>` is typed `L` by `type_path`; the pointee is recorded under a name no
+    // identifier can spell (`SELF_DEREF_VAR`), which the receiver resolvers read for exactly those forms.
+    if let Some(syn::Type::Path(tp)) = impl_self {
+        if let Some(seg) = tp.path.segments.last() {
+            if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
+                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    if let Some(inner) = ab.args.iter().find_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    }) {
+                        let mut gb = generic_bounds_of(sig);
+                        if let Some(g) = impl_generics {
+                            for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                                gb.entry(k).or_default().extend(v);
+                            }
+                        }
+                        let leaves = crate::lang::trait_leaves(inner, &gb);
+                        if !leaves.is_empty() {
+                            trait_vars.insert(crate::collector::SELF_DEREF_VAR.to_string(), leaves);
+                        } else if let Some(t) = type_path(inner, sig_uses) {
+                            vars.insert(crate::collector::SELF_DEREF_VAR.to_string(), t);
+                        }
+                        if std::env::var_os("CANDOR_R1036_INSTR").is_some() {
+                            eprintln!("R1036SELFDEREF\t{qual}");
+                        }
+                    }
+                }
+            }
+        }
+    }
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
@@ -4135,6 +4229,16 @@ pub(crate) fn collect_decls(
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
                 for ti in &t.items {
+                    // R1037 — an associated type's bounds (`type Tf: Conv;`).
+                    if let syn::TraitItem::Type(at) = ti {
+                        let b = bound_leaves(&at.bounds);
+                        let slot = e.assoc_types.entry(at.ident.to_string()).or_default();
+                        for l in b {
+                            if !slot.contains(&l) {
+                                slot.push(l);
+                            }
+                        }
+                    }
                     if let syn::TraitItem::Fn(m) = ti {
                         // `methods` holds only `&self`/`self` DISPATCH methods (its two uses — CHA on
                         // `t.method()` and the R36 trait-default fallback — are both receiver calls). An
@@ -4184,7 +4288,7 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Impl(im) => {
-                let self_ty = impl_type_name(&im.self_ty);
+                let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items); // R1034
                 // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only
                 // when it is NOT one of them. A blanket `impl<T> Trait for T` names every type at once,
                 // so an impl-qualified return key written from it would claim `T::get -> R` for whatever

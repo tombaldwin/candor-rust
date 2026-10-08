@@ -413,6 +413,25 @@ gjc_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" policy policy-clean --gate-json verdi
 gjclean=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["ok"], len(d["violations"]))' "$GJ/verdict-clean.json" 2>/dev/null)
 want "a clean policy --gate-json writes { ok: true, [] }" "$gjclean" "True 0"
 if [ "$gjc_rc" -eq 0 ]; then echo "  ok   clean policy --gate-json exits 0"; pass=$((pass+1)); else echo "  FAIL clean policy --gate-json exited $gjc_rc (want 0)"; fail=$((fail+1)); fi
+# SOUNDNESS R1033 — ⟨0.27⟩'s `zeroMatch` rides the DEEP verdict too (it was stderr-only), with the same list
+# the scan route's verdict carries, and is omitted when every rule bound something (the clean verdict above).
+# SOUNDNESS R1028 — and the routes bind the SAME rules: a crate-QUALIFIED scope (`gj::domain_logic`) binds
+# nothing on candor-scan (`fn` carries no crate name, SPEC §6.2), so it binds nothing on the lint either.
+printf 'deny Net  domian\ndeny Fs  gj::domain_logic\ndeny Net  domain\n' > "$GJ/policy-zm"
+gjz_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" policy policy-zm --gate-json verdict-zm.json >/dev/null 2>&1 ) || gjz_rc=$?
+"$ROOT/target/debug/candor-scan" "$GJ" --policy "$GJ/policy-zm" --gate-json "$GJ/scan-verdict-zm.json" >/dev/null 2>&1 || true
+gjzm=$(python3 - "$GJ/verdict-zm.json" "$GJ/scan-verdict-zm.json" "$GJ/verdict-clean.json" <<'PY'
+import json, sys
+deep, scan, clean = (json.load(open(p)) for p in sys.argv[1:4])
+print("deep:", deep.get("zeroMatch"), deep["ok"])
+print("clean-has-key:", "zeroMatch" in clean)
+print("ZMPARITY" if deep.get("zeroMatch") == scan.get("zeroMatch") and deep["ok"] == scan["ok"] else f"ZMMISMATCH {deep.get('zeroMatch')} {deep['ok']} vs {scan.get('zeroMatch')} {scan['ok']}")
+PY
+)
+want "R1033 deep verdict carries zeroMatch, verbatim and sorted" "$gjzm" "deep: ['deny Fs  gj::domain_logic', 'deny Net  domian'] True"
+want "R1033 a fully-binding deep verdict carries no zeroMatch key" "$gjzm" "clean-has-key: False"
+want "R1028/R1033 deep and scan routes bind the same rules (zeroMatch + ok agree)" "$gjzm" "ZMPARITY"
+if [ "$gjz_rc" -eq 0 ]; then echo "  ok   R1033 zeroMatch moves no exit code (0)"; pass=$((pass+1)); else echo "  FAIL R1033 policy-zm exited $gjz_rc (want 0: the crate-qualified deny binds nothing on either route)"; fail=$((fail+1)); fi
 # guard --gate-json: a gained effect (AS-EFF-005 — the deep-only rule) rides the same verdict shape.
 ( cd "$GJ"; "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 )
 printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > "$GJ/src/main.rs"
@@ -842,17 +861,26 @@ want "the impostor's own same-named trait dispatch is honestly Unknown, not pure
      "$ci_summary" "via_dyn inferred=['Unknown']"
 rm -rf "$(dirname "$CI")"
 
-# ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
+# ── 9d. Layering with a CRATE-NAME from-scope: a DISCLOSED no-op, as on the scan route (SOUNDNESS R1028) ──
 echo "== layering crate-name from-scope (AS-EFF-009) =="
 LC=$(mktemp -d)/lc; mkdir -p "$LC/src"
 printf '[package]\nname="appcrate"\nversion="0.1.0"\nedition="2021"\n' > "$LC/Cargo.toml"
-# `worker` reaches the `infra` module. The from-scope is the CRATE name `appcrate` — which a crate's own
-# functions DON'T carry in def_path_str, so without the crate-prefix fix this rule would match nothing.
+# `worker` reaches the `infra` module. The from-scope is the CRATE name `appcrate`, which no `fn` carries
+# (SPEC §6.2; ⟨0.23⟩ puts the package in `hash`). `fcee080` crate-prefixed the lint's names so this rule
+# would not be a SILENT no-op; ⟨0.27⟩ made it a DISCLOSED one, which is what candor-scan does with the same
+# policy, and SPEC §3.1 requires the routes to bind the same rules. The module-scoped spelling still fires.
 printf 'mod infra { pub fn save(){ let _=std::fs::write("/tmp/x",""); } }\nfn worker(){ infra::save(); }\nfn helper()->u32{ 1 }\nfn main(){ worker(); let _=helper(); }\n' > "$LC/src/main.rs"
 echo "forbid appcrate -> infra" > "$LC/policy"
 out=$(dl "$LC" env CANDOR_POLICY="$LC/policy")
-want   "crate-name from-scope matches the crate's own fns (worker flagged)" "$out" '[AS-EFF-009] `worker`'
-absent "a fn that doesn't reach infra is not flagged (helper)"              "$out" '[AS-EFF-009] `helper`'
+# Its `to` endpoint (`infra`) binds, so ⟨0.27⟩ counts the rule as bound on BOTH routes (R952: a `forbid`
+# counts a match on either endpoint) — the from-scope simply names no function, here and on candor-scan.
+absent "R1028 a crate-name from-scope binds no function on the lint (worker not flagged)" "$out" '[AS-EFF-009] `worker`'
+lc_rc=0; "$ROOT/target/debug/candor-scan" "$LC" --policy "$LC/policy" >/dev/null 2>&1 || lc_rc=$?
+if [ "$lc_rc" -eq 0 ]; then echo "  ok   R1028 …and candor-scan agrees (exit 0 on the same policy)"; pass=$((pass+1)); else echo "  FAIL R1028 candor-scan exited $lc_rc on the crate-name from-scope (the routes disagree)"; fail=$((fail+1)); fi
+echo "forbid worker -> infra" > "$LC/policy-fn"
+out=$(dl "$LC" env CANDOR_POLICY="$LC/policy-fn")
+want   "a crate-relative from-scope still fires (worker flagged)"     "$out" '[AS-EFF-009] `worker`'
+absent "a fn that doesn't reach infra is not flagged (helper)"        "$out" '[AS-EFF-009] `helper`'
 rm -rf "$(dirname "$LC")"
 
 # ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──

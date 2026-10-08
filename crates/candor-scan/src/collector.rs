@@ -99,6 +99,32 @@ pub(crate) enum Bound {
     Traits(Vec<String>),
     /// The name is bound but its type is undetermined — clear, install nothing.
     Unknown,
+    /// SOUNDNESS R1023 — the name is bound to a value that is still a std layer around an element: its
+    /// own std type (`vars`, when the layer names one) and its element entry (`elem_of`). What a binder
+    /// peels out of a LAYERED entry when more than the value is left (`if let Some(v) = &self.ov` over an
+    /// `Option<Vec<G>>` binds a `Vec` whose element is `G`).
+    Layered { ty: Option<String>, elem: String },
+}
+
+/// SOUNDNESS R1036 — the binding name under which `fninfo` records what `*self` / `self.as_ref()` evaluate
+/// to in an impl for a deref wrapper (`Box<X>`, `Arc<X>`, …). No identifier can spell it.
+pub(crate) const SELF_DEREF_VAR: &str = "\u{2}selfderef";
+
+/// SOUNDNESS R1036 — `**self`, `*self`, `self.as_ref()`, `self.deref()` (and their `&`/paren wrappings):
+/// the forms that name the POINTEE of an impl's deref-wrapper `self`.
+fn is_self_deref(expr: &syn::Expr) -> bool {
+    let is_self = |e: &syn::Expr| matches!(peel_recv(e), syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self"));
+    match expr {
+        syn::Expr::Paren(p) => is_self_deref(&p.expr),
+        syn::Expr::Group(g) => is_self_deref(&g.expr),
+        syn::Expr::Reference(r) => is_self_deref(&r.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => is_self(&u.expr) || is_self_deref(&u.expr),
+        syn::Expr::MethodCall(m) if m.args.is_empty() => {
+            matches!(m.method.to_string().as_str(), "as_ref" | "as_mut" | "deref" | "deref_mut" | "get_ref" | "get_mut")
+                && is_self(&m.receiver)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) struct CallCollector<'a> {
@@ -1175,7 +1201,7 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
             syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => self.type_of(&pin_macro_arg(&mm.mac)?), // R980
             syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
-            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             syn::Expr::MethodCall(m) => self.type_of_method(m),
             // STRICT, unlike the receiver walk's merge: EVERY value branch must type, and to one type. A
             // branch the typer cannot answer (`None`, a diverging arm aside) makes the whole unknown —
@@ -1435,6 +1461,14 @@ impl<'a> CallCollector<'a> {
     /// method-chain arm hands each level its OWN step's leaf, which is the method that level's answer
     /// will be joined to.
     fn resolve_recv_type_for(&self, expr: &syn::Expr, outer: &str) -> Option<String> {
+        if is_self_deref(expr) {
+            if let Some(t) = self.vars.get(SELF_DEREF_VAR) {
+                return Some(t.clone());
+            }
+            if self.trait_vars.contains_key(SELF_DEREF_VAR) {
+                return None; // the pointee dispatches — `resolve_recv_traits` answers
+            }
+        }
         match expr {
             syn::Expr::Reference(r) => self.resolve_recv_type_for(&r.expr, outer),
             syn::Expr::Paren(p) => self.resolve_recv_type_for(&p.expr, outer),
@@ -1800,7 +1834,7 @@ impl<'a> CallCollector<'a> {
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
-            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             // SOUNDNESS R535 — A CONTROL-FLOW MERGE AT THE RECEIVER. `(if c { a } else { b }).go()`,
             // `(match c { .. }).go()`, `{ a }.go()` and `unsafe { a }.go()` matched no arm here and
             // fell to `_ => None`, so the caller read ABSENT — a §4 purity claim decided by how the
@@ -1917,13 +1951,11 @@ impl<'a> CallCollector<'a> {
     ///     typed the payload as `Option`. A name cannot say whether its recorded type was unwrapped, so
     ///     it is not asked; that spelling stays as it was (see the test's residual note).
     fn resolve_payload_type(&self, pat: &syn::Pat, expr: &syn::Expr) -> Option<String> {
-        // R893 — HELD: `if let Ok(v) = self.m.lock()` over a `Mutex<Vec<G>>` binds the guard. A marked
-        // answer also declines the constructor fallback below (it would type the scrutinee itself).
-        let raw = self.resolve_elem_type_raw(expr);
-        if raw.as_deref().is_some_and(crate::lang::is_wrapped) {
-            return None;
-        }
-        if let Some(e) = raw {
+        // SOUNDNESS R1023 — a LAYERED answer is returned as is, for the binder to peel ONE layer of its own
+        // kind (`payload_bound`): `if let Ok(v) = self.m.lock()` over a `Mutex<Vec<G>>` binds the guard of
+        // the Vec, `if let Some(v) = &self.ov` over an `Option<Vec<G>>` binds the Vec. It also declines the
+        // constructor fallback below (that would type the scrutinee itself).
+        if let Some(e) = self.resolve_elem_type_raw(expr) {
             return Some(e);
         }
         if !crate::lang::std_some_ok_pat(pat) {
@@ -1955,76 +1987,130 @@ impl<'a> CallCollector<'a> {
         t
     }
 
-    /// SOUNDNESS R893 — the ELEMENT of a collection-valued expression, for a consumer that binds or types
-    /// the ELEMENT (a for-loop variable, `xs[i]`, `xs.first()`): a wrapper-held container's marked entry
-    /// (`m: Mutex<Vec<G>>`) answers with its element. See `resolve_elem_type_raw` for the mark.
-    fn resolve_elem_type(&self, expr: &syn::Expr) -> Option<String> {
-        let r = self.resolve_elem_type_raw(expr)?;
-        if crate::lang::is_wrapped(&r) && std::env::var_os("CANDOR_R893_INSTR").is_some() {
-            eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
+    /// SOUNDNESS R1023 — the `Bound` a `Some(x)`/`Ok(x)` pattern installs for a payload answer `t` (from
+    /// `resolve_payload_type`): a plain answer is the concrete type, as it always was; a LAYERED one is
+    /// peeled one layer of the PATTERN'S kind (`Some` pops `Option`, `Ok` pops `Result`/a lock result).
+    /// `None` when the pattern is neither, or does not peel the top layer — the caller then falls through
+    /// to its default walk exactly as when there was no answer.
+    fn payload_bound(&self, pat: &syn::Pat, t: String) -> Option<Bound> {
+        if !crate::lang::is_wrapped(&t) {
+            return Some(Bound::Concrete(t));
         }
-        Some(crate::lang::strip_wrapped(&r).to_string())
+        let kind = some_or_ok_kind(pat)?;
+        self.elem_bound(Some(t), kind, "")
     }
 
-    /// SOUNDNESS R893 — the same answer for a consumer that types the HELD value or a PAYLOAD
-    /// (`wrapper_accessor_type`, the `Some`/`Ok` binders, a HOF closure's parameter): a marked entry is
-    /// REFUSED there, because what those positions bind is the wrapper-held CONTAINER (the guard, the
-    /// `LockResult`), never its element. Typing it `G` would form `G::len` for `guard.len()`.
+    /// The ELEMENT of a collection-valued expression, for a consumer that types the ELEMENT VALUE (`xs[i]`,
+    /// a tuple slot). SOUNDNESS R1023 — a LAYERED entry is peeled ONE layer by `binder`: when that leaves
+    /// the value itself it answers `G`; when it leaves another layer it answers that layer's std type, the
+    /// same string the one-level route answered before layering existed (`grid[i]` over a
+    /// `Vec<Vec<G>>` is a `Vec`).
+    fn resolve_elem_type_as(&self, expr: &syn::Expr, binder: crate::lang::LayerBinder) -> Option<String> {
+        let r = self.resolve_elem_type_raw(expr)?;
+        if !crate::lang::is_wrapped(&r) {
+            return Some(r);
+        }
+        match crate::lang::layer_bind(&r, binder, "")? {
+            crate::lang::Layered::Val(g) => Some(g),
+            crate::lang::Layered::Elem { outer, .. } => outer,
+        }
+    }
+    fn resolve_elem_type(&self, expr: &syn::Expr) -> Option<String> {
+        self.resolve_elem_type_as(expr, crate::lang::LayerBinder::For)
+    }
+
+    /// The answer for a consumer that types the HELD value of a wrapper (`wrapper_accessor_type`): a
+    /// LAYERED entry is REFUSED there, because a one-level consumer would read `G` as the held value —
+    /// `self.m.lock().unwrap().len()` over a `Mutex<Vec<G>>` would form `G::len` (R893).
     fn resolve_elem_type_held(&self, expr: &syn::Expr) -> Option<String> {
         self.resolve_elem_type_raw(expr).filter(|t| !crate::lang::is_wrapped(t))
     }
 
-    /// SOUNDNESS R893 — the type of `recv.method()` for an ELEMENT ACCESSOR (`first`, `pop`, `get`): the
-    /// receiver's element, stepping into a wrapper-held container only where the accessor can only be
-    /// the container's (`guard.first()`), and refusing where it may be the wrapper's own (`cell.get()`
-    /// on an `OnceLock<Vec<G>>` is the Vec, not a `G`).
+    /// SOUNDNESS R1023 — what a binder of kind `binder` binds out of `expr`, as a `Bound`: the plain entry
+    /// as a concrete type (the one-level route, unchanged), or one layer of a LAYERED entry peeled — the
+    /// value `G`, or an element entry plus the std type of the layer left on top. `None` when the
+    /// expression has no element entry or the binder does not peel its top layer (refused).
+    fn elem_bound(&self, raw: Option<String>, binder: crate::lang::LayerBinder, method: &str) -> Option<Bound> {
+        let r = raw?;
+        if !crate::lang::is_wrapped(&r) {
+            return Some(Bound::Concrete(r));
+        }
+        let out = crate::lang::layer_bind(&r, binder, method)?;
+        if std::env::var_os("CANDOR_R1023_INSTR").is_some() {
+            eprintln!("R1023BIND\t{binder:?}\t{}", crate::lang::wrapped_layers(&r)); // §E1, CHANGED branch
+        }
+        Some(match out {
+            crate::lang::Layered::Val(g) => Bound::Concrete(g),
+            crate::lang::Layered::Elem { entry, outer } => Bound::Layered { ty: outer, elem: entry },
+        })
+    }
+
+    /// The type of `recv.method()` for an ELEMENT ACCESSOR (`first`, `pop`, `get`): the receiver's
+    /// element. A LAYERED receiver takes the accessor as one `layer_step` and answers only when that
+    /// leaves a plain entry (`guard.first()` over a `Mutex<Vec<G>>`), refusing where the step is not its
+    /// top layer's (`cell.get()` on an `OnceLock<Vec<G>>` is the Vec, not a `G`).
     fn elem_after_accessor(&self, recv: &syn::Expr, method: &str) -> Option<String> {
-        self.resolve_elem_type_raw(recv)
-            .map(|t| Self::step_wrapped(t, method))
-            .filter(|t| !crate::lang::is_wrapped(t))
+        let r = self.resolve_elem_type_raw(recv)?;
+        if !crate::lang::is_wrapped(&r) {
+            return Some(r);
+        }
+        match crate::lang::layer_step(&r, method)? {
+            crate::lang::Layered::Elem { entry, .. } if !crate::lang::is_wrapped(&entry) => Some(entry),
+            _ => None,
+        }
     }
 
     /// SOUNDNESS R893 — `Mutex::new(vec![G])` / `RwLock::new(xs)` / `RefCell::new(Vec::<G>::new())`: a std
-    /// wrapper CONSTRUCTED around a container records the container's element MARKED, exactly as the
+    /// wrapper CONSTRUCTED around a container records the container's element LAYERED, exactly as the
     /// annotated `let m: Mutex<Vec<G>>` does through `elem_type_b`. Only when the argument is PROVABLY a
     /// sequence or map — a collection literal, or a value whose own type the typer names as one — so an
-    /// `Option` payload (which `elem_of` also holds, unmarked) is never re-read as a container.
+    /// `Option` payload (which `elem_of` also holds, plain) is never re-read as a container.
     fn wrapper_ctor_elem(&self, full: &str, c: &syn::ExprCall) -> Option<String> {
         let mut segs = full.rsplit("::");
         if segs.next() != Some("new") || c.args.len() != 1 {
             return None;
         }
         let w = segs.next()?;
-        if !matches!(w, "Mutex" | "RwLock" | "RefCell" | "ReentrantMutex") {
-            return None;
-        }
+        let code = match w {
+            "Mutex" | "RwLock" | "ReentrantMutex" => 'M',
+            "RefCell" => 'R',
+            _ => return None,
+        };
         let arg = c.args.first()?;
-        let is_container = matches!(peel_recv(arg), syn::Expr::Array(_) | syn::Expr::Repeat(_) | syn::Expr::Macro(_))
-            || self.type_of(arg).is_some_and(|t| {
-                let l = t.rsplit("::").next().unwrap_or(&t);
-                crate::lang::is_sequence_container(l) || crate::lang::is_map_container(l)
-            });
-        if !is_container {
-            return None;
-        }
-        let e = self.resolve_elem_type_raw(arg).filter(|e| !crate::lang::is_wrapped(e))?;
+        let inner = if matches!(peel_recv(arg), syn::Expr::Array(_) | syn::Expr::Repeat(_) | syn::Expr::Macro(_)) {
+            'C'
+        } else {
+            let t = self.type_of(arg)?;
+            let l = t.rsplit("::").next().unwrap_or(&t);
+            if crate::lang::is_sequence_container(l) {
+                'C'
+            } else if crate::lang::is_map_container(l) {
+                'K'
+            } else {
+                return None;
+            }
+        };
+        let e = self.resolve_elem_type_raw(arg)?;
+        // The argument's own entry is one layer (plain) or several (layered): the wrapper adds one on top.
         if std::env::var_os("CANDOR_R893_INSTR").is_some() {
             eprintln!("R893CTOR\t{w}");
         }
-        Some(crate::lang::mark_wrapped(&e))
+        Some(crate::lang::prefix_layer(code, inner, &e))
     }
 
-    /// SOUNDNESS R893 — one element-preserving adapter step over a possibly-marked answer: an iterator
-    /// producer or an element accessor on a wrapper-held container steps INTO its element (the mark goes);
-    /// every other adapter (`lock`, `unwrap`, `borrow`, `as_ref`, `clone`, `get`) leaves it a container.
-    fn step_wrapped(t: String, method: &str) -> String {
-        if crate::lang::is_wrapped(&t) && crate::lang::steps_into_wrapped_container(method) {
-            if std::env::var_os("CANDOR_R893_INSTR").is_some() {
-                eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
-            }
-            crate::lang::strip_wrapped(&t).to_string()
-        } else {
-            t
+    /// SOUNDNESS R1023 — one adapter over an element entry: a LAYERED entry takes it as one `layer_step`
+    /// (the value `G` itself is not an element entry, so it answers `None`); a plain entry keeps the
+    /// one-level route's answer, which is the entry unchanged.
+    fn step_layer(t: String, method: &str) -> Option<String> {
+        if !crate::lang::is_wrapped(&t) {
+            return Some(t);
+        }
+        if std::env::var_os("CANDOR_R893_INSTR").is_some() {
+            eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+        match crate::lang::layer_step(&t, method)? {
+            crate::lang::Layered::Elem { entry, .. } => Some(entry),
+            crate::lang::Layered::Val(_) => None,
         }
     }
 
@@ -2038,7 +2124,31 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Reference(r) => self.resolve_elem_type_raw(&r.expr),
             syn::Expr::Paren(p) => self.resolve_elem_type_raw(&p.expr),
             syn::Expr::Group(g) => self.resolve_elem_type_raw(&g.expr),
-            syn::Expr::Try(t) => self.resolve_elem_type_raw(&t.expr),
+            // SOUNDNESS R1023 — `?` pops a LAYERED entry's `Option`/`Result`/lock-result layer; a plain one
+            // keeps the one-level route's answer (the entry, unchanged).
+            syn::Expr::Try(t) => {
+                let r = self.resolve_elem_type_raw(&t.expr)?;
+                if !crate::lang::is_wrapped(&r) {
+                    return Some(r);
+                }
+                match crate::lang::layer_try(&r)? {
+                    crate::lang::Layered::Elem { entry, .. } => Some(entry),
+                    crate::lang::Layered::Val(_) => None,
+                }
+            }
+            // SOUNDNESS R1023 — `*guard` / `&*guard`: a guard's `Deref` is transparent to the element, and
+            // pops a LAYERED entry's lock-result layer. `param_mo`'s `if let Some(g) = &*m.lock().unwrap()`
+            // over a `&Mutex<Option<G>>` reached nothing because no arm here read `*` at all.
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                let r = self.resolve_elem_type_raw(&u.expr)?;
+                if !crate::lang::is_wrapped(&r) {
+                    return Some(r);
+                }
+                match crate::lang::layer_deref(&r)? {
+                    crate::lang::Layered::Elem { entry, .. } => Some(entry),
+                    crate::lang::Layered::Val(_) => None,
+                }
+            }
             syn::Expr::Await(a) => self.resolve_elem_type_raw(&a.base),
             syn::Expr::Path(p) => {
                 if let Some(name) = p.path.get_ident().map(|i| i.to_string()) {
@@ -2092,9 +2202,15 @@ impl<'a> CallCollector<'a> {
                 // SOUNDNESS R347 — ONE authority, shared with `resolve_elem_trait_leaves`. The two
                 // resolvers each kept their own copy of this list and diverged in BOTH directions;
                 // see `lang::is_element_preserving_adapter` for what each divergence cost.
+                // SOUNDNESS R1023 — a LAYERED receiver takes EVERY method through the layer table (its top
+                // layer is a std type, so the method is std's): `layer_step` answers or refuses. The
+                // adapter list below is the one-level route's, and a plain receiver keeps it unchanged.
+                if let Some(r) = self.resolve_elem_type_raw(&m.receiver).filter(|r| crate::lang::is_wrapped(r)) {
+                    return Self::step_layer(r, &m.method.to_string());
+                }
                 let adapter = crate::lang::is_element_preserving_adapter(&m.method.to_string());
                 if adapter {
-                    let r = self.resolve_elem_type_raw(&m.receiver).map(|t| Self::step_wrapped(t, &m.method.to_string()));
+                    let r = self.resolve_elem_type_raw(&m.receiver).and_then(|t| Self::step_layer(t, &m.method.to_string()));
                     // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                     if r.is_some()
                         && crate::lang::is_r536_added_name(&m.method.to_string())
@@ -2151,7 +2267,18 @@ impl<'a> CallCollector<'a> {
                 e
             }
             // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
-            syn::Expr::Index(idx) => self.resolve_elem_type_raw(&idx.expr).map(|t| crate::lang::strip_wrapped(&t).to_string()),
+            // SOUNDNESS R1023 — a LAYERED base is peeled one sequence/map layer: what is left is the row's own
+            // entry (`grid[i]` over `Vec<Vec<G>>` is a collection of `G`), or nothing when the row IS `G`.
+            syn::Expr::Index(idx) => {
+                let r = self.resolve_elem_type_raw(&idx.expr)?;
+                if !crate::lang::is_wrapped(&r) {
+                    return Some(r);
+                }
+                match crate::lang::layer_bind(&r, crate::lang::LayerBinder::Index, "")? {
+                    crate::lang::Layered::Elem { entry, .. } => Some(entry),
+                    crate::lang::Layered::Val(_) => None,
+                }
+            }
             // SOUNDNESS R535 — the same control-flow merge, one question over: `for x in (if c { a }
             // else { b })` asks what the MERGE evaluates to, and the answer is the agreed element of
             // its branches. Added here rather than left to the receiver resolvers so the boundary is
@@ -2591,6 +2718,88 @@ impl<'a> CallCollector<'a> {
                 eprintln!("R984UFCS {tr}::{method} -> {want}");
             }
             self.push_coercion_edge(&ty_leaf, method);
+        }
+    }
+
+    /// SOUNDNESS R1038 — `Box::<T>::deserialize(d)` / `Option::<T>::deserialize(d)`: an associated fn of a
+    /// DEPENDENCY trait (`serde::Deserialize`) called on a STD type. std declares no `Box::deserialize`, so
+    /// the body that runs is the dependency's `impl Deserialize for Box<T>` — and it drives the caller's
+    /// `D: Deserializer`, i.e. arbitrary code. The written path expands to `Box::deserialize`, which the
+    /// classifier reads as a pure std call, so the edge VANISHED: portable-atomic-util's
+    /// `impl Deserialize for Arc<T> { Box::deserialize(d)… }` had no callees and the crate published the
+    /// union `serde#de::Deserialize::deserialize` as `[]` — a pure-only union over the trait every consumer
+    /// deserializes through (executed fixture `fxserde`: the deserializer's write happened).
+    ///
+    /// Resolved to the dependency trait's member, `<dep>::<trait path>::<m>`, and ONLY on evidence: the
+    /// member must be one THIS crate implements for that dependency trait (`foreign_impls`, the witness
+    /// R551 established), and the trait must be imported here under its own leaf. What that edge carries
+    /// is whatever the dependency route gives a call into `serde` — `invisible: [serde]` unchained, the
+    /// dependency's own answer chained. Additive: the written path is still pushed.
+    fn edge_std_type_dep_trait_member(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        if p.qself.is_some() {
+            return;
+        }
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() < 2 {
+            return;
+        }
+        let method = segs[segs.len() - 1].clone();
+        let written = crate::lang::path_to_string_lc(&p.path);
+        let full = expand(&written, &self.uses);
+        let Some((ty_path, _)) = full.rsplit_once("::") else { return };
+        let root = ty_path.split("::").next().unwrap_or(ty_path);
+        let ty_leaf = ty_path.rsplit("::").next().unwrap_or(ty_path);
+        let std_ty = matches!(root, "std" | "core" | "alloc")
+            || (!ty_path.contains("::")
+                && matches!(ty_leaf, "Box" | "Option" | "Vec" | "String" | "Result")
+                && !self.uses.contains_key(ty_leaf));
+        if !std_ty || !ty_leaf.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return;
+        }
+        let deps: Vec<String> = self.uses.get(crate::lang::DEPS_KEY).map(|d| d.split('\u{1}').map(String::from).collect()).unwrap_or_default();
+        let mut targets: Vec<String> = Vec::new();
+        for k in self.foreign_impls.keys() {
+            let Some((owner, member)) = k.split_once('#') else { continue };
+            if !deps.iter().any(|d| d == owner) {
+                continue;
+            }
+            let Some(tr_path) = member.strip_suffix(&format!("::{method}")) else { continue };
+            let tr_leaf = tr_path.rsplit("::").next().unwrap_or(tr_path);
+            // The trait must be IN SCOPE here, imported from that dependency, for `Ty::m` to name it.
+            let imported = self.use_target(tr_leaf).is_some_and(|t| t.split("::").next() == Some(owner));
+            if imported {
+                let t = format!("{owner}::{tr_path}::{method}");
+                if !targets.contains(&t) {
+                    targets.push(t);
+                }
+            }
+        }
+        // THE ARGUMENT IS THE CALLER'S CODE. When the value handed over is this fn's own generic bounded by
+        // a DEPENDENCY trait (`d: D` under `D: serde::Deserializer`), what the dependency runs is that
+        // value's methods — the caller's deserializer, which no report on either side of this crate can
+        // name (measured: chaining serde's report answers the call PURE, and the fixture's deserializer
+        // writes a file). Disclosed as the callback it is, never left to the edge alone.
+        if !targets.is_empty() {
+            for a in args {
+                let syn::Expr::Path(ap) = peel_recv(a) else { continue };
+                let Some(n) = ap.path.get_ident().map(|i| i.to_string()) else { continue };
+                let Some(leaves) = self.trait_vars.get(&n) else { continue };
+                let dep_bound = leaves.iter().find(|l| {
+                    self.use_target(l).and_then(|t| t.split("::").next()).is_some_and(|r| deps.iter().any(|d| d == r))
+                });
+                if let Some(b) = dep_bound.cloned() {
+                    self.mark_unresolved(format!("callback:a generic `{b}` handed to a dependency trait member"));
+                }
+            }
+        }
+        for t in targets {
+            if std::env::var_os("CANDOR_R1038_INSTR").is_some() {
+                eprintln!("R1038DEPTRAIT\t{full} -> {t}"); // §E1 REACH COUNTER, on the CHANGED branch only
+            }
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                leaf: method.clone(), path: t,
+                str_arg: None, path_lits_partial: false, path_lit2: None,
+                typed: false, method: false, is_macro: false });
         }
     }
 
@@ -3177,6 +3386,11 @@ impl<'a> CallCollector<'a> {
     }
 
     fn resolve_recv_traits_walk(&self, expr: &syn::Expr) -> Vec<String> {
+        if is_self_deref(expr) {
+            if let Some(l) = self.trait_vars.get(SELF_DEREF_VAR) {
+                return l.clone();
+            }
+        }
         // Hot-path guard: with NO dispatch source this function could answer from, every lookup below
         // is a guaranteed miss — skip the recursive walk.
         //
@@ -3647,7 +3861,17 @@ impl<'a> CallCollector<'a> {
                 syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
                 _ => None,
             };
-            let unnamed = qid.as_deref().is_some_and(|i| {
+            // SOUNDNESS R1037 — …or an associated-type PROJECTION of one (`<S::Tf as Conv>::conv(x)` under
+            // `S: Std`): its implementor is whatever `S` picks, which only the bounded CHA can answer.
+            // Read as the concrete type it is not, the call formed `Tf::conv` and vanished.
+            let projection = match &*q.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() >= 2 => {
+                    let h = tp.path.segments[0].ident.to_string();
+                    generic(self, &h).is_some() || h == "Self"
+                }
+                _ => false,
+            };
+            let unnamed = projection || qid.as_deref().is_some_and(|i| {
                 generic(self, i).is_some() || (i == "Self" && self.trait_self.as_deref() == Some(tr.as_str()))
             });
             let concrete = if unnamed {
@@ -3663,6 +3887,36 @@ impl<'a> CallCollector<'a> {
                     targets.push((b, None));
                 }
             }
+        } else if p.qself.is_none() && segs.len() == 3 && generic(self, &segs[0]).is_some() {
+            // SOUNDNESS R1037 — `S::Tf::conv(x)`: a member called on an ASSOCIATED TYPE of a generic
+            // parameter (palette's `S::TransferFn::into_linear(..)`). The projection's own bound is not
+            // indexed, so every LOCAL trait declaring the member is a candidate — the bounded CHA over
+            // what `S::Tf` can be, never a guess at one implementor. Formed no edge at all before.
+            if std::env::var_os("CANDOR_R1037_INSTR").is_some() {
+                eprintln!("R1037PROJ\t{path}");
+            }
+            // The projection's bound, read off the generic's own LOCAL bounds (`S: Std` → `Std`'s `type Tf:
+            // Conv`). With no local declaration of the associated type there is nothing to bound the CHA by,
+            // and a wider set (every local trait declaring `conv`) would charge an unrelated trait's impls:
+            // that case is DISCLOSED instead (the call names a body this scan cannot pick).
+            let assoc = &segs[1];
+            let mut ts: Vec<String> = Vec::new();
+            for b in generic(self, &segs[0]).unwrap_or_default() {
+                if let Some(lt) = self.local_traits.get(&b) {
+                    for l in lt.assoc_types.get(assoc).into_iter().flatten() {
+                        if !ts.contains(l) {
+                            ts.push(l.clone());
+                        }
+                    }
+                }
+            }
+            let local_bound = generic(self, &segs[0]).unwrap_or_default().iter().any(|b| self.local_traits.contains_key(b));
+            if ts.is_empty() && local_bound {
+                self.mark_unresolved(format!("dispatch:{}::{assoc}.{leaf}", segs[0]));
+            }
+            for t in ts {
+                targets.push((t, None));
+            }
         }
         if targets.is_empty() && p.qself.is_none() {
             // `Tr::m(x)` (or `Self::m(x)` in a default body, which `expand` has already turned into the
@@ -3674,7 +3928,13 @@ impl<'a> CallCollector<'a> {
                     // The first argument may NAME the implementor (`Dsl::limit(&s1)`): only a plain
                     // binding is read, from `vars` alone — never a typed expression, so no inference
                     // this engine does elsewhere (the builder assumption) can mis-name it.
-                    let named = args.first().and_then(|a| match peel_recv(a) {
+                    // SOUNDNESS R1049 (R1034's masked twin) — ONLY for a member with a RECEIVER. An associated fn's implementor is
+                    // chosen by the caller's TYPE CONTEXT (`FromRedisValue::from_redis_value(v)` returns `T`),
+                    // never by its first argument, which is merely an input (`v: &Value`): reading it as the
+                    // implementor resolved redis's generic `from_redis_value::<T>` to `Value::from_redis_value`
+                    // alone — pure — while it dispatches over every `FromRedisValue` impl.
+                    let has_receiver = self.local_traits.get(&tr).is_some_and(|lt| lt.methods.contains(leaf));
+                    let named = args.first().filter(|_| has_receiver).and_then(|a| match peel_recv(a) {
                         syn::Expr::Path(ap) => ap.path.get_ident().map(|i| i.to_string()),
                         _ => None,
                     }).filter(|n| !self.trait_vars.contains_key(n))
@@ -4456,6 +4716,12 @@ impl<'a> CallCollector<'a> {
                 self.trait_vars.insert(name.to_string(), leaves);
             }
             Bound::Unknown => {}
+            Bound::Layered { ty, elem } => {
+                if let Some(t) = ty {
+                    self.vars.insert(name.to_string(), t);
+                }
+                self.elem_of.insert(name.to_string(), elem);
+            }
         }
         let r = body(self);
 
@@ -4865,6 +5131,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         if let syn::Expr::Path(p) = func {
             self.edge_ufcs_foreign_trait(p, &node.args);
+            self.edge_std_type_dep_trait_member(p, &node.args);
         }
         match func {
             syn::Expr::Path(p) => {
@@ -6034,7 +6301,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the element. Default-visit the rest; visit the typed closure under scope.
         // R893 — HELD: a HOF called on a wrapper-held container itself (`m.lock().map(|g| ..)`) receives the
         // guard, not an element; the iterator spelling (`.iter().for_each(..)`) has already stepped in.
-        let elem_ty = if elem_hof { self.resolve_elem_type_held(&node.receiver) } else { None };
+        // SOUNDNESS R1023 — a LAYERED receiver is peeled one layer by the adapter's closure (`LockResult::map`
+        // gets the guard, `Option::map` the payload, an iterator's adapters the item); a plain one keeps
+        // the one-level route (`resolve_elem_type_held`, which is the plain entry unchanged).
+        let elem_bound = if elem_hof {
+            self.elem_bound(self.resolve_elem_type_raw(&node.receiver), crate::lang::LayerBinder::Hof, leaf.as_str())
+        } else {
+            None
+        };
+        let elem_ty = match &elem_bound {
+            Some(Bound::Concrete(t)) => Some(t.clone()),
+            _ => None,
+        };
         // VEIN B — R347's NAMED PRECONDITION for peeling the interior-mutability wrappers: a closure in
         // the ERROR position is not the element. `unwrap_or_else`'s one-parameter closure exists only on
         // `Result` (`Option`'s takes none) and receives the `Err` — `PoisonError` after `m.lock()` — so
@@ -6087,8 +6365,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     let pat = &cl.inputs[pos];
                     match single_pat_ident(pat) {
                         Some(name) => {
-                            if let Some(t) = &elem_ty {
-                                binds.push((name, Bound::Concrete(t.clone())));
+                            match &elem_bound {
+                                Some(Bound::Concrete(t)) => binds.push((name, Bound::Concrete(t.clone()))),
+                                Some(Bound::Layered { ty, elem }) => {
+                                    binds.push((name, Bound::Layered { ty: ty.clone(), elem: elem.clone() }))
+                                }
+                                _ => {}
                             }
                         }
                         None => binds.extend(tuple_pat_elem_binds(pat, elem_tuple.as_deref())),
@@ -6217,7 +6499,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
                             }
                         } else {
-                            self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                            let b = match &elem_bound {
+                                Some(Bound::Layered { ty, elem }) => Bound::Layered { ty: ty.clone(), elem: elem.clone() },
+                                _ => elem_ty.clone().map(Bound::Concrete).unwrap_or(Bound::Unknown),
+                            };
+                            self.scoped_binding(&name, b, |s| s.visit_expr(&cl.body));
                         }
                         continue;
                     }
@@ -6285,9 +6571,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // named `elem_type`. Adding `Option` to `elem_type` ALONE moves nothing: this arm
                 // returns early only for dispatch, so the concrete answer had no route to the binding.
                 // Both halves are needed, and only measuring showed it.
-                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
+                if let Some(bound) =
+                    self.resolve_payload_type(&el.pat, &el.expr).and_then(|t| self.payload_bound(&el.pat, t))
+                {
                     self.visit_expr(&el.expr);
-                    self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.then_branch));
+                    self.scoped_binding(&binding, bound, |s| s.visit_block(&node.then_branch));
                     if let Some((_, else_b)) = &node.else_branch {
                         self.visit_expr(else_b);
                     }
@@ -6355,9 +6643,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R185 — the while-let twin of the concrete fallthrough added to
                 // `visit_expr_if`. Same defect, same fix; kept beside its sibling so the pair cannot
                 // drift, which is how the dispatch half of this arm came to exist without it.
-                if let Some(elem) = self.resolve_payload_type(&el.pat, &el.expr) {
+                if let Some(bound) =
+                    self.resolve_payload_type(&el.pat, &el.expr).and_then(|t| self.payload_bound(&el.pat, t))
+                {
                     self.visit_expr(&el.expr);
-                    self.scoped_var(&binding, Some(elem), |s| s.visit_block(&node.body));
+                    self.scoped_binding(&binding, bound, |s| s.visit_block(&node.body));
                     return;
                 }
             } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&el.pat) {
@@ -6431,8 +6721,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if node.arms.iter().any(|a| some_ok_binding(&a.pat).is_some()) {
                 self.visit_expr(&node.expr);
                 for arm in &node.arms {
-                    match some_ok_binding(&arm.pat) {
-                        Some(binding) => self.scoped_var(&binding, Some(elem.clone()), |s| {
+                    // R1023 — per arm: a LAYERED payload is peeled by THIS arm's pattern kind; an arm that
+                    // does not peel its top layer keeps the normal route, as when nothing resolved.
+                    match some_ok_binding(&arm.pat).and_then(|b| Some((b, self.payload_bound(&arm.pat, elem.clone())?))) {
+                        Some((binding, bound)) => self.scoped_binding(&binding, bound, |s| {
                             if let Some((_, guard)) = &arm.guard {
                                 s.visit_expr(guard);
                             }
@@ -6461,18 +6753,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // charge the local `Type::next` so its effect isn't silently dropped (see `iter_next_target`).
         self.charge_iter_next(&node.expr);
         if let Some(name) = single_pat_ident(&node.pat) {
-            // R893 — iterating a wrapper-held container yields its element, EXCEPT where the iterated
-            // value is the wrapper accessor's own `LockResult`/`Option` (`for g in m.lock()` binds the
-            // GUARD) — the mark says "a container", not which wrapping of it.
-            let elem = {
-                let raw = self.resolve_elem_type_raw(&node.expr);
-                let wrapped_result = raw.as_deref().is_some_and(crate::lang::is_wrapped)
-                    && matches!(peel_recv(&node.expr), syn::Expr::MethodCall(m) if matches!(
-                        m.method.to_string().as_str(),
-                        "lock" | "read" | "write" | "try_lock" | "try_read" | "try_write" | "borrow"
-                            | "borrow_mut" | "try_borrow" | "try_borrow_mut" | "get" | "get_mut" | "ok"
-                    ));
-                if wrapped_result { None } else { raw.map(|t| crate::lang::strip_wrapped(&t).to_string()) }
+            // SOUNDNESS R1023 — the loop variable is what ONE `for` peels off the iterated value: a plain
+            // entry is the element (the one-level route, unchanged); a LAYERED one pops its top layer when
+            // that is something a `for` iterates (a sequence, an iterator, an `Option`/`Result`/lock
+            // result — `for v in m.lock()` binds the GUARD of the Vec, never a `G`), leaving the element
+            // value or a binding that is itself a collection (`Bound::Layered`).
+            let elem_bound = self.elem_bound(self.resolve_elem_type_raw(&node.expr), crate::lang::LayerBinder::For, "");
+            let elem = match &elem_bound {
+                Some(Bound::Concrete(t)) => Some(t.clone()),
+                _ => None,
             };
             // A `for it in items` over a COLLECTION OF TRAIT OBJECTS (`items: Vec<Box<dyn Doer>>`) types
             // the loop var into `trait_vars` for dispatch (`it.go()` → bounded CHA over Doer's impls),
@@ -6500,7 +6789,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
                 }
             } else {
-                self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+                self.scoped_binding(&name, elem_bound.unwrap_or(Bound::Unknown), |s| s.visit_block(&node.body));
             }
         } else {
             // SOUNDNESS R349 — a TUPLE destructuring loop pattern over a TUPLE-YIELDING adapter:
@@ -7046,8 +7335,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     self.vars.remove(&binding);
                     self.trait_vars.insert(binding, leaves);
-                } else if let Some(elem) =
-                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_payload_type(&node.pat, &init.expr))
+                } else if let Some(bound) = self
+                    .with_pre_bindings(&pre_bindings, |s| s.resolve_payload_type(&node.pat, &init.expr))
+                    .and_then(|t| self.payload_bound(&node.pat, t))
                 {
                     // SOUNDNESS R185 — the let-else twin. The comment above notes "a concrete payload
                     // yields no leaves" and stops there; the concrete payload then had no route at all,
@@ -7059,7 +7349,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // fn-wide, not scoped, because let-else binds for the rest of the fn — and `trait_vars`
                     // is cleared alongside so the two tables cannot both answer for this name.
                     self.trait_vars.remove(&binding);
-                    self.vars.insert(binding, elem);
+                    match bound {
+                        Bound::Concrete(elem) => {
+                            self.vars.insert(binding, elem);
+                        }
+                        // R1023 — a LAYERED payload peeled one layer: the binding's own std type and its
+                        // element entry, fn-wide like the concrete form.
+                        Bound::Layered { ty, elem } => {
+                            match ty {
+                                Some(t) => self.vars.insert(binding.clone(), t),
+                                None => self.vars.remove(&binding),
+                            };
+                            self.elem_of.insert(binding, elem);
+                        }
+                        Bound::Traits(_) | Bound::Unknown => {}
+                    }
                 }
             }
         } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {
@@ -8932,4 +9236,20 @@ fn std_required_member(tr: &str, m: &str) -> bool {
             | ("DerefMut", "deref_mut")
             | ("Drop", "drop")
     )
+}
+
+/// SOUNDNESS R1023 — which layer a std `Some(x)`/`Ok(x)` pattern peels (see `lang::LayerBinder`).
+fn some_or_ok_kind(pat: &syn::Pat) -> Option<crate::lang::LayerBinder> {
+    match pat {
+        syn::Pat::Reference(r) => some_or_ok_kind(&r.pat),
+        syn::Pat::Paren(p) => some_or_ok_kind(&p.pat),
+        syn::Pat::TupleStruct(ts) if crate::lang::std_some_ok_pat(pat) => {
+            match ts.path.segments.last()?.ident.to_string().as_str() {
+                "Some" | "Included" | "Excluded" => Some(crate::lang::LayerBinder::Some),
+                "Ok" => Some(crate::lang::LayerBinder::Ok),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }

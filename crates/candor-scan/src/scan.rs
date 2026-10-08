@@ -1313,6 +1313,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let walked_canon: std::collections::HashSet<std::path::PathBuf> =
         paths.par_iter().filter_map(|(p, _)| p.canonicalize().ok()).collect();
     let include_env = crate::lang::IncludeEnv { root, manifest_dir: root, walked: &walked_canon, include_tests };
+    // SOUNDNESS R1004 (the cross-file residual) — the crate's `macro_rules!` definitions, so an item-position
+    // invocation of a macro defined in ANOTHER file (`#[macro_use] mod mac;`) is expanded like a same-file
+    // one (`mbe::CrateMacros`). Read from every walked file that names `macro_rules`, cached or not: a warm
+    // file's expansion depends on these bytes, so their digest joins every file's key below.
+    let xmacros: crate::mbe::CrateMacros = crate::mbe::merge_crate_macros(
+        paths
+            .par_iter()
+            .filter_map(|(p, _)| {
+                let text = std::fs::read_to_string(p).ok()?;
+                if !text.contains("macro_rules") {
+                    return None;
+                }
+                let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
+                Some(crate::mbe::file_macro_defs(&file.items))
+            })
+            .collect::<Vec<_>>(),
+    );
+    let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
     // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
     // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
@@ -1328,6 +1346,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R977 — the cfg-off verdict comes from ANOTHER file (the declaring `mod`), so it is
             // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
             let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
+            let key = match &xmacros_key { Some(x) => format!("{key}+xmac{x}"), None => key };
             (rel.clone(), key)
         })
         .collect();
@@ -1372,8 +1391,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if text.contains("pin_project") || text.contains("link!") {
                 crate::lang::splice_pin_project(&mut file.items); // R988, R960
             }
-            if text.contains("macro_rules") {
-                crate::mbe::splice_local_macros(&mut file.items); // R1004
+            if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) {
+                crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
@@ -1583,8 +1602,54 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         format!("{}#deps:{}", decl_index_digest(&merged), d.join(","))
     };
     // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
-    let returns: ReturnIndex =
+    #[allow(unused_mut)]
+    let mut returns: ReturnIndex =
         merged.rets.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
+    // SOUNDNESS R1025 (its receiver half) — an `impl` written ON a type alias (`impl LcPtr<EVP_PKEY> { fn
+    // agree }`, `type LcPtr<T> = ManagedPointer<*mut T>` in aws-lc-rs) files its (TYPE, method) facts under
+    // the ALIAS's leaf, while a receiver typed through the alias — a field, a parameter, a declared return
+    // — expands to the TARGET's. The unit side already bridges this (`alias_tails` below, VEIN A); the
+    // DECLARED-FACT side did not, so R451's gate (`impl_declared_return`, "the corrected type must declare
+    // the method") refused `self.get().agree()` over `fn get(&self) -> &LcPtr<Evp>` and the call vanished.
+    // That was a pre-existing silence for a non-generic alias (`type Plain = Managed<u8>`) and became one
+    // for a generic alias once R1025 records those. Mirrored under the target's leaf, only where the target
+    // has no fact of its own (a supply, never an override), with `alias_tails`' own target filters.
+    {
+        let mut adds: Vec<(String, String)> = Vec::new();
+        for (q, t) in &merged.mod_aliases {
+            if t.contains(crate::decls::ALIAS_ALT_SEP) {
+                continue;
+            }
+            let a_leaf = q.rsplit("::").next().unwrap_or(q);
+            let t_body = t.strip_prefix("crate::").unwrap_or(t);
+            let t_root = t_body.split("::").next().unwrap_or(t_body);
+            if t_body.contains('<') || manifest_deps.contains(t_root) || matches!(t_root, "std" | "core" | "alloc") {
+                continue;
+            }
+            let t_leaf = t_body.rsplit("::").next().unwrap_or(t_body);
+            if a_leaf == t_leaf || a_leaf.starts_with(crate::decls::REDIRECT_MOD_MARK) {
+                continue;
+            }
+            for pre in [crate::model::RET_IMPL_FN, crate::model::RET_IMPL, crate::model::RET_IMPL_SELF, crate::model::RET_IMPL_ELEM] {
+                let from = format!("{pre}{a_leaf}\u{1f}");
+                for (k, v) in &returns {
+                    if let Some(m) = k.strip_prefix(&from) {
+                        adds.push((format!("{pre}{t_leaf}\u{1f}{m}"), v.clone()));
+                    }
+                }
+            }
+        }
+        adds.sort();
+        adds.dedup();
+        for (k, v) in adds {
+            if let std::collections::hash_map::Entry::Vacant(slot) = returns.entry(k) {
+                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                    eprintln!("R1025ALIASFACT {}", slot.key()); // §E1 REACH COUNTER
+                }
+                slot.insert(v);
+            }
+        }
+    }
     let mut enum_variants: EnumVariantIndex =
         merged.enum_tmp.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
     // R77: same ambiguous-drop filter, for a DISPATCH-typed single-field tuple-variant payload's leaves.
@@ -1891,8 +1956,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t.contains("pin_project") || t.contains("link!") {
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
-                    if t.contains("macro_rules") {
-                        crate::mbe::splice_local_macros(&mut f.items); // R1004 — the round-2 twin
+                    if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) {
+                        crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
                     Some(f)
                 })

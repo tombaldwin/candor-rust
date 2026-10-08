@@ -11,6 +11,86 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `std::ops::Bound` payload is typed.** `match start { Bound::Included(ref v) | Bound::Excluded(ref v) =>
+  v.to_sql(), .. }` over a `Bound<&T>` (`T: ToSql`) left `v` untyped and the dispatch formed no edge (diesel's
+  `ranges::to_sql`, executed fixture writes a file). Its 0.40.0 `Unknown` came from the R1034 collision; it now
+  dispatches over `ToSql`. Or-patterns of payload variants bind when every case binds the same name.
+- ⚠ **An associated fn called through its trait dispatches over the trait, not over its first argument's type (SOUNDNESS R1049).**
+  `FromV::from_v(v)` (no receiver) was resolved to the impl for `v`'s type (`v: &Value` → `Value::from_v`), but the
+  implementor is chosen by the return type: redis's `from_redis_value::<T>` read pure that way (executed fixture
+  `from_v::<Loud>` writes a file; ABSENT on 0.40.0). Found when R1034 stopped merging it with a `[T; N]` impl.
+- ⚠ **A deref wrapper's pointee is the receiver (SOUNDNESS R1036).** `impl<T: Doer + ?Sized> Doer for Box<T> { fn go(&self)
+  { (**self).go() } }`, `self.as_ref().go()` in an impl for `Arc<T>`, and a call on a fn's returned lock guard
+  (`get().write()` over `-> MutexGuard<'static, Runtime>`, snapbox's `Data::write_to`) formed no edge (executed: each
+  writes a file). `*self`/`self.as_ref()`/`self.deref()` in an impl for `Box`/`Arc`/`Rc`/`Pin<X>` now type as `X`
+  (or dispatch on its bounds), and std/lock-crate guards peel to what they guard, like `Box`.
+- ⚠ **A member called on an associated-type projection dispatches (SOUNDNESS R1037).** `S::Tf::conv(x)` and
+  `<S::Tf as Conv>::conv(x)` under `S: Std` (`type Tf: Conv;`) formed no edge (palette's
+  `S::TransferFn::into_linear(..)`; executed: both write). They now dispatch over the associated type's DECLARED bound
+  (never every trait sharing the member's name); with a local bound that does not declare it, `Unknown` +
+  `dispatch:`. Cache schema rev75.
+- ⚠ **An impl for a non-path self type (`&str`, `&[u8]`, `[T]`, a tuple) gets its own key (SOUNDNESS R1034).** Its
+  methods were filed as the module's FREE fn of the same name, so wasm-bindgen-backend's `impl Encode for &[u8]` /
+  `&str` merged with `pub fn encode(program)` (Env/Fs): every `Encode::encode` dispatch charged Env/Fs it cannot
+  perform, and an effectful `impl Tr for &str` was reached by no call (executed: `s.encode()` wrote a file, read
+  ABSENT). Only an impl whose module-level qual a FREE fn of that module also claims is re-keyed (`&str` → `str`,
+  `&[u8]` → `[u8]`, `&Name`, `[T]`, `(A,B)`); every other non-path impl keeps the qual it had.
+- ⚠ **An associated fn of a DEPENDENCY trait called on a std type is disclosed (SOUNDNESS R1038).**
+  `Box::<T>::deserialize(d)` / `Option::<T>::deserialize(d)` names no std fn — the dependency's impl runs and drives
+  the caller's `D: Deserializer` — but read as a pure std call, so portable-atomic-util published
+  `serde#de::Deserialize::deserialize` as a pure-only union. Now an edge to the dependency trait member (on
+  `foreign_impls` evidence, trait imported here) and, when the argument is the fn's own generic bounded by a
+  dependency trait, `Unknown` + `callback:a generic `<Trait>` handed to a dependency trait member`. Cache schema rev74.
+- ⚠ **The deep (`cargo candor policy`/`guard`) verdict carries ⟨0.27⟩'s `zeroMatch`, and its scopes match the
+  CRATE-RELATIVE name (SOUNDNESS R1033, R1028).** A rule whose scope bound nothing was disclosed on stderr only on
+  this route; the `--gate-json` verdict now carries the same `zeroMatch` list the scan route's does (summed across
+  every crate of the `cargo dylint` pass, omitted when empty). And the lint matched scopes against
+  `<crate>::<name>` while reporting `<name>`, so `deny Fs mycrate::f` / `allow Net in mycrate::f …` BOUND on the
+  lint and bound nothing on candor-scan (SPEC §3.1 requires the routes to agree; `fn` carries no crate name, SPEC
+  §6.2). The lint now matches the crate-relative name: a crate-qualified scope binds nothing on both routes and is
+  disclosed as `zeroMatch`. A policy that relied on a crate-qualified scope on the deep route must drop the crate
+  prefix (the scan route never honoured it).
+- ⚠ **A method written on a type ALIAS resolves through a receiver typed by a declared RETURN (R1025's receiver
+  half).** `impl LcPtr<Evp> { fn agree }` (with `type LcPtr<T> = Managed<*mut T>`) keys `agree` under the alias,
+  while `fn get(&self) -> &LcPtr<Evp>` types `self.get()` as the TARGET; R451's gate ("the corrected type must
+  declare the method") refused it and `self.get().agree()` vanished. Pre-existing for a non-generic alias
+  (`type Plain = Managed<u8>` — executed, ABSENT at 15ef1d1), and it would have spread to generic aliases once
+  R1025 records them (aws-lc-rs `agreement::agree` lost its `LcPtr::agree` edge on the first cut). The alias's
+  (TYPE, method) facts are now mirrored under the target's leaf where the target has none of its own — the
+  declared-fact twin of VEIN A's unit bridge. Cache schema rev73.
+- ⚠ **A `macro_rules!` defined in ANOTHER file of the crate is expanded too (SOUNDNESS R1004, the cross-file
+  residual).** `#[macro_use] mod mac;` + `pub mod hidden { m!(); pub fn bare(p: &str) -> bool { spawn(p) } }`, with
+  `m!` generating an effectful `spawn`, read `hidden::bare` ABSENT (`deny Fs hidden::bare` exit 0; executed, it
+  writes a file) while the `super::`/`crate::` spellings disclosed `macro:`. The crate's definitions are now one
+  table (a name defined twice with different bodies — `#[cfg]` twins — is refused and keeps R128's `macro:` hedge),
+  used for any name the invoking file does not define, and the table's digest joins every file's cache key. A
+  CONFIGURATION macro (one that stamps `#[cfg]` on what it wraps, tokio's `cfg_*!`) is not expanded across files:
+  its arms live in different macros and only one would be spliced.
+  Callers of such functions now carry the real effect where they carried `macro:` before. Cache schema rev72.
+- ⚠ **A call through a GENERIC type alias resolves (SOUNDNESS R1025).** `type Closure<T> = ScopedClosure<'static, T>;`
+  then `Closure::<T>::wrap_maybe_aborting::<true>(x)` (wasm-bindgen's `ScopedClosure::once`) formed no edge: Pass A
+  recorded only non-generic aliases, because their target "carries parameters this map cannot substitute" — but the
+  alias map answers a PATH question, and the path does not depend on the arguments. `Alias::<u8>::f(x)` (no
+  turbofish on the method) was silent the same way. Generic aliases are now recorded, except one whose target is its
+  own parameter (`type P<T> = T`). Cache schema rev71.
+- ⚠ **A second std layer around an element is peeled one layer per binder (SOUNDNESS R1023, R893's chain).**
+  `Mutex<Option<G>>`, `Option<Vec<G>>`, `&Mutex<Option<G>>`, `Vec<Vec<G>>`, `Vec<Option<G>>`, `HashMap<_, Vec<G>>`,
+  `RefCell<Option<G>>`, `Mutex<Option<Vec<G>>>` recorded no element, so `if let Some(g) = self.mo.lock().unwrap()
+  .as_ref() { g.go() }`, `if let Some(v) = &self.ov { for g in v { g.go() } }` and twelve sibling spellings read
+  ABSENT (executed: each writes a file). R893's one-bit mark ("a container held by a wrapper") is replaced by the
+  LAYER LIST (`G` + `MO`, outermost first): each adapter is one transition on the top layer and each binder (`for`,
+  `[i]`, `Some`, `Ok`, an adapter's closure) pops one layer of its own kind, refusing anything the table does not
+  name. A layer is read only off a type whose resolved path is std's (or a known lock/collection crate's), so a
+  crate's own `struct Mutex` stays a nominal type. Ten executed controls — a guard, a payload `Vec`, an `Option`
+  asked `len`/`is_some`/`is_empty` where `G` declares those — stay pure.
+- ⚠ **`self` in an `impl` for a std container, `Option` or `Result` is typed like a parameter of that type (SOUNDNESS
+  R1024).** `impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }` formed no
+  edge — `self` was keyed by the impl's bare leaf (`Option`), which says nothing about what a binder over it yields —
+  so the impl's unit had no callees and the trait's union row `Run::run` was published `[]`, a pure-only union a
+  chained consumer reads as *implementors exist and are pure*. Executed (every arm writes a file): `match self`,
+  `if let Some(x) = self`, `self.as_ref()`, `for x in self` / `self[0]` over `impl … for Vec<L>`, `if let Ok(x) =
+  self` over `Result<L, ()>`, and `for x in self { x.go() }` in `impl<T: Doer> Vd for Vec<T>` (dispatch) were ABSENT
+  on v0.40.0 and now charge `Fs`. Cache schema rev70.
 - ⚠ **A renamed, feature-inactive crate-local `use` resolves inside the gated item that needs it (SOUNDNESS R982
   residual).** `#[cfg(feature = "x")] use crate::imp::deep::eff2 as renamed;` + `#[cfg(feature = "x")] pub fn f() {
   renamed() }` read ABSENT (executed with the feature: it writes a file). R982's fix resolved only EXTERNAL targets

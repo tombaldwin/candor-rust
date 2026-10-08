@@ -831,7 +831,22 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
             if let Some(seg) = p.path.segments.last() {
                 // SOUNDNESS R980 — and `Pin<P>`, which derefs to `P::Target`: a `p: Pin<&mut Req>`
                 // parameter's `p.poll(cx)` is `Req::poll` (fixture `rustagent-rel/p1` `e_pin_param`).
-                if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
+                // SOUNDNESS R1036 — and a lock/borrow GUARD, which derefs to what it guards: `fn get() ->
+                // MutexGuard<'static, Runtime>` then `get().write(..)` is `Runtime::write` (snapbox's
+                // `Data::write_to`, a dropped edge in every arm). Only by its RESOLVED std path: a crate's own
+                // `Ref<T>` is its own type.
+                let guard = matches!(
+                    seg.ident.to_string().as_str(),
+                    "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Ref" | "RefMut" | "MappedMutexGuard"
+                        | "MappedRwLockReadGuard" | "MappedRwLockWriteGuard" | "ReentrantMutexGuard"
+                ) && {
+                    let full = expand(&path_to_string_lc(&p.path), uses);
+                    // std's own only: a DEPENDENCY's guard (`parking_lot::MutexGuard`) derefs through the
+                    // dependency's code, and peeling it hid that boundary (tokio's loom shim lost
+                    // `invisible: [parking_lot]` on its `Deref` impls in the A/B).
+                    matches!(full.split("::").next(), Some("std" | "core"))
+                };
+                if guard || matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                         if let Some(inner) = args.args.iter().find_map(|a| match a {
                             syn::GenericArgument::Type(t) => Some(t),
@@ -952,6 +967,27 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
 /// is not on the walk, so `HashMap<&'static str, Guard>` owns its `Guard` values (EXECUTED: 1 drop)
 /// although the type contains a `&`.
 pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(String, bool)> {
+    let plain = elem_type_b_plain(ty, uses);
+    // SOUNDNESS R1023 — the one-level answer stands wherever it names a NOMINAL element (`Vec<G>` -> `G`,
+    // `Mutex<G>` -> `G`): that is every entry the collector's one-level consumers were written for, and
+    // it is unchanged. Where it names a std container/`Option` instead (`Option<Vec<G>>` -> `Vec`, one
+    // level off) or nothing (`Mutex<Option<G>>`), a type two or more std layers above a nominal leaf is
+    // recorded LAYERED (see `WRAPPED_CONTAINER_MARK`), so the binders can peel it a layer at a time.
+    if plain.as_ref().is_some_and(|(t, _)| is_wrapped(t) || is_layer_leaf(t)) {
+        return plain;
+    }
+    if let Some((ls, g, b)) = layer_walk(ty, uses) {
+        if ls.len() >= 2 {
+            if std::env::var_os("CANDOR_R1023_INSTR").is_some() {
+                eprintln!("R1023LAYER\t{}", ls.iter().map(|l| l.0).collect::<String>());
+            }
+            return Some((encode_layers(&g, &ls), b));
+        }
+    }
+    plain
+}
+
+fn elem_type_b_plain(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(String, bool)> {
     match ty {
         syn::Type::Reference(r) => elem_type_b(&r.elem, uses).map(|(t, _)| (t, true)),
         syn::Type::Paren(p) => elem_type_b(&p.elem, uses),
@@ -1022,7 +1058,7 @@ pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                 // `if let Ok(h) = &self.r` binds `h: &T`, and `for h in &self.r` is legal Rust too.
                 // The error type is deliberately not reachable here: nothing binds a name out of it
                 // through any of this function's callers.
-                "Option" | "Result" | "IoResult" => type_path_b(first_ty, uses),
+                "Option" | "Result" | "IoResult" | "Bound" => type_path_b(first_ty, uses),
                 // VEIN B (R878, R568) — a std interior-mutability / lazy-init WRAPPER holds exactly one
                 // value of its type argument, the same shape as `Option`. Recorded here so the wrapper
                 // accessors (`is_wrapper_accessor`) can answer `self.db.borrow_mut()` with `T`.
@@ -1032,44 +1068,11 @@ pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                 // they had nothing before — measured on the chained corpus, mongodb's
                 // `inner.lock().await.as_ref()?.cache` lost its ⟨0.40⟩ `dispatch:` disclosure. R347's
                 // guard-chain half (`Mutex<Vec<Guard>>`) stays open, as it was.
-                n if is_value_wrapper(n) => {
-                    let held = type_path_b(first_ty, uses);
-                    let nominal = |t: &str| {
-                        let leaf = t.rsplit("::").next().unwrap_or(t);
-                        !(is_sequence_container(leaf)
-                            || is_map_container(leaf)
-                            || is_value_wrapper(leaf)
-                            || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
-                            || (matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
-                                && !candor_classify::is_std_effect_handle(t)))
-                    };
-                    match held {
-                        Some((t, b)) if nominal(&t) => Some((t, b)),
-                        // SOUNDNESS R893 — a wrapper of a SEQUENCE or MAP (`Mutex<Vec<G>>`,
-                        // `RwLock<HashMap<K, G>>`, `RefCell<Vec<G>>`): the held value is a container,
-                        // and what the chain goes on to iterate or index is ITS element. Recorded
-                        // MARKED (`mark_wrapped`), never bare: the bare form means "the held value is
-                        // G" to `wrapper_accessor_type` (`self.m.lock().unwrap().len()` would type as
-                        // `G::len`), to the payload binders (`if let Ok(v) = self.m.lock()` binds the
-                        // guard, not a `G`) and to the HOF closure route (`.map(|g| ..)` on a
-                        // `LockResult` receives the guard; `unwrap_or_else` the `PoisonError`, R347).
-                        // Those three refuse a marked answer; the element consumers (for-loop, index,
-                        // the element accessors) strip it — see `Collector::resolve_elem_type_raw`.
-                        // ONE container level, onto a NOMINAL element only: `Mutex<Option<G>>`,
-                        // `Option<Vec<G>>` and `Mutex<Vec<Vec<G>>>` need a second level the marker
-                        // does not carry, and stay unrecorded.
-                        Some((t, _)) => {
-                            let leaf = t.rsplit("::").next().unwrap_or(&t);
-                            if !(is_sequence_container(leaf) || is_map_container(leaf)) {
-                                return None;
-                            }
-                            elem_type_b(first_ty, uses)
-                                .filter(|(e, _)| !is_wrapped(e) && nominal(e))
-                                .map(|(e, b)| (mark_wrapped(&e), b))
-                        }
-                        None => None,
-                    }
-                }
+                n if is_value_wrapper(n) => type_path_b(first_ty, uses).filter(|(t, _)| is_held_nominal(t)),
+                // SOUNDNESS R893 / R1023 — a wrapper of a container or of an `Option` (`Mutex<Vec<G>>`,
+                // `Mutex<Option<G>>`) is TWO std layers deep and is recorded LAYERED by `elem_type_b`'s
+                // fallback below, never here: the plain form means "the held value is G" to
+                // `wrapper_accessor_type`, the payload binders and the HOF closure route.
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
                 //
@@ -1192,6 +1195,9 @@ pub(crate) fn elem_trait_leaves(
                 // leaves let `o.map(|d| d.go())` / `for d in o` / `o.iter().for_each(..)` dispatch. (if-let /
                 // `.unwrap()` are separate binding sites handled at their pattern.)
                 "Option" | "Result" => dispatch(first_ty),
+                // SOUNDNESS R1034 residue — `std::ops::Bound<&T>`, whose `Included`/`Excluded` payload is a `T`
+                // (diesel's `ranges::to_sql` dispatches `value.to_sql(..)` on it, `T: ToSql`).
+                "Bound" => dispatch(first_ty),
                 // A MAP's VALUE (2nd type arg) — a `.values()`/`for v in m.values()` iteration of
                 // trait-object values (`HashMap<String, Box<dyn Handler>>`, the keyed-registry shape).
                 // R454 — the list is shared with `elem_type`, which did not have this arm at all.
@@ -3101,13 +3107,22 @@ pub(crate) fn std_some_ok_pat(pat: &syn::Pat) -> bool {
     match pat {
         syn::Pat::Reference(r) => std_some_ok_pat(&r.pat),
         syn::Pat::Paren(p) => std_some_ok_pat(&p.pat),
+        // An or-pattern of payload variants (`Bound::Included(v) | Bound::Excluded(v)`).
+        syn::Pat::Or(o) => !o.cases.is_empty() && o.cases.iter().all(std_some_ok_pat),
         syn::Pat::TupleStruct(ts) => {
             let segs: Vec<String> = ts.path.segments.iter().map(|s| s.ident.to_string()).collect();
             match segs.as_slice() {
                 [v] => v == "Some" || v == "Ok",
                 [.., o, v] => {
-                    let head_ok = segs[..segs.len() - 2].iter().all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result"));
-                    head_ok && ((o == "Option" && v == "Some") || (o == "Result" && v == "Ok"))
+                    let head_ok = segs[..segs.len() - 2]
+                        .iter()
+                        .all(|s| matches!(s.as_str(), "std" | "core" | "option" | "result" | "ops"));
+                    head_ok
+                        && ((o == "Option" && v == "Some")
+                            || (o == "Result" && v == "Ok")
+                            // R1034 residue — `std::ops::Bound`'s two payload variants, spelled through
+                            // the enum (bare `Included` names nothing std exports).
+                            || (o == "Bound" && (v == "Included" || v == "Excluded")))
                 }
                 _ => false,
             }
@@ -3133,11 +3148,17 @@ pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
         syn::Pat::Paren(p) => some_ok_binding(&p.pat),
         syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
             let variant = ts.path.segments.last()?.ident.to_string();
-            if variant == "Some" || variant == "Ok" {
+            if matches!(variant.as_str(), "Some" | "Ok" | "Included" | "Excluded") {
                 single_pat_ident(ts.elems.first()?)
             } else {
                 None
             }
+        }
+        // Every case binds the SAME single name, or none is taken.
+        syn::Pat::Or(o) => {
+            let mut names = o.cases.iter().map(some_ok_binding);
+            let first = names.next()??;
+            names.all(|n| n.as_deref() == Some(first.as_str())).then_some(first)
         }
         _ => None,
     }
@@ -3605,6 +3626,91 @@ pub(crate) fn stmt_cfg_inactive(stmt: &syn::Stmt) -> bool {
     }
 }
 
+/// SOUNDNESS R1034 — the key an impl's methods are filed under, NARROWED to the defect: a non-path self type
+/// keeps the module-level qual it always had (`{modpath}::{m}`) UNLESS that qual is a free fn this module
+/// declares — the merge R1034 is. Keying every non-path impl (the first cut) renamed thousands of units and
+/// moved CHA fan-outs past their cap (jni lost `Log` on 34 rows to a `dispatch:` hedge, bstr/bumpalo traded
+/// hedges for resolutions); keying only the colliding ones changes exactly the units that were wrong.
+pub(crate) fn impl_key_avoiding_free_fns(im: &syn::ItemImpl, items: &[syn::Item]) -> Option<String> {
+    if let Some(t) = impl_type_name(&im.self_ty) {
+        return Some(t);
+    }
+    let methods: Vec<String> = im
+        .items
+        .iter()
+        .filter_map(|ii| match ii {
+            syn::ImplItem::Fn(m) => Some(m.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let collides = items.iter().any(|it| matches!(it, syn::Item::Fn(f) if methods.contains(&f.sig.ident.to_string())));
+    if collides {
+        if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+            eprintln!("R1034KEY\t{}", methods.join(","));
+        }
+        impl_unit_type_name(&im.self_ty, &im.generics)
+    } else {
+        None
+    }
+}
+
+/// SOUNDNESS R1034 — the type KEY an impl block's methods are filed under, for the unit qual and the CHA
+/// edge. `impl_type_name` answers only a PATH self type, so `impl Encode for &'a [u8]` / `&'a str` had no
+/// key and its `encode` was filed as the FREE fn `encode::encode` — the same qual as wasm-bindgen-backend's
+/// `pub fn encode(program)`, which reads the environment and the filesystem. The two bodies merged into one
+/// unit (three rows at the free fn's location) and every `Encode::encode` dispatch charged Env/Fs, while a
+/// real `impl Encode for &str` that writes a file was reached by no call at all.
+///
+/// A non-path self type now gets a key no identifier can spell and no free fn can share: a reference to a
+/// primitive/`str`/slice keys as its referent (`&str` → `str`, so `s.encode()` on a `&str` — typed `str` —
+/// reaches it), a reference to a nominal type as `&Name` (never `Name`, which would collide with `impl Tr
+/// for Name`, the `IntoIterator for &Coll` + `for Coll` pair), a slice/array as `[T]`, a tuple as `(A,B)`.
+/// A self type built from the impl's OWN parameters (`&W`, `(C, M)`) is keyed the same way (`&W`, `(C,M)`), as a
+/// blanket `impl<T> Tr for T` already is (`T::m`): jni's `impl<C, M> Desc for (C, M)` performs effects of its
+/// own (`Log`), and it reached the CHA only by colliding with the `&str` impl's free-fn qual — keying the
+/// `&str` impl alone dropped it (measured: 34 jni rows lost `Log`).
+pub(crate) fn impl_unit_type_name(ty: &syn::Type, generics: &syn::Generics) -> Option<String> {
+    if let Some(t) = impl_type_name(ty) {
+        return Some(t);
+    }
+    let own = |id: &syn::Ident| generics.type_params().any(|tp| tp.ident == *id);
+    fn prim(n: &str) -> bool {
+        matches!(n, "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "isize" | "f32" | "f64" | "bool" | "char" | "str")
+    }
+    fn elem(t: &syn::Type, own: &dyn Fn(&syn::Ident) -> bool) -> Option<String> {
+        match t {
+            syn::Type::Paren(p) => elem(&p.elem, own),
+            syn::Type::Group(g) => elem(&g.elem, own),
+            syn::Type::Path(p) if p.qself.is_none() => {
+                let seg = p.path.segments.last()?;
+                let _ = own(&seg.ident);
+                Some(seg.ident.to_string())
+            }
+            syn::Type::Slice(s) => elem(&s.elem, own).map(|e| format!("[{e}]")),
+            syn::Type::Array(a) => elem(&a.elem, own).map(|e| format!("[{e};_]")),
+            syn::Type::Tuple(t) if !t.elems.is_empty() => {
+                let parts: Option<Vec<String>> = t.elems.iter().map(|e| elem(e, own)).collect();
+                parts.map(|v| format!("({})", v.join(",")))
+            }
+            syn::Type::Reference(r) => elem(&r.elem, own).map(|e| format!("&{e}")),
+            _ => None,
+        }
+    }
+    match ty {
+        syn::Type::Reference(r) => {
+            let inner = elem(&r.elem, &own)?;
+            let bare = inner.trim_start_matches('&');
+            if inner.starts_with('[') || prim(bare) && !inner.starts_with('&') {
+                Some(inner)
+            } else {
+                Some(format!("&{inner}"))
+            }
+        }
+        _ => elem(ty, &own),
+    }
+}
+
 pub(crate) fn impl_type_name(ty: &syn::Type) -> Option<String> {
     if let syn::Type::Path(p) = ty {
         return p.path.segments.last().map(|s| s.ident.to_string());
@@ -3861,27 +3967,407 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// receiver position they are always spelled through an `.unwrap()`/`.expect()`, and those two walk
 /// to their own receiver rather than needing an entry here.
 /// VEIN B — the std single-value wrappers whose type argument `elem_type_b` records as their element.
-/// SOUNDNESS R893 — the suffix that marks an element index entry as "a CONTAINER of this type, held by a
-/// std wrapper" (`m: Mutex<Vec<G>>` records `G` + marker), as opposed to "this type itself". A SUFFIX so
-/// every leaf taken by `rsplit("::")` keeps it (a twin leaf, an alias re-expansion), and a control
-/// character no identifier can contain. See `elem_type_b`'s wrapper arm.
+/// SOUNDNESS R1023 — A LAYERED ELEMENT ENTRY. An element index entry (`elem_of`, `field_elem`, the
+/// static and return element keys) is either PLAIN — `G`, meaning "one std layer (a sequence, a map's
+/// values, an `Option`/`Result` payload, a wrapper's held value) and then `G`", the semantics every
+/// one-level consumer in the collector was written for — or LAYERED: `G` + this mark + the LIST of std
+/// layers between the value and `G`, outermost first (`m: Mutex<Option<G>>` records `G\u{1c}MO`).
+///
+/// WHY A LIST AND NOT THE ONE-BIT MARK IT REPLACES. R893 recorded `Mutex<Vec<G>>` as `G` + a bare mark
+/// meaning "a container of G held by a wrapper", and then had to hand-encode, consumer by consumer, which
+/// layer each adapter and binder was looking at: `get`/`get_mut`/`ok` were "ambiguous", `for v in
+/// m.lock()` needed a thirteen-name exception, the payload binders and the HOF route refused outright.
+/// None of those ambiguities is in Rust — they are what a one-bit encoding of a two-layer type cannot
+/// say. And the bit could not express a second level at all, which is R1023: `Mutex<Option<G>>`,
+/// `Option<Vec<G>>`, `&Mutex<Option<G>>` recorded nothing and their callers read ABSENT (executed). The
+/// list states which layer is on top, so each adapter is ONE transition on the top layer
+/// (`layer_step`) and each binder ONE pop of a layer of its own kind (`layer_bind`). A method or binder
+/// the table does not name REFUSES — the answer is `None`, never a guess — so the failure direction of an
+/// incomplete table is the silence this replaces, not a fabrication.
+///
+/// The codes: `M` a lock cell (`Mutex`/`RwLock`/`ReentrantMutex`), `R` a `RefCell`, `L` a `OnceLock`/
+/// `OnceCell`, `Q` what a lock accessor returned (std's `LockResult`, or another crate's guard — see
+/// `layer_step`), `O` `Option`, `E` `Result`, `C` a sequence (or slice/array), `K` a map (its VALUES), `I`
+/// an iterator. Transparent layers (`&`, `Box`/`Arc`/`Rc`/`Pin`, a guard's `Deref`, `LazyLock`) are not
+/// recorded. A list of ONE layer is always written PLAIN — that is exactly the one-level semantics — and a
+/// list of ZERO is the value `G` itself, which is not an element entry at all (`Layered::Val`).
+///
+/// A SUFFIX so every leaf taken by `rsplit("::")` keeps it (a twin leaf, an alias re-expansion), behind a
+/// control character no identifier can contain.
 pub(crate) const WRAPPED_CONTAINER_MARK: char = '\u{1c}';
-pub(crate) fn mark_wrapped(t: &str) -> String {
-    format!("{t}{WRAPPED_CONTAINER_MARK}")
+/// After the codes, the WRITTEN path of each layer whose type is not std's own (`ahash::HashMap`, a
+/// crate's `type Map = …`), one per code and empty for std's — so a binder that peels to that layer types
+/// the binding with the path the source named, as the one-level route did (redis's `Vec<HashMap<..>>`
+/// over an `ahash` map: typing `row` as std's `HashMap` lost `row.into_iter()`'s `invisible: [ahash]`).
+/// `::` is re-spelled so a leaf taken by `rsplit("::")` still ends at `G`'s suffix.
+const LAYER_PATH_SEP: char = '\u{1b}';
+const LAYER_PATH_COLONS: char = '\u{1a}';
+
+/// One std layer: its code and the written path of its type when that is not std's own (else empty).
+pub(crate) type Layer = (char, String);
+
+/// `G` with the layer list `codes` (outermost first, std's own types), normalised: one layer is plain `G`.
+#[cfg(test)]
+pub(crate) fn with_layers(g: &str, codes: &str) -> String {
+    encode_layers(g, &codes.chars().map(|c| (c, String::new())).collect::<Vec<_>>())
+}
+fn encode_layers(g: &str, ls: &[Layer]) -> String {
+    if ls.len() <= 1 {
+        return g.to_string();
+    }
+    let codes: String = ls.iter().map(|(c, _)| *c).collect();
+    if ls.iter().all(|(_, p)| p.is_empty()) {
+        return format!("{g}{WRAPPED_CONTAINER_MARK}{codes}");
+    }
+    let paths: Vec<String> = ls.iter().map(|(_, p)| p.replace("::", &LAYER_PATH_COLONS.to_string())).collect();
+    format!("{g}{WRAPPED_CONTAINER_MARK}{codes}{LAYER_PATH_SEP}{}", paths.join(&LAYER_PATH_SEP.to_string()))
+}
+fn decode_layers(t: &str) -> (&str, Vec<Layer>) {
+    let Some((g, rest)) = t.split_once(WRAPPED_CONTAINER_MARK) else { return (t, Vec::new()) };
+    let mut parts = rest.split(LAYER_PATH_SEP);
+    let codes = parts.next().unwrap_or("");
+    let paths: Vec<String> = parts.map(|p| p.replace(LAYER_PATH_COLONS, "::")).collect();
+    let ls = codes.chars().enumerate().map(|(i, c)| (c, paths.get(i).cloned().unwrap_or_default())).collect();
+    (g, ls)
 }
 pub(crate) fn is_wrapped(t: &str) -> bool {
-    t.ends_with(WRAPPED_CONTAINER_MARK)
+    t.contains(WRAPPED_CONTAINER_MARK)
 }
+/// The `G` of an entry, plain or layered.
 pub(crate) fn strip_wrapped(t: &str) -> &str {
-    t.strip_suffix(WRAPPED_CONTAINER_MARK).unwrap_or(t)
+    t.split(WRAPPED_CONTAINER_MARK).next().unwrap_or(t)
 }
-/// SOUNDNESS R893 — the methods that step from a wrapper-held CONTAINER (a marked entry) to its ELEMENT:
-/// the iterator producers, and the element accessors whose receiver can only be the container. NOT
-/// `get`/`get_mut` (`OnceLock::get`, `Mutex::get_mut` yield the held container itself), `ok` (a
-/// `LockResult`'s guard) or `replace`/`upgrade` — those keep the mark, so nothing binds a `G` there.
-pub(crate) fn steps_into_wrapped_container(method: &str) -> bool {
-    matches!(method, "iter" | "into_iter" | "iter_mut" | "drain" | "values" | "values_mut" | "into_values")
-        || (is_element_yielding_accessor(method) && !matches!(method, "get" | "get_mut" | "ok" | "replace" | "upgrade"))
+/// The layer CODES of a LAYERED entry (`""` for a plain one).
+pub(crate) fn wrapped_layers(t: &str) -> &str {
+    t.split_once(WRAPPED_CONTAINER_MARK).map(|(_, c)| c.split(LAYER_PATH_SEP).next().unwrap_or("")).unwrap_or("")
+}
+/// The same layers over a different `G` (an alias re-expansion of the leaf).
+pub(crate) fn rewrap(t: &str, g: &str) -> String {
+    match t.split_once(WRAPPED_CONTAINER_MARK) {
+        Some((_, rest)) => format!("{g}{WRAPPED_CONTAINER_MARK}{rest}"),
+        None => g.to_string(),
+    }
+}
+/// `e` (plain = one layer `inner`, or layered) under one more std layer `code` on top.
+pub(crate) fn prefix_layer(code: char, inner: char, e: &str) -> String {
+    let (g, mut ls) = decode_layers(e);
+    if ls.is_empty() {
+        ls.push((inner, String::new()));
+    }
+    ls.insert(0, (code, String::new()));
+    encode_layers(g, &ls)
+}
+
+/// What a step or a binder over a LAYERED entry leaves.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Layered {
+    /// No layer left: the value IS `G`.
+    Val(String),
+    /// Layers left: the element entry (plain when one is left) and the type of the new OUTER layer, which
+    /// is what a binder installs as the binding's own type — the same string the one-level route gave it
+    /// before this existed (`for row in grid` bound `row: Vec`).
+    Elem { entry: String, outer: Option<String> },
+}
+
+/// The std type a binding whose outermost layer is `code` has, for `vars`. `None` for `Q`/`I`, which
+/// name no single type.
+pub(crate) fn layer_outer_type(code: char) -> Option<&'static str> {
+    Some(match code {
+        'C' => "Vec",
+        'K' => "std::collections::HashMap",
+        'O' => "Option",
+        'E' => "Result",
+        'M' => "std::sync::Mutex",
+        'R' => "std::cell::RefCell",
+        'L' => "std::sync::OnceLock",
+        _ => return None,
+    })
+}
+
+fn layered_from(g: &str, ls: &[Layer]) -> Layered {
+    match ls.first() {
+        None => Layered::Val(g.to_string()),
+        Some((c, p)) => Layered::Elem {
+            entry: encode_layers(g, ls),
+            outer: if p.is_empty() { layer_outer_type(*c).map(str::to_string) } else { Some(p.clone()) },
+        },
+    }
+}
+
+/// The layer code a std type's LAST segment names, for the layer walk. `None` for anything else.
+fn layer_code_of(leaf: &str) -> Option<char> {
+    if is_sequence_container(leaf) {
+        return Some('C');
+    }
+    if is_map_container(leaf) {
+        return Some('K');
+    }
+    Some(match leaf {
+        "Option" => 'O',
+        "Result" | "IoResult" => 'E',
+        "Mutex" | "RwLock" | "ReentrantMutex" => 'M',
+        "RefCell" => 'R',
+        "OnceLock" | "OnceCell" => 'L',
+        _ => return None,
+    })
+}
+
+/// VEIN B — what a std wrapper's held value must be for `elem_type_b` to record it plain: not a std
+/// container/wrapper/`Option`, and not a std type other than an effect handle.
+pub(crate) fn is_held_nominal(t: &str) -> bool {
+    let leaf = t.rsplit("::").next().unwrap_or(t);
+    !(is_sequence_container(leaf)
+        || is_map_container(leaf)
+        || is_value_wrapper(leaf)
+        || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
+        || (matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
+            && !candor_classify::is_std_effect_handle(t)))
+}
+
+/// The NOMINAL leaf a layer walk may end on: a type the crate can give methods to (or a std effect
+/// handle), never a std container/wrapper, a `String`, or a primitive.
+pub(crate) fn is_layer_leaf(t: &str) -> bool {
+    let leaf = t.rsplit("::").next().unwrap_or(t);
+    is_held_nominal(t)
+        && !(leaf == "Self"
+        || matches!(
+            leaf,
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "f32" | "f64" | "bool" | "char" | "str"
+        ))
+}
+
+/// SOUNDNESS R1023 — the std layers of `ty` down to a nominal leaf: `(codes, leaf, borrowed)`. `None` when
+/// the walk meets anything but a std layer, a transparent pointer, or a nominal leaf. `borrowed` is
+/// R718's question asked along this walk (a map's KEY is not on it).
+pub(crate) fn layer_walk(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(Vec<Layer>, String, bool)> {
+    let push = |code: char, path: String, (mut ls, g, b): (Vec<Layer>, String, bool)| {
+        ls.insert(0, (code, path));
+        (ls, g, b)
+    };
+    match ty {
+        syn::Type::Reference(r) => layer_walk(&r.elem, uses).map(|(c, g, _)| (c, g, true)),
+        syn::Type::Paren(p) => layer_walk(&p.elem, uses),
+        syn::Type::Group(g) => layer_walk(&g.elem, uses),
+        syn::Type::Slice(s) => layer_walk(&s.elem, uses).map(|w| push('C', String::new(), w)),
+        syn::Type::Array(a) => layer_walk(&a.elem, uses).map(|w| push('C', String::new(), w)),
+        syn::Type::Path(p) => {
+            let seg = p.path.segments.last()?;
+            let name = seg.ident.to_string();
+            let tys: Vec<&syn::Type> = match &seg.arguments {
+                syn::PathArguments::AngleBracketed(a) => a
+                    .args
+                    .iter()
+                    .filter_map(|x| match x {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !layer_path_is_std(&p.path, uses) {
+                let (t, b) = type_path_b(ty, uses)?;
+                return is_layer_leaf(&t).then_some((Vec::new(), t, b));
+            }
+            if matches!(name.as_str(), "Box" | "Arc" | "Rc" | "Pin" | "LazyLock" | "LazyCell") {
+                return layer_walk(tys.first()?, uses);
+            }
+            if let Some(code) = layer_code_of(&name) {
+                let inner = if code == 'K' { tys.get(1)? } else { tys.first()? };
+                // The written path, kept only when it is not std's own type (see `LAYER_PATH_SEP`).
+                let full = expand(&path_to_string_lc(&p.path), uses);
+                let root = full.split("::").next().unwrap_or("");
+                let path = if matches!(root, "std" | "core" | "alloc") || !full.contains("::") {
+                    String::new()
+                } else {
+                    full
+                };
+                return layer_walk(inner, uses).map(|w| push(code, path, w));
+            }
+            let (t, b) = type_path_b(ty, uses)?;
+            is_layer_leaf(&t).then_some((Vec::new(), t, b))
+        }
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1023 — whether a written type path may be read as the std layer its LEAF names. Refused only
+/// where the evidence says the name is the crate's OWN type: the written path is one segment and this
+/// module declares it (R482's `Vec<Mutex<T>>` regression control has a local `struct Mutex<T>` whose
+/// `read()` is effectful — reading it as a lock layer typed `self.hs[0]` as `std::sync::Mutex` and dropped
+/// the edge). Every other spelling is read by its leaf, the rule the one-level route has always applied
+/// (`Mutex<G>` records `G` by the segment name): a `use crate::sync::Mutex` over a crate-root `use
+/// std::sync;` (rayon-core) is std's, and refusing it lost R893's element — measured, `inject_broadcast`'s
+/// `invisible: [crossbeam_deque]` disappeared.
+fn layer_path_is_std(path: &syn::Path, uses: &HashMap<String, String>) -> bool {
+    if path.leading_colon.is_some() || path.segments.len() != 1 {
+        return true;
+    }
+    module_declares(uses, &path.segments[0].ident.to_string()) != Some(true)
+}
+
+/// SOUNDNESS R1023 — ONE adapter `method` applied to a LAYERED entry `t`: the transition on its top layer.
+/// `None` for a method this table does not name on that layer (refused, never guessed).
+///
+/// `Q` is the one layer whose identity is not known from the type: std's `lock()` returns a `LockResult`,
+/// `parking_lot`'s and `tokio`'s a guard. `unwrap`/`expect`/`unwrap_or_else`/`ok`/`?` exist only on the
+/// `LockResult` reading (a guard over a non-`Copy` payload cannot be unwrapped by value) and are answered
+/// that way; any other method is the guard's `Deref` target's, so `Q` is popped and the method applied to
+/// what it guards.
+pub(crate) fn layer_step(t: &str, method: &str) -> Option<Layered> {
+    let (g, ls) = decode_layers(t);
+    layer_step_ls(g, &ls, method)
+}
+fn layer_step_ls(g: &str, ls: &[Layer], method: &str) -> Option<Layered> {
+    let top = ls.first()?.0;
+    let rest = &ls[1..];
+    let out = |r: &[Layer]| Some(layered_from(g, r));
+    let same = || Some(layered_from(g, ls));
+    let swap = |c: char| {
+        let mut v = vec![(c, String::new())];
+        v.extend_from_slice(rest);
+        Some(layered_from(g, &v))
+    };
+    let rest_top = rest.first().map(|l| l.0);
+    match top {
+        'M' => match method {
+            "lock" | "read" | "write" | "try_lock" | "try_read" | "try_write" | "blocking_lock" | "blocking_read"
+            | "blocking_write" | "get_mut" | "into_inner" => swap('Q'),
+            _ => None,
+        },
+        'R' => match method {
+            "borrow" | "borrow_mut" | "get_mut" | "into_inner" | "take" => out(rest),
+            "try_borrow" | "try_borrow_mut" => swap('E'),
+            _ => None,
+        },
+        'L' => match method {
+            "get" | "get_mut" | "into_inner" | "take" => swap('O'),
+            "get_or_init" | "wait" | "force" => out(rest),
+            "get_or_try_init" => swap('E'),
+            _ => None,
+        },
+        'Q' => match method {
+            "unwrap" | "expect" | "unwrap_or_else" | "unwrap_unchecked" => out(rest),
+            "ok" => swap('O'),
+            "is_ok" | "is_err" | "err" | "map_err" | "map" | "and_then" | "or_else" => None,
+            // the guard's `Deref`: the method is its target's
+            _ if !rest.is_empty() => layer_step_ls(g, rest, method),
+            _ => None,
+        },
+        'O' => match method {
+            "unwrap" | "expect" | "unwrap_unchecked" | "unwrap_or_default" | "unwrap_or" | "unwrap_or_else"
+            | "insert" | "get_or_insert" | "get_or_insert_with" => out(rest),
+            "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "clone" | "cloned" | "copied" | "take" | "replace"
+            | "filter" | "or" | "or_else" | "xor" | "inspect" | "take_if" => same(),
+            "iter" | "iter_mut" | "into_iter" => swap('I'),
+            "ok_or" | "ok_or_else" => swap('E'),
+            "flatten" if rest_top == Some('O') => out(rest),
+            _ => None,
+        },
+        'E' => match method {
+            "unwrap" | "expect" | "unwrap_unchecked" | "unwrap_or_default" | "unwrap_or" | "unwrap_or_else" => out(rest),
+            "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "clone" | "cloned" | "copied" | "inspect" | "map_err"
+            | "or_else" => same(),
+            "ok" => swap('O'),
+            "iter" | "iter_mut" | "into_iter" => swap('I'),
+            _ => None,
+        },
+        'C' => match method {
+            "iter" | "iter_mut" | "into_iter" | "drain" => swap('I'),
+            "clone" | "as_slice" | "as_mut_slice" | "to_vec" | "as_ref" | "as_mut" => same(),
+            "first" | "last" | "get" | "get_mut" | "first_mut" | "last_mut" | "pop" | "pop_front" | "pop_back"
+            | "front" | "back" | "front_mut" | "back_mut" | "pop_first" | "pop_last" | "pop_if" => swap('O'),
+            _ => None,
+        },
+        'K' => match method {
+            "values" | "values_mut" | "into_values" => swap('I'),
+            "get" | "get_mut" | "remove" => swap('O'),
+            "clone" => same(),
+            _ => None,
+        },
+        'I' => match method {
+            "next" | "next_back" | "nth" | "nth_back" | "last" | "find" | "rfind" | "min" | "max" | "min_by"
+            | "max_by" | "min_by_key" | "max_by_key" | "peek" | "peek_mut" | "reduce" | "next_if" | "next_if_eq" => {
+                swap('O')
+            }
+            "rev" | "take" | "skip" | "step_by" | "peekable" | "by_ref" | "fuse" | "filter" | "take_while"
+            | "skip_while" | "inspect" | "cloned" | "copied" | "iter" | "into_iter" => same(),
+            "flatten" if matches!(rest_top, Some('O' | 'E' | 'C' | 'I')) => {
+                let mut v = vec![('I', String::new())];
+                v.extend_from_slice(&rest[1..]);
+                Some(layered_from(g, &v))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `?`/`*` over a LAYERED entry. `?` pops an `Option`/`Result`/lock result; `*` pops only `Q` (a guard's
+/// `Deref` — every other layer is either transparent to `*` or not dereferenceable).
+pub(crate) fn layer_try(t: &str) -> Option<Layered> {
+    let (g, ls) = decode_layers(t);
+    matches!(ls.first()?.0, 'O' | 'E' | 'Q').then(|| layered_from(g, &ls[1..]))
+}
+pub(crate) fn layer_deref(t: &str) -> Option<Layered> {
+    let (g, ls) = decode_layers(t);
+    match ls.first()?.0 {
+        'Q' => Some(layered_from(g, &ls[1..])),
+        _ => Some(layered_from(g, &ls)),
+    }
+}
+
+/// The binder positions a LAYERED entry can be peeled at, each popping a layer of its own kind only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LayerBinder {
+    /// `for x in e` — a sequence, an iterator, an `Option`/`Result`/lock result (iterating yields the
+    /// payload). NOT a map: its item is a `(K, V)` tuple.
+    For,
+    /// `e[i]` — a sequence or a map's value.
+    Index,
+    /// `Some(x)`
+    Some,
+    /// `Ok(x)`
+    Ok,
+    /// The element parameter of a closure passed to an adapter `method` called ON the entry.
+    Hof,
+}
+
+/// SOUNDNESS R1023 — the binding a `binder` peels out of a LAYERED entry `t`. `None` when the top layer
+/// is not one that binder peels — refused.
+pub(crate) fn layer_bind(t: &str, binder: LayerBinder, method: &str) -> Option<Layered> {
+    let (g, ls) = decode_layers(t);
+    layer_bind_ls(g, &ls, binder, method)
+}
+fn layer_bind_ls(g: &str, ls: &[Layer], binder: LayerBinder, method: &str) -> Option<Layered> {
+    let top = ls.first()?.0;
+    let ok = match binder {
+        LayerBinder::For => matches!(top, 'C' | 'I' | 'O' | 'E' | 'Q'),
+        LayerBinder::Index => matches!(top, 'C' | 'K'),
+        LayerBinder::Some => top == 'O',
+        LayerBinder::Ok => matches!(top, 'E' | 'Q'),
+        LayerBinder::Hof => match top {
+            'I' | 'O' | 'E' => true,
+            // `LockResult::map`/`and_then`/`is_ok_and` receive the guard; any other adapter is the
+            // guarded value's (a `parking_lot` guard's `Deref`), so pop `Q` and ask again.
+            'Q' => {
+                if matches!(method, "map" | "and_then" | "is_ok_and" | "inspect" | "map_or" | "map_or_else") {
+                    true
+                } else {
+                    return layer_bind_ls(g, &ls[1..], binder, method);
+                }
+            }
+            // `Vec::retain(|x| ..)`, `sort_by_key`, … take the element.
+            'C' => matches!(
+                method,
+                "retain" | "retain_mut" | "sort_by_key" | "sort_by_cached_key" | "sort_unstable_by_key"
+                    | "dedup_by_key" | "binary_search_by" | "binary_search_by_key" | "partition_point"
+                    | "extract_if" | "is_sorted_by_key"
+            ),
+            _ => false,
+        },
+    };
+    ok.then(|| layered_from(g, &ls[1..]))
 }
 
 pub(crate) fn is_value_wrapper(name: &str) -> bool {
@@ -8448,8 +8934,14 @@ pub(crate) fn collect_opaque_trait_impls(
                 // obligation-2 index has no spelling for.
                 if foreign_trait_owner_qual(tr, uses).is_none() {
                     if let Some(leaf) = impl_trait_leaf(tr, uses) {
+                        // SOUNDNESS R1034 — the unit is minted under the impl's own key now (`&str` → `str::m`),
+                        // never as the free fn `{modpath}::{m}` it used to merge with.
+                        let key = impl_key_avoiding_free_fns(im, items);
                         for m in &members {
-                            let q = crate::decls::qualify(modpath, m);
+                            let q = match &key {
+                                Some(k) => crate::decls::qualify(modpath, &format!("{k}::{m}")),
+                                None => crate::decls::qualify(modpath, m),
+                            };
                             if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
                                 eprintln!("VEINC_NONNOMINAL\t{leaf}::{m}\t{q}"); // §E1 REACH PROBE
                             }
