@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.1] — 2026-10-08
+
 - ⚠ **A `std::ops::Bound` payload is typed.** `match start { Bound::Included(ref v) | Bound::Excluded(ref v) =>
   v.to_sql(), .. }` over a `Bound<&T>` (`T: ToSql`) left `v` untyped and the dispatch formed no edge (diesel's
   `ranges::to_sql`, executed fixture writes a file). Its 0.40.0 `Unknown` came from the R1034 collision; it now
