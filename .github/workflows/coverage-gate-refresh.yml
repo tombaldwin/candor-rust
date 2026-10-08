@@ -56,6 +56,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # refresh.sh rebuilds the engine at the commit that last wrote the manifests
       - uses: dtolnay/rust-toolchain@stable
 
       # SOUNDNESS R157. This step ran NIGHTLY, not stable, and had never once succeeded: the repo's
@@ -88,41 +90,23 @@ jobs:
           python3 eval/coverage-gate/generate.py --print-fixture-toml > /tmp/coverage-gate-fixture/Cargo.toml
           cd /tmp/coverage-gate-fixture && cargo fetch
 
-      - name: Regenerate covered.tsv / open.tsv against the fresh fetch
+      # ENGINE CHANGE vs CRATES.IO DRIFT (2026-10-08). Regenerate, then regenerate AGAIN with the engine at
+      # the commit that last wrote the manifests (over the same fetch), and split every finding on it — see
+      # `eval/coverage-gate/refresh.sh` and `diff_manifests()`. Run 37608278047 filed 74 "crates.io drift"
+      # rows that were all engine change. One script, so the laptop run and this one cannot drift apart.
+      # `fetch-depth: 0` (checkout above) is what lets it find that commit.
+      - name: Regenerate and diff fresh vs checked-in — engine change vs drift, fail on regression or growth
+        id: diff
         run: |
           REG=$(ls -d ~/.cargo/registry/src/index.crates.io-* | head -1)
-          mkdir -p /tmp/fresh
-          cp eval/coverage-gate/generate.py /tmp/fresh-generate.py
-          python3 eval/coverage-gate/generate.py --registry "$REG"
-          cp eval/coverage-gate/covered.tsv /tmp/fresh/covered.tsv
-          cp eval/coverage-gate/open.tsv /tmp/fresh/open.tsv
-          # restore the checked-in files so `git diff` below is the ONLY source of truth for what changed
-          git checkout -- eval/coverage-gate/covered.tsv eval/coverage-gate/open.tsv
-
-      - name: Diff fresh vs checked-in — fail on regression or growth, report oracle drops separately
-        id: diff
-        # SOUNDNESS R214. This used to be ~50 lines of `comm`/`cut` reimplementing the comparison in
-        # bash — see git history if you need the old spelling. It is now one call into
-        # `eval/coverage-gate/generate.py --diff-manifests`, the SAME script that generated both
-        # manifests, so there is exactly one place that knows what `entry`, `covered`, and `open` mean
-        # (Ask the authority, never reimplement it). It prints a labelled report to this step's own log
-        # (regressed / oracle-dropped / newly-uncovered, plus the R212 platform caveat whenever there is
-        # anything to report — see that function's docstring for why the split matters and why the
-        # platform question stays open) and exits 1 only for `regressed` or `grown`; `oracle_dropped`
-        # reaches this step's log as a `::warning::` annotation (visible in the Actions run summary even
-        # on an otherwise-green run) and is written to $GITHUB_OUTPUT, but never fails the job by itself.
-        run: |
-          python3 eval/coverage-gate/generate.py --diff-manifests \
-            eval/coverage-gate/covered.tsv /tmp/fresh/covered.tsv \
-            eval/coverage-gate/open.tsv /tmp/fresh/open.tsv \
-            --github-output "$GITHUB_OUTPUT"
+          bash eval/coverage-gate/refresh.sh "$REG" /tmp/cg "$GITHUB_OUTPUT"
 
       - name: Upload fresh manifests
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-gate-fresh-manifests
-          path: /tmp/fresh/*.tsv
+          path: /tmp/cg/*/*.tsv
           if-no-files-found: warn
 
       - name: On drift, open a tracking issue
@@ -131,10 +115,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "A fresh \`cargo fetch\` against live crates.io shifted the coverage-gate differential:"
+            echo "A fresh regeneration shifted the coverage-gate differential (attribution below):"
             echo ""
             echo "- **regressed** (classify() no longer resolves this entry, and self-scan STILL nominates it — a real coverage loss): ${{ steps.diff.outputs.regressed }}"
-            echo "- **newly uncovered** (crates.io drift introduced a public entry point no rule recognizes): ${{ steps.diff.outputs.grown }}"
+            echo "- **newly uncovered** (a public entry point no rule recognizes): ${{ steps.diff.outputs.grown }} — of which **engine change** (our scanner/classify moved since the manifest; the manifest's own engine does not see them on this same fetch): ${{ steps.diff.outputs.grown_engine }}, **crates.io drift** (the manifest's own engine sees them too): ${{ steps.diff.outputs.grown_drift }}"
+            echo "- regressed split: engine ${{ steps.diff.outputs.regressed_engine }}, drift ${{ steps.diff.outputs.regressed_drift }}"
             echo ""
             echo "Not counted above and NOT why this issue was filed (SOUNDNESS R214) — reported here only"
             echo "for visibility, since it was also a \`::warning::\` in the job log: ${{ steps.diff.outputs.oracle_dropped }} entries where the self-scan candidate oracle itself stopped nominating the row (its inferred effect set went empty or narrowed to a non-CORE effect — e.g. a drop-glue over-charge correctly withdrawn from the scanner, the async_nats/e9cdd23 instance this distinction was written for). If that count is large, or concentrated entirely in one crate, check the earlier 'self-scan FAILED' log lines before assuming it is benign — it can also mean that crate's self-scan errored out this run."
@@ -151,7 +136,7 @@ jobs:
             echo "Regenerate locally (\`python3 eval/coverage-gate/generate.py --print-fixture-toml | ...\`, see that file's USAGE) and either add a classify.rs rule, list a genuinely-pure entry in REVIEWED_PURE_ENTRIES, or fold the new row into open.tsv after triage."
           } > /tmp/issue-body.md
           gh issue create \
-            --title "coverage-gate: crates.io drift changed the CALIBRATED_CRATES differential" \
+            --title "coverage-gate: the CALIBRATED_CRATES differential moved (engine ${{ steps.diff.outputs.grown_engine }} / drift ${{ steps.diff.outputs.grown_drift }})" \
             --label automated,coverage-gate \
             --body-file /tmp/issue-body.md 2>/tmp/issue.err \
             || {

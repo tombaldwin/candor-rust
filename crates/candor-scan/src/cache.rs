@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev79: SOUNDNESS R1056 — Pass B types a slice/array/tuple receiver into the crate's own impl for it
+    // (cached `calls` change). Mandatory.
+    // rev78: SOUNDNESS R1034 (residual) — `FileDecls` gained `nonpath_receivers`; R529c — `block_fields` /
+    // `block_field_elem`; R1004 — local macros' inherent impls are spliced. A rev77 entry deserializes the
+    // new fields EMPTY and replays the silences warm. Mandatory.
     // rev77: `std::ops::Bound` payloads are typed (field_elem/elem_of record its argument). Mandatory.
     // rev76: an associated fn through its trait no longer names its implementor from its first argument;
     // R1036's guard peel narrowed to std. Pass B `calls` change. Mandatory.
@@ -415,7 +420,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev77/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev79/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -452,6 +457,14 @@ pub(crate) struct FileDecls {
     #[serde(default)]
     pub(crate) field_borrows: HashMap<String, HashMap<String, crate::model::FieldBorrow>>,
     pub(crate) field_elem: FieldElemIndex,
+    /// SOUNDNESS R529c — `fields`/`field_elem` for the structs this file declares INSIDE A BLOCK
+    /// (`lang::collect_block_local_structs`). NOT merged into `fields` per file: `fields` is keyed by type
+    /// LEAF crate-wide, so a body-local `H` would retype every module-level `H` receiver. Scan joins them
+    /// after the whole crate is merged, and only for a leaf nothing else declares (`join_block_local_fields`).
+    #[serde(default)]
+    pub(crate) block_fields: FieldIndex,
+    #[serde(default)]
+    pub(crate) block_field_elem: FieldElemIndex,
     /// `Type -> { field -> element dispatch leaves }` for a COLLECTION-OF-TRAIT-OBJECTS field (R37 field form).
     #[serde(default)]
     pub(crate) field_elem_trait: FieldElemTraitIndex,
@@ -630,6 +643,10 @@ pub(crate) struct FileDecls {
     /// implementor can be reached, which a hedge would only disclose. See `lang::collect_opaque_trait_impls`.
     #[serde(default)]
     pub(crate) nonnominal_impls: Vec<String>,
+    /// SOUNDNESS R1034 (residual) — `"{referent}::{method}\u{1f}{unit qual}"` for a non-path impl whose
+    /// methods are filed under the module path. See `lang::collect_nonpath_receivers`.
+    #[serde(default)]
+    pub(crate) nonpath_receivers: Vec<String>,
     /// SOUNDNESS R598 — the EVIDENCE about which members this file's `impl Trait for Ty` blocks declare
     /// (`lang::collect_local_impl_members`; three key shapes, `model::impl_seen_key`). A pre-rev41 entry
     /// deserializes EMPTY, which reads as "no evidence" and restores the pre-fix over-approximation for
@@ -686,6 +703,62 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut dyn_trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases, &mut field_borrows);
+    // SOUNDNESS R529c — the block-local structs' fields, typed by the SAME struct arm against the file's
+    // top-level `use` map, into their own maps; every other output of this second walk is discarded.
+    let mut block_fields: FieldIndex = HashMap::new();
+    let mut block_field_elem: FieldElemIndex = HashMap::new();
+    {
+        let locals = crate::lang::collect_block_local_structs(items, include_tests);
+        // A leaf declared in TWO blocks of this file is contested before the crate join even looks:
+        // `collect_decls` would merge the two field maps into one entry, so it is dropped here.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for it in &locals {
+            if let syn::Item::Struct(st) = it {
+                *seen.entry(st.ident.to_string()).or_default() += 1;
+            }
+        }
+        if !locals.is_empty() {
+            // Throwaways: only `block_fields` / `block_field_elem` are kept. A field typed by ANOTHER
+            // block-local struct's name is bound to that struct's sentinel spelling, as its body sees it.
+            let mut u = uses.clone();
+            for k in seen.keys() {
+                u.insert(k.clone(), format!("{}{k}", crate::decls::ITEM_SENTINEL));
+            }
+            let mut cal = callable_aliases.clone();
+            let mut twins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let (mut fet, mut rets_, mut enum_, mut evt, mut timpl, mut tdecl, mut tf, mut dtf) = (
+                HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(),
+                HashMap::new(), HashMap::new(), HashMap::new());
+            let (mut prim, mut ext, mut drops, mut lazy, mut stat) = (
+                std::collections::HashSet::new(), std::collections::HashSet::new(),
+                std::collections::HashSet::new(), std::collections::HashSet::new(),
+                std::collections::HashSet::new());
+            let (mut deref, mut consts, mut lmac, mut blanket, mut fbor) =
+                (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+            collect_decls(&locals, include_tests, &mut u, &mut block_fields, &mut block_field_elem, &mut fet,
+                          &mut rets_, &mut enum_, &mut evt, &mut timpl, &mut tdecl, &mut tf, &mut dtf, &mut prim,
+                          &mut ext, &mut drops, &mut deref, &mut lazy, &mut consts, &mut lmac, &mut twins,
+                          &mut blanket, &mut stat, &mut cal, &mut fbor);
+            block_fields.retain(|k, _| seen.get(k) == Some(&1));
+            block_field_elem.retain(|k, _| seen.get(k) == Some(&1));
+            // Keyed as the BODY sees the name: R106 rebinds a body-declared item to `ITEM_SENTINEL + name`
+            // in that body's `use` map, so a receiver of the body-local struct types as `<body-item>H`, a
+            // key no module-level `H` can share. The sentinel is what keeps this out of the leaf collision.
+            let tag = |m: &mut HashMap<String, HashMap<String, String>>| {
+                *m = std::mem::take(m)
+                    .into_iter()
+                    .map(|(k, v)| (format!("{}{k}", crate::decls::ITEM_SENTINEL), v))
+                    .collect();
+            };
+            tag(&mut block_fields);
+            tag(&mut block_field_elem);
+            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                for k in block_fields.keys() {
+                    eprintln!("R529CFIELDS\t{modpath}\t{k}"); // §E1 REACH PROBE
+                }
+            }
+        }
+    }
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
     // an external `pub use`. `uses` is this file's top-level `use` map, as `collect_decls` left it, so a
@@ -750,6 +823,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut nonnominal: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_opaque_trait_impls(
         items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal);
+    let mut nonpath_receivers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    crate::lang::collect_nonpath_receivers(items, include_tests, modpath, &mut nonpath_receivers); // R1034
     extern_fns.extend(nested_externs);
     // R598 — which members each `impl Trait for Ty` block actually declares. Walked beside the two
     // above for the same reason and over the same `items`: `collect_decls` records the CHA edge and
@@ -760,6 +835,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     FileDecls {
         fields,
         field_borrows,
+        block_fields,
+        block_field_elem,
         field_elem,
         field_elem_trait,
         rets,
@@ -854,6 +931,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
         nonnominal_impls: nonnominal.into_iter().collect(),
+        nonpath_receivers: nonpath_receivers.into_iter().collect(),
         // R598 — same determinism requirement, same reason.
         impl_members: impl_members.into_iter().collect(),
         ts: crate::typesurf::collect_file(items, modpath, include_tests),
@@ -949,6 +1027,8 @@ pub(crate) struct MergedDecls {
     pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
     /// R828 — every file's `FileDecls::nonnominal_impls`, unioned.
     pub(crate) nonnominal_impls: std::collections::HashSet<String>,
+    /// R1034 — every file's `FileDecls::nonpath_receivers`, unioned.
+    pub(crate) nonpath_receivers: std::collections::HashSet<String>,
     /// SOUNDNESS R598 — every file's IMPL-MEMBER EVIDENCE, unioned. See `FileDecls::impl_members` and
     /// `model::impl_seen_key`. Union is the right merge in both directions: two files can write two
     /// `impl Tr for Ty` blocks for two different `Ty`s under one leaf, and a file that cannot read its
@@ -1306,6 +1386,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.nonnominal_impls {
         acc.nonnominal_impls.insert(n.clone()); // set union — order-independent (R828)
     }
+    for n in &fd.nonpath_receivers {
+        acc.nonpath_receivers.insert(n.clone()); // set union — order-independent (R1034)
+    }
     for n in &fd.nested_impl_members {
         acc.nested_impl_members.insert(n.clone()); // set union — order-independent (R529)
     }
@@ -1643,6 +1726,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         ("nested_impl_members", &m.nested_impl_members),
         ("nested_impl_foreign", &m.nested_impl_foreign),
         ("nonnominal_impls", &m.nonnominal_impls),
+        ("nonpath_receivers", &m.nonpath_receivers),
         ("impl_members", &m.impl_members),
     ] {
         s.push_str(label);

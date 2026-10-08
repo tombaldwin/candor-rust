@@ -3356,6 +3356,18 @@ pub(crate) fn cfg_cell() -> &'static std::sync::RwLock<FeatureSets> {
     CFG_FEATURES.get_or_init(|| std::sync::RwLock::new((Default::default(), Default::default())))
 }
 
+/// SOUNDNESS R1056 — the `{key}::{method}` tails of the crate's impls on a SLICE / ARRAY / TUPLE self type
+/// (`[u8]::enc`, `[u8;_]::ar`, `(u8,u8)::pr`), installed once per `scan_one` before Pass B, which reads it
+/// to type a receiver the collector otherwise leaves untyped (see `CallCollector::nonpath_recv_calls`).
+/// Crate-wide on purpose, the same way `CFG_FEATURES` is: it is read deep inside the collector, and the
+/// decl-index digest already folds `nonpath_receivers` in, so a warm Pass B cannot replay a stale answer.
+pub(crate) static NONPATH_RECV_TAILS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn nonpath_recv_cell() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    NONPATH_RECV_TAILS.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
 /// Install the active/declared feature sets for the crate about to be scanned (called once per `scan_one`,
 /// which runs sequentially per workspace member, before its parallel Pass B reads them).
 pub(crate) fn set_cfg_features(f: FeatureSets) {
@@ -5638,6 +5650,56 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
         }
         syn::visit::visit_item_foreign_mod(self, fm);
     }
+}
+
+/// SOUNDNESS R529c — every `struct` declared INSIDE A BLOCK (a fn body, a method, a `const` initializer),
+/// cloned out as items so `collect_decls`' own struct arm can type its fields — one authority for how a
+/// field's type is read, not a second copy. Pass A's decl walk recurses through `Item::Mod` and nothing
+/// else, so `fn f() { struct H { c: Inner } let h = H { c: Inner }; h.c.go(); }` had no `fields` entry for
+/// `H`, `h.c` typed to nothing, and the caller read PURE over `Inner::go`'s write. A module (`mod`) inside a
+/// block is not entered: its items see that module's own imports, which this walk does not assemble.
+pub(crate) fn collect_block_local_structs(items: &[syn::Item], include_tests: bool) -> Vec<syn::Item> {
+    struct W {
+        include_tests: bool,
+        depth: usize,
+        out: Vec<syn::Item>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for W {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            self.depth += 1;
+            syn::visit::visit_block(self, b);
+            self.depth -= 1;
+        }
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            if self.depth > 0 || (!self.include_tests && is_cfg_test(&m.attrs)) {
+                return;
+            }
+            syn::visit::visit_item_mod(self, m);
+        }
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if !self.include_tests && (is_cfg_test(&f.attrs) || is_test_attr_fn(&f.attrs)) {
+                return;
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+        fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
+            if !self.include_tests && is_cfg_test(&im.attrs) {
+                return;
+            }
+            syn::visit::visit_item_impl(self, im);
+        }
+        fn visit_item_struct(&mut self, st: &'ast syn::ItemStruct) {
+            if self.depth > 0 && (self.include_tests || !is_cfg_test(&st.attrs)) {
+                self.out.push(syn::Item::Struct(st.clone()));
+            }
+            syn::visit::visit_item_struct(self, st);
+        }
+    }
+    let mut w = W { include_tests, depth: 0, out: Vec::new() };
+    for it in items {
+        syn::visit::Visit::visit_item(&mut w, it);
+    }
+    w.out
 }
 
 /// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
@@ -8986,6 +9048,114 @@ pub(crate) fn collect_opaque_trait_impls(
                             continue;
                         }
                         record(&p, &["*".to_string()], uses, local, foreign, "derive");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1034 (residual) — THE RECEIVER A NON-PATH IMPL'S METHODS ANSWER TO. A non-path self type
+/// that collides with no free fn keeps the module-level qual it always had (`{modpath}::{m}`; see
+/// `impl_key_avoiding_free_fns` for why it is not re-keyed), and a qual with no type segment is a key no
+/// receiver-typed call can spell: `s.encode()` on `s: &str` is typed `str::encode`, `f.tk()` on `f: &Foo`
+/// (or `f: Foo`, by autoref) is typed `Foo::tk`, and neither matched anything, so the caller read PURE over
+/// an impl body that wrote a file. This records, per such method, `"{referent}::{m}\u{1f}{unit qual}\u{1f}{0|1}"`
+/// (the last field: 1 when several non-path impls of the module merge into that qual) —
+/// the REFERENT is the self type with its references peeled (`&'a str` → `str`, `&mut Foo` → `Foo`), which is
+/// the spelling the receiver typing produces. Pass B admits it as a by_tail2 FALLBACK only where no
+/// definition already claims that tail, so it can supply an edge and never displace or split an existing one.
+///
+/// Not recorded: a referent that is not a plain path (a slice, array, tuple — the receiver typing does not
+/// type those, so no typed call could use the entry; they stay the residual), and a referent that is one of
+/// the impl's OWN type parameters (`impl<T: Tr> Tr for &T` forwards to `T`'s implementor; it names no
+/// receiver of its own).
+pub(crate) fn collect_nonpath_receivers(
+    items: &[syn::Item],
+    include_tests: bool,
+    modpath: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977
+                    let sub_mod = crate::decls::qualify(modpath, &m.ident.to_string());
+                    collect_nonpath_receivers(inner, include_tests, &sub_mod, out);
+                }
+            }
+            syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                if impl_key_avoiding_free_fns(im, items).is_some() {
+                    continue; // a path self type, or a colliding one already keyed under its own type
+                }
+                // How many non-path impl blocks of THIS module file a method of this name under the one
+                // module-level qual: more than one means the unit is a MERGE of distinct bodies (`impl Enc
+                // for &str` beside `impl Enc for &[u8]`), and an edge to it would charge one impl's effect
+                // to a receiver that runs the other. Such an entry is marked SHARED and Pass B discloses
+                // instead of edging.
+                let shared_count = |m: &str| {
+                    items.iter().filter(|o| match o {
+                        syn::Item::Impl(oi) if (include_tests || !is_cfg_test(&oi.attrs))
+                            && impl_key_avoiding_free_fns(oi, items).is_none() =>
+                        {
+                            oi.items.iter().any(|x| matches!(x, syn::ImplItem::Fn(f) if f.sig.ident == m))
+                        }
+                        _ => false,
+                    }).count()
+                };
+                let mut t: &syn::Type = &im.self_ty;
+                loop {
+                    t = match t {
+                        syn::Type::Reference(r) => &r.elem,
+                        syn::Type::Paren(p) => &p.elem,
+                        syn::Type::Group(g) => &g.elem,
+                        _ => break,
+                    };
+                }
+                // SOUNDNESS R1056 — a SLICE / ARRAY / TUPLE referent is keyed the way `impl_unit_type_name`
+                // spells it (`[u8]`, `[u8;_]`, `(u8,u8)`), which is also what the collector builds from a
+                // receiver's element / per-position types. A key naming one of the impl's OWN parameters
+                // (`impl<T: Tr> Tr for [T]`) is a forwarder over T's implementors, not a receiver, and is skipped.
+                if matches!(t, syn::Type::Slice(_) | syn::Type::Array(_) | syn::Type::Tuple(_)) {
+                    let Some(key) = impl_unit_type_name(t, &im.generics) else { continue };
+                    let own = |k: &str| im.generics.type_params().any(|p| {
+                        let id = p.ident.to_string();
+                        k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
+                    });
+                    if own(&key) {
+                        continue;
+                    }
+                    for ii in &im.items {
+                        if let syn::ImplItem::Fn(f) = ii {
+                            if !include_tests && is_cfg_test(&f.attrs) {
+                                continue;
+                            }
+                            let m = f.sig.ident.to_string();
+                            let shared = if shared_count(&m) > 1 { "1" } else { "0" };
+                            out.insert(format!("{key}::{m}\u{1f}{}\u{1f}{shared}", crate::decls::qualify(modpath, &m)));
+                        }
+                    }
+                    continue;
+                }
+                let syn::Type::Path(tp) = t else { continue };
+                if tp.qself.is_some() {
+                    continue;
+                }
+                let Some(seg) = tp.path.segments.last() else { continue };
+                let referent = seg.ident.to_string();
+                if im.generics.type_params().any(|p| p.ident == seg.ident) {
+                    continue; // `impl<T> Tr for &T` — a forwarder, not a receiver
+                }
+                for ii in &im.items {
+                    if let syn::ImplItem::Fn(f) = ii {
+                        if !include_tests && is_cfg_test(&f.attrs) {
+                            continue;
+                        }
+                        let m = f.sig.ident.to_string();
+                        let shared = if shared_count(&m) > 1 { "1" } else { "0" };
+                        out.insert(format!("{referent}::{m}\u{1f}{}\u{1f}{shared}", crate::decls::qualify(modpath, &m)));
                     }
                 }
             }

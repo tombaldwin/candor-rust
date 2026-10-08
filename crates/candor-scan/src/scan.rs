@@ -1541,6 +1541,51 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
+    // `lang::NONPATH_RECV_TAILS`; installed here, after the last merge and before any Pass B collection.
+    {
+        let tails: HashSet<String> = merged
+            .nonpath_receivers
+            .iter()
+            .filter_map(|e| e.split('\u{1f}').next())
+            .filter(|t2| t2.starts_with('[') || t2.starts_with('('))
+            .map(str::to_string)
+            .collect();
+        *crate::lang::nonpath_recv_cell().write().unwrap() = tails;
+    }
+    // SOUNDNESS R529c — JOIN THE BLOCK-LOCAL STRUCTS' FIELDS. A struct declared inside a fn body was in no
+    // `fields` entry, so `h.c.go()` through it typed to nothing and the caller read PURE over a module-level
+    // `Inner::go` that writes. The entries are keyed `<body-item>H` (R106's sentinel — the spelling the body's
+    // own receivers type as), so they can never meet a module-level `H`: the leaf collision the row named as
+    // the reason not to fix it is absent by construction. What remains is TWO block-local `H`s in the crate,
+    // which share the sentinel key; a key more than one declaration claims is left out (unchanged from
+    // before — the residual), never merged. Run after the R99 re-merge, which rebuilds `merged` from scratch.
+    {
+        let mut claims: HashMap<&str, usize> = HashMap::new();
+        for (_, _, fd) in &decls_per_file {
+            for k in fd.block_fields.keys() {
+                *claims.entry(k.as_str()).or_default() += 1;
+            }
+        }
+        type FieldMap = HashMap<String, String>;
+        let mut joined: Vec<(String, FieldMap, Option<FieldMap>)> = Vec::new();
+        for (_, _, fd) in &decls_per_file {
+            for (k, m) in &fd.block_fields {
+                if claims.get(k.as_str()) == Some(&1) {
+                    joined.push((k.clone(), m.clone(), fd.block_field_elem.get(k).cloned()));
+                }
+            }
+        }
+        for (k, m, e) in joined {
+            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                eprintln!("R529CJOIN\t{k}"); // §E1 REACH PROBE
+            }
+            merged.fields.insert(k.clone(), m);
+            if let Some(e) = e {
+                merged.field_elem.insert(k, e);
+            }
+        }
+    }
     // SOUNDNESS R476 — the crate-wide half of the impl-bound-generic-field join, run BEFORE the digest
     // so the hash is taken over the index resolution actually reads (it is a pure function of the
     // merged map either way, but hashing the pre-image would be hashing something no consumer sees).
@@ -2303,11 +2348,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // already claims it — so this can supply a resolution and can never turn an existing unique one
     // into an ambiguity.
     // SOUNDNESS R986 — the crate's path-redirected modules (see `decls::REDIRECT_MOD_MARK`).
-    let redirect_mods: Vec<String> = merged
+    // Ordered MOST SPECIFIC first (longest, then lexical): the consumer takes the first module a path is
+    // under, and `mod_aliases` is a HashMap, so in key order a path under both `crate::backend` and
+    // `crate::backend::libc::c` named either one run to run (measured on rustix-0.37.11: the published
+    // binary printed both reasons across four runs of the same tree).
+    let mut redirect_mods: Vec<String> = merged
         .mod_aliases
         .keys()
         .filter_map(|k| k.strip_prefix(crate::decls::REDIRECT_MOD_MARK).map(String::from))
         .collect();
+    redirect_mods.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     let mut alias_tails: Vec<(String, String)> = Vec::new();
     for (q, t) in &merged.mod_aliases {
         if t.contains(crate::decls::ALIAS_ALT_SEP) {
@@ -2347,6 +2397,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 slot.insert(v);
             }
+        }
+    }
+    // SOUNDNESS R1034 (residual) — A NON-PATH IMPL'S METHODS ANSWER TO THEIR REFERENT'S RECEIVER. `impl Encode
+    // for &str` (no colliding free fn) files `encode` under the module path, so `s.encode()` — typed
+    // `str::encode` — and `f.tk()` on a `&Foo`/`Foo` receiver — typed `Foo::tk` — matched no tail and the
+    // caller read PURE over a body that writes. The referent tail is ADDED only where no definition already
+    // claims it (VEIN A's discipline above), and only where the unit it names exists, so it can supply an
+    // edge and never displace a unique resolution or split one into an ambiguity. `nonpath_tails` admits the
+    // tail to `resolvable` without putting `str` in `local_types`, which would re-route EVERY typed `str`
+    // call in the crate. Two modules both implementing the member for one referent leave the tail with two
+    // claimants, which `resolve_target` refuses and R451 (a) discloses `ambiguous:` — never a pick.
+    let mut nonpath_tails: HashSet<String> = HashSet::new();
+    let mut nonpath_shared: HashSet<String> = HashSet::new();
+    {
+        let have: HashSet<&str> = fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias).map(|f| f.qual.as_str()).collect();
+        let mut adds: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for e in &merged.nonpath_receivers {
+            let mut parts = e.split('\u{1f}');
+            let (Some(t2), Some(q), Some(shared)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            if by_tail2.contains_key(t2) || !have.contains(q) {
+                continue;
+            }
+            if shared == "1" {
+                // The unit is a MERGE of several impls' bodies: an edge would charge a sibling's effect
+                // to this receiver. Disclose at the call site instead (`nonpath_shared`).
+                nonpath_shared.insert(t2.to_string());
+                continue;
+            }
+            let v = adds.entry(t2.to_string()).or_default();
+            if !v.iter().any(|x| x == q) {
+                v.push(q.to_string());
+            }
+        }
+        for (t2, v) in adds {
+            if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                eprintln!("R1034RECV\t{t2}\t{}", v.join(",")); // §E1 REACH PROBE
+            }
+            nonpath_tails.insert(t2.clone());
+            by_tail2.insert(t2, v);
         }
     }
     // ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf) -> the in-scope fns that DIRECTLY dispatch
@@ -3493,10 +3582,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // Command`) no longer contributing its edge: `by_tail2` keys BOTH that impl and a
                 // local `struct Command`'s method as `Command::spawn`, so honouring one means
                 // guessing between them — the collision the `resolved_local` guard exists to refuse.
-                !matches!(c.path.split("::").next().unwrap_or(""), "std" | "core" | "alloc")
-                    && tail2(&c.path)
+!matches!(c.path.split("::").next().unwrap_or(""), "std" | "core" | "alloc")
+                    && (tail2(&c.path)
                         .and_then(|t2| t2.split("::").next().map(str::to_string))
                         .is_some_and(|ty| local_types.contains(&ty))
+                        // R1034 (residual) — a non-path impl's referent tail (`str::encode`), admitted
+                        // by its exact tail only; see `nonpath_tails`.
+                        || tail2(&c.path).is_some_and(|t2| nonpath_tails.contains(&t2)))
             } else {
                 !matches!(cr, "std" | "core" | "alloc")
             };
@@ -4425,6 +4517,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // call exactly when its own answer was not itself `Unknown`.
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf
                 || (dep_join_hit && !dep_join_unknown);
+            // SOUNDNESS R1034 (residual) — a typed call whose tail names a non-path impl MERGED with a sibling
+            // impl under one module-level qual (`nonpath_shared`): which body runs is the receiver's, and
+            // the unit cannot say which. Disclosed as the name-resolution ambiguity it is.
+            if !already_handled && !c.is_macro && c.method && c.typed
+                && tail2(&c.path).is_some_and(|t2| nonpath_shared.contains(&t2))
+            {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local methods".to_string());
+                if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                    eprintln!("R1034SHARED\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+                }
+            }
             // ── SOUNDNESS R986 — A CALL THROUGH A PATH-REDIRECTED MODULE THAT RESOLVED TO NOTHING ──────
             // rustix `#[cfg_attr(libc, path = "backend/libc/mod.rs")] mod backend;`: the crate writes
             // `crate::backend::c::timerfd_create`, this scanner placed the file at `backend::libc::c`, and
@@ -4538,6 +4642,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
                             eprintln!("R501MARK\tMACRO\t{}\t{}", f.qual, c.path);
+                        }
+                    }
+                }
+            }
+            // SOUNDNESS R1004 (trait-impl residual) — R452 (b)'s condition, for the PATH spelling. A
+            // `macro_rules!`-generated TRAIT impl stays unexpanded (`mbe::Ctx::splice`), so `Y::tm(&y)` —
+            // an associated-fn path call on a type this crate declares beside a hidden item, naming a `fn`
+            // written inside unexpanded macro text — has no claimant and read PURE, while `y.tm()` already
+            // disclosed `macro:` through (b). Same two conjuncts, same evidence; only the call shape differs.
+            if !c.is_macro && !c.method && !already_handled && c.path.contains("::") {
+                if let Some(t2) = tail2(&c.path) {
+                    let ty = t2.split("::").next().unwrap_or("").to_string();
+                    if !by_tail2.contains_key(&t2)
+                        && merged.macro_hidden_types.contains(&ty)
+                        && merged.macro_hidden_fns.contains(&c.leaf)
+                    {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("macro:module items hidden by an unexpanded macro".to_string());
+                        if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                            eprintln!("R1004PATH\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
                         }
                     }
                 }

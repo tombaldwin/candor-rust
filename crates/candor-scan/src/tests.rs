@@ -7231,8 +7231,11 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } } } defit!(); }\n\
                    use crate::hidden::T;\n\
                    pub fn go(p: &str) -> bool { T::spawn(p) }\n";
-        assert_eq!(fixture_effects(&scan_fixture("r128assoc", src), "go"), Vec::<String>::new(),
-                   "STATED LIMIT, not a desired behaviour: a macro-declared `impl` is still silent");
+        // SOUNDNESS R1004 (impl residual) CLOSED this limit for a macro this crate defines once: the inherent
+        // impl is spliced and `T::spawn` is a unit, so `go` inherits the real `Exec`. The stated under-report
+        // survives only where the expansion is refused (cfg twins, an unreadable matcher).
+        assert_eq!(fixture_effects(&scan_fixture("r128assoc", src), "go"), vec!["Exec".to_string()],
+                   "R1004: a macro-declared inherent `impl` is expanded and reached");
     }
 
     /// SOUNDNESS R340 — SERIALISES EVERY FIXTURE SCAN IN THIS BINARY.
@@ -11312,8 +11315,12 @@ pub fn uniq(r: &Reg) { r.only().deregister(3); }\n";
         // to be asked of, and no `crate::` head either. Wiring R128 to method calls was therefore
         // impossible; the fix needed a new index keyed on the TYPE (`macro_hidden_types`) and a second
         // keyed on the `fn` names the macro text mentions (`macro_hidden_fns`).
+        // R1004 (impl residual) now EXPANDS a macro this crate defines once, so the hidden impl must be one the
+        // expander REFUSES — `#[cfg]` twins with different bodies — for the R452 hedge to be what answers.
+        // The once-defined spelling resolving to the real `Exec` is asserted at the end.
         let src = "\
-macro_rules! os_only { ($($it:item)*) => { $($it)* }; }\n\
+#[cfg(unix)] macro_rules! os_only { ($($it:item)*) => { $($it)* }; }\n\
+#[cfg(not(unix))] macro_rules! os_only { ($($it:item)*) => { }; }\n\
 pub struct Sel;\n\
 os_only! {\n\
   impl Sel { pub fn deregister(&self, _fd: i32) { let _ = std::process::Command::new(\"true\").status(); } }\n\
@@ -11343,6 +11350,11 @@ pub fn ctl(s: &Seen) { s.visible(); }\n";
         assert!(fixture_effects(&v, "ctl").is_empty(),
                 "the over-disclosure control: a READABLE method on a type declared in the same \
                  macro-hidden module must not hedge:\n{v:#}");
+        // R1004 — defined ONCE, the macro's inherent impl is spliced and the hedge gives way to the effect.
+        let once = src.replacen("#[cfg(unix)] macro_rules!", "macro_rules!", 1)
+            .replacen("#[cfg(not(unix))] macro_rules! os_only { ($($it:item)*) => { }; }\n", "", 1);
+        let v = scan_fixture("r452once", &once);
+        assert_eq!(fixture_effects(&v, "bare"), vec!["Exec".to_string()], "R1004: the expanded impl is reached:\n{v:#}");
     }
 
     #[test]
@@ -15221,6 +15233,8 @@ trait G {
             nested_impl_foreign => |m| { m.nested_impl_foreign.insert("iface#backend::Backend::size".into()); },
             // SOUNDNESS R828: a non-nominal implementor's unit, which a dispatch now edges to.
             nonnominal_impls => |m| { m.nonnominal_impls.insert("T5::go\u{1f}go".into()); },
+            // SOUNDNESS R1034 (residual): a non-path impl's receiver alias, which a typed call now edges to.
+            nonpath_receivers => |m| { m.nonpath_receivers.insert("str::encode\u{1f}encode".into()); },
             // SOUNDNESS R598: WHICH members an `impl Trait for Ty` block declares. It decides whether
             // `{ty}::{method}` is read as that trait's implementation at all, so a file gaining or
             // losing an impl member changes what the interface-union publishes for the whole crate.
@@ -16810,6 +16824,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
         // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
         // R979/R980 bumped it to rev63 (generic-accessor returns and pinned receivers are typed).
+        // R1034 (residual)/R529c/R1004 (impls) bumped it to rev78 (`FileDecls` gained `nonpath_receivers` and
+        // `block_fields`, and local macros' inherent impls are spliced — a rev77 entry replays each silence warm).
         // R977/R978 bumped it to rev62 (a feature-gated item keeps its nested feature arms; a smart-pointer
         // type alias records its pointee — a rev61 entry replays both silences warm).
         // R817/R949 bumped it to rev61 (a runtime-string `bind` sets the cached call's `path_lits_partial`;
@@ -16842,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16853,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev77/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev79/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26038,6 +26054,147 @@ impl<'a> Desc for &'a str { fn lookup(self) -> u8 { 0 } }\n\
 pub fn via<T: Desc>(t: T) -> u8 { t.lookup() }\n";
         let v = scan_fixture("r1034tuple", src2);
         assert!(fixture_effects(&v, "via").contains(&"Fs".to_string()), "the tuple impl stays a candidate:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1034 (residual) — with NO colliding free fn the non-path impl keeps the module-level qual, and
+    /// a receiver-typed call could not reach it: `s.encode()` on `&str` types as `str::encode`, `f.tk()` on
+    /// `&Foo`/`Foo` (autoref) as `Foo::tk`, and both callers were ABSENT. EXECUTED (scratchpad
+    /// `rustagent-v043/fx1034`, `fx1034b`): every caller below wrote its marker. The second half is the
+    /// over-charge control, executed first: where TWO non-path impls of one module merge into the qual, the
+    /// receiver runs only ITS impl (`via_str` wrote nothing), so the call discloses rather than edges.
+    #[test]
+    fn r1034_a_non_path_impl_answers_its_referent_receiver() {
+        let src = "\
+pub trait Encode { fn encode(&self) -> u8; }\n\
+impl<'a> Encode for &'a str { fn encode(&self) -> u8 { std::fs::write(\"/tmp/a\", b\"x\").ok(); 1 } }\n\
+pub fn via_str(s: &str) -> u8 { s.encode() }\n\
+pub struct Foo;\n\
+pub trait Tk { fn tk(self) -> u8; }\n\
+impl<'a> Tk for &'a Foo { fn tk(self) -> u8 { std::fs::write(\"/tmp/b\", b\"x\").ok(); 2 } }\n\
+pub fn via_ref(f: &Foo) -> u8 { f.tk() }\n\
+pub fn via_own(f: Foo) -> u8 { f.tk() }\n";
+        let v = scan_fixture("r1034recv", src);
+        for f in ["via_str", "via_ref", "via_own"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches the non-path impl:\n{v:#}");
+        }
+        let shared = "\
+pub trait Enc { fn enc(&self) -> u8; }\n\
+impl<'a> Enc for &'a str { fn enc(&self) -> u8 { 1 } }\n\
+impl<'a> Enc for &'a [u8] { fn enc(&self) -> u8 { std::fs::write(\"/tmp/c\", b\"x\").ok(); 2 } }\n\
+pub fn via_str(s: &str) -> u8 { s.enc() }\n";
+        let v = scan_fixture("r1034shared", shared);
+        assert_eq!(fixture_effects(&v, "via_str"), vec!["Unknown".to_string()],
+                   "a merged qual is disclosed, never charged with the sibling's Fs:\n{v:#}");
+        assert!(fixture_why(&v, "via_str").iter().any(|w| w == "ambiguous:same-name local methods"), "{v:#}");
+    }
+
+    /// SOUNDNESS R1056 — a SLICE / ARRAY / TUPLE receiver was never typed, so `b.enc()` over `impl Enc for
+    /// &[u8]` (and the array and tuple twins) read ABSENT over a write (EXECUTED, scratchpad
+    /// `rustagent-v043/fx1034b`). Over-charge controls, executed first (`fx1056ctl`, none wrote): a local
+    /// `len` on `&[u8]` is NOT what `b.len()` runs (std's inherent method wins), and a tuple impl merged with
+    /// a slice impl under one qual discloses rather than charging the slice impl's write.
+    #[test]
+    fn r1056_a_slice_array_or_tuple_receiver_reaches_its_impl() {
+        let src = "\
+pub trait Enc { fn enc(&self) -> u8; }\n\
+impl<'a> Enc for &'a [u8] { fn enc(&self) -> u8 { std::fs::write(\"/tmp/a\", b\"x\").ok(); 1 } }\n\
+pub fn via_bytes(b: &[u8]) -> u8 { b.enc() }\n\
+pub mod t { pub trait Pr { fn pr(&self) -> u8; }\n\
+  impl Pr for (u8, u8) { fn pr(&self) -> u8 { std::fs::write(\"/tmp/b\", b\"x\").ok(); 3 } }\n\
+  pub fn via_tup(t: (u8, u8)) -> u8 { t.pr() } }\n\
+pub mod a { pub trait Ar { fn ar(&self) -> u8; }\n\
+  impl Ar for [u8; 4] { fn ar(&self) -> u8 { std::fs::write(\"/tmp/c\", b\"x\").ok(); 4 } }\n\
+  pub fn via_arr(a: [u8; 4]) -> u8 { a.ar() } }\n\
+pub mod l { pub trait Ln { fn len(&self) -> usize; }\n\
+  impl<'a> Ln for &'a [u8] { fn len(&self) -> usize { std::fs::write(\"/tmp/d\", b\"x\").ok(); 9 } }\n\
+  pub fn inherent_len(b: &[u8]) -> usize { b.len() } }\n\
+pub mod m { pub trait Mx { fn mx(&self) -> u8; }\n\
+  impl<'a> Mx for &'a [u8] { fn mx(&self) -> u8 { std::fs::write(\"/tmp/e\", b\"x\").ok(); 1 } }\n\
+  impl Mx for (u8, u8) { fn mx(&self) -> u8 { 2 } }\n\
+  pub fn merged_tup(t: (u8, u8)) -> u8 { t.mx() } }\n";
+        let v = scan_fixture("r1056recv", src);
+        for f in ["via_bytes", "t::via_tup", "a::via_arr"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "l::inherent_len").is_empty(), "std's inherent `len` wins:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "m::merged_tup"), vec!["Unknown".to_string()],
+                   "a merged qual discloses, never charges the slice impl's Fs:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1004 (impl residual) — an INHERENT impl generated by a local `macro_rules!` is spliced, so
+    /// `W::touch(&W)` (ABSENT before; EXECUTED, it wrote the file) resolves like the hand-written impl, and
+    /// the unit is keyed `W::touch` (a `$t:ty` fragment arrives as an invisible group, peeled). A generated
+    /// TRAIT impl stays unexpanded; its PATH spelling `Y::tm(&Y)` (ABSENT before; EXECUTED) now discloses
+    /// `macro:` as its receiver spelling already did.
+    #[test]
+    fn r1004_a_macro_generated_inherent_impl_is_reached_by_path() {
+        let src = "\
+pub struct W;\n\
+macro_rules! gen_impl { ($t:ty) => { impl $t { pub fn touch(&self) { std::fs::write(\"/tmp/w\", b\"x\").ok(); } } }; }\n\
+gen_impl!(W);\n\
+pub fn via_impl(w: &W) { w.touch() }\n\
+pub fn via_path() { W::touch(&W) }\n\
+pub trait Tr { fn tm(&self); }\n\
+pub struct Y;\n\
+macro_rules! gen_tr { ($t:ty) => { impl crate::Tr for $t { fn tm(&self) { std::fs::write(\"/tmp/y\", b\"x\").ok(); } } }; }\n\
+gen_tr!(Y);\n\
+pub fn trait_path() { Y::tm(&Y) }\n";
+        let v = scan_fixture("r1004impl", src);
+        for f in ["W::touch", "via_impl", "via_path"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        assert_eq!(fixture_effects(&v, "trait_path"), vec!["Unknown".to_string()], "{v:#}");
+        assert!(fixture_why(&v, "trait_path").iter().any(|w| w.starts_with("macro:")), "{v:#}");
+    }
+
+    /// SOUNDNESS R529c — a struct declared INSIDE a fn body was in no `fields` entry, so `h.c.go()` through it
+    /// typed nothing and the caller read PURE (EXECUTED, scratchpad `rustagent-v043/fx529c`: it wrote). The
+    /// entries are keyed `<body-item>H`, the spelling R106 gives the body's own receivers, so a module-level
+    /// `H` with an effectful field is untouched and the body-local `H` with a PURE field stays pure (the
+    /// over-charge control, executed: `shadow_pure` wrote nothing).
+    #[test]
+    fn r529c_a_body_local_struct_types_its_fields() {
+        let src = "\
+pub struct Eff; impl Eff { pub fn go(&self) { std::fs::write(\"/tmp/e\", b\"x\").ok(); } }\n\
+pub struct Pure; impl Pure { pub fn go(&self) {} }\n\
+pub struct Sock; impl Sock { pub fn run(&self) { let _ = std::net::TcpStream::connect(\"127.0.0.1:9\"); } }\n\
+pub struct H { c: Eff }\n\
+pub fn module_h(h: &H) { h.c.go() }\n\
+pub fn body_field() { struct BodyHolder { c: Eff } let h = BodyHolder { c: Eff }; h.c.go(); }\n\
+pub fn shadow_pure() { struct H { c: Pure } let h = H { c: Pure }; h.c.go(); }\n\
+pub fn nested() { struct Leaf { n: Sock } struct Outer { l: Leaf } let o = Outer { l: Leaf { n: Sock } }; o.l.n.run(); }\n";
+        let v = scan_fixture("r529cbody", src);
+        assert_eq!(fixture_effects(&v, "body_field"), vec!["Fs".to_string()], "{v:#}");
+        assert_eq!(fixture_effects(&v, "module_h"), vec!["Fs".to_string()], "{v:#}");
+        assert!(fixture_effects(&v, "shadow_pure").is_empty(), "the body-local H is not the module-level H:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "nested"), vec!["Net".to_string()], "{v:#}");
+    }
+
+    /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`
+    /// and `t.0.go()` were ABSENT over a write (EXECUTED, scratchpad `rustagent-v043/probe3`). The struct's
+    /// own positional fields are the authority. Over-charge controls, executed first (`fx1055ctl`, neither
+    /// wrote): a same-leaf ENUM VARIANT, qualified or glob-imported, is not the struct.
+    #[test]
+    fn r1055_a_tuple_struct_constructor_names_its_type() {
+        let src = "\
+pub struct Eff; impl Eff { pub fn go(&self) { std::fs::write(\"/tmp/t0\", b\"x\").ok(); } }\n\
+pub struct Tw(pub Eff);\n\
+impl Tw { pub fn run(&self) { std::fs::write(\"/tmp/t1\", b\"x\").ok(); } }\n\
+pub fn ctor_method() { let t = Tw(Eff); t.run(); }\n\
+pub fn ctor_field() { let t = Tw(Eff); t.0.go(); }\n\
+pub fn ctor_inline() { Tw(Eff).run(); }\n\
+pub mod a { pub struct V(pub u8); impl V { pub fn kick(&self) { std::fs::write(\"/tmp/t2\", b\"x\").ok(); } } }\n\
+pub enum E { V(u8) }\n\
+impl E { pub fn kick(&self) {} }\n\
+pub fn variant_path() { E::V(1).kick() }\n\
+pub mod b { use crate::E::*; pub fn variant_glob() { let x = V(1); x.kick() } }\n\
+pub fn real_struct() { a::V(1).kick() }\n";
+        let v = scan_fixture("r1055ctor", src);
+        for f in ["ctor_method", "ctor_field", "ctor_inline", "real_struct"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "variant_path").is_empty(), "{v:#}");
+        assert!(fixture_effects(&v, "b::variant_glob").is_empty(), "a glob-imported variant is not the struct:\n{v:#}");
     }
 
     /// SOUNDNESS R1038 — `Box::<u32>::deserialize(d)` names no std fn: the body that runs is the DEPENDENCY's
