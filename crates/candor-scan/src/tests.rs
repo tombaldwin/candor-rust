@@ -7959,8 +7959,8 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         let mut ti = TraitImplIndex::new();
         ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
-        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() });
-        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![], assoc: Default::default() }); // no impl in sight
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![], assoc_types: Default::default(), assoc: Default::default() });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![], assoc_types: Default::default(), assoc: Default::default() }); // no impl in sight
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
@@ -16842,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16853,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev74/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev75/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26079,6 +26079,65 @@ pub fn read_opt() -> u32 { Opt::deserialize(EffDe).ok().and_then(|o| o.0).unwrap
         for f in ["Wrap::deserialize", "Opt::deserialize", "read_wrap", "read_opt", "de::Deserialize::deserialize"] {
             assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()),
                     "`{f}` hands the caller's deserializer to serde — never pure:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1036 — the POINTEE of a deref wrapper. `**self` / `self.as_ref()` in an impl for `Box<T>` /
+    /// `Arc<T>` (the forwarding impl every trait-object user writes) formed no edge, and neither did a call on
+    /// a fn's returned lock GUARD (`get().write()` over `-> MutexGuard<'static, Runtime>`, snapbox's
+    /// `Data::write_to`). EXECUTED (scratchpad `rustagent-v042/fxbox`, `fxguard`): every arm wrote the marker;
+    /// `c_count` (the guard's pure method) wrote nothing and stays pure.
+    #[test]
+    fn r1036_a_deref_wrappers_pointee_is_the_receiver() {
+        let v = scan_fixture("r1036box", "\
+pub struct L;\n\
+pub trait Doer { fn go(&self); }\n\
+impl Doer for L { fn go(&self) { let _ = std::fs::write(\"/tmp/fxbox_mark\", b\"x\"); } }\n\
+impl<T: Doer + ?Sized> Doer for Box<T> { fn go(&self) { (**self).go() } }\n\
+pub trait Arcer { fn ga(&self); }\n\
+impl<T: Doer + ?Sized> Arcer for std::sync::Arc<T> { fn ga(&self) { self.as_ref().go() } }\n\
+pub trait Bx { fn bx(&self); }\n\
+impl Bx for Box<L> { fn bx(&self) { self.go() } }\n\
+pub trait Vd { fn vd(&self); }\n\
+impl<T: Doer> Vd for Vec<T> { fn vd(&self) { for x in self { x.go() } } }\n\
+pub fn use_box(b: Box<dyn Doer>) { b.go() }\n\
+pub fn use_vd(v: Vec<L>) { v.vd() }\n\
+");
+        for f in ["Box::go", "Box::bx", "Arc::ga"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches L::go:\n{v:#}");
+        }
+        let v = scan_fixture("r1036guard", "\
+pub struct Runtime;\n\
+impl Runtime { pub fn write(&mut self) { let _ = std::fs::write(\"/tmp/fxguard\", \"x\"); } pub fn count(&mut self) -> usize { 0 } }\n\
+static RT: std::sync::Mutex<Runtime> = std::sync::Mutex::new(Runtime);\n\
+pub fn get() -> std::sync::MutexGuard<'static, Runtime> { RT.lock().unwrap() }\n\
+pub fn write_to() { get().write() }\n\
+pub fn c_count() -> usize { get().count() }\n\
+");
+        assert_eq!(fixture_effects(&v, "write_to"), vec!["Fs".to_string()], "the guard derefs to Runtime:\n{v:#}");
+        assert!(fixture_effects(&v, "c_count").is_empty(), "the guard's pure method stays pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1037 — a member called on an ASSOCIATED-TYPE PROJECTION (`S::Tf::conv(x)`, `<S::Tf as
+    /// Conv>::conv(x)` under `S: Std`, `type Tf: Conv`) formed no edge; palette's `Rgb::into_linear` calls
+    /// `S::TransferFn::into_linear(..)` this way. EXECUTED (scratchpad `rustagent-v042/fxproj`): both arms wrote.
+    /// It dispatches over the associated type's DECLARED bound only: `Loud`'s same-named `Other::conv` (which
+    /// writes) is never a candidate.
+    #[test]
+    fn r1037_a_projection_call_dispatches_over_the_associated_types_bound() {
+        let v = scan_fixture("r1037proj", "\
+pub trait Conv { fn conv(x: u8) -> u8; }\n\
+pub struct Eff;\n\
+impl Conv for Eff { fn conv(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/fxproj\", \"x\"); x } }\n\
+pub trait Std { type Tf: Conv; }\n\
+pub struct S1;\n\
+impl Std for S1 { type Tf = Eff; }\n\
+pub fn via_proj<S: Std>(x: u8) -> u8 { S::Tf::conv(x) }\n\
+pub fn via_qself<S: Std>(x: u8) -> u8 { <S::Tf as Conv>::conv(x) }\n\
+pub fn call_proj() -> u8 { via_proj::<S1>(1) }\n\
+");
+        for f in ["via_proj", "via_qself"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Eff::conv:\n{v:#}");
         }
     }
 

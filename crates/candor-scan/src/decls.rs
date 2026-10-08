@@ -2612,7 +2612,7 @@ pub(crate) fn fninfo(
     // Dispatch-typing WINS where both could apply: `x: X` under `X: Store` also looks like a
     // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
     // the CHA route with a meaningless receiver type.
-    let trait_vars = seed_trait_vars(sig);
+    let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
     // SOUNDNESS R369 — A `#[cfg]`-DUPLICATED `use` ON THE TYPE ROUTE IS THE UNION OF ITS ARMS. Two
@@ -2698,6 +2698,41 @@ pub(crate) fn fninfo(
                     eprintln!("R1024SELF\t{qual}\t{leaves:?}");
                 }
                 elem_trait_of.insert("self".to_string(), leaves);
+            }
+        }
+    }
+    // SOUNDNESS R1036 — `self` in an impl for a DEREF wrapper (`Box<X>`/`Arc<X>`/`Rc<X>`/`Pin<X>`): what
+    // `**self` / `self.as_ref()` / `self.deref()` evaluate to is the POINTEE, and `vars["self"]` (the
+    // wrapper leaf the impl's units are keyed under) cannot say so. `impl<T: Doer + ?Sized> Doer for Box<T> {
+    // fn go(&self) { (**self).go() } }` — the forwarding impl every trait-object user writes — formed no edge,
+    // and neither did `impl<T: Doer> Arcer for Arc<T> { self.as_ref().go() }` (executed, fxbox: both write).
+    // A parameter `b: Box<L>` is typed `L` by `type_path`; the pointee is recorded under a name no
+    // identifier can spell (`SELF_DEREF_VAR`), which the receiver resolvers read for exactly those forms.
+    if let Some(syn::Type::Path(tp)) = impl_self {
+        if let Some(seg) = tp.path.segments.last() {
+            if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
+                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    if let Some(inner) = ab.args.iter().find_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    }) {
+                        let mut gb = generic_bounds_of(sig);
+                        if let Some(g) = impl_generics {
+                            for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                                gb.entry(k).or_default().extend(v);
+                            }
+                        }
+                        let leaves = crate::lang::trait_leaves(inner, &gb);
+                        if !leaves.is_empty() {
+                            trait_vars.insert(crate::collector::SELF_DEREF_VAR.to_string(), leaves);
+                        } else if let Some(t) = type_path(inner, sig_uses) {
+                            vars.insert(crate::collector::SELF_DEREF_VAR.to_string(), t);
+                        }
+                        if std::env::var_os("CANDOR_R1036_INSTR").is_some() {
+                            eprintln!("R1036SELFDEREF\t{qual}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -4194,6 +4229,16 @@ pub(crate) fn collect_decls(
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
                 for ti in &t.items {
+                    // R1037 — an associated type's bounds (`type Tf: Conv;`).
+                    if let syn::TraitItem::Type(at) = ti {
+                        let b = bound_leaves(&at.bounds);
+                        let slot = e.assoc_types.entry(at.ident.to_string()).or_default();
+                        for l in b {
+                            if !slot.contains(&l) {
+                                slot.push(l);
+                            }
+                        }
+                    }
                     if let syn::TraitItem::Fn(m) = ti {
                         // `methods` holds only `&self`/`self` DISPATCH methods (its two uses — CHA on
                         // `t.method()` and the R36 trait-default fallback — are both receiver calls). An

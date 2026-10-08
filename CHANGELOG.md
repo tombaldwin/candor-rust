@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A deref wrapper's pointee is the receiver (SOUNDNESS R1036).** `impl<T: Doer + ?Sized> Doer for Box<T> { fn go(&self)
+  { (**self).go() } }`, `self.as_ref().go()` in an impl for `Arc<T>`, and a call on a fn's returned lock guard
+  (`get().write()` over `-> MutexGuard<'static, Runtime>`, snapbox's `Data::write_to`) formed no edge (executed: each
+  writes a file). `*self`/`self.as_ref()`/`self.deref()` in an impl for `Box`/`Arc`/`Rc`/`Pin<X>` now type as `X`
+  (or dispatch on its bounds), and std/lock-crate guards peel to what they guard, like `Box`.
+- ⚠ **A member called on an associated-type projection dispatches (SOUNDNESS R1037).** `S::Tf::conv(x)` and
+  `<S::Tf as Conv>::conv(x)` under `S: Std` (`type Tf: Conv;`) formed no edge (palette's
+  `S::TransferFn::into_linear(..)`; executed: both write). They now dispatch over the associated type's DECLARED bound
+  (never every trait sharing the member's name); with a local bound that does not declare it, `Unknown` +
+  `dispatch:`. Cache schema rev75.
 - ⚠ **An impl for a non-path self type (`&str`, `&[u8]`, `[T]`, a tuple) gets its own key (SOUNDNESS R1034).** Its
   methods were filed as the module's FREE fn of the same name, so wasm-bindgen-backend's `impl Encode for &[u8]` /
   `&str` merged with `pub fn encode(program)` (Env/Fs): every `Encode::encode` dispatch charged Env/Fs it cannot

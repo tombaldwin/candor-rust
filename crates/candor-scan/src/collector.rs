@@ -106,6 +106,27 @@ pub(crate) enum Bound {
     Layered { ty: Option<String>, elem: String },
 }
 
+/// SOUNDNESS R1036 — the binding name under which `fninfo` records what `*self` / `self.as_ref()` evaluate
+/// to in an impl for a deref wrapper (`Box<X>`, `Arc<X>`, …). No identifier can spell it.
+pub(crate) const SELF_DEREF_VAR: &str = "\u{2}selfderef";
+
+/// SOUNDNESS R1036 — `**self`, `*self`, `self.as_ref()`, `self.deref()` (and their `&`/paren wrappings):
+/// the forms that name the POINTEE of an impl's deref-wrapper `self`.
+fn is_self_deref(expr: &syn::Expr) -> bool {
+    let is_self = |e: &syn::Expr| matches!(peel_recv(e), syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self"));
+    match expr {
+        syn::Expr::Paren(p) => is_self_deref(&p.expr),
+        syn::Expr::Group(g) => is_self_deref(&g.expr),
+        syn::Expr::Reference(r) => is_self_deref(&r.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => is_self(&u.expr) || is_self_deref(&u.expr),
+        syn::Expr::MethodCall(m) if m.args.is_empty() => {
+            matches!(m.method.to_string().as_str(), "as_ref" | "as_mut" | "deref" | "deref_mut" | "get_ref" | "get_mut")
+                && is_self(&m.receiver)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
@@ -1440,6 +1461,14 @@ impl<'a> CallCollector<'a> {
     /// method-chain arm hands each level its OWN step's leaf, which is the method that level's answer
     /// will be joined to.
     fn resolve_recv_type_for(&self, expr: &syn::Expr, outer: &str) -> Option<String> {
+        if is_self_deref(expr) {
+            if let Some(t) = self.vars.get(SELF_DEREF_VAR) {
+                return Some(t.clone());
+            }
+            if self.trait_vars.contains_key(SELF_DEREF_VAR) {
+                return None; // the pointee dispatches — `resolve_recv_traits` answers
+            }
+        }
         match expr {
             syn::Expr::Reference(r) => self.resolve_recv_type_for(&r.expr, outer),
             syn::Expr::Paren(p) => self.resolve_recv_type_for(&p.expr, outer),
@@ -3357,6 +3386,11 @@ impl<'a> CallCollector<'a> {
     }
 
     fn resolve_recv_traits_walk(&self, expr: &syn::Expr) -> Vec<String> {
+        if is_self_deref(expr) {
+            if let Some(l) = self.trait_vars.get(SELF_DEREF_VAR) {
+                return l.clone();
+            }
+        }
         // Hot-path guard: with NO dispatch source this function could answer from, every lookup below
         // is a guaranteed miss — skip the recursive walk.
         //
@@ -3827,7 +3861,17 @@ impl<'a> CallCollector<'a> {
                 syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
                 _ => None,
             };
-            let unnamed = qid.as_deref().is_some_and(|i| {
+            // SOUNDNESS R1037 — …or an associated-type PROJECTION of one (`<S::Tf as Conv>::conv(x)` under
+            // `S: Std`): its implementor is whatever `S` picks, which only the bounded CHA can answer.
+            // Read as the concrete type it is not, the call formed `Tf::conv` and vanished.
+            let projection = match &*q.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() >= 2 => {
+                    let h = tp.path.segments[0].ident.to_string();
+                    generic(self, &h).is_some() || h == "Self"
+                }
+                _ => false,
+            };
+            let unnamed = projection || qid.as_deref().is_some_and(|i| {
                 generic(self, i).is_some() || (i == "Self" && self.trait_self.as_deref() == Some(tr.as_str()))
             });
             let concrete = if unnamed {
@@ -3842,6 +3886,36 @@ impl<'a> CallCollector<'a> {
                 for b in bounds {
                     targets.push((b, None));
                 }
+            }
+        } else if p.qself.is_none() && segs.len() == 3 && generic(self, &segs[0]).is_some() {
+            // SOUNDNESS R1037 — `S::Tf::conv(x)`: a member called on an ASSOCIATED TYPE of a generic
+            // parameter (palette's `S::TransferFn::into_linear(..)`). The projection's own bound is not
+            // indexed, so every LOCAL trait declaring the member is a candidate — the bounded CHA over
+            // what `S::Tf` can be, never a guess at one implementor. Formed no edge at all before.
+            if std::env::var_os("CANDOR_R1037_INSTR").is_some() {
+                eprintln!("R1037PROJ\t{path}");
+            }
+            // The projection's bound, read off the generic's own LOCAL bounds (`S: Std` → `Std`'s `type Tf:
+            // Conv`). With no local declaration of the associated type there is nothing to bound the CHA by,
+            // and a wider set (every local trait declaring `conv`) would charge an unrelated trait's impls:
+            // that case is DISCLOSED instead (the call names a body this scan cannot pick).
+            let assoc = &segs[1];
+            let mut ts: Vec<String> = Vec::new();
+            for b in generic(self, &segs[0]).unwrap_or_default() {
+                if let Some(lt) = self.local_traits.get(&b) {
+                    for l in lt.assoc_types.get(assoc).into_iter().flatten() {
+                        if !ts.contains(l) {
+                            ts.push(l.clone());
+                        }
+                    }
+                }
+            }
+            let local_bound = generic(self, &segs[0]).unwrap_or_default().iter().any(|b| self.local_traits.contains_key(b));
+            if ts.is_empty() && local_bound {
+                self.mark_unresolved(format!("dispatch:{}::{assoc}.{leaf}", segs[0]));
+            }
+            for t in ts {
+                targets.push((t, None));
             }
         }
         if targets.is_empty() && p.qself.is_none() {

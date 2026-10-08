@@ -855,6 +855,10 @@ pub(crate) struct LocalTrait {
     /// `Sink::open(p)`, `Self::open(p)` in a default body) — the shapes that reached no dispatch decision
     /// at all and read silent (R776).
     pub(crate) assoc: std::collections::HashSet<String>,
+    /// SOUNDNESS R1037 — the trait's ASSOCIATED TYPES' bounds (`type Tf: Conv;` → `"Tf" -> ["Conv"]`), so a
+    /// member called on a projection (`S::Tf::conv(x)` under `S: Std`) dispatches over what `Tf` is bound
+    /// by and nothing wider.
+    pub(crate) assoc_types: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),

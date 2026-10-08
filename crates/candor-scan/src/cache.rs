@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev75: SOUNDNESS R1037 — `FileDecls` gained `trait_assoc_types`; R1036 — Pass B types a deref wrapper's
+    // pointee and peels lock guards. Mandatory.
     // rev74: SOUNDNESS R1034 — Pass A keys a non-path impl self type (`&str` → `str`) in `trait_impls` and
     // the units; SOUNDNESS R1038 — Pass B adds a dependency-trait member edge. Mandatory.
     // rev73: SOUNDNESS R1025 (receiver half) — Pass B's `returns` gains an alias's (TYPE, method) facts under
@@ -410,7 +412,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev74/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev75/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -465,6 +467,9 @@ pub(crate) struct FileDecls {
     /// A separate map rather than a fourth tuple slot so the existing triple keeps its shape.
     #[serde(default)]
     pub(crate) trait_assoc: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1037 — `LocalTrait::assoc_types`, flattened: trait leaf -> assoc type -> bound leaves.
+    #[serde(default)]
+    pub(crate) trait_assoc_types: HashMap<String, std::collections::BTreeMap<String, Vec<String>>>,
     pub(crate) trait_fields: TraitFieldIndex,
     /// SOUNDNESS R562 — the `dyn`-ONLY twin of `trait_fields`, keyed identically (struct leaf ->
     /// field name -> trait leaves). `trait_fields` collapses `dyn T`, `impl T` and `T: Bound`; the
@@ -766,6 +771,11 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
                 a.sort(); // content-hashed: a HashSet's order must not reach the entry
                 (k.clone(), a)
             })
+            .collect(),
+        trait_assoc_types: trait_decls
+            .iter()
+            .filter(|(_, v)| !v.assoc_types.is_empty())
+            .map(|(k, v)| (k.clone(), v.assoc_types.clone()))
             .collect(),
         trait_decls: trait_decls
             .into_iter()
@@ -1231,6 +1241,17 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for (tr, tys) in &fd.trait_impls {
         acc.trait_impls.entry(tr.clone()).or_default().extend(tys.iter().cloned());
     }
+    for (tr, at) in &fd.trait_assoc_types {
+        let e = acc.trait_decls.entry(tr.clone()).or_default();
+        for (a, ls) in at {
+            let slot = e.assoc_types.entry(a.clone()).or_default();
+            for l in ls {
+                if !slot.contains(l) {
+                    slot.push(l.clone());
+                }
+            }
+        }
+    }
     for (tr, assoc) in &fd.trait_assoc {
         acc.trait_decls.entry(tr.clone()).or_default().assoc.extend(assoc.iter().cloned()); // set union (R776)
     }
@@ -1520,6 +1541,16 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         for aname in asc {
             s.push('&'); // R776 — associated fns; a distinct sigil so `fn a` and `fn a(&self)` differ
             s.push_str(aname);
+        }
+        for (aname, ls) in &lt.assoc_types {
+            let mut ls: Vec<&String> = ls.iter().collect();
+            ls.sort();
+            s.push('%'); // R1037 — associated types' bounds
+            s.push_str(aname);
+            for l in ls {
+                s.push(':');
+                s.push_str(l);
+            }
         }
         let mut sup: Vec<&String> = lt.supertraits.iter().collect();
         sup.sort();

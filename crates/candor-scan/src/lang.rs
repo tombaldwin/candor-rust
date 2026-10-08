@@ -831,7 +831,19 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
             if let Some(seg) = p.path.segments.last() {
                 // SOUNDNESS R980 — and `Pin<P>`, which derefs to `P::Target`: a `p: Pin<&mut Req>`
                 // parameter's `p.poll(cx)` is `Req::poll` (fixture `rustagent-rel/p1` `e_pin_param`).
-                if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
+                // SOUNDNESS R1036 — and a lock/borrow GUARD, which derefs to what it guards: `fn get() ->
+                // MutexGuard<'static, Runtime>` then `get().write(..)` is `Runtime::write` (snapbox's
+                // `Data::write_to`, a dropped edge in every arm). Only by its RESOLVED std/lock-crate path:
+                // a crate's own `Ref<T>` is its own type.
+                let guard = matches!(
+                    seg.ident.to_string().as_str(),
+                    "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Ref" | "RefMut" | "MappedMutexGuard"
+                        | "MappedRwLockReadGuard" | "MappedRwLockWriteGuard" | "ReentrantMutexGuard"
+                ) && {
+                    let full = expand(&path_to_string_lc(&p.path), uses);
+                    matches!(full.split("::").next(), Some("std" | "core" | "parking_lot" | "lock_api" | "tokio" | "spin"))
+                };
+                if guard || matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                         if let Some(inner) = args.args.iter().find_map(|a| match a {
                             syn::GenericArgument::Type(t) => Some(t),
