@@ -10414,6 +10414,58 @@ pub fn either_match() { let _ = std::fs::read(\"b\"); }\n";
     }
 
     #[test]
+    fn an_allow_rule_whose_scope_binds_nothing_is_disclosed_like_a_deny() {
+        // SOUNDNESS R952 — the §4 ⟨0.27⟩ zero-match pass enrolled `deny`/`pure`/`forbid`/`only` and never
+        // `allow`. Measured: `allow Net in exec817::f ok.example` (a crate-qualified scope — names here are
+        // crate-relative, so it binds nothing) printed `policy ✓`, exit 0, NO disclosure, over an `f` that
+        // connects to a caller-chosen host; `allow Net in f ok.example` fails it with AS-EFF-008. The
+        // `deny` spelling of the same scope already said `matched NO function`. Each arm below differs from
+        // its neighbour in ONE thing: the rule form, or whether the scope binds.
+        use candor_classify::gate::{gate, GateInput};
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> = vec!["f".into(), "inner::g".into()];
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let effects: HashMap<String, BTreeSet<String>> =
+            names.iter().map(|n| (n.clone(), BTreeSet::from(["Net".to_string()]))).collect();
+        let empty_sets: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty_nc: HashMap<String, Vec<String>> = HashMap::new();
+        let gi = GateInput {
+            all: &names,
+            display: &empty_map,
+            hash: &empty_map,
+            inferred: &effects,
+            calls: &empty_sets,
+            hosts: &empty_sets,
+            cmds: &empty_sets,
+            paths: &empty_sets,
+            tables: &empty_sets,
+            surface_incomplete: &empty_sets,
+            reason_classes: &empty_sets,
+            net_classes: &empty_nc,
+        };
+        let run = |t: &str| gate(&candor_classify::policy::parse_policy(t), &gi);
+
+        // the arm the row names: a crate-qualified `allow` scope that binds nothing — disclosed, and the
+        // verdict is UNCHANGED by the disclosure (no violation appears, none is removed).
+        let o = run("allow Net in exec817::f ok.example");
+        assert_eq!(o.zero_match, vec!["allow Net in exec817::f ok.example".to_string()]);
+        assert!(o.violations.is_empty(), "a disclosure must not become a verdict: {:?}", o.violations);
+        // its `deny` twin — the control the disclosure must now match
+        assert_eq!(run("deny Net exec817::f").zero_match, vec!["deny Net exec817::f".to_string()]);
+        // the plain typo, every literal-bearing effect
+        for e in ["Net", "Exec", "Fs", "Db", "Llm"] {
+            let raw = format!("allow {e} in zzz x");
+            assert_eq!(run(&raw).zero_match, vec![raw.clone()], "{e}");
+        }
+        // an `allow` that BINDS stays quiet, and still gates (f has no visible literal)
+        let b = run("allow Net in f ok.example");
+        assert!(b.zero_match.is_empty(), "{:?}", b.zero_match);
+        assert_eq!(b.violations.len(), 1, "the binding arm must still fire AS-EFF-008");
+        // a SCOPELESS `allow` binds every function by construction — exempt, like a scopeless `deny`
+        assert!(run("allow Net ok.example").zero_match.is_empty());
+    }
+
+    #[test]
     fn a_rust_2015_bare_closure_trait_object_no_longer_drops_the_whole_file() {
         // SOUNDNESS R308 — `syn` rejects the 2015 spelling `&Fn(..)`, and a parse failure is per-FILE,
         // so ONE elided `dyn` dropped every function in it. Measured on `serial-core-0.4.0`: the whole

@@ -540,6 +540,18 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     for r in &p.layer_rules {
         zero.entry(r.raw.as_str()).or_insert(0);
     }
+    // SOUNDNESS R952 — …AND A SCOPED `allow`. The clause's headline is "a rule whose SCOPE matches no
+    // function", with no form named, but this pass enrolled only `deny`/`pure`/`forbid`/`only`: measured,
+    // `allow Net in exec817::f ok.example` (a crate-qualified scope, which binds nothing here) printed
+    // `policy ✓`, exit 0, and no disclosure — over a `f` that connects to a caller-chosen host, which the
+    // crate-relative `allow Net in f ok.example` fails with AS-EFF-008. An `allow` is a certification, so
+    // one that binds nothing is the MORE dangerous typo: the operator believes a surface was checked. A
+    // SCOPELESS `allow` binds every function by construction and stays exempt, like a scopeless `deny`.
+    for r in &p.allow_rules {
+        if r.scope.is_some() {
+            zero.entry(r.raw.as_str()).or_insert(0);
+        }
+    }
     // ⟨0.29⟩ an `only` rule binds nothing when NEITHER endpoint names anything in this tree — the same
     // typo channel `forbid` has, and the more dangerous one to leave silent: a `forbid` that binds
     // nothing merely fails to prohibit, while an `only` that binds nothing withholds a promise the
@@ -553,6 +565,15 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         names.extend(gi.calls.keys().map(String::as_str));
         for n in names {
             for r in &p.rules {
+                if let Some(s) = &r.scope {
+                    if scope_matches(gi.disp(n), s) {
+                        *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                    }
+                }
+            }
+            // R952 — the SAME matcher the AS-EFF-008 loop above skips on, so "bound" means here what
+            // it means to the allowlist check.
+            for r in &p.allow_rules {
                 if let Some(s) = &r.scope {
                     if scope_matches(gi.disp(n), s) {
                         *zero.entry(r.raw.as_str()).or_insert(0) += 1;

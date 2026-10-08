@@ -11,6 +11,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **A scoped `allow` rule whose scope binds no function is now disclosed (SOUNDNESS R952).** SPEC §4 ⟨0.27⟩'s
+  zero-match clause covers any rule, but the counting pass enrolled `deny`/`pure`/`forbid`/`only` and never
+  `allow`: `allow Net in exec817::f ok.example` (a crate-qualified scope, which binds nothing in candor-scan)
+  printed `policy ✓`, exit 0, with no line — a certification that could not fail — over an `f` that connects
+  to a caller-chosen host. It now prints `policy rule matched NO function` and rides `zeroMatch` on the
+  `--gate-json` verdict, exactly as the `deny` spelling did. Disclosure only: no exit code moves. A scopeless
+  `allow` binds everything and stays exempt. `gate --report` was never affected (it refuses every `allow`).
+  **The deep (`cargo dylint`) route** had no zero-match disclosure for ANY rule form; it now prints the same
+  line for an unbound `deny`/`pure`/`allow`/`forbid` (stderr only — its `CANDOR_GATE_JSON` verdict does not
+  carry `zeroMatch`).
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; `SPEC_VERSION` and its two literal canaries in

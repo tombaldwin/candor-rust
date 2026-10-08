@@ -3734,6 +3734,73 @@ impl Candor {
         }
     }
 
+    /// SOUNDNESS R952 — the §4 ⟨0.27⟩ ZERO-MATCH disclosure on the deep route, which had none for ANY rule
+    /// form: `deny Net zzz` over a crate whose `f` connects ran green with no line saying the rule bound
+    /// nothing (candor-scan prints `policy rule matched NO function` for the same policy). Counted over the
+    /// SAME crate-prefixed `scope_name` the AS-EFF-006/008 loops skip on, and over the same items (macro-
+    /// generated consts/statics excluded, exactly as that loop excludes them), so "bound nothing" means
+    /// here what it means to the gate. A scopeless `deny`/`pure`/`allow` binds every function and is
+    /// exempt. A `forbid` counts a match on either endpoint, over local names only — the same set
+    /// candor-scan counts. DISCLOSURE ONLY: the exit code is never moved by it (SPEC §4 MUST NOT).
+    ///
+    /// Not carried into the CANDOR_GATE_JSON verdict: that document is assembled from per-crate
+    /// violation records by a separate pass, and the key is pinned by PART 36 on the scan and report
+    /// routes, not this one.
+    fn disclose_zero_match(&self, cx: &LateContext<'_>, krate: &str, items: &[LocalDefId]) {
+        let mut zero: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for r in &self.policy {
+            if r.scope.is_some() {
+                zero.entry(r.raw.as_str()).or_insert(0);
+            }
+        }
+        for r in &self.allow_rules {
+            if r.scope.is_some() {
+                zero.entry(r.raw.as_str()).or_insert(0);
+            }
+        }
+        for r in &self.layer_rules {
+            zero.entry(r.raw.as_str()).or_insert(0);
+        }
+        if zero.is_empty() {
+            return;
+        }
+        for &f in items {
+            let span = cx.tcx.def_span(f);
+            if span.from_expansion()
+                && !matches!(cx.tcx.def_kind(f.to_def_id()), DefKind::Fn | DefKind::AssocFn)
+            {
+                continue;
+            }
+            let scope_name = format!("{krate}::{}", cx.tcx.def_path_str(f.to_def_id()));
+            for r in &self.policy {
+                if let Some(sc) = &r.scope
+                    && scope_matches(&scope_name, sc)
+                {
+                    *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                }
+            }
+            for r in &self.allow_rules {
+                if let Some(sc) = &r.scope
+                    && scope_matches(&scope_name, sc)
+                {
+                    *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                }
+            }
+            for r in &self.layer_rules {
+                if scope_matches(&scope_name, &r.from) || scope_matches(&scope_name, &r.to) {
+                    *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        for (raw, _) in zero.iter().filter(|(_, c)| **c == 0) {
+            eprintln!(
+                "candor: policy rule matched NO function — `{raw}`. It was evaluated and bound nothing, \
+                 so it cannot have caught anything. Legitimate when one policy is shared across repos; \
+                 a typo'd layer name otherwise."
+            );
+        }
+    }
+
     /// check_crate_post concern: assemble the §3.3 CANDOR_GATE_JSON verdict from the NDJSON
     /// `.parts` records — or withhold it (never a fail-open ok:true) when the guard could not
     /// evaluate (`guard_unavailable`) or a record is corrupt.
@@ -4342,7 +4409,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let owned_set = |s: &BTreeSet<&str>| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
 
-        for f in items {
+        for &f in &items {
             let span = cx.tcx.def_span(f);
             // Macro-generated items. The blanket `from_expansion()` skip was added to suppress the
             // flood from tracing's `__CALLSITE` *statics* — but it also hid macro-generated
@@ -4776,6 +4843,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 );
             }
         }
+
+        // R952 — the zero-match disclosure, once per crate, after every rule has been evaluated.
+        self.disclose_zero_match(cx, krate.as_str(), &items);
 
         if !absent_unknown_only.is_empty() {
             absent_unknown_only.sort();
