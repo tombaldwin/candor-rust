@@ -1928,14 +1928,26 @@ pub(crate) fn collect_reexports(
             // exactly as `use x::Foo;` already does today. Converging on the `use` route means inheriting
             // its residual, deliberately, rather than opening a second one.
             //
-            // Generic aliases (`type R<T> = Result<T, E>`) are skipped: their target carries parameters
-            // this map has no way to substitute.
-            syn::Item::Type(t) if t.generics.params.is_empty() && !is_non_nominal_type(&t.ty) => {
+            // SOUNDNESS R1025 — GENERIC aliases too (`type Closure<T> = ScopedClosure<'static, T>`). They were
+            // skipped because "their target carries parameters this map has no way to substitute" — but this
+            // map answers a PATH question, and `Closure::<T>::wrap(..)` names `ScopedClosure::wrap` whatever
+            // `T` is: the generic arguments are on the type, never in the path the call resolves through.
+            // Skipping them left every call through one with no edge (wasm-bindgen's `ScopedClosure::once` →
+            // `Closure::wrap_maybe_aborting::<true>`, executed: ABSENT). What DOES depend on the substitution
+            // is refused: a target that IS one of the alias's own parameters (`type P<T> = T`), and the R978
+            // pointee below when it is one (`type A<T> = Arc<T>`).
+            syn::Item::Type(t) if !is_non_nominal_type(&t.ty) => {
                 if !include_tests && is_cfg_test(&t.attrs) {
                     continue;
                 }
+                let own_param = |p: &syn::Path| {
+                    p.get_ident().is_some_and(|i| t.generics.type_params().any(|tp| tp.ident == *i))
+                };
                 if let syn::Type::Path(p) = &*t.ty {
-                    if p.qself.is_none() {
+                    if p.qself.is_none() && !own_param(&p.path) {
+                        if !t.generics.params.is_empty() && std::env::var_os("CANDOR_R1025_INSTR").is_some() {
+                            eprintln!("R1025ALIAS\t{}", t.ident); // §E1 REACH COUNTER, CHANGED branch only
+                        }
                         let mut written = path_to_string(&p.path);
                         // SOUNDNESS R181 (the double alias) — `type DoubleAlias = ModAlias;` inside
                         // `mod am` names `am::ModAlias`, and a bare one-segment target was recorded bare,
@@ -1960,7 +1972,9 @@ pub(crate) fn collect_reexports(
                         // `lang::DEREF_ALIAS_SUF`), so `type_path` can peel it the way it peels the written
                         // wrapper, while a PATH call (`HouseKeeperArc::new(..)`, which is `Arc::new`) keeps
                         // resolving to the wrapper exactly as before.
-                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path) {
+                        if let Some(inner) = crate::lang::deref_wrapper_arg(&p.path).filter(|i| {
+                            !matches!(i, syn::Type::Path(ip) if ip.qself.is_none() && own_param(&ip.path))
+                        }) {
                             if let Some(pointee) = crate::lang::type_path(inner, uses) {
                                 record_alias(
                                     aliases,

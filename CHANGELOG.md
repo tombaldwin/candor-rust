@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A call through a GENERIC type alias resolves (SOUNDNESS R1025).** `type Closure<T> = ScopedClosure<'static, T>;`
+  then `Closure::<T>::wrap_maybe_aborting::<true>(x)` (wasm-bindgen's `ScopedClosure::once`) formed no edge: Pass A
+  recorded only non-generic aliases, because their target "carries parameters this map cannot substitute" — but the
+  alias map answers a PATH question, and the path does not depend on the arguments. `Alias::<u8>::f(x)` (no
+  turbofish on the method) was silent the same way. Generic aliases are now recorded, except one whose target is its
+  own parameter (`type P<T> = T`). Cache schema rev71.
 - ⚠ **A second std layer around an element is peeled one layer per binder (SOUNDNESS R1023, R893's chain).**
   `Mutex<Option<G>>`, `Option<Vec<G>>`, `&Mutex<Option<G>>`, `Vec<Vec<G>>`, `Vec<Option<G>>`, `HashMap<_, Vec<G>>`,
   `RefCell<Option<G>>`, `Mutex<Option<Vec<G>>>` recorded no element, so `if let Some(g) = self.mo.lock().unwrap()

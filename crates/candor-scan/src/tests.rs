@@ -16832,7 +16832,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16843,7 +16843,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev70/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev71/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25842,6 +25842,35 @@ pub trait Run { fn run(&self); }\n\
 impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }\n";
         let v = scan_fixture("r1024ctl", src2);
         assert!(fixture_effects(&v, "Option::run").is_empty(), "`x` is an L, whose go is pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1025 — a call through a GENERIC type alias (`type Alias<T> = Scoped<'static, T>`) formed no
+    /// edge: Pass A recorded only non-generic aliases, so `Alias::<T>::wrap_inner::<true>(x)` (wasm-bindgen's
+    /// `ScopedClosure::once` → `Closure::wrap_maybe_aborting`) and `Alias::<u8>::plain_inner(x)` named
+    /// `Alias::…`, which no unit is keyed under. The row read the method's TURBOFISH as the cause; the
+    /// `plain_inner` arm (no turbofish) is silent the same way, so it is the alias's own generics. EXECUTED
+    /// (scratchpad `rustagent-v042/fxalias`): every arm wrote the marker.
+    #[test]
+    fn r1025_a_call_through_a_generic_type_alias_resolves() {
+        let src = "\
+pub struct Scoped<'a, T> { pub v: &'a T }\n\
+pub type Alias<T> = Scoped<'static, T>;\n\
+impl<T> Scoped<'static, T> {\n\
+    fn wrap_inner<const B: bool>(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/r1025\", \"x\"); x }\n\
+    fn plain_inner(x: u8) -> u8 { let _ = std::fs::write(\"/tmp/r1025\", \"x\"); x }\n\
+    pub fn via_alias(x: u8) -> u8 { Alias::<T>::wrap_inner::<true>(x) }\n\
+    pub fn via_alias_bare(x: u8) -> u8 { Alias::<T>::plain_inner(x) }\n\
+}\n\
+pub fn free_generic_alias(x: u8) -> u8 { Alias::<u8>::plain_inner(x) }\n\
+pub type Param<T> = T;\n\
+pub struct Pure;\n\
+impl Pure { pub fn plain_inner(x: u8) -> u8 { x } }\n\
+pub fn c_param_alias(x: u8) -> u8 { Param::<Pure>::plain_inner(x) }\n";
+        let v = scan_fixture("r1025alias", src);
+        for f in ["Scoped::via_alias", "Scoped::via_alias_bare", "free_generic_alias"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Scoped's body:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "c_param_alias").is_empty(), "an alias to its own parameter names nothing:\n{v:#}");
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,
