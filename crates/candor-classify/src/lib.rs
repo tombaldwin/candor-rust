@@ -1104,6 +1104,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "rustls" && path.ends_with("KeyLogFile::new") {
         return Some("Fs");
     }
+    // THE COVERAGE-GATE REFRESH (2026-10-08): `KeyLogFile::log` (rustls-0.23.45 key_log_file.rs:100) is
+    // `try_write` -> `file.write_all(..)` (:67) on the SSLKEYLOGFILE it opened.
+    if crate_name == "rustls"
+        && matches!(path, "rustls::KeyLogFile::log" | "rustls::key_log_file::KeyLogFile::log")
+    {
+        return Some("Fs");
+    }
     // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
     // inside the crate, unseen), so a user's connect/publish/consume calls ARE the I/O
     // boundary — to a remote broker, hence Net. Match the broker round-trip verbs (snake_case
@@ -1175,6 +1182,31 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "lettre" {
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
+        }
+        // THE COVERAGE-GATE REFRESH (2026-10-08), read against lettre-0.11.23 source: the SMTP client
+        // connection layer, which `send` above reaches but a consumer driving the protocol by hand never
+        // names. `SmtpConnection::connect` -> `NetworkStream::connect` (connection.rs:66, a TCP dial);
+        // `command` -> `write_all` + `flush` on the stream (:275); `read_response` -> `read_line` (:289);
+        // `quit`/`test_connected`/`auth`/`message`/`message_iter`/`starttls` are `command` +
+        // `read_response`; `abort` sends QUIT and `shutdown`s the socket (:178). The async twins
+        // (async_connection.rs) are the same over tokio, `connect_with_transport` reading the greeting.
+        // `AsyncNetworkStream::{connect_tokio1, upgrade_tls}` dial / handshake the socket (the sync
+        // `NetworkStream` is in the private `mod net;` and nameable by no consumer — no rule, as before);
+        // `Tokio1Executor::connect` is `AsyncSmtpConnection::connect_tokio1` (executor.rs:140). NOT charged:
+        // the accessors (`server_info`, `has_broken`, `can_starttls`, `is_encrypted`, `peer_*`,
+        // `certificate_chain`, `tls_verify_result`, `set_stream`).
+        if let Some((ty, m)) = type_method(path, "lettre", &["", "transport::smtp::client"]) {
+            const CONN: &[&str] = &["connect", "connect_tokio1", "connect_with_transport", "starttls", "quit",
+                "abort", "test_connected", "auth", "message", "message_iter", "command", "read_response"];
+            let hit = match ty {
+                "SmtpConnection" | "AsyncSmtpConnection" => CONN.contains(&m),
+                "AsyncNetworkStream" => matches!(m, "connect_tokio1" | "upgrade_tls"),
+                "Tokio1Executor" => m == "connect",
+                _ => false,
+            };
+            if hit {
+                return Some("Net");
+            }
         }
         // SOUNDNESS R337 — lettre's half of the same wrapper gap. `Identity::from_pem(pem, key)`
         // (transport/smtp/client/tls.rs:749) is `native_tls::Identity::from_pkcs8(pem, key)`, which on
@@ -1684,6 +1716,36 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             {
                 return Some("Db");
             }
+            // THE COVERAGE-GATE REFRESH (2026-10-08), read against rusqlite-0.39.0 source. Transactions,
+            // savepoints and pragmas are SQL round-trips through `execute_batch`/`query_row`/`prepare`,
+            // which this block already charges, but a consumer calling the wrapper never names them:
+            //   * `Transaction::new`/`new_unchecked` -> `conn.execute_batch("BEGIN …")` (transaction.rs:125);
+            //     `commit`/`rollback`/`finish` -> `execute_batch("COMMIT"/"ROLLBACK")` (:192,:204,:219);
+            //     `savepoint`/`savepoint_with_name` -> `Savepoint::with_name_` -> `execute_batch("SAVEPOINT …")` (:253).
+            //   * `Savepoint::{new, with_name, savepoint, savepoint_with_name}` (same `SAVEPOINT`), `commit`
+            //     (`RELEASE`, :314), `rollback` (`ROLLBACK TO`, :328), `finish` (:342).
+            //   * `Connection::{transaction_with_behavior, unchecked_transaction, savepoint,
+            //     savepoint_with_name}` (:427,:465,:495,:507) construct the two above.
+            //   * `Connection::pragma_query_value`/`pragma_update_and_check` -> `query_row` (pragma.rs:154,:262),
+            //     `pragma_query`/`pragma` -> `prepare` + rows (:172,:209), `pragma_update` -> `execute_batch` (:238).
+            // NOT charged: `drop_behavior`/`set_drop_behavior` (a field), and the private `pragma::Sql` builder.
+            if crate_name == "rusqlite" {
+                if let Some((ty, m)) = type_method(path, "rusqlite", &["", "transaction", "pragma"]) {
+                    let hit = match ty {
+                        "Transaction" => matches!(m, "new" | "new_unchecked" | "commit" | "rollback" | "finish"
+                            | "savepoint" | "savepoint_with_name"),
+                        "Savepoint" => matches!(m, "new" | "with_name" | "savepoint" | "savepoint_with_name"
+                            | "commit" | "rollback" | "finish"),
+                        "Connection" => matches!(m, "transaction_with_behavior" | "unchecked_transaction"
+                            | "savepoint" | "savepoint_with_name" | "pragma" | "pragma_query"
+                            | "pragma_query_value" | "pragma_update" | "pragma_update_and_check"),
+                        _ => false,
+                    };
+                    if hit {
+                        return Some("Db");
+                    }
+                }
+            }
             return None;
         }
         // redis: the way redis is ACTUALLY used is the high-level `Commands`/`AsyncCommands`
@@ -1722,6 +1784,22 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 eprintln!("R335SENTINEL {path}");
             }
             return Some("Db");
+        }
+        // THE COVERAGE-GATE REFRESH (2026-10-08), read against redis-1.7.1 source. The sync `Connection`'s
+        // raw protocol pair and the sync `PubSub` reader touch the socket directly:
+        // `send_packed_command` -> `send_bytes` -> `reader.write_all(bytes)` (connection.rs:1661,:1053);
+        // `recv_response` -> `read(true)` -> `parser.parse_value(reader)` (:1668,:1850);
+        // `PubSub::get_message` -> `self.con.read(false)` (:2204). `Net`, not the `Db` the command verbs
+        // carry: these move bytes, they issue no command. Exact type segment (`type_method`), so
+        // `MultiplexedConnection`/`ClusterConnection` are not swept in.
+        if crate_name == "redis" {
+            if let Some((ty, m)) = type_method(path, "redis", &["", "connection"]) {
+                if (ty == "Connection" && matches!(m, "send_packed_command" | "recv_response"))
+                    || (ty == "PubSub" && m == "get_message")
+                {
+                    return Some("Net");
+                }
+            }
         }
         if crate_name == "redis"
             && (path.contains("Commands::")
@@ -3346,6 +3424,17 @@ pub const LIBC_EXEC: &[&str] = &[
 /// `deadpool_postgres` and `rusqlite` — the round-trips themselves. Module-level because the masking
 /// guard reads it too (`masks_locator`, SOUNDNESS R806): every verb here takes the SQL text at
 /// argument 0 except the three in `PG_DB_VERBS_NO_SQL`, so a verb added here is masked by default.
+/// `(type, method)` of a `crate::[modules::]Type::method` path whose modules are exactly one of `mods`
+/// (the crate-root re-export when `mods` holds `""`). Used by the coverage-gate rules below that name a
+/// method on ONE type: comparing the type SEGMENT, not a suffix, so `MultiplexedConnection::recv_response`
+/// can never satisfy a rule written for `Connection::recv_response`.
+fn type_method<'a>(path: &'a str, krate: &str, mods: &[&str]) -> Option<(&'a str, &'a str)> {
+    let rest = path.strip_prefix(krate)?.strip_prefix("::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    mods.contains(&module).then_some((ty, method))
+}
+
 pub const PG_DB_VERBS: &[&str] = &[
                 "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
                 "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
@@ -5807,5 +5896,37 @@ mod masks_locator_tests {
         assert!(masks_locator("Db", "sqlx_core", "sqlx_core::executor::Executor::prepare_with", "prepare_with", true));
         assert!(!masks_locator("Db", "sqlx_core", "sqlx_core::query::Query::fetch_all", "fetch_all", true),
                 "a Query terminal takes an EXECUTOR at arg 0 — masking it would swallow every literal query");
+    }
+
+    /// THE COVERAGE-GATE REFRESH (2026-10-08) — each family's rule fires on the spellings a consumer writes
+    /// and NOT on a sibling type or an accessor (each charge is traced to a body in the rule's comment).
+    #[test]
+    fn coverage_gate_refresh_2026_10_08_rules() {
+        for p in ["rusqlite::Transaction::commit", "rusqlite::transaction::Transaction::new",
+                  "rusqlite::Savepoint::rollback", "rusqlite::Connection::pragma_update",
+                  "rusqlite::Connection::unchecked_transaction", "rusqlite::Connection::savepoint_with_name"] {
+            assert_eq!(classify("rusqlite", p), Some("Db"), "{p}");
+        }
+        for p in ["rusqlite::Transaction::drop_behavior", "rusqlite::Savepoint::set_drop_behavior"] {
+            assert_eq!(classify("rusqlite", p), None, "{p}");
+        }
+        for p in ["redis::Connection::send_packed_command", "redis::connection::Connection::recv_response",
+                  "redis::PubSub::get_message"] {
+            assert_eq!(classify("redis", p), Some("Net"), "{p}");
+        }
+        assert_eq!(classify("redis", "redis::aio::MultiplexedConnection::recv_response"), None);
+        assert_eq!(classify("redis", "redis::Connection::set_write_timeout"), None);
+        for p in ["lettre::SmtpConnection::command", "lettre::transport::smtp::client::SmtpConnection::connect",
+                  "lettre::AsyncSmtpConnection::read_response",
+                  "lettre::transport::smtp::client::AsyncNetworkStream::connect_tokio1",
+                  "lettre::Tokio1Executor::connect"] {
+            assert_eq!(classify("lettre", p), Some("Net"), "{p}");
+        }
+        for p in ["lettre::SmtpConnection::server_info", "lettre::NetworkStream::peer_addr",
+                  "lettre::AsyncSmtpConnection::is_encrypted"] {
+            assert_eq!(classify("lettre", p), None, "{p}");
+        }
+        assert_eq!(classify("rustls", "rustls::KeyLogFile::log"), Some("Fs"));
+        assert_eq!(classify("rustls", "rustls::NoKeyLog::log"), None);
     }
 }

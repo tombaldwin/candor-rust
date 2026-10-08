@@ -720,6 +720,28 @@ def selftest():
               not r3["regressed"] and not r3["oracle_dropped"] and not r3["grown"], f"{r3}")
         exit3 = diff_manifests_cli(c3_cov, c3_cov, c3_open, c3_open, out=devnull)
         check("case 3: diff_manifests_cli exits 0 — a clean run must PASS", exit3 == 0, f"exit={exit3}")
+
+        # Case 4: ENGINE CHANGE vs DRIFT. Two grown rows; the baseline (manifest's engine on the same
+        # fetch) produces only one of them, so it is drift and the other is engine change. A covered row
+        # the fresh run lost while the baseline still covers it is an ENGINE regression.
+        c4_checked_cov = write("c4_checked_cov.tsv", [cov_hdr, "acme\tacme::Foo::bar\tNet\tNet\tacme::m::Foo::bar"])
+        c4_fresh_cov = write("c4_fresh_cov.tsv", [cov_hdr])
+        c4_checked_open = write("c4_checked_open.tsv", [open_hdr])
+        c4_fresh_open = write("c4_fresh_open.tsv", [open_hdr,
+                              "acme\tacme::Foo::bar\tNet\tsrc/m.rs\tacme::m::Foo::bar",
+                              "acme\tacme::A::up\tFs\tsrc/a.rs\tacme::a::A::up",
+                              "acme\tacme::B::eng\tDb\tsrc/b.rs\tacme::b::B::eng"])
+        c4_base_cov = write("c4_base_cov.tsv", [cov_hdr, "acme\tacme::Foo::bar\tNet\tNet\tacme::m::Foo::bar"])
+        c4_base_open = write("c4_base_open.tsv", [open_hdr, "acme\tacme::A::up\tFs\tsrc/a.rs\tacme::a::A::up"])
+        r4 = diff_manifests(c4_checked_cov, c4_fresh_cov, c4_checked_open, c4_fresh_open, c4_base_cov, c4_base_open)
+        check("case 4 (attribution): A::up is drift, B::eng is engine change, Foo::bar an ENGINE regression",
+              [k[1] for k, *_ in r4["grown_drift"]] == ["acme::a::A::up"]
+              and [k[1] for k, *_ in r4["grown_engine"]] == ["acme::b::B::eng"]
+              and [k[1] for k, *_ in r4["regressed_engine"]] == ["acme::m::Foo::bar"]
+              and not r4["regressed_drift"], f"{r4}")
+        r4u = diff_manifests(c4_checked_cov, c4_fresh_cov, c4_checked_open, c4_fresh_open)
+        check("case 4: without a baseline nothing is attributed (never labelled drift by default)",
+              not r4u["baseline"] and "grown_drift" not in r4u, f"{r4u}")
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
 
@@ -875,7 +897,8 @@ def _require_entry_column(path, rows):
         )
 
 
-def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path):
+def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
+                   baseline_covered_path=None, baseline_open_path=None):
     """Compare a fresh regeneration against the checked-in manifests and return a dict with three
     DISTINCT findings, per the R214 comment block above:
 
@@ -892,6 +915,16 @@ def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, 
 
     Each finding value is a list of ((crate, entry), checked_in_row, fresh_row_or_None) tuples, sorted
     by key, so a caller can print whatever detail it wants without re-reading the files.
+
+    ENGINE CHANGE vs CRATES.IO DRIFT (2026-10-08). `grown` and `regressed` used to be reported as
+    "crates.io drift" whatever moved them, and on run 37608278047 that was wrong for all 74 rows: the
+    generator at the engine that wrote the manifest, over the SAME fresh fetch, reproduced the checked-in
+    open.tsv exactly — every row came from engine work committed after it. When the caller supplies
+    `baseline_*` (a fresh regeneration with the manifest's OWN engine — the commit that last wrote it —
+    over the same fetch), each finding is split on that run: a row the baseline engine ALSO produces is
+    DRIFT (the sources moved under an engine that did not), one it does not is ENGINE (the same sources
+    read differently by the engine that did). Both still fail the job — the ratchet may not grow without
+    review either way — but the report names which review is needed.
     """
     checked_cov_rows = read_tsv_rows(checked_covered_path)
     fresh_cov_rows = read_tsv_rows(fresh_covered_path)
@@ -922,10 +955,26 @@ def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, 
     grown_raw = set(fresh_open) - set(checked_open)
     grown = sorted((k, None, fresh_open[k]) for k in grown_raw if k not in checked_cov)
 
-    return {
+    result = {
         "regressed": regressed, "oracle_dropped": oracle_dropped, "grown": grown,
-        "crate_covered_totals": crate_covered_totals,
+        "crate_covered_totals": crate_covered_totals, "baseline": False,
     }
+    if baseline_open_path and baseline_covered_path:
+        base_open_rows = read_tsv_rows(baseline_open_path)
+        base_cov_rows = read_tsv_rows(baseline_covered_path)
+        _require_entry_column(baseline_open_path, base_open_rows)
+        _require_entry_column(baseline_covered_path, base_cov_rows)
+        base_open = _manifest_key_map(base_open_rows)
+        base_cov = _manifest_key_map(base_cov_rows)
+        # grown: drift iff the manifest's engine also leaves it open on these sources.
+        result["grown_drift"] = [g for g in grown if g[0] in base_open]
+        result["grown_engine"] = [g for g in grown if g[0] not in base_open]
+        # regressed: drift iff the manifest's engine ALSO fails to cover it on these sources (the source
+        # moved out from under the rule); engine iff that engine still covers it (HEAD lost the rule).
+        result["regressed_drift"] = [r for r in regressed if r[0] not in base_cov]
+        result["regressed_engine"] = [r for r in regressed if r[0] in base_cov]
+        result["baseline"] = True
+    return result
 
 
 def _fmt_key(k):
@@ -968,9 +1017,26 @@ def format_diff_report(result):
                       "gain on one entry. Investigate before assuming benign.")
 
     lines.append("")
-    lines.append(f"--- GROWN: newly-uncovered (crates.io drift) ({len(grown)}) ---")
-    for k, _, new in grown:
-        lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
+    if result.get("baseline"):
+        for label, key, why in (
+            ("ENGINE CHANGE", "grown_engine",
+             "the manifest's own engine, over this SAME fetch, does not produce these rows: engine/classify "
+             "work since the manifest was written made self-scan find them. Regenerate and review."),
+            ("CRATES.IO DRIFT", "grown_drift",
+             "the manifest's own engine produces these too over this fetch: upstream source moved."),
+        ):
+            lines.append(f"--- GROWN — {label} ({len(result[key])}) ---")
+            lines.append(why)
+            for k, _, new in result[key]:
+                lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
+            lines.append("")
+        lines.append(f"--- REGRESSED split: engine {len(result['regressed_engine'])}, "
+                     f"drift {len(result['regressed_drift'])} ---")
+    else:
+        lines.append(f"--- GROWN: newly-uncovered ({len(grown)}) — NOT attributed: no baseline-engine run "
+                     "was supplied, so engine change and crates.io drift cannot be told apart ---")
+        for k, _, new in grown:
+            lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
 
     lines.append("")
     if regressed or oracle_dropped:
@@ -979,12 +1045,14 @@ def format_diff_report(result):
 
 
 def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
-                        github_output_path=None, out=sys.stdout):
+                        github_output_path=None, out=sys.stdout, baseline_covered_path=None,
+                        baseline_open_path=None):
     """Run `diff_manifests`, print the report to `out`, write GitHub Actions step outputs if
     `github_output_path` is given, and return the process exit code the caller should use: 1 if
     `regressed` or `grown` is non-empty (the two FAILING findings), 0 otherwise. `oracle_dropped` is
     never, by itself, part of the exit-code decision — see the R214 comment block for why."""
-    result = diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path)
+    result = diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
+                            baseline_covered_path, baseline_open_path)
     print(format_diff_report(result), file=out)
 
     # SOUNDNESS R311 — report a CRATE VERSION CHANGE before the row counts, because it EXPLAINS them.
@@ -1019,12 +1087,19 @@ def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_pa
             fh.write(f"regressed={len(result['regressed'])}\n")
             fh.write(f"oracle_dropped={len(result['oracle_dropped'])}\n")
             fh.write(f"grown={len(result['grown'])}\n")
+            fh.write(f"attributed={'true' if result['baseline'] else 'false'}\n")
+            fh.write(f"grown_engine={len(result.get('grown_engine', []))}\n")
+            fh.write(f"grown_drift={len(result.get('grown_drift', []))}\n")
+            fh.write(f"regressed_engine={len(result.get('regressed_engine', []))}\n")
+            fh.write(f"regressed_drift={len(result.get('regressed_drift', []))}\n")
 
     if result["regressed"] or result["grown"]:
         print(f"::error::coverage-gate drift: {len(result['regressed'])} regressed "
               f"(classify() lost a rule), {len(result['oracle_dropped'])} oracle-dropped (self-scan "
-              f"stopped nominating, reported not failed), {len(result['grown'])} newly-uncovered "
-              f"— see job log above", file=out)
+              f"stopped nominating, reported not failed), {len(result['grown'])} newly-uncovered"
+              + (f" ({len(result['grown_engine'])} engine change, {len(result['grown_drift'])} crates.io "
+                 f"drift)" if result["baseline"] else " (not attributed)")
+              + " — see job log above", file=out)
         return 1
     if result["oracle_dropped"]:
         print(f"::warning::coverage-gate: {len(result['oracle_dropped'])} entries dropped out of both "
@@ -1046,6 +1121,9 @@ def main():
                     metavar=("CHECKED_COVERED", "FRESH_COVERED", "CHECKED_OPEN", "FRESH_OPEN"),
                     help="diff a fresh regeneration against the checked-in manifests (SOUNDNESS R214) "
                          "and exit with the job's verdict; see diff_manifests()'s docstring")
+    ap.add_argument("--baseline", nargs=2, default=None, metavar=("BASELINE_COVERED", "BASELINE_OPEN"),
+                    help="with --diff-manifests: a fresh regeneration by the engine that WROTE the checked-in "
+                         "manifests, over the same fetch, so growth splits into engine change vs drift")
     ap.add_argument("--github-output", default=None,
                     help="with --diff-manifests, append regressed/oracle_dropped/grown counts to this "
                          "GITHUB_OUTPUT file")
@@ -1060,7 +1138,9 @@ def main():
         return
 
     if args.diff_manifests:
-        code = diff_manifests_cli(*args.diff_manifests, github_output_path=args.github_output)
+        b = args.baseline or (None, None)
+        code = diff_manifests_cli(*args.diff_manifests, github_output_path=args.github_output,
+                                  baseline_covered_path=b[0], baseline_open_path=b[1])
         sys.exit(code)
 
     registry_src = args.registry
