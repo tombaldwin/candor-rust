@@ -1032,9 +1032,9 @@ pub(crate) fn alias_expand_decls(
         None
     };
     let re = |p: &str| -> Option<String> {
-        // R893 — a wrapper-held container's element keeps its mark through the re-expansion.
+        // R893 / R1023 — a LAYERED element keeps its layers through the re-expansion of its leaf.
         if crate::lang::is_wrapped(p) {
-            return re_plain(crate::lang::strip_wrapped(p)).map(|e| crate::lang::mark_wrapped(&e));
+            return re_plain(crate::lang::strip_wrapped(p)).map(|e| crate::lang::rewrap(p, &e));
         }
         re_plain(p)
     };

@@ -13471,12 +13471,38 @@ trait G {
         // `an_unwrap_or_else_error_closure_is_not_the_guarded_value`).
         // R893 — …and a wrapper of a CONTAINER records the container's element MARKED, never bare (a bare
         // `Sender` would say the guard IS one).
-        let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
-        assert_eq!(elem_type(&mx, &u), Some(crate::lang::mark_wrapped("Sender")),
-                   "R893: a wrapper of a CONTAINER records its element, marked");
-        for nested in ["Mutex<Option<Sender>>", "Mutex<Vec<Vec<Sender>>>", "Mutex<Vec<String>>"] {
+        // R1023 — the mark is now the LAYER LIST, outermost first, so a second level is recorded too.
+        // A layer is read by its leaf unless this module declares the name itself (R482's control).
+        for (nested, want) in [
+            ("std::sync::Mutex<Vec<Sender>>", Some(crate::lang::with_layers("Sender", "MC"))),
+            ("std::sync::Mutex<Option<Sender>>", Some(crate::lang::with_layers("Sender", "MO"))),
+            ("std::sync::Mutex<Vec<Vec<Sender>>>", Some(crate::lang::with_layers("Sender", "MCC"))),
+            ("Option<Vec<Sender>>", Some(crate::lang::with_layers("Sender", "OC"))),
+            ("std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u8, Sender>>>",
+             Some(crate::lang::with_layers("Sender", "MK"))),
+            // a non-nominal leaf records nothing layered: the one-level answer stands
+            ("std::sync::Mutex<Vec<String>>", None),
+            ("Option<Vec<String>>", Some("Vec".to_string())),
+            // a bare `Mutex` is read by its leaf, as the one-level route reads it (a module-declared one
+            // is refused — see `layer_path_is_std`; R482's control pins that end to end)
+            ("Mutex<Option<Sender>>", Some(crate::lang::with_layers("Sender", "MO"))),
+        ] {
             let t: syn::Type = syn::parse_str(nested).unwrap();
-            assert_eq!(elem_type(&t, &u), None, "{nested}: one container level onto a nominal element only");
+            // Compared as (element, layer codes): a non-std layer's written path rides after the codes.
+            let got = elem_type(&t, &u);
+            let key = |e: &Option<String>| e.as_deref().map(|e| (crate::lang::strip_wrapped(e).to_string(),
+                                                                  crate::lang::wrapped_layers(e).to_string()));
+            assert_eq!(key(&got), key(&want), "{nested}");
+        }
+        // …and that path is what a binder peeling to the layer types the binding with (redis's ahash map).
+        let t: syn::Type = syn::parse_str("Vec<ahash::HashMap<u8, Vec<Sender>>>").unwrap();
+        let e = elem_type(&t, &u).unwrap();
+        match crate::lang::layer_bind(&e, crate::lang::LayerBinder::For, "") {
+            Some(crate::lang::Layered::Elem { entry, outer }) => {
+                assert_eq!(crate::lang::wrapped_layers(&entry), "KC");
+                assert_eq!(outer.as_deref(), Some("ahash::HashMap"));
+            }
+            other => panic!("a `for` over Vec<ahash::HashMap<..>> binds the map: {other:?}"),
         }
         let rc: syn::Type = syn::parse_str("RefCell<Sender>").unwrap();
         assert_eq!(elem_type(&rc, &u).as_deref(), Some("Sender"));
@@ -25689,6 +25715,133 @@ pub fn c_local_len() -> usize { let m = Mutex::new(vec![G]); let n = m.lock().un
             assert!(fixture_effects(&v, f).is_empty(),
                     "`{f}` asks the CONTAINER, never a G — executed, it writes nothing:\n{v:#}");
         }
+    }
+
+    /// SOUNDNESS R1023 (R893's second level) — a std layer around a std layer around `G`: `Mutex<Option<G>>`,
+    /// `Option<Vec<G>>`, `Vec<Vec<G>>`, `Vec<Option<G>>`, `HashMap<_, Vec<G>>`, `RefCell<Option<G>>`,
+    /// `Mutex<Option<Vec<G>>>`. One-bit marking could not say which layer was on top, so none of them recorded
+    /// an element and every arm below read ABSENT. EXECUTED (scratchpad `rustagent-v042/fx1023`): each `a_` arm
+    /// wrote the marker, each `c_` control did not — and `G` declares `len`/`is_some`/`is_empty`, so a binder
+    /// that peeled the WRONG layer (typing the guard, the payload `Vec` or the `Option` as `G`) charges a control.
+    #[test]
+    fn r1023_a_second_std_layer_is_peeled_one_layer_per_binder() {
+        let src = "\
+use std::cell::RefCell;\n\
+use std::collections::HashMap;\n\
+use std::sync::Mutex;\n\
+pub struct G;\n\
+fn mark() { let _ = std::fs::write(\"/tmp/fx1023_mark\", \"x\"); }\n\
+impl G {\n\
+    pub fn go(&self) { mark() }\n\
+    pub fn len(&self) -> usize { mark(); 0 }\n\
+    pub fn is_some(&self) -> bool { mark(); true }\n\
+    pub fn is_empty(&self) -> bool { mark(); true }\n\
+}\n\
+pub struct H {\n\
+    pub ov: Option<Vec<G>>,\n\
+    pub vv: Vec<Vec<G>>,\n\
+    pub vo: Vec<Option<G>>,\n\
+    pub hv: HashMap<String, Vec<G>>,\n\
+    pub mo: Mutex<Option<G>>,\n\
+    pub ro: RefCell<Option<G>>,\n\
+    pub mov: Mutex<Option<Vec<G>>>,\n\
+}\n\
+impl H {\n\
+    // effectful arms\n\
+    pub fn a_ov_unwrap(&self) { for g in self.ov.as_ref().unwrap().iter() { g.go() } }\n\
+    pub fn a_ov_flatten(&self) { for g in self.ov.iter().flatten() { g.go() } }\n\
+    pub fn a_ov_idx(&self) { if let Some(v) = self.ov.as_ref() { v[0].go() } }\n\
+    pub fn a_ov_match(&self) { match &self.ov { Some(v) => { for g in v { g.go() } } None => {} } }\n\
+    pub fn a_vv_nested(&self) { for row in &self.vv { for g in row { g.go() } } }\n\
+    pub fn a_vv_idx(&self) { self.vv[0][0].go() }\n\
+    pub fn a_vo_iflet(&self) { for o in &self.vo { if let Some(g) = o { g.go() } } }\n\
+    pub fn a_vo_flatten(&self) { self.vo.iter().flatten().for_each(|g| g.go()) }\n\
+    pub fn a_hv_values(&self) { for v in self.hv.values() { for g in v { g.go() } } }\n\
+    pub fn a_hv_get(&self) { self.hv.get(\"k\").unwrap()[0].go() }\n\
+    pub fn a_ro_borrow(&self) { if let Some(g) = self.ro.borrow().as_ref() { g.go() } }\n\
+    pub fn a_mo_match(&self) { match &*self.mo.lock().unwrap() { Some(g) => g.go(), None => {} } }\n\
+    pub fn a_mov(&self) { if let Some(v) = self.mov.lock().unwrap().as_ref() { for g in v.iter() { g.go() } } }\n\
+    pub fn a_mo_map(&self) { self.mo.lock().unwrap().as_ref().map(|g| g.go()); }\n\
+    // controls: nothing effectful runs; G::len/is_some/is_empty write if wrongly reached\n\
+    pub fn c_ov_map_len(&self) -> usize { self.ov.as_ref().map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_ov_iflet_len(&self) -> usize { if let Some(v) = &self.ov { v.len() } else { 0 } }\n\
+    pub fn c_vv_row_len(&self) -> usize { let mut n = 0; for row in &self.vv { n += row.len(); } n }\n\
+    pub fn c_mo_is_some(&self) -> bool { self.mo.lock().unwrap().is_some() }\n\
+    pub fn c_mo_ok_guard(&self) -> bool { if let Ok(g) = self.mo.lock() { g.is_some() } else { false } }\n\
+    pub fn c_vo_is_some(&self) -> usize { let mut n = 0; for o in &self.vo { if o.is_some() { n += 1 } } n }\n\
+    pub fn c_hv_get_len(&self) -> usize { self.hv.get(\"k\").map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_mov_len(&self) -> usize { if let Some(v) = self.mov.lock().unwrap().as_ref() { v.len() } else { 0 } }\n\
+    pub fn c_ro_is_some(&self) -> bool { self.ro.borrow().is_some() }\n\
+    pub fn c_vv_first_empty(&self) -> bool { self.vv.first().map(|r| r.is_empty()).unwrap_or(true) }\n\
+}\n\
+";
+        let v = scan_fixture("r1023layer", src);
+        for f in ["H::a_ov_unwrap", "H::a_ov_flatten", "H::a_ov_idx", "H::a_ov_match", "H::a_vv_nested",
+                  "H::a_vv_idx", "H::a_vo_iflet", "H::a_vo_flatten", "H::a_hv_values", "H::a_hv_get",
+                  "H::a_ro_borrow", "H::a_mo_match", "H::a_mov", "H::a_mo_map"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches G::go:\n{v:#}");
+        }
+        for f in ["H::c_ov_map_len", "H::c_ov_iflet_len", "H::c_vv_row_len", "H::c_mo_is_some", "H::c_mo_ok_guard",
+                  "H::c_vo_is_some", "H::c_hv_get_len", "H::c_mov_len", "H::c_ro_is_some", "H::c_vv_first_empty"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` asks a std layer, never a G — executed, it writes nothing:\n{v:#}");
+        }
+        // R1023's own three spellings (the row's fixture), and a parameter of the same type.
+        let src2 = "\
+use std::sync::Mutex;\n\
+pub struct G;\n\
+impl G { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1023\", \"x\"); } }\n\
+pub struct H { pub mo: Mutex<Option<G>>, pub ov: Option<Vec<G>> }\n\
+impl H {\n\
+    pub fn mo_some(&self) { if let Some(g) = self.mo.lock().unwrap().as_ref() { g.go() } }\n\
+    pub fn ov_some(&self) { if let Some(v) = &self.ov { for g in v { g.go() } } }\n\
+}\n\
+pub fn param_mo(m: &Mutex<Option<G>>) { if let Some(g) = &*m.lock().unwrap() { g.go() } }\n";
+        let v = scan_fixture("r1023row", src2);
+        for f in ["H::mo_some", "H::ov_some", "param_mo"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1024 — `self` in an impl for a std container, `Option` or `Result` is a parameter of that
+    /// type, and was the one parameter `seed_elem_of` never saw: every binder over it bound an untyped name,
+    /// the impl's unit had no callees and the trait's union row was published `[]`. EXECUTED (scratchpad
+    /// `rustagent-v042/fxself2`, `fxbox`): every arm wrote the marker. R962's mirror control — an effectful
+    /// `Option`-level method beside a pure `L::go` — must stay pure: `x` is `L`, never the self type.
+    #[test]
+    fn r1024_self_in_an_impl_for_a_std_container_binds_its_element() {
+        let src = "\
+pub struct L;\n\
+impl L { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1024\", b\"x\"); } }\n\
+pub trait RunA { fn ra(&self); }\n\
+pub trait RunB { fn rb(&self); }\n\
+pub trait RunD { fn rd(&self); }\n\
+pub trait RunE { fn re(&self); }\n\
+pub trait RunG { fn rg(&self); }\n\
+pub trait Doer { fn dgo(&self); }\n\
+impl Doer for L { fn dgo(&self) { let _ = std::fs::write(\"/tmp/r1024\", b\"x\"); } }\n\
+pub trait Vd { fn vd(&self); }\n\
+impl RunA for Option<L> { fn ra(&self) { match self { Some(x) => x.go(), None => {} } } }\n\
+impl RunB for Option<L> { fn rb(&self) { if let Some(x) = self.as_ref() { x.go() } } }\n\
+impl RunD for Vec<L> { fn rd(&self) { for x in self { x.go() } } }\n\
+impl RunE for Vec<L> { fn re(&self) { self[0].go() } }\n\
+impl RunG for Result<L, ()> { fn rg(&self) { if let Ok(x) = self { x.go() } } }\n\
+impl<T: Doer> Vd for Vec<T> { fn vd(&self) { for x in self { x.dgo() } } }\n";
+        let v = scan_fixture("r1024self", src);
+        for f in ["Option::ra", "Option::rb", "Vec::rd", "Vec::re", "Result::rg", "Vec::vd", "RunA::ra", "RunD::rd"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches L::go:\n{v:#}");
+        }
+        // R962's control, mirrored: `x` binds `L`, so the effectful method on the impl's OWN type is not
+        // reached through it.
+        let src2 = "\
+pub struct L;\n\
+impl L { pub fn go(&self) {} }\n\
+pub trait G { fn go(&self); }\n\
+impl G for Option<L> { fn go(&self) { let _ = std::fs::write(\"/tmp/r1024c\", b\"x\"); } }\n\
+pub trait Run { fn run(&self); }\n\
+impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }\n";
+        let v = scan_fixture("r1024ctl", src2);
+        assert!(fixture_effects(&v, "Option::run").is_empty(), "`x` is an L, whose go is pure:\n{v:#}");
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,

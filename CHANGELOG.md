@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A second std layer around an element is peeled one layer per binder (SOUNDNESS R1023, R893's chain).**
+  `Mutex<Option<G>>`, `Option<Vec<G>>`, `&Mutex<Option<G>>`, `Vec<Vec<G>>`, `Vec<Option<G>>`, `HashMap<_, Vec<G>>`,
+  `RefCell<Option<G>>`, `Mutex<Option<Vec<G>>>` recorded no element, so `if let Some(g) = self.mo.lock().unwrap()
+  .as_ref() { g.go() }`, `if let Some(v) = &self.ov { for g in v { g.go() } }` and twelve sibling spellings read
+  ABSENT (executed: each writes a file). R893's one-bit mark ("a container held by a wrapper") is replaced by the
+  LAYER LIST (`G` + `MO`, outermost first): each adapter is one transition on the top layer and each binder (`for`,
+  `[i]`, `Some`, `Ok`, an adapter's closure) pops one layer of its own kind, refusing anything the table does not
+  name. A layer is read only off a type whose resolved path is std's (or a known lock/collection crate's), so a
+  crate's own `struct Mutex` stays a nominal type. Ten executed controls — a guard, a payload `Vec`, an `Option`
+  asked `len`/`is_some`/`is_empty` where `G` declares those — stay pure.
 - ⚠ **`self` in an `impl` for a std container, `Option` or `Result` is typed like a parameter of that type (SOUNDNESS
   R1024).** `impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }` formed no
   edge — `self` was keyed by the impl's bare leaf (`Option`), which says nothing about what a binder over it yields —
