@@ -16842,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16853,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev72/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev73/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25881,6 +25881,32 @@ pub fn c_param_alias(x: u8) -> u8 { Param::<Pure>::plain_inner(x) }\n";
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Scoped's body:\n{v:#}");
         }
         assert!(fixture_effects(&v, "c_param_alias").is_empty(), "an alias to its own parameter names nothing:\n{v:#}");
+        // THE RECEIVER HALF. An `impl` written ON an alias keys its methods under the alias, a receiver typed
+        // through it expands to the target. EXECUTED (scratchpad `rustagent-v042/fxlcp`): every caller wrote
+        // the marker. At 15ef1d1 `via_field` (generic alias, unrecorded) and `via_ret_plain` (non-generic
+        // alias, declared return: R451's gate refused the target) were ABSENT; recording generic aliases
+        // alone moved `via_ret` from charged to ABSENT, which is what this half closes.
+        let src2 = "\
+pub struct Managed<P> { pub p: P }\n\
+pub type LcPtr<T> = Managed<*mut T>;\n\
+pub type Plain = Managed<*mut u8>;\n\
+pub struct Evp;\n\
+impl LcPtr<Evp> { pub fn agree(&self) { let _ = std::fs::write(\"/tmp/r1025b\", \"x\"); } }\n\
+impl Plain { pub fn agree2(&self) { let _ = std::fs::write(\"/tmp/r1025b\", \"x\"); } }\n\
+pub struct K { pub k: LcPtr<Evp>, pub q: Plain }\n\
+impl K {\n\
+    pub fn get(&self) -> &LcPtr<Evp> { &self.k }\n\
+    pub fn getq(&self) -> &Plain { &self.q }\n\
+    pub fn via_ret(&self) { self.get().agree() }\n\
+    pub fn via_field(&self) { self.k.agree() }\n\
+    pub fn via_ret_plain(&self) { self.getq().agree2() }\n\
+    pub fn via_field_plain(&self) { self.q.agree2() }\n\
+}\n\
+pub fn via_param(p: &LcPtr<Evp>) { p.agree() }\n";
+        let v = scan_fixture("r1025recv", src2);
+        for f in ["K::via_ret", "K::via_field", "K::via_ret_plain", "K::via_field_plain", "via_param"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches the alias's impl:\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R1004, THE CROSS-FILE RESIDUAL — a macro defined in ANOTHER file (`#[macro_use] mod mac;`)

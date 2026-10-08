@@ -1602,8 +1602,54 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         format!("{}#deps:{}", decl_index_digest(&merged), d.join(","))
     };
     // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
-    let returns: ReturnIndex =
+    #[allow(unused_mut)]
+    let mut returns: ReturnIndex =
         merged.rets.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
+    // SOUNDNESS R1025 (its receiver half) — an `impl` written ON a type alias (`impl LcPtr<EVP_PKEY> { fn
+    // agree }`, `type LcPtr<T> = ManagedPointer<*mut T>` in aws-lc-rs) files its (TYPE, method) facts under
+    // the ALIAS's leaf, while a receiver typed through the alias — a field, a parameter, a declared return
+    // — expands to the TARGET's. The unit side already bridges this (`alias_tails` below, VEIN A); the
+    // DECLARED-FACT side did not, so R451's gate (`impl_declared_return`, "the corrected type must declare
+    // the method") refused `self.get().agree()` over `fn get(&self) -> &LcPtr<Evp>` and the call vanished.
+    // That was a pre-existing silence for a non-generic alias (`type Plain = Managed<u8>`) and became one
+    // for a generic alias once R1025 records those. Mirrored under the target's leaf, only where the target
+    // has no fact of its own (a supply, never an override), with `alias_tails`' own target filters.
+    {
+        let mut adds: Vec<(String, String)> = Vec::new();
+        for (q, t) in &merged.mod_aliases {
+            if t.contains(crate::decls::ALIAS_ALT_SEP) {
+                continue;
+            }
+            let a_leaf = q.rsplit("::").next().unwrap_or(q);
+            let t_body = t.strip_prefix("crate::").unwrap_or(t);
+            let t_root = t_body.split("::").next().unwrap_or(t_body);
+            if t_body.contains('<') || manifest_deps.contains(t_root) || matches!(t_root, "std" | "core" | "alloc") {
+                continue;
+            }
+            let t_leaf = t_body.rsplit("::").next().unwrap_or(t_body);
+            if a_leaf == t_leaf || a_leaf.starts_with(crate::decls::REDIRECT_MOD_MARK) {
+                continue;
+            }
+            for pre in [crate::model::RET_IMPL_FN, crate::model::RET_IMPL, crate::model::RET_IMPL_SELF, crate::model::RET_IMPL_ELEM] {
+                let from = format!("{pre}{a_leaf}\u{1f}");
+                for (k, v) in &returns {
+                    if let Some(m) = k.strip_prefix(&from) {
+                        adds.push((format!("{pre}{t_leaf}\u{1f}{m}"), v.clone()));
+                    }
+                }
+            }
+        }
+        adds.sort();
+        adds.dedup();
+        for (k, v) in adds {
+            if let std::collections::hash_map::Entry::Vacant(slot) = returns.entry(k) {
+                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                    eprintln!("R1025ALIASFACT {}", slot.key()); // §E1 REACH COUNTER
+                }
+                slot.insert(v);
+            }
+        }
+    }
     let mut enum_variants: EnumVariantIndex =
         merged.enum_tmp.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
     // R77: same ambiguous-drop filter, for a DISPATCH-typed single-field tuple-variant payload's leaves.

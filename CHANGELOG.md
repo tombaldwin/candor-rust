@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A method written on a type ALIAS resolves through a receiver typed by a declared RETURN (R1025's receiver
+  half).** `impl LcPtr<Evp> { fn agree }` (with `type LcPtr<T> = Managed<*mut T>`) keys `agree` under the alias,
+  while `fn get(&self) -> &LcPtr<Evp>` types `self.get()` as the TARGET; R451's gate ("the corrected type must
+  declare the method") refused it and `self.get().agree()` vanished. Pre-existing for a non-generic alias
+  (`type Plain = Managed<u8>` — executed, ABSENT at 15ef1d1), and it would have spread to generic aliases once
+  R1025 records them (aws-lc-rs `agreement::agree` lost its `LcPtr::agree` edge on the first cut). The alias's
+  (TYPE, method) facts are now mirrored under the target's leaf where the target has none of its own — the
+  declared-fact twin of VEIN A's unit bridge. Cache schema rev73.
 - ⚠ **A `macro_rules!` defined in ANOTHER file of the crate is expanded too (SOUNDNESS R1004, the cross-file
   residual).** `#[macro_use] mod mac;` + `pub mod hidden { m!(); pub fn bare(p: &str) -> bool { spawn(p) } }`, with
   `m!` generating an effectful `spawn`, read `hidden::bare` ABSENT (`deny Fs hidden::bare` exit 0; executed, it
