@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev74: SOUNDNESS R1034 — Pass A keys a non-path impl self type (`&str` → `str`) in `trait_impls` and
+    // the units; SOUNDNESS R1038 — Pass B adds a dependency-trait member edge. Mandatory.
     // rev73: SOUNDNESS R1025 (receiver half) — Pass B's `returns` gains an alias's (TYPE, method) facts under
     // its target's leaf, so cached `calls` change. Mandatory.
     // rev72: SOUNDNESS R1004 (cross-file) — Pass A expands an invocation of a macro defined in ANOTHER file;
@@ -408,7 +410,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev73/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev74/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

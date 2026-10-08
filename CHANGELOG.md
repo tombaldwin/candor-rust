@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **An impl for a non-path self type (`&str`, `&[u8]`, `[T]`, a tuple) gets its own key (SOUNDNESS R1034).** Its
+  methods were filed as the module's FREE fn of the same name, so wasm-bindgen-backend's `impl Encode for &[u8]` /
+  `&str` merged with `pub fn encode(program)` (Env/Fs): every `Encode::encode` dispatch charged Env/Fs it cannot
+  perform, and an effectful `impl Tr for &str` was reached by no call (executed: `s.encode()` wrote a file, read
+  ABSENT). Only an impl whose module-level qual a FREE fn of that module also claims is re-keyed (`&str` → `str`,
+  `&[u8]` → `[u8]`, `&Name`, `[T]`, `(A,B)`); every other non-path impl keeps the qual it had.
+- ⚠ **An associated fn of a DEPENDENCY trait called on a std type is disclosed (SOUNDNESS R1038).**
+  `Box::<T>::deserialize(d)` / `Option::<T>::deserialize(d)` names no std fn — the dependency's impl runs and drives
+  the caller's `D: Deserializer` — but read as a pure std call, so portable-atomic-util published
+  `serde#de::Deserialize::deserialize` as a pure-only union. Now an edge to the dependency trait member (on
+  `foreign_impls` evidence, trait imported here) and, when the argument is the fn's own generic bounded by a
+  dependency trait, `Unknown` + `callback:a generic `<Trait>` handed to a dependency trait member`. Cache schema rev74.
 - ⚠ **The deep (`cargo candor policy`/`guard`) verdict carries ⟨0.27⟩'s `zeroMatch`, and its scopes match the
   CRATE-RELATIVE name (SOUNDNESS R1033, R1028).** A rule whose scope bound nothing was disclosed on stderr only on
   this route; the `--gate-json` verdict now carries the same `zeroMatch` list the scan route's does (summed across

@@ -16842,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16853,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev73/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev74/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -17406,7 +17406,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let src = concat!(
             "pub trait ToConnection<'a> { fn to_connection(self) -> ConnLike<'a>; }\n",
             "pub struct Pool;\n",
-            "impl<'a> ToConnection<'a> for &'a Pool { fn to_connection(self) -> ConnLike<'a> { ConnLike(std::marker::PhantomData) } }\n",
+            "impl<'a> ToConnection<'a> for &'a Pool { fn to_connection(self) -> ConnLike<'a> { let _ = std::fs::write(\"/tmp/r88\", \"x\"); ConnLike(std::marker::PhantomData) } }\n",
             "pub struct ConnLike<'a>(std::marker::PhantomData<&'a ()>);\n",
             "impl<'a> ConnLike<'a> { pub fn resolve(self) -> Result<Conn, ()> { Ok(Conn) } }\n",
             "pub struct Conn;\n",
@@ -17415,9 +17415,19 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "impl<Q> Query for Q { fn run<'a, C: ToConnection<'a>>(self, conn: C) -> Result<(), ()> { \
                  let mut conn = conn.to_connection().resolve()?; conn.raw_query(); Ok(()) } }\n",
         );
+        // SOUNDNESS R1034 — the "pre-existing behaviour" this reproducer leaned on was the reference-type impl
+        // having NO key (it read as an opaque `Unknown`). It is keyed `&Pool` now and the dispatch RESOLVES,
+        // so the impl's body carries a real effect and the guard asks the R88 question directly: `run` must
+        // keep what the OUTER `conn`'s dispatch reaches — the effect, or an honest `Unknown` — never vanish.
+        let v = scan_src_to_json("r88shadow", src);
+        let run = fn_entry(&v, "Q::run");
+        assert!(
+            effs(run).contains(&"Fs".to_string()) || run["unresolved"] == serde_json::json!(true),
+            "R88 self-shadow regression: `Q::run` must keep the outer binding's reach (Fs, or Unknown): {v:#}"
+        );
         let unres = unresolved_of(src);
         assert_eq!(
-            unres.get("Q::run"), Some(&true),
+            unres.get("Q::run").map(|_| true), Some(true),
             "R88 self-shadow regression: `Q::run`'s self-shadowing `let mut conn = conn.to_connection()\
              .resolve()?;` must stay in the report with its pre-existing honest `unresolved` disclosure, \
              not vanish entirely (zero calls, zero unresolved) — the rebind's OWN RHS must resolve \
@@ -25978,6 +25988,98 @@ pub fn via_param(p: &LcPtr<Evp>) { p.agree() }\n";
         assert_eq!(rc2, 1, "warm: lib.rs's bytes did not change, its expansion did — a cached entry must not \
                             replay the old declaration:\n{v2:#}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// SOUNDNESS R1034 — an impl for a NON-PATH self type (`&[u8]`, `&str`) had no type key, so its methods
+    /// were filed as the FREE fn `encode::encode` and merged with wasm-bindgen-backend's `pub fn encode`
+    /// (Env/Fs): every `Encode::encode` dispatch charged Env/Fs, while the `&str` impl that really writes a
+    /// file was reachable by no call. EXECUTED (scratchpad `rustagent-v042/fxkey`): `via_str` wrote the
+    /// marker (ABSENT before), the rest wrote nothing. The second half is the fabrication control, written
+    /// FIRST: the free fn keeps its own Env/Fs, and no dispatcher inherits the free fn's Env.
+    #[test]
+    fn r1034_an_impl_for_a_reference_type_has_its_own_key() {
+        let src = "\
+pub mod encode {\n\
+    pub fn encode(p: &str) -> usize { let _ = std::env::var(\"X\"); let _ = std::fs::read(p); 1 }\n\
+    pub struct Encoder;\n\
+    pub trait Encode { fn encode(&self, dst: &mut Encoder); }\n\
+    impl Encode for u32 { fn encode(&self, _dst: &mut Encoder) {} }\n\
+    impl<'a> Encode for &'a [u8] { fn encode(&self, _dst: &mut Encoder) {} }\n\
+    impl<'a> Encode for &'a str { fn encode(&self, _dst: &mut Encoder) { let _ = std::fs::write(\"/tmp/fxkey\", \"x\"); } }\n\
+    impl<T: Encode> Encode for Option<T> {\n\
+        fn encode(&self, dst: &mut Encoder) { if let Some(t) = self { t.encode(dst) } }\n\
+    }\n\
+    pub fn call_free() -> usize { encode(\"/tmp/none\") }\n\
+    pub fn via_str(s: &str) { let mut e = Encoder; s.encode(&mut e) }\n\
+    pub fn via_bytes(b: &[u8]) { let mut e = Encoder; b.encode(&mut e) }\n\
+    pub fn via_gen<T: Encode>(t: &T) { let mut e = Encoder; t.encode(&mut e) }\n\
+    pub fn via_gen_bytes() { via_gen(&(&b\"ab\"[..])) }\n\
+}\n\
+";
+        let v = scan_fixture("r1034key", src);
+        assert_eq!(fixture_effects(&v, "encode::encode"), vec!["Env".to_string(), "Fs".to_string()],
+                   "the free fn keeps its own effects:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "encode::via_str"), vec!["Fs".to_string()], "the &str impl is reached:\n{v:#}");
+        assert!(fixture_effects(&v, "encode::via_bytes").is_empty(), "the &[u8] impl is pure:\n{v:#}");
+        for f in ["encode::via_gen", "encode::Option::encode"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "`{f}` dispatches over the implementors (the &str one writes), never the free fn's Env:\n{v:#}");
+        }
+        let rows = v["functions"].as_array().unwrap().iter().filter(|f| f["fn"] == "encode::encode").count();
+        assert_eq!(rows, 1, "one free fn, one row — the impl bodies no longer merge into it:\n{v:#}");
+        // jni's shape: an impl over the impl's OWN parameters (`(C, M)`) with an effect of its own reaches the
+        // CHA through the module-level qual it shares with the `&str` impl. Keying every non-path impl (the
+        // first cut) dropped it — 34 jni rows lost `Log` in the A/B — so only an impl whose qual a FREE fn
+        // also claims is re-keyed, and this module declares none.
+        let src2 = "\
+pub trait Desc { fn lookup(self) -> u8; }\n\
+impl<C, M> Desc for (C, M) { fn lookup(self) -> u8 { let _ = std::fs::write(\"/tmp/r1034t\", \"x\"); 1 } }\n\
+impl<'a> Desc for &'a str { fn lookup(self) -> u8 { 0 } }\n\
+pub fn via<T: Desc>(t: T) -> u8 { t.lookup() }\n";
+        let v = scan_fixture("r1034tuple", src2);
+        assert!(fixture_effects(&v, "via").contains(&"Fs".to_string()), "the tuple impl stays a candidate:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1038 — `Box::<u32>::deserialize(d)` names no std fn: the body that runs is the DEPENDENCY's
+    /// `impl Deserialize for Box<T>`, which drives the caller's `d`. The written path read as a pure std
+    /// call, the edge vanished, and portable-atomic-util published `serde#de::Deserialize::deserialize` as a
+    /// pure-only union (its 0.40.0 `Unknown` there was a `macro:` hedge with the wrong reason, which the
+    /// same-file macro expansion correctly removed). EXECUTED (scratchpad `rustagent-v042/fxserde`): the
+    /// local deserializer's write happens through `read_wrap`/`read_opt`. Chaining serde's report answers the
+    /// call pure, so the disclosure must be the callback, not the edge alone.
+    #[test]
+    fn r1038_a_dependency_trait_member_on_a_std_type_is_disclosed() {
+        let src = "\
+use serde::de::{Deserialize, Deserializer, Visitor};\n\
+pub struct Wrap(pub u32);\n\
+impl<'de> Deserialize<'de> for Wrap {\n\
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n\
+        Box::<u32>::deserialize(d).map(|b| Wrap(*b))\n\
+    }\n\
+}\n\
+pub struct Opt(pub Option<u32>);\n\
+impl<'de> Deserialize<'de> for Opt {\n\
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n\
+        Option::<u32>::deserialize(d).map(Opt)\n\
+    }\n\
+}\n\
+pub struct EffDe;\n\
+impl<'de> Deserializer<'de> for EffDe {\n\
+    type Error = serde::de::value::Error;\n\
+    fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {\n\
+        let _ = std::fs::write(\"/tmp/fxserde\", \"x\");\n\
+        v.visit_u32(7)\n\
+    }\n\
+    serde::forward_to_deserialize_any! { bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier ignored_any }\n\
+}\n\
+pub fn read_wrap() -> u32 { Wrap::deserialize(EffDe).map(|w| w.0).unwrap_or(0) }\n\
+pub fn read_opt() -> u32 { Opt::deserialize(EffDe).ok().and_then(|o| o.0).unwrap_or(0) }\n\
+";
+        let v = scan_fixture_raw("r1038serde", src, "serde = \"1\"", "");
+        for f in ["Wrap::deserialize", "Opt::deserialize", "read_wrap", "read_opt", "de::Deserialize::deserialize"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()),
+                    "`{f}` hands the caller's deserializer to serde — never pure:\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,

@@ -2692,6 +2692,88 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1038 — `Box::<T>::deserialize(d)` / `Option::<T>::deserialize(d)`: an associated fn of a
+    /// DEPENDENCY trait (`serde::Deserialize`) called on a STD type. std declares no `Box::deserialize`, so
+    /// the body that runs is the dependency's `impl Deserialize for Box<T>` — and it drives the caller's
+    /// `D: Deserializer`, i.e. arbitrary code. The written path expands to `Box::deserialize`, which the
+    /// classifier reads as a pure std call, so the edge VANISHED: portable-atomic-util's
+    /// `impl Deserialize for Arc<T> { Box::deserialize(d)… }` had no callees and the crate published the
+    /// union `serde#de::Deserialize::deserialize` as `[]` — a pure-only union over the trait every consumer
+    /// deserializes through (executed fixture `fxserde`: the deserializer's write happened).
+    ///
+    /// Resolved to the dependency trait's member, `<dep>::<trait path>::<m>`, and ONLY on evidence: the
+    /// member must be one THIS crate implements for that dependency trait (`foreign_impls`, the witness
+    /// R551 established), and the trait must be imported here under its own leaf. What that edge carries
+    /// is whatever the dependency route gives a call into `serde` — `invisible: [serde]` unchained, the
+    /// dependency's own answer chained. Additive: the written path is still pushed.
+    fn edge_std_type_dep_trait_member(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        if p.qself.is_some() {
+            return;
+        }
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() < 2 {
+            return;
+        }
+        let method = segs[segs.len() - 1].clone();
+        let written = crate::lang::path_to_string_lc(&p.path);
+        let full = expand(&written, &self.uses);
+        let Some((ty_path, _)) = full.rsplit_once("::") else { return };
+        let root = ty_path.split("::").next().unwrap_or(ty_path);
+        let ty_leaf = ty_path.rsplit("::").next().unwrap_or(ty_path);
+        let std_ty = matches!(root, "std" | "core" | "alloc")
+            || (!ty_path.contains("::")
+                && matches!(ty_leaf, "Box" | "Option" | "Vec" | "String" | "Result")
+                && !self.uses.contains_key(ty_leaf));
+        if !std_ty || !ty_leaf.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return;
+        }
+        let deps: Vec<String> = self.uses.get(crate::lang::DEPS_KEY).map(|d| d.split('\u{1}').map(String::from).collect()).unwrap_or_default();
+        let mut targets: Vec<String> = Vec::new();
+        for k in self.foreign_impls.keys() {
+            let Some((owner, member)) = k.split_once('#') else { continue };
+            if !deps.iter().any(|d| d == owner) {
+                continue;
+            }
+            let Some(tr_path) = member.strip_suffix(&format!("::{method}")) else { continue };
+            let tr_leaf = tr_path.rsplit("::").next().unwrap_or(tr_path);
+            // The trait must be IN SCOPE here, imported from that dependency, for `Ty::m` to name it.
+            let imported = self.use_target(tr_leaf).is_some_and(|t| t.split("::").next() == Some(owner));
+            if imported {
+                let t = format!("{owner}::{tr_path}::{method}");
+                if !targets.contains(&t) {
+                    targets.push(t);
+                }
+            }
+        }
+        // THE ARGUMENT IS THE CALLER'S CODE. When the value handed over is this fn's own generic bounded by
+        // a DEPENDENCY trait (`d: D` under `D: serde::Deserializer`), what the dependency runs is that
+        // value's methods — the caller's deserializer, which no report on either side of this crate can
+        // name (measured: chaining serde's report answers the call PURE, and the fixture's deserializer
+        // writes a file). Disclosed as the callback it is, never left to the edge alone.
+        if !targets.is_empty() {
+            for a in args {
+                let syn::Expr::Path(ap) = peel_recv(a) else { continue };
+                let Some(n) = ap.path.get_ident().map(|i| i.to_string()) else { continue };
+                let Some(leaves) = self.trait_vars.get(&n) else { continue };
+                let dep_bound = leaves.iter().find(|l| {
+                    self.use_target(l).and_then(|t| t.split("::").next()).is_some_and(|r| deps.iter().any(|d| d == r))
+                });
+                if let Some(b) = dep_bound.cloned() {
+                    self.mark_unresolved(format!("callback:a generic `{b}` handed to a dependency trait member"));
+                }
+            }
+        }
+        for t in targets {
+            if std::env::var_os("CANDOR_R1038_INSTR").is_some() {
+                eprintln!("R1038DEPTRAIT\t{full} -> {t}"); // §E1 REACH COUNTER, on the CHANGED branch only
+            }
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                leaf: method.clone(), path: t,
+                str_arg: None, path_lits_partial: false, path_lit2: None,
+                typed: false, method: false, is_macro: false });
+        }
+    }
+
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -4969,6 +5051,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         if let syn::Expr::Path(p) = func {
             self.edge_ufcs_foreign_trait(p, &node.args);
+            self.edge_std_type_dep_trait_member(p, &node.args);
         }
         match func {
             syn::Expr::Path(p) => {

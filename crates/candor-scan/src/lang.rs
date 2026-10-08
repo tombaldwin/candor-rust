@@ -3593,6 +3593,91 @@ pub(crate) fn stmt_cfg_inactive(stmt: &syn::Stmt) -> bool {
     }
 }
 
+/// SOUNDNESS R1034 — the key an impl's methods are filed under, NARROWED to the defect: a non-path self type
+/// keeps the module-level qual it always had (`{modpath}::{m}`) UNLESS that qual is a free fn this module
+/// declares — the merge R1034 is. Keying every non-path impl (the first cut) renamed thousands of units and
+/// moved CHA fan-outs past their cap (jni lost `Log` on 34 rows to a `dispatch:` hedge, bstr/bumpalo traded
+/// hedges for resolutions); keying only the colliding ones changes exactly the units that were wrong.
+pub(crate) fn impl_key_avoiding_free_fns(im: &syn::ItemImpl, items: &[syn::Item]) -> Option<String> {
+    if let Some(t) = impl_type_name(&im.self_ty) {
+        return Some(t);
+    }
+    let methods: Vec<String> = im
+        .items
+        .iter()
+        .filter_map(|ii| match ii {
+            syn::ImplItem::Fn(m) => Some(m.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let collides = items.iter().any(|it| matches!(it, syn::Item::Fn(f) if methods.contains(&f.sig.ident.to_string())));
+    if collides {
+        if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+            eprintln!("R1034KEY\t{}", methods.join(","));
+        }
+        impl_unit_type_name(&im.self_ty, &im.generics)
+    } else {
+        None
+    }
+}
+
+/// SOUNDNESS R1034 — the type KEY an impl block's methods are filed under, for the unit qual and the CHA
+/// edge. `impl_type_name` answers only a PATH self type, so `impl Encode for &'a [u8]` / `&'a str` had no
+/// key and its `encode` was filed as the FREE fn `encode::encode` — the same qual as wasm-bindgen-backend's
+/// `pub fn encode(program)`, which reads the environment and the filesystem. The two bodies merged into one
+/// unit (three rows at the free fn's location) and every `Encode::encode` dispatch charged Env/Fs, while a
+/// real `impl Encode for &str` that writes a file was reached by no call at all.
+///
+/// A non-path self type now gets a key no identifier can spell and no free fn can share: a reference to a
+/// primitive/`str`/slice keys as its referent (`&str` → `str`, so `s.encode()` on a `&str` — typed `str` —
+/// reaches it), a reference to a nominal type as `&Name` (never `Name`, which would collide with `impl Tr
+/// for Name`, the `IntoIterator for &Coll` + `for Coll` pair), a slice/array as `[T]`, a tuple as `(A,B)`.
+/// A self type built from the impl's OWN parameters (`&W`, `(C, M)`) is keyed the same way (`&W`, `(C,M)`), as a
+/// blanket `impl<T> Tr for T` already is (`T::m`): jni's `impl<C, M> Desc for (C, M)` performs effects of its
+/// own (`Log`), and it reached the CHA only by colliding with the `&str` impl's free-fn qual — keying the
+/// `&str` impl alone dropped it (measured: 34 jni rows lost `Log`).
+pub(crate) fn impl_unit_type_name(ty: &syn::Type, generics: &syn::Generics) -> Option<String> {
+    if let Some(t) = impl_type_name(ty) {
+        return Some(t);
+    }
+    let own = |id: &syn::Ident| generics.type_params().any(|tp| tp.ident == *id);
+    fn prim(n: &str) -> bool {
+        matches!(n, "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "isize" | "f32" | "f64" | "bool" | "char" | "str")
+    }
+    fn elem(t: &syn::Type, own: &dyn Fn(&syn::Ident) -> bool) -> Option<String> {
+        match t {
+            syn::Type::Paren(p) => elem(&p.elem, own),
+            syn::Type::Group(g) => elem(&g.elem, own),
+            syn::Type::Path(p) if p.qself.is_none() => {
+                let seg = p.path.segments.last()?;
+                let _ = own(&seg.ident);
+                Some(seg.ident.to_string())
+            }
+            syn::Type::Slice(s) => elem(&s.elem, own).map(|e| format!("[{e}]")),
+            syn::Type::Array(a) => elem(&a.elem, own).map(|e| format!("[{e};_]")),
+            syn::Type::Tuple(t) if !t.elems.is_empty() => {
+                let parts: Option<Vec<String>> = t.elems.iter().map(|e| elem(e, own)).collect();
+                parts.map(|v| format!("({})", v.join(",")))
+            }
+            syn::Type::Reference(r) => elem(&r.elem, own).map(|e| format!("&{e}")),
+            _ => None,
+        }
+    }
+    match ty {
+        syn::Type::Reference(r) => {
+            let inner = elem(&r.elem, &own)?;
+            let bare = inner.trim_start_matches('&');
+            if inner.starts_with('[') || prim(bare) && !inner.starts_with('&') {
+                Some(inner)
+            } else {
+                Some(format!("&{inner}"))
+            }
+        }
+        _ => elem(ty, &own),
+    }
+}
+
 pub(crate) fn impl_type_name(ty: &syn::Type) -> Option<String> {
     if let syn::Type::Path(p) = ty {
         return p.path.segments.last().map(|s| s.ident.to_string());
@@ -8816,8 +8901,14 @@ pub(crate) fn collect_opaque_trait_impls(
                 // obligation-2 index has no spelling for.
                 if foreign_trait_owner_qual(tr, uses).is_none() {
                     if let Some(leaf) = impl_trait_leaf(tr, uses) {
+                        // SOUNDNESS R1034 — the unit is minted under the impl's own key now (`&str` → `str::m`),
+                        // never as the free fn `{modpath}::{m}` it used to merge with.
+                        let key = impl_key_avoiding_free_fns(im, items);
                         for m in &members {
-                            let q = crate::decls::qualify(modpath, m);
+                            let q = match &key {
+                                Some(k) => crate::decls::qualify(modpath, &format!("{k}::{m}")),
+                                None => crate::decls::qualify(modpath, m),
+                            };
                             if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
                                 eprintln!("VEINC_NONNOMINAL\t{leaf}::{m}\t{q}"); // §E1 REACH PROBE
                             }

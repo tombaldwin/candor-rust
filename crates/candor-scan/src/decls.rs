@@ -122,7 +122,8 @@ pub(crate) fn scan_items(
                 if !include_tests && is_cfg_test(&im.attrs) {
                     continue; // a `#[cfg(test)] impl` block — test-only
                 }
-                let tyname = impl_type_name(&im.self_ty);
+                // SOUNDNESS R1034 — a non-path self type gets its own key (see `impl_unit_type_name`).
+                let tyname = crate::lang::impl_key_avoiding_free_fns(im, items);
                 // SOUNDNESS R160 — `Self` IS the enclosing impl's type, and nothing told the resolver so.
                 // Every path in a body reaches `lang::expand` through this one `uses` map, so binding
                 // `Self` HERE makes `Self::assoc()`, `Self::CONST`, `Self::Variant(..)`, `Self { .. }` and
@@ -4242,7 +4243,7 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Impl(im) => {
-                let self_ty = impl_type_name(&im.self_ty);
+                let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items); // R1034
                 // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only
                 // when it is NOT one of them. A blanket `impl<T> Trait for T` names every type at once,
                 // so an impl-qualified return key written from it would claim `T::get -> R` for whatever
