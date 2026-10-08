@@ -6592,3 +6592,71 @@ fn r894_a_dependencys_published_foreign_import_is_unknown_native_when_chained() 
     assert!(!wr.is_some_and(|f| f["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "xwrap"))),
         "a wrappers-only crate is analysed code and must stay covered: {v:#}");
 }
+
+/// SOUNDNESS R959 — a RENAMED re-export (`pub use inner::eff as reff;`) published nothing under `reff`, so
+/// a consumer chained onto the dependency read `ydep::reff()` as PURE: ABSENT, `deny Fs c_reff` 0, over a
+/// call that EXECUTED writes a file (scratchpad `rustagent-v041/fx959x`). The producer now publishes one
+/// unit per renamed re-export of a crate-local fn, with one edge to the definition. Controls: the
+/// un-renamed path is unchanged, a renamed TYPE and an EXTERNAL rename publish nothing, a renamed PURE fn
+/// is a pure unit, and `analyzed.count` still equals the sidecar's node set.
+#[test]
+fn r959_a_renamed_reexport_is_a_unit_a_chained_consumer_can_call() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-r959-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("ydep/src")).unwrap();
+    std::fs::create_dir_all(d.join("app/src")).unwrap();
+    std::fs::write(d.join("ydep/Cargo.toml"), "[package]\nname = \"ydep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("ydep/src/lib.rs"), "\
+        pub mod inner {\n\
+            pub fn eff() { let _ = std::fs::write(\"/tmp/fx959_mark\", \"x\"); }\n\
+            pub fn calm() -> u32 { 1 }\n\
+            pub struct T;\n\
+        }\n\
+        pub use inner::eff as reff;\n\
+        pub use inner::calm as rcalm;\n\
+        pub use inner::T as U;\n\
+        pub use std::fs::remove_file as rmf;\n\
+        pub mod m { pub use crate::inner::eff as meff; }\n\
+        pub fn reff_user() { reff() }\n").unwrap();
+    std::fs::write(d.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nydep = { path = \"../ydep\" }\n").unwrap();
+    std::fs::write(d.join("app/src/lib.rs"), "\
+        pub fn c_reff() { ydep::reff() }\n\
+        pub fn c_meff() { ydep::m::meff() }\n\
+        pub fn c_plain() { ydep::inner::eff() }\n\
+        pub fn c_calm() -> u32 { ydep::rcalm() }\n\
+        pub fn c_type() -> ydep::U { ydep::U }\n").unwrap();
+    let rep = d.join("rep");
+    std::fs::create_dir_all(&rep).unwrap();
+    let st = Command::new(bin()).arg(d.join("ydep").to_string_lossy().as_ref())
+        .args(["--out", rep.join("y").to_string_lossy().as_ref()])
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .status().unwrap();
+    assert!(st.success());
+    let dep: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rep.join("y.ydep.scan.json")).unwrap()).unwrap();
+    let nodes = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+        &std::fs::read_to_string(rep.join("y.ydep.scan.callgraph.json")).unwrap()).unwrap();
+    let out = Command::new(bin()).arg(d.join("app").to_string_lossy().as_ref()).arg("--json")
+        .env("CANDOR_DEPS", rep.to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .output().unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON");
+    let eff = |v: &serde_json::Value, n: &str| -> Option<Vec<String>> {
+        v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == n).map(|f| {
+            f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)).collect()
+        })
+    };
+    let fs = Some(vec!["Fs".to_string()]);
+    // the producer
+    assert_eq!(eff(&dep, "reff"), fs, "{dep:#}");
+    assert_eq!(eff(&dep, "m::meff"), fs, "{dep:#}");
+    assert!(nodes.contains_key("rcalm") && eff(&dep, "rcalm").is_none(), "a renamed PURE fn is a pure unit: {dep:#}");
+    assert!(!nodes.contains_key("U") && !nodes.contains_key("rmf"), "a renamed type / external item is no unit: {nodes:?}");
+    assert_eq!(dep["analyzed"]["count"].as_u64().unwrap() as usize, nodes.len(), "count must equal the node set");
+    // the consumer
+    assert_eq!(eff(&v, "c_reff"), fs, "{v:#}");
+    assert_eq!(eff(&v, "c_meff"), fs, "{v:#}");
+    assert_eq!(eff(&v, "c_plain"), fs, "the un-renamed path is the control: {v:#}");
+    assert_eq!(eff(&v, "c_calm"), None, "{v:#}");
+    assert_eq!(eff(&v, "c_type"), None, "{v:#}");
+}

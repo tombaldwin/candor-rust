@@ -2154,7 +2154,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
         // SOUNDNESS R894 — a published foreign declaration's unit is for the REPORT; in-crate calls keep
         // answering through `extern_fns`, so it joins neither local resolution index.
-        if f.extern_decl {
+        if f.extern_decl || f.reexport_alias {
             continue;
         }
         let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);
@@ -2459,6 +2459,65 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut incomplete: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut loc: HashMap<String, String> = HashMap::new();
+    // SOUNDNESS R959 — A RENAMED RE-EXPORT IS A NAME A CONSUMER CALLS. `pub use inner::eff as reff;`
+    // published nothing under `reff` (no row, no call-graph node), so a chained consumer's
+    // `ydep::reff()` matched no unit of a COVERED crate and read PURE — ABSENT, `deny Fs` 0 — while the
+    // un-renamed `pub use inner2::eff2` beside it resolved by its leaf. A unit per renamed re-export of a
+    // crate-local fn, with ONE call edge to each `#[cfg]` arm's definition, publishes exactly the answer
+    // the in-crate route gives a caller of `reff` (which already resolves through the `use` alias).
+    // Only where the target IS a unit this scan analysed — a renamed TYPE, trait, const or an external
+    // item names no fn here and gets nothing (an external one is R99's alias route) — and never over a
+    // name a real fn of that module already carries.
+    //
+    // ADDED HERE, AFTER every in-crate resolution index (`by_leaf`, `by_tail2`, the re-export alias index,
+    // `unit_quals`) is built, and kept out of all of them: a unit named `construct::mangled_name` beside
+    // `pub use self::symbol::mangled as mangled_name` told the alias index the module DECLARES that name,
+    // which shadowed the alias and left `construct::mangled_name()` unresolved (measured:
+    // `a_renamed_and_a_super_relative_reexport_both_resolve` lost its `Exec`).
+    {
+        let real: HashMap<&str, &FnInfo> = fns
+            .iter()
+            .filter(|f| !f.extern_decl)
+            .map(|f| (f.qual.as_str(), f))
+            .collect();
+        let mut add: Vec<FnInfo> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in &merged.reexports {
+            if r.alias == "*" || r.alias == r.name {
+                continue;
+            }
+            let aq = crate::decls::qualify(&r.module, &r.alias);
+            if real.contains_key(aq.as_str()) || !seen.insert(aq.clone()) {
+                continue;
+            }
+            let targets: Vec<&FnInfo> =
+                r.from.iter().filter_map(|m| real.get(crate::decls::qualify(m, &r.name).as_str()).copied()).collect();
+            let Some(first) = targets.first() else { continue };
+            let mut u = (*first).clone();
+            u.qual = aq;
+            u.leaf = r.alias.clone();
+            u.calls = targets
+                .iter()
+                .filter_map(|t| {
+                    serde_json::from_value::<crate::model::Call>(
+                        serde_json::json!({ "p": format!("crate::{}", t.qual), "l": t.leaf }),
+                    )
+                    .ok()
+                })
+                .collect();
+            u.unresolved = false;
+            u.unresolved_why = Vec::new();
+            u.refusals = Vec::new();
+            u.dispatch = Vec::new();
+            u.foreign_dispatch = Vec::new();
+            u.reexport_alias = true;
+            if std::env::var_os("CANDOR_R959_INSTR").is_some() {
+                eprintln!("R959ALIAS\t{}\t{}", u.qual, first.qual);
+            }
+            add.push(u);
+        }
+        fns.extend(add);
+    }
     // Per-fn DIRECT Unknown-origin reasons (the receipt's `unknownWhy`, spec §2). Coarse, like the lint's
     // per-trait tag: a callback we can't see through, an FFI/extern boundary, or a genuinely-unresolvable
     // bare call. Tracked so the disclosure names WHY, not just that an Unknown exists.

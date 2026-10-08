@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A renamed re-export is a unit a chained consumer can call (SOUNDNESS R959).** `pub use inner::eff as reff;`
+  published nothing under `reff`, so a consumer chained onto the crate read `ydep::reff()` as PURE (ABSENT,
+  `deny Fs` 0) over a call that executed writes a file, while the un-renamed `pub use` beside it resolved by its
+  leaf. The producer now publishes one unit per renamed re-export of a crate-local fn (root or module level), with
+  one edge to each `#[cfg]` arm's definition, so the row carries the definition's answer and the call-graph sidecar
+  names it (`analyzed.count` still equals the node set). Kept out of every in-crate resolution index, which
+  already answers `reff` through the `use` alias. A renamed type, const or external item publishes nothing.
 - ⚠ **A function a local `macro_rules!` declares is now a unit (SOUNDNESS R1004).** An item-position invocation
   of a macro defined in the SAME file is expanded by a macro-by-example matcher (first matching arm, `syn`-parsed
   fragments, nested repetitions, `$crate`), and the free `fn`s and `extern` blocks it yields are spliced in beside

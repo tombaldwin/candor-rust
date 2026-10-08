@@ -2846,6 +2846,7 @@ pub(crate) fn fninfo(
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         extern_decl: false,
+        reexport_alias: false,
     }
 }
 
