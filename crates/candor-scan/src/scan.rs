@@ -1372,6 +1372,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if text.contains("pin_project") || text.contains("link!") {
                 crate::lang::splice_pin_project(&mut file.items); // R988, R960
             }
+            if text.contains("macro_rules") {
+                crate::mbe::splice_local_macros(&mut file.items); // R1004
+            }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -1887,6 +1890,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                     if t.contains("pin_project") || t.contains("link!") {
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
+                    }
+                    if t.contains("macro_rules") {
+                        crate::mbe::splice_local_macros(&mut f.items); // R1004 — the round-2 twin
                     }
                     Some(f)
                 })

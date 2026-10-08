@@ -6891,8 +6891,10 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                         use crate::hidden::spawn;\n\
                         pub fn go(p: &str) -> bool { spawn(p) }\n";
         // (2) the macro body declares the `pub fn` ITSELF — no target row anywhere in the report.
-        let declares = "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
-                          std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n\
+        // SOUNDNESS R1004 — defined in ANOTHER file, because a macro this file defines is now EXPANDED and
+        // its `spawn` is a unit (`r1004_a_function_a_local_macro_declares_is_a_unit`). R128 is the hedge
+        // for what the expansion does not reach, and a cross-file definition is that.
+        let declares = "#[macro_use] mod macros;\n\
                         mod hidden { defit!(); }\n\
                         use crate::hidden::spawn;\n\
                         pub fn go(p: &str) -> bool { spawn(p) }\n";
@@ -6910,7 +6912,9 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (attack A — a test that cannot discriminate is worse than no test). With the hedge disabled all
         // three lines appear in the failure.
         let mut wrong: Vec<String> = Vec::new();
-        for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[]),
+        let defit = ("macros.rs", "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n");
+        for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[defit][..]),
                                    ("r128incl", included, &[gen][..])] {
             let v = scan_fixture_files(name, src, extra);
             let eff = fixture_effects(&v, "go");
@@ -7069,11 +7073,14 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // actually produced to the classifier. With the emission site reverted this reads `ambiguous:`
         // and classifies `Dispatch`, which is precisely the 30 crates that pass `deny Unknown[unresolved]`
         // today while holding the hole.
-        let src = "mod hidden { macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
-                     std::process::Command::new(p).status().is_ok() } }; } m!(); }\n\
+        // R1004 — the macro lives in another file, so it stays unexpanded (a same-file one is now a unit).
+        let src = "#[macro_use] mod macros;\n\
+                   mod hidden { m!(); }\n\
                    use crate::hidden::spawn;\n\
                    pub fn go(p: &str) -> bool { spawn(p) }\n";
-        let v = scan_fixture_files("r270e2e", src, &[]);
+        let mac = ("macros.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n");
+        let v = scan_fixture_files("r270e2e", src, &[mac]);
         let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some("go"))
             .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
@@ -7141,13 +7148,17 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (1) `Wrap` is a visible tuple struct in a module that also carries an unexpandable item macro.
         // diesel's exact shape: a visible tuple struct WITH an impl (which is what puts its leaf in
         // `local_types`), in a module that also carries an unexpandable item macro.
-        let ctor = "pub mod m { macro_rules! noise { () => { pub fn hidden_one() {} } } noise!();\n\
+        // R1004 — every `noise!` below is defined in ANOTHER file (`noise_files`): a macro this file
+        // defines is now expanded, and its `hidden_*` would be a visible unit rather than R128's evidence.
+        let noise_files = [("macros.rs", "macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n")];
+        let ctor = "#[macro_use] mod macros;\n\
+                    pub mod m { noise!();\n\
                       pub struct Wrap(pub u8);\n\
                       impl Wrap { pub fn get(&self) -> u8 { self.0 } } }\n\
                     use crate::m::{Wrap, hidden_one};\n\
                     pub fn go() -> Wrap { Wrap(1) }\n\
                     pub fn discriminator() { hidden_one() }\n";
-        let v = scan_fixture("r128ctor", ctor);
+        let v = scan_fixture_files("r128ctor", ctor, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "constructing a VISIBLE tuple struct is pure — a macro elsewhere in its module is not \
                     evidence that `Wrap` was hidden");
@@ -7161,13 +7172,13 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // `compile_error!` at item position; 160 of that cut's 472 corpus hits, across 27 crates, were
         // this one misreading — criterion's `black_box`, rusqlite's `str_to_cstring`, zstd-safe's
         // `parse_code`, palette's `clamp`, chacha20's `quarter_round`, all plainly visible in source.
-        let rootfn = "macro_rules! noise { () => { pub fn hidden_three() {} } }\n\
+        let rootfn = "#[macro_use] mod macros;\n\
                       noise!();\n\
                       pub fn visible_root() {}\n\
                       use crate::{visible_root, hidden_three};\n\
                       pub fn go() { visible_root() }\n\
                       pub fn discriminator() { hidden_three() }\n";
-        let v = scan_fixture("r128rootfn", rootfn);
+        let v = scan_fixture_files("r128rootfn", rootfn, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "a crate-ROOT free fn is VISIBLE — it merely has no 2-segment tail to be indexed \
                     under, and the shape of an index is not evidence about the source");
@@ -7175,13 +7186,14 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                    "…discriminator: the macro-declared root fn still hedges");
 
         // (2) `dup::pick` exists twice, so the 2-segment tail `dup::pick` is AMBIGUOUS, not absent.
-        let ambiguous = "pub mod dup { macro_rules! noise { () => { pub fn hidden_two() {} } } noise!();\n\
+        let ambiguous = "#[macro_use] mod macros;\n\
+                         pub mod dup { noise!();\n\
                            pub fn pick() {} }\n\
                          pub mod outer { pub mod dup { pub fn pick() {} } }\n\
                          use crate::dup::{pick, hidden_two};\n\
                          pub fn go() { pick() }\n\
                          pub fn discriminator() { hidden_two() }\n";
-        let v = scan_fixture("r128ambig", ambiguous);
+        let v = scan_fixture_files("r128ambig", ambiguous, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "an AMBIGUOUS tail names definitions candor SAW and declined to choose between — a \
                     different state from naming nothing, and not R128's");
@@ -16692,7 +16704,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16703,7 +16715,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev67/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev68/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25574,6 +25586,44 @@ pub fn c_local_len() -> usize { let m = Mutex::new(vec![G]); let n = m.lock().un
                   "H::c_for_lock", "H::c_guard_len", "H::c_borrow_empty", "c_local_len"] {
             assert!(fixture_effects(&v, f).is_empty(),
                     "`{f}` asks the CONTAINER, never a G — executed, it writes nothing:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,
+    /// had no unit and its caller read PURE. EXECUTED (scratchpad `rustagent-v041/fx1004`): every caller
+    /// below wrote the marker file. The `externs!` shape is wasm-bindgen's own (lib.rs), with the stub's
+    /// `panic!` replaced by a write; `ctl` is the calibration.
+    #[test]
+    fn r1004_a_function_a_local_macro_declares_is_a_unit() {
+        let src = "\
+macro_rules! externs {\n\
+    ($(#[$attr:meta])* extern \"C\" { $(fn $name:ident($($args:tt)*) -> $ret:ty;)* }) => (\n\
+        #[cfg(target_arch = \"wasm32\")]\n\
+        $(#[$attr])*\n\
+        extern \"C\" { $(fn $name($($args)*) -> $ret;)* }\n\
+        $(\n\
+            #[cfg(not(target_arch = \"wasm32\"))]\n\
+            #[allow(unused_variables)]\n\
+            unsafe extern \"C\" fn $name($($args)*) -> $ret { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); }\n\
+        )*\n\
+    )\n\
+}\n\
+mod desc {\n\
+    externs! { extern \"C\" { fn wb_describe(v: u32) -> (); } }\n\
+    pub fn inform(a: u32) { unsafe { wb_describe(a) } }\n\
+}\n\
+externs! { extern \"C\" { fn do_describe(v: u32) -> (); } }\n\
+macro_rules! mkfn { ($n:ident) => { pub fn $n() { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); } }; }\n\
+mkfn!(plain_gen);\n\
+pub fn direct(a: u32) { unsafe { do_describe(a) } }\n\
+pub mod describe { pub fn inform2(a: u32) { unsafe { super::do_describe(a) } } }\n\
+pub fn call_plain() { plain_gen() }\n\
+pub fn ctl() { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); }\n";
+        let v = scan_fixture("r1004mac", src);
+        assert_eq!(fixture_effects(&v, "ctl"), vec!["Fs".to_string()], "CALIBRATION:\n{v:#}");
+        for f in ["direct", "desc::inform", "describe::inform2", "call_plain"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "`{f}` calls a function the local macro declares:\n{v:#}");
         }
     }
 

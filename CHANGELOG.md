@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A function a local `macro_rules!` declares is now a unit (SOUNDNESS R1004).** An item-position invocation
+  of a macro defined in the SAME file is expanded by a macro-by-example matcher (first matching arm, `syn`-parsed
+  fragments, nested repetitions, `$crate`), and the free `fn`s and `extern` blocks it yields are spliced in beside
+  it. Before, `mkfn!(go); … go()` and wasm-bindgen's `externs! { extern "C" { fn __wbindgen_describe(..); } }`
+  called as `super::__wbindgen_describe(a)` had no callee at all and the caller read PURE (executed fixture: each
+  caller wrote a file). Refused, leaving the invocation exactly as before: a name the file defines twice, a
+  `stmt` fragment, an ambiguous or non-matching invocation, an expansion that does not parse. Not expanded: a
+  macro defined in ANOTHER file (the per-file cache keys on one file's bytes), and generated `impl`s/types (R128's
+  hedge still covers the `crate::` spelling of those). Cache schema rev68.
 - ⚠ **A std wrapper around a container now yields the container's element (SOUNDNESS R893).** `m: Mutex<Vec<G>>`
   (and `RwLock`/`RefCell`/`OnceLock` of a `Vec`/map, a `&Mutex<Vec<G>>` parameter, a `Mutex::new(vec![..])`
   local) recorded no element, so `self.m.lock().unwrap().iter().for_each(|g| g.go())`, `for g in …iter()`,

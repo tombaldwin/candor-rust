@@ -8704,7 +8704,7 @@ pub(crate) fn item_attrs(it: &syn::Item) -> &[syn::Attribute] {
     }
 }
 
-fn item_attrs_mut(it: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
+pub(crate) fn item_attrs_mut(it: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
     Some(match it {
         syn::Item::Const(x) => &mut x.attrs,
         syn::Item::Enum(x) => &mut x.attrs,
