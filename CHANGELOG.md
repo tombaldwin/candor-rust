@@ -11,6 +11,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **An associated fn called through its trait dispatches over the trait, not over its first argument's type.**
+  `FromV::from_v(v)` (no receiver) was resolved to the impl for `v`'s type (`v: &Value` → `Value::from_v`), but the
+  implementor is chosen by the return type: redis's `from_redis_value::<T>` read pure that way (executed fixture
+  `from_v::<Loud>` writes a file; ABSENT on 0.40.0). Found when R1034 stopped merging it with a `[T; N]` impl.
 - ⚠ **A deref wrapper's pointee is the receiver (SOUNDNESS R1036).** `impl<T: Doer + ?Sized> Doer for Box<T> { fn go(&self)
   { (**self).go() } }`, `self.as_ref().go()` in an impl for `Arc<T>`, and a call on a fn's returned lock guard
   (`get().write()` over `-> MutexGuard<'static, Runtime>`, snapbox's `Data::write_to`) formed no edge (executed: each

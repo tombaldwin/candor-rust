@@ -833,15 +833,18 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                 // parameter's `p.poll(cx)` is `Req::poll` (fixture `rustagent-rel/p1` `e_pin_param`).
                 // SOUNDNESS R1036 — and a lock/borrow GUARD, which derefs to what it guards: `fn get() ->
                 // MutexGuard<'static, Runtime>` then `get().write(..)` is `Runtime::write` (snapbox's
-                // `Data::write_to`, a dropped edge in every arm). Only by its RESOLVED std/lock-crate path:
-                // a crate's own `Ref<T>` is its own type.
+                // `Data::write_to`, a dropped edge in every arm). Only by its RESOLVED std path: a crate's own
+                // `Ref<T>` is its own type.
                 let guard = matches!(
                     seg.ident.to_string().as_str(),
                     "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Ref" | "RefMut" | "MappedMutexGuard"
                         | "MappedRwLockReadGuard" | "MappedRwLockWriteGuard" | "ReentrantMutexGuard"
                 ) && {
                     let full = expand(&path_to_string_lc(&p.path), uses);
-                    matches!(full.split("::").next(), Some("std" | "core" | "parking_lot" | "lock_api" | "tokio" | "spin"))
+                    // std's own only: a DEPENDENCY's guard (`parking_lot::MutexGuard`) derefs through the
+                    // dependency's code, and peeling it hid that boundary (tokio's loom shim lost
+                    // `invisible: [parking_lot]` on its `Deref` impls in the A/B).
+                    matches!(full.split("::").next(), Some("std" | "core"))
                 };
                 if guard || matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc" | "Pin") {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {

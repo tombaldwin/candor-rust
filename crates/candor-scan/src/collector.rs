@@ -3928,7 +3928,13 @@ impl<'a> CallCollector<'a> {
                     // The first argument may NAME the implementor (`Dsl::limit(&s1)`): only a plain
                     // binding is read, from `vars` alone — never a typed expression, so no inference
                     // this engine does elsewhere (the builder assumption) can mis-name it.
-                    let named = args.first().and_then(|a| match peel_recv(a) {
+                    // SOUNDNESS R1034 (the masked twin; row id pending) — ONLY for a member with a RECEIVER. An associated fn's implementor is
+                    // chosen by the caller's TYPE CONTEXT (`FromRedisValue::from_redis_value(v)` returns `T`),
+                    // never by its first argument, which is merely an input (`v: &Value`): reading it as the
+                    // implementor resolved redis's generic `from_redis_value::<T>` to `Value::from_redis_value`
+                    // alone — pure — while it dispatches over every `FromRedisValue` impl.
+                    let has_receiver = self.local_traits.get(&tr).is_some_and(|lt| lt.methods.contains(leaf));
+                    let named = args.first().filter(|_| has_receiver).and_then(|a| match peel_recv(a) {
                         syn::Expr::Path(ap) => ap.path.get_ident().map(|i| i.to_string()),
                         _ => None,
                     }).filter(|n| !self.trait_vars.contains_key(n))

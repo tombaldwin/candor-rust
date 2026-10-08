@@ -16842,7 +16842,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16853,7 +16853,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev75/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev76/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26139,6 +26139,25 @@ pub fn call_proj() -> u8 { via_proj::<S1>(1) }\n\
         for f in ["via_proj", "via_qself"] {
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches Eff::conv:\n{v:#}");
         }
+    }
+
+    /// R1034's masked twin (row id pending) — `FromV::from_v(v)`, an ASSOCIATED fn called through the trait,
+    /// was resolved to the impl of its first ARGUMENT's type (`v: &Value` → `Value::from_v`, pure), while the
+    /// implementor is chosen by the return type `T`. redis's `from_redis_value::<T>` read pure that way once
+    /// R1034 stopped merging it with the `[T; N]` impl's methods. EXECUTED (scratchpad `rustagent-v042/
+    /// fxassoc`): `from_v::<Loud>` writes the marker; ABSENT on v0.40.0.
+    #[test]
+    fn an_associated_fn_through_its_trait_dispatches_on_the_trait_not_the_argument() {
+        let v = scan_fixture("r1034assoc", "\
+pub struct Value;\n\
+pub trait FromV: Sized { fn from_v(v: &Value) -> Option<Self>; }\n\
+impl FromV for Value { fn from_v(_v: &Value) -> Option<Self> { Some(Value) } }\n\
+pub struct Loud;\n\
+impl FromV for Loud { fn from_v(_v: &Value) -> Option<Self> { let _ = std::fs::write(\"/tmp/fxassoc\", \"x\"); Some(Loud) } }\n\
+pub fn from_v<T: FromV>(v: &Value) -> Option<T> { FromV::from_v(v) }\n\
+pub fn get_loud() -> bool { from_v::<Loud>(&Value).is_some() }\n\
+");
+        assert_eq!(fixture_effects(&v, "from_v"), vec!["Fs".to_string()], "dispatches over FromV's impls:\n{v:#}");
     }
 
     /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,
