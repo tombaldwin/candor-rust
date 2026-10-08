@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Two more `to_socket_addrs` receivers are typed (SOUNDNESS R963, R950's residual).** A struct-pattern binding
+  (`let B { address, .. } = self;` over `address: T` under `T: ToSocketAddrs` — mysql's `MyTcpBuilder::connect`)
+  and a `format!`-built local (`let address = format!("{h}:80")`) left the receiver untyped, so the resolution was
+  ABSENT (`deny Net` 0; executed, both resolve). A plain `let` struct / tuple-struct pattern over a place
+  expression now binds each named field as `let NAME = <init>.FIELD;` would, and a `let` of a provably-string value
+  (`format!`, `+`, `.to_string()`, the R949 authority) types its name `String`. mysql's `connect` now marks
+  `incomplete: ["Net"]`.
 - ⚠ **A `Result`/`Option` held in a name, then destructured, types its payload (SOUNDNESS R962, R946's residual).**
   `let r = UdpSocket::bind(..); if let Ok(s) = r { s.send_to(b, d) }` (and let-else, `match`, `.ok()` + `Some`) left
   `s` untyped, so beside a benign `connect("ok.example:80")` `allow Net in <fn> ok.example` exited 0 over a datagram

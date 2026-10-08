@@ -7579,6 +7579,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     eprintln!("VEINB_DEPPROV\t{}\t{prov}", id.ident);
                                 }
                                 self.dep_bound_vars.insert(id.ident.to_string(), prov);
+                            } else if self.with_pre_bindings(&pre_bindings, |s| s.is_provably_str(&init.expr)) {
+                                // SOUNDNESS R963 — A PROVABLY-STRING VALUE TYPES ITS NAME. `let address =
+                                // format!("{h}:80"); address.to_socket_addrs()` left `address` untyped, so the
+                                // DNS resolution reached no rule and the caller was ABSENT (executed: two
+                                // addresses resolved), while the same receiver as a `String` PARAMETER charged
+                                // `Net`. R950 refused ANY untyped receiver (async-std's IP impls); this types
+                                // only what `is_provably_str` proves — a `format!`, a `+` onto a string,
+                                // `.to_string()`/`.as_str()`, `String::from` — the R949 authority, not a guess.
+                                if std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                                    eprintln!("R963STRLET");
+                                }
+                                self.vars.insert(id.ident.to_string(), "String".to_string());
                             }
                         }
                         }
@@ -7730,6 +7742,37 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.restore_bindings(&pre_bindings);
         syn::visit::visit_local(self, node);
         self.restore_bindings(&post);
+        // SOUNDNESS R963 — A STRUCT PATTERN BINDS WHAT THE FIELD ACCESS WOULD. `let B { address, .. } = self;
+        // address.to_socket_addrs()` (mysql's `MyTcpBuilder::connect`, `address: T` under `T: ToSocketAddrs`)
+        // left `address` in no table, so the DNS resolution was ABSENT while `let a = self.address;
+        // a.to_socket_addrs()` and `self.address.to_socket_addrs()` both charged `Net` (executed: two
+        // addresses resolved). Each named field is bound exactly as `let NAME = <init>.FIELD;` binds it —
+        // the SAME binder, re-entered, so every table it writes is written the one way (§G). Only a plain
+        // `let` (a let-else's pattern may be an enum variant's, whose fields are not the scrutinee's) and
+        // only over a PLACE expression, so re-entering evaluates nothing the statement did not.
+        if let (Some(init), true) = (&node.init, matches!(peel_place(&node.pat), syn::Pat::Struct(_) | syn::Pat::TupleStruct(_))) {
+            if init.diverge.is_none() && is_place_expr(&init.expr) {
+                for (member, id) in struct_pattern_bindings(peel_place(&node.pat)) {
+                    let field = syn::Expr::Field(syn::ExprField {
+                        attrs: Vec::new(),
+                        base: init.expr.clone(),
+                        dot_token: Default::default(),
+                        member,
+                    });
+                    let synth = syn::Local {
+                        attrs: Vec::new(),
+                        let_token: Default::default(),
+                        pat: syn::Pat::Ident(id),
+                        init: Some(syn::LocalInit { eq_token: Default::default(), expr: Box::new(field), diverge: None }),
+                        semi_token: Default::default(),
+                    };
+                    if std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                        eprintln!("R963STRUCTPAT");
+                    }
+                    self.visit_local(&synth);
+                }
+            }
+        }
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         // The macro PATH itself can carry/hide an effect that a syntactic (pre-expansion) scan can't see.
@@ -8011,6 +8054,55 @@ pub(crate) fn ctor_written_head(expr: &syn::Expr) -> Option<String> {
         syn::Expr::Path(p) if p.qself.is_none() => p.path.segments.first().map(|s| s.ident.to_string()),
         syn::Expr::MethodCall(m) => ctor_written_head(&m.receiver),
         _ => None,
+    }
+}
+
+/// SOUNDNESS R963 — a `let` pattern under its type ascription (`let S { a }: S = x;`).
+fn peel_place(p: &syn::Pat) -> &syn::Pat {
+    match p {
+        syn::Pat::Type(t) => peel_place(&t.pat),
+        syn::Pat::Paren(x) => peel_place(&x.pat),
+        _ => p,
+    }
+}
+
+/// SOUNDNESS R963 — whether evaluating `e` again could DO anything: a name, a field of one, `&`/`*`/parens of
+/// those. Anything else (a call, a method, a macro) is refused.
+fn is_place_expr(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Path(_) => true,
+        syn::Expr::Field(f) => is_place_expr(&f.base),
+        syn::Expr::Reference(r) => is_place_expr(&r.expr),
+        syn::Expr::Paren(p) => is_place_expr(&p.expr),
+        syn::Expr::Group(g) => is_place_expr(&g.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => is_place_expr(&u.expr),
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R963 — the (field, binding) pairs a struct / tuple-struct pattern binds to a plain name:
+/// `S { a, b: c, .. }` → (a, a), (b, c); `S(x, _, y)` → (0, x), (2, y), stopping at a `..`. A nested or
+/// sub-patterned field binds nothing here.
+fn struct_pattern_bindings(p: &syn::Pat) -> Vec<(syn::Member, syn::PatIdent)> {
+    let plain = |p: &syn::Pat| match p {
+        syn::Pat::Ident(id) if id.subpat.is_none() => Some(id.clone()),
+        _ => None,
+    };
+    match p {
+        syn::Pat::Struct(ps) => ps.fields.iter().filter_map(|f| Some((f.member.clone(), plain(&f.pat)?))).collect(),
+        syn::Pat::TupleStruct(ts) => {
+            let mut out = Vec::new();
+            for (i, e) in ts.elems.iter().enumerate() {
+                if matches!(e, syn::Pat::Rest(_)) {
+                    break;
+                }
+                if let Some(id) = plain(e) {
+                    out.push((syn::Member::Unnamed(syn::Index { index: i as u32, span: proc_macro2::Span::call_site() }), id));
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
     }
 }
 

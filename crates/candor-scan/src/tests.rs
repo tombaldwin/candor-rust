@@ -9101,6 +9101,38 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn r963_a_non_tuple_receiver_of_to_socket_addrs_is_typed() {
+        // SOUNDNESS R963 (R950's residual) — two receivers this file could not type, both EXECUTED
+        // (scratchpad `rustagent-v041/fx963`: each resolved two addresses for `localhost:80`) and both
+        // ABSENT on published v0.40.0, `deny Net` 0: mysql's `let B { address, .. } = self;` over a field
+        // `address: T` under `T: ToSocketAddrs`, and a `format!`-built local.
+        for (tag, body) in [
+            ("destruct", r#"use std::net::ToSocketAddrs;
+                pub struct B<T: ToSocketAddrs> { pub address: T }
+                impl<T: ToSocketAddrs> B<T> { pub fn go(self) -> usize { let B { address } = self; address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) } }"#),
+            ("tuplestruct", r#"use std::net::ToSocketAddrs;
+                pub struct B<T: ToSocketAddrs>(pub T, pub u8);
+                impl<T: ToSocketAddrs> B<T> { pub fn go(self) -> usize { let B(address, _) = self; address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) } }"#),
+            ("format", r#"use std::net::ToSocketAddrs;
+                pub fn go(h: &str) -> usize { let address = format!("{h}:80"); address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) }"#),
+        ] {
+            let (rc, v) = r817_run(&format!("r963{tag}"), body, "deny Net go\n");
+            assert_eq!(rc, 1, "R963 `{tag}`: the resolution must be seen\n{v:#}");
+        }
+        // CONTROLS: an IP-typed field destructured resolves nothing; a `format!` local asked its length
+        // charges nothing.
+        for (tag, body) in [
+            ("ipfield", r#"use std::net::ToSocketAddrs;
+                pub struct B { pub a: std::net::SocketAddr }
+                pub fn go(b: B) -> usize { let B { a } = b; a.to_socket_addrs().map(|i| i.count()).unwrap_or(0) }"#),
+            ("fmtlen", r#"pub fn go(h: &str) -> usize { let s = format!("{h}:80"); s.len() }"#),
+        ] {
+            let (rc, v) = r817_run(&format!("r963c{tag}"), body, "deny Net go\n");
+            assert_eq!(rc, 0, "R963 control `{tag}` must stay clean\n{v:#}");
+        }
+    }
+
+    #[test]
     fn r950_to_socket_addrs_on_an_untyped_receiver() {
         // SOUNDNESS R950: `(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT
         // from `functions[]` (`deny Net` exit 0) while `h.to_socket_addrs()` on a `&str` PARAMETER marked —
