@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A std wrapper around a container now yields the container's element (SOUNDNESS R893).** `m: Mutex<Vec<G>>`
+  (and `RwLock`/`RefCell`/`OnceLock` of a `Vec`/map, a `&Mutex<Vec<G>>` parameter, a `Mutex::new(vec![..])`
+  local) recorded no element, so `self.m.lock().unwrap().iter().for_each(|g| g.go())`, `for g in …iter()`,
+  `guard[0].go()` and `guard.first()` read ABSENT over a `go` that writes a file. The element is recorded
+  MARKED as "held in a container", so the guard itself, its `LockResult`, `OnceLock::get`'s result and an
+  `unwrap_or_else` closure's `PoisonError` are never typed as the element (each pinned by an executed
+  control whose `G` declares `len`/`is_empty`/`into_inner`). Still unrecorded: a second level
+  (`Mutex<Option<G>>`, `Option<Vec<G>>`). Cache schema rev67.
 - **A scoped `allow` rule whose scope binds no function is now disclosed (SOUNDNESS R952).** SPEC §4 ⟨0.27⟩'s
   zero-match clause covers any rule, but the counting pass enrolled `deny`/`pure`/`forbid`/`only` and never
   `allow`: `allow Net in exec817::f ok.example` (a crate-qualified scope, which binds nothing in candor-scan)

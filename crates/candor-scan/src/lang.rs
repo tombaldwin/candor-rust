@@ -1032,15 +1032,44 @@ pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                 // they had nothing before — measured on the chained corpus, mongodb's
                 // `inner.lock().await.as_ref()?.cache` lost its ⟨0.40⟩ `dispatch:` disclosure. R347's
                 // guard-chain half (`Mutex<Vec<Guard>>`) stays open, as it was.
-                n if is_value_wrapper(n) => type_path_b(first_ty, uses).filter(|(t, _)| {
-                    let leaf = t.rsplit("::").next().unwrap_or(t);
-                    !(is_sequence_container(leaf)
-                        || is_map_container(leaf)
-                        || is_value_wrapper(leaf)
-                        || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
-                        || (matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
-                            && !candor_classify::is_std_effect_handle(t)))
-                }),
+                n if is_value_wrapper(n) => {
+                    let held = type_path_b(first_ty, uses);
+                    let nominal = |t: &str| {
+                        let leaf = t.rsplit("::").next().unwrap_or(t);
+                        !(is_sequence_container(leaf)
+                            || is_map_container(leaf)
+                            || is_value_wrapper(leaf)
+                            || matches!(leaf, "Option" | "Result" | "IoResult" | "String" | "Box" | "Arc" | "Rc" | "Cow" | "Pin")
+                            || (matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
+                                && !candor_classify::is_std_effect_handle(t)))
+                    };
+                    match held {
+                        Some((t, b)) if nominal(&t) => Some((t, b)),
+                        // SOUNDNESS R893 — a wrapper of a SEQUENCE or MAP (`Mutex<Vec<G>>`,
+                        // `RwLock<HashMap<K, G>>`, `RefCell<Vec<G>>`): the held value is a container,
+                        // and what the chain goes on to iterate or index is ITS element. Recorded
+                        // MARKED (`mark_wrapped`), never bare: the bare form means "the held value is
+                        // G" to `wrapper_accessor_type` (`self.m.lock().unwrap().len()` would type as
+                        // `G::len`), to the payload binders (`if let Ok(v) = self.m.lock()` binds the
+                        // guard, not a `G`) and to the HOF closure route (`.map(|g| ..)` on a
+                        // `LockResult` receives the guard; `unwrap_or_else` the `PoisonError`, R347).
+                        // Those three refuse a marked answer; the element consumers (for-loop, index,
+                        // the element accessors) strip it — see `Collector::resolve_elem_type_raw`.
+                        // ONE container level, onto a NOMINAL element only: `Mutex<Option<G>>`,
+                        // `Option<Vec<G>>` and `Mutex<Vec<Vec<G>>>` need a second level the marker
+                        // does not carry, and stay unrecorded.
+                        Some((t, _)) => {
+                            let leaf = t.rsplit("::").next().unwrap_or(&t);
+                            if !(is_sequence_container(leaf) || is_map_container(leaf)) {
+                                return None;
+                            }
+                            elem_type_b(first_ty, uses)
+                                .filter(|(e, _)| !is_wrapped(e) && nominal(e))
+                                .map(|(e, b)| (mark_wrapped(&e), b))
+                        }
+                        None => None,
+                    }
+                }
                 // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
                 // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
                 //
@@ -3820,6 +3849,29 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// receiver position they are always spelled through an `.unwrap()`/`.expect()`, and those two walk
 /// to their own receiver rather than needing an entry here.
 /// VEIN B — the std single-value wrappers whose type argument `elem_type_b` records as their element.
+/// SOUNDNESS R893 — the suffix that marks an element index entry as "a CONTAINER of this type, held by a
+/// std wrapper" (`m: Mutex<Vec<G>>` records `G` + marker), as opposed to "this type itself". A SUFFIX so
+/// every leaf taken by `rsplit("::")` keeps it (a twin leaf, an alias re-expansion), and a control
+/// character no identifier can contain. See `elem_type_b`'s wrapper arm.
+pub(crate) const WRAPPED_CONTAINER_MARK: char = '\u{1c}';
+pub(crate) fn mark_wrapped(t: &str) -> String {
+    format!("{t}{WRAPPED_CONTAINER_MARK}")
+}
+pub(crate) fn is_wrapped(t: &str) -> bool {
+    t.ends_with(WRAPPED_CONTAINER_MARK)
+}
+pub(crate) fn strip_wrapped(t: &str) -> &str {
+    t.strip_suffix(WRAPPED_CONTAINER_MARK).unwrap_or(t)
+}
+/// SOUNDNESS R893 — the methods that step from a wrapper-held CONTAINER (a marked entry) to its ELEMENT:
+/// the iterator producers, and the element accessors whose receiver can only be the container. NOT
+/// `get`/`get_mut` (`OnceLock::get`, `Mutex::get_mut` yield the held container itself), `ok` (a
+/// `LockResult`'s guard) or `replace`/`upgrade` — those keep the mark, so nothing binds a `G` there.
+pub(crate) fn steps_into_wrapped_container(method: &str) -> bool {
+    matches!(method, "iter" | "into_iter" | "iter_mut" | "drain" | "values" | "values_mut" | "into_values")
+        || (is_element_yielding_accessor(method) && !matches!(method, "get" | "get_mut" | "ok" | "replace" | "upgrade"))
+}
+
 pub(crate) fn is_value_wrapper(name: &str) -> bool {
     matches!(
         name,

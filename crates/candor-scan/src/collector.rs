@@ -1326,7 +1326,7 @@ impl<'a> CallCollector<'a> {
             if !self.resolve_elem_trait_leaves(&m.receiver).is_empty() {
                 return None;
             }
-            if let Some(e) = self.resolve_elem_type(&m.receiver) {
+            if let Some(e) = self.elem_after_accessor(&m.receiver, &name) {
                 return Some(e);
             }
         }
@@ -1363,7 +1363,9 @@ impl<'a> CallCollector<'a> {
         if self.elem_root_ambiguous(recv) {
             return None;
         }
-        let e = self.resolve_elem_type(recv)?;
+        // R893 — HELD, never the element of a wrapper-held container: `self.m.lock()` over a
+        // `Mutex<Vec<G>>` is a guard of the Vec, not a `G`.
+        let e = self.resolve_elem_type_held(recv)?;
         // A wrapper whose argument is itself a std container or `Option`/`Result` (`Mutex<Option<X>>`)
         // yields a value this typer can say nothing USEFUL about — `Option` names no method the chain
         // goes on to call — and answering it replaced the walk's dependency guess, whose ⟨0.40⟩ miss rule
@@ -1524,7 +1526,7 @@ impl<'a> CallCollector<'a> {
                     // already right. Trading a silence for a lost disclosure is the direction this
                     // register ranks worst, so the narrowing is filed as its own finding rather than
                     // smuggled in beside a fix that only adds.
-                    if let Some(e) = self.resolve_elem_type(&m.receiver) {
+                    if let Some(e) = self.elem_after_accessor(&m.receiver, &m.method.to_string()) {
                         // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                         if crate::lang::is_r536_added_name(&m.method.to_string())
                             && std::env::var_os("CANDOR_R536_INSTR").is_some()
@@ -1909,7 +1911,13 @@ impl<'a> CallCollector<'a> {
     ///     typed the payload as `Option`. A name cannot say whether its recorded type was unwrapped, so
     ///     it is not asked; that spelling stays as it was (see the test's residual note).
     fn resolve_payload_type(&self, pat: &syn::Pat, expr: &syn::Expr) -> Option<String> {
-        if let Some(e) = self.resolve_elem_type(expr) {
+        // R893 — HELD: `if let Ok(v) = self.m.lock()` over a `Mutex<Vec<G>>` binds the guard. A marked
+        // answer also declines the constructor fallback below (it would type the scrutinee itself).
+        let raw = self.resolve_elem_type_raw(expr);
+        if raw.as_deref().is_some_and(crate::lang::is_wrapped) {
+            return None;
+        }
+        if let Some(e) = raw {
             return Some(e);
         }
         if !crate::lang::std_some_ok_pat(pat) || matches!(peel_recv(expr), syn::Expr::Path(_)) {
@@ -1925,18 +1933,91 @@ impl<'a> CallCollector<'a> {
         t
     }
 
+    /// SOUNDNESS R893 — the ELEMENT of a collection-valued expression, for a consumer that binds or types
+    /// the ELEMENT (a for-loop variable, `xs[i]`, `xs.first()`): a wrapper-held container's marked entry
+    /// (`m: Mutex<Vec<G>>`) answers with its element. See `resolve_elem_type_raw` for the mark.
+    fn resolve_elem_type(&self, expr: &syn::Expr) -> Option<String> {
+        let r = self.resolve_elem_type_raw(expr)?;
+        if crate::lang::is_wrapped(&r) && std::env::var_os("CANDOR_R893_INSTR").is_some() {
+            eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+        Some(crate::lang::strip_wrapped(&r).to_string())
+    }
+
+    /// SOUNDNESS R893 — the same answer for a consumer that types the HELD value or a PAYLOAD
+    /// (`wrapper_accessor_type`, the `Some`/`Ok` binders, a HOF closure's parameter): a marked entry is
+    /// REFUSED there, because what those positions bind is the wrapper-held CONTAINER (the guard, the
+    /// `LockResult`), never its element. Typing it `G` would form `G::len` for `guard.len()`.
+    fn resolve_elem_type_held(&self, expr: &syn::Expr) -> Option<String> {
+        self.resolve_elem_type_raw(expr).filter(|t| !crate::lang::is_wrapped(t))
+    }
+
+    /// SOUNDNESS R893 — the type of `recv.method()` for an ELEMENT ACCESSOR (`first`, `pop`, `get`): the
+    /// receiver's element, stepping into a wrapper-held container only where the accessor can only be
+    /// the container's (`guard.first()`), and refusing where it may be the wrapper's own (`cell.get()`
+    /// on an `OnceLock<Vec<G>>` is the Vec, not a `G`).
+    fn elem_after_accessor(&self, recv: &syn::Expr, method: &str) -> Option<String> {
+        self.resolve_elem_type_raw(recv)
+            .map(|t| Self::step_wrapped(t, method))
+            .filter(|t| !crate::lang::is_wrapped(t))
+    }
+
+    /// SOUNDNESS R893 — `Mutex::new(vec![G])` / `RwLock::new(xs)` / `RefCell::new(Vec::<G>::new())`: a std
+    /// wrapper CONSTRUCTED around a container records the container's element MARKED, exactly as the
+    /// annotated `let m: Mutex<Vec<G>>` does through `elem_type_b`. Only when the argument is PROVABLY a
+    /// sequence or map — a collection literal, or a value whose own type the typer names as one — so an
+    /// `Option` payload (which `elem_of` also holds, unmarked) is never re-read as a container.
+    fn wrapper_ctor_elem(&self, full: &str, c: &syn::ExprCall) -> Option<String> {
+        let mut segs = full.rsplit("::");
+        if segs.next() != Some("new") || c.args.len() != 1 {
+            return None;
+        }
+        let w = segs.next()?;
+        if !matches!(w, "Mutex" | "RwLock" | "RefCell" | "ReentrantMutex") {
+            return None;
+        }
+        let arg = c.args.first()?;
+        let is_container = matches!(peel_recv(arg), syn::Expr::Array(_) | syn::Expr::Repeat(_) | syn::Expr::Macro(_))
+            || self.type_of(arg).is_some_and(|t| {
+                let l = t.rsplit("::").next().unwrap_or(&t);
+                crate::lang::is_sequence_container(l) || crate::lang::is_map_container(l)
+            });
+        if !is_container {
+            return None;
+        }
+        let e = self.resolve_elem_type_raw(arg).filter(|e| !crate::lang::is_wrapped(e))?;
+        if std::env::var_os("CANDOR_R893_INSTR").is_some() {
+            eprintln!("R893CTOR\t{w}");
+        }
+        Some(crate::lang::mark_wrapped(&e))
+    }
+
+    /// SOUNDNESS R893 — one element-preserving adapter step over a possibly-marked answer: an iterator
+    /// producer or an element accessor on a wrapper-held container steps INTO its element (the mark goes);
+    /// every other adapter (`lock`, `unwrap`, `borrow`, `as_ref`, `clone`, `get`) leaves it a container.
+    fn step_wrapped(t: String, method: &str) -> String {
+        if crate::lang::is_wrapped(&t) && crate::lang::steps_into_wrapped_container(method) {
+            if std::env::var_os("CANDOR_R893_INSTR").is_some() {
+                eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
+            }
+            crate::lang::strip_wrapped(&t).to_string()
+        } else {
+            t
+        }
+    }
+
     /// The ELEMENT type of an expression that evaluates to a COLLECTION — a collection var/param (via
     /// `elem_of`), a collection FIELD (`self.senders`, via `field_elem`), an iterator adapter that
     /// preserves the element (`.iter()`/`.into_iter()`/`.iter_mut()`/`.clone()`), or another subscript
     /// (`grid[i]` -> a row, whose own element types `grid[i][j]`). Peels the effect-transparent
     /// wrappers. `None` when the element type can't be determined — honest under-report, never a guess.
-    fn resolve_elem_type(&self, expr: &syn::Expr) -> Option<String> {
+    fn resolve_elem_type_raw(&self, expr: &syn::Expr) -> Option<String> {
         match expr {
-            syn::Expr::Reference(r) => self.resolve_elem_type(&r.expr),
-            syn::Expr::Paren(p) => self.resolve_elem_type(&p.expr),
-            syn::Expr::Group(g) => self.resolve_elem_type(&g.expr),
-            syn::Expr::Try(t) => self.resolve_elem_type(&t.expr),
-            syn::Expr::Await(a) => self.resolve_elem_type(&a.base),
+            syn::Expr::Reference(r) => self.resolve_elem_type_raw(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_elem_type_raw(&p.expr),
+            syn::Expr::Group(g) => self.resolve_elem_type_raw(&g.expr),
+            syn::Expr::Try(t) => self.resolve_elem_type_raw(&t.expr),
+            syn::Expr::Await(a) => self.resolve_elem_type_raw(&a.base),
             syn::Expr::Path(p) => {
                 if let Some(name) = p.path.get_ident().map(|i| i.to_string()) {
                     if let Some(e) = self.elem_of.get(&name) {
@@ -1991,7 +2072,7 @@ impl<'a> CallCollector<'a> {
                 // see `lang::is_element_preserving_adapter` for what each divergence cost.
                 let adapter = crate::lang::is_element_preserving_adapter(&m.method.to_string());
                 if adapter {
-                    let r = self.resolve_elem_type(&m.receiver);
+                    let r = self.resolve_elem_type_raw(&m.receiver).map(|t| Self::step_wrapped(t, &m.method.to_string()));
                     // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                     if r.is_some()
                         && crate::lang::is_r536_added_name(&m.method.to_string())
@@ -2021,7 +2102,7 @@ impl<'a> CallCollector<'a> {
                 let syn::Expr::Path(p) = &*c.func else { return None };
                 let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                 if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
-                    return None;
+                    return self.wrapper_ctor_elem(&full, c);
                 }
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
                 // SOUNDNESS R893 — two same-named factories withdrew the leaf's answer (both `-> Vec<_>`
@@ -2048,7 +2129,7 @@ impl<'a> CallCollector<'a> {
                 e
             }
             // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
-            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            syn::Expr::Index(idx) => self.resolve_elem_type_raw(&idx.expr).map(|t| crate::lang::strip_wrapped(&t).to_string()),
             // SOUNDNESS R535 — the same control-flow merge, one question over: `for x in (if c { a }
             // else { b })` asks what the MERGE evaluates to, and the answer is the agreed element of
             // its branches. Added here rather than left to the receiver resolvers so the boundary is
@@ -2058,7 +2139,7 @@ impl<'a> CallCollector<'a> {
                 let branches = crate::lang::merge_value_exprs(expr)?;
                 let mut found: Option<String> = None;
                 for b in branches {
-                    let Some(t) = self.resolve_elem_type(b) else { continue };
+                    let Some(t) = self.resolve_elem_type_raw(b) else { continue };
                     match &found {
                         None => found = Some(t),
                         Some(prev) if *prev == t => {}
@@ -5912,7 +5993,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // ONE-parameter closure only: `fold`'s accumulator is its first parameter, so a two-parameter
         // closure is not typed HERE — it is typed by `elem_binds` below, which knows which parameter is
         // the element. Default-visit the rest; visit the typed closure under scope.
-        let elem_ty = if elem_hof { self.resolve_elem_type(&node.receiver) } else { None };
+        // R893 — HELD: a HOF called on a wrapper-held container itself (`m.lock().map(|g| ..)`) receives the
+        // guard, not an element; the iterator spelling (`.iter().for_each(..)`) has already stepped in.
+        let elem_ty = if elem_hof { self.resolve_elem_type_held(&node.receiver) } else { None };
         // VEIN B — R347's NAMED PRECONDITION for peeling the interior-mutability wrappers: a closure in
         // the ERROR position is not the element. `unwrap_or_else`'s one-parameter closure exists only on
         // `Result` (`Option`'s takes none) and receives the `Err` — `PoisonError` after `m.lock()` — so
@@ -6339,7 +6422,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // charge the local `Type::next` so its effect isn't silently dropped (see `iter_next_target`).
         self.charge_iter_next(&node.expr);
         if let Some(name) = single_pat_ident(&node.pat) {
-            let elem = self.resolve_elem_type(&node.expr);
+            // R893 — iterating a wrapper-held container yields its element, EXCEPT where the iterated
+            // value is the wrapper accessor's own `LockResult`/`Option` (`for g in m.lock()` binds the
+            // GUARD) — the mark says "a container", not which wrapping of it.
+            let elem = {
+                let raw = self.resolve_elem_type_raw(&node.expr);
+                let wrapped_result = raw.as_deref().is_some_and(crate::lang::is_wrapped)
+                    && matches!(peel_recv(&node.expr), syn::Expr::MethodCall(m) if matches!(
+                        m.method.to_string().as_str(),
+                        "lock" | "read" | "write" | "try_lock" | "try_read" | "try_write" | "borrow"
+                            | "borrow_mut" | "try_borrow" | "try_borrow_mut" | "get" | "get_mut" | "ok"
+                    ));
+                if wrapped_result { None } else { raw.map(|t| crate::lang::strip_wrapped(&t).to_string()) }
+            };
             // A `for it in items` over a COLLECTION OF TRAIT OBJECTS (`items: Vec<Box<dyn Doer>>`) types
             // the loop var into `trait_vars` for dispatch (`it.go()` → bounded CHA over Doer's impls),
             // which `elem_of`/`vars` can't express (a `dyn` element has no nominal type). Only when there's
@@ -7519,7 +7614,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // still resolve. Drop any STALE element binding first — a rebind to a non-collection
                     // must not leave the old element type to mis-type a later subscript/loop.
                     self.elem_of.remove(&id.ident.to_string());
-                    if let Some(e) = self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr)) {
+                    // R893 — RAW, so a guard of a wrapper-held container (`let v = self.m.lock().unwrap()`)
+                    // stays a CONTAINER of its element rather than becoming one.
+                    if let Some(e) = self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type_raw(&init.expr)) {
                         self.elem_of.insert(id.ident.to_string(), e);
                     }
                     // SOUNDNESS R536 (SECOND HALF) — …AND THE DISPATCH COUNTERPART, WHICH THIS SITE

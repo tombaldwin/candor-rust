@@ -10566,14 +10566,15 @@ impl H {\n\
         // So assert the DOCUMENT, not the effect list: the row must be ABSENT — which is what the
         // residual actually is — and if it ever becomes PRESENT the pin fails and names itself,
         // whether it arrived as a concrete effect or as a disclosure.
+        //
+        // SOUNDNESS R893 — THE TYPE PEEL LANDED, as a MARKED element (see `lang::mark_wrapped`): the
+        // guard-chain's element is the container's, while the guard itself, the `LockResult` and the
+        // `unwrap_or_else` closure's `x` are never typed as it. async-process's `has_zombies` shape is
+        // pinned by `an_unwrap_or_else_error_closure_is_not_the_guarded_value` and by the R893 test's
+        // `poison` control, and was checked in the R893 corpus A/B.
         for f in ["H::g_mutex", "H::g_refcell", "H::g_rwlock"] {
-            let present = v["functions"].as_array().into_iter().flatten()
-                .any(|r| r["fn"].as_str() == Some(f));
-            assert!(!present,
-                    "{f} is a PINNED residual — a concrete element behind a guard chain. It must be \
-                     ABSENT from functions[]; it is now PRESENT, which means the type peel landed \
-                     (check async-process's `has_zombies` in the same A/B) or something else began \
-                     disclosing here. See the comment above before changing this:\n{v:#}");
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f}: a concrete element behind a guard chain (R893):\n{v:#}");
         }
     }
 
@@ -13354,9 +13355,15 @@ trait G {
         // nominal value (the `Option` shape, one held value), and nothing when it is a container. R347's backed-out half peeled THROUGH to the element, and its precondition —
         // a closure in the error position is not the element — is now enforced at the HOF route (see
         // `an_unwrap_or_else_error_closure_is_not_the_guarded_value`).
+        // R893 — …and a wrapper of a CONTAINER records the container's element MARKED, never bare (a bare
+        // `Sender` would say the guard IS one).
         let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
-        assert_eq!(elem_type(&mx, &u), None,
-                   "vein B: a wrapper of a CONTAINER records nothing (R347's guard-chain half stays open)");
+        assert_eq!(elem_type(&mx, &u), Some(crate::lang::mark_wrapped("Sender")),
+                   "R893: a wrapper of a CONTAINER records its element, marked");
+        for nested in ["Mutex<Option<Sender>>", "Mutex<Vec<Vec<Sender>>>", "Mutex<Vec<String>>"] {
+            let t: syn::Type = syn::parse_str(nested).unwrap();
+            assert_eq!(elem_type(&t, &u), None, "{nested}: one container level onto a nominal element only");
+        }
         let rc: syn::Type = syn::parse_str("RefCell<Sender>").unwrap();
         assert_eq!(elem_type(&rc, &u).as_deref(), Some("Sender"));
     }
@@ -16685,7 +16692,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16696,7 +16703,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev66/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev67/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -25513,6 +25520,61 @@ pub fn ctl(g: ChildGuard) -> u8 { g.into_inner() }\n";
         assert_eq!(fixture_effects(&v, "ctl"), vec!["Exec".to_string()], "CALIBRATION:\n{v:#}");
         assert!(fixture_effects(&v, "Reaper::has_zombies").is_empty(),
                 "the error closure's `x` is a PoisonError, not the guarded ChildGuard:\n{v:#}");
+    }
+
+    /// SOUNDNESS R893 (the wrapper-of-containers half) — a std wrapper around a SEQUENCE or MAP
+    /// (`Mutex<Vec<G>>`, `RwLock`, `RefCell`, `OnceLock`, a `Mutex::new(vec![..])` local) recorded no
+    /// element, so every iteration/index of it read ABSENT. EXECUTED (scratchpad `rustagent-v041/fx893`):
+    /// each charged arm wrote the marker file, each control did not. The controls are the reason the
+    /// element is recorded MARKED rather than bare: `G` declares `len`/`is_empty`/`into_inner`, so typing
+    /// the guard, the `LockResult`, the `OnceLock::get` result or the poison closure's `x` as `G` would
+    /// charge `Fs` to a function that only asks a `Vec` its length.
+    #[test]
+    fn r893_a_wrapper_of_a_container_yields_the_containers_element_and_nothing_else() {
+        let src = "\
+use std::sync::{Mutex, RwLock, OnceLock};\n\
+use std::cell::RefCell;\n\
+pub struct G;\n\
+impl G {\n\
+    pub fn go(&self) { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); }\n\
+    pub fn len(&self) -> usize { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); 0 }\n\
+    pub fn is_empty(&self) -> bool { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); true }\n\
+    pub fn into_inner(self) -> u8 { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); 0 }\n\
+}\n\
+pub struct H { pub mv: Mutex<Vec<G>>, pub rv: RwLock<Vec<G>>, pub cv: RefCell<Vec<G>>, pub ol: OnceLock<Vec<G>> }\n\
+impl H {\n\
+    pub fn mv_iter(&self) { self.mv.lock().unwrap().iter().for_each(|g| g.go()) }\n\
+    pub fn mv_for(&self) { for g in self.mv.lock().unwrap().iter() { g.go() } }\n\
+    pub fn mv_idx(&self) { self.mv.lock().unwrap()[0].go() }\n\
+    pub fn mv_guard(&self) { let v = self.mv.lock().unwrap(); for g in v.iter() { g.go() } }\n\
+    pub fn mv_first(&self) { if let Some(g) = self.mv.lock().unwrap().first() { g.go() } }\n\
+    pub fn rv_read(&self) { for g in self.rv.read().unwrap().iter() { g.go() } }\n\
+    pub fn cv_borrow(&self) { for g in self.cv.borrow().iter() { g.go() } }\n\
+    pub fn once_iter(&self) { for g in self.ol.get().unwrap().iter() { g.go() } }\n\
+    pub fn poison(&self) -> bool { self.mv.lock().unwrap_or_else(|x| x.into_inner()).is_empty() }\n\
+    pub fn c_len(&self) -> usize { self.mv.lock().unwrap().len() }\n\
+    pub fn c_iflet(&self) -> usize { if let Ok(v) = self.mv.lock() { v.len() } else { 0 } }\n\
+    pub fn c_map(&self) -> usize { self.mv.lock().map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_once(&self) -> usize { self.ol.get().unwrap().len() }\n\
+    pub fn c_once_iflet(&self) -> usize { if let Some(v) = self.ol.get() { v.len() } else { 0 } }\n\
+    pub fn c_for_lock(&self) -> usize { let mut n = 0; for v in self.mv.lock() { n += v.len() } n }\n\
+    pub fn c_guard_len(&self) -> usize { let v = self.mv.lock().unwrap(); v.len() }\n\
+    pub fn c_borrow_empty(&self) -> bool { self.cv.borrow().is_empty() }\n\
+}\n\
+pub fn local_mutex() { let m = Mutex::new(vec![G]); for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn local_mutex_annot() { let m: Mutex<Vec<G>> = Mutex::new(vec![G]); for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn param_mutex(m: &Mutex<Vec<G>>) { for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn c_local_len() -> usize { let m = Mutex::new(vec![G]); let n = m.lock().unwrap().len(); n }\n";
+        let v = scan_fixture("r893wrap", src);
+        for f in ["H::mv_iter", "H::mv_for", "H::mv_idx", "H::mv_guard", "H::mv_first", "H::rv_read",
+                  "H::cv_borrow", "H::once_iter", "local_mutex", "local_mutex_annot", "param_mutex"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches G::go:\n{v:#}");
+        }
+        for f in ["H::poison", "H::c_len", "H::c_iflet", "H::c_map", "H::c_once", "H::c_once_iflet",
+                  "H::c_for_lock", "H::c_guard_len", "H::c_borrow_empty", "c_local_len"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` asks the CONTAINER, never a G — executed, it writes nothing:\n{v:#}");
+        }
     }
 
     /// R197, R733 — a turbofish names a generic return. A bound with no turbofish keeps its dispatch.

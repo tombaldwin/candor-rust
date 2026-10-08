@@ -1677,6 +1677,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     {
                         continue;
                     }
+                    // R893 — …and an element MARKED as held by a wrapper (`Arc<Mutex<Vec<G>>>`, whose own
+                    // `fields` kind is `Arc`): recorded for the typing routes, and as invisible to drop
+                    // glue as it was before the mark existed.
+                    if elem && crate::lang::is_wrapped(ty) {
+                        continue;
+                    }
                     if borrows(t, k, elem) {
                         withdrew(t, k, ty);
                     } else {

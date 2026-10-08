@@ -3113,7 +3113,10 @@ pub(crate) fn record_return(
         let sig_generic =
             |n: &str| sig.generics.params.iter().any(|g| matches!(g, syn::GenericParam::Type(t) if t.ident == n));
         let elem = crate::lang::elem_type(unwrap_result_option(ty), uses)
-            .filter(|e| !sig_generic(e) && !impl_key.is_some_and(|(_, ig)| ig.contains(e)) && e != "Self");
+            .filter(|e| {
+                let e = crate::lang::strip_wrapped(e); // R893 — a marked element is judged as its type
+                !sig_generic(e) && !impl_key.is_some_and(|(_, ig)| ig.contains(e)) && e != "Self"
+            });
         if let Some(e) = &elem {
             file_decl_fact(rets, crate::model::elem_ret_key(&leaf), e.clone());
             if let Some(q) = &free_qual {
@@ -3807,7 +3810,7 @@ pub(crate) fn collect_decls(
                                 // SOUNDNESS R482 — and NOT when that "type" is the struct's own generic
                                 // PARAMETER while the element dispatches. See `elem_param_shadow`.
                                 if let Some(e) = elem_type(&f.ty, uses_ty) {
-                                    if had_elem_leaves && elem_param_shadow(&e, &gen_probe) {
+                                    if had_elem_leaves && elem_param_shadow(crate::lang::strip_wrapped(&e), &gen_probe) {
                                         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                             eprintln!("R482SHADOW {}.{} {e}", s.ident, name); // §E1
                                         }
@@ -3930,7 +3933,7 @@ pub(crate) fn collect_decls(
                             }
                             // SOUNDNESS R482 — see the `Named` arm and `elem_param_shadow`.
                             if let Some(e) = elem_type(&f.ty, uses_ty) {
-                                if had_elem_leaves && elem_param_shadow(&e, &gen_probe) {
+                                if had_elem_leaves && elem_param_shadow(crate::lang::strip_wrapped(&e), &gen_probe) {
                                     if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                         eprintln!("R482SHADOW {}.{} {e}", s.ident, i); // §E1
                                     }
