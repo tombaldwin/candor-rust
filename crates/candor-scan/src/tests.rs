@@ -252,7 +252,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -305,7 +305,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -631,7 +631,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), ctor_bound: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
@@ -6891,8 +6891,10 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                         use crate::hidden::spawn;\n\
                         pub fn go(p: &str) -> bool { spawn(p) }\n";
         // (2) the macro body declares the `pub fn` ITSELF — no target row anywhere in the report.
-        let declares = "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
-                          std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n\
+        // SOUNDNESS R1004 — defined in ANOTHER file, because a macro this file defines is now EXPANDED and
+        // its `spawn` is a unit (`r1004_a_function_a_local_macro_declares_is_a_unit`). R128 is the hedge
+        // for what the expansion does not reach, and a cross-file definition is that.
+        let declares = "#[macro_use] mod macros;\n\
                         mod hidden { defit!(); }\n\
                         use crate::hidden::spawn;\n\
                         pub fn go(p: &str) -> bool { spawn(p) }\n";
@@ -6910,7 +6912,9 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (attack A — a test that cannot discriminate is worse than no test). With the hedge disabled all
         // three lines appear in the failure.
         let mut wrong: Vec<String> = Vec::new();
-        for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[]),
+        let defit = ("macros.rs", "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                      std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n");
+        for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[defit][..]),
                                    ("r128incl", included, &[gen][..])] {
             let v = scan_fixture_files(name, src, extra);
             let eff = fixture_effects(&v, "go");
@@ -7069,11 +7073,14 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // actually produced to the classifier. With the emission site reverted this reads `ambiguous:`
         // and classifies `Dispatch`, which is precisely the 30 crates that pass `deny Unknown[unresolved]`
         // today while holding the hole.
-        let src = "mod hidden { macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
-                     std::process::Command::new(p).status().is_ok() } }; } m!(); }\n\
+        // R1004 — the macro lives in another file, so it stays unexpanded (a same-file one is now a unit).
+        let src = "#[macro_use] mod macros;\n\
+                   mod hidden { m!(); }\n\
                    use crate::hidden::spawn;\n\
                    pub fn go(p: &str) -> bool { spawn(p) }\n";
-        let v = scan_fixture_files("r270e2e", src, &[]);
+        let mac = ("macros.rs", "macro_rules! m { () => { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().is_ok() } }; }\n");
+        let v = scan_fixture_files("r270e2e", src, &[mac]);
         let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
             .filter(|f| f["fn"].as_str() == Some("go"))
             .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
@@ -7141,13 +7148,17 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // (1) `Wrap` is a visible tuple struct in a module that also carries an unexpandable item macro.
         // diesel's exact shape: a visible tuple struct WITH an impl (which is what puts its leaf in
         // `local_types`), in a module that also carries an unexpandable item macro.
-        let ctor = "pub mod m { macro_rules! noise { () => { pub fn hidden_one() {} } } noise!();\n\
+        // R1004 — every `noise!` below is defined in ANOTHER file (`noise_files`): a macro this file
+        // defines is now expanded, and its `hidden_*` would be a visible unit rather than R128's evidence.
+        let noise_files = [("macros.rs", "macro_rules! noise { () => { pub fn hidden_one() {} pub fn hidden_two() {} pub fn hidden_three() {} } }\n")];
+        let ctor = "#[macro_use] mod macros;\n\
+                    pub mod m { noise!();\n\
                       pub struct Wrap(pub u8);\n\
                       impl Wrap { pub fn get(&self) -> u8 { self.0 } } }\n\
                     use crate::m::{Wrap, hidden_one};\n\
                     pub fn go() -> Wrap { Wrap(1) }\n\
                     pub fn discriminator() { hidden_one() }\n";
-        let v = scan_fixture("r128ctor", ctor);
+        let v = scan_fixture_files("r128ctor", ctor, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "constructing a VISIBLE tuple struct is pure — a macro elsewhere in its module is not \
                     evidence that `Wrap` was hidden");
@@ -7161,13 +7172,13 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // `compile_error!` at item position; 160 of that cut's 472 corpus hits, across 27 crates, were
         // this one misreading — criterion's `black_box`, rusqlite's `str_to_cstring`, zstd-safe's
         // `parse_code`, palette's `clamp`, chacha20's `quarter_round`, all plainly visible in source.
-        let rootfn = "macro_rules! noise { () => { pub fn hidden_three() {} } }\n\
+        let rootfn = "#[macro_use] mod macros;\n\
                       noise!();\n\
                       pub fn visible_root() {}\n\
                       use crate::{visible_root, hidden_three};\n\
                       pub fn go() { visible_root() }\n\
                       pub fn discriminator() { hidden_three() }\n";
-        let v = scan_fixture("r128rootfn", rootfn);
+        let v = scan_fixture_files("r128rootfn", rootfn, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "a crate-ROOT free fn is VISIBLE — it merely has no 2-segment tail to be indexed \
                     under, and the shape of an index is not evidence about the source");
@@ -7175,13 +7186,14 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                    "…discriminator: the macro-declared root fn still hedges");
 
         // (2) `dup::pick` exists twice, so the 2-segment tail `dup::pick` is AMBIGUOUS, not absent.
-        let ambiguous = "pub mod dup { macro_rules! noise { () => { pub fn hidden_two() {} } } noise!();\n\
+        let ambiguous = "#[macro_use] mod macros;\n\
+                         pub mod dup { noise!();\n\
                            pub fn pick() {} }\n\
                          pub mod outer { pub mod dup { pub fn pick() {} } }\n\
                          use crate::dup::{pick, hidden_two};\n\
                          pub fn go() { pick() }\n\
                          pub fn discriminator() { hidden_two() }\n";
-        let v = scan_fixture("r128ambig", ambiguous);
+        let v = scan_fixture_files("r128ambig", ambiguous, &noise_files);
         assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
                    "an AMBIGUOUS tail names definitions candor SAW and declined to choose between — a \
                     different state from naming nothing, and not R128's");
@@ -7973,7 +7985,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -8021,7 +8033,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -8047,7 +8059,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(), body_externs: Default::default(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -8091,7 +8103,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(), body_externs: Default::default(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -8130,7 +8142,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -9041,10 +9053,112 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             });
             assert!(hit, "a local enum's `Some` variant must keep its payload route: W::{f} lost Fs\n{v:#}");
         }
-        // RESIDUAL, pinned so it is not mistaken for covered: a Result held in a NAME and destructured later
-        // (`let r = UdpSocket::bind(..); if let Ok(s) = r`) is not typed by this fix — a name cannot say
-        // whether its recorded type was unwrapped (`match self` in `impl … for Option<L>` is the
-        // counter-example). See the report for the measured reach of this spelling.
+        // The Result held in a NAME and destructured later was this fix's residual — R962, below.
+    }
+
+    #[test]
+    fn r962_a_result_held_in_a_name_types_its_payload() {
+        // SOUNDNESS R962 (R946's residual): `let r = UdpSocket::bind(..); if let Ok(s) = r { s.send_to(b, d) }`
+        // left `s` untyped — EXECUTED (scratchpad `rustagent-v041/fx962`), the datagram arrived at the
+        // caller's address while `allow Net in <fn> ok.example` answered 0, in all four binder spellings.
+        for (tag, body) in [
+            ("iflet", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); if let Ok(s) = r { let _ = s.send_to(b"x", d); } }"#),
+            ("letelse", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); let Ok(s) = r else { return }; let _ = s.send_to(b"x", d); }"#),
+            ("match", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0"); match r { Ok(s) => { let _ = s.send_to(b"x", d); } Err(_) => {} } }"#),
+            ("some", r#"pub fn go(d: &str) { let _ = std::net::TcpStream::connect("ok.example:80"); let r = std::net::UdpSocket::bind("0.0.0.0:0").ok(); if let Some(s) = r { let _ = s.send_to(b"x", d); } }"#),
+        ] {
+            assert_eq!(r817_both(&format!("r962{tag}"), body, "ok.example"), (1, 1), "R962 held `{tag}` must not hide the destination");
+        }
+        // THE COUNTER-EXAMPLE R946 REFUSED THE NAME FOR, kept refused: `self` inside `impl … for Option<L>`
+        // is typed as the impl's own type, which no construction wrote, so it is not in `ctor_bound`. Built
+        // so that the refused reading FABRICATES: typing `x` as `Option` resolves `x.go()` to the effectful
+        // `<Option<L> as G>::go` instead of the pure `L::go` it really calls.
+        let selfopt = r#"
+            pub struct L;
+            impl L { pub fn go(&self) {} }
+            pub trait G { fn go(&self); }
+            impl G for Option<L> { fn go(&self) { let _ = std::fs::write("/tmp/r962", b"x"); } }
+            pub trait Run { fn run(&self); }
+            impl Run for Option<L> { fn run(&self) { match self { Some(x) => x.go(), None => {} } } }
+        "#;
+        let (_, v) = r817_run("r962self", selfopt, "deny Net\n");
+        let fs_on_run = v["functions"].as_array().unwrap().iter().any(|r| {
+            r["fn"].as_str().is_some_and(|f| f.ends_with("::run"))
+                && r["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Fs"))
+        });
+        assert!(!fs_on_run, "`x` is an `L`, whose `go` is pure — never `Option`'s:\n{v:#}");
+        // A REBIND by another route reads as absent, not stale: `r` is re-bound by a closure parameter, so
+        // its payload is unknown there and nothing is charged from the outer construction.
+        let shadow = r#"
+            pub struct Q;
+            impl Q { pub fn send_to(&self, _b: &[u8], _d: &str) { let _ = std::fs::write("/tmp/r962q", b"x"); } }
+            pub fn go(d: &str) { let r = std::net::UdpSocket::bind("0.0.0.0:0"); let _ = r; let f = |r: Option<Q>| { if let Some(s) = r { s.send_to(b"x", d); } }; f(None); }
+        "#;
+        let (_, v) = r817_run("r962shadow", shadow, "deny Net\n");
+        let go = r817_row(&v, "go");
+        assert!(!go["incomplete"].as_array().into_iter().flatten().any(|e| e == "Net"),
+                "the closure's `s` is a Q, not the outer socket:\n{v:#}");
+    }
+
+    #[test]
+    fn r963_a_non_tuple_receiver_of_to_socket_addrs_is_typed() {
+        // SOUNDNESS R963 (R950's residual) — two receivers this file could not type, both EXECUTED
+        // (scratchpad `rustagent-v041/fx963`: each resolved two addresses for `localhost:80`) and both
+        // ABSENT on published v0.40.0, `deny Net` 0: mysql's `let B { address, .. } = self;` over a field
+        // `address: T` under `T: ToSocketAddrs`, and a `format!`-built local.
+        for (tag, body) in [
+            ("destruct", r#"use std::net::ToSocketAddrs;
+                pub struct B<T: ToSocketAddrs> { pub address: T }
+                impl<T: ToSocketAddrs> B<T> { pub fn go(self) -> usize { let B { address } = self; address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) } }"#),
+            ("tuplestruct", r#"use std::net::ToSocketAddrs;
+                pub struct B<T: ToSocketAddrs>(pub T, pub u8);
+                impl<T: ToSocketAddrs> B<T> { pub fn go(self) -> usize { let B(address, _) = self; address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) } }"#),
+            ("format", r#"use std::net::ToSocketAddrs;
+                pub fn go(h: &str) -> usize { let address = format!("{h}:80"); address.to_socket_addrs().map(|i| i.count()).unwrap_or(0) }"#),
+        ] {
+            let (rc, v) = r817_run(&format!("r963{tag}"), body, "deny Net go\n");
+            assert_eq!(rc, 1, "R963 `{tag}`: the resolution must be seen\n{v:#}");
+        }
+        // CONTROLS: an IP-typed field destructured resolves nothing; a `format!` local asked its length
+        // charges nothing.
+        for (tag, body) in [
+            ("ipfield", r#"use std::net::ToSocketAddrs;
+                pub struct B { pub a: std::net::SocketAddr }
+                pub fn go(b: B) -> usize { let B { a } = b; a.to_socket_addrs().map(|i| i.count()).unwrap_or(0) }"#),
+            ("fmtlen", r#"pub fn go(h: &str) -> usize { let s = format!("{h}:80"); s.len() }"#),
+        ] {
+            let (rc, v) = r817_run(&format!("r963c{tag}"), body, "deny Net go\n");
+            assert_eq!(rc, 0, "R963 control `{tag}` must stay clean\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn r963_a_pinned_generic_bounded_only_by_a_dependency_trait_discloses() {
+        // The R963 binder typed futures-lite's `let Self { reader, buf } = &mut *self;`, moving
+        // `ReadFuture::poll` out of R985's untyped-pinned hedge into a PRE-EXISTING silence: a pinned value
+        // whose type is a generic parameter bounded only by a DEPENDENCY trait formed no edge and no
+        // disclosure (`direct` below was ABSENT on published v0.40.0). All three spellings now disclose.
+        let src = r#"
+            use std::pin::Pin; use std::task::{Context, Poll}; use std::future::Future;
+            use futures_io::AsyncRead;
+            pub struct ReadFuture<'a, R: Unpin + ?Sized> { reader: &'a mut R, buf: &'a mut [u8] }
+            impl<R: AsyncRead + Unpin + ?Sized> Future for ReadFuture<'_, R> {
+                type Output = std::io::Result<usize>;
+                fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                    let Self { reader, buf } = &mut *self; Pin::new(reader).poll_read(cx, buf) }
+            }
+            pub struct F2<'a, R: Unpin + ?Sized> { reader: &'a mut R, buf: &'a mut [u8] }
+            impl<R: AsyncRead + Unpin + ?Sized> F2<'_, R> {
+                pub fn direct(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<usize>> { Pin::new(&mut *self.reader).poll_read(cx, self.buf) }
+            }
+        "#;
+        let (_, v) = r817_run("r963pin", src, "deny Unknown\n");
+        for f in ["poll", "direct"] {
+            let why: Vec<String> = r817_row(&v, f)["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w.starts_with("dispatch:") && w.contains("pinned receiver")),
+                    "`{f}` must disclose the generic pinned receiver:\n{v:#}");
+        }
     }
 
     #[test]
@@ -10414,6 +10528,58 @@ pub fn either_match() { let _ = std::fs::read(\"b\"); }\n";
     }
 
     #[test]
+    fn an_allow_rule_whose_scope_binds_nothing_is_disclosed_like_a_deny() {
+        // SOUNDNESS R952 — the §4 ⟨0.27⟩ zero-match pass enrolled `deny`/`pure`/`forbid`/`only` and never
+        // `allow`. Measured: `allow Net in exec817::f ok.example` (a crate-qualified scope — names here are
+        // crate-relative, so it binds nothing) printed `policy ✓`, exit 0, NO disclosure, over an `f` that
+        // connects to a caller-chosen host; `allow Net in f ok.example` fails it with AS-EFF-008. The
+        // `deny` spelling of the same scope already said `matched NO function`. Each arm below differs from
+        // its neighbour in ONE thing: the rule form, or whether the scope binds.
+        use candor_classify::gate::{gate, GateInput};
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> = vec!["f".into(), "inner::g".into()];
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let effects: HashMap<String, BTreeSet<String>> =
+            names.iter().map(|n| (n.clone(), BTreeSet::from(["Net".to_string()]))).collect();
+        let empty_sets: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty_nc: HashMap<String, Vec<String>> = HashMap::new();
+        let gi = GateInput {
+            all: &names,
+            display: &empty_map,
+            hash: &empty_map,
+            inferred: &effects,
+            calls: &empty_sets,
+            hosts: &empty_sets,
+            cmds: &empty_sets,
+            paths: &empty_sets,
+            tables: &empty_sets,
+            surface_incomplete: &empty_sets,
+            reason_classes: &empty_sets,
+            net_classes: &empty_nc,
+        };
+        let run = |t: &str| gate(&candor_classify::policy::parse_policy(t), &gi);
+
+        // the arm the row names: a crate-qualified `allow` scope that binds nothing — disclosed, and the
+        // verdict is UNCHANGED by the disclosure (no violation appears, none is removed).
+        let o = run("allow Net in exec817::f ok.example");
+        assert_eq!(o.zero_match, vec!["allow Net in exec817::f ok.example".to_string()]);
+        assert!(o.violations.is_empty(), "a disclosure must not become a verdict: {:?}", o.violations);
+        // its `deny` twin — the control the disclosure must now match
+        assert_eq!(run("deny Net exec817::f").zero_match, vec!["deny Net exec817::f".to_string()]);
+        // the plain typo, every literal-bearing effect
+        for e in ["Net", "Exec", "Fs", "Db", "Llm"] {
+            let raw = format!("allow {e} in zzz x");
+            assert_eq!(run(&raw).zero_match, vec![raw.clone()], "{e}");
+        }
+        // an `allow` that BINDS stays quiet, and still gates (f has no visible literal)
+        let b = run("allow Net in f ok.example");
+        assert!(b.zero_match.is_empty(), "{:?}", b.zero_match);
+        assert_eq!(b.violations.len(), 1, "the binding arm must still fire AS-EFF-008");
+        // a SCOPELESS `allow` binds every function by construction — exempt, like a scopeless `deny`
+        assert!(run("allow Net ok.example").zero_match.is_empty());
+    }
+
+    #[test]
     fn a_rust_2015_bare_closure_trait_object_no_longer_drops_the_whole_file() {
         // SOUNDNESS R308 — `syn` rejects the 2015 spelling `&Fn(..)`, and a parse failure is per-FILE,
         // so ONE elided `dyn` dropped every function in it. Measured on `serial-core-0.4.0`: the whole
@@ -10514,14 +10680,15 @@ impl H {\n\
         // So assert the DOCUMENT, not the effect list: the row must be ABSENT — which is what the
         // residual actually is — and if it ever becomes PRESENT the pin fails and names itself,
         // whether it arrived as a concrete effect or as a disclosure.
+        //
+        // SOUNDNESS R893 — THE TYPE PEEL LANDED, as a MARKED element (see `lang::mark_wrapped`): the
+        // guard-chain's element is the container's, while the guard itself, the `LockResult` and the
+        // `unwrap_or_else` closure's `x` are never typed as it. async-process's `has_zombies` shape is
+        // pinned by `an_unwrap_or_else_error_closure_is_not_the_guarded_value` and by the R893 test's
+        // `poison` control, and was checked in the R893 corpus A/B.
         for f in ["H::g_mutex", "H::g_refcell", "H::g_rwlock"] {
-            let present = v["functions"].as_array().into_iter().flatten()
-                .any(|r| r["fn"].as_str() == Some(f));
-            assert!(!present,
-                    "{f} is a PINNED residual — a concrete element behind a guard chain. It must be \
-                     ABSENT from functions[]; it is now PRESENT, which means the type peel landed \
-                     (check async-process's `has_zombies` in the same A/B) or something else began \
-                     disclosing here. See the comment above before changing this:\n{v:#}");
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "{f}: a concrete element behind a guard chain (R893):\n{v:#}");
         }
     }
 
@@ -13302,9 +13469,15 @@ trait G {
         // nominal value (the `Option` shape, one held value), and nothing when it is a container. R347's backed-out half peeled THROUGH to the element, and its precondition —
         // a closure in the error position is not the element — is now enforced at the HOF route (see
         // `an_unwrap_or_else_error_closure_is_not_the_guarded_value`).
+        // R893 — …and a wrapper of a CONTAINER records the container's element MARKED, never bare (a bare
+        // `Sender` would say the guard IS one).
         let mx: syn::Type = syn::parse_str("Mutex<Vec<Sender>>").unwrap();
-        assert_eq!(elem_type(&mx, &u), None,
-                   "vein B: a wrapper of a CONTAINER records nothing (R347's guard-chain half stays open)");
+        assert_eq!(elem_type(&mx, &u), Some(crate::lang::mark_wrapped("Sender")),
+                   "R893: a wrapper of a CONTAINER records its element, marked");
+        for nested in ["Mutex<Option<Sender>>", "Mutex<Vec<Vec<Sender>>>", "Mutex<Vec<String>>"] {
+            let t: syn::Type = syn::parse_str(nested).unwrap();
+            assert_eq!(elem_type(&t, &u), None, "{nested}: one container level onto a nominal element only");
+        }
         let rc: syn::Type = syn::parse_str("RefCell<Sender>").unwrap();
         assert_eq!(elem_type(&rc, &u).as_deref(), Some("Sender"));
     }
@@ -16633,7 +16806,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16644,7 +16817,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev66/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev69/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -21350,7 +21523,7 @@ pub fn go() {{ imp::doit(); }}
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(), body_externs: Default::default(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
-            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
+            dep_bound_vars: HashMap::new(), ctor_bound: HashMap::new(), fn_alias: Default::default(), use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), lazy_statics: &lazy,
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
@@ -25463,6 +25636,99 @@ pub fn ctl(g: ChildGuard) -> u8 { g.into_inner() }\n";
                 "the error closure's `x` is a PoisonError, not the guarded ChildGuard:\n{v:#}");
     }
 
+    /// SOUNDNESS R893 (the wrapper-of-containers half) — a std wrapper around a SEQUENCE or MAP
+    /// (`Mutex<Vec<G>>`, `RwLock`, `RefCell`, `OnceLock`, a `Mutex::new(vec![..])` local) recorded no
+    /// element, so every iteration/index of it read ABSENT. EXECUTED (scratchpad `rustagent-v041/fx893`):
+    /// each charged arm wrote the marker file, each control did not. The controls are the reason the
+    /// element is recorded MARKED rather than bare: `G` declares `len`/`is_empty`/`into_inner`, so typing
+    /// the guard, the `LockResult`, the `OnceLock::get` result or the poison closure's `x` as `G` would
+    /// charge `Fs` to a function that only asks a `Vec` its length.
+    #[test]
+    fn r893_a_wrapper_of_a_container_yields_the_containers_element_and_nothing_else() {
+        let src = "\
+use std::sync::{Mutex, RwLock, OnceLock};\n\
+use std::cell::RefCell;\n\
+pub struct G;\n\
+impl G {\n\
+    pub fn go(&self) { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); }\n\
+    pub fn len(&self) -> usize { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); 0 }\n\
+    pub fn is_empty(&self) -> bool { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); true }\n\
+    pub fn into_inner(self) -> u8 { let _ = std::fs::write(\"/tmp/fx893_mark\", \"x\"); 0 }\n\
+}\n\
+pub struct H { pub mv: Mutex<Vec<G>>, pub rv: RwLock<Vec<G>>, pub cv: RefCell<Vec<G>>, pub ol: OnceLock<Vec<G>> }\n\
+impl H {\n\
+    pub fn mv_iter(&self) { self.mv.lock().unwrap().iter().for_each(|g| g.go()) }\n\
+    pub fn mv_for(&self) { for g in self.mv.lock().unwrap().iter() { g.go() } }\n\
+    pub fn mv_idx(&self) { self.mv.lock().unwrap()[0].go() }\n\
+    pub fn mv_guard(&self) { let v = self.mv.lock().unwrap(); for g in v.iter() { g.go() } }\n\
+    pub fn mv_first(&self) { if let Some(g) = self.mv.lock().unwrap().first() { g.go() } }\n\
+    pub fn rv_read(&self) { for g in self.rv.read().unwrap().iter() { g.go() } }\n\
+    pub fn cv_borrow(&self) { for g in self.cv.borrow().iter() { g.go() } }\n\
+    pub fn once_iter(&self) { for g in self.ol.get().unwrap().iter() { g.go() } }\n\
+    pub fn poison(&self) -> bool { self.mv.lock().unwrap_or_else(|x| x.into_inner()).is_empty() }\n\
+    pub fn c_len(&self) -> usize { self.mv.lock().unwrap().len() }\n\
+    pub fn c_iflet(&self) -> usize { if let Ok(v) = self.mv.lock() { v.len() } else { 0 } }\n\
+    pub fn c_map(&self) -> usize { self.mv.lock().map(|v| v.len()).unwrap_or(0) }\n\
+    pub fn c_once(&self) -> usize { self.ol.get().unwrap().len() }\n\
+    pub fn c_once_iflet(&self) -> usize { if let Some(v) = self.ol.get() { v.len() } else { 0 } }\n\
+    pub fn c_for_lock(&self) -> usize { let mut n = 0; for v in self.mv.lock() { n += v.len() } n }\n\
+    pub fn c_guard_len(&self) -> usize { let v = self.mv.lock().unwrap(); v.len() }\n\
+    pub fn c_borrow_empty(&self) -> bool { self.cv.borrow().is_empty() }\n\
+}\n\
+pub fn local_mutex() { let m = Mutex::new(vec![G]); for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn local_mutex_annot() { let m: Mutex<Vec<G>> = Mutex::new(vec![G]); for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn param_mutex(m: &Mutex<Vec<G>>) { for g in m.lock().unwrap().iter() { g.go() } }\n\
+pub fn c_local_len() -> usize { let m = Mutex::new(vec![G]); let n = m.lock().unwrap().len(); n }\n";
+        let v = scan_fixture("r893wrap", src);
+        for f in ["H::mv_iter", "H::mv_for", "H::mv_idx", "H::mv_guard", "H::mv_first", "H::rv_read",
+                  "H::cv_borrow", "H::once_iter", "local_mutex", "local_mutex_annot", "param_mutex"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}` reaches G::go:\n{v:#}");
+        }
+        for f in ["H::poison", "H::c_len", "H::c_iflet", "H::c_map", "H::c_once", "H::c_once_iflet",
+                  "H::c_for_lock", "H::c_guard_len", "H::c_borrow_empty", "c_local_len"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` asks the CONTAINER, never a G — executed, it writes nothing:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1004 — a function a local `macro_rules!` DECLARES, called by a bare or `super::` path,
+    /// had no unit and its caller read PURE. EXECUTED (scratchpad `rustagent-v041/fx1004`): every caller
+    /// below wrote the marker file. The `externs!` shape is wasm-bindgen's own (lib.rs), with the stub's
+    /// `panic!` replaced by a write; `ctl` is the calibration.
+    #[test]
+    fn r1004_a_function_a_local_macro_declares_is_a_unit() {
+        let src = "\
+macro_rules! externs {\n\
+    ($(#[$attr:meta])* extern \"C\" { $(fn $name:ident($($args:tt)*) -> $ret:ty;)* }) => (\n\
+        #[cfg(target_arch = \"wasm32\")]\n\
+        $(#[$attr])*\n\
+        extern \"C\" { $(fn $name($($args)*) -> $ret;)* }\n\
+        $(\n\
+            #[cfg(not(target_arch = \"wasm32\"))]\n\
+            #[allow(unused_variables)]\n\
+            unsafe extern \"C\" fn $name($($args)*) -> $ret { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); }\n\
+        )*\n\
+    )\n\
+}\n\
+mod desc {\n\
+    externs! { extern \"C\" { fn wb_describe(v: u32) -> (); } }\n\
+    pub fn inform(a: u32) { unsafe { wb_describe(a) } }\n\
+}\n\
+externs! { extern \"C\" { fn do_describe(v: u32) -> (); } }\n\
+macro_rules! mkfn { ($n:ident) => { pub fn $n() { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); } }; }\n\
+mkfn!(plain_gen);\n\
+pub fn direct(a: u32) { unsafe { do_describe(a) } }\n\
+pub mod describe { pub fn inform2(a: u32) { unsafe { super::do_describe(a) } } }\n\
+pub fn call_plain() { plain_gen() }\n\
+pub fn ctl() { let _ = std::fs::write(\"/tmp/fx1004_mark\", \"x\"); }\n";
+        let v = scan_fixture("r1004mac", src);
+        assert_eq!(fixture_effects(&v, "ctl"), vec!["Fs".to_string()], "CALIBRATION:\n{v:#}");
+        for f in ["direct", "desc::inform", "describe::inform2", "call_plain"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "`{f}` calls a function the local macro declares:\n{v:#}");
+        }
+    }
+
     /// R197, R733 — a turbofish names a generic return. A bound with no turbofish keeps its dispatch.
     #[test]
     fn vein_b_a_turbofish_names_the_generic_return() {
@@ -26768,6 +27034,22 @@ fn r982_r987_r988_r989_r985_release_audit_shapes() {
 #[cfg(feature = \"tls\")]\npub fn e_gated() { let _ = load_native_certs(\"/etc/ssl\"); }\n"),
     ]);
     assert_eq!(veina_row_effs(&v, "e_gated"), vec!["Fs".to_string()], "{v:#}");
+
+    // R982 (residual) — a CRATE-LOCAL target under a RENAME: nothing else names it, so it resolves through
+    // the inactive `use` (EXECUTED with the feature, scratchpad `rustagent-v041/fx982`: it writes). The
+    // non-renamed crate-local spelling keeps its `ambiguous:` hedge — the measured exclusion stands.
+    let v = scan_src_to_json_multi("r982local", &[
+        ("Cargo.toml", "[package]\nname = \"r982local\"\n\n[features]\ndefault = []\nx = []\n"),
+        ("src/lib.rs", "\
+pub mod imp { pub fn eff() { let _ = std::fs::write(\"/tmp/r982\", \"x\"); } pub mod deep { pub fn eff2() { let _ = std::fs::write(\"/tmp/r982\", \"x\"); } } }\n\
+pub mod other { pub fn eff() {} }\n\
+#[cfg(feature = \"x\")]\nuse crate::imp::eff;\n\
+#[cfg(feature = \"x\")]\nuse crate::imp::deep::eff2 as renamed;\n\
+#[cfg(feature = \"x\")]\npub fn e_renamed() { renamed() }\n\
+#[cfg(feature = \"x\")]\npub fn e_bare() { eff() }\n"),
+    ]);
+    assert_eq!(veina_row_effs(&v, "e_renamed"), vec!["Fs".to_string()], "{v:#}");
+    assert_eq!(row_why(&v, "e_bare"), vec!["ambiguous:same-name local defs".to_string()], "{v:#}");
 
     // R987: `ManuallyDrop::new(x)` / `ptr::read(&x)` are `x` (allocator-api2 `Box::into_inner`).
     let a = scan_src_to_json("r987", "\

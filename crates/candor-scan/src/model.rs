@@ -173,6 +173,13 @@ pub(crate) struct FnInfo {
     /// in-crate calls keep answering through `extern_fns`, unchanged.
     #[serde(rename = "xd", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) extern_decl: bool,
+    /// SOUNDNESS R959 — a SYNTHETIC unit for a RENAMED `pub use path::f as g;` of a crate-local fn: one
+    /// call edge to `f`, so the report publishes `g` with `f`'s answer and a chained consumer calling
+    /// `dep::g()` finds a unit. Kept out of the local resolution indexes exactly like `extern_decl`:
+    /// in-crate calls of `g` already resolve through the `use` alias, unchanged. Built in `scan.rs`
+    /// after Pass B, never cached.
+    #[serde(rename = "ra", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) reexport_alias: bool,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.

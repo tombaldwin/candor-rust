@@ -45,6 +45,7 @@ pub(crate) use syn::visit::Visit;
 mod model;
 mod lang;
 mod lazy;
+mod mbe;
 mod deps;
 mod collector;
 mod decls;

@@ -11,6 +11,61 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A renamed, feature-inactive crate-local `use` resolves inside the gated item that needs it (SOUNDNESS R982
+  residual).** `#[cfg(feature = "x")] use crate::imp::deep::eff2 as renamed;` + `#[cfg(feature = "x")] pub fn f() {
+  renamed() }` read ABSENT (executed with the feature: it writes a file). R982's fix resolved only EXTERNAL targets
+  through an inactive `use`, because crate-local ones withdrew real hedges (time, rustix); those were non-renamed
+  names that still resolve by their leaf. A rename has no leaf of its own, so it now resolves through the `use`.
+  Still open: the UNGATED call to a name bound only by an inactive `use` (`fx-lookup`), which does not compile in the
+  default build this scanner describes. Cache schema rev69 (also covers R962/R963).
+- ⚠ **Two more `to_socket_addrs` receivers are typed (SOUNDNESS R963, R950's residual).** A struct-pattern binding
+  (`let B { address, .. } = self;` over `address: T` under `T: ToSocketAddrs` — mysql's `MyTcpBuilder::connect`)
+  and a `format!`-built local (`let address = format!("{h}:80")`) left the receiver untyped, so the resolution was
+  ABSENT (`deny Net` 0; executed, both resolve). A plain `let` struct / tuple-struct pattern over a place
+  expression now binds each named field as `let NAME = <init>.FIELD;` would, and a `let` of a provably-string value
+  (`format!`, `+`, `.to_string()`, the R949 authority) types its name `String`. mysql's `connect` now marks
+  `incomplete: ["Net"]`.
+- ⚠ **A `Result`/`Option` held in a name, then destructured, types its payload (SOUNDNESS R962, R946's residual).**
+  `let r = UdpSocket::bind(..); if let Ok(s) = r { s.send_to(b, d) }` (and let-else, `match`, `.ok()` + `Some`) left
+  `s` untyped, so beside a benign `connect("ok.example:80")` `allow Net in <fn> ok.example` exited 0 over a datagram
+  sent to a caller-chosen address (executed). A std `Ok`/`Some` pattern over a name now binds what a plain `let`
+  CONSTRUCTION bound that name to, and only while that binding still stands; `self` in `impl … for Option<L>`
+  (R946's counter-example) was never bound by a construction and is unchanged.
+- ⚠ **A renamed re-export is a unit a chained consumer can call (SOUNDNESS R959).** `pub use inner::eff as reff;`
+  published nothing under `reff`, so a consumer chained onto the crate read `ydep::reff()` as PURE (ABSENT,
+  `deny Fs` 0) over a call that executed writes a file, while the un-renamed `pub use` beside it resolved by its
+  leaf. The producer now publishes one unit per renamed re-export of a crate-local fn (root or module level), with
+  one edge to each `#[cfg]` arm's definition, so the row carries the definition's answer and the call-graph sidecar
+  names it (`analyzed.count` still equals the node set). Kept out of every in-crate resolution index, which
+  already answers `reff` through the `use` alias. A renamed type, const or external item publishes nothing.
+- ⚠ **A function a local `macro_rules!` declares is now a unit (SOUNDNESS R1004).** An item-position invocation
+  of a macro defined in the SAME file is expanded by a macro-by-example matcher (first matching arm, `syn`-parsed
+  fragments, nested repetitions, `$crate`), and the free `fn`s and `extern` blocks it yields are spliced in beside
+  it. Before, `mkfn!(go); … go()` and wasm-bindgen's `externs! { extern "C" { fn __wbindgen_describe(..); } }`
+  called as `super::__wbindgen_describe(a)` had no callee at all and the caller read PURE (executed fixture: each
+  caller wrote a file). Refused, leaving the invocation exactly as before: a name the file defines twice, a
+  `stmt` fragment, an ambiguous or non-matching invocation, an expansion that does not parse. Not expanded: a
+  macro defined in ANOTHER file (the per-file cache keys on one file's bytes), and generated `impl`s/types (R128's
+  hedge still covers the `crate::` spelling of those). Cache schema rev68.
+- ⚠ **A std wrapper around a container now yields the container's element (SOUNDNESS R893).** `m: Mutex<Vec<G>>`
+  (and `RwLock`/`RefCell`/`OnceLock` of a `Vec`/map, a `&Mutex<Vec<G>>` parameter, a `Mutex::new(vec![..])`
+  local) recorded no element, so `self.m.lock().unwrap().iter().for_each(|g| g.go())`, `for g in …iter()`,
+  `guard[0].go()` and `guard.first()` read ABSENT over a `go` that writes a file. The element is recorded
+  MARKED as "held in a container", so the guard itself, its `LockResult`, `OnceLock::get`'s result and an
+  `unwrap_or_else` closure's `PoisonError` are never typed as the element (each pinned by an executed
+  control whose `G` declares `len`/`is_empty`/`into_inner`). Still unrecorded: a second level
+  (`Mutex<Option<G>>`, `Option<Vec<G>>`). Cache schema rev67.
+- **A scoped `allow` rule whose scope binds no function is now disclosed (SOUNDNESS R952).** SPEC §4 ⟨0.27⟩'s
+  zero-match clause covers any rule, but the counting pass enrolled `deny`/`pure`/`forbid`/`only` and never
+  `allow`: `allow Net in exec817::f ok.example` (a crate-qualified scope, which binds nothing in candor-scan)
+  printed `policy ✓`, exit 0, with no line — a certification that could not fail — over an `f` that connects
+  to a caller-chosen host. It now prints `policy rule matched NO function` and rides `zeroMatch` on the
+  `--gate-json` verdict, exactly as the `deny` spelling did. Disclosure only: no exit code moves. A scopeless
+  `allow` binds everything and stays exempt. `gate --report` was never affected (it refuses every `allow`).
+  **The deep (`cargo dylint`) route** had no zero-match disclosure for ANY rule form; it now prints the same
+  line for an unbound `deny`/`pure`/`allow`/`forbid` (stderr only — its `CANDOR_GATE_JSON` verdict does not
+  carry `zeroMatch`).
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; `SPEC_VERSION` and its two literal canaries in

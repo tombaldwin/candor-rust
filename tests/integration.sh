@@ -225,6 +225,16 @@ want   "AS-EFF-006 violation writes the CANDOR_VIOLATIONS sentinel"             
 : > "$VIO"; echo "deny Net  domain" > "$PL/policy-clean"   # the crate has no Net, so nothing fires
 dl "$PL" env CANDOR_POLICY="$PL/policy-clean" CANDOR_VIOLATIONS="$VIO" >/dev/null
 if [ -s "$VIO" ]; then echo "  FAIL clean run must leave the sentinel empty — got: $(cat "$VIO")"; fail=$((fail+1)); else echo "  ok   clean run leaves the CANDOR_VIOLATIONS sentinel empty"; pass=$((pass+1)); fi
+# SOUNDNESS R952 — a rule whose SCOPE binds nothing is DISCLOSED (SPEC §4 ⟨0.27⟩), every form, and the
+# disclosure moves no verdict. The deep route had none for any form. `domian` is the typo; the bound
+# `allow` and `deny` beside it are the controls that keep the line from firing on everything.
+: > "$VIO"; printf 'allow Fs in domian /tmp\ndeny Net domian\nforbid domian -> std\nallow Fs in domain /tmp\n' > "$PL/policy-zero"
+out=$(dl "$PL" env CANDOR_POLICY="$PL/policy-zero" CANDOR_VIOLATIONS="$VIO")
+want   "R952 lint: an unbound allow is disclosed"    "$out" 'matched NO function — `allow Fs in domian /tmp`'
+want   "R952 lint: an unbound deny is disclosed"     "$out" 'matched NO function — `deny Net domian`'
+want   "R952 lint: an unbound forbid is disclosed"   "$out" 'matched NO function — `forbid domian -> std`'
+absent "R952 lint: a BOUND allow is not disclosed"   "$out" 'matched NO function — `allow Fs in domain /tmp`'
+if [ -s "$VIO" ]; then echo "  FAIL R952 the disclosure must not become a violation — got: $(cat "$VIO")"; fail=$((fail+1)); else echo "  ok   R952 zero-match disclosure writes no violation"; pass=$((pass+1)); fi
 rm -rf "$(dirname "$PL")"
 
 # ── 9-u. `deny <Effect>` vs `Unknown` (SEMANTICS §6, family ruling): AS-EFF-006 fires iff the rule
