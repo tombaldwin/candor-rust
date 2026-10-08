@@ -9133,6 +9133,35 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
     }
 
     #[test]
+    fn r963_a_pinned_generic_bounded_only_by_a_dependency_trait_discloses() {
+        // The R963 binder typed futures-lite's `let Self { reader, buf } = &mut *self;`, moving
+        // `ReadFuture::poll` out of R985's untyped-pinned hedge into a PRE-EXISTING silence: a pinned value
+        // whose type is a generic parameter bounded only by a DEPENDENCY trait formed no edge and no
+        // disclosure (`direct` below was ABSENT on published v0.40.0). All three spellings now disclose.
+        let src = r#"
+            use std::pin::Pin; use std::task::{Context, Poll}; use std::future::Future;
+            use futures_io::AsyncRead;
+            pub struct ReadFuture<'a, R: Unpin + ?Sized> { reader: &'a mut R, buf: &'a mut [u8] }
+            impl<R: AsyncRead + Unpin + ?Sized> Future for ReadFuture<'_, R> {
+                type Output = std::io::Result<usize>;
+                fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                    let Self { reader, buf } = &mut *self; Pin::new(reader).poll_read(cx, buf) }
+            }
+            pub struct F2<'a, R: Unpin + ?Sized> { reader: &'a mut R, buf: &'a mut [u8] }
+            impl<R: AsyncRead + Unpin + ?Sized> F2<'_, R> {
+                pub fn direct(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<usize>> { Pin::new(&mut *self.reader).poll_read(cx, self.buf) }
+            }
+        "#;
+        let (_, v) = r817_run("r963pin", src, "deny Unknown\n");
+        for f in ["poll", "direct"] {
+            let why: Vec<String> = r817_row(&v, f)["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w.starts_with("dispatch:") && w.contains("pinned receiver")),
+                    "`{f}` must disclose the generic pinned receiver:\n{v:#}");
+        }
+    }
+
+    #[test]
     fn r950_to_socket_addrs_on_an_untyped_receiver() {
         // SOUNDNESS R950: `(h, 80u16).to_socket_addrs()` and `"evil.example:80".to_socket_addrs()` were ABSENT
         // from `functions[]` (`deny Net` exit 0) while `h.to_socket_addrs()` on a `&str` PARAMETER marked —

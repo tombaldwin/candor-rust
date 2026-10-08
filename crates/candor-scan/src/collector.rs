@@ -5138,7 +5138,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // R980's resolution and never reaches here.
         if leaf.starts_with("poll") {
             if let Some(arg) = pinned_arg(&node.receiver) {
-                if self.resolve_recv_type(arg).is_none() && self.resolve_recv_traits(arg).is_empty() {
+                // SOUNDNESS R963 follow-up — …AND A PINNED GENERIC whose only bounds are DEPENDENCY traits
+                // (`R: futures_io::AsyncRead`, `Pin::new(&mut *self.reader).poll_read(cx, buf)`). "Typed"
+                // there means the type is the parameter itself: R980's local-`impl Future` resolution has
+                // nothing to join, no local trait carries the member, and the call formed no edge — silent
+                // on published v0.40.0 (`F2::direct`, rustagent-v041/fxpin). It surfaced because R963's
+                // struct-pattern binder typed futures-lite's `let Self { reader, buf } = &mut *self;`,
+                // moving `ReadFuture::poll` out of the untyped arm below and into this silence.
+                let ty = self.resolve_recv_type(arg);
+                let traits = self.resolve_recv_traits(arg);
+                let generic_ty = ty.as_deref().is_none_or(|t| self.generic_bounds.contains_key(t));
+                let only_dep_traits = !traits.is_empty()
+                    && traits.iter().all(|t| !self.local_traits.contains_key(t.rsplit("::").next().unwrap_or(t)));
+                if generic_ty && only_dep_traits {
+                    if crate::lang::reach_debug() || std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                        eprintln!("R963PINGEN {leaf}");
+                    }
+                    self.mark_unresolved(format!("dispatch:generic pinned receiver of `{leaf}`"));
+                } else if ty.is_none() && traits.is_empty() {
                     if crate::lang::reach_debug() {
                         eprintln!("R985PIN {leaf}");
                     }
