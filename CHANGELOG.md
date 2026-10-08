@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **The deep (`cargo candor policy`/`guard`) verdict carries ⟨0.27⟩'s `zeroMatch`, and its scopes match the
+  CRATE-RELATIVE name (SOUNDNESS R1033, R1028).** A rule whose scope bound nothing was disclosed on stderr only on
+  this route; the `--gate-json` verdict now carries the same `zeroMatch` list the scan route's does (summed across
+  every crate of the `cargo dylint` pass, omitted when empty). And the lint matched scopes against
+  `<crate>::<name>` while reporting `<name>`, so `deny Fs mycrate::f` / `allow Net in mycrate::f …` BOUND on the
+  lint and bound nothing on candor-scan (SPEC §3.1 requires the routes to agree; `fn` carries no crate name, SPEC
+  §6.2). The lint now matches the crate-relative name: a crate-qualified scope binds nothing on both routes and is
+  disclosed as `zeroMatch`. A policy that relied on a crate-qualified scope on the deep route must drop the crate
+  prefix (the scan route never honoured it).
 - ⚠ **A method written on a type ALIAS resolves through a receiver typed by a declared RETURN (R1025's receiver
   half).** `impl LcPtr<Evp> { fn agree }` (with `type LcPtr<T> = Managed<*mut T>`) keys `agree` under the alias,
   while `fn get(&self) -> &LcPtr<Evp>` types `self.get()` as the TARGET; R451's gate ("the corrected type must

@@ -183,6 +183,37 @@
       ]
     },
     {
+      "fn": "Candor::disclose_zero_match",
+      "loc": "src/lib.rs:3750:5: 3750:78",
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "ec4df31efde3695264804cc568169eec",
+      "unknownWhy": [
+        "dispatch:Write.write_fmt"
+      ],
+      "invisible": [
+        "candor_classify",
+        "rustc_middle",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "collect_generic_callee_edges",
       "loc": "src/lib.rs:1702:1: 1709:2",
       "inferred": [

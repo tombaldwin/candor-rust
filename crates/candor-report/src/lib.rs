@@ -1359,6 +1359,69 @@ pub fn gate_verdict_json_with_coverage_v28(
     })
 }
 
+/// SOUNDNESS R1033 — the assembled (LINT-route) verdict with SPEC §4/§3.1 ⟨0.27⟩'s `zeroMatch` list: every
+/// rule whose scope bound no function across the whole `cargo dylint` pass, verbatim, code-point sorted and
+/// deduplicated, OMITTED when empty — so a fully-binding verdict is byte-identical to
+/// [`gate_verdict_json_with_coverage_v28`]'s. The lint route printed the disclosure on stderr only (R952),
+/// and ⟨0.27⟩ requires the same list on every verdict document, on every route. Disclosure only: `ok` is
+/// computed without consulting it. Key order matches the scan route's (`violations`, `zeroMatch`,
+/// `ignored`, `coverage`).
+pub fn gate_verdict_json_lint(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    ignored: &[IgnoredLine],
+    zero_match: &[String],
+) -> serde_json::Result<String> {
+    violations.sort_by(|a, b| {
+        (a.rule.as_str(), a.detail.as_str(), a.hash.as_str())
+            .cmp(&(b.rule.as_str(), b.detail.as_str(), b.hash.as_str()))
+    });
+    let mut zm: Vec<&String> = zero_match.iter().collect();
+    zm.sort();
+    zm.dedup();
+    #[derive(Serialize)]
+    struct Verdict<'a> {
+        spec: &'static str,
+        ok: bool,
+        violations: &'a [GateViolation],
+        #[serde(rename = "zeroMatch", skip_serializing_if = "Vec::is_empty")]
+        zero_match: Vec<&'a String>,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        ignored: &'a [IgnoredLine],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<&'a GateCoverage>,
+    }
+    serde_json::to_string_pretty(&Verdict {
+        spec: SPEC_VERSION,
+        ok: violations.is_empty(),
+        violations,
+        zero_match: zm,
+        ignored,
+        coverage,
+    })
+}
+
+/// SOUNDNESS R1033 — one crate's scoped-rule binding counts, as the lint appends them (NDJSON) to
+/// `<CANDOR_GATE_JSON>.zm`: the assembler sums them across every crate of the pass, and a rule is
+/// `zeroMatch` only when the SUM is zero (a rule bound in one workspace member bound something).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ZeroMatchCount {
+    pub rule: String,
+    pub matched: usize,
+}
+
+/// The rules whose summed count is zero, from `ZeroMatchCount` NDJSON text. `Err` on a corrupt line —
+/// a dropped record could only ever ADD a false `zeroMatch` entry or hide a real one, so the caller fails
+/// closed rather than guess.
+pub fn zero_match_from_counts(text: &str) -> Result<Vec<String>, serde_json::Error> {
+    let mut sum: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let c: ZeroMatchCount = serde_json::from_str(line)?;
+        *sum.entry(c.rule).or_insert(0) += c.matched;
+    }
+    Ok(sum.into_iter().filter(|(_, n)| *n == 0).map(|(r, _)| r).collect())
+}
+
 /// ⟨0.22⟩ COMPLETENESS MANIFEST verdict: like [`gate_verdict_json_with_coverage`], plus the `analyzed`
 /// count (Gap 1, always present) and — when the scan was INCOMPLETE (`unanalyzed` non-empty) — `incomplete:
 /// true` + the `unanalyzed` list (Gap 2). `ok` requires BOTH no violation AND a complete analysis, so a

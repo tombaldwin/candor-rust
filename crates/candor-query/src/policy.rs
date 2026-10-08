@@ -721,7 +721,30 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
                 .collect()
         }
     };
-    let json = match candor_report::gate_verdict_json_with_coverage_v28(&mut violations, coverage.as_ref(), &ignored) {
+    // SOUNDNESS R1033 — ⟨0.27⟩'s `zeroMatch`: the lint appends each crate's scoped-rule binding counts to
+    // `<gate>.zm` beside `<gate>.parts`; a rule is zero-match when its count summed over the WHOLE pass is
+    // zero. Absent file = no scoped rule (or no lint run). A corrupt record fails closed, like `.parts`.
+    let zero_match: Vec<String> = {
+        let zm_path = match parts.strip_suffix(".parts") {
+            Some(base) => format!("{base}.zm"),
+            None => format!("{parts}.zm"),
+        };
+        match std::fs::read_to_string(&zm_path) {
+            Ok(text) => match candor_report::zero_match_from_counts(&text) {
+                Ok(z) => z,
+                Err(e) => {
+                    eprintln!("candor-query: corrupt zero-match record in {zm_path} ({e}) — no faithful verdict exists");
+                    return 2;
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                eprintln!("candor-query: cannot read {zm_path} ({e})");
+                return 2;
+            }
+        }
+    };
+    let json = match candor_report::gate_verdict_json_lint(&mut violations, coverage.as_ref(), &ignored, &zero_match) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("candor-query: could not serialize the gate verdict ({e})");

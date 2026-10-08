@@ -3561,12 +3561,13 @@ impl Candor {
                                 -> HashMap<LocalDefId, Vec<(String, String)>> {
         let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
         if !self.layer_rules.is_empty() {
-            // Scope-match against the CRATE-PREFIXED path (`<crate>::<path>`), because a crate's own
-            // functions' `def_path_str` omits the crate name — so a `from`/`to` scope spelled as the
-            // crate name would otherwise match nothing (a silent no-op). Module/type-name scopes still
-            // match (the segment is present either way). Cross-crate callee paths already carry the
-            // crate, so those (in `cross_callees`) are matched as-is, not through `name_of`.
-            let name_of = |g: LocalDefId| format!("{krate}::{}", cx.tcx.def_path_str(g.to_def_id()));
+            // SOUNDNESS R1028 — scope-match against the CRATE-RELATIVE path, the name the report carries
+            // and the name every engine's `fn` is (SPEC §6.2; ⟨0.23⟩ puts the package in `hash`, never in
+            // `fn`). This was crate-PREFIXED (`fcee080`) so a crate-name scope would not be a silent no-op;
+            // ⟨0.27⟩'s zero-match disclosure has since made it a DISCLOSED no-op, which is what candor-scan
+            // does with the same policy — and SPEC §3.1 requires the two routes to bind the same rules.
+            // Cross-crate callee paths carry their crate, so those (in `cross_callees`) are matched as-is.
+            let name_of = |g: LocalDefId| cx.tcx.def_path_str(g.to_def_id());
             let tos: BTreeSet<&str> = self.layer_rules.iter().map(|r| r.to.as_str()).collect();
             // Seed: scopes each function reaches via a DIRECT callee (local path match, cross path match,
             // or cross callee's sidecar reach). Track an example path per (fn, scope) for the message.
@@ -3737,16 +3738,16 @@ impl Candor {
     /// SOUNDNESS R952 — the §4 ⟨0.27⟩ ZERO-MATCH disclosure on the deep route, which had none for ANY rule
     /// form: `deny Net zzz` over a crate whose `f` connects ran green with no line saying the rule bound
     /// nothing (candor-scan prints `policy rule matched NO function` for the same policy). Counted over the
-    /// SAME crate-prefixed `scope_name` the AS-EFF-006/008 loops skip on, and over the same items (macro-
+    /// SAME crate-relative `scope_name` the AS-EFF-006/008 loops skip on (R1028), and over the same items (macro-
     /// generated consts/statics excluded, exactly as that loop excludes them), so "bound nothing" means
     /// here what it means to the gate. A scopeless `deny`/`pure`/`allow` binds every function and is
     /// exempt. A `forbid` counts a match on either endpoint, over local names only — the same set
     /// candor-scan counts. DISCLOSURE ONLY: the exit code is never moved by it (SPEC §4 MUST NOT).
     ///
-    /// Not carried into the CANDOR_GATE_JSON verdict: that document is assembled from per-crate
-    /// violation records by a separate pass, and the key is pinned by PART 36 on the scan and report
-    /// routes, not this one.
-    fn disclose_zero_match(&self, cx: &LateContext<'_>, krate: &str, items: &[LocalDefId]) {
+    /// SOUNDNESS R1033 — and carried into the CANDOR_GATE_JSON verdict as `zeroMatch` (⟨0.27⟩ requires it
+    /// on every verdict document): the per-crate counts go to `<gate>.zm`, and the verdict assemblers (this
+    /// lint's own, and `candor-query gate-verdict`, run once over the whole pass) sum them.
+    fn disclose_zero_match(&self, cx: &LateContext<'_>, items: &[LocalDefId]) {
         let mut zero: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for r in &self.policy {
             if r.scope.is_some() {
@@ -3771,7 +3772,8 @@ impl Candor {
             {
                 continue;
             }
-            let scope_name = format!("{krate}::{}", cx.tcx.def_path_str(f.to_def_id()));
+            // R1028 — the crate-relative name, exactly as the enforcement loop matches it.
+            let scope_name = cx.tcx.def_path_str(f.to_def_id());
             for r in &self.policy {
                 if let Some(sc) = &r.scope
                     && scope_matches(&scope_name, sc)
@@ -3790,6 +3792,27 @@ impl Candor {
                 if scope_matches(&scope_name, &r.from) || scope_matches(&scope_name, &r.to) {
                     *zero.entry(r.raw.as_str()).or_insert(0) += 1;
                 }
+            }
+        }
+        // SOUNDNESS R1033 — the same counts, for the VERDICT document: ⟨0.27⟩ requires `zeroMatch` on every
+        // verdict, on every route, and this route printed it on stderr only. Per crate, ALL counted rules
+        // (zero or not), so the assembler can sum across a workspace: a rule that binds in one member bound
+        // something.
+        if let Some(gate) = &self.gate_sink {
+            use std::io::Write;
+            let zm = format!("{gate}.zm");
+            match std::fs::OpenOptions::new().create(true).append(true).open(&zm) {
+                Ok(mut fh) => {
+                    for (raw, n) in &zero {
+                        let rec = candor_report::ZeroMatchCount { rule: raw.to_string(), matched: *n };
+                        if let Ok(line) = serde_json::to_string(&rec)
+                            && let Err(e) = writeln!(fh, "{line}")
+                        {
+                            eprintln!("candor: could not append to {zm:?} ({e})");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("candor: could not open {zm:?} ({e})"),
             }
         }
         for (raw, _) in zero.iter().filter(|(_, c)| **c == 0) {
@@ -3826,12 +3849,24 @@ impl Candor {
                         }
                     }
                 }
+                // SOUNDNESS R1033 — the zero-match counts every crate so far appended (`disclose_zero_match`).
+                let zero_match = match std::fs::read_to_string(format!("{gate}.zm")) {
+                    Ok(t) => match candor_report::zero_match_from_counts(&t) {
+                        Ok(z) => z,
+                        Err(e) => {
+                            eprintln!("candor: corrupt zero-match record in {gate}.zm ({e})");
+                            corrupt = true;
+                            Vec::new()
+                        }
+                    },
+                    Err(_) => Vec::new(),
+                };
                 if corrupt {
                     // A dropped record would make the verdict UNDER-report vs the exit code — withhold
                     // it (the wrapper then fails closed on the missing file) rather than write a lie.
                     eprintln!("candor: CANDOR_GATE_JSON verdict NOT written — corrupt violation records");
                 } else {
-                    match candor_report::gate_verdict_json(&mut violations) {
+                    match candor_report::gate_verdict_json_lint(&mut violations, None, &[], &zero_match) {
                         Ok(json) => {
                             if let Err(e) = candor_report::write_atomic(
                                 std::path::Path::new(gate),
@@ -4425,9 +4460,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             let effs = &eff[&f];
             let name = cx.tcx.def_path_str(f.to_def_id());
-            // Crate-prefixed form for policy scope matching (so a crate-name scope isn't a silent
-            // no-op — see the layering note above). `name` itself stays unprefixed for display.
-            let scope_name = format!("{krate}::{name}");
+            // SOUNDNESS R1028 — scopes match the CRATE-RELATIVE name, the one the report carries and the
+            // one candor-scan matches (see `compute_layer_violations`); a crate-name scope binds nothing
+            // and is disclosed by `disclose_zero_match`, as on the scan route.
+            let scope_name = name.clone();
             let declared = declared_caps(cx.tcx, f);
             let mut direct = self.direct.get(&f).cloned().unwrap_or_default();
             // A param-invoking HOF's own `Unknown` is DIRECT (the opacity originates in this fn's body,
@@ -4845,7 +4881,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         }
 
         // R952 — the zero-match disclosure, once per crate, after every rule has been evaluated.
-        self.disclose_zero_match(cx, krate.as_str(), &items);
+        self.disclose_zero_match(cx, &items);
 
         if !absent_unknown_only.is_empty() {
             absent_unknown_only.sort();
