@@ -815,7 +815,7 @@ impl<'a> CallCollector<'a> {
             {
                 Some(&mc.receiver)
             }
-            syn::Expr::Index(ix) if matches!(&*ix.index, syn::Expr::Range(_)) => Some(&ix.expr),
+            syn::Expr::Index(ix) if is_range_index(ix) => Some(&ix.expr),
             _ => None,
         };
         // A range index is a re-slice even where the receiver typer answers it (it reads `v[..]` as an
@@ -1414,6 +1414,8 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
             syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => self.type_of(&pin_macro_arg(&mm.mac)?), // R980
             syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
+            // SOUNDNESS R1070 — a RANGE index (`v[1..]`) is a re-slice, not an element (see the receiver arm).
+            syn::Expr::Index(idx) if is_range_index(idx) => None,
             syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             syn::Expr::MethodCall(m) => self.type_of_method(m),
             // STRICT, unlike the receiver walk's merge: EVERY value branch must type, and to one type. A
@@ -2047,6 +2049,20 @@ impl<'a> CallCollector<'a> {
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
+            //
+            // SOUNDNESS R1070 — …but a RANGE index (`v[1..]`, `v[..n]`, `v[a..=b]`) is a RE-SLICE: its value is
+            // `[T]`, not a `T`. Typed as the element, `v[1..].tm()` formed `W::tm` and charged `impl Tw for W`'s
+            // write to a call that runs `impl Ts for [W]` (pure) — a FABRICATION (EXECUTED, scratchpad
+            // `rustagent-v044/fxrange`: nothing written). The re-slice is answered by `nonpath_recv_calls`
+            // (R1056), which forms the crate's `[T]` impl key from the base's element.
+            syn::Expr::Index(idx) if is_range_index(idx) => {
+                if std::env::var_os("CANDOR_R1070_INSTR").is_some() {
+                    if let Some(t) = self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index) {
+                        eprintln!("R1070RANGE\t{outer}\t{t}"); // §E1 REACH PROBE — the old answer, withdrawn
+                    }
+                }
+                None
+            }
             syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             // SOUNDNESS R535 — A CONTROL-FLOW MERGE AT THE RECEIVER. `(if c { a } else { b }).go()`,
             // `(match c { .. }).go()`, `{ a }.go()` and `unsafe { a }.go()` matched no arm here and
@@ -3775,6 +3791,8 @@ impl<'a> CallCollector<'a> {
             // THIS function already used by for-loop resolution. R88 compounding gap: this arm was
             // missing while both siblings had it, so `self.handlers[0].go()` (a `Vec<Box<dyn Doer>>`
             // field) resolved neither a concrete type nor a dispatch leaf and dropped silent-pure.
+            // SOUNDNESS R1070 — a RANGE index is a slice, whose methods are not the element's.
+            syn::Expr::Index(idx) if is_range_index(idx) => Vec::new(),
             syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
             // SOUNDNESS R541 — AN EXPLICIT DEREFERENCE, the dispatch twin of the `Unary` arm
             // `resolve_recv_type_for` has carried all along. Found by DIFFING THE TWO RESOLVERS' ARM
@@ -8638,6 +8656,19 @@ fn struct_pattern_bindings(p: &syn::Pat) -> Vec<(syn::Member, syn::PatIdent)> {
             out
         }
         _ => Vec::new(),
+    }
+}
+
+/// SOUNDNESS R1070 — `v[a..b]` (any range form, through parens/groups) indexes a SLICE out of `v`, not an element.
+pub(crate) fn is_range_index(ix: &syn::ExprIndex) -> bool {
+    let mut e: &syn::Expr = &ix.index;
+    loop {
+        e = match e {
+            syn::Expr::Paren(p) => &p.expr,
+            syn::Expr::Group(g) => &g.expr,
+            syn::Expr::Range(_) => return true,
+            _ => return false,
+        };
     }
 }
 

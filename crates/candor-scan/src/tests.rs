@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev80/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev81/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26240,6 +26240,36 @@ pub fn c_strlen(s: String) -> usize { s.len() }\n";
         }
         for f in ["c_owner", "c_len", "c_into_iter", "c_strlen"] {
             assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the wrapper's own method:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1070 — a RANGE index is a re-slice, not an element: `v[1..].tm()` was typed `W` and charged
+    /// `impl Tw for W`'s write to a call that runs the pure `impl Ts for [W]` (EXECUTED, scratchpad
+    /// `rustagent-v044/fxrange`: nothing written). Second fixture written first, executed: the element access
+    /// `v[1].tm()` keeps the charge, and a range whose slice impl writes (`v[..1].te()`) is charged.
+    #[test]
+    fn r1070_a_range_index_is_a_slice_not_an_element() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub struct W(pub u8);\n\
+pub trait Tw { fn tm(&self); }\n\
+impl Tw for W { fn tm(&self) { mark() } }\n\
+pub trait Ts { fn tm(&self); }\n\
+impl Ts for [W] { fn tm(&self) {} }\n\
+pub trait Te { fn te(&self); }\n\
+impl Te for [W] { fn te(&self) { mark() } }\n\
+pub fn rng(v: Vec<W>) { v[1..].tm() }\n\
+pub fn elem(v: Vec<W>) { v[1].tm() }\n\
+pub fn rng_eff(v: Vec<W>) { v[..1].te() }\n\
+pub struct S { pub ws: Vec<W> }\n\
+pub fn field_rng(s: &S) { s.ws[1..].tm() }\n\
+pub fn field_elem(s: &S) { s.ws[0].tm() }\n";
+        let v = scan_fixture("r1070range", src);
+        for f in ["elem", "rng_eff", "field_elem"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["rng", "field_rng"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the slice impl:\n{v:#}");
         }
     }
 
