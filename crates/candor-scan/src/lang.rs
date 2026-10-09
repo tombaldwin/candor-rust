@@ -392,6 +392,26 @@ fn collect_trait_quals(ty: &syn::Type, out: &mut HashMap<String, String>) {
     }
 }
 
+/// SOUNDNESS R1069 — the primitive type a literal SPELLS: a suffixed number (`1u8`, `2.0f32`), a byte (`b'a'`)
+/// or byte string element, a `char`, a `bool`. `None` for an unsuffixed number (inference decides it) and for
+/// anything that is not a literal (a negation `-1i8` is peeled).
+pub(crate) fn literal_prim_type(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Paren(p) => literal_prim_type(&p.expr),
+        syn::Expr::Group(g) => literal_prim_type(&g.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => literal_prim_type(&u.expr),
+        syn::Expr::Lit(l) => match &l.lit {
+            syn::Lit::Int(i) if !i.suffix().is_empty() => Some(i.suffix().to_string()),
+            syn::Lit::Float(f) if !f.suffix().is_empty() => Some(f.suffix().to_string()),
+            syn::Lit::Byte(_) => Some("u8".to_string()),
+            syn::Lit::Char(_) => Some("char".to_string()),
+            syn::Lit::Bool(_) => Some("bool".to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R582 — THE ELEMENT EXPRESSIONS OF A COLLECTION LITERAL: `[a, b]`, `[a; n]`, `vec![a, b]`,
 /// `vec![a; n]`. `None` for anything else.
 ///
@@ -4208,16 +4228,13 @@ pub(crate) fn is_held_nominal(t: &str) -> bool {
 }
 
 /// The NOMINAL leaf a layer walk may end on: a type the crate can give methods to (or a std effect
-/// handle), never a std container/wrapper, a `String`, or a primitive.
+/// handle) or a primitive, never a std container/wrapper or a `String`.
 pub(crate) fn is_layer_leaf(t: &str) -> bool {
     let leaf = t.rsplit("::").next().unwrap_or(t);
-    is_held_nominal(t)
-        && !(leaf == "Self"
-        || matches!(
-            leaf,
-            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                | "f32" | "f64" | "bool" | "char" | "str"
-        ))
+    // SOUNDNESS R1069 — a PRIMITIVE may end the walk: a crate CAN give one methods (`impl En for [u8]`,
+    // `impl Tr for u8`), and refusing it left `for x in &vv { x.en() }` over `Vec<Vec<u8>>` untyped while the
+    // one-level `Vec<u8>` already records `u8` (EXECUTED, scratchpad `rustagent-v044/fxvlit`: it wrote).
+    is_held_nominal(t) && leaf != "Self"
 }
 
 /// SOUNDNESS R1023 — the std layers of `ty` down to a nominal leaf: `(codes, leaf, borrowed)`. `None` when

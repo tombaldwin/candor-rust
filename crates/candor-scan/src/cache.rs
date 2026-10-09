@@ -44,6 +44,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev82: SOUNDNESS R1069 — literal / primitive-row element typing (cached `calls` change). Mandatory.
     // rev81: SOUNDNESS R1070 — a range index is a re-slice, not an element (cached `calls` change). Mandatory.
     // rev80: SOUNDNESS R1056 (residual) — `nonpath_receivers` gains the generic `[_]`/`[_;_]` keys and the
     // colliding impls' tails, and Pass B forms the deref / re-slice calls; R529c (residual) — a body's own
@@ -424,7 +425,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev81/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev82/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

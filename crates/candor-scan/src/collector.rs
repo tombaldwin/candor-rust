@@ -2656,7 +2656,11 @@ impl<'a> CallCollector<'a> {
         let elems = crate::lang::collection_literal_elems(expr)?;
         let mut answer: Option<String> = None;
         for e in &elems {
-            let Some(t) = self.resolve_recv_type(e) else { continue };
+            // SOUNDNESS R1069 — a SUFFIXED / byte / char / bool literal names its own type (`vec![1u8, 2]`,
+            // `vec![0u8; 4]`), which the receiver typer does not read; without it `v.en()` over `impl En for
+            // [u8]` was ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxvlit`). An UNSUFFIXED
+            // number is left untyped (inference decides it) and, like any untyped element, abstains.
+            let Some(t) = self.resolve_recv_type(e).or_else(|| crate::lang::literal_prim_type(e)) else { continue };
             match &answer {
                 None => answer = Some(t),
                 Some(prev) if *prev != t => return None,

@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev81/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev82/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26270,6 +26270,36 @@ pub fn field_elem(s: &S) { s.ws[0].tm() }\n";
         }
         for f in ["rng", "field_rng"] {
             assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the slice impl:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1069 — a `Vec` value whose element the receiver typer did not know: `vec![1u8, 2]` /
+    /// `vec![0u8; 4]` (a suffixed literal names its type) and a `Vec<Vec<u8>>` row (a primitive may now end a
+    /// layer walk). All ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxvlit`). Controls first
+    /// (`fxvlitctl`, executed): the slice impl is pure and the `u8` impl writes, so the row / literal Vec
+    /// receivers stay pure and the ELEMENT accesses are charged; an unsuffixed literal abstains.
+    #[test]
+    fn r1069_vec_literals_and_nested_rows_type_their_element() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub trait En { fn en(&self); }\n\
+impl En for [u16] { fn en(&self) { mark() } }\n\
+pub fn lit_u16() { let v = vec![1u16, 2]; v.en() }\n\
+pub fn lit_rep() { let v = vec![0u16; 4]; v.en() }\n\
+pub fn nested(vv: Vec<Vec<u16>>) { for x in &vv { x.en() } }\n\
+pub trait M { fn m(&self); }\n\
+impl M for u8 { fn m(&self) { mark() } }\n\
+impl M for [u8] { fn m(&self) {} }\n\
+pub fn nest_slice(vv: Vec<Vec<u8>>) { for x in &vv { x.m() } }\n\
+pub fn nest_elem(vv: Vec<Vec<u8>>) { vv[0][0].m() }\n\
+pub fn lit_slice() { let v = vec![1u8]; v.m() }\n\
+pub fn lit_elem() { let v = vec![1u8]; v[0].m() }\n";
+        let v = scan_fixture("r1069vlit", src);
+        for f in ["lit_u16", "lit_rep", "nested", "nest_elem", "lit_elem"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["nest_slice", "lit_slice"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the pure slice impl:\n{v:#}");
         }
     }
 
