@@ -2426,7 +2426,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // call in the crate. Two modules both implementing the member for one referent leave the tail with two
     // claimants, which `resolve_target` refuses and R451 (a) discloses `ambiguous:` — never a pick.
     let mut nonpath_tails: HashSet<String> = HashSet::new();
-    let mut nonpath_shared: HashSet<String> = HashSet::new();
+    // t2 -> the MERGED unit quals that tail names (R1034's shared case; judged post-fixpoint, see below).
+    let mut nonpath_shared: HashMap<String, Vec<String>> = HashMap::new();
     {
         let have: HashSet<&str> = fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias).map(|f| f.qual.as_str()).collect();
         let mut adds: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2439,7 +2440,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if shared == "1" {
                 // The unit is a MERGE of several impls' bodies: an edge would charge a sibling's effect
                 // to this receiver. Disclose at the call site instead (`nonpath_shared`).
-                nonpath_shared.insert(t2.to_string());
+                let v = nonpath_shared.entry(t2.to_string()).or_default();
+                if !v.iter().any(|x| x == q) {
+                    v.push(q.to_string());
+                }
                 continue;
             }
             let v = adds.entry(t2.to_string()).or_default();
@@ -2609,6 +2613,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // VEIN A — contested non-method path calls the written path could not anchor: (caller, claimants).
     // Judged after the fixpoint (see `veina_contested` below the first `propagate`).
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
+    let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect`, candor-swift and
     // candor-ts. It must NOT be propagated over call edges: a caller reaching one callee that writes and
@@ -4537,13 +4543,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R1034 (residual) — a typed call whose tail names a non-path impl MERGED with a sibling
             // impl under one module-level qual (`nonpath_shared`): which body runs is the receiver's, and
             // the unit cannot say which. Disclosed as the name-resolution ambiguity it is.
-            if !already_handled && !c.is_macro && c.method && c.typed
-                && tail2(&c.path).is_some_and(|t2| nonpath_shared.contains(&t2))
-            {
-                direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local methods".to_string());
-                if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
-                    eprintln!("R1034SHARED\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+            //
+            // JUDGED AFTER THE FIXPOINT, NOT HERE. The hedge exists because an edge into the merged unit would
+            // charge a SIBLING impl's effect to this receiver. Where the merged unit is GENUINELY PURE — its
+            // propagated effects are empty (no `Unknown` either) and it reaches no unanalysed dependency — no
+            // body in it can do anything, whichever one runs, so the hedge discloses nothing true: the x11rb
+            // `[T]`/tuple `serialize_into` family (which R1056's deref/re-slice routes made reachable from ~700
+            // callers) is every one of them writing into a `Vec`. Recorded here, decided below
+            // (`nonpath_contested`), where the merged unit's propagated answer exists.
+            if !already_handled && !c.is_macro && c.method && c.typed {
+                if let Some(units) = tail2(&c.path).and_then(|t2| nonpath_shared.get(&t2)) {
+                    nonpath_contested.push((f.qual.clone(), units.clone()));
+                    if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                        eprintln!("R1034SHARED\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
+                    }
                 }
             }
             // ── SOUNDNESS R986 — A CALL THROUGH A PATH-REDIRECTED MODULE THAT RESOLVED TO NOTHING ──────
@@ -5345,8 +5358,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // NOT A RESOLUTION and never a pick: no edge is added, because a union over distinct definitions is
     // a fabrication (only one runs). Measured reach: 151 sites / 116 callers in 28 entries carry a
     // claimant effect the caller lacks (`resid/eff.py` in the lane's scratch); the rest are untouched.
+    // R1034 / R1056 — the merged-sibling hedge, judged here. A merged unit's "is anything there" includes
+    // the dependencies it reaches without a report (`invisible`): those bodies were not read, so it is not
+    // genuinely pure and the hedge stays. Edges never change in this loop, so one walk of `blind_direct`
+    // answers for every round.
+    let nonpath_blind = if nonpath_contested.is_empty() {
+        HashMap::new()
+    } else {
+        propagate_str(&blind_direct, &calls, &all)
+    };
     for _round in 0..8 {
         let mut hedged = false;
+        for (caller, units) in &nonpath_contested {
+            let impure = units.iter().any(|u| {
+                inferred.get(u).is_some_and(|e| !e.is_empty())
+                    || nonpath_blind.get(u).is_some_and(|b| !b.is_empty())
+                    || !inferred.contains_key(u) && direct.get(u).is_some_and(|d| !d.is_empty())
+            });
+            if !impure {
+                if _round == 0 && std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                    eprintln!("R1034MERGEPURE\t{caller}\t{}", units.join(",")); // §E1 — the hedge WITHDRAWN
+                }
+                continue;
+            }
+            let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+            let fresh_why = unknown_why
+                .entry(caller.clone())
+                .or_default()
+                .insert("ambiguous:same-name local methods".to_string());
+            if fresh || fresh_why {
+                hedged = true;
+                if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                    eprintln!("R1034MERGEHEDGE\t{caller}"); // §E1 REACH PROBE — the hedge KEPT
+                }
+            }
+        }
         for (caller, claimants) in &veina_contested {
             let empty = BTreeSet::new();
             let have = inferred.get(caller).unwrap_or(&empty);

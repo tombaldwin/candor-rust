@@ -26338,6 +26338,55 @@ pub fn unused_eff(w: bool) { struct H { c: B } let h = H { c: B }; h.c.go(); if 
         }
     }
 
+    /// R1034 / R1056 MERGED-SIBLING HEDGE, JUDGED AFTER THE FIXPOINT. A call into a unit that merges several
+    /// non-path impls discloses `ambiguous:` only where the merged unit is NOT genuinely pure. Controls first,
+    /// executed (scratchpad `rustagent-v044/fxmerge`, `fxmergeinv`): one writing sibling, a generic body whose
+    /// dispatch reaches a writing implementor, and a callback all keep the hedge; an unchained dependency
+    /// (`invisible`) keeps it too. The all-pure merge (`p_slice`, executed: writes nothing) withdraws it.
+    #[test]
+    fn r1034_a_merged_unit_hedges_only_when_it_is_not_pure() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub mod allpure {\n\
+    pub trait Ser { fn ser(&self, out: &mut Vec<u8>); }\n\
+    impl Ser for [u8] { fn ser(&self, out: &mut Vec<u8>) { out.extend_from_slice(self) } }\n\
+    impl Ser for (u8, u8) { fn ser(&self, out: &mut Vec<u8>) { out.push(self.0) } }\n\
+    pub fn p_slice(v: Vec<u8>, o: &mut Vec<u8>) { v.ser(o) }\n\
+}\n\
+pub mod oneeff {\n\
+    pub trait Ser2 { fn ser2(&self); }\n\
+    impl Ser2 for [u8] { fn ser2(&self) {} }\n\
+    impl Ser2 for (u8, u8) { fn ser2(&self) { super::mark() } }\n\
+    pub fn e_slice(v: Vec<u8>) { v.ser2() }\n\
+}\n\
+pub mod generic {\n\
+    pub trait G { fn g(&self); }\n\
+    pub struct A; impl G for A { fn g(&self) { super::mark() } }\n\
+    impl<T: G> G for [T] { fn g(&self) { for x in self { x.g() } } }\n\
+    impl G for (u8, u8) { fn g(&self) {} }\n\
+    pub fn g_slice(v: Vec<A>) { v.g() }\n\
+}\n\
+pub mod callback {\n\
+    pub trait Cb { fn cb(&self, f: &dyn Fn()); }\n\
+    impl Cb for [u8] { fn cb(&self, f: &dyn Fn()) { f() } }\n\
+    impl Cb for (u8, u8) { fn cb(&self, _f: &dyn Fn()) {} }\n\
+    pub fn c_slice(v: Vec<u8>) { v.cb(&|| super::mark()) }\n\
+}\n";
+        let v = scan_fixture("r1034merge", src);
+        assert!(fixture_effects(&v, "allpure::p_slice").is_empty(), "every merged body is pure:\n{v:#}");
+        for f in ["oneeff::e_slice", "generic::g_slice", "callback::c_slice"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "`{f}` keeps the hedge:\n{v:#}");
+            assert!(fixture_why(&v, f).iter().any(|w| w == "ambiguous:same-name local methods"), "`{f}`:\n{v:#}");
+        }
+        // A merged body that reaches an UNCHAINED dependency is not genuinely pure (`invisible`).
+        let v = scan_fixture_raw("r1034mergeinv", "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { mydep::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn i_slice(v: Vec<u8>) { v.inv() }\n", "mydep = \"1\"", "");
+        assert!(fixture_effects(&v, "i_slice").contains(&"Unknown".to_string()), "invisible keeps the hedge:\n{v:#}");
+    }
+
     /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`
     /// and `t.0.go()` were ABSENT over a write (EXECUTED, scratchpad `rustagent-v043/probe3`). The struct's
     /// own positional fields are the authority. Over-charge controls, executed first (`fx1055ctl`, neither
