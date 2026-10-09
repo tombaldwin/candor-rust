@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `Vec<T>` / `String` receiver reaches the crate's `[T]` / `str` impl through autoderef, and a generic `impl<T>
+  Tr for [T]` serves every element (SOUNDNESS R1056 residual).** `v.enc()` on `v: Vec<u8>` over `impl Enc for [u8]`,
+  `s.sx()` on `s: String` over `impl Sx for str`, `v.as_slice().enc()` / `v[1..].enc()`, and `xs.m()` over `impl<T> Tr
+  for [T]` all read absent over a write (executed). Not redirected: a method `Vec`/`String` (or a std trait on them)
+  defines, the target's own inherent surface, or a member the crate's own `impl Tr for Vec<..>`/`for String` writes.
+- ⚠ **Two body-local structs sharing a name in different functions are typed per body (SOUNDNESS R529c residual).**
+  `twin1`'s `h.c.go()` read absent over a write because the crate-wide key was contested; each body's own
+  declaration is now typed for that body. Two same-named structs inside ONE body stay unresolved.
+
 ## [0.40.2] — 2026-10-09
 
 - ⚠ **A slice, array or tuple receiver reaches the crate's own impl for it (SOUNDNESS R1056).** `b.enc()` on `b: &[u8]`

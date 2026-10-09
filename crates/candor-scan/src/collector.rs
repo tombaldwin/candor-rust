@@ -783,7 +783,7 @@ impl<'a> CallCollector<'a> {
     /// an inherent method wins method resolution over a trait impl at the same autoderef step (a local
     /// `impl Tr for &[u8] { fn len(..) }` is never what `b.len()` runs). That list is a DENYLIST narrowing a
     /// resolution: a name missing from it costs an over-charge, never a silence. Tuples have no inherent
-    /// methods. `Vec<T>` is typed `Vec` already and never reaches here.
+    /// methods. A `Vec<T>` / `String` receiver reaches its `[T]` / `str` impl by autoderef (see the typed arm).
     fn nonpath_recv_calls(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
         const SLICE_INHERENT: &[&str] = &[
             "len", "is_empty", "first", "first_mut", "last", "last_mut", "split_first", "split_last", "get",
@@ -799,34 +799,123 @@ impl<'a> CallCollector<'a> {
             "to_ascii_uppercase", "to_ascii_lowercase", "escape_ascii", "trim_ascii", "trim_ascii_start",
             "trim_ascii_end", "utf8_chunks", "as_chunks", "as_rchunks", "group_by", "chunk_by", "align_to",
         ];
-        let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
-        let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
-        if self.resolve_recv_type_for(&node.receiver, leaf).is_some() {
-            return;
-        }
         let tails = crate::lang::nonpath_recv_cell().read().unwrap();
         if tails.is_empty() {
             return;
         }
         let short = |t: &str| t.rsplit("::").next().unwrap_or(t).to_string();
         let mut keys: Vec<String> = Vec::new();
-        if !SLICE_INHERENT.contains(&leaf) {
-            if let Some(e) = self.elem_of.get(&name) {
-                let e = short(e);
-                keys.push(format!("[{e}]"));
-                keys.push(format!("[{e};_]"));
+        let mut route = "R1056RECV";
+        // SOUNDNESS R1056 (residual) — an explicit RE-SLICE of a Vec or slice: `v.as_slice().enc()`,
+        // `v.as_mut_slice().enc()`, `(&v[..]).enc()` / `v[1..].enc()`. Each is a `[T]` whose element is
+        // the base's; none typed, so the call was ABSENT (EXECUTED, `rustagent-v044/fxvec3`).
+        let sliced: Option<&syn::Expr> = match peel_recv(&node.receiver) {
+            syn::Expr::MethodCall(mc)
+                if mc.args.is_empty() && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice") =>
+            {
+                Some(&mc.receiver)
+            }
+            syn::Expr::Index(ix) if matches!(&*ix.index, syn::Expr::Range(_)) => Some(&ix.expr),
+            _ => None,
+        };
+        // A range index is a re-slice even where the receiver typer answers it (it reads `v[..]` as an
+        // ELEMENT access), so the re-slice forms are asked first.
+        let typed = if sliced.is_some() { None } else { self.resolve_recv_type_for(&node.receiver, leaf) };
+        if let Some(t) = typed {
+            route = "R1056DEREF";
+            // SOUNDNESS R1056 (residual) — THE DEREF STEP. A receiver typed as std's `Vec<T>` or `String`
+            // reaches `[T]` / `str` methods by AUTODEREF, so `v.enc2()` over `impl Enc2 for [u8]` with `v:
+            // Vec<u8>` runs the slice impl — and was typed `Vec::enc2`, which names nothing: ABSENT over a
+            // write (EXECUTED, scratchpad `rustagent-v044/fxvec`). Method lookup tries the wrapper's own steps
+            // (`Vec<T>`, `&Vec<T>`, `&mut Vec<T>`) FIRST, so the slice/str key is formed only where nothing at
+            // those steps can claim the name: not std's surface on the wrapper (inherent, or a std trait it
+            // implements — `lang::VEC_SURFACE` / `lang::STR_SURFACE`), not the target's own inherent surface (which
+            // wins at the deref step, exactly as for a direct slice receiver), and not a member this crate's
+            // own `impl Tr for Vec<..>` / `for String` writes (`lang::deref_owner_marker`, from R598's
+            // `impl_members`, incl. its opaque `*` key). Both lists are DENYLISTS narrowing a resolution: a
+            // name missing from one costs an over-charge, never a silence.
+            let Some(owner) = crate::lang::std_deref_owner(&t, &self.uses) else { return };
+            // A crate-local type of that leaf (`struct Vec<T>(..)` in the same module) is not std's.
+            if self.fields.contains_key(owner) {
+                return;
+            }
+            if tails.contains(&crate::lang::deref_owner_marker(owner, leaf))
+                || tails.contains(&crate::lang::deref_owner_marker(owner, "*"))
+            {
+                return;
+            }
+            match owner {
+                "Vec" => {
+                    if SLICE_INHERENT.contains(&leaf) || crate::lang::VEC_SURFACE.contains(&leaf) {
+                        return;
+                    }
+                    // The element must be PLAIN: a layered entry names a container inside the Vec.
+                    let Some(e) = self.resolve_elem_type_held(&node.receiver) else { return };
+                    keys.push(format!("[{}]", short(&e)));
+                }
+                _ => {
+                    if crate::lang::STR_SURFACE.contains(&leaf) {
+                        return;
+                    }
+                    keys.push("str".to_string());
+                }
+            }
+        } else {
+            if let Some(base) = sliced {
+                if SLICE_INHERENT.contains(&leaf) {
+                    return;
+                }
+                let base_ok = match self.resolve_recv_type_for(base, leaf) {
+                    Some(t) => crate::lang::std_deref_owner(&t, &self.uses) == Some("Vec")
+                        && !self.fields.contains_key("Vec"),
+                    None => matches!(peel_recv(base), syn::Expr::Path(_)),
+                };
+                let Some(e) = base_ok.then(|| self.resolve_elem_type_held(base)).flatten() else { return };
+                keys.push(format!("[{}]", short(&e)));
+                route = "R1056SLICE";
             }
         }
-        if let Some(t) = self.tuple_of.get(&name) {
-            if let Some(parts) = t.iter().map(|x| x.as_deref().map(short)).collect::<Option<Vec<_>>>() {
-                keys.push(format!("({})", parts.join(",")));
+        if route == "R1056RECV" && keys.is_empty() {
+            let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
+            let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
+            if !SLICE_INHERENT.contains(&leaf) {
+                if let Some(e) = self.elem_of.get(&name) {
+                    let e = short(e);
+                    keys.push(format!("[{e}]"));
+                    keys.push(format!("[{e};_]"));
+                }
+            }
+            if let Some(t) = self.tuple_of.get(&name) {
+                if let Some(parts) = t.iter().map(|x| x.as_deref().map(short)).collect::<Option<Vec<_>>>() {
+                    keys.push(format!("({})", parts.join(",")));
+                }
             }
         }
+        // SOUNDNESS R1056 (residual) — A GENERIC ELEMENT. `impl<T> Tr for [T]` is filed under `[_]` (and an
+        // array over its own parameter under `[_;_]`, `lang::collect_nonpath_receivers`): every element type
+        // reaches it. Asked only where the exact key is absent, so a concrete `impl Tr for [u8]` elsewhere
+        // still answers `u8` receivers by itself.
+        let keys: Vec<String> = keys
+            .into_iter()
+            .filter_map(|k| {
+                if tails.contains(&format!("{k}::{leaf}")) {
+                    return Some(k);
+                }
+                let wild = if k.starts_with('[') && k.ends_with(";_]") {
+                    "[_;_]"
+                } else if k.starts_with('[') {
+                    "[_]"
+                } else {
+                    return None;
+                };
+                tails.contains(&format!("{wild}::{leaf}")).then(|| wild.to_string())
+            })
+            .collect();
         for k in keys {
             let t2 = format!("{k}::{leaf}");
             if tails.contains(&t2) {
                 if std::env::var_os("CANDOR_R1056_INSTR").is_some() {
-                    eprintln!("R1056RECV\t{t2}"); // §E1 REACH PROBE
+                    eprintln!("{route}\t{t2}"); // §E1 REACH PROBE (`[_]`/`[_;_]` in t2 = the generic arm)
                 }
                 self.calls.push(Call { argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
                     leaf: leaf.to_string(), str_arg: None, typed: true, method: true, is_macro: false,

@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev79/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev80/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26168,6 +26168,79 @@ pub fn nested() { struct Leaf { n: Sock } struct Outer { l: Leaf } let o = Outer
         assert_eq!(fixture_effects(&v, "module_h"), vec!["Fs".to_string()], "{v:#}");
         assert!(fixture_effects(&v, "shadow_pure").is_empty(), "the body-local H is not the module-level H:\n{v:#}");
         assert_eq!(fixture_effects(&v, "nested"), vec!["Net".to_string()], "{v:#}");
+    }
+
+    /// SOUNDNESS R529c (residual) — two bodies that each declare `struct H` share the crate-wide `<body-item>H`
+    /// key, which Pass A leaves out, so `twin_eff`'s `k.c.go()` typed nothing and read ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxtwin` + `fxtwinctl`). The body's own declaration is the one
+    /// its receivers mean, so Pass B types it per body. Controls (executed, none wrote): the twin over a PURE
+    /// field stays pure, the chained body-local pair over a pure leaf stays pure, and a module-level `K`
+    /// keeps its own field.
+    #[test]
+    fn r529c_twin_body_local_structs_are_typed_per_body() {
+        let src = "\
+pub struct E; impl E { pub fn go(&self) { std::fs::write(\"/tmp/e\", b\"x\").ok(); } }\n\
+pub struct B; impl B { pub fn go(&self) {} }\n\
+pub fn twin_pure() { struct K { c: B } let k = K { c: B }; k.c.go(); }\n\
+pub fn twin_eff() { struct K { c: E } let k = K { c: E }; k.c.go(); }\n\
+pub fn chain1() { struct In { e: E } struct Out { i: In } let o = Out { i: In { e: E } }; o.i.e.go(); }\n\
+pub fn chain2() { struct In { e: B } struct Out { i: In } let o = Out { i: In { e: B } }; o.i.e.go(); }\n\
+pub struct K { pub c: E }\n\
+pub fn module_k(k: &K) { k.c.go() }\n";
+        let v = scan_fixture("r529ctwin", src);
+        for f in ["twin_eff", "chain1", "module_k"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["twin_pure", "chain2"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` must stay pure:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1056 (residual) — a `Vec<T>` / `String` receiver reaches an `impl Tr for [T]` / `for str` by
+    /// AUTODEREF, and a generic `impl<T> Tr for [T]` serves every element; all read ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxvec`, `fxvec2`, `fxvec3`, `fxstr`). Controls first, executed in
+    /// `fxvecctl` (none wrote): the crate's own `impl OnVec for Vec<u8>` wins at the wrapper's step, `Vec`'s
+    /// inherent `len` / std's `into_iter` win, and `String`'s inherent `len` wins over a local `str` impl.
+    #[test]
+    fn r1056_a_vec_or_string_receiver_derefs_to_the_slice_or_str_impl() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub trait Enc2 { fn enc2(&self); }\n\
+impl Enc2 for [u8] { fn enc2(&self) { mark() } }\n\
+pub trait Gen { fn gen_w(&self); }\n\
+impl<T> Gen for [T] { fn gen_w(&self) { mark() } }\n\
+pub trait Sx { fn sx(&self); }\n\
+impl Sx for str { fn sx(&self) { mark() } }\n\
+pub struct S { pub b: Vec<u8> }\n\
+pub fn via_vec(v: Vec<u8>) { v.enc2() }\n\
+pub fn via_vec_ref(v: &Vec<u8>) { v.enc2() }\n\
+pub fn via_mutvec(v: &mut Vec<u8>) { v.enc2() }\n\
+pub fn via_field(s: &S) { s.b.enc2() }\n\
+pub fn via_slice_call(v: Vec<u8>) { v.as_slice().enc2() }\n\
+pub fn via_range(v: Vec<u8>) { (&v[..]).enc2() }\n\
+pub fn via_gen_vec(v: Vec<String>) { v.gen_w() }\n\
+pub fn via_gen_slice(v: &[String]) { v.gen_w() }\n\
+pub fn via_string(s: String) { s.sx() }\n\
+pub trait OnVec { fn m(&self); }\n\
+impl OnVec for Vec<u8> { fn m(&self) {} }\n\
+pub trait OnSlice { fn m(&self); }\n\
+impl OnSlice for [u8] { fn m(&self) { mark() } }\n\
+pub fn c_owner(v: Vec<u8>) { v.m() }\n\
+pub trait L { fn len(&self) -> usize; fn into_iter(&self); }\n\
+impl L for [u16] { fn len(&self) -> usize { mark(); 0 } fn into_iter(&self) { mark() } }\n\
+pub fn c_len(v: Vec<u16>) -> usize { v.len() }\n\
+pub fn c_into_iter(v: Vec<u16>) -> usize { v.into_iter().count() }\n\
+pub trait SL { fn len(&self) -> usize; }\n\
+impl SL for str { fn len(&self) -> usize { mark(); 0 } }\n\
+pub fn c_strlen(s: String) -> usize { s.len() }\n";
+        let v = scan_fixture("r1056deref", src);
+        for f in ["via_vec", "via_vec_ref", "via_mutvec", "via_field", "via_slice_call", "via_range", "via_gen_vec",
+                  "via_gen_slice", "via_string"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["c_owner", "c_len", "c_into_iter", "c_strlen"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the wrapper's own method:\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`

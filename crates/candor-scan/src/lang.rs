@@ -3368,6 +3368,77 @@ pub(crate) fn nonpath_recv_cell() -> &'static std::sync::RwLock<std::collections
     NONPATH_RECV_TAILS.get_or_init(|| std::sync::RwLock::new(Default::default()))
 }
 
+/// SOUNDNESS R1056 (residual) — the std wrapper a typed receiver AUTODEREFS through to a non-path impl's
+/// referent: `Vec<T>` → `[T]`, `String` → `str`. `None` for anything else, and for a bare `Vec` / `String`
+/// the scope rebinds (`use x::Vec`), which is not std's.
+pub(crate) fn std_deref_owner(ty: &str, uses: &HashMap<String, String>) -> Option<&'static str> {
+    match ty {
+        "Vec" if !uses.contains_key("Vec") => Some("Vec"),
+        "String" if !uses.contains_key("String") => Some("String"),
+        "std::vec::Vec" | "alloc::vec::Vec" => Some("Vec"),
+        "std::string::String" | "alloc::string::String" => Some("String"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1056 (residual) — the `NONPATH_RECV_TAILS` entry recording that this crate's own `impl Tr for
+/// Vec<..>` / `for String` writes member `m` (`*`: a block whose members cannot be read). Such a member
+/// wins method lookup at the wrapper's own step, before the deref to `[T]` / `str` is tried. `\u{1}` cannot
+/// begin a `{key}::{method}` tail, so the two kinds of entry never collide.
+pub(crate) fn deref_owner_marker(owner: &str, m: &str) -> String {
+    format!("\u{1}{owner}::{m}")
+}
+
+/// SOUNDNESS R1056 (residual) — what a `Vec<T>` receiver finds at its OWN autoderef steps (`Vec<T>`,
+/// `&Vec<T>`, `&mut Vec<T>`) before it reaches `[T]`: `Vec`'s inherent methods and the methods of the std
+/// traits `Vec` implements. A DENYLIST over a resolution (see `CallCollector::nonpath_recv_calls`).
+pub(crate) const VEC_SURFACE: &[&str] = &[
+    "new", "with_capacity", "capacity", "reserve", "reserve_exact", "try_reserve", "try_reserve_exact",
+    "shrink_to_fit", "shrink_to", "into_boxed_slice", "truncate", "as_slice", "as_mut_slice", "as_ptr",
+    "as_mut_ptr", "set_len", "swap_remove", "insert", "remove", "retain", "retain_mut", "dedup_by_key",
+    "dedup_by", "dedup", "push", "pop", "pop_if", "append", "drain", "clear", "len", "is_empty", "split_off",
+    "resize_with", "resize", "leak", "spare_capacity_mut", "extend_from_slice", "extend_from_within",
+    "splice", "extract_if", "into_raw_parts", "allocator", "push_within_capacity", "into_flattened",
+    "into_parts", "as_non_null",
+    // std traits implemented for `Vec<T>`
+    "clone", "clone_from", "extend", "extend_one", "extend_reserve", "into_iter", "deref", "deref_mut",
+    "as_ref", "as_mut", "borrow", "borrow_mut", "hash", "eq", "ne", "cmp", "partial_cmp", "lt", "le", "gt",
+    "ge", "max", "min", "clamp", "fmt", "index", "index_mut", "drop", "into", "try_into", "to_owned",
+    "clone_into", "write", "write_all", "write_vectored", "write_fmt", "flush", "by_ref", "type_id",
+    "is_write_vectored", "write_all_vectored", "from_iter", "default",
+];
+
+/// SOUNDNESS R1056 (residual) — what a `String` receiver finds before `str`'s trait impls: `String`'s inherent
+/// methods, the std traits it implements, and `str`'s own INHERENT surface (which wins at the deref step,
+/// as it does for a direct `&str` receiver). A DENYLIST over a resolution.
+pub(crate) const STR_SURFACE: &[&str] = &[
+    // String inherent
+    "new", "with_capacity", "from_utf8", "from_utf8_lossy", "from_utf16", "into_bytes", "as_str",
+    "as_mut_str", "push_str", "extend_from_within", "capacity", "reserve", "reserve_exact", "try_reserve",
+    "try_reserve_exact", "shrink_to_fit", "shrink_to", "push", "as_bytes", "truncate", "pop", "remove",
+    "retain", "insert", "insert_str", "as_mut_vec", "len", "is_empty", "split_off", "clear", "drain",
+    "replace_range", "into_boxed_str", "leak", "into_chars",
+    // std traits implemented for `String`
+    "clone", "clone_from", "extend", "extend_one", "extend_reserve", "deref", "deref_mut", "as_ref",
+    "as_mut", "borrow", "borrow_mut", "hash", "eq", "ne", "cmp", "partial_cmp", "lt", "le", "gt", "ge", "max",
+    "min", "clamp", "fmt", "index", "index_mut", "drop", "into", "try_into", "to_owned", "clone_into",
+    "to_string", "write_str", "write_char", "write_fmt", "add", "add_assign", "type_id", "from_iter",
+    "default", "from_str", "into_iter",
+    // str inherent
+    "is_char_boundary", "as_bytes_mut", "as_ptr", "as_mut_ptr", "get", "get_mut", "get_unchecked",
+    "get_unchecked_mut", "slice_unchecked", "split_at", "split_at_mut", "split_at_checked", "chars",
+    "char_indices", "bytes", "split_whitespace", "split_ascii_whitespace", "lines", "lines_any",
+    "encode_utf16", "contains", "starts_with", "ends_with", "find", "rfind", "split", "split_inclusive",
+    "rsplit", "split_terminator", "rsplit_terminator", "splitn", "rsplitn", "split_once", "rsplit_once",
+    "matches", "rmatches", "match_indices", "rmatch_indices", "trim", "trim_start", "trim_end", "trim_left",
+    "trim_right", "trim_matches", "trim_start_matches", "strip_prefix", "strip_suffix", "trim_end_matches",
+    "trim_left_matches", "trim_right_matches", "parse", "is_ascii", "eq_ignore_ascii_case",
+    "make_ascii_uppercase", "make_ascii_lowercase", "trim_ascii", "trim_ascii_start", "trim_ascii_end",
+    "escape_debug", "escape_default", "escape_unicode", "replace", "replacen", "to_lowercase",
+    "to_uppercase", "into_string", "repeat", "to_ascii_uppercase", "to_ascii_lowercase", "floor_char_boundary",
+    "ceil_char_boundary", "char_count",
+];
+
 /// Install the active/declared feature sets for the crate about to be scanned (called once per `scan_one`,
 /// which runs sequentially per workspace member, before its parallel Pass B reads them).
 pub(crate) fn set_cfg_features(f: FeatureSets) {
@@ -5652,6 +5723,43 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
     }
 }
 
+struct BlockStructWalker {
+    include_tests: bool,
+    depth: usize,
+    out: Vec<syn::Item>,
+}
+impl<'ast> syn::visit::Visit<'ast> for BlockStructWalker {
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        self.depth += 1;
+        syn::visit::visit_block(self, b);
+        self.depth -= 1;
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if self.depth > 0 || (!self.include_tests && is_cfg_test(&m.attrs)) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, m);
+    }
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if !self.include_tests && (is_cfg_test(&f.attrs) || is_test_attr_fn(&f.attrs)) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, f);
+    }
+    fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
+        if !self.include_tests && is_cfg_test(&im.attrs) {
+            return;
+        }
+        syn::visit::visit_item_impl(self, im);
+    }
+    fn visit_item_struct(&mut self, st: &'ast syn::ItemStruct) {
+        if self.depth > 0 && (self.include_tests || !is_cfg_test(&st.attrs)) {
+            self.out.push(syn::Item::Struct(st.clone()));
+        }
+        syn::visit::visit_item_struct(self, st);
+    }
+}
+
 /// SOUNDNESS R529c — every `struct` declared INSIDE A BLOCK (a fn body, a method, a `const` initializer),
 /// cloned out as items so `collect_decls`' own struct arm can type its fields — one authority for how a
 /// field's type is read, not a second copy. Pass A's decl walk recurses through `Item::Mod` and nothing
@@ -5659,46 +5767,19 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
 /// `H`, `h.c` typed to nothing, and the caller read PURE over `Inner::go`'s write. A module (`mod`) inside a
 /// block is not entered: its items see that module's own imports, which this walk does not assemble.
 pub(crate) fn collect_block_local_structs(items: &[syn::Item], include_tests: bool) -> Vec<syn::Item> {
-    struct W {
-        include_tests: bool,
-        depth: usize,
-        out: Vec<syn::Item>,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for W {
-        fn visit_block(&mut self, b: &'ast syn::Block) {
-            self.depth += 1;
-            syn::visit::visit_block(self, b);
-            self.depth -= 1;
-        }
-        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-            if self.depth > 0 || (!self.include_tests && is_cfg_test(&m.attrs)) {
-                return;
-            }
-            syn::visit::visit_item_mod(self, m);
-        }
-        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            if !self.include_tests && (is_cfg_test(&f.attrs) || is_test_attr_fn(&f.attrs)) {
-                return;
-            }
-            syn::visit::visit_item_fn(self, f);
-        }
-        fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
-            if !self.include_tests && is_cfg_test(&im.attrs) {
-                return;
-            }
-            syn::visit::visit_item_impl(self, im);
-        }
-        fn visit_item_struct(&mut self, st: &'ast syn::ItemStruct) {
-            if self.depth > 0 && (self.include_tests || !is_cfg_test(&st.attrs)) {
-                self.out.push(syn::Item::Struct(st.clone()));
-            }
-            syn::visit::visit_item_struct(self, st);
-        }
-    }
-    let mut w = W { include_tests, depth: 0, out: Vec::new() };
+    let mut w = BlockStructWalker { include_tests, depth: 0, out: Vec::new() };
     for it in items {
         syn::visit::Visit::visit_item(&mut w, it);
     }
+    w.out
+}
+
+/// SOUNDNESS R529c — the block-local structs of ONE fn body, by the same walker as
+/// `collect_block_local_structs` (the body's block is depth 1, so every struct in it and in any nested
+/// block, nested fn or impl body counts — the collector walks all of those into this one unit).
+pub(crate) fn collect_body_local_structs(block: &syn::Block, include_tests: bool) -> Vec<syn::Item> {
+    let mut w = BlockStructWalker { include_tests, depth: 0, out: Vec::new() };
+    syn::visit::Visit::visit_block(&mut w, block);
     w.out
 }
 
@@ -9087,7 +9168,26 @@ pub(crate) fn collect_nonpath_receivers(
                 }
             }
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
-                if impl_key_avoiding_free_fns(im, items).is_some() {
+                if let Some(k) = impl_key_avoiding_free_fns(im, items) {
+                    // SOUNDNESS R1056 (residual) — a COLLIDING non-path impl is keyed under its own type
+                    // (`str::m`, `[u8]::m`), a tail the typed call reaches with no alias. It is recorded with an
+                    // EMPTY unit qual (which Pass B's alias builder skips) only so `NONPATH_RECV_TAILS` knows the
+                    // tail exists: without it a `Vec`/`String`/slice receiver never formed the call at all.
+                    if impl_type_name(&im.self_ty).is_none()
+                        && (k == "str" || k.starts_with('[') || k.starts_with('('))
+                        && !im.generics.type_params().any(|p| {
+                            let id = p.ident.to_string();
+                            k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
+                        })
+                    {
+                        for ii in &im.items {
+                            if let syn::ImplItem::Fn(f) = ii {
+                                if include_tests || !is_cfg_test(&f.attrs) {
+                                    out.insert(format!("{k}::{}\u{1f}\u{1f}0", f.sig.ident));
+                                }
+                            }
+                        }
+                    }
                     continue; // a path self type, or a colliding one already keyed under its own type
                 }
                 // How many non-path impl blocks of THIS module file a method of this name under the one
@@ -9124,9 +9224,23 @@ pub(crate) fn collect_nonpath_receivers(
                         let id = p.ident.to_string();
                         k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
                     });
-                    if own(&key) {
-                        continue;
-                    }
+                    // SOUNDNESS R1056 (residual) — `impl<T> Tr for [T]` (or `[T; N]`) is not a forwarder: its
+                    // body is the method EVERY slice (array) receiver runs, whatever its element, and skipping
+                    // it left `s.gen_w()` on `&[String]` / `Vec<String>` ABSENT over a write (EXECUTED,
+                    // scratchpad `rustagent-v044/fxvec2`). Filed under the wildcard element `[_]` / `[_;_]`,
+                    // which the collector asks only where no exact key answers. Where the body forwards to
+                    // `T`'s own implementor (`for x in self { x.m() }`), that call is the unit's bounded
+                    // dispatch, the same over-approximation a generic caller already gets. A key that only
+                    // CONTAINS a parameter (`[Vec<T>]`, `(T, u8)`) is still skipped: no receiver forms it.
+                    let elem_is_own_param = |e: &syn::Type| matches!(e, syn::Type::Path(tp)
+                        if tp.qself.is_none() && tp.path.get_ident()
+                            .is_some_and(|id| im.generics.type_params().any(|p| &p.ident == id)));
+                    let key = match t {
+                        syn::Type::Slice(sl) if own(&key) && elem_is_own_param(&sl.elem) => "[_]".to_string(),
+                        syn::Type::Array(ar) if own(&key) && elem_is_own_param(&ar.elem) => "[_;_]".to_string(),
+                        _ if own(&key) => continue,
+                        _ => key,
+                    };
                     for ii in &im.items {
                         if let syn::ImplItem::Fn(f) = ii {
                             if !include_tests && is_cfg_test(&f.attrs) {

@@ -1544,13 +1544,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
     // `lang::NONPATH_RECV_TAILS`; installed here, after the last merge and before any Pass B collection.
     {
-        let tails: HashSet<String> = merged
+        let mut tails: HashSet<String> = merged
             .nonpath_receivers
             .iter()
             .filter_map(|e| e.split('\u{1f}').next())
-            .filter(|t2| t2.starts_with('[') || t2.starts_with('('))
+            .filter(|t2| t2.starts_with('[') || t2.starts_with('(') || t2.starts_with("str::"))
             .map(str::to_string)
             .collect();
+        // R1056 (residual) — the members this crate's own `impl Tr for Vec<..>` / `for String` blocks write
+        // (R598's `impl_members`: `<tr>\u{1f}<ty>\u{1f}<m>`, `*` = unreadable), which win lookup at the
+        // wrapper's own step before a deref to `[T]` / `str` is tried.
+        {
+            for k in &merged.impl_members {
+                let mut p = k.split('\u{1f}');
+                let (Some(_), Some(ty), Some(m)) = (p.next(), p.next(), p.next()) else { continue };
+                if (ty == "Vec" || ty == "String") && !m.starts_with('!') {
+                    tails.insert(crate::lang::deref_owner_marker(ty, m));
+                }
+                // …and an `impl Tr for str` (a PATH self type, so not a `nonpath_receivers` entry): its unit
+                // is `str::m`, the tail a `String` receiver's deref forms.
+                if ty == "str" && !m.starts_with('!') && m != "*" {
+                    tails.insert(format!("str::{m}"));
+                }
+            }
+        }
         *crate::lang::nonpath_recv_cell().write().unwrap() = tails;
     }
     // SOUNDNESS R529c — JOIN THE BLOCK-LOCAL STRUCTS' FIELDS. A struct declared inside a fn body was in no

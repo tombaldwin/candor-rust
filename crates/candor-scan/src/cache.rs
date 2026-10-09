@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev80: SOUNDNESS R1056 (residual) — `nonpath_receivers` gains the generic `[_]`/`[_;_]` keys and the
+    // colliding impls' tails, and Pass B forms the deref / re-slice calls; R529c (residual) — a body's own
+    // contested structs are typed in Pass B (cached `calls` change). Mandatory.
     // rev79: SOUNDNESS R1056 — Pass B types a slice/array/tuple receiver into the crate's own impl for it
     // (cached `calls` change). Mandatory.
     // rev78: SOUNDNESS R1034 (residual) — `FileDecls` gained `nonpath_receivers`; R529c — `block_fields` /
@@ -420,7 +423,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev79/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev80/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -709,49 +712,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut block_field_elem: FieldElemIndex = HashMap::new();
     {
         let locals = crate::lang::collect_block_local_structs(items, include_tests);
-        // A leaf declared in TWO blocks of this file is contested before the crate join even looks:
-        // `collect_decls` would merge the two field maps into one entry, so it is dropped here.
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        for it in &locals {
-            if let syn::Item::Struct(st) = it {
-                *seen.entry(st.ident.to_string()).or_default() += 1;
-            }
-        }
         if !locals.is_empty() {
-            // Throwaways: only `block_fields` / `block_field_elem` are kept. A field typed by ANOTHER
-            // block-local struct's name is bound to that struct's sentinel spelling, as its body sees it.
-            let mut u = uses.clone();
-            for k in seen.keys() {
-                u.insert(k.clone(), format!("{}{k}", crate::decls::ITEM_SENTINEL));
-            }
-            let mut cal = callable_aliases.clone();
-            let mut twins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            let (mut fet, mut rets_, mut enum_, mut evt, mut timpl, mut tdecl, mut tf, mut dtf) = (
-                HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(),
-                HashMap::new(), HashMap::new(), HashMap::new());
-            let (mut prim, mut ext, mut drops, mut lazy, mut stat) = (
-                std::collections::HashSet::new(), std::collections::HashSet::new(),
-                std::collections::HashSet::new(), std::collections::HashSet::new(),
-                std::collections::HashSet::new());
-            let (mut deref, mut consts, mut lmac, mut blanket, mut fbor) =
-                (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
-            collect_decls(&locals, include_tests, &mut u, &mut block_fields, &mut block_field_elem, &mut fet,
-                          &mut rets_, &mut enum_, &mut evt, &mut timpl, &mut tdecl, &mut tf, &mut dtf, &mut prim,
-                          &mut ext, &mut drops, &mut deref, &mut lazy, &mut consts, &mut lmac, &mut twins,
-                          &mut blanket, &mut stat, &mut cal, &mut fbor);
-            block_fields.retain(|k, _| seen.get(k) == Some(&1));
-            block_field_elem.retain(|k, _| seen.get(k) == Some(&1));
-            // Keyed as the BODY sees the name: R106 rebinds a body-declared item to `ITEM_SENTINEL + name`
-            // in that body's `use` map, so a receiver of the body-local struct types as `<body-item>H`, a
-            // key no module-level `H` can share. The sentinel is what keeps this out of the leaf collision.
-            let tag = |m: &mut HashMap<String, HashMap<String, String>>| {
-                *m = std::mem::take(m)
-                    .into_iter()
-                    .map(|(k, v)| (format!("{}{k}", crate::decls::ITEM_SENTINEL), v))
-                    .collect();
-            };
-            tag(&mut block_fields);
-            tag(&mut block_field_elem);
+            (block_fields, block_field_elem) =
+                crate::decls::block_local_field_index(&locals, include_tests, &uses, &callable_aliases);
             if std::env::var_os("CANDOR_R529_INSTR").is_some() {
                 for k in block_fields.keys() {
                     eprintln!("R529CFIELDS\t{modpath}\t{k}"); // §E1 REACH PROBE
