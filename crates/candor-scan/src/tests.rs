@@ -26385,6 +26385,45 @@ impl Inv for [u8] { fn inv(&self) { mydep::touch() } }\n\
 impl Inv for (u8, u8) { fn inv(&self) {} }\n\
 pub fn i_slice(v: Vec<u8>) { v.inv() }\n", "mydep = \"1\"", "");
         assert!(fixture_effects(&v, "i_slice").contains(&"Unknown".to_string()), "invisible keeps the hedge:\n{v:#}");
+        // …a merged body making a call NOTHING handled (here a crate the manifest does not list) keeps it: its
+        // purity is not established.
+        let v = scan_fixture("r1034mergeunres", "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { notlisted::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn s_slice(v: &[u8]) { v.inv() }\n");
+        assert!(fixture_effects(&v, "s_slice").contains(&"Unknown".to_string()), "unresolved keeps the hedge:\n{v:#}");
+        // …and a SINGLE-FILE scan (no manifest: the dependency universe is unknown) keeps every merged hedge,
+        // as 0.40.2 did — the C3 the first cut introduced (EXECUTED, `rustagent-v044/fxmergeinv`: the
+        // dependency writes; 0.40.2 discloses `s_slice` in this mode).
+        let d = std::env::temp_dir().join(format!("candor-scan-r1034single-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("lib.rs");
+        std::fs::write(&f, "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { mydep::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn s_slice(v: &[u8]) { v.inv() }\n\
+pub fn p_slice(v: &[u16]) { v.pz() }\n\
+pub trait Pz { fn pz(&self); }\n\
+impl Pz for [u16] { fn pz(&self) { mydep::poke!() } }\n\
+impl Pz for (u8, u16) { fn pz(&self) {} }\n").unwrap();
+        let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, body) = scan_one(&f.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        // Read `functions[]` directly: this report has no `_fixture_fns`, and ABSENCE is the failure under test.
+        for f in ["s_slice", "p_slice"] {
+            let hedged = v["functions"].as_array().into_iter().flatten().any(|r| {
+                r["fn"] == f && r["inferred"].as_array().is_some_and(|e| e.iter().any(|x| x == "Unknown"))
+            });
+            assert!(hedged, "single-file keeps `{f}`'s hedge:\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`

@@ -2615,6 +2615,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
+    // …and, per fn, the external-looking calls NOTHING handled (no classification, no local definition, no
+    // dependency join): `mydep::touch()` in a scan that cannot see the manifest drops with no trace at all, so
+    // a merged unit reading pure is not EVIDENCE of purity where its bodies (transitively) contain one.
+    let mut unresolved_ext: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect`, candor-swift and
     // candor-ts. It must NOT be propagated over call edges: a caller reaching one callee that writes and
@@ -4540,6 +4544,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // call exactly when its own answer was not itself `Unknown`.
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf
                 || (dep_join_hit && !dep_join_unknown);
+            // SOUNDNESS R1034 / R1056 merged-hedge guard — an unhandled call whose expanded path is rooted in a
+            // lowercase segment that is not std/core/alloc/the crate itself names some OTHER crate's code (or a
+            // module this scan could not place): the body behind it was not read.
+            if !already_handled && !c.is_macro {
+                let root = c.path.split("::").next().unwrap_or("");
+                if c.path.contains("::")
+                    && root.chars().next().is_some_and(|ch| ch.is_ascii_lowercase())
+                    && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
+                {
+                    unresolved_ext.entry(f.qual.clone()).or_default().insert(root.to_string());
+                }
+            }
             // SOUNDNESS R1034 (residual) — a typed call whose tail names a non-path impl MERGED with a sibling
             // impl under one module-level qual (`nonpath_shared`): which body runs is the receiver's, and
             // the unit cannot say which. Disclosed as the name-resolution ambiguity it is.
@@ -5367,11 +5383,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     } else {
         propagate_str(&blind_direct, &calls, &all)
     };
+    // The withdrawal needs purity ESTABLISHED, which needs the dependency universe: a scan with no manifest
+    // (a single file) cannot tell a dependency call from nothing, so it keeps every merged-sibling hedge, as
+    // 0.40.2 did. With a manifest, a merged unit that (transitively) makes a call nothing handled keeps it too.
+    let manifest_seen = std::path::Path::new(dir).join("Cargo.toml").is_file();
+    let nonpath_unres = if nonpath_contested.is_empty() {
+        HashMap::new()
+    } else {
+        propagate_str(&unresolved_ext, &calls, &all)
+    };
     for _round in 0..8 {
         let mut hedged = false;
         for (caller, units) in &nonpath_contested {
-            let impure = units.iter().any(|u| {
+            let impure = !manifest_seen || units.iter().any(|u| {
                 inferred.get(u).is_some_and(|e| !e.is_empty())
+                    || nonpath_unres.get(u).is_some_and(|b| !b.is_empty())
                     || nonpath_blind.get(u).is_some_and(|b| !b.is_empty())
                     || !inferred.contains_key(u) && direct.get(u).is_some_and(|d| !d.is_empty())
             });
