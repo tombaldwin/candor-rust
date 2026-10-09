@@ -2736,6 +2736,95 @@ pub(crate) fn fninfo(
             }
         }
     }
+    // SOUNDNESS R529c (residual) — A BODY'S OWN STRUCTS, WHERE THE CRATE-WIDE KEY IS CONTESTED. Pass A
+    // joins a block-local struct's fields under `<body-item>H`, which is crate-wide; two bodies that each
+    // declare `struct H` share that key and Pass A leaves it OUT, so `h.c.go()` in either typed nothing and
+    // the caller read PURE over a write (EXECUTED, scratchpad `rustagent-v044/fxtwin`). The key is
+    // contested only crate-wide: inside THIS body the name has one declaration, which is the one a
+    // receiver typed `<body-item>H` here can mean (R106's shadow — nothing outside the body spells it). So
+    // the body's own declarations are typed here, against the body's own `use` map, and overlay the
+    // crate-wide index for this unit only. A name this body declares twice (two nested blocks, R119) is
+    // still dropped by `block_local_field_index`. Only a key the crate-wide index LACKS is overlaid, so an
+    // uncontested key keeps Pass A's answer and the common case clones nothing.
+    let all_local_structs = crate::lang::collect_body_local_structs(block, include_tests);
+    // SOUNDNESS R1068 — A NAME THIS BODY DECLARES IN TWO BLOCKS. Each declaration is in force in its own
+    // block (and the blocks nested in it), which is exactly the scope R119 gives the body's `use` map; one
+    // index for the whole unit cannot say which, so `block_local_field_index` used to drop the name and
+    // `h.c.go()` in either block read ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxtwinctl`
+    // `twoblocks`). The ROOT block's declaration is the unit's default (the collector walks the root's
+    // statements directly); every nested block that declares such a name gets its own index variant,
+    // which the collector swaps in for that block (`CallCollector::block_field_variants`).
+    let (local_structs, dup_scopes) = crate::lang::scope_duplicate_body_structs(block, &all_local_structs, include_tests);
+    if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+        for (_, eff) in &dup_scopes {
+            for it in eff {
+                if let syn::Item::Struct(st) = it {
+                    eprintln!("R1068SCOPE\t{qual}\t{}", st.ident); // §E1 REACH PROBE
+                }
+            }
+        }
+    }
+    let overlaid: Option<(FieldIndex, FieldElemIndex)> = if local_structs.iter().any(|it| {
+        matches!(it, syn::Item::Struct(st) if !fields.contains_key(&format!("{ITEM_SENTINEL}{}", st.ident)))
+    }) {
+        let (bf, be) = block_local_field_index(&local_structs, include_tests, uses, elems.callable_aliases);
+        let add: Vec<(String, HashMap<String, String>)> =
+            bf.into_iter().filter(|(k, _)| !fields.contains_key(k)).collect();
+        if add.is_empty() {
+            None
+        } else {
+            let mut f2 = fields.clone();
+            let mut e2 = elems.field_elem.clone();
+            for (k, m) in add {
+                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                    eprintln!("R529CBODY\t{qual}\t{k}"); // §E1 REACH PROBE
+                }
+                if let Some(e) = be.get(&k) {
+                    e2.insert(k.clone(), e.clone());
+                }
+                f2.insert(k, m);
+            }
+            Some((f2, e2))
+        }
+    } else {
+        None
+    };
+    let (fields, field_elem_ix): (&FieldIndex, &FieldElemIndex) = match &overlaid {
+        Some((f, e)) => (f, e),
+        None => (fields, elems.field_elem),
+    };
+    // R1068 — one owned index pair per nested block that re-declares a duplicated name, built on top of the
+    // unit's own (`fields`/`field_elem_ix` above). Owned here so the collector can borrow them for its walk.
+    let own_names: HashMap<usize, Vec<String>> = dup_scopes.iter().map(|(p, _)| (*p, Vec::new())).collect();
+    let own_names: HashMap<usize, Vec<String>> = crate::lang::block_own_struct_names(block, &own_names);
+    let dup_variants: Vec<(usize, FieldIndex, FieldElemIndex, Vec<String>)> = dup_scopes
+        .iter()
+        .map(|(ptr, eff)| {
+            let mut items: Vec<syn::Item> = local_structs.clone();
+            let names: std::collections::HashSet<String> = eff
+                .iter()
+                .filter_map(|it| match it { syn::Item::Struct(st) => Some(st.ident.to_string()), _ => None })
+                .collect();
+            items.retain(|it| !matches!(it, syn::Item::Struct(st) if names.contains(&st.ident.to_string())));
+            items.extend(eff.iter().cloned());
+            let (bf, be) = block_local_field_index(&items, include_tests, uses, elems.callable_aliases);
+            let mut f2 = fields.clone();
+            let mut e2 = field_elem_ix.clone();
+            for n in &names {
+                let k = format!("{ITEM_SENTINEL}{n}");
+                f2.remove(&k);
+                e2.remove(&k);
+                if let Some(m) = bf.get(&k) {
+                    f2.insert(k.clone(), m.clone());
+                }
+                if let Some(m) = be.get(&k) {
+                    e2.insert(k, m.clone());
+                }
+            }
+            let own: Vec<String> = own_names.get(ptr).cloned().unwrap_or_default();
+            (*ptr, f2, e2, own)
+        })
+        .collect();
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
@@ -2806,7 +2895,7 @@ pub(crate) fn fninfo(
         // did not ask what else the gated arms read. The answer was in the arms' own source and took
         // one `grep` for `self\.` to produce.
         has_dyn_return: returns.values().any(|t| crate::collector::ret_dispatch_leaves(t).is_some()),
-        field_elem: elems.field_elem,
+        field_elem: field_elem_ix,
         field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,
         enum_variant_traits: elems.enum_variant_traits,
@@ -2858,6 +2947,7 @@ pub(crate) fn fninfo(
         marked_ctors: std::collections::HashSet::new(),
         marked_cross_ctors: std::collections::HashSet::new(),
         in_pattern: false,
+        block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
     // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
     // in THIS scope, and no construction expression in this body says so. Same marker, same consumer —
@@ -3503,6 +3593,63 @@ pub(crate) fn note_amb_ret(rets: &mut HashMap<String, Option<String>>, fn_leaf: 
             Some(crate::model::RET_AMB.to_string()),
         );
     }
+}
+
+/// SOUNDNESS R529c — THE FIELD MAPS OF BLOCK-LOCAL STRUCTS, keyed as the BODY sees each name
+/// (`ITEM_SENTINEL + name`, R106's spelling — what a receiver of the body-local struct types as, a key no
+/// module-level `H` can share). One authority for both callers: Pass A (`cache.rs`, over every block-local
+/// struct of a FILE, typed against the file's top-level `use` map) and Pass B (`fninfo`, over ONE BODY's
+/// structs, typed against that body's own map). A leaf `locals` declares more than once is DROPPED, never
+/// merged: `collect_decls` would union two field maps into one entry and type a receiver of one struct by
+/// the other's fields. A field typed by ANOTHER struct of `locals` is bound to that struct's sentinel
+/// spelling, as its body sees it. Every other output of the walk is a throwaway.
+pub(crate) fn block_local_field_index(
+    locals: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> (FieldIndex, FieldElemIndex) {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for it in locals {
+        if let syn::Item::Struct(st) = it {
+            *seen.entry(st.ident.to_string()).or_default() += 1;
+        }
+    }
+    let mut block_fields: FieldIndex = HashMap::new();
+    let mut block_field_elem: FieldElemIndex = HashMap::new();
+    if locals.is_empty() {
+        return (block_fields, block_field_elem);
+    }
+    let mut u = uses.clone();
+    for k in seen.keys() {
+        u.insert(k.clone(), format!("{ITEM_SENTINEL}{k}"));
+    }
+    let mut cal = callable_aliases.clone();
+    let mut twins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let (mut fet, mut rets_, mut enum_, mut evt, mut timpl, mut tdecl, mut tf, mut dtf) = (
+        HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(),
+        HashMap::new(), HashMap::new(), HashMap::new());
+    let (mut prim, mut ext, mut drops, mut lazy, mut stat) = (
+        std::collections::HashSet::new(), std::collections::HashSet::new(),
+        std::collections::HashSet::new(), std::collections::HashSet::new(),
+        std::collections::HashSet::new());
+    let (mut deref, mut consts, mut lmac, mut blanket, mut fbor) =
+        (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+    collect_decls(locals, include_tests, &mut u, &mut block_fields, &mut block_field_elem, &mut fet,
+                  &mut rets_, &mut enum_, &mut evt, &mut timpl, &mut tdecl, &mut tf, &mut dtf, &mut prim,
+                  &mut ext, &mut drops, &mut deref, &mut lazy, &mut consts, &mut lmac, &mut twins,
+                  &mut blanket, &mut stat, &mut cal, &mut fbor);
+    block_fields.retain(|k, _| seen.get(k) == Some(&1));
+    block_field_elem.retain(|k, _| seen.get(k) == Some(&1));
+    let tag = |m: &mut HashMap<String, HashMap<String, String>>| {
+        *m = std::mem::take(m)
+            .into_iter()
+            .map(|(k, v)| (format!("{ITEM_SENTINEL}{k}"), v))
+            .collect();
+    };
+    tag(&mut block_fields);
+    tag(&mut block_field_elem);
+    (block_fields, block_field_elem)
 }
 
 /// Pre-pass: index struct field types (`App -> { http: reqwest::Client }`) AND function return types

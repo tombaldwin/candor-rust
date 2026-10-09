@@ -258,7 +258,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -311,7 +311,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -636,7 +636,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(),
-            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
         let n = "x";
@@ -8004,7 +8004,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -8046,7 +8046,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -8072,7 +8072,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(), body_externs: Default::default(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -8122,7 +8122,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -8161,7 +8161,7 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev79/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev84/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -20565,12 +20565,12 @@ pub fn go() {{ imp::doit(); }}
     /// scoping are indistinguishable, so the shadow is still applied. EXECUTED ground truth: `nested_only`
     /// returns 7 and runs no process — pre-R106 this fabricated `Exec`.
     ///
-    /// SECOND ARM: THE STATED RESIDUAL, PINNED. With the SAME name declared by two SIBLING blocks, no
-    /// single block contains every occurrence, so no promotion happens and the import stays in scope —
-    /// `two_blocks` keeps the pre-R106 FABRICATION. (The rule declines to promote for ANY two declaring
-    /// blocks, including a nested pair where promotion would in fact have been exact; that is a
-    /// deliberate simplification, and it errs by over-reporting.) Asserted here so that "improving" it
-    /// into an empty answer fails loudly rather than quietly.
+    /// SECOND ARM, FORMERLY THE PINNED RESIDUAL: with the SAME name declared by two SIBLING blocks, no single
+    /// block contains every occurrence, so R119 promotes nothing function-wide. SOUNDNESS R1068 rebinds the
+    /// name to its sentinel INSIDE EACH DECLARING BLOCK ONLY, which is Rust's own scope rule, so `two_blocks`
+    /// (EXECUTED, scratchpad `rustagent-v044/fxcmd`: runs no process) no longer fabricates `Exec`. The
+    /// cardinal-sin guard the pin existed for is the THIRD arm, written and executed first: the same two
+    /// blocks plus a use of the import OUTSIDE them (`two_blocks_then_import`, which spawns) keeps `Exec`.
     #[test]
     fn r109_a_nested_item_used_only_in_its_own_block_still_shadows() {
         let v = scan_src_to_json("r109prec", concat!(
@@ -20596,17 +20596,27 @@ pub fn go() {{ imp::doit(); }}
             "  };\n",
             "  a + b\n",
             "}\n",
+            "pub fn two_blocks_then_import() -> u32 {\n",
+            "  let a = { struct Cmd { n: u32 } impl Cmd { fn new(_: &str) -> Self { Cmd { n: 1 } } fn status(&self) -> u32 { self.n } } Cmd::new(\"/usr/bin/true\").status() };\n",
+            "  let b = { struct Cmd { n: u32 } impl Cmd { fn new(_: &str) -> Self { Cmd { n: 2 } } fn status(&self) -> u32 { self.n } } Cmd::new(\"/usr/bin/true\").status() };\n",
+            "  let _ = Cmd::new(\"/usr/bin/true\").status();\n",
+            "  a + b\n",
+            "}\n",
         ));
         assert!(
             effs_opt(&v, "nested_only").is_empty(),
             "R119 CONTROL: every mention of `Cmd` in this body is inside the block that declares it, so \
              the shadow is exact — `Exec` here is R106's fabrication on a path that runs nothing:\n{v:#}"
         );
+        assert!(
+            effs_opt(&v, "two_blocks").is_empty(),
+            "R1068: each sibling block's `Cmd` is its own struct inside that block, and nothing outside them \
+             names the import:\n{v:#}"
+        );
         assert_eq!(
-            effs_opt(&v, "two_blocks"), vec!["Exec".to_string()],
-            "R119 RESIDUAL: two sibling blocks declare the name, so no function-wide promotion is sound \
-             and the import is left in scope. This is a known OVER-report on a pure path — pinned so the \
-             cheap 'fix' of shadowing anyway, which is the cardinal-sin direction, cannot land quietly:\n{v:#}"
+            effs_opt(&v, "two_blocks_then_import"), vec!["Exec".to_string()],
+            "R1068 GUARD: the import used OUTSIDE both declaring blocks still runs a process — the per-block \
+             shadow must not leak function-wide (the cardinal-sin direction R119's pin guarded):\n{v:#}"
         );
     }
 
@@ -21590,7 +21600,7 @@ pub fn go() {{ imp::doit(); }}
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(),
-            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, block_field_variants: Default::default(),
         };
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());
@@ -26168,6 +26178,285 @@ pub fn nested() { struct Leaf { n: Sock } struct Outer { l: Leaf } let o = Outer
         assert_eq!(fixture_effects(&v, "module_h"), vec!["Fs".to_string()], "{v:#}");
         assert!(fixture_effects(&v, "shadow_pure").is_empty(), "the body-local H is not the module-level H:\n{v:#}");
         assert_eq!(fixture_effects(&v, "nested"), vec!["Net".to_string()], "{v:#}");
+    }
+
+    /// SOUNDNESS R529c (residual) — two bodies that each declare `struct H` share the crate-wide `<body-item>H`
+    /// key, which Pass A leaves out, so `twin_eff`'s `k.c.go()` typed nothing and read ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxtwin` + `fxtwinctl`). The body's own declaration is the one
+    /// its receivers mean, so Pass B types it per body. Controls (executed, none wrote): the twin over a PURE
+    /// field stays pure, the chained body-local pair over a pure leaf stays pure, and a module-level `K`
+    /// keeps its own field.
+    #[test]
+    fn r529c_twin_body_local_structs_are_typed_per_body() {
+        let src = "\
+pub struct E; impl E { pub fn go(&self) { std::fs::write(\"/tmp/e\", b\"x\").ok(); } }\n\
+pub struct B; impl B { pub fn go(&self) {} }\n\
+pub fn twin_pure() { struct K { c: B } let k = K { c: B }; k.c.go(); }\n\
+pub fn twin_eff() { struct K { c: E } let k = K { c: E }; k.c.go(); }\n\
+pub fn chain1() { struct In { e: E } struct Out { i: In } let o = Out { i: In { e: E } }; o.i.e.go(); }\n\
+pub fn chain2() { struct In { e: B } struct Out { i: In } let o = Out { i: In { e: B } }; o.i.e.go(); }\n\
+pub struct K { pub c: E }\n\
+pub fn module_k(k: &K) { k.c.go() }\n";
+        let v = scan_fixture("r529ctwin", src);
+        for f in ["twin_eff", "chain1", "module_k"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["twin_pure", "chain2"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` must stay pure:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1056 (residual) — a `Vec<T>` / `String` receiver reaches an `impl Tr for [T]` / `for str` by
+    /// AUTODEREF, and a generic `impl<T> Tr for [T]` serves every element; all read ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxvec`, `fxvec2`, `fxvec3`, `fxstr`). Controls first, executed in
+    /// `fxvecctl` (none wrote): the crate's own `impl OnVec for Vec<u8>` wins at the wrapper's step, `Vec`'s
+    /// inherent `len` / std's `into_iter` win, and `String`'s inherent `len` wins over a local `str` impl.
+    #[test]
+    fn r1056_a_vec_or_string_receiver_derefs_to_the_slice_or_str_impl() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub trait Enc2 { fn enc2(&self); }\n\
+impl Enc2 for [u8] { fn enc2(&self) { mark() } }\n\
+pub trait Gen { fn gen_w(&self); }\n\
+impl<T> Gen for [T] { fn gen_w(&self) { mark() } }\n\
+pub trait Sx { fn sx(&self); }\n\
+impl Sx for str { fn sx(&self) { mark() } }\n\
+pub struct S { pub b: Vec<u8> }\n\
+pub fn via_vec(v: Vec<u8>) { v.enc2() }\n\
+pub fn via_vec_ref(v: &Vec<u8>) { v.enc2() }\n\
+pub fn via_mutvec(v: &mut Vec<u8>) { v.enc2() }\n\
+pub fn via_field(s: &S) { s.b.enc2() }\n\
+pub fn via_slice_call(v: Vec<u8>) { v.as_slice().enc2() }\n\
+pub fn via_range(v: Vec<u8>) { (&v[..]).enc2() }\n\
+pub fn via_gen_vec(v: Vec<String>) { v.gen_w() }\n\
+pub fn via_gen_slice(v: &[String]) { v.gen_w() }\n\
+pub fn via_string(s: String) { s.sx() }\n\
+pub trait OnVec { fn m(&self); }\n\
+impl OnVec for Vec<u8> { fn m(&self) {} }\n\
+pub trait OnSlice { fn m(&self); }\n\
+impl OnSlice for [u8] { fn m(&self) { mark() } }\n\
+pub fn c_owner(v: Vec<u8>) { v.m() }\n\
+pub trait L { fn len(&self) -> usize; fn into_iter(&self); }\n\
+impl L for [u16] { fn len(&self) -> usize { mark(); 0 } fn into_iter(&self) { mark() } }\n\
+pub fn c_len(v: Vec<u16>) -> usize { v.len() }\n\
+pub fn c_into_iter(v: Vec<u16>) -> usize { v.into_iter().count() }\n\
+pub trait SL { fn len(&self) -> usize; }\n\
+impl SL for str { fn len(&self) -> usize { mark(); 0 } }\n\
+pub fn c_strlen(s: String) -> usize { s.len() }\n";
+        let v = scan_fixture("r1056deref", src);
+        for f in ["via_vec", "via_vec_ref", "via_mutvec", "via_field", "via_slice_call", "via_range", "via_gen_vec",
+                  "via_gen_slice", "via_string"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["c_owner", "c_len", "c_into_iter", "c_strlen"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the wrapper's own method:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1070 — a RANGE index is a re-slice, not an element: `v[1..].tm()` was typed `W` and charged
+    /// `impl Tw for W`'s write to a call that runs the pure `impl Ts for [W]` (EXECUTED, scratchpad
+    /// `rustagent-v044/fxrange`: nothing written). Second fixture written first, executed: the element access
+    /// `v[1].tm()` keeps the charge, and a range whose slice impl writes (`v[..1].te()`) is charged.
+    #[test]
+    fn r1070_a_range_index_is_a_slice_not_an_element() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub struct W(pub u8);\n\
+pub trait Tw { fn tm(&self); }\n\
+impl Tw for W { fn tm(&self) { mark() } }\n\
+pub trait Ts { fn tm(&self); }\n\
+impl Ts for [W] { fn tm(&self) {} }\n\
+pub trait Te { fn te(&self); }\n\
+impl Te for [W] { fn te(&self) { mark() } }\n\
+pub fn rng(v: Vec<W>) { v[1..].tm() }\n\
+pub fn elem(v: Vec<W>) { v[1].tm() }\n\
+pub fn rng_eff(v: Vec<W>) { v[..1].te() }\n\
+pub struct S { pub ws: Vec<W> }\n\
+pub fn field_rng(s: &S) { s.ws[1..].tm() }\n\
+pub fn field_elem(s: &S) { s.ws[0].tm() }\n";
+        let v = scan_fixture("r1070range", src);
+        for f in ["elem", "rng_eff", "field_elem"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["rng", "field_rng"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the slice impl:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1069 — a `Vec` value whose element the receiver typer did not know: `vec![1u8, 2]` /
+    /// `vec![0u8; 4]` (a suffixed literal names its type) and a `Vec<Vec<u8>>` row (a primitive may now end a
+    /// layer walk). All ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxvlit`). Controls first
+    /// (`fxvlitctl`, executed): the slice impl is pure and the `u8` impl writes, so the row / literal Vec
+    /// receivers stay pure and the ELEMENT accesses are charged; an unsuffixed literal abstains.
+    #[test]
+    fn r1069_vec_literals_and_nested_rows_type_their_element() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub trait En { fn en(&self); }\n\
+impl En for [u16] { fn en(&self) { mark() } }\n\
+pub fn lit_u16() { let v = vec![1u16, 2]; v.en() }\n\
+pub fn lit_rep() { let v = vec![0u16; 4]; v.en() }\n\
+pub fn nested(vv: Vec<Vec<u16>>) { for x in &vv { x.en() } }\n\
+pub trait M { fn m(&self); }\n\
+impl M for u8 { fn m(&self) { mark() } }\n\
+impl M for [u8] { fn m(&self) {} }\n\
+pub fn nest_slice(vv: Vec<Vec<u8>>) { for x in &vv { x.m() } }\n\
+pub fn nest_elem(vv: Vec<Vec<u8>>) { vv[0][0].m() }\n\
+pub fn lit_slice() { let v = vec![1u8]; v.m() }\n\
+pub fn lit_elem() { let v = vec![1u8]; v[0].m() }\n";
+        let v = scan_fixture("r1069vlit", src);
+        for f in ["lit_u16", "lit_rep", "nested", "nest_elem", "lit_elem"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["nest_slice", "lit_slice"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` runs the pure slice impl:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1068 — one body declaring `struct H` in TWO blocks: each declaration is in force in its own
+    /// block, and the unit-wide index had to drop the name, so `h.c.go()` read ABSENT over a write (EXECUTED,
+    /// scratchpad `rustagent-v044/fxblk`). Controls, executed: both blocks pure stays pure; a root-level pure `H`
+    /// shadowed by an effectful nested one, and the reverse used after the block, are each charged by the
+    /// declaration in force; an effectful declaration nobody uses stays pure.
+    #[test]
+    fn r1068_a_name_declared_in_two_blocks_is_typed_per_block() {
+        let src = "\
+pub struct E; impl E { pub fn go(&self) { std::fs::write(\"/tmp/e\", b\"x\").ok(); } }\n\
+pub struct B; impl B { pub fn go(&self) {} }\n\
+pub fn twoblocks(w: bool) { if w { struct H { c: E } let h = H { c: E }; h.c.go(); } else { struct H { c: B } let h = H { c: B }; h.c.go(); } }\n\
+pub fn twopure(w: bool) { if w { struct H { c: B } let h = H { c: B }; h.c.go(); } else { struct H { c: B } let h = H { c: B }; h.c.go(); } }\n\
+pub fn rootshadow(w: bool) { struct H { c: B } let h = H { c: B }; h.c.go(); if w { struct H { c: E } let g = H { c: E }; g.c.go(); } }\n\
+pub fn rootafter(w: bool) { struct K { c: E } if w { struct K { c: B } let g = K { c: B }; g.c.go(); } let h = K { c: E }; h.c.go(); }\n\
+pub fn inherit() { { struct H { c: E } { let h = H { c: E }; h.c.go(); } } { struct H { c: B } let h = H { c: B }; h.c.go(); } }\n\
+pub fn unused_eff(w: bool) { struct H { c: B } let h = H { c: B }; h.c.go(); if w { #[allow(dead_code)] struct H { c: E } } }\n";
+        let v = scan_fixture("r1068blk", src);
+        for f in ["twoblocks", "rootshadow", "rootafter", "inherit"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["twopure", "unused_eff"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}` must stay pure:\n{v:#}");
+        }
+    }
+
+    /// R1034 / R1056 MERGED-SIBLING HEDGE, JUDGED AFTER THE FIXPOINT. A call into a unit that merges several
+    /// non-path impls discloses `ambiguous:` only where the merged unit is NOT genuinely pure. Controls first,
+    /// executed (scratchpad `rustagent-v044/fxmerge`, `fxmergeinv`): one writing sibling, a generic body whose
+    /// dispatch reaches a writing implementor, and a callback all keep the hedge; an unchained dependency
+    /// (`invisible`) keeps it too. The all-pure merge (`p_slice`, executed: writes nothing) withdraws it.
+    #[test]
+    fn r1034_a_merged_unit_hedges_only_when_it_is_not_pure() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub mod allpure {\n\
+    pub trait Ser { fn ser(&self, out: &mut Vec<u8>); }\n\
+    impl Ser for [u8] { fn ser(&self, out: &mut Vec<u8>) { out.extend_from_slice(self) } }\n\
+    impl Ser for (u8, u8) { fn ser(&self, out: &mut Vec<u8>) { out.push(self.0) } }\n\
+    pub fn p_slice(v: Vec<u8>, o: &mut Vec<u8>) { v.ser(o) }\n\
+}\n\
+pub mod oneeff {\n\
+    pub trait Ser2 { fn ser2(&self); }\n\
+    impl Ser2 for [u8] { fn ser2(&self) {} }\n\
+    impl Ser2 for (u8, u8) { fn ser2(&self) { super::mark() } }\n\
+    pub fn e_slice(v: Vec<u8>) { v.ser2() }\n\
+}\n\
+pub mod generic {\n\
+    pub trait G { fn g(&self); }\n\
+    pub struct A; impl G for A { fn g(&self) { super::mark() } }\n\
+    impl<T: G> G for [T] { fn g(&self) { for x in self { x.g() } } }\n\
+    impl G for (u8, u8) { fn g(&self) {} }\n\
+    pub fn g_slice(v: Vec<A>) { v.g() }\n\
+}\n\
+pub mod callback {\n\
+    pub trait Cb { fn cb(&self, f: &dyn Fn()); }\n\
+    impl Cb for [u8] { fn cb(&self, f: &dyn Fn()) { f() } }\n\
+    impl Cb for (u8, u8) { fn cb(&self, _f: &dyn Fn()) {} }\n\
+    pub fn c_slice(v: Vec<u8>) { v.cb(&|| super::mark()) }\n\
+}\n";
+        let v = scan_fixture("r1034merge", src);
+        assert!(fixture_effects(&v, "allpure::p_slice").is_empty(), "every merged body is pure:\n{v:#}");
+        for f in ["oneeff::e_slice", "generic::g_slice", "callback::c_slice"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "`{f}` keeps the hedge:\n{v:#}");
+            assert!(fixture_why(&v, f).iter().any(|w| w == "ambiguous:same-name local methods"), "`{f}`:\n{v:#}");
+        }
+        // A merged body that reaches an UNCHAINED dependency is not genuinely pure (`invisible`).
+        let v = scan_fixture_raw("r1034mergeinv", "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { mydep::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn i_slice(v: Vec<u8>) { v.inv() }\n", "mydep = \"1\"", "");
+        assert!(fixture_effects(&v, "i_slice").contains(&"Unknown".to_string()), "invisible keeps the hedge:\n{v:#}");
+        // …a merged body making a call NOTHING handled (here a crate the manifest does not list) keeps it: its
+        // purity is not established.
+        let v = scan_fixture("r1034mergeunres", "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { notlisted::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn s_slice(v: &[u8]) { v.inv() }\n");
+        assert!(fixture_effects(&v, "s_slice").contains(&"Unknown".to_string()), "unresolved keeps the hedge:\n{v:#}");
+        // …and a SINGLE-FILE scan (no manifest: the dependency universe is unknown) keeps every merged hedge,
+        // as 0.40.2 did — the C3 the first cut introduced (EXECUTED, `rustagent-v044/fxmergeinv`: the
+        // dependency writes; 0.40.2 discloses `s_slice` in this mode).
+        let d = std::env::temp_dir().join(format!("candor-scan-r1034single-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("lib.rs");
+        std::fs::write(&f, "\
+pub trait Inv { fn inv(&self); }\n\
+impl Inv for [u8] { fn inv(&self) { mydep::touch() } }\n\
+impl Inv for (u8, u8) { fn inv(&self) {} }\n\
+pub fn s_slice(v: &[u8]) { v.inv() }\n\
+pub fn p_slice(v: &[u16]) { v.pz() }\n\
+pub trait Pz { fn pz(&self); }\n\
+impl Pz for [u16] { fn pz(&self) { mydep::poke!() } }\n\
+impl Pz for (u8, u16) { fn pz(&self) {} }\n").unwrap();
+        let idx = DepIndex::default();
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, body) = scan_one(&f.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        // Read `functions[]` directly: this report has no `_fixture_fns`, and ABSENCE is the failure under test.
+        for f in ["s_slice", "p_slice"] {
+            let hedged = v["functions"].as_array().into_iter().flatten().any(|r| {
+                r["fn"] == f && r["inferred"].as_array().is_some_and(|e| e.iter().any(|x| x == "Unknown"))
+            });
+            assert!(hedged, "single-file keeps `{f}`'s hedge:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R1080 — a `Vec::new()` local's element known only by inference: the first pushed value of a
+    /// form that cannot coerce (struct literal, tuple-struct constructor, literal, or a cast / binding naming a
+    /// trait object) fixes it. All ABSENT over an executed write before (scratchpad `rustagent-v044/fxpush`).
+    /// Controls, executed: a pure slice impl stays pure, and the element access charges the element's impl.
+    #[test]
+    fn r1080_a_pushed_value_fixes_an_inferred_vec_element() {
+        let src = "\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub struct W(pub u8);\n\
+pub struct P(pub u8);\n\
+pub struct Q { pub n: u8 }\n\
+pub trait Ew { fn ew(&self); }\n\
+mod iw { use super::*; impl Ew for [W] { fn ew(&self) { mark() } } }\n\
+mod ip { use super::*; impl Ew for [P] { fn ew(&self) {} } }\n\
+mod iq { use super::*; impl Ew for [Q] { fn ew(&self) { mark() } } }\n\
+pub trait Go { fn go(&self); }\n\
+impl Go for P { fn go(&self) { mark() } }\n\
+pub struct A; impl Go for A { fn go(&self) {} }\n\
+pub struct B; impl Go for B { fn go(&self) { mark() } }\n\
+pub fn push_w() { let mut v = Vec::new(); v.push(W(1)); v.ew() }\n\
+pub fn push_q() { let mut v = Vec::with_capacity(2); v.push(Q { n: 1 }); v.ew() }\n\
+pub fn insert_w() { let mut v = Vec::new(); v.insert(0, W(1)); v.ew() }\n\
+pub fn push_p() { let mut v = Vec::new(); v.push(P(1)); v.ew() }\n\
+pub fn push_p_elem() { let mut v = Vec::new(); v.push(P(1)); v[0].go() }\n\
+pub fn boxed() { let mut v = Vec::new(); v.push(Box::new(A) as Box<dyn Go>); v.push(Box::new(B)); for x in &v { x.go() } }\n\
+pub fn boxed_var() { let a: Box<dyn Go> = Box::new(A); let mut v = Vec::new(); v.push(a); v.push(Box::new(B)); v[1].go() }\n";
+        let v = scan_fixture("r1080push", src);
+        for f in ["push_w", "push_q", "insert_w", "push_p_elem", "boxed", "boxed_var"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "push_p").is_empty(), "the [P] impl is pure:\n{v:#}");
     }
 
     /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`

@@ -527,6 +527,13 @@ pub(crate) struct CallCollector<'a> {
     /// `match` over three arms, was charged the agent `Handle`'s `Drop`. A pattern MATCHES a value,
     /// it never builds one.
     pub(crate) in_pattern: bool,
+    /// SOUNDNESS R1068 — a body that declares one struct name in TWO of its blocks: per block (keyed by the
+    /// block's address in the AST this collector walks), the field indexes with THAT block's declaration in
+    /// force. `visit_block` swaps `fields` / `field_elem` to the entry for the block it enters and restores
+    /// them on the way out, and rebinds the names that block itself declares to their R106 sentinel spelling
+    /// (`uses[H] = <body-item>H`) for the same span — R119 refuses to promote a name two nested scopes
+    /// declare, so without this a receiver of either struct typed as the file's `H`. Empty for every other body.
+    pub(crate) block_field_variants: HashMap<usize, (&'a FieldIndex, &'a FieldElemIndex, &'a [String])>,
 }
 
 /// Decode a `self.returns` entry — recorded by `decls::record_return` under a fn's leaf name — into the
@@ -783,7 +790,7 @@ impl<'a> CallCollector<'a> {
     /// an inherent method wins method resolution over a trait impl at the same autoderef step (a local
     /// `impl Tr for &[u8] { fn len(..) }` is never what `b.len()` runs). That list is a DENYLIST narrowing a
     /// resolution: a name missing from it costs an over-charge, never a silence. Tuples have no inherent
-    /// methods. `Vec<T>` is typed `Vec` already and never reaches here.
+    /// methods. A `Vec<T>` / `String` receiver reaches its `[T]` / `str` impl by autoderef (see the typed arm).
     fn nonpath_recv_calls(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
         const SLICE_INHERENT: &[&str] = &[
             "len", "is_empty", "first", "first_mut", "last", "last_mut", "split_first", "split_last", "get",
@@ -799,40 +806,195 @@ impl<'a> CallCollector<'a> {
             "to_ascii_uppercase", "to_ascii_lowercase", "escape_ascii", "trim_ascii", "trim_ascii_start",
             "trim_ascii_end", "utf8_chunks", "as_chunks", "as_rchunks", "group_by", "chunk_by", "align_to",
         ];
-        let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
-        let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
-        if self.resolve_recv_type_for(&node.receiver, leaf).is_some() {
-            return;
-        }
         let tails = crate::lang::nonpath_recv_cell().read().unwrap();
         if tails.is_empty() {
             return;
         }
         let short = |t: &str| t.rsplit("::").next().unwrap_or(t).to_string();
         let mut keys: Vec<String> = Vec::new();
-        if !SLICE_INHERENT.contains(&leaf) {
-            if let Some(e) = self.elem_of.get(&name) {
-                let e = short(e);
-                keys.push(format!("[{e}]"));
-                keys.push(format!("[{e};_]"));
+        let mut route = "R1056RECV";
+        // SOUNDNESS R1056 (residual) — an explicit RE-SLICE of a Vec or slice: `v.as_slice().enc()`,
+        // `v.as_mut_slice().enc()`, `(&v[..]).enc()` / `v[1..].enc()`. Each is a `[T]` whose element is
+        // the base's; none typed, so the call was ABSENT (EXECUTED, `rustagent-v044/fxvec3`).
+        let sliced: Option<&syn::Expr> = match peel_recv(&node.receiver) {
+            syn::Expr::MethodCall(mc)
+                if mc.args.is_empty() && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice") =>
+            {
+                Some(&mc.receiver)
+            }
+            syn::Expr::Index(ix) if is_range_index(ix) => Some(&ix.expr),
+            _ => None,
+        };
+        // A range index is a re-slice even where the receiver typer answers it (it reads `v[..]` as an
+        // ELEMENT access), so the re-slice forms are asked first.
+        let typed = if sliced.is_some() { None } else { self.resolve_recv_type_for(&node.receiver, leaf) };
+        if let Some(t) = typed {
+            route = "R1056DEREF";
+            // SOUNDNESS R1056 (residual) — THE DEREF STEP. A receiver typed as std's `Vec<T>` or `String`
+            // reaches `[T]` / `str` methods by AUTODEREF, so `v.enc2()` over `impl Enc2 for [u8]` with `v:
+            // Vec<u8>` runs the slice impl — and was typed `Vec::enc2`, which names nothing: ABSENT over a
+            // write (EXECUTED, scratchpad `rustagent-v044/fxvec`). Method lookup tries the wrapper's own steps
+            // (`Vec<T>`, `&Vec<T>`, `&mut Vec<T>`) FIRST, so the slice/str key is formed only where nothing at
+            // those steps can claim the name: not std's surface on the wrapper (inherent, or a std trait it
+            // implements — `lang::VEC_SURFACE` / `lang::STR_SURFACE`), not the target's own inherent surface (which
+            // wins at the deref step, exactly as for a direct slice receiver), and not a member this crate's
+            // own `impl Tr for Vec<..>` / `for String` writes (`lang::deref_owner_marker`, from R598's
+            // `impl_members`, incl. its opaque `*` key). Both lists are DENYLISTS narrowing a resolution: a
+            // name missing from one costs an over-charge, never a silence.
+            let Some(owner) = crate::lang::std_deref_owner(&t, &self.uses) else { return };
+            // A crate-local type of that leaf (`struct Vec<T>(..)` in the same module) is not std's.
+            if self.fields.contains_key(owner) {
+                return;
+            }
+            if tails.contains(&crate::lang::deref_owner_marker(owner, leaf))
+                || tails.contains(&crate::lang::deref_owner_marker(owner, "*"))
+            {
+                return;
+            }
+            match owner {
+                "Vec" => {
+                    if SLICE_INHERENT.contains(&leaf) || crate::lang::VEC_SURFACE.contains(&leaf) {
+                        return;
+                    }
+                    // The element must be PLAIN: a layered entry names a container inside the Vec.
+                    let Some(e) = self.resolve_elem_type_held(&node.receiver) else { return };
+                    keys.push(format!("[{}]", short(&e)));
+                }
+                _ => {
+                    if crate::lang::STR_SURFACE.contains(&leaf) {
+                        return;
+                    }
+                    keys.push("str".to_string());
+                }
+            }
+        } else {
+            if let Some(base) = sliced {
+                if SLICE_INHERENT.contains(&leaf) {
+                    return;
+                }
+                let base_ok = match self.resolve_recv_type_for(base, leaf) {
+                    Some(t) => crate::lang::std_deref_owner(&t, &self.uses) == Some("Vec")
+                        && !self.fields.contains_key("Vec"),
+                    None => matches!(peel_recv(base), syn::Expr::Path(_)),
+                };
+                let Some(e) = base_ok.then(|| self.resolve_elem_type_held(base)).flatten() else { return };
+                keys.push(format!("[{}]", short(&e)));
+                route = "R1056SLICE";
             }
         }
-        if let Some(t) = self.tuple_of.get(&name) {
-            if let Some(parts) = t.iter().map(|x| x.as_deref().map(short)).collect::<Option<Vec<_>>>() {
-                keys.push(format!("({})", parts.join(",")));
+        if route == "R1056RECV" && keys.is_empty() {
+            let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
+            let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
+            if !SLICE_INHERENT.contains(&leaf) {
+                if let Some(e) = self.elem_of.get(&name) {
+                    let e = short(e);
+                    keys.push(format!("[{e}]"));
+                    keys.push(format!("[{e};_]"));
+                }
+            }
+            if let Some(t) = self.tuple_of.get(&name) {
+                if let Some(parts) = t.iter().map(|x| x.as_deref().map(short)).collect::<Option<Vec<_>>>() {
+                    keys.push(format!("({})", parts.join(",")));
+                }
             }
         }
+        // SOUNDNESS R1056 (residual) — A GENERIC ELEMENT. `impl<T> Tr for [T]` is filed under `[_]` (and an
+        // array over its own parameter under `[_;_]`, `lang::collect_nonpath_receivers`): every element type
+        // reaches it. Asked only where the exact key is absent, so a concrete `impl Tr for [u8]` elsewhere
+        // still answers `u8` receivers by itself.
+        let keys: Vec<String> = keys
+            .into_iter()
+            .filter_map(|k| {
+                if tails.contains(&format!("{k}::{leaf}")) {
+                    return Some(k);
+                }
+                let wild = if k.starts_with('[') && k.ends_with(";_]") {
+                    "[_;_]"
+                } else if k.starts_with('[') {
+                    "[_]"
+                } else {
+                    return None;
+                };
+                tails.contains(&format!("{wild}::{leaf}")).then(|| wild.to_string())
+            })
+            .collect();
         for k in keys {
             let t2 = format!("{k}::{leaf}");
             if tails.contains(&t2) {
                 if std::env::var_os("CANDOR_R1056_INSTR").is_some() {
-                    eprintln!("R1056RECV\t{t2}"); // §E1 REACH PROBE
+                    eprintln!("{route}\t{t2}"); // §E1 REACH PROBE (`[_]`/`[_;_]` in t2 = the generic arm)
                 }
                 self.calls.push(Call { argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
                     leaf: leaf.to_string(), str_arg: None, typed: true, method: true, is_macro: false,
                     path_lits_partial: false, path_lit2: None });
             }
         }
+    }
+
+    /// SOUNDNESS R1080 — `let mut v = Vec::new(); v.push(W(1)); v.ew()`: the element is known only by
+    /// inference, so `v` carried no element and `v.ew()` over `impl Ew for [W]` was ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxvlit` `new_push`). A `Vec<T>` holds ONE `T`, so a single pushed
+    /// value of an exactly-known type fixes it — EXCEPT where the push coerces (`Box<W>` into a `Vec<Box<dyn
+    /// Tr>>`, `&w` into `Vec<&dyn Tr>`), which would type every element as `W` and silence the others. So the
+    /// value must be a form that cannot coerce: a struct literal (`W { .. }`), a tuple-struct constructor
+    /// (`W(..)`), or a suffixed / byte / char / bool literal. Only for a receiver the typer already reads as
+    /// std's `Vec`/`VecDeque` with NO element recorded (an annotation or any other route wins), and only the
+    /// value position of `push` / `push_back` / `push_front` / `insert(i, x)`.
+    fn infer_vec_elem_from_push(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        let val = match (leaf, node.args.len()) {
+            ("push" | "push_back" | "push_front", 1) => &node.args[0],
+            ("insert", 2) => &node.args[1],
+            _ => return,
+        };
+        let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
+        let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
+        if self.elem_of.contains_key(&name) || self.elem_trait_of.contains_key(&name) {
+            return;
+        }
+        let Some(t) = self.vars.get(&name) else { return };
+        let ok = matches!(t.as_str(), "Vec" | "VecDeque") && !self.uses.contains_key(t.as_str())
+            || matches!(t.as_str(), "std::vec::Vec" | "alloc::vec::Vec" | "std::collections::VecDeque"
+                | "alloc::collections::VecDeque" | "std::collections::vec_deque::VecDeque");
+        if !ok || self.fields.contains_key(t.rsplit("::").next().unwrap_or(t)) {
+            return;
+        }
+        // A TRAIT-OBJECT element names itself exactly too: a cast to `Box<dyn Tr>` / `&dyn Tr`, or a binding
+        // already typed as one (`let a: Box<dyn Go> = ..; v.push(a)`). Recorded as the element's dispatch
+        // leaves, so a later `for x in &v { x.go() }` is the bounded-CHA union over `Tr`'s implementors.
+        let dyn_leaves: Vec<String> = match peel_paren(val) {
+            syn::Expr::Cast(c) => crate::lang::trait_leaves(&c.ty, &self.generic_bounds),
+            syn::Expr::Path(vp) => vp
+                .path
+                .get_ident()
+                .filter(|i| !self.vars.contains_key(&i.to_string()))
+                .and_then(|i| self.trait_vars.get(&i.to_string()).cloned())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if !dyn_leaves.is_empty() {
+            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                eprintln!("R1080PUSHDYN\t{name}\t{}", dyn_leaves.join(",")); // §E1 REACH PROBE
+            }
+            self.elem_trait_of.insert(name, dyn_leaves);
+            return;
+        }
+        let e = match peel_paren(val) {
+            syn::Expr::Struct(_) => self.nominal_ctor_type(val),
+            c @ syn::Expr::Call(_) => self.tuple_struct_ctor_type(c),
+            syn::Expr::Cast(c) => match &*c.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => {
+                    let t = crate::lang::path_to_string_lc(&tp.path);
+                    crate::lang::is_layer_leaf(&t).then_some(t)
+                }
+                _ => None,
+            },
+            other => crate::lang::literal_prim_type(other),
+        };
+        let Some(e) = e else { return };
+        if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+            eprintln!("R1080PUSH\t{name}\t{e}"); // §E1 REACH PROBE
+        }
+        self.elem_of.insert(name, e);
     }
 
     /// SOUNDNESS R1055 — A TUPLE-STRUCT CONSTRUCTOR NAMES ITS TYPE. `let t = Tw(x); t.run()` and `Tw(x).run()`
@@ -1325,6 +1487,8 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
             syn::Expr::Macro(mm) if pin_macro_arg(&mm.mac).is_some() => self.type_of(&pin_macro_arg(&mm.mac)?), // R980
             syn::Expr::Call(_) | syn::Expr::Struct(_) => self.nominal_ctor_type(expr),
+            // SOUNDNESS R1070 — a RANGE index (`v[1..]`) is a re-slice, not an element (see the receiver arm).
+            syn::Expr::Index(idx) if is_range_index(idx) => None,
             syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             syn::Expr::MethodCall(m) => self.type_of_method(m),
             // STRICT, unlike the receiver walk's merge: EVERY value branch must type, and to one type. A
@@ -1958,6 +2122,20 @@ impl<'a> CallCollector<'a> {
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
+            //
+            // SOUNDNESS R1070 — …but a RANGE index (`v[1..]`, `v[..n]`, `v[a..=b]`) is a RE-SLICE: its value is
+            // `[T]`, not a `T`. Typed as the element, `v[1..].tm()` formed `W::tm` and charged `impl Tw for W`'s
+            // write to a call that runs `impl Ts for [W]` (pure) — a FABRICATION (EXECUTED, scratchpad
+            // `rustagent-v044/fxrange`: nothing written). The re-slice is answered by `nonpath_recv_calls`
+            // (R1056), which forms the crate's `[T]` impl key from the base's element.
+            syn::Expr::Index(idx) if is_range_index(idx) => {
+                if std::env::var_os("CANDOR_R1070_INSTR").is_some() {
+                    if let Some(t) = self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index) {
+                        eprintln!("R1070RANGE\t{outer}\t{t}"); // §E1 REACH PROBE — the old answer, withdrawn
+                    }
+                }
+                None
+            }
             syn::Expr::Index(idx) => self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index),
             // SOUNDNESS R535 — A CONTROL-FLOW MERGE AT THE RECEIVER. `(if c { a } else { b }).go()`,
             // `(match c { .. }).go()`, `{ a }.go()` and `unsafe { a }.go()` matched no arm here and
@@ -2551,7 +2729,11 @@ impl<'a> CallCollector<'a> {
         let elems = crate::lang::collection_literal_elems(expr)?;
         let mut answer: Option<String> = None;
         for e in &elems {
-            let Some(t) = self.resolve_recv_type(e) else { continue };
+            // SOUNDNESS R1069 — a SUFFIXED / byte / char / bool literal names its own type (`vec![1u8, 2]`,
+            // `vec![0u8; 4]`), which the receiver typer does not read; without it `v.en()` over `impl En for
+            // [u8]` was ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxvlit`). An UNSUFFIXED
+            // number is left untyped (inference decides it) and, like any untyped element, abstains.
+            let Some(t) = self.resolve_recv_type(e).or_else(|| crate::lang::literal_prim_type(e)) else { continue };
             match &answer {
                 None => answer = Some(t),
                 Some(prev) if *prev != t => return None,
@@ -3686,6 +3868,8 @@ impl<'a> CallCollector<'a> {
             // THIS function already used by for-loop resolution. R88 compounding gap: this arm was
             // missing while both siblings had it, so `self.handlers[0].go()` (a `Vec<Box<dyn Doer>>`
             // field) resolved neither a concrete type nor a dispatch leaf and dropped silent-pure.
+            // SOUNDNESS R1070 — a RANGE index is a slice, whose methods are not the element's.
+            syn::Expr::Index(idx) if is_range_index(idx) => Vec::new(),
             syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
             // SOUNDNESS R541 — AN EXPLICIT DEREFERENCE, the dispatch twin of the `Unary` arm
             // `resolve_recv_type_for` has carried all along. Found by DIFFING THE TWO RESOLVERS' ARM
@@ -5186,7 +5370,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // certified (exit 0) after, so R416 WIDENED this to the dominant rust path spelling; the plain
         // `&str` spelling was already certified at both commits. This restore closes both.
         let saved_str_locals = self.str_locals.clone();
+        let saved_fields = self.block_field_variants.get(&(node as *const syn::Block as usize)).map(|&(f, e, names)| {
+            let old = (self.fields, self.field_elem);
+            self.fields = f;
+            self.field_elem = e;
+            let prev: Vec<(String, Option<String>)> = names
+                .iter()
+                .map(|n| {
+                    let p = self.uses.to_mut().insert(n.clone(), format!("{}{n}", crate::decls::ITEM_SENTINEL));
+                    (n.clone(), p)
+                })
+                .collect();
+            (old, prev)
+        });
         syn::visit::visit_block(self, node);
+        if let Some(((f, e), prev)) = saved_fields {
+            self.fields = f;
+            self.field_elem = e;
+            for (n, p) in prev {
+                match p {
+                    Some(v) => {
+                        self.uses.to_mut().insert(n, v);
+                    }
+                    None => {
+                        self.uses.to_mut().remove(&n);
+                    }
+                }
+            }
+        }
         self.str_locals = saved_str_locals;
         self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;
@@ -5826,6 +6037,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                    leaf: leaf.clone(), str_arg: lit, typed: true, method: true,
                                    is_macro: false, path_lits_partial: false, path_lit2: None });
         }
+        self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
@@ -8549,6 +8761,27 @@ fn struct_pattern_bindings(p: &syn::Pat) -> Vec<(syn::Member, syn::PatIdent)> {
             out
         }
         _ => Vec::new(),
+    }
+}
+
+/// SOUNDNESS R1070 — `v[a..b]` (any range form, through parens/groups) indexes a SLICE out of `v`, not an element.
+fn peel_paren(e: &syn::Expr) -> &syn::Expr {
+    match e {
+        syn::Expr::Paren(p) => peel_paren(&p.expr),
+        syn::Expr::Group(g) => peel_paren(&g.expr),
+        other => other,
+    }
+}
+
+pub(crate) fn is_range_index(ix: &syn::ExprIndex) -> bool {
+    let mut e: &syn::Expr = &ix.index;
+    loop {
+        e = match e {
+            syn::Expr::Paren(p) => &p.expr,
+            syn::Expr::Group(g) => &g.expr,
+            syn::Expr::Range(_) => return true,
+            _ => return false,
+        };
     }
 }
 

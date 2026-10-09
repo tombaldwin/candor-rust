@@ -11,6 +11,33 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A pushed value fixes an inferred `Vec` element (SOUNDNESS R1080).** `let mut v = Vec::new(); v.push(W(1));
+  v.ew()` read absent over a write; so did a `Vec` of `Box<dyn Tr>` built by `push(.. as Box<dyn Tr>)`. Only values
+  that cannot coerce (struct literal, tuple-struct constructor, literal, a cast or a trait-object binding) count.
+- The merged-sibling hedge is withdrawn only with a manifest in view and no merged body making a call nothing
+  handled: a single-file scan keeps every such hedge, as 0.40.2 did.
+
+- ⚠ **A range index is a re-slice, not an element (SOUNDNESS R1070).** `v[1..].tm()` was typed as the element and
+  charged the element type's `tm` (a write) to a call that runs the slice impl (pure) — a fabrication, executed.
+  Range-indexed receivers now type as slices (R1056's route); an element access `v[1].tm()` is unchanged.
+- ⚠ **`vec![..]` literals and primitive nested rows type their element (SOUNDNESS R1069).** `vec![1u8, 2].en()`,
+  `vec![0u8; 4]` and `for x in &vv { x.en() }` over `Vec<Vec<u8>>` read absent over a write (executed).
+- ⚠ **A struct name one body declares in two blocks is typed per block (SOUNDNESS R1068).** The call through
+  the effectful block's struct read absent (executed). As a consequence a same-named import used only outside
+  those blocks is no longer charged to calls inside them (R119's pinned over-report is gone; its guard stays).
+- ⚠ **The merged-sibling `ambiguous:` hedge discloses only where the merged unit is not genuinely pure.** A call
+  into a unit that merges several non-path impls hedges where any merged body has an effect, `Unknown`, or an
+  unanalysed dependency; an all-pure merge no longer discloses.
+
+- ⚠ **A `Vec<T>` / `String` receiver reaches the crate's `[T]` / `str` impl through autoderef, and a generic `impl<T>
+  Tr for [T]` serves every element (SOUNDNESS R1056 residual).** `v.enc()` on `v: Vec<u8>` over `impl Enc for [u8]`,
+  `s.sx()` on `s: String` over `impl Sx for str`, `v.as_slice().enc()` / `v[1..].enc()`, and `xs.m()` over `impl<T> Tr
+  for [T]` all read absent over a write (executed). Not redirected: a method `Vec`/`String` (or a std trait on them)
+  defines, the target's own inherent surface, or a member the crate's own `impl Tr for Vec<..>`/`for String` writes.
+- ⚠ **Two body-local structs sharing a name in different functions are typed per body (SOUNDNESS R529c residual).**
+  `twin1`'s `h.c.go()` read absent over a write because the crate-wide key was contested; each body's own
+  declaration is now typed for that body. Two same-named structs inside ONE body stay unresolved.
+
 ## [0.40.2] — 2026-10-09
 
 - ⚠ **A slice, array or tuple receiver reaches the crate's own impl for it (SOUNDNESS R1056).** `b.enc()` on `b: &[u8]`
