@@ -816,11 +816,26 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1056 (residual) — an explicit RE-SLICE of a Vec or slice: `v.as_slice().enc()`,
         // `v.as_mut_slice().enc()`, `(&v[..]).enc()` / `v[1..].enc()`. Each is a `[T]` whose element is
         // the base's; none typed, so the call was ABSENT (EXECUTED, `rustagent-v044/fxvec3`).
+        // SOUNDNESS R1080 (residual) — and a `VecDeque`'s slice views: `d.make_contiguous()` is a `&mut [T]`,
+        // `d.as_slices().0` / `.1` (and `as_mut_slices`) each a `[T]`; untyped, so `d.make_contiguous().ew()`
+        // was ABSENT over a write (executed, scratchpad `rustagent-v045/fx1`).
         let sliced: Option<&syn::Expr> = match peel_recv(&node.receiver) {
             syn::Expr::MethodCall(mc)
-                if mc.args.is_empty() && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice") =>
+                if mc.args.is_empty()
+                    && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice" | "make_contiguous") =>
             {
                 Some(&mc.receiver)
+            }
+            syn::Expr::Field(fe) if matches!(&fe.member, syn::Member::Unnamed(ix) if ix.index <= 1) => {
+                match peel_recv(&fe.base) {
+                    syn::Expr::MethodCall(mc)
+                        if mc.args.is_empty()
+                            && matches!(mc.method.to_string().as_str(), "as_slices" | "as_mut_slices") =>
+                    {
+                        Some(&mc.receiver)
+                    }
+                    _ => None,
+                }
             }
             syn::Expr::Index(ix) if is_range_index(ix) => Some(&ix.expr),
             _ => None,
@@ -857,8 +872,13 @@ impl<'a> CallCollector<'a> {
                         return;
                     }
                     // The element must be PLAIN: a layered entry names a container inside the Vec.
-                    let Some(e) = self.resolve_elem_type_held(&node.receiver) else { return };
-                    keys.push(format!("[{}]", short(&e)));
+                    match self.resolve_elem_type_held(&node.receiver) {
+                        Some(e) => keys.push(format!("[{}]", short(&e))),
+                        None => {
+                            keys.extend(Self::slice_union_keys(&tails, leaf));
+                            route = "R1080UNION";
+                        }
+                    }
                 }
                 _ => {
                     if crate::lang::STR_SURFACE.contains(&leaf) {
@@ -872,14 +892,27 @@ impl<'a> CallCollector<'a> {
                 if SLICE_INHERENT.contains(&leaf) {
                     return;
                 }
-                let base_ok = match self.resolve_recv_type_for(base, leaf) {
-                    Some(t) => crate::lang::std_deref_owner(&t, &self.uses) == Some("Vec")
-                        && !self.fields.contains_key("Vec"),
+                let base_ty = self.resolve_recv_type_for(base, leaf);
+                let base_ok = match &base_ty {
+                    Some(t) => crate::lang::std_deref_owner(t, &self.uses) == Some("Vec")
+                        && !self.fields.contains_key("Vec")
+                        || self.is_std_vec_like(t),
                     None => matches!(peel_recv(base), syn::Expr::Path(_)),
                 };
-                let Some(e) = base_ok.then(|| self.resolve_elem_type_held(base)).flatten() else { return };
-                keys.push(format!("[{}]", short(&e)));
+                if !base_ok {
+                    return;
+                }
                 route = "R1056SLICE";
+                match self.resolve_elem_type_held(base) {
+                    Some(e) => keys.push(format!("[{}]", short(&e))),
+                    // R1080 — the same union for a re-slice of a base TYPED as std's `Vec` / `VecDeque` whose
+                    // element is not known. An untyped base is not known to be a `Vec` at all: refused.
+                    None if base_ty.is_some() => {
+                        keys.extend(Self::slice_union_keys(&tails, leaf));
+                        route = "R1080UNION";
+                    }
+                    None => return,
+                }
             }
         }
         if route == "R1056RECV" && keys.is_empty() {
@@ -931,6 +964,27 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1080 (residual) — a `Vec` / `VecDeque` whose element NOTHING here names (it is fixed by
+    /// inference from somewhere this syntactic typer does not follow: a `fill(&mut v)`, a factory return, a
+    /// pushed `Box`, a push in another block) still reaches a `[T]` method by autoderef, and that call was
+    /// ABSENT over a write. Every key this crate files a NON-ARRAY slice impl of `leaf` under (`[W]`, `[P]`,
+    /// the generic `[_]`) is a candidate the element could select, so the call is the union over them — a
+    /// bounded CHA over the crate's own slice impls, the same shape as a `dyn` dispatch over implementors. An
+    /// over-approximation (a pure element is charged with a sibling impl's effect), never a silence; asked
+    /// only where the exact element is unknown, so an exactly-typed receiver keeps its one key.
+    fn slice_union_keys(tails: &std::collections::HashSet<String>, leaf: &str) -> Vec<String> {
+        let suffix = format!("::{leaf}");
+        let mut ks: Vec<String> = tails
+            .iter()
+            .filter_map(|t| t.strip_suffix(&suffix))
+            .filter(|k| k.starts_with('[') && k.ends_with(']') && !k.contains(';'))
+            .map(str::to_string)
+            .collect();
+        ks.sort();
+        ks.dedup();
+        ks
+    }
+
     /// SOUNDNESS R1080 — `let mut v = Vec::new(); v.push(W(1)); v.ew()`: the element is known only by
     /// inference, so `v` carried no element and `v.ew()` over `impl Ew for [W]` was ABSENT over a write
     /// (EXECUTED, scratchpad `rustagent-v044/fxvlit` `new_push`). A `Vec<T>` holds ONE `T`, so a single pushed
@@ -952,10 +1006,7 @@ impl<'a> CallCollector<'a> {
             return;
         }
         let Some(t) = self.vars.get(&name) else { return };
-        let ok = matches!(t.as_str(), "Vec" | "VecDeque") && !self.uses.contains_key(t.as_str())
-            || matches!(t.as_str(), "std::vec::Vec" | "alloc::vec::Vec" | "std::collections::VecDeque"
-                | "alloc::collections::VecDeque" | "std::collections::vec_deque::VecDeque");
-        if !ok || self.fields.contains_key(t.rsplit("::").next().unwrap_or(t)) {
+        if !self.is_std_vec_like(t) {
             return;
         }
         // A TRAIT-OBJECT element names itself exactly too: a cast to `Box<dyn Tr>` / `&dyn Tr`, or a binding
@@ -972,29 +1023,247 @@ impl<'a> CallCollector<'a> {
             _ => Vec::new(),
         };
         if !dyn_leaves.is_empty() {
+            // SOUNDNESS R1080 (residual) — TRAIT UPCASTING. Where the `Vec`'s element was already fixed elsewhere
+            // as a SUPERTRAIT object (`fill(&mut v)` taking `&mut Vec<Box<dyn Sup>>`), `v.push(x as Box<dyn
+            // Sub>)` upcasts, and the `Vec` also holds `Sup` implementors that are not `Sub`. Typing the element
+            // as `Sub` alone resolved `for x in &v { x.sp() }` to `[]` over a write (executed, scratchpad
+            // `rustagent-v045/fx1` `h_upc`/`h_upv`; also on published 0.40.3). So the element's leaves carry
+            // every (transitive, local) supertrait too: a `Sup` method dispatches over `Sup`'s implementors
+            // (a superset of `Sub`'s), and a `Sub`-only method finds no extra body. Over-approximation only.
+            let mut dyn_leaves = dyn_leaves;
+            let mut i = 0;
+            while i < dyn_leaves.len() && dyn_leaves.len() < 64 {
+                if let Some(lt) = self.local_traits.get(&dyn_leaves[i]) {
+                    for sup in &lt.supertraits {
+                        if !dyn_leaves.contains(sup) {
+                            dyn_leaves.push(sup.clone());
+                        }
+                    }
+                }
+                i += 1;
+            }
             if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
                 eprintln!("R1080PUSHDYN\t{name}\t{}", dyn_leaves.join(",")); // §E1 REACH PROBE
             }
             self.elem_trait_of.insert(name, dyn_leaves);
             return;
         }
-        let e = match peel_paren(val) {
-            syn::Expr::Struct(_) => self.nominal_ctor_type(val),
-            c @ syn::Expr::Call(_) => self.tuple_struct_ctor_type(c),
-            syn::Expr::Cast(c) => match &*c.ty {
-                syn::Type::Path(tp) if tp.qself.is_none() => {
-                    let t = crate::lang::path_to_string_lc(&tp.path);
-                    crate::lang::is_layer_leaf(&t).then_some(t)
-                }
-                _ => None,
-            },
-            other => crate::lang::literal_prim_type(other),
-        };
-        let Some(e) = e else { return };
+        let Some(e) = self.exact_value_type(val) else { return };
         if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
             eprintln!("R1080PUSH\t{name}\t{e}"); // §E1 REACH PROBE
         }
         self.elem_of.insert(name, e);
+    }
+
+    /// Walk a block's statements in order — the root body (`decls`) and every nested block (`visit_block`)
+    /// come through here — with SOUNDNESS R1080's pre-pass: an inferred `Vec`'s element, read from every
+    /// exact push in the rest of the block (`inferred_vec_elems`), recorded the moment its `let` has bound it.
+    pub(crate) fn walk_stmts(&mut self, stmts: &[syn::Stmt]) {
+        let pre_elems = self.inferred_vec_elems(stmts);
+        for (i, st) in stmts.iter().enumerate() {
+            self.visit_stmt(st);
+            if let syn::Stmt::Local(l) = st {
+                self.turbofish_vec_elem(l);
+            }
+            for (_, v, t) in pre_elems.iter().filter(|(j, _, _)| *j == i) {
+                if self.elem_of.contains_key(v) || self.elem_trait_of.contains_key(v) {
+                    continue;
+                }
+                let Some(ty) = self.vars.get(v) else { continue };
+                if !self.is_std_vec_like(ty) {
+                    continue;
+                }
+                if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                    eprintln!("R1080PRE\t{v}\t{t}"); // §E1 REACH PROBE
+                }
+                self.elem_of.insert(v.clone(), t.clone());
+            }
+        }
+    }
+
+    /// SOUNDNESS R1080 (residual) — a TURBOFISHED constructor names its element as plainly as an annotation:
+    /// `let mut v = Vec::<Box<dyn Go>>::new(); .. for x in &v { x.go() }` and `Vec::<W>::with_capacity(n)`
+    /// recorded no element, so every element call was ABSENT (executed, scratchpad `rustagent-v045/fx1`
+    /// `c_turb`). Read through the SAME helpers the annotated `let v: Vec<..>` arm uses, from the type the
+    /// turbofish spells (`Vec::<X>` as the type `Vec<X>`); only where nothing else recorded an element.
+    fn turbofish_vec_elem(&mut self, l: &syn::Local) {
+        let syn::Pat::Ident(pi) = &l.pat else { return };
+        if pi.by_ref.is_some() || pi.subpat.is_some() {
+            return;
+        }
+        let Some(init) = l.init.as_ref().filter(|i| i.diverge.is_none()) else { return };
+        let syn::Expr::Call(c) = peel_paren(&init.expr) else { return };
+        let syn::Expr::Path(p) = &*c.func else { return };
+        let n = p.path.segments.len();
+        if p.qself.is_some() || n < 2 || !matches!(p.path.segments[n - 1].ident.to_string().as_str(), "new" | "with_capacity") {
+            return;
+        }
+        if !matches!(p.path.segments[n - 2].arguments, syn::PathArguments::AngleBracketed(_)) {
+            return;
+        }
+        let name = pi.ident.to_string();
+        if self.elem_of.contains_key(&name) || self.elem_trait_of.contains_key(&name) {
+            return;
+        }
+        let Some(t) = self.vars.get(&name) else { return };
+        if !self.is_std_vec_like(t) {
+            return;
+        }
+        let mut tp = syn::TypePath { qself: None, path: p.path.clone() };
+        tp.path.segments.pop();
+        tp.path.segments.pop_punct();
+        let ty = syn::Type::Path(tp);
+        let leaves = elem_trait_leaves(&ty, &self.generic_bounds, self.callable_aliases);
+        if !leaves.is_empty() {
+            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                eprintln!("R1080TURBODYN\t{name}\t{}", leaves.join(",")); // §E1 REACH PROBE
+            }
+            self.elem_trait_of.insert(name, leaves);
+        } else if let Some(e) = elem_type(&ty, &self.uses) {
+            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                eprintln!("R1080TURBO\t{name}\t{e}"); // §E1 REACH PROBE
+            }
+            self.elem_of.insert(name, e);
+        }
+    }
+
+    /// R1080 — a receiver type that is std's `Vec` / `VecDeque` (not a crate-local or `use`-rebound one).
+    fn is_std_vec_like(&self, t: &str) -> bool {
+        let ok = matches!(t, "Vec" | "VecDeque") && !self.uses.contains_key(t)
+            || matches!(t, "std::vec::Vec" | "alloc::vec::Vec" | "std::collections::VecDeque"
+                | "alloc::collections::VecDeque" | "std::collections::vec_deque::VecDeque");
+        ok && !self.fields.contains_key(t.rsplit("::").next().unwrap_or(t))
+    }
+
+    /// SOUNDNESS R1080 — the type a value expression has EXACTLY, in a form that cannot coerce: a struct
+    /// literal, a tuple-struct constructor, a cast to a primitive, or a suffixed / byte / char / bool literal.
+    /// None of these is a pointer, and Rust's coercions at a `push` site (unsizing, `&`-deref) apply only to
+    /// pointers, so a `Vec` this value is pushed into holds exactly this type, whatever else constrained it.
+    /// `None` for anything else — notably a `Type::new()` / factory call, whose `ctor_type` answer peels a
+    /// `Box`/`Rc`/`Arc` and trusts a recorded return, so it names the pointee rather than the value.
+    fn exact_value_type(&self, val: &syn::Expr) -> Option<String> {
+        match peel_paren(val) {
+            syn::Expr::Struct(_) => self.nominal_ctor_type(val),
+            c @ syn::Expr::Call(_) => self.tuple_struct_ctor_type(c),
+            // `as` reaches a non-primitive only as a COERCION cast (`as Box<dyn Tr>`, or an alias of one), which
+            // names a pointer; so only a primitive target is an exact non-pointer type.
+            syn::Expr::Cast(c) => match &*c.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()).filter(|t| {
+                    matches!(t.as_str(), "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32"
+                        | "i64" | "i128" | "isize" | "f32" | "f64" | "bool" | "char")
+                        && !self.uses.contains_key(t.as_str())
+                }),
+                _ => None,
+            },
+            other => crate::lang::literal_prim_type(other),
+        }
+    }
+
+    /// SOUNDNESS R1080 (residual) — THE ELEMENT OF AN INFERRED `Vec` IS WHATEVER ANY EXACT PUSH SAYS, NOT
+    /// ONLY THE FIRST ONE THE WALK HAS REACHED. `infer_vec_elem_from_push` types the element at the push, in
+    /// source order, so a call made BEFORE the first push (`let mut v = Vec::new(); v.ew(); v.push(W(1));`,
+    /// or the loop-carried `loop { v.ew(); v.push(W(..)) }`) and a pushed plain VARIABLE (`let w = W(1);
+    /// v.push(w)`, refused there because a variable's typing peels `Box`) were ABSENT over a write (executed,
+    /// scratchpad `rustagent-v045/fx1`). Answered here, before the block is walked, for each
+    /// `let [mut] v = Vec::new()` / `Vec::with_capacity(..)` / `VecDeque::new()` / `VecDeque::with_capacity(..)`
+    /// statement (no turbofish, so nothing typed the element yet), from the REST of the same block:
+    ///
+    /// - `v` is not rebound anywhere after the statement (any binder, any depth — `binder_count`), so every
+    ///   `v.push(x)` / `push_back` / `push_front` / `insert(_, x)` there is a push into THIS `Vec`;
+    /// - `x` is an exact non-pointer form (`exact_value_type`), OR a plain by-value variable bound exactly
+    ///   once in the whole block, by an earlier `let w = <exact form>;` — so the push names that binding and
+    ///   its type is that form's, with no `Box` to peel;
+    /// - a `Vec<T>` holds one `T` and a non-pointer value cannot coerce, so ONE such push fixes `T` for the
+    ///   whole scope, before or after the call; two that disagree (a misread) refuse.
+    ///
+    /// Returns (statement index, element type) pairs; the caller records the element as the `let` binds.
+    fn inferred_vec_elems(&self, stmts: &[syn::Stmt]) -> Vec<(usize, String, String)> {
+        let mut out = Vec::new();
+        for (i, st) in stmts.iter().enumerate() {
+            let syn::Stmt::Local(l) = st else { continue };
+            let syn::Pat::Ident(pi) = &l.pat else { continue };
+            if pi.by_ref.is_some() || pi.subpat.is_some() {
+                continue;
+            }
+            let Some(init) = &l.init else { continue };
+            if init.diverge.is_some() || !self.is_untyped_vec_ctor(&init.expr) {
+                continue;
+            }
+            let v = pi.ident.to_string();
+            let rest = &stmts[i + 1..];
+            if rest.iter().map(|s| binder_count(s, &v)).sum::<usize>() != 0 {
+                continue;
+            }
+            let mut found: Option<String> = None;
+            let mut conflict = false;
+            for (k, s) in rest.iter().enumerate() {
+                let k = i + 1 + k;
+                for x in pushed_values(s, &v) {
+                    let t = self.exact_value_type(x).or_else(|| {
+                        let syn::Expr::Path(p) = peel_paren(x) else { return None };
+                        if p.qself.is_some() || !p.attrs.is_empty() {
+                            return None;
+                        }
+                        let w = p.path.get_ident()?.to_string();
+                        self.block_exact_binding(stmts, &w, k)
+                    });
+                    match (t, &found) {
+                        (Some(t), None) => found = Some(t),
+                        (Some(t), Some(f)) if &t != f => conflict = true,
+                        _ => {}
+                    }
+                }
+            }
+            if let (Some(t), false) = (found, conflict) {
+                out.push((i, v, t));
+            }
+        }
+        out
+    }
+
+    /// R1080 — the exact type of `w` at statement `k`, if `w` is bound exactly ONCE in the whole block, by a
+    /// plain by-value `let w = <exact form>;` at a statement before `k`.
+    fn block_exact_binding(&self, stmts: &[syn::Stmt], w: &str, k: usize) -> Option<String> {
+        if stmts.iter().map(|s| binder_count(s, w)).sum::<usize>() != 1 {
+            return None;
+        }
+        stmts[..k].iter().find_map(|s| {
+            let syn::Stmt::Local(l) = s else { return None };
+            let syn::Pat::Ident(pi) = &l.pat else { return None };
+            if pi.ident != w || pi.by_ref.is_some() || pi.subpat.is_some() {
+                return None;
+            }
+            let init = l.init.as_ref().filter(|i| i.diverge.is_none())?;
+            self.exact_value_type(&init.expr)
+        })
+    }
+
+    /// R1080 — `Vec::new()` / `Vec::with_capacity(..)` / `VecDeque::new()` / `VecDeque::with_capacity(..)`,
+    /// written with no generic argument anywhere (a turbofish types the element itself), naming std's type
+    /// (not a crate-local or `use`-rebound `Vec`).
+    fn is_untyped_vec_ctor(&self, e: &syn::Expr) -> bool {
+        let syn::Expr::Call(c) = peel_paren(e) else { return false };
+        let syn::Expr::Path(p) = &*c.func else { return false };
+        if p.qself.is_some() || p.path.segments.iter().any(|s| !s.arguments.is_none()) {
+            return false;
+        }
+        let full = path_to_string(&p.path);
+        let Some((ty, f)) = full.rsplit_once("::") else { return false };
+        if !matches!(f, "new" | "with_capacity") {
+            return false;
+        }
+        let leaf = ty.rsplit("::").next().unwrap_or(ty);
+        if self.fields.contains_key(leaf) {
+            return false;
+        }
+        match ty {
+            "Vec" | "VecDeque" => !self.uses.contains_key(ty) || matches!(self.uses.get(ty).map(String::as_str),
+                Some("std::collections::VecDeque" | "alloc::collections::VecDeque"
+                    | "std::collections::vec_deque::VecDeque" | "std::vec::Vec" | "alloc::vec::Vec")),
+            "std::vec::Vec" | "alloc::vec::Vec" | "std::collections::VecDeque" | "alloc::collections::VecDeque"
+            | "std::collections::vec_deque::VecDeque" => true,
+            _ => false,
+        }
     }
 
     /// SOUNDNESS R1055 — A TUPLE-STRUCT CONSTRUCTOR NAMES ITS TYPE. `let t = Tw(x); t.run()` and `Tw(x).run()`
@@ -5383,7 +5652,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 .collect();
             (old, prev)
         });
-        syn::visit::visit_block(self, node);
+        self.walk_stmts(&node.stmts);
         if let Some(((f, e), prev)) = saved_fields {
             self.fields = f;
             self.field_elem = e;
@@ -8783,6 +9052,80 @@ pub(crate) fn is_range_index(ix: &syn::ExprIndex) -> bool {
             _ => return false,
         };
     }
+}
+
+/// SOUNDNESS R1080 — how many times `stmt` BINDS `name`, by any binder at any depth: a `let`, `for`, `match`
+/// arm, `if let` / `while let`, closure or nested-fn parameter (every one is a `Pat::Ident`). A macro whose
+/// tokens carry the name beside a binding keyword (`let`, `for`, `match`, a closure `|`) counts as one too,
+/// since the collector re-parses some macro bodies and a binder in there is invisible to syn's tree.
+pub(crate) fn binder_count(stmt: &syn::Stmt, name: &str) -> usize {
+    struct B<'n> {
+        name: &'n str,
+        n: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for B<'_> {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            if p.ident == self.name {
+                self.n += 1;
+            }
+            syn::visit::visit_pat_ident(self, p);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            fn walk(ts: proc_macro2::TokenStream, name: &str, has_name: &mut bool, has_binder: &mut bool) {
+                for tt in ts {
+                    match tt {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            let s = i.to_string();
+                            if s == name {
+                                *has_name = true;
+                            }
+                            if matches!(s.as_str(), "let" | "for" | "match") {
+                                *has_binder = true;
+                            }
+                        }
+                        proc_macro2::TokenTree::Punct(p) if p.as_char() == '|' => *has_binder = true,
+                        proc_macro2::TokenTree::Group(g) => walk(g.stream(), name, has_name, has_binder),
+                        _ => {}
+                    }
+                }
+            }
+            let (mut has_name, mut has_binder) = (false, false);
+            walk(m.tokens.clone(), self.name, &mut has_name, &mut has_binder);
+            if has_name && has_binder {
+                self.n += 1;
+            }
+        }
+    }
+    let mut b = B { name, n: 0 };
+    syn::visit::Visit::visit_stmt(&mut b, stmt);
+    b.n
+}
+
+/// SOUNDNESS R1080 — the values `stmt` pushes into the local `name`, at any depth: the value position of
+/// `name.push(x)` / `push_back(x)` / `push_front(x)` / `insert(i, x)` (a receiver of `name`, `&mut name` or
+/// `(name)`).
+pub(crate) fn pushed_values<'s>(stmt: &'s syn::Stmt, name: &str) -> Vec<&'s syn::Expr> {
+    struct P<'s, 'n> {
+        name: &'n str,
+        out: Vec<&'s syn::Expr>,
+    }
+    impl<'s> syn::visit::Visit<'s> for P<'s, '_> {
+        fn visit_expr_method_call(&mut self, m: &'s syn::ExprMethodCall) {
+            if let syn::Expr::Path(p) = peel_recv(&m.receiver) {
+                if p.qself.is_none() && p.path.get_ident().is_some_and(|i| i == self.name) {
+                    match (m.method.to_string().as_str(), m.args.len()) {
+                        ("push" | "push_back" | "push_front", 1) => self.out.push(&m.args[0]),
+                        ("insert", 2) => self.out.push(&m.args[1]),
+                        _ => {}
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+    }
+    let mut p = P { name, out: Vec::new() };
+    syn::visit::Visit::visit_stmt(&mut p, stmt);
+    p.out
 }
 
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {

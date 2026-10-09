@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **An inferred `Vec` element is read from any exact push in the block (SOUNDNESS R1080, residual).** A pushed
+  plain variable (`let w = W(1); v.push(w)`), a call made before the first push (incl. loop-carried), and
+  `VecDeque::make_contiguous()` / `as_slices().0` read absent over a write (executed); so did a turbofished
+  `Vec::<Box<dyn Tr>>::new()`. A `[T]` method on a `Vec` whose element is still unknown is now the union over the
+  crate's own slice impls of that method (an over-approximation where the element is pure), and a pushed `dyn Sub`
+  also dispatches over its supertraits (trait upcasting into a `Vec<Box<dyn Sup>>` resolved pure over a write).
+
 ## [0.40.3] — 2026-10-09
 
 - ⚠ **A pushed value fixes an inferred `Vec` element (SOUNDNESS R1080).** `let mut v = Vec::new(); v.push(W(1));

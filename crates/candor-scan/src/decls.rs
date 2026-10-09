@@ -2959,9 +2959,7 @@ pub(crate) fn fninfo(
     for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
         c.note_owned_param_drop(Some(leaf));
     }
-    for stmt in &block.stmts {
-        c.visit_stmt(stmt);
-    }
+    c.walk_stmts(&block.stmts);
     let ret_idents = match &sig.output {
         syn::ReturnType::Type(_, ty) => {
             let mut v = Vec::new();

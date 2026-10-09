@@ -16858,7 +16858,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16869,7 +16869,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev84/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev85/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -26457,6 +26457,58 @@ pub fn boxed_var() { let a: Box<dyn Go> = Box::new(A); let mut v = Vec::new(); v
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
         }
         assert!(fixture_effects(&v, "push_p").is_empty(), "the [P] impl is pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1080 (residual) — the shapes `r1080_a_pushed_value_fixes_an_inferred_vec_element` left ABSENT,
+    /// each over an EXECUTED write (scratchpad `rustagent-v045/fx1`, also ABSENT on published 0.40.3): a pushed
+    /// plain VARIABLE bound by an exact form, a call BEFORE the first push, `VecDeque::make_contiguous()` and
+    /// `as_slices().0`, a turbofished `Vec::<Box<dyn Go>>::new()`, an element fixed only by `fill(&mut v)` (the
+    /// slice-impl union), and a `dyn Sub` pushed into a `Vec` whose element is `dyn Sup` (trait upcasting).
+    /// Controls, executed first: a pure `[P]` impl stays pure under both the variable and the before-push
+    /// shapes; a `Vec<Box<dyn Go>>` holding an `A` and a `B` is charged with `B`'s write, not typed as `A`.
+    #[test]
+    fn r1080_residual_an_inferred_vec_element_from_any_exact_push() {
+        let src = "\
+use std::collections::VecDeque;\n\
+fn mark() { std::fs::write(\"/tmp/m\", b\"x\").ok(); }\n\
+pub struct W(pub u8);\n\
+pub struct P(pub u8);\n\
+pub trait Ew { fn ew(&self); }\n\
+mod iw { use super::*; impl Ew for [W] { fn ew(&self) { mark() } } }\n\
+mod ip { use super::*; impl Ew for [P] { fn ew(&self) {} } }\n\
+pub trait Go { fn go(&self); }\n\
+impl Go for W { fn go(&self) { mark() } }\n\
+pub struct A; impl Go for A { fn go(&self) {} }\n\
+pub struct B; impl Go for B { fn go(&self) { mark() } }\n\
+fn fill(v: &mut Vec<Box<dyn Go>>) { v.push(Box::new(B)); }\n\
+fn fill_w(v: &mut Vec<W>) { v.push(W(9)); }\n\
+pub trait Sup { fn sp(&self); }\n\
+pub trait Sub: Sup {}\n\
+pub struct SA; impl Sup for SA { fn sp(&self) {} } impl Sub for SA {}\n\
+pub struct SB; impl Sup for SB { fn sp(&self) { mark() } }\n\
+fn fill_s(v: &mut Vec<Box<dyn Sup>>) { v.push(Box::new(SB)); }\n\
+pub fn t_pvar() { let w = W(1); let mut v = Vec::new(); v.push(w); v.ew() }\n\
+pub fn t_paft() { let mut v = Vec::new(); v.ew(); v.push(W(1)); }\n\
+pub fn t_velm() { let w = W(1); let mut v = Vec::new(); v.push(w); v[0].go() }\n\
+pub fn t_vfor() { let w = W(1); let mut v = Vec::new(); v.push(w); for x in &v { x.go() } }\n\
+pub fn t_mkct() { let mut d = VecDeque::new(); d.push_back(W(1)); d.make_contiguous().ew() }\n\
+pub fn t_dqaf() { let mut d = VecDeque::new(); d.make_contiguous().ew(); d.push_back(W(1)); }\n\
+pub fn t_slcs() { let w = W(1); let mut d = VecDeque::new(); d.push_back(w); d.as_slices().0.ew() }\n\
+pub fn t_turb() { let mut v = Vec::<Box<dyn Go>>::new(); v.push(Box::new(B)); for x in &v { x.go() } }\n\
+pub fn t_fillw() { let mut v = Vec::new(); fill_w(&mut v); v.ew() }\n\
+pub fn t_upc() { let mut v = Vec::new(); fill_s(&mut v); v.push(Box::new(SA) as Box<dyn Sub>); for x in &v { x.sp() } }\n\
+pub fn c_pure() { let p = P(1); let mut v = Vec::new(); v.push(p); v.ew() }\n\
+pub fn c_pafp() { let mut v = Vec::new(); v.ew(); v.push(P(1)); }\n\
+pub fn c_two() { let mut v: Vec<Box<dyn Go>> = Vec::new(); let a = Box::new(A); v.push(a); v.push(Box::new(B)); for x in &v { x.go() } }\n\
+pub fn c_mkvc() { let mut v = Vec::new(); fill(&mut v); v.push(Box::new(A) as Box<dyn Go>); for x in &v { x.go() } }\n";
+        let v = scan_fixture("r1080resid", src);
+        for f in ["t_pvar", "t_paft", "t_velm", "t_vfor", "t_mkct", "t_dqaf", "t_slcs", "t_turb", "t_fillw", "t_upc",
+            "c_two", "c_mkvc"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
+        }
+        for f in ["c_pure", "c_pafp"] {
+            assert!(fixture_effects(&v, f).is_empty(), "`{f}`: the [P] impl is pure:\n{v:#}");
+        }
     }
 
     /// SOUNDNESS R1055 — a TUPLE-STRUCT CONSTRUCTOR typed nothing: `let t = Tw(Eff); t.run()`, `Tw(Eff).run()`
