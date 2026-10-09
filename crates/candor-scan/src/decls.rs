@@ -2946,7 +2946,7 @@ pub(crate) fn fninfo(
         escaping_ctors: escapes.leaves,
         marked_ctors: std::collections::HashSet::new(),
         marked_cross_ctors: std::collections::HashSet::new(),
-        in_pattern: false,
+        in_pattern: false, untyped_methods: Default::default(),
         block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
     // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
@@ -2959,9 +2959,7 @@ pub(crate) fn fninfo(
     for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
         c.note_owned_param_drop(Some(leaf));
     }
-    for stmt in &block.stmts {
-        c.visit_stmt(stmt);
-    }
+    c.walk_stmts(&block.stmts);
     let ret_idents = match &sig.output {
         syn::ReturnType::Type(_, ty) => {
             let mut v = Vec::new();
@@ -3032,6 +3030,8 @@ pub(crate) fn fninfo(
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         extern_decl: false,
         reexport_alias: false,
+        has_self: sig.receiver().is_some(),
+        untyped_methods: c.untyped_methods.into_iter().collect(),
     }
 }
 

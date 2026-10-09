@@ -180,6 +180,12 @@ pub(crate) struct FnInfo {
     /// after Pass B, never cached.
     #[serde(rename = "ra", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reexport_alias: bool,
+    /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
+    #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) has_self: bool,
+    /// SOUNDNESS R1095 — method leaves called on a receiver no route typed (`CallCollector::untyped_methods`).
+    #[serde(rename = "um", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) untyped_methods: Vec<String>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
