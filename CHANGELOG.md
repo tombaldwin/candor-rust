@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.2] — 2026-10-09
+
 - ⚠ **A slice, array or tuple receiver reaches the crate's own impl for it (SOUNDNESS R1056).** `b.enc()` on `b: &[u8]`
   over `impl Enc for &[u8]` (and the `[u8; 4]` / `(u8, u8)` twins) left the receiver untyped and the caller read pure
   over a write (executed). Typed only where the crate implements that exact key and method; a std inherent slice
