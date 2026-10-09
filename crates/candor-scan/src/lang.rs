@@ -5777,6 +5777,113 @@ impl<'ast> syn::visit::Visit<'ast> for BlockStructWalker {
     }
 }
 
+/// SOUNDNESS R1068 — for each block address in `want`, the struct names that block declares DIRECTLY.
+pub(crate) fn block_own_struct_names(
+    block: &syn::Block,
+    want: &HashMap<usize, Vec<String>>,
+) -> HashMap<usize, Vec<String>> {
+    struct W<'w> {
+        want: &'w HashMap<usize, Vec<String>>,
+        out: HashMap<usize, Vec<String>>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for W<'_> {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            let k = b as *const syn::Block as usize;
+            if self.want.contains_key(&k) {
+                let names = b
+                    .stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        syn::Stmt::Item(syn::Item::Struct(st)) => Some(st.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                self.out.insert(k, names);
+            }
+            syn::visit::visit_block(self, b);
+        }
+        fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
+    }
+    let mut w = W { want, out: HashMap::new() };
+    syn::visit::Visit::visit_block(&mut w, block);
+    w.out
+}
+
+/// SOUNDNESS R1068 — split a body's local structs (`all`, from `collect_body_local_structs`) by SCOPE where a
+/// name is declared more than once. Returns the structs in force for the unit as a whole (every name declared
+/// once, plus the ROOT block's own declaration of a duplicated name) and, for each nested block that itself
+/// declares a duplicated name, that block's address and the duplicated-name declarations in force inside it
+/// (its own, then the nearest enclosing block's for the rest). A duplicated name nobody declares at the root
+/// is absent from the unit-wide set, so outside every declaring block it types nothing (as before).
+#[allow(clippy::type_complexity)]
+pub(crate) fn scope_duplicate_body_structs(
+    block: &syn::Block,
+    all: &[syn::Item],
+    include_tests: bool,
+) -> (Vec<syn::Item>, Vec<(usize, Vec<syn::Item>)>) {
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for it in all {
+        if let syn::Item::Struct(st) = it {
+            *n.entry(st.ident.to_string()).or_default() += 1;
+        }
+    }
+    let dups: std::collections::HashSet<String> = n.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
+    if dups.is_empty() {
+        return (all.to_vec(), Vec::new());
+    }
+    struct S<'d> {
+        dups: &'d std::collections::HashSet<String>,
+        include_tests: bool,
+        stack: Vec<HashMap<String, syn::ItemStruct>>,
+        out: Vec<(usize, Vec<syn::Item>)>,
+        root: Option<HashMap<String, syn::ItemStruct>>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for S<'_> {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            let mut own: HashMap<String, syn::ItemStruct> = HashMap::new();
+            for st in &b.stmts {
+                if let syn::Stmt::Item(syn::Item::Struct(it)) = st {
+                    let name = it.ident.to_string();
+                    if self.dups.contains(&name) && (self.include_tests || !is_cfg_test(&it.attrs)) {
+                        own.insert(name, it.clone());
+                    }
+                }
+            }
+            if self.root.is_none() {
+                self.root = Some(own.clone());
+                self.stack.push(own);
+            } else if own.is_empty() {
+                syn::visit::visit_block(self, b);
+                return;
+            } else {
+                self.stack.push(own);
+                let mut eff: HashMap<String, syn::ItemStruct> = HashMap::new();
+                for frame in &self.stack {
+                    for (k, v) in frame {
+                        eff.insert(k.clone(), v.clone());
+                    }
+                }
+                let mut v: Vec<syn::Item> = eff.into_values().map(syn::Item::Struct).collect();
+                v.sort_by_key(|it| match it { syn::Item::Struct(s) => s.ident.to_string(), _ => String::new() });
+                self.out.push((b as *const syn::Block as usize, v));
+            }
+            syn::visit::visit_block(self, b);
+            self.stack.pop();
+        }
+        fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
+    }
+    let mut w = S { dups: &dups, include_tests, stack: Vec::new(), out: Vec::new(), root: None };
+    syn::visit::Visit::visit_block(&mut w, block);
+    let root = w.root.unwrap_or_default();
+    let mut unit: Vec<syn::Item> = all
+        .iter()
+        .filter(|it| !matches!(it, syn::Item::Struct(st) if dups.contains(&st.ident.to_string())))
+        .cloned()
+        .collect();
+    unit.extend(root.into_values().map(syn::Item::Struct));
+    (unit, w.out)
+}
+
 /// SOUNDNESS R529c — every `struct` declared INSIDE A BLOCK (a fn body, a method, a `const` initializer),
 /// cloned out as items so `collect_decls`' own struct arm can type its fields — one authority for how a
 /// field's type is read, not a second copy. Pass A's decl walk recurses through `Item::Mod` and nothing

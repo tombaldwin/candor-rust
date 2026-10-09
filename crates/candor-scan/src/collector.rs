@@ -527,6 +527,13 @@ pub(crate) struct CallCollector<'a> {
     /// `match` over three arms, was charged the agent `Handle`'s `Drop`. A pattern MATCHES a value,
     /// it never builds one.
     pub(crate) in_pattern: bool,
+    /// SOUNDNESS R1068 — a body that declares one struct name in TWO of its blocks: per block (keyed by the
+    /// block's address in the AST this collector walks), the field indexes with THAT block's declaration in
+    /// force. `visit_block` swaps `fields` / `field_elem` to the entry for the block it enters and restores
+    /// them on the way out, and rebinds the names that block itself declares to their R106 sentinel spelling
+    /// (`uses[H] = <body-item>H`) for the same span — R119 refuses to promote a name two nested scopes
+    /// declare, so without this a receiver of either struct typed as the file's `H`. Empty for every other body.
+    pub(crate) block_field_variants: HashMap<usize, (&'a FieldIndex, &'a FieldElemIndex, &'a [String])>,
 }
 
 /// Decode a `self.returns` entry — recorded by `decls::record_return` under a fn's leaf name — into the
@@ -5297,7 +5304,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // certified (exit 0) after, so R416 WIDENED this to the dominant rust path spelling; the plain
         // `&str` spelling was already certified at both commits. This restore closes both.
         let saved_str_locals = self.str_locals.clone();
+        let saved_fields = self.block_field_variants.get(&(node as *const syn::Block as usize)).map(|&(f, e, names)| {
+            let old = (self.fields, self.field_elem);
+            self.fields = f;
+            self.field_elem = e;
+            let prev: Vec<(String, Option<String>)> = names
+                .iter()
+                .map(|n| {
+                    let p = self.uses.to_mut().insert(n.clone(), format!("{}{n}", crate::decls::ITEM_SENTINEL));
+                    (n.clone(), p)
+                })
+                .collect();
+            (old, prev)
+        });
         syn::visit::visit_block(self, node);
+        if let Some(((f, e), prev)) = saved_fields {
+            self.fields = f;
+            self.field_elem = e;
+            for (n, p) in prev {
+                match p {
+                    Some(v) => {
+                        self.uses.to_mut().insert(n, v);
+                    }
+                    None => {
+                        self.uses.to_mut().remove(&n);
+                    }
+                }
+            }
+        }
         self.str_locals = saved_str_locals;
         self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;

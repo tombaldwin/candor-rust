@@ -2746,18 +2746,21 @@ pub(crate) fn fninfo(
     // crate-wide index for this unit only. A name this body declares twice (two nested blocks, R119) is
     // still dropped by `block_local_field_index`. Only a key the crate-wide index LACKS is overlaid, so an
     // uncontested key keeps Pass A's answer and the common case clones nothing.
-    let local_structs = crate::lang::collect_body_local_structs(block, include_tests);
+    let all_local_structs = crate::lang::collect_body_local_structs(block, include_tests);
+    // SOUNDNESS R1068 — A NAME THIS BODY DECLARES IN TWO BLOCKS. Each declaration is in force in its own
+    // block (and the blocks nested in it), which is exactly the scope R119 gives the body's `use` map; one
+    // index for the whole unit cannot say which, so `block_local_field_index` used to drop the name and
+    // `h.c.go()` in either block read ABSENT over a write (EXECUTED, scratchpad `rustagent-v044/fxtwinctl`
+    // `twoblocks`). The ROOT block's declaration is the unit's default (the collector walks the root's
+    // statements directly); every nested block that declares such a name gets its own index variant,
+    // which the collector swaps in for that block (`CallCollector::block_field_variants`).
+    let (local_structs, dup_scopes) = crate::lang::scope_duplicate_body_structs(block, &all_local_structs, include_tests);
     if std::env::var_os("CANDOR_R529_INSTR").is_some() {
-        // §E1 REACH PROBE for the stated residual: a name this ONE body declares twice stays untyped.
-        let mut n: HashMap<String, usize> = HashMap::new();
-        for it in &local_structs {
-            if let syn::Item::Struct(st) = it {
-                *n.entry(st.ident.to_string()).or_default() += 1;
-            }
-        }
-        for (k, c) in n {
-            if c > 1 {
-                eprintln!("R529CBODYDUP\t{qual}\t{k}");
+        for (_, eff) in &dup_scopes {
+            for it in eff {
+                if let syn::Item::Struct(st) = it {
+                    eprintln!("R1068SCOPE\t{qual}\t{}", st.ident); // §E1 REACH PROBE
+                }
             }
         }
     }
@@ -2790,6 +2793,38 @@ pub(crate) fn fninfo(
         Some((f, e)) => (f, e),
         None => (fields, elems.field_elem),
     };
+    // R1068 — one owned index pair per nested block that re-declares a duplicated name, built on top of the
+    // unit's own (`fields`/`field_elem_ix` above). Owned here so the collector can borrow them for its walk.
+    let own_names: HashMap<usize, Vec<String>> = dup_scopes.iter().map(|(p, _)| (*p, Vec::new())).collect();
+    let own_names: HashMap<usize, Vec<String>> = crate::lang::block_own_struct_names(block, &own_names);
+    let dup_variants: Vec<(usize, FieldIndex, FieldElemIndex, Vec<String>)> = dup_scopes
+        .iter()
+        .map(|(ptr, eff)| {
+            let mut items: Vec<syn::Item> = local_structs.clone();
+            let names: std::collections::HashSet<String> = eff
+                .iter()
+                .filter_map(|it| match it { syn::Item::Struct(st) => Some(st.ident.to_string()), _ => None })
+                .collect();
+            items.retain(|it| !matches!(it, syn::Item::Struct(st) if names.contains(&st.ident.to_string())));
+            items.extend(eff.iter().cloned());
+            let (bf, be) = block_local_field_index(&items, include_tests, uses, elems.callable_aliases);
+            let mut f2 = fields.clone();
+            let mut e2 = field_elem_ix.clone();
+            for n in &names {
+                let k = format!("{ITEM_SENTINEL}{n}");
+                f2.remove(&k);
+                e2.remove(&k);
+                if let Some(m) = bf.get(&k) {
+                    f2.insert(k.clone(), m.clone());
+                }
+                if let Some(m) = be.get(&k) {
+                    e2.insert(k, m.clone());
+                }
+            }
+            let own: Vec<String> = own_names.get(ptr).cloned().unwrap_or_default();
+            (*ptr, f2, e2, own)
+        })
+        .collect();
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
@@ -2912,6 +2947,7 @@ pub(crate) fn fninfo(
         marked_ctors: std::collections::HashSet::new(),
         marked_cross_ctors: std::collections::HashSet::new(),
         in_pattern: false,
+        block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
     // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
     // in THIS scope, and no construction expression in this body says so. Same marker, same consumer —
