@@ -527,6 +527,12 @@ pub(crate) struct CallCollector<'a> {
     /// `match` over three arms, was charged the agent `Handle`'s `Drop`. A pattern MATCHES a value,
     /// it never builds one.
     pub(crate) in_pattern: bool,
+    /// SOUNDNESS R1095 — the method LEAVES this body calls on a receiver no route typed: no concrete type, no
+    /// element/slice/dispatch call formed, no disclosure made at the site. Judged after the
+    /// fixpoint (`scan.rs`): where a crate-local method of that name (a unit with a `self` receiver) carries a
+    /// concrete effect, the caller discloses `Unknown` (`dispatch:untyped receiver of `m` (..)`) instead of
+    /// reading silent.
+    pub(crate) untyped_methods: std::collections::BTreeSet<String>,
     /// SOUNDNESS R1068 — a body that declares one struct name in TWO of its blocks: per block (keyed by the
     /// block's address in the AST this collector walks), the field indexes with THAT block's declaration in
     /// force. `visit_block` swaps `fields` / `field_elem` to the entry for the block it enters and restores
@@ -1125,6 +1131,59 @@ impl<'a> CallCollector<'a> {
             }
             self.elem_of.insert(name, e);
         }
+    }
+
+    /// SOUNDNESS R1095 — record `leaf` as called on an UNTYPED receiver when this site's own handling (before
+    /// its children are walked) typed nothing: no receiver type, no call beyond the bare-leaf
+    /// twin, and no disclosure (`unresolved`, `unresolved_why`, a dispatch site). The exact routes stay the
+    /// precision layer; this only records what reached none of them.
+    fn note_untyped_method(&mut self, node: &syn::ExprMethodCall, leaf: &str,
+        start: (usize, usize, bool, usize, usize)) {
+        let (c0, w0, u0, d0, f0) = start;
+        if self.unresolved_why.len() != w0 || self.unresolved != u0 || self.dispatch_sites.len() != d0
+            || self.foreign_dispatch_sites.len() != f0
+        {
+            return;
+        }
+        if self.calls[c0..].iter().any(|c| c.typed || c.path != leaf || !c.method) {
+            return;
+        }
+        // A trait BOUND alone does not count as typed: a bound that answered for `leaf` formed a call or a
+        // dispatch site above, and one that did not names nothing this method could run — measured: `for x in
+        // i` over `I: Iterator<Item = W>` binds `x` to `I`'s own bound (`Iterator`), and `x.go()` then reached
+        // no body at all (scratchpad `rustagent-v045/fx5`).
+        if self.resolve_recv_type_for(&node.receiver, leaf).is_some() {
+            return;
+        }
+        // A receiver known to be a slice / array / tuple / collection (its element or positions are recorded)
+        // is typed — by `nonpath_recv_calls`, which forms the crate's own `[T]`/`(..)` impl key where one
+        // exists and leaves std's inherent surface (`b.len()` on `&[u8]`) to std. Nothing a crate `self`
+        // method of another type could run.
+        match peel_recv(&node.receiver) {
+            syn::Expr::Path(p) => {
+                if let Some(n) = p.path.get_ident().map(|i| i.to_string()) {
+                    if self.elem_of.contains_key(&n) || self.tuple_of.contains_key(&n) || self.elem_trait_of.contains_key(&n) {
+                        return;
+                    }
+                }
+            }
+            // …and an explicit RE-SLICE (`v.as_slice()`, `v[1..]`, `d.make_contiguous()`, `d.as_slices().0`) is a
+            // `[T]`, the same route's.
+            syn::Expr::MethodCall(mc)
+                if mc.args.is_empty()
+                    && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice" | "make_contiguous") =>
+            {
+                return;
+            }
+            syn::Expr::Index(ix) if is_range_index(ix) => return,
+            syn::Expr::Field(fe) if matches!(peel_recv(&fe.base), syn::Expr::MethodCall(mc)
+                if matches!(mc.method.to_string().as_str(), "as_slices" | "as_mut_slices")) => return,
+            _ => {}
+        }
+        if std::env::var_os("CANDOR_R1095_INSTR").is_some() {
+            eprintln!("R1095SITE\t{leaf}"); // §E1 REACH PROBE — a site, before the candidate judgement
+        }
+        self.untyped_methods.insert(leaf.to_string());
     }
 
     /// R1080 — a receiver type that is std's `Vec` / `VecDeque` (not a crate-local or `use`-rebound one).
@@ -6001,6 +6060,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
+        // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
+        let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
+            self.dispatch_sites.len(), self.foreign_dispatch_sites.len());
         // SOUNDNESS R985 — `Pin::new(x).poll_*(cx)` where `x` types to NOTHING (aws-smithy-types'
         // `match inner.get_mut() { BoxBody::HttpBody04(b) => Pin::new(b).poll_trailers(cx) }` behind a
         // pin-projection): a value is pinned to drive a `Future`/`Stream`/`Body` poll, and with no type the
@@ -7083,6 +7145,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else {
             Vec::new()
         };
+        self.note_untyped_method(node, &leaf, r1095_start);
         self.visit_expr(&node.receiver);
         if let Some(name) = closure_param {
             for a in &node.args {

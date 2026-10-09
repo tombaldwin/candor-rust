@@ -2615,6 +2615,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
+    // whose name a crate-local `self` method carries. Judged after the fixpoint, below.
+    let untyped_contested: Vec<(String, String, Vec<String>)> = {
+        let mut by_method: HashMap<&str, Vec<&str>> = HashMap::new();
+        for f in &fns {
+            if f.has_self && !f.extern_decl && !f.reexport_alias {
+                let v = by_method.entry(f.leaf.as_str()).or_default();
+                if !v.contains(&f.qual.as_str()) {
+                    v.push(f.qual.as_str());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for f in &fns {
+            for m in &f.untyped_methods {
+                if let Some(c) = by_method.get(m.as_str()) {
+                    out.push((f.qual.clone(), m.clone(), c.iter().map(|q| q.to_string()).collect()));
+                }
+            }
+        }
+        out
+    };
     // …and, per fn, the external-looking calls NOTHING handled (no classification, no local definition, no
     // dependency join): `mydep::touch()` in a scan that cannot see the manifest drops with no trace at all, so
     // a merged unit reading pure is not EVIDENCE of purity where its bodies (transitively) contain one.
@@ -2691,6 +2713,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             u.refusals = Vec::new();
             u.dispatch = Vec::new();
             u.foreign_dispatch = Vec::new();
+            u.untyped_methods = Vec::new();
+            u.has_self = false;
             u.reexport_alias = true;
             if std::env::var_os("CANDOR_R959_INSTR").is_some() {
                 eprintln!("R959ALIAS\t{}\t{}", u.qual, first.qual);
@@ -5416,6 +5440,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 hedged = true;
                 if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
                     eprintln!("R1034MERGEHEDGE\t{caller}"); // §E1 REACH PROBE — the hedge KEPT
+                }
+            }
+        }
+        // SOUNDNESS R1095 — THE UNTYPED-RECEIVER FLOOR. `x.go()` where no route typed `x` (an iterator's
+        // `Item`, an `if let Some(x) = Some(W(1))` payload, a `.collect()` into `Vec<_>`, an element fixed only
+        // by inference — R1083) formed only the bare-leaf twin, which by design resolves to nothing: the
+        // caller read ABSENT over a write (executed, scratchpad `rustagent-v045/fx4`). Typing it exactly is
+        // the precision layer (R1023/R1056/R1069/R1080 each added a route); this is the floor under all of
+        // them. A crate-local `self` method of that name could be the body that runs, so where ANY such
+        // candidate carries a concrete propagated effect the caller discloses `Unknown` naming them — never an
+        // edge, since only one runs and a union would charge the others' effects. A name only std (or a
+        // dependency) defines has no candidate here and is untouched; a candidate set with no concrete effect
+        // discloses nothing (see the measurement below for why `Unknown`-only candidates are excluded). The
+        // detail is dot-free (§4: no owner could be formed), with any `.` in a qual replaced.
+        for (caller, leaf, cands) in &untyped_contested {
+            // A CONCRETELY effectful candidate only. Measured over a quarter of the 1,916-crate registry corpus
+            // (480 entries): any not-genuinely-pure candidate hedged 8,871 callers (5.95% of all rows newly
+            // `Unknown` on the full corpus — above the declined band), dominated by std-trait names whose crate
+            // impls are themselves `Unknown`-only (`hash`, `clone`, `as_ref`, `to_tokens` over a generic
+            // `Hasher`/`TokenStream`); a concrete-effect candidate hedges 672. The residual is stated: an
+            // untyped call to a crate method whose ONLY effect is `Unknown` stays undisclosed at the caller.
+            let impure: Vec<&String> = cands
+                .iter()
+                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")))
+                .collect();
+            if impure.is_empty() {
+                continue;
+            }
+            let shown: Vec<&str> = impure.iter().take(3).map(|s| s.as_str()).collect();
+            let more = if impure.len() > 3 { format!(", +{}", impure.len() - 3) } else { String::new() };
+            let why = format!("dispatch:untyped receiver of `{leaf}` ({}{more})", shown.join(", ")).replace('.', "_");
+            let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+            let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(why);
+            if fresh || fresh_why {
+                hedged = true;
+                if std::env::var_os("CANDOR_R1095_INSTR").is_some() && fresh {
+                    eprintln!("R1095HEDGE\t{caller}\t{leaf}"); // §E1 REACH PROBE — a caller newly Unknown
                 }
             }
         }

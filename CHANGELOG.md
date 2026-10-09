@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A method called on a receiver nothing typed discloses instead of reading silent (SOUNDNESS R1095, R1083).**
+  `for x in i` over `I: Iterator<Item = W>`, an `if let Some(x) = ..` payload, a `.collect()` into `Vec<_>`, a
+  pushed `Box`, or a `dyn` element fixed only by `fill(&mut v)`, then `x.go()`: the call formed no edge and the
+  caller read absent over a write (executed). Where a crate-local `self` method of that name carries a concrete
+  effect, the caller now carries `Unknown` with `dispatch:untyped receiver of `go` (W::go, ..)`. `deny E` gates
+  do not move; `deny E Unknown` / `deny Unknown` can.
 - ⚠ **An inferred `Vec` element is read from any exact push in the block (SOUNDNESS R1080, residual).** A pushed
   plain variable (`let w = W(1); v.push(w)`), a call made before the first push (incl. loop-carried), and
   `VecDeque::make_contiguous()` / `as_slices().0` read absent over a write (executed); so did a turbofished
