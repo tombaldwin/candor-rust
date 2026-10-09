@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A pushed value fixes an inferred `Vec` element (SOUNDNESS R1080).** `let mut v = Vec::new(); v.push(W(1));
+  v.ew()` read absent over a write; so did a `Vec` of `Box<dyn Tr>` built by `push(.. as Box<dyn Tr>)`. Only values
+  that cannot coerce (struct literal, tuple-struct constructor, literal, a cast or a trait-object binding) count.
+- The merged-sibling hedge is withdrawn only with a manifest in view and no merged body making a call nothing
+  handled: a single-file scan keeps every such hedge, as 0.40.2 did.
+
 - ⚠ **A range index is a re-slice, not an element (SOUNDNESS R1070).** `v[1..].tm()` was typed as the element and
   charged the element type's `tm` (a write) to a call that runs the slice impl (pure) — a fabrication, executed.
   Range-indexed receivers now type as slices (R1056's route); an element access `v[1].tm()` is unchanged.

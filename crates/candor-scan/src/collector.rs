@@ -931,6 +931,72 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1080 — `let mut v = Vec::new(); v.push(W(1)); v.ew()`: the element is known only by
+    /// inference, so `v` carried no element and `v.ew()` over `impl Ew for [W]` was ABSENT over a write
+    /// (EXECUTED, scratchpad `rustagent-v044/fxvlit` `new_push`). A `Vec<T>` holds ONE `T`, so a single pushed
+    /// value of an exactly-known type fixes it — EXCEPT where the push coerces (`Box<W>` into a `Vec<Box<dyn
+    /// Tr>>`, `&w` into `Vec<&dyn Tr>`), which would type every element as `W` and silence the others. So the
+    /// value must be a form that cannot coerce: a struct literal (`W { .. }`), a tuple-struct constructor
+    /// (`W(..)`), or a suffixed / byte / char / bool literal. Only for a receiver the typer already reads as
+    /// std's `Vec`/`VecDeque` with NO element recorded (an annotation or any other route wins), and only the
+    /// value position of `push` / `push_back` / `push_front` / `insert(i, x)`.
+    fn infer_vec_elem_from_push(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        let val = match (leaf, node.args.len()) {
+            ("push" | "push_back" | "push_front", 1) => &node.args[0],
+            ("insert", 2) => &node.args[1],
+            _ => return,
+        };
+        let syn::Expr::Path(p) = peel_recv(&node.receiver) else { return };
+        let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
+        if self.elem_of.contains_key(&name) || self.elem_trait_of.contains_key(&name) {
+            return;
+        }
+        let Some(t) = self.vars.get(&name) else { return };
+        let ok = matches!(t.as_str(), "Vec" | "VecDeque") && !self.uses.contains_key(t.as_str())
+            || matches!(t.as_str(), "std::vec::Vec" | "alloc::vec::Vec" | "std::collections::VecDeque"
+                | "alloc::collections::VecDeque" | "std::collections::vec_deque::VecDeque");
+        if !ok || self.fields.contains_key(t.rsplit("::").next().unwrap_or(t)) {
+            return;
+        }
+        // A TRAIT-OBJECT element names itself exactly too: a cast to `Box<dyn Tr>` / `&dyn Tr`, or a binding
+        // already typed as one (`let a: Box<dyn Go> = ..; v.push(a)`). Recorded as the element's dispatch
+        // leaves, so a later `for x in &v { x.go() }` is the bounded-CHA union over `Tr`'s implementors.
+        let dyn_leaves: Vec<String> = match peel_paren(val) {
+            syn::Expr::Cast(c) => crate::lang::trait_leaves(&c.ty, &self.generic_bounds),
+            syn::Expr::Path(vp) => vp
+                .path
+                .get_ident()
+                .filter(|i| !self.vars.contains_key(&i.to_string()))
+                .and_then(|i| self.trait_vars.get(&i.to_string()).cloned())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if !dyn_leaves.is_empty() {
+            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                eprintln!("R1080PUSHDYN\t{name}\t{}", dyn_leaves.join(",")); // §E1 REACH PROBE
+            }
+            self.elem_trait_of.insert(name, dyn_leaves);
+            return;
+        }
+        let e = match peel_paren(val) {
+            syn::Expr::Struct(_) => self.nominal_ctor_type(val),
+            c @ syn::Expr::Call(_) => self.tuple_struct_ctor_type(c),
+            syn::Expr::Cast(c) => match &*c.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => {
+                    let t = crate::lang::path_to_string_lc(&tp.path);
+                    crate::lang::is_layer_leaf(&t).then_some(t)
+                }
+                _ => None,
+            },
+            other => crate::lang::literal_prim_type(other),
+        };
+        let Some(e) = e else { return };
+        if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+            eprintln!("R1080PUSH\t{name}\t{e}"); // §E1 REACH PROBE
+        }
+        self.elem_of.insert(name, e);
+    }
+
     /// SOUNDNESS R1055 — A TUPLE-STRUCT CONSTRUCTOR NAMES ITS TYPE. `let t = Tw(x); t.run()` and `Tw(x).run()`
     /// typed nothing: `ctor_type` reads a `Type::ctor(..)` path or a recorded FUNCTION return, and a tuple
     /// struct's constructor is neither, so the receiver had no type and the caller read PURE over
@@ -5971,6 +6037,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                    leaf: leaf.clone(), str_arg: lit, typed: true, method: true,
                                    is_macro: false, path_lits_partial: false, path_lit2: None });
         }
+        self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
             let cr = ty.split("::").next().unwrap_or("");
@@ -8698,6 +8765,14 @@ fn struct_pattern_bindings(p: &syn::Pat) -> Vec<(syn::Member, syn::PatIdent)> {
 }
 
 /// SOUNDNESS R1070 — `v[a..b]` (any range form, through parens/groups) indexes a SLICE out of `v`, not an element.
+fn peel_paren(e: &syn::Expr) -> &syn::Expr {
+    match e {
+        syn::Expr::Paren(p) => peel_paren(&p.expr),
+        syn::Expr::Group(g) => peel_paren(&g.expr),
+        other => other,
+    }
+}
+
 pub(crate) fn is_range_index(ix: &syn::ExprIndex) -> bool {
     let mut e: &syn::Expr = &ix.index;
     loop {
