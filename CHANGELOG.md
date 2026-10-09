@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.3] — 2026-10-09
+
 - ⚠ **A pushed value fixes an inferred `Vec` element (SOUNDNESS R1080).** `let mut v = Vec::new(); v.push(W(1));
   v.ew()` read absent over a write; so did a `Vec` of `Box<dyn Tr>` built by `push(.. as Box<dyn Tr>)`. Only values
   that cannot coerce (struct literal, tuple-struct constructor, literal, a cast or a trait-object binding) count.
