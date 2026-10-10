@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.5] — 2026-10-11
+
+- **Version-only cut to keep the family on one build line — no change to candor-rust since 0.40.4.**
+  The source is identical to the v0.40.4 tag (`4ade9e2`); only the crate versions, the inter-crate
+  requirements and `Cargo.lock` move. candor-java and candor-swift carry the 0.40.5 fixes, and
+  candor-spec a clarification of SPEC §6.2 that codifies how every engine, this one included, already
+  matched an `only` rule's scopes.
+
 ## [0.40.4] — 2026-10-10
 
 - ⚠ **A method called on a receiver nothing typed discloses instead of reading silent (SOUNDNESS R1095, R1083).**
