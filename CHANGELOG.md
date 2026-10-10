@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.4] — 2026-10-10
+
 - ⚠ **A method called on a receiver nothing typed discloses instead of reading silent (SOUNDNESS R1095, R1083).**
   `for x in i` over `I: Iterator<Item = W>`, an `if let Some(x) = ..` payload, a `.collect()` into `Vec<_>`, a
   pushed `Box`, or a `dyn` element fixed only by `fill(&mut v)`, then `x.go()`: the call formed no edge and the
