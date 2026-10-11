@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.6] — 2026-10-11
+
 - ⚠ **A comparison over a std wrapper now reaches the element's own `PartialEq`/`PartialOrd` (SOUNDNESS
   R1098).** `a == b` (and `!=`, `<`, `<=`, `>`, `>=`) over `Option<T>`, `Result<T, _>`, `Vec<T>`, slices,
   arrays, map values, and `Weak::upgrade()`'s `Option<Arc<T>>` runs `T`'s impl element by element; the
@@ -34,7 +36,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     bound outside it unless every sibling arm also mentions the value.
   - **R1116** — a by-value parameter used only through field projections (`fn into_file(self) -> F {
     self.file }`) drops its remaining fields here; a type with its own `Drop` drops whole. tempfile's
-    `NamedTempFile::into_file` now reads `Fs` (it deletes the temp file).
+    `NamedTempFile::into_file` now reads `Fs` (it deletes the temp file), so `deny Fs` over it now fails
+    where 0.40.5 passed.
   - **R1118** — a chained DEPENDENCY's `Drop` type released in frame (an unmoved by-value parameter, an
     overwritten place, a reassignment, `Vec::clear`/`truncate`/`retain`/`dedup*`/`resize` on a param or
     field) joins the dependency report's `Type::drop` row. The same container rule applies to local
