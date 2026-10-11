@@ -313,6 +313,26 @@ finding arrives with a reproduction.
   3 endings enumerated in the two generators. It is a bigger space than any fixture set, and it is
   still a list somebody wrote down.
 
+## The hand-off gate for candor-scan (`run_handoff.sh`, `gen_drop.py --handoff`)
+
+`run_drop.sh` drives the deep engine, and `run_q.sh`/`run_macro.sh` compare two spellings of one program,
+so a value that dies in a CALLEE reached none of them — which is where SOUNDNESS R198, R200, R323 and R1121
+all lived. This gate generates cells that hand ONE fresh `H` (its `Drop` writes a file) across three axes —
+POSITION (stmt / tail / `?` operand discarded / `?` operand returned / closure tail), TARGET (local fn /
+`Option<H>` param / generic param / closure param / std `drop` / a callee storing into a `Vec` this frame
+owns) and BINDING (direct / let / shadowed / sibling) — RUNS them against a drop counter, scans with
+candor-scan, and fails on a cell that drops whose row is neither charged nor disclosed, unless it is in
+`known_open_handoff.tsv`. `--lv` does the same over the checked-in 68-cell `handoff/lv` fixture against
+`handoff/lv.expect.tsv`; `--calibrate` seeds a known silence outside the register and must FAIL.
+
+Measured over the 120-cell grid: published 0.40.6 leaves 23 cells silent; rustagent-v049 leaves 6 (the
+register). Over lv: 0.40.6 has 28 unstated silent cells; rustagent-v049 has 0.
+
+```sh
+bash soundness/run_handoff.sh --calibrate && bash soundness/run_handoff.sh --all \
+  && bash soundness/run_handoff.sh --lv && bash soundness/run_handoff.sh 20     # ~1 min, in CI
+```
+
 ## The two engines, differenced (`run_differential.sh`) — SOUNDNESS R758
 
 Every other gate in this directory drives exactly ONE engine. `run.sh`, `run_cross.sh`, `run_drop.sh`,
