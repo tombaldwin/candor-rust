@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev93/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev94/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28948,17 +28948,297 @@ pub async fn ok_asyncsink() -> u32 { sink(H::new()).await }\n\
     let charged = ["aw_struct_tail", "aw_mkfut_tail", "aw_struct_q", "aw_mkfut_q", "aw_boxpin", "aw_ret", "aw_letret",
         "aw_stmt", "aw_bindfirst", "a7_stmt", "a7b_expr", "a7c_vec", "a7d_println", "a7e_assert", "a7_ctl_plain",
         "a7f_template", "b_kept", "b_inblock", "b_twice", "b_vec", "b_discard",
-        // pre-existing over-charges (EXECUTED 0 drops), unchanged from published 0.40.6
-        "ok_block", "ok_blockq", "ok_slot", "ok_letslot", "ok_push", "ok_letpush", "ok_asynccall"];
+        // pre-existing over-charges (EXECUTED 0 drops), unchanged from published 0.40.6. SOUNDNESS R1127:
+        // `ok_slot`/`ok_letslot` are the OVERWRITE of `*slot` (a may-drop: 1 executed drop with a `Some` slot,
+        // the same as the sync twin), and `ok_push`/`ok_letpush`/`ok_asynccall` are the sync store-into-a-
+        // container-this-frame-does-not-own limit, not an `.await` effect. `ok_block`/`ok_blockq` were the
+        // `.await` ones and are closed (below).
+        "ok_slot", "ok_letslot", "ok_push", "ok_letpush", "ok_asynccall"];
     for f in charged {
         assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
     }
-    for f in ["ok_callee", "ok_wrap", "ok_forget", "ok_asyncsink", "a7_ok_after", "a7_ok_noq", "b_ok_never", "b_ok_ret"] {
+    for f in ["ok_callee", "ok_wrap", "ok_forget", "ok_asyncsink", "a7_ok_after", "a7_ok_noq", "b_ok_never", "b_ok_ret",
+              "ok_block", "ok_blockq"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f} EXECUTED drops nothing in its frame\n{v:#}");
     }
     // Two controls read `Unknown` on published 0.40.6 too (an unexpandable closure / a multi-arm macro):
     // never a concrete charge.
     for f in ["a7_ok_closure", "a7_ok_multiarm"] {
         assert!(!veina_row_effs(&v, f).contains(&"Fs".to_string()), "{f}\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1122 / R1123 / R1124 / R1125 / R1127 / R1128 / R1129 — one EXECUTED fixture (scratchpad
+/// `rustagent-v050/fx`: every cell run against a counter its `Drop` / `eq` bumps; the row's GT is that count).
+///   * `a22_*` — R1122: a shared borrow of a value this frame owns (`size_of_val(&h)`, `peek(&h)`, `&H::new()`)
+///     is no route out of it. `c22_*`: the borrow CAN hand ownership out (`Rc::clone(&rc)`, a `RefCell`
+///     moved out of, `&mut` + `mem::take`/`replace`/`swap`), so the escape is kept.
+///   * `a23_*` — R1123: a DISCARDED call result, a binding nothing consumes, a tuple pattern's unbound or
+///     unconsumed position, a projection of a temporary — tuple / `Vec` / `Cow` / owned-method results.
+///   * `a24_*` — R1124: `let _x: H = src.into()` — the annotation names what the binding owns.
+///   * `a25_*` — R1125: `Box::leak` / `Box::into_raw` suppress the destructor like `mem::forget`.
+///   * `o27_block*` — R1127: an AWAITED `async { .. }`'s tail is its value. `k27_*` still drop here, incl. a
+///     future consumed by `.await` inside a RETURNED async block (`k27_retfut`, async-std's `OpenOptions::open`).
+///   * `o28_strstr` / `o28_idstr` — R1128: `impl PartialEq<Value> for String` is not what `String == String`
+///     runs; `k28_derived` — a DERIVED `PartialEq` beside a foreign-`Rhs` impl is (it was ABSENT on 0.40.6).
+///   * `a29_*_q` / `a29_gen_tailq` — R1129: a generic / `impl Trait` parameter named nowhere else in the
+///     callee's signature is dropped by a callee whose row cannot say so; the caller keeps the charge.
+///
+/// STATED RESIDUALS (still ABSENT, GT > 0): `a22_downgrade` (a shared borrow of an `Rc` is kept as an escape
+/// — the denylist cannot tell `downgrade` from `clone`), `a22_refmut` (`&mut` kept for `mem::take`),
+/// `a29_gen`/`a29_impl` (the generic callee itself — SPEC §4 external-abstraction dispatch, documented in the
+/// scanner README's misses), `e26_*` (R1126, same clause) and `e30_*` (R1130's comparison residuals).
+///
+/// PINNED OVER-CHARGES (GT 0, charged on published 0.40.6 too): receiver-consuming `rc.clone()` /
+/// `c.take()` / `mem::swap`, the `*slot` overwrite (a may-drop: GT 1 with a `Some` slot), the store into a
+/// container this frame does not own (`v.push(..)`), and an operator type with BOTH a `Self` and a foreign
+/// `Rhs` impl (`o28_g2g2`: the two bodies share the qual `G2::eq`).
+#[test]
+fn r1122_r1129_released_values_borrows_leaks_async_tails_and_opaque_params() {
+    let src = r##"use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } pub fn peek_m(&self) -> u32 { self.tag } }
+impl Drop for H { fn drop(&mut self) { hit(); } }
+#[derive(Clone)]
+pub struct K { pub tag: u32 }
+impl K { pub fn new() -> K { K { tag: 0 } } }
+impl Drop for K { fn drop(&mut self) { hit(); } }
+pub fn gen(i: u32) -> Result<u32, ()> { if i == 99 { Err(()) } else { Ok(i) } }
+fn peek(h: &H) -> u32 { h.tag }
+
+// ===== R1122: a let-bound owned value reaching the tail via a borrow argument (GT 1) =====
+pub fn a22_sov() -> usize { let h = H::new(); std::mem::size_of_val(&h) }
+pub fn a22_alignval() -> usize { let h = H::new(); std::mem::align_of_val(&h) }
+pub fn a22_ptreq() -> bool { let h = H::new(); std::ptr::eq(&h, &h) }
+pub fn a22_localfn() -> u32 { let h = H::new(); peek(&h) }
+pub fn a22_method() -> u32 { let h = H::new(); h.peek_m() }
+pub fn a22_fmt() -> String { let h = H::new(); format!("{}", h.tag) }
+pub fn a22_maxfield() -> u32 { let h = H::new(); std::cmp::max(h.tag, 1) }
+pub fn a22_hashref() -> u64 { let h = H::new(); let mut s = std::collections::hash_map::DefaultHasher::new(); h.tag.hash(&mut s); s.finish() }
+pub fn a22_param_sov(h: H) -> usize { std::mem::size_of_val(&h) }
+// controls (GT 0): the value is carried out
+pub fn c22_ret() -> H { let h = H::new(); h }
+pub fn c22_identity() -> H { let h = H::new(); std::convert::identity(h) }
+pub fn c22_box() -> Box<H> { let h = H::new(); Box::new(h) }
+pub fn c22_some() -> Option<H> { let h = H::new(); Some(h) }
+pub fn c22_vec() -> Vec<H> { let h = H::new(); vec![h] }
+pub fn c22_forget() { let h = H::new(); std::mem::forget(h) }
+pub fn c22_refcell() -> RefCell<H> { let h = H::new(); RefCell::new(h) }
+
+// ===== R1123: tuple / Cow / owned-method returns, dropped by the caller (GT 1) =====
+pub fn mk_pair() -> (H, u32) { (H::new(), 1) }
+pub fn mk_cow() -> Cow<'static, KC> { Cow::Owned(KC::new()) }
+pub fn mk_opt() -> Option<H> { Some(H::new()) }
+pub fn mk_vec() -> Vec<H> { vec![H::new()] }
+pub fn mk_h() -> H { H::new() }
+pub struct Slot { pub h: Option<H> }
+impl Slot { pub fn take(&mut self) -> H { self.h.take().unwrap() } pub fn take_pair(&mut self) -> (H, u32) { (self.h.take().unwrap(), 1) } }
+#[derive(Clone)]
+pub struct KC(pub u32);
+impl KC { pub fn new() -> KC { KC(0) } }
+impl Drop for KC { fn drop(&mut self) { hit(); } }
+pub fn a23_pair_stmt() { mk_pair(); }
+pub fn a23_pair_let() -> u32 { let p = mk_pair(); p.1 }
+pub fn a23_pair_destr() -> u32 { let (_h, n) = mk_pair(); n }
+pub fn a23_pair_field() -> u32 { mk_pair().1 }
+pub fn a23_cow_stmt() { mk_cow(); }
+pub fn a23_cow_let() -> u32 { let c = mk_cow(); c.0 }
+pub fn a23_take(s: &mut Slot) { s.take(); }
+pub fn a23_take_let(s: &mut Slot) -> u32 { let h = s.take(); h.tag }
+pub fn a23_take_pair(s: &mut Slot) { s.take_pair(); }
+pub fn a23_opt_stmt() { mk_opt(); }
+pub fn a23_vec_stmt() { mk_vec(); }
+pub fn a23_plain_stmt() { mk_h(); }
+// controls GT 0
+pub fn c23_pair_ret() -> (H, u32) { let p = mk_pair(); p }
+pub fn c23_pair_h() -> H { let (h, _) = mk_pair(); h }
+pub fn c23_take_ret(s: &mut Slot) -> H { s.take() }
+pub fn c23_cow_ret() -> Cow<'static, KC> { mk_cow() }
+
+// ===== R1124: let _x: H = src.into() inside callees (GT 1) =====
+pub struct Src(pub u32);
+impl From<Src> for H { fn from(s: Src) -> H { H { tag: s.0 } } }
+pub fn a24_into_impl(h: impl Into<H>) { let _x: H = h.into(); }
+pub fn a24_into_gen<T: Into<H>>(h: T) { let _x: H = h.into(); }
+pub fn a24_into_conc(s: Src) { let _x: H = s.into(); }
+pub fn a24_into_tail(s: Src) -> u32 { let x: H = s.into(); x.tag }
+pub fn a24_from(s: Src) { let _x = H::from(s); }
+pub fn a24_into_hparam(h: H) { let _x: H = h.into(); }
+// controls GT 0
+pub fn c24_into_ret(s: Src) -> H { s.into() }
+pub fn c24_into_letret(s: Src) -> H { let x: H = s.into(); x }
+
+// ===== R1129: generic / impl Into by-value params (GT 1, called with an H) =====
+pub fn a29_gen<T>(_t: T) {}
+pub fn a29_impl(_h: impl Into<H>) {}
+pub fn a29_call_gen() { a29_gen(H::new()); }
+pub fn a29_call_impl() { a29_impl(H::new()); }
+fn eat_gen_r<T>(_t: T, n: u32) -> Result<u32, ()> { gen(n) }
+fn eat_impl_r(_t: impl Into<H>, n: u32) -> Result<u32, ()> { gen(n) }
+pub fn a29_gen_q(n: u32) -> Result<u32, ()> { let x = eat_gen_r(H::new(), n)?; Ok(x) }
+pub fn a29_impl_q(n: u32) -> Result<u32, ()> { let x = eat_impl_r(H::new(), n)?; Ok(x) }
+pub fn a29_gen_tailq(n: u32) -> Result<u32, ()> { eat_gen_r(H::new(), n) }
+// controls GT 0: a generic callee that hands the value on
+fn keep_gen<T>(t: T, v: &mut Vec<T>) -> Result<u32, ()> { v.push(t); Ok(1) }
+pub fn c29_keep_q(v: &mut Vec<H>) -> Result<u32, ()> { let x = keep_gen(H::new(), v)?; Ok(x) }
+fn ret_gen<T>(t: T) -> T { t }
+pub fn c29_ret() -> H { ret_gen(H::new()) }
+
+// ===== R1130 / R1126: comparisons =====
+#[derive(Debug)]
+pub struct Guard(pub i32);
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { hit(); self.0 == o.0 } }
+impl Eq for Guard {}
+impl Hash for Guard { fn hash<Hs: Hasher>(&self, h: &mut Hs) { hit(); self.0.hash(h) } }
+pub struct Pair { pub p: (Guard, i32) }
+impl Pair { pub fn e30_field(&self, o: &Pair) -> bool { self.p == o.p } }
+pub fn e30_letparam(a: (Guard, i32), b: (Guard, i32)) -> bool { let x = a; x == b }
+pub fn e30_letlit(x: Guard, y: Guard) -> bool { let a = (x, 1); let b = (y, 1); a == b }
+#[derive(PartialEq)]
+pub enum E { A(Guard), B }
+pub fn e30_enum(a: &E, b: &E) -> bool { a == b }
+pub fn e30_collect(v: Vec<Guard>) -> usize { v.into_iter().collect::<HashSet<_>>().len() }
+pub fn e30_collect_ann(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }
+pub fn e26_gen<T: PartialEq>(a: T, b: T) -> bool { a == b }
+pub fn e26_call(a: Guard, b: Guard) -> bool { e26_gen(a, b) }
+pub fn e26_genref<T: PartialEq>(a: &T, b: &T) -> bool { a == b }
+pub fn e26_dyn(a: &dyn Fn() -> bool) -> bool { a() }
+// controls GT 0
+pub fn n30_tupint(a: (i32, i32), b: (i32, i32)) -> bool { a == b }
+
+// ===== R1125: Box::leak(...).borrow() — the leaked value is never dropped (GT 0) =====
+pub fn a25_leak() -> u32 { Box::leak(Box::new(RefCell::new(H::new()))).borrow().tag }
+pub fn a25_leak_plain() -> u32 { Box::leak(Box::new(H::new())).tag }
+pub fn a25_leak_mut() -> u32 { let r = Box::leak(Box::new(RefCell::new(H::new()))); r.borrow_mut().tag }
+// controls GT 1
+pub fn c25_cell() -> u32 { let c = RefCell::new(H::new()); let t = c.borrow().tag; t }
+pub fn c25_tmp() -> u32 { RefCell::new(H::new()).borrow().tag }
+
+// ===== R1127: async over-charges (GT 0) =====
+pub async fn wrap(h: H) -> H { h }
+pub async fn o27_block() -> H { async { H::new() }.await }
+pub async fn o27_blockq() -> Result<H, ()> { let h = async { Ok::<H, ()>(H::new()) }.await?; Ok(h) }
+pub async fn o27_slot(slot: &mut Option<H>) -> u32 { *slot = Some(wrap(H::new()).await); 1 }
+pub async fn o27_letslot(slot: &mut Option<H>) -> u32 { let x = wrap(H::new()).await; *slot = Some(x); 1 }
+pub async fn o27_push(v: &mut Vec<H>) -> u32 { v.push(wrap(H::new()).await); 1 }
+pub async fn o27_letpush(v: &mut Vec<H>) -> u32 { let x = wrap(H::new()).await; v.push(x); 1 }
+pub async fn hand_on(h: H, out: &mut Vec<H>) -> u32 { out.push(h); 1 }
+pub async fn o27_asynccall(out: &mut Vec<H>) -> u32 { hand_on(H::new(), out).await }
+// sync twins (the overwrite of `*slot` drops its OLD value: GT 1 with a Some slot)
+pub fn wraps(h: H) -> H { h }
+pub fn s27_slot(slot: &mut Option<H>) -> u32 { *slot = Some(wraps(H::new())); 1 }
+pub fn s27_push(v: &mut Vec<H>) -> u32 { v.push(wraps(H::new())); 1 }
+pub fn s27_letpush(v: &mut Vec<H>) -> u32 { let x = wraps(H::new()); v.push(x); 1 }
+pub fn hand_on_s(h: H, out: &mut Vec<H>) -> u32 { out.push(h); 1 }
+pub fn s27_call(out: &mut Vec<H>) -> u32 { hand_on_s(H::new(), out) }
+pub fn s27_block() -> H { { H::new() } }
+
+// ===== R1122 over-charge controls: a borrow that CAN hand ownership out (GT 0) =====
+use std::rc::Rc;
+pub fn mk_rc() -> Rc<H> { Rc::new(H::new()) }
+fn take_it(c: &RefCell<Option<H>>) -> Option<H> { c.borrow_mut().take() }
+pub fn c22_rcclone_m() -> Rc<H> { let rc = Rc::new(H::new()); rc.clone() }
+pub fn c22_rcclone_f() -> Rc<H> { let rc = Rc::new(H::new()); Rc::clone(&rc) }
+pub fn c22_mkrc() -> Rc<H> { let rc = mk_rc(); Rc::clone(&rc) }
+pub fn c22_cell_take() -> Option<H> { let c = RefCell::new(Some(H::new())); take_it(&c) }
+pub fn c22_cell_m() -> Option<H> { let c = RefCell::new(Some(H::new())); c.take() }
+pub fn c22_memtake() -> Option<H> { let mut o = Some(H::new()); std::mem::take(&mut o) }
+pub fn c22_memreplace() -> Option<H> { let mut o = Some(H::new()); std::mem::replace(&mut o, None) }
+pub fn c22_swap() -> Option<H> { let mut a = Some(H::new()); let mut b = None; std::mem::swap(&mut a, &mut b); b }
+pub fn c22_temp_rc() -> Rc<H> { Rc::clone(&Rc::new(H::new())) }
+// …and GT 1 twins
+pub fn a22_downgrade() -> std::rc::Weak<H> { let rc = Rc::new(H::new()); Rc::downgrade(&rc) }
+pub fn a22_temp() -> usize { std::mem::size_of_val(&H::new()) }
+pub fn a22_clone_h() -> K { let k = K::new(); Clone::clone(&k) }
+pub fn a22_refmut() -> usize { let mut h = H::new(); bump(&mut h) }
+fn bump(h: &mut H) -> usize { h.tag += 1; h.tag as usize }
+
+// ===== R1127 removal controls: an async block that DOES drop in this frame (GT 1) =====
+pub async fn k27_inner() -> u32 { async { let _g = H::new(); 1 }.await }
+pub async fn k27_stmt() -> u32 { async { H::new() }.await; 1 }
+pub async fn k27_letkept() -> u32 { let x = async { H::new() }.await; x.tag }
+pub async fn k27_q(n: u32) -> Result<u32, ()> { let x = async { let _g = H::new(); gen(n) }.await?; Ok(x) }
+pub async fn k27_cond(f: bool) -> Option<H> { let h = async { H::new() }.await; if f { Some(h) } else { None } }
+pub fn k27_ret_fut() -> impl std::future::Future<Output = u32> { let h = H::new(); async move { h.tag } }
+// ===== R1125 removal controls (GT 1 / GT 0) =====
+pub fn k25_local_and_leak() -> u32 { let _g = H::new(); Box::leak(Box::new(H::new())).tag }
+pub fn k25_bound_leak() -> u32 { let b = Box::new(H::new()); let r = Box::leak(b); r.tag }
+fn leak(b: Box<H>) -> u32 { b.tag }
+pub fn k25_local_leakfn() -> u32 { leak(Box::new(H::new())) }
+
+// ===== R1128: an operator impl with a FOREIGN Rhs =====
+pub struct Value(pub u32);
+impl PartialEq<Value> for String { fn eq(&self, o: &Value) -> bool { hit(); self.len() as u32 == o.0 } }
+pub struct G2(pub i32);
+impl PartialEq<i32> for G2 { fn eq(&self, o: &i32) -> bool { hit(); self.0 == *o } }
+impl PartialEq for G2 { fn eq(&self, o: &G2) -> bool { self.0 == o.0 } }
+pub fn o28_strstr(s: String, t: String) -> bool { s == t }
+pub fn o28_strval(s: String, v: Value) -> bool { s == v }
+pub fn k28_guard(a: Guard, b: Guard) -> bool { a == b }
+pub fn k28_g2int(a: G2, n: i32) -> bool { a == n }
+pub fn o28_g2g2(a: G2, b: G2) -> bool { a == b }
+pub fn k28_untyped(s: String) -> bool { s == mk_value() }
+fn mk_value() -> Value { Value(1) }
+
+// ===== R1128 second fixture: a DERIVED PartialEq beside a foreign-Rhs impl (GT 1 via the field) =====
+#[derive(PartialEq)]
+pub struct Id(pub Guard);
+impl PartialEq<str> for Id { fn eq(&self, o: &str) -> bool { o.is_empty() } }
+pub fn k28_derived(a: &Id, b: &Id) -> bool { a == b }
+pub fn o28_idstr(a: &Id, s: &str) -> bool { a == s }
+
+// ===== R1127 second fixture: a future CONSUMED by `.await` inside an async block (GT 1: dropped after await) =====
+pub struct JH(pub u32);
+impl Drop for JH { fn drop(&mut self) { hit(); } }
+impl std::future::Future for JH { type Output = u32; fn poll(self: std::pin::Pin<&mut Self>, _c: &mut std::task::Context<'_>) -> std::task::Poll<u32> { std::task::Poll::Ready(self.0) } }
+fn spawn_jh() -> JH { JH(1) }
+pub fn k27_retfut() -> impl std::future::Future<Output = Result<u32, ()>> { async move { let x = spawn_jh().await; Ok(x) } }
+pub async fn k27_awaited() -> Result<u32, ()> { async { let x = spawn_jh().await; Ok(x) }.await }
+pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() }.await }
+"##;
+    let v = scan_src_to_json_multi("v050fx", &[("Cargo.toml", "[package]\nname = \"v050fx\"\nedition = \"2021\"\n"), ("src/lib.rs", src)]);
+    // EXECUTED > 0: charged.
+    for f in [
+        "a22_sov", "a22_alignval", "a22_ptreq", "a22_localfn", "a22_method", "a22_fmt", "a22_maxfield",
+        "a22_hashref", "a22_param_sov", "a23_pair_stmt", "a23_pair_let", "a23_pair_destr", "a23_pair_field",
+        "a23_cow_stmt", "a23_cow_let", "a23_take", "a23_take_let", "a23_take_pair", "a23_opt_stmt",
+        "a23_vec_stmt", "a23_plain_stmt", "a24_into_impl", "a24_into_gen", "a24_into_conc", "a24_into_tail",
+        "a24_from", "a24_into_hparam", "a29_call_gen", "a29_call_impl", "a29_gen_q", "a29_impl_q",
+        "a29_gen_tailq", "c25_cell", "c25_tmp", "a22_temp", "a22_clone_h", "k27_inner", "k27_stmt",
+        "k27_letkept", "k27_q", "k27_cond", "k27_ret_fut", "k25_local_and_leak", "k25_local_leakfn",
+        "o28_strval", "k28_guard", "k28_g2int", "k28_untyped", "k28_derived", "k27_retfut", "k27_awaited",
+        "k27_awaited_h",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` drops / compares effectfully (executed) and was silent:\n{v:#}");
+    }
+    // EXECUTED 0: never a charge.
+    for f in [
+        "c22_ret", "c22_identity", "c22_box", "c22_some", "c22_vec", "c22_forget", "c22_refcell",
+        "c23_pair_ret", "c23_pair_h", "c23_take_ret", "c23_cow_ret", "c24_into_ret", "c24_into_letret",
+        "c29_keep_q", "c29_ret", "n30_tupint", "a25_leak", "a25_leak_plain", "a25_leak_mut", "o27_block",
+        "o27_blockq", "s27_block", "c22_rcclone_f", "c22_mkrc", "c22_cell_take", "c22_memtake",
+        "c22_memreplace", "c22_temp_rc", "k25_bound_leak", "o28_strstr", "o28_idstr",
+    ] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` performs nothing (executed 0) — FABRICATION:\n{v:#}");
+    }
+    // Pinned over-charges (executed 0, charged on published 0.40.6 too) — a change to them is a decision.
+    for f in [
+        "o27_slot", "o27_letslot", "o27_push", "o27_letpush", "o27_asynccall", "s27_slot", "s27_push",
+        "s27_letpush", "s27_call", "c22_rcclone_m", "c22_cell_m", "c22_swap", "o28_g2g2",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` moved — decide it:\n{v:#}");
+    }
+    // Stated residual silences (executed > 0) — a change to them closes a residual; shrink this list.
+    for f in [
+        "a29_gen", "a29_impl", "Pair::e30_field", "e30_letparam", "e30_letlit", "e30_enum", "e30_collect",
+        "e30_collect_ann", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut",
+    ] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` is now charged — shrink the residual list:\n{v:#}");
     }
 }

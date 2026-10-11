@@ -275,15 +275,17 @@ def handoff_main(seed, out, every):
         shapes[name] = f"pos={p},target={t},binding={b}"
         calls.append(f'm!("{name}", {name}({"1" if p in ("q", "qret") else ""}));')
     # CALIBRATION — a shape candor-scan is KNOWN to miss and that is NOT in the register, so the checker
-    # must fail on it. A BORROW handed to a non-unit std call in the tail keeps the binding on the escape
-    # spine (call arguments are "the callee's"), although `size_of_val` only reads it: the `H` dies here
-    # (executed: 1). The previous seed, a field read in the tail (`let h = H::new(); h.tag`), stopped being
-    # a silence when SOUNDNESS R209(b)/R201 (rustagent-v048) stopped a drop-free root's field projection
-    # from marking a `let`-bound base as escaping — the seed has to track what is still open.
+    # must fail on it. A MUTABLE borrow handed to a value-returning callee in the tail keeps the binding on
+    # the escape spine: `&mut h` can move the contents out (`mem::take`/`replace`), so SOUNDNESS R1122's
+    # narrowing deliberately covers SHARED borrows only, although `bump` only writes a field — the `H` dies
+    # here (executed: 1). Two earlier seeds closed and had to move: the tail field read (`h.tag`, R209(b)/
+    # R201, rustagent-v048) and the SHARED borrow to a std call (`size_of_val(&h)`, R1122, rustagent-v050).
+    # The seed has to track what is still open.
     if os.environ.get("CANDOR_HANDOFF_SEED_SILENCE"):
         name = f"seeded_{sfx}"
-        lines.append(f"pub fn {name}() -> usize {{ let h = H::new(); std::mem::size_of_val(&h) }}")
-        shapes[name] = "pos=seeded,target=borrow_to_std_tail,binding=let"
+        lines.append(f"fn bump_{sfx}(h: &mut H) -> usize {{ h.tag += 1; 1 }}")
+        lines.append(f"pub fn {name}() -> usize {{ let mut h = H::new(); bump_{sfx}(&mut h) }}")
+        shapes[name] = "pos=seeded,target=mut_borrow_tail,binding=let"
         calls.append(f'm!("{name}", {name}());')
     os.makedirs(os.path.join(out, "src", "bin"), exist_ok=True)
     with open(os.path.join(out, "Cargo.toml"), "w") as f:

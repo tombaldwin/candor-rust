@@ -132,6 +132,18 @@ fn is_self_deref(expr: &syn::Expr) -> bool {
 /// no field-borrow index), which can only withhold charges, never add one.
 #[derive(Default)]
 pub(crate) struct AssignDrop<'a> {
+    /// SOUNDNESS R1123/R1124 — `lang::released_let_bindings_full`: `let` addresses whose value nothing takes, with
+    /// the field members the body reads off it.
+    pub(crate) released_lets: HashMap<usize, Vec<String>>,
+    /// …and the TUPLE-pattern lets, per position (`lang::released_let_bindings_full`).
+    pub(crate) released_tuple_lets: HashMap<usize, Vec<Option<Vec<String>>>>,
+    /// The leaves with their OWN local `impl Drop` (`ElemIndexes::drop_types`) — a field cannot be moved out
+    /// of one (E0509), so a field read of a released binding of that type takes nothing.
+    pub(crate) drop_types: Option<&'a std::collections::HashSet<String>>,
+    /// SOUNDNESS R1128 — set only while `visit_expr_binary` charges its operands: the LEFT operand's type leaf
+    /// and the right operand's (`None` when untyped). Read only for a comparison whose dispatch type IS that
+    /// left leaf; every other comparison here (a tuple component, a collection element) is `T` against `T`.
+    pub(crate) binop_rhs: std::cell::RefCell<Option<(String, Option<String>)>>,
     /// `lang::assign_drop_exempt` — addresses of the `syn::ExprAssign`s that provably overwrite nothing.
     pub(crate) exempt: std::collections::HashSet<usize>,
     /// Parameter NAME -> its declared type, for the names the body never re-binds (a shadowing `let`
@@ -1782,6 +1794,125 @@ impl<'a> CallCollector<'a> {
                 }
             }
         }
+    }
+
+    /// SOUNDNESS R1123 — what a CALL's value owns, from the callee's DECLARED return (`model::ret_owned_key`,
+    /// `impl_owned_key`), when the callee is provably this crate's: a `Type::f(..)` on a local type, a bare
+    /// non-imported, non-shadowed fn name or a `crate::`/`self::`/`super::` path, or a METHOD whose receiver
+    /// type this collector resolved. A std/core/alloc path, a dependency path, a closure or fn-pointer call
+    /// answers `None` (today's silence, never a guess).
+    fn released_result(&self, e: &syn::Expr) -> Option<(bool, Vec<Vec<String>>)> {
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                _ => break,
+            }
+        }
+        let enc = match e {
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return None };
+                if p.qself.is_some() {
+                    return None;
+                }
+                let written = path_to_string(&p.path);
+                let full = crate::lang::expand(&written, &self.uses);
+                if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
+                    return None;
+                }
+                let leaf = full.rsplit("::").next().unwrap_or(&full);
+                let bare = !written.contains("::") && !self.uses.contains_key(&written) && !self.bound_names.contains(&written);
+                let local_path = full.starts_with("crate::")
+                    || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
+                let assoc = full.rsplit_once("::").and_then(|(head, last)| {
+                    let ty = head.rsplit("::").next().unwrap_or(head);
+                    if !crate::lang::is_type_ident(ty) || self.is_dependency_type(head) {
+                        return None;
+                    }
+                    self.returns.get(&crate::model::impl_owned_key(ty, last)).cloned()
+                });
+                match assoc {
+                    Some(a) => a,
+                    None if bare || local_path => self.returns.get(&crate::model::ret_owned_key(leaf))?.clone(),
+                    None => return None,
+                }
+            }
+            syn::Expr::MethodCall(m) => {
+                let t = self.resolve_recv_type(&m.receiver)?;
+                if matches!(t.split("::").next(), Some("std" | "core" | "alloc")) || self.is_dependency_type(&t) {
+                    return None;
+                }
+                let tl = t.rsplit("::").next().unwrap_or(&t);
+                self.returns.get(&crate::model::impl_owned_key(tl, &m.method.to_string()))?.clone()
+            }
+            _ => return None,
+        };
+        crate::lang::decode_owned_result(&enc)
+    }
+
+    /// SOUNDNESS R1123/R1124 — THE RELEASED-RESULT RULE. A value nothing takes dies in this frame, whatever
+    /// built it: a call's DISCARDED result (`mk_pair();`, `let _ = s.take();`) and a `let` binding the body
+    /// never consumes (`lang::released_let_bindings_full`) run their owned leaves' destructors here. EXECUTED: 1
+    /// drop each for a discarded tuple / `Vec` / `Cow` result, an owned method result, and
+    /// `let _x: H = src.into()`, all ABSENT before — the construction route keys on a constructor PATH, and
+    /// none of these spells one. Charged through the parameter route (not escape-gated): the value provably
+    /// never leaves, which is a stronger fact than the escape walk's.
+    fn note_released(&mut self, res: (bool, Vec<Vec<String>>), fields: &[String]) {
+        let (tuple, pos) = res;
+        // Only the drop-relevant leaves matter (a primitive position reads as its own leaf, `u32`). A leaf
+        // declared at two quals (`ElemIndexes::twin_type_leaves` — tokio's many `State`s) cannot say WHICH
+        // type the callee returned, so it is no claim here (the R1118 container rule's same refusal).
+        let twin = |l: &String| self.assign_drop.twin_leaves.is_some_and(|t| t.contains(l));
+        let pos: Vec<Vec<String>> = pos
+            .into_iter()
+            .map(|p| p.into_iter().filter(|l| self.drop_relevant.contains(l) && !twin(l)).collect())
+            .collect();
+        if !fields.is_empty() {
+            let ok = if tuple {
+                // `p.N` moves position N out; harmless only when N owns nothing drop-relevant.
+                fields.iter().all(|f| f.parse::<usize>().ok().is_some_and(|n| pos.get(n).is_some_and(|l| l.is_empty())))
+            } else {
+                // A field read of a type with its OWN `impl Drop` cannot move out of it (E0509).
+                pos.iter().flatten().all(|l| self.assign_drop.drop_types.is_some_and(|d| d.contains(l)))
+            };
+            if !ok {
+                return;
+            }
+        }
+        for l in pos.into_iter().flatten() {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.drop_relevant.contains(&l) {
+                eprintln!("R1123RELEASED {l} in {}", self.modpath); // §E1 REACH COUNTER
+            }
+            self.note_owned_param_drop(Some(l));
+        }
+    }
+
+    /// SOUNDNESS R1124 — a `let NAME: T = init` whose init this collector cannot type on its own: the
+    /// annotation names what the binding owns. Only when the init PRODUCES a value (a method call, or a call
+    /// not rooted in std — `Vec::new()`/`None` under a `Vec<G>`/`Option<G>` annotation own nothing).
+    fn annotated_result(&self, ty: &syn::Type, init: &syn::Expr) -> Option<(bool, Vec<Vec<String>>)> {
+        let mut e = init;
+        while let syn::Expr::Paren(p) = e {
+            e = &p.expr;
+        }
+        let producing = match e {
+            syn::Expr::MethodCall(_) => true,
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => !matches!(
+                    crate::lang::expand(&path_to_string(&p.path), &self.uses).split("::").next(),
+                    Some("std" | "core" | "alloc" | "Vec" | "Box" | "Some" | "Ok" | "Err" | "Default")
+                ),
+                _ => false,
+            },
+            _ => false,
+        };
+        if !producing {
+            return None;
+        }
+        let generics: std::collections::HashSet<String> = self.generic_bounds.keys().cloned().collect();
+        let enc = crate::lang::owned_result_encoding(ty, &self.uses, &generics, self.assign_drop.self_leaf.as_deref());
+        crate::lang::decode_owned_result(&enc)
     }
 
     pub(crate) fn note_owned_param_drop(&mut self, leaf: Option<String>) {
@@ -4236,6 +4367,16 @@ impl<'a> CallCollector<'a> {
         })
     }
 
+    /// SOUNDNESS R1128 — may an operator impl of `trait_leaf` for `ty_leaf` be the one `ty_leaf OP rhs` runs?
+    /// `model::impl_rhs_key` lists each impl's written `Rhs` (`Self` for the default or the type itself, `*`
+    /// for a generic one). No entry (an older index, a trait with no `Rhs`) and an unknown `rhs` both answer
+    /// yes — today's edge; the edge is refused only when every recorded `Rhs` is a named type `rhs` is not.
+    fn rhs_ok(&self, trait_leaf: &str, ty_leaf: &str, rhs: Option<&str>) -> bool {
+        let Some(rs) = self.returns.get(&crate::model::impl_rhs_key(trait_leaf, ty_leaf)) else { return true };
+        let Some(r) = rhs else { return true };
+        rs.split(',').any(|x| x == "*" || x == r || (x == "Self" && r == ty_leaf))
+    }
+
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -4285,8 +4426,23 @@ impl<'a> CallCollector<'a> {
         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
-                self.push_coercion_edge(ty_leaf, method);
-                return;
+                // SOUNDNESS R1128 — an operator impl with an explicit FOREIGN `Rhs` (`impl PartialEq<Value> for
+                // String`, serde_json) runs only when the other operand IS that `Rhs`. `s == t` over two
+                // `String`s edged to it (an over-charge, 0 executed calls of that body). The right operand's
+                // type comes from the bare-operand site; every other comparison here is `T` against `T`.
+                let rhs = match self.assign_drop.binop_rhs.borrow().clone() {
+                    Some((l, r)) if depth == 0 && l == ty_leaf => r,
+                    _ => Some(ty_leaf.to_string()),
+                };
+                if self.rhs_ok(trait_leaf, ty_leaf, rhs.as_deref()) {
+                    self.push_coercion_edge(ty_leaf, method);
+                    return;
+                }
+                // Not this impl — but a DERIVED `PartialEq`/`PartialOrd` beside it (which `trait_impls` does
+                // not record) still runs; fall through to the derive route below rather than stop here.
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R1128RHS {ty_leaf}::{method}"); // §E1 REACH COUNTER
+                }
             }
         }
         // SOUNDNESS R1111 — a DERIVED `PartialEq`/`PartialOrd`/`Ord`/`Hash` has no body to edge to: the
@@ -6613,12 +6769,70 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.use_alts = alts;
         syn::visit::visit_item_use(self, node);
     }
+    /// SOUNDNESS R1123 — `mk_pair().1`: the projection moves position 1 out of a TEMPORARY, and every other
+    /// position dies with the temporary in this frame (EXECUTED: 1 drop). A subset of what the temporary
+    /// really drops (`&mk_pair().0` drops all of it), so it can only under-charge.
+    fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+        if let syn::Member::Unnamed(i) = &node.member {
+            if let Some((true, leaves)) = self.released_result(&node.base) {
+                let n = i.index as usize;
+                if n < leaves.len() {
+                    let rest: Vec<Vec<String>> =
+                        leaves.into_iter().enumerate().filter(|(j, _)| *j != n).map(|(_, l)| l).collect();
+                    self.note_released((true, rest), &[]);
+                }
+            }
+        }
+        syn::visit::visit_expr_field(self, node);
+    }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
         // contributes no effects to this fn — don't walk it (else its calls fabricate effects the default
         // build never performs; winnow's debug-trace block reaching `std::env::var`).
         if stmt_cfg_inactive(node) {
             return;
+        }
+        // SOUNDNESS R1123 — a call whose value is DISCARDED (`mk_pair();`, `s.take();`). See `note_released`.
+        match node {
+            syn::Stmt::Expr(e, Some(_)) => {
+                if let Some(r) = self.released_result(e) {
+                    self.note_released(r, &[]);
+                }
+            }
+            syn::Stmt::Local(l) => {
+                if let Some(init) = &l.init {
+                    if matches!(l.pat, syn::Pat::Wild(_)) {
+                        // `let _ = f();` drops the value at the end of the statement.
+                        if let Some(r) = self.released_result(&init.expr) {
+                            self.note_released(r, &[]);
+                        }
+                    } else if let Some(pos) =
+                        self.assign_drop.released_tuple_lets.get(&(l as *const syn::Local as usize)).cloned()
+                    {
+                        // `let (_h, n) = mk_pair();` — each released position drops its own leaves.
+                        if let Some((true, leaves)) = self.released_result(&init.expr) {
+                            if leaves.len() == pos.len() {
+                                for (lv, p) in leaves.into_iter().zip(pos) {
+                                    if let Some(fields) = p {
+                                        self.note_released((false, vec![lv]), &fields);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(fields) =
+                        self.assign_drop.released_lets.get(&(l as *const syn::Local as usize)).cloned()
+                    {
+                        let typed = match &l.pat {
+                            syn::Pat::Type(pt) => self.annotated_result(&pt.ty, &init.expr),
+                            _ => None,
+                        };
+                        if let Some(r) = typed.or_else(|| self.released_result(&init.expr)) {
+                            self.note_released(r, &fields);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         syn::visit::visit_stmt(self, node);
     }
@@ -8668,6 +8882,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.in_pattern = saved;
     }
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        // SOUNDNESS R1129 (closure half) — `let f = |_h: H| {}; f(H::new())`: the closure's typed by-value
+        // parameter dies in its body (EXECUTED: 1 drop), and the call of a local VALUE carries no callee row.
+        for leaf in crate::lang::closure_param_releases(node, &self.uses) {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.drop_relevant.contains(&leaf) {
+                eprintln!("R1129CLOSURE {leaf} in {}", self.modpath); // §E1 REACH COUNTER
+            }
+            self.note_owned_param_drop(Some(leaf));
+        }
         // Type each ANNOTATED closure param (`|c: &Conn| c.send()`) into `vars` so the body's `c.method()`
         // resolves — the annotation was discarded, so an effectful method on it read silent-pure (sweep
         // [29]). Save+restore scopes the bindings to the closure body (closures are walked lexically here).
@@ -9894,10 +10116,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
+            // The right operand's type LEAF, with references and generic arguments peeled (`&'a str` -> `str`,
+            // `IndexSet<T, S2>` -> `IndexSet`) — the same spelling `impl_rhs_key` records.
+            let rt = self.type_of(&node.right).map(|t| {
+                let t = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
+                let t = if t.starts_with('\'') { t.split_once(' ').map_or(t, |(_, r)| r.trim_start()) } else { t };
+                let t = t.strip_prefix("mut ").unwrap_or(t);
+                let t = t.split('<').next().unwrap_or(t);
+                t.rsplit("::").next().unwrap_or(t).trim().to_string()
+            })
+            // A GENERIC right operand (`x.key == key` over `K` with `KeyType: PartialEq<K>`, clap) can be any of
+            // the `Rhs`es: unknown, which keeps the edge.
+            .filter(|t| !self.generic_bounds.contains_key(t) && !self.impl_generic_bounds.contains_key(t)
+                && !(t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase())));
+            let lt = self.resolve_recv_type(&node.left).map(|t| t.rsplit("::").next().unwrap_or(&t).to_string());
+            *self.assign_drop.binop_rhs.borrow_mut() = lt.map(|l| (l, rt));
             self.charge_coercion(&node.left, tr, method);
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
+            *self.assign_drop.binop_rhs.borrow_mut() = None;
         }
         syn::visit::visit_expr_binary(self, node);
     }

@@ -6468,8 +6468,10 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     ret_short: bool,
     // SOUNDNESS R201 — `Some(the crate's local impl Future types)` when `ret_type_drop_free` holds.
     future_impls: Option<&'a [String]>,
+    // SOUNDNESS R1122 — the by-value parameters whose declared type is plain-owned (`plain_owned_param`).
+    plain_params: &[String],
 ) -> Escapes {
-    escaping_ctor_full(block, uses, fields, returns, local_macros, params, ret_short, future_impls).0
+    escaping_ctor_full(block, uses, fields, returns, local_macros, params, ret_short, future_impls, plain_params).0
 }
 
 /// `escaping_ctor_leaves`, plus the body's construction SITES. SOUNDNESS R300 — a body-local `fn` item's
@@ -6485,6 +6487,7 @@ fn escaping_ctor_full<'a>(
     params: &[String],
     ret_short: bool,
     future_impls: Option<&'a [String]>,
+    plain_params: &[String],
 ) -> (Escapes, HashMap<String, Vec<SiteId>>) {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
@@ -6503,6 +6506,7 @@ fn escaping_ctor_full<'a>(
     sites.ret_short = ret_short;
     sites.future_impls = future_impls;
     sites.walk_block(block, true);
+    sites.ref_plain = ref_transparent_names(block, &sites.lets, plain_params, uses, returns);
     // SOUNDNESS R198/R209(b) — decide the LET-BOUND closures now that the whole body is walked.
     //
     // A closure's body is only built when the closure RUNS, and only dies here if the value it
@@ -6876,7 +6880,7 @@ fn escape_from_root(
     let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
     // The SAME macro indexes the site walk used. `body_macros` is complete by now — `walk_block` has
     // finished — so both walks resolve every invocation to the same template.
-    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros, shadow: &sites.call_shadow, root_drop_free: false, invoked: Some(&sites.invoked_closures), let_names: Some(&sites.first_bind_seq), futs: None };
+    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros, shadow: &sites.call_shadow, root_drop_free: false, invoked: Some(&sites.invoked_closures), let_names: Some(&sites.first_bind_seq), futs: None, ref_plain: Some(&sites.ref_plain) };
     // SOUNDNESS R201 — `X.await` yields the future's OUTPUT and DROPS THE FUTURE in this frame, so a value
     // the future owns (`FutH { h: H::new(), .. }.await`, `mk_fut(H::new(), n).await`) dies here, EXECUTED:
     // 1 drop, while `for_each_value_child`'s `Await` pass-through read every construction inside the
@@ -7088,6 +7092,9 @@ struct MacroLens<'a> {
     /// SOUNDNESS R201 — the crate's local `impl Future` types, and the `let` names bound to a future of
     /// one: an `.await` is vetoed only over a base that BUILDS such a future (see `future_ctor`).
     futs: Option<(&'a [String], &'a std::collections::HashSet<String>)>,
+    /// SOUNDNESS R1122 — `Some(names)` on the escape walk proper: a shared borrow `&name` of one of these,
+    /// or `&` of a plain temporary construction, is not a route out of this frame (`mark_escape`).
+    ref_plain: Option<&'a std::collections::HashSet<String>>,
 }
 
 /// ONE READING OF ONE MACRO INVOCATION, produced by `macro_reading` and consumed by BOTH walks.
@@ -7508,9 +7515,354 @@ fn owned_value_leaves_into(ty: &syn::Type, uses: &HashMap<String, String>, out: 
     }
 }
 
+/// SOUNDNESS R1129 — `model::param_opaque_key`'s positions for `sig` (see there).
+pub(crate) fn opaque_param_positions(sig: &syn::Signature) -> Vec<usize> {
+    fn idents_in(t: &syn::Type, out: &mut Vec<String>) {
+        struct I<'o>(&'o mut Vec<String>);
+        impl<'x> syn::visit::Visit<'x> for I<'_> {
+            fn visit_ident(&mut self, i: &'x syn::Ident) {
+                self.0.push(i.to_string());
+            }
+        }
+        syn::visit::Visit::visit_type(&mut I(out), t);
+    }
+    let gens: std::collections::HashSet<String> = sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|g| match g {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let tys: Vec<&syn::Type> = sig
+        .inputs
+        .iter()
+        .filter_map(|i| match i {
+            syn::FnArg::Typed(pt) => Some(&*pt.ty),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (i, ty) in tys.iter().enumerate() {
+        let opaque_name: Option<String> = match ty {
+            syn::Type::ImplTrait(_) => Some(String::new()),
+            syn::Type::Path(p) if p.qself.is_none() => {
+                p.path.get_ident().map(|id| id.to_string()).filter(|n| gens.contains(n))
+            }
+            _ => None,
+        };
+        let Some(name) = opaque_name else { continue };
+        if !name.is_empty() {
+            let mut elsewhere = Vec::new();
+            for (j, t) in tys.iter().enumerate() {
+                if j != i {
+                    idents_in(t, &mut elsewhere);
+                }
+            }
+            if let syn::ReturnType::Type(_, r) = &sig.output {
+                idents_in(r, &mut elsewhere);
+            }
+            if elsewhere.contains(&name) {
+                continue;
+            }
+        } else if let syn::ReturnType::Type(_, r) = &sig.output {
+            // An `impl Trait` argument can still be returned when the return is itself opaque/generic.
+            if matches!(&**r, syn::Type::ImplTrait(_)) {
+                continue;
+            }
+        }
+        out.push(i);
+    }
+    out
+}
+
+/// SOUNDNESS R1129 — the argument positions of `c` whose callee parameter is opaque (`opaque_param_positions`),
+/// for a callee provably this crate's free fn (bare, not imported, not a local binding; or a `crate::` path).
+fn opaque_call_positions(
+    c: &syn::ExprCall,
+    uses: &HashMap<String, String>,
+    returns: &ReturnIndex,
+    shadow: &std::collections::HashSet<String>,
+) -> Vec<usize> {
+    let syn::Expr::Path(p) = &*c.func else { return Vec::new() };
+    if p.qself.is_some() {
+        return Vec::new();
+    }
+    let written = path_to_string(&p.path);
+    let expanded = expand(&written, uses);
+    let bare = !written.contains("::") && !uses.contains_key(&written) && !shadow.contains(&written);
+    let local = bare
+        || expanded.starts_with("crate::")
+        || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
+    if !local {
+        return Vec::new();
+    }
+    let leaf = written.rsplit("::").next().unwrap_or(&written);
+    match returns.get(&crate::model::param_opaque_key(leaf)) {
+        Some(v) => v.split(',').filter_map(|x| x.parse().ok()).filter(|i| *i < c.args.len()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// SOUNDNESS R1123 — `model::ret_owned_key`'s encoding of the drop-relevant leaves a value of type `ty` OWNS
+/// (`owned_value_leaves`), per tuple position for a top-level tuple. A generic parameter (`generics`) names no
+/// type and is dropped; `Self` is the enclosing impl's type. Any shared-ownership / interior-mutability type
+/// anywhere in `ty` makes the answer `""` — `Rc<G>` discarded runs `G::drop` only on the last reference.
+pub(crate) fn owned_result_encoding(
+    ty: &syn::Type,
+    uses: &HashMap<String, String>,
+    generics: &std::collections::HashSet<String>,
+    self_ty: Option<&str>,
+) -> String {
+    if type_mentions_shared_owner(ty) || type_borrows(ty) {
+        return String::new();
+    }
+    // An ASSOCIATED-TYPE projection (`L::Handle`, `Self::Item`, `<T as Tr>::Out`) names no type this scan can
+    // see — its last segment is a leaf COLLISION waiting to happen (tokio's `LinkedList::remove` ->
+    // `Option<L::Handle>` read as the runtime's `Handle`). No claim.
+    struct Proj<'g>(&'g std::collections::HashSet<String>, bool);
+    impl<'x> syn::visit::Visit<'x> for Proj<'_> {
+        fn visit_type_path(&mut self, p: &'x syn::TypePath) {
+            let first = p.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+            if p.qself.is_some() || (p.path.segments.len() > 1 && (first == "Self" || self.0.contains(&first))) {
+                self.1 = true;
+            }
+            syn::visit::visit_type_path(self, p);
+        }
+    }
+    let mut pj = Proj(generics, false);
+    syn::visit::Visit::visit_type(&mut pj, ty);
+    if pj.1 {
+        return String::new();
+    }
+    let leaves_of = |t: &syn::Type| -> Vec<String> {
+        let mut v: Vec<String> = owned_value_leaves(t, uses)
+            .into_iter()
+            .map(|l| l.rsplit("::").next().unwrap_or(&l).to_string())
+            .filter_map(|l| if l == "Self" { self_ty.map(|s| s.rsplit("::").next().unwrap_or(s).to_string()) } else { Some(l) })
+            .filter(|l| !generics.contains(l))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let mut t = ty;
+    while let syn::Type::Paren(p) = t {
+        t = &p.elem;
+    }
+    let enc = match t {
+        syn::Type::Tuple(tt) if !tt.elems.is_empty() => {
+            let pos: Vec<String> = tt.elems.iter().map(|e| leaves_of(e).join(",")).collect();
+            if pos.iter().all(|p| p.is_empty()) { String::new() } else { format!("T{}", pos.join("|")) }
+        }
+        _ => {
+            let v = leaves_of(t);
+            if v.is_empty() { String::new() } else { format!("V{}", v.join(",")) }
+        }
+    };
+    enc
+}
+
+/// Decode `owned_result_encoding`: `(is_tuple, per-position leaves)`; a non-tuple is one position.
+pub(crate) fn decode_owned_result(enc: &str) -> Option<(bool, Vec<Vec<String>>)> {
+    let split = |s: &str| -> Vec<String> { s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect() };
+    if let Some(r) = enc.strip_prefix('T') {
+        return Some((true, r.split('|').map(split).collect()));
+    }
+    enc.strip_prefix('V').map(|r| (false, vec![split(r)]))
+}
+
+/// SOUNDNESS R1123/R1124 — `released_let_bindings_full`: the `let` bindings whose value provably DIES in this body because nothing ever
+/// takes it: `let NAME = ..` / `let NAME: T = ..` (by value, no sub-pattern), NAME bound exactly once in the
+/// whole body (no parameter, pattern, closure parameter or other `let` shares it), never named inside macro
+/// tokens, and every mention a SHARED borrow `&NAME`, std's `drop(NAME)`, or a field read `NAME.f` (the
+/// members read are returned, for the collector to judge against the value's type — a field read of a
+/// type with its own `impl Drop` cannot move out, E0509; a tuple position with no owned leaves moves out
+/// nothing drop-relevant). Keyed by the `syn::Local`'s address. `&mut NAME` is a consumption here
+/// (`mem::take`), unlike `param_never_consumed`.
+///
+/// SOUNDNESS R1123 — the second map is the TUPLE-pattern lets (`let (_h, n) = mk_pair();`): per
+/// position, `Some(fields)` when that position is `_` (dropped at the end of the statement) or an identifier
+/// the body never consumes (same test as above), `None` when the position is anything else. Keyed by the
+/// `syn::Local`'s address.
+#[allow(clippy::type_complexity)]
+pub(crate) fn released_let_bindings_full(
+    sig: &syn::Signature,
+    block: &syn::Block,
+) -> (HashMap<usize, Vec<String>>, HashMap<usize, Vec<Option<Vec<String>>>>) {
+    struct Binds(HashMap<String, usize>, Vec<(usize, String)>, bool, Vec<(usize, Vec<Option<String>>)>);
+    impl<'x> syn::visit::Visit<'x> for Binds {
+        fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+            *self.0.entry(i.ident.to_string()).or_insert(0) += 1;
+            syn::visit::visit_pat_ident(self, i);
+        }
+        fn visit_local(&mut self, l: &'x syn::Local) {
+            let id = match &l.pat {
+                syn::Pat::Ident(pi) => Some(pi),
+                syn::Pat::Type(pt) => match &*pt.pat {
+                    syn::Pat::Ident(pi) => Some(pi),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let (Some(pi), Some(_)) = (id, &l.init) {
+                if pi.by_ref.is_none() && pi.subpat.is_none() && l.init.as_ref().is_some_and(|i| i.diverge.is_none()) {
+                    self.1.push((l as *const syn::Local as usize, pi.ident.to_string()));
+                }
+            }
+            if let (syn::Pat::Tuple(t), Some(init)) = (&l.pat, &l.init) {
+                if init.diverge.is_none() {
+                    let pos: Vec<Option<String>> = t
+                        .elems
+                        .iter()
+                        .map(|p| match p {
+                            syn::Pat::Wild(_) => Some(String::new()),
+                            syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => Some(pi.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    self.3.push((l as *const syn::Local as usize, pos));
+                }
+            }
+            syn::visit::visit_local(self, l);
+        }
+        // A nested fn item is a different body.
+        fn visit_item_fn(&mut self, _: &'x syn::ItemFn) {
+            self.2 = true;
+        }
+    }
+    let mut b = Binds(HashMap::new(), Vec::new(), false, Vec::new());
+    for i in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = i {
+            syn::visit::Visit::visit_pat(&mut b, &pt.pat);
+        }
+    }
+    syn::visit::Visit::visit_block(&mut b, block);
+    let mut out = HashMap::new();
+    let mut tuples = HashMap::new();
+    if b.2 {
+        return (out, tuples); // a body-local fn item: its names are a different scope; refuse the whole body.
+    }
+    let unconsumed = |name: &str| -> Option<Vec<String>> {
+        if b.0.get(name).copied() != Some(1) {
+            return None;
+        }
+        never_consumed_fields(name, block)
+    };
+    for (addr, pos) in &b.3 {
+        let v: Vec<Option<Vec<String>>> = pos
+            .iter()
+            .map(|p| match p.as_deref() {
+                Some("") => Some(Vec::new()),
+                Some(n) => unconsumed(n),
+                None => None,
+            })
+            .collect();
+        tuples.insert(*addr, v);
+    }
+    for (addr, name) in b.1 {
+        if let Some(f) = unconsumed(&name) {
+            out.insert(addr, f);
+        }
+    }
+    (out, tuples)
+}
+
+/// SOUNDNESS R1123/R1124 — `Some(field members read)` when every mention of `name` in `block` is a shared
+/// borrow, std's `drop`, or a field read; `None` on any other mention (a move, `&mut`, a method receiver, a
+/// macro naming it).
+fn never_consumed_fields(name: &str, block: &syn::Block) -> Option<Vec<String>> {
+    {
+        struct V<'n> {
+            name: &'n str,
+            ok: bool,
+            fields: Vec<String>,
+        }
+        impl<'x> syn::visit::Visit<'x> for V<'_> {
+            fn visit_expr(&mut self, e: &'x syn::Expr) {
+                let is_name = |x: &syn::Expr| matches!(x, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(self.name));
+                match e {
+                    syn::Expr::Reference(r) if r.mutability.is_none() && is_name(&r.expr) => return,
+                    syn::Expr::Field(f) if is_name(&f.base) => {
+                        self.fields.push(match &f.member {
+                            syn::Member::Named(i) => i.to_string(),
+                            syn::Member::Unnamed(i) => i.index.to_string(),
+                        });
+                        return;
+                    }
+                    syn::Expr::Call(c) if c.args.len() == 1 && is_name(&c.args[0]) => {
+                        if let syn::Expr::Path(f) = &*c.func {
+                            let w = path_to_string(&f.path);
+                            if matches!(w.as_str(), "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop") {
+                                return;
+                            }
+                        }
+                    }
+                    _ if is_name(e) => {
+                        self.ok = false;
+                        return;
+                    }
+                    _ => {}
+                }
+                syn::visit::visit_expr(self, e);
+            }
+            fn visit_macro(&mut self, m: &'x syn::Macro) {
+                fn mentions(ts: proc_macro2::TokenStream, n: &str) -> bool {
+                    ts.into_iter().any(|t| match t {
+                        proc_macro2::TokenTree::Ident(i) => i == n,
+                        proc_macro2::TokenTree::Group(g) => mentions(g.stream(), n),
+                        _ => false,
+                    })
+                }
+                if mentions(m.tokens.clone(), self.name) {
+                    self.ok = false;
+                }
+            }
+        }
+        let mut v = V { name, ok: true, fields: Vec::new() };
+        syn::visit::Visit::visit_block(&mut v, block);
+        if v.ok {
+            v.fields.sort();
+            v.fields.dedup();
+            return Some(v.fields);
+        }
+    }
+    None
+}
+
 /// SOUNDNESS R1121 — whether the body never CONSUMES parameter `name`: every mention of it is the operand
 /// of a borrow (`&o`, `&mut o`) or the argument of std's `drop`, the body binds no other entity of that
 /// name (a pattern, closure parameter or `let`), and no macro names it. An unused `_o` qualifies.
+/// SOUNDNESS R1129 (closure half) — the leaves a CLOSURE's typed by-value parameter releases when its body
+/// never consumes it (`|_h: H| {}`): the same test `owned_drop_params` applies to a fn parameter. The
+/// collector walks a closure body lexically into its enclosing fn, so the charge lands there, exactly as
+/// every other effect in that body does.
+pub(crate) fn closure_param_releases(c: &syn::ExprClosure, uses: &HashMap<String, String>) -> Vec<String> {
+    let body = syn::Block {
+        brace_token: Default::default(),
+        stmts: vec![syn::Stmt::Expr((*c.body).clone(), None)],
+    };
+    let mut out = Vec::new();
+    for input in &c.inputs {
+        let syn::Pat::Type(pt) = input else { continue };
+        let Some(name) = single_pat_ident(&pt.pat) else { continue };
+        if type_borrows(&pt.ty) || !param_never_consumed(&name, &body) {
+            continue;
+        }
+        let mut leaves = owned_value_leaves(&pt.ty, uses);
+        if let Some((t, false)) = type_path_b(&pt.ty, uses) {
+            leaves.push(t);
+        }
+        for t in leaves {
+            out.push(t.rsplit("::").next().unwrap_or(&t).to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn param_never_consumed(name: &str, block: &syn::Block) -> bool {
     struct V<'n> {
         name: &'n str,
@@ -7844,6 +8196,9 @@ struct EscapeSites<'a> {
     escapes: Vec<(usize, &'a syn::Expr)>,
     /// `let NAME = init` — single-ident binders only (a destructuring binder cannot name the value).
     lets: Vec<(String, &'a syn::Expr)>,
+    /// SOUNDNESS R1122 — names whose SHARED BORROW (`&name`) cannot carry the named value out of this frame
+    /// (see `ref_transparent_names`). Filled once the walk is done; read by `mark_escape`'s `Reference` arm.
+    ref_plain: std::collections::HashSet<String>,
     /// `lhs = rhs`; `Some(name)` for a plain local lvalue, `None` for a field/index/deref lvalue.
     /// R709 — each one carries the pre-order position of the assignment, read only for the `None`
     /// (unconditional) half, which is an escape ROUTE and so has a position of its own.
@@ -7930,6 +8285,7 @@ impl<'a> EscapeSites<'a> {
             roots: Vec::new(),
             escapes: Vec::new(),
             lets: Vec::new(),
+            ref_plain: std::collections::HashSet::new(),
             assigns: Vec::new(),
             method_args: Vec::new(),
             route_inside: HashMap::new(),
@@ -7955,7 +8311,7 @@ impl<'a> EscapeSites<'a> {
     /// never an over-veto. Its operand spine is not opened (the operand lives in a re-parsed tree whose
     /// addresses the spine cannot hold), so `interior` is empty.
     fn note_macro_try_exit(&mut self, m: &syn::ExprMacro) {
-        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
+        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None, ref_plain: None };
         if !macro_has_exit_try(m, &lens, 0) {
             return;
         }
@@ -8146,7 +8502,7 @@ impl<'a> EscapeSites<'a> {
                 };
                 let syn::Expr::Macro(em) = &inner_m else { unreachable!() };
                 let inner = {
-                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
+                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None, ref_plain: None };
                     macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                 };
                 let iords = macro_reading_ordinals(&inner);
@@ -8188,7 +8544,7 @@ impl<'a> EscapeSites<'a> {
     /// One macro invocation, read ONCE for both halves of this walk.
     fn note_macro_reading(&mut self, m: &syn::ExprMacro) {
         let reading = {
-            let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
+            let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None, ref_plain: None };
             macro_reading(m, &lens, &|n| self.macro_expanding.contains(n))
         };
         self.note_reading_sites(&reading, m as *const syn::ExprMacro as usize);
@@ -8242,7 +8598,7 @@ impl<'a> EscapeSites<'a> {
         let mut inner_spine = std::collections::HashSet::new();
         if on_spine.iter().any(|b| *b) {
             for e in &exprs {
-                value_spine_addrs(e, &mut inner_spine);
+                value_spine_addrs(e, &mut inner_spine, (self.uses, self.returns, &self.call_shadow));
             }
         }
         let mut n = 0usize;
@@ -8491,7 +8847,7 @@ impl<'a> EscapeSites<'a> {
                 let mut inner = std::collections::HashSet::new();
                 if on_spine.iter().any(|b| *b) {
                     for x in &exprs {
-                        value_spine_addrs(x, &mut inner);
+                        value_spine_addrs(x, &mut inner, (self.uses, self.returns, &self.call_shadow));
                     }
                 }
                 for x in &exprs {
@@ -8623,7 +8979,7 @@ impl<'a> EscapeSites<'a> {
             let mut inner = std::collections::HashSet::new();
             if on_spine.iter().any(|x| *x) {
                 if let Some(t) = tail_expr_of(b) {
-                    value_spine_addrs(t, &mut inner);
+                    value_spine_addrs(t, &mut inner, (self.uses, self.returns, &self.call_shadow));
                 }
             }
             self.note_opaque_block(b, on_spine, &inner);
@@ -8787,7 +9143,7 @@ impl<'a> EscapeSites<'a> {
                     let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                     let syn::Expr::Macro(em) = &host else { unreachable!() };
                     let reading = {
-                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
+                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None, ref_plain: None };
                         macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                     };
                     self.note_reading_sites(&reading, m as *const syn::StmtMacro as usize);
@@ -8828,7 +9184,7 @@ impl<'a> EscapeSites<'a> {
     /// cannot be typed (`.map(|_| mk())` in an inline closure). Not taken here; stated, and the
     /// over-report stands as it shipped.
     fn note_nested_body(&mut self, b: &'a syn::Block) {
-        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[], false, None);
+        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[], false, None, &[]);
         for (l, v) in inner_sites {
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 eprintln!("R300NESTED {l}"); // §E1 REACH COUNTER — the sites this change adds
@@ -8952,7 +9308,7 @@ impl<'a> EscapeSites<'a> {
                 self.try_exits.push(e);
                 // R194 — open this `?`'s operand scope for the child walk below.
                 let mut spine = std::collections::HashSet::new();
-                value_spine_addrs(&t.expr, &mut spine);
+                value_spine_addrs(&t.expr, &mut spine, (self.uses, self.returns, &self.call_shadow));
                 self.open_tries.push((self.try_exits.len() - 1, spine));
             }
             syn::Expr::Assign(a) => match &*a.left {
@@ -9008,10 +9364,19 @@ impl<'a> EscapeSites<'a> {
                 self.skip_sites.insert(&*c.func as *const syn::Expr as usize);
                 if let syn::Expr::Path(p) = &*c.func {
                     let full = path_to_string(&p.path);
+                    // SOUNDNESS R1125 — `Box::leak` / `Box::into_raw` (and `Rc`/`Arc::into_raw`) are the same
+                    // contract: the allocation is handed out of Rust's ownership and its `Drop` does not run in
+                    // this frame. `Box::leak(Box::new(RefCell::new(G::new()))).borrow()` charged `G::drop`
+                    // (EXECUTED: 0 drops). Matched on the written `Type::fn` pair, so a local `leak` fn does not
+                    // land; a `std::boxed::Box::leak` spelling does.
+                    let leaks = ["Box::leak", "Box::into_raw", "Rc::into_raw", "Arc::into_raw"]
+                        .iter()
+                        .any(|l| full == *l || full.ends_with(&format!("::{l}")));
                     let suppresses = full == "forget"
                         || full.ends_with("mem::forget")
                         || full == "ManuallyDrop::new"
-                        || full.ends_with("::ManuallyDrop::new");
+                        || full.ends_with("::ManuallyDrop::new")
+                        || leaks;
                     if suppresses {
                         // An unconditional ESCAPE ROUTE, not an exit of this function — see `escapes`'s
                         // doc comment. Must NOT go through `roots`: it would then be intersected against
@@ -9231,6 +9596,136 @@ impl<'a> EscapeSites<'a> {
 
 /// Mark one escaping expression: record any construction leaf it builds, any local NAME it hands
 /// out, and recurse through the value positions that carry a value outward.
+/// SOUNDNESS R1122 — the type names through which a value's destructor-bearing contents can be SHARED or
+/// MOVED OUT behind a shared borrow: a refcount (`Rc::clone(&rc)` keeps the pointee alive after `rc` dies)
+/// or an interior-mutability cell (`cell.borrow_mut().take()`, `Cell::take`, `Mutex`). Matched on any ident
+/// in the tokens, so a third-party `triomphe::Arc` or `parking_lot::Mutex` reads the same. A DENYLIST of the
+/// narrowing in `mark_escape`: a name on it keeps the shipped escape (silence), never a new charge.
+fn is_shared_owner_ident(s: &str) -> bool {
+    matches!(
+        s,
+        "Rc" | "Arc" | "Weak" | "Cell" | "RefCell" | "UnsafeCell" | "SyncUnsafeCell" | "OnceCell" | "OnceLock"
+            | "LazyCell" | "LazyLock" | "Lazy" | "Mutex" | "RwLock" | "ReentrantMutex" | "AtomicPtr" | "ArcSwap"
+            | "Gc"
+    )
+}
+
+fn tokens_mention_shared_owner(ts: proc_macro2::TokenStream) -> bool {
+    ts.into_iter().any(|t| match t {
+        proc_macro2::TokenTree::Ident(i) => is_shared_owner_ident(&i.to_string()),
+        proc_macro2::TokenTree::Group(g) => tokens_mention_shared_owner(g.stream()),
+        _ => false,
+    })
+}
+
+struct SharedOwnerVisit(bool);
+impl<'x> syn::visit::Visit<'x> for SharedOwnerVisit {
+    fn visit_ident(&mut self, i: &'x syn::Ident) {
+        if is_shared_owner_ident(&i.to_string()) {
+            self.0 = true;
+        }
+    }
+    fn visit_macro(&mut self, m: &'x syn::Macro) {
+        if tokens_mention_shared_owner(m.tokens.clone()) {
+            self.0 = true;
+        }
+        syn::visit::visit_macro(self, m);
+    }
+}
+
+pub(crate) fn type_mentions_shared_owner(t: &syn::Type) -> bool {
+    let mut v = SharedOwnerVisit(false);
+    syn::visit::Visit::visit_type(&mut v, t);
+    v.0
+}
+
+fn expr_mentions_shared_owner(e: &syn::Expr) -> bool {
+    let mut v = SharedOwnerVisit(false);
+    syn::visit::Visit::visit_expr(&mut v, e);
+    v.0
+}
+
+/// SOUNDNESS R1122 — `init` builds a value this frame then OWNS OUTRIGHT: a struct literal, a tuple-struct /
+/// `Type::assoc(..)` call, or a local factory whose recorded return is an owned (not borrowed) local type —
+/// and nowhere in the expression, nor in any same-leaf factory's declared return (`ret_shared_key`), is a
+/// shared-ownership or interior-mutability type. Anything else (a method call, a moved name, a macro, a
+/// dependency or std call) answers `false`, i.e. keeps the shipped escape.
+fn plain_owned_init(init: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnIndex) -> bool {
+    let init = peel_paren_group(init);
+    if expr_mentions_shared_owner(init) {
+        return false;
+    }
+    match init {
+        syn::Expr::Struct(_) => ctor_leaf_of_expr(init, uses, &FieldIndex::default(), returns).is_some(),
+        syn::Expr::Call(c) => {
+            let syn::Expr::Path(p) = &*c.func else { return false };
+            if p.qself.is_some() {
+                return false;
+            }
+            let written = path_to_string(&p.path);
+            let leaf = written.rsplit("::").next().unwrap_or(&written);
+            if returns.contains_key(&crate::model::ret_shared_key(leaf)) {
+                return false;
+            }
+            ctor_leaf_from_call_path(&written, uses).is_some()
+                || ctor_leaf_from_call_returns(&expand(&written, uses), returns).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R1122 — the names a shared borrow of which is NOT an escape route (`mark_escape`): a `let`
+/// whose every binding of that name is a `plain_owned_init`, or a by-value parameter `plain_params` lists
+/// that the body never rebinds. A name bound by ANY other binder (a pattern, a closure parameter, a `let`
+/// with no initialiser or a non-plain one) is left out — the scope-less key cannot tell two entities apart.
+fn ref_transparent_names(
+    block: &syn::Block,
+    lets: &[(String, &syn::Expr)],
+    plain_params: &[String],
+    uses: &HashMap<String, String>,
+    returns: &ReturnIndex,
+) -> std::collections::HashSet<String> {
+    struct Count(HashMap<String, usize>);
+    impl<'x> syn::visit::Visit<'x> for Count {
+        fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+            *self.0.entry(i.ident.to_string()).or_insert(0) += 1;
+            syn::visit::visit_pat_ident(self, i);
+        }
+    }
+    let mut binds = Count(HashMap::new());
+    syn::visit::Visit::visit_block(&mut binds, block);
+    let mut plain_lets: HashMap<&str, usize> = HashMap::new();
+    let mut bad: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (n, init) in lets {
+        if plain_owned_init(init, uses, returns) {
+            *plain_lets.entry(n.as_str()).or_insert(0) += 1;
+        } else {
+            bad.insert(n.as_str());
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for (n, k) in plain_lets {
+        if !bad.contains(n) && binds.0.get(n).copied().unwrap_or(0) == k && !plain_params.iter().any(|p| p == n) {
+            out.insert(n.to_string());
+        }
+    }
+    for p in plain_params {
+        if !binds.0.contains_key(p.as_str()) {
+            out.insert(p.clone());
+        }
+    }
+    out
+}
+
+/// SOUNDNESS R1122 — a by-value parameter whose declared type OWNS its value plainly: no reference or raw
+/// pointer anywhere in it, no shared-ownership / interior-mutability type (`type_mentions_shared_owner`), and no
+/// `impl`/`dyn`. Its shared borrow cannot carry it out of the callee.
+pub(crate) fn plain_owned_param(ty: &syn::Type) -> bool {
+    !type_borrows(ty)
+        && !matches!(ty, syn::Type::ImplTrait(_) | syn::Type::TraitObject(_))
+        && !type_mentions_shared_owner(ty)
+}
+
 fn mark_escape(
     e: &syn::Expr,
     lens: &MacroLens<'_>,
@@ -9385,6 +9880,34 @@ fn mark_escape(
     // the intersected `names`). Every OTHER value-carrying position handled by `for_each_value_child`
     // below (`Struct`/`Tuple`/`Ok(x)`/…) is unconditional once its parent executes, so union-across-
     // children stays correct there too — `If`/`Match` are the only node kinds needing a NAME/leaf split.
+    // SOUNDNESS R1122 — A SHARED BORROW OF A VALUE THIS FRAME OWNS IS NOT A ROUTE OUT OF IT. `Reference` is a
+    // pass-through in `for_each_value_child`, so a tail `size_of_val(&h)` / `peek(&h)` / `ptr::eq(&h, &h)`
+    // marked `h` escaping and its construction (or its by-value parameter) was suppressed — EXECUTED: one
+    // `H::drop` in that frame each, ABSENT, `deny Fs` exit 0. Borrowck forbids any value derived from the
+    // borrow to outlive `h`, which dies at this frame's end; so what the call returns cannot BE `h`. Two
+    // ways the call CAN still hand `h`'s destructor-bearing contents out, and both keep the old escape:
+    //   · `&mut h` — `mem::take`/`replace`/`swap` move the contents out (executed: 0 drops). Not narrowed.
+    //   · a shared borrow of SHARED OWNERSHIP or INTERIOR MUTABILITY — `Rc::clone(&rc)` keeps the pointee
+    //     alive, `take_it(&cell)` moves out of a `RefCell` (executed: 0 drops). `ref_transparent_names`
+    //     admits a name only when every binding of it is a plain construction / plain-owned parameter
+    //     that mentions none of those types, and a temporary only under the same test.
+    // Not inside an escaping closure: a `move` closure CAPTURES `h` and carries it away (`Marks::in_closure`).
+    if let (Some(plain), syn::Expr::Reference(r)) = (lens.ref_plain, e) {
+        if !m.in_closure && r.mutability.is_none() {
+            let inner = peel_paren_group(&r.expr);
+            let transparent = match inner {
+                syn::Expr::Path(p) => p.qself.is_none() && p.path.get_ident().is_some_and(|id| plain.contains(&id.to_string())),
+                syn::Expr::Struct(_) | syn::Expr::Call(_) => plain_owned_init(inner, uses, returns),
+                _ => false,
+            };
+            if transparent {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R1122REF"); // §E1 REACH COUNTER — the changed branch only
+                }
+                return;
+            }
+        }
+    }
     // SOUNDNESS R209(b) — `f()` of a let-bound closure whose uses are all calls: its value is the body's.
     if let (Some(inv), syn::Expr::Call(c)) = (lens.invoked, e) {
         if let syn::Expr::Path(p) = &*c.func {
@@ -9453,6 +9976,46 @@ fn mark_escape(
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 if let syn::Expr::Path(p) = &*c.func {
                     eprintln!("R200UNIT {}", path_to_string(&p.path)); // §E1 REACH COUNTER
+                }
+            }
+            return;
+        }
+        // SOUNDNESS R1129 (std combinators) — `ok_or`/`unwrap_or`/`and`/`or`/`xor`/`get_or_insert`/`map_or`'s
+        // DEFAULT carry their argument out on ONE outcome and DROP it on the other (`opt(n).ok_or(H::new())?`
+        // on `Some`, `o.unwrap_or(H::new())` on `Some`, `gen(n).and(Ok(H::new()))?` on `Err` — EXECUTED: 1
+        // drop each, ABSENT). An escape has to hold on EVERY path, so the argument is no value child here and
+        // is charged as a may-drop, the same reading an `if`/`else` that escapes on one arm gets. Matched by
+        // NAME (the escape walk cannot type a receiver): a local method of one of these names that always
+        // keeps its argument is over-charged — the safe direction.
+        syn::Expr::MethodCall(mc)
+            if !m.in_closure
+                && matches!(
+                    mc.method.to_string().as_str(),
+                    "ok_or" | "unwrap_or" | "and" | "or" | "xor" | "get_or_insert" | "map_or"
+                ) =>
+        {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R1129STDALT {}", mc.method); // §E1 REACH COUNTER
+            }
+            // `map_or(default, f)`: only the default is conditional; `f`'s body is a closure route as before.
+            if mc.method == "map_or" {
+                for a in mc.args.iter().skip(1) {
+                    mark_escape(a, lens, guard, uses, fields, returns, m);
+                }
+            }
+            return;
+        }
+        // SOUNDNESS R1129 — an argument at an OPAQUE parameter position cannot come back out in the call's
+        // value (the callee's signature names its type nowhere else), so it is no value child of the call:
+        // `eat_gen_r(H::new(), n)` in tail position drops the `H` in the callee and its row cannot say so.
+        syn::Expr::Call(c) if !m.in_closure && !opaque_call_positions(c, uses, returns, lens.shadow).is_empty() => {
+            let opaque = opaque_call_positions(c, uses, returns, lens.shadow);
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R1129OPAQUE"); // §E1 REACH COUNTER
+            }
+            for (i, a) in c.args.iter().enumerate() {
+                if !opaque.contains(&i) {
+                    mark_escape(a, lens, guard, uses, fields, returns, m);
                 }
             }
             return;
@@ -9597,7 +10160,17 @@ fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) 
         syn::Expr::Paren(p) => f(&p.expr),
         syn::Expr::Group(g) => f(&g.expr),
         syn::Expr::Try(t) => f(&t.expr),
-        syn::Expr::Await(a) => f(&a.base),
+        // SOUNDNESS R1127 — an AWAITED `async { .. }` block runs to completion right here and its value is its
+        // TAIL: `async fn f() -> H { async { H::new() }.await }` hands the `H` to the caller (EXECUTED: 0 drops
+        // here) and was charged because this walk stopped at the block. Its STATEMENTS are not value positions
+        // (`async { let _g = H::new(); 1 }.await` still drops here). Only when awaited: a RETURNED async block
+        // is a future whose `.await`s run later, and following its tail let the `Await` pass-through below
+        // certify a consumed `JoinHandle` as carried out (async-std `OpenOptions::open`, measured) — so that
+        // spelling keeps the shipped reading.
+        syn::Expr::Await(a) => match peel_paren_group(&a.base) {
+            syn::Expr::Async(b) => tail_expr_of(&b.block).into_iter().for_each(&mut *f),
+            other => f(other),
+        },
         syn::Expr::Reference(r) => f(&r.expr),
         syn::Expr::Unary(u) => f(&u.expr),
         syn::Expr::Cast(c) => f(&c.expr),
@@ -9648,37 +10221,50 @@ fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) 
 /// The listed shapes are exactly the ones the audited corpus removals rely on: `Ok(Repr::new(s)?)`
 /// (compact_str), `Ok(Self { inner: RsaPrivateKey::new(..)? })` (rsa, rusqlite), `Ok((Async::new(
 /// stream)?, addr))` (async-io), `let raw = RawBatchCursor::generic_new(..)?` (mongodb, rdkafka).
-fn value_spine_addrs(e: &syn::Expr, out: &mut std::collections::HashSet<usize>) {
+type SpineCx<'c> = (&'c HashMap<String, String>, &'c ReturnIndex, &'c std::collections::HashSet<String>);
+
+fn value_spine_addrs(e: &syn::Expr, out: &mut std::collections::HashSet<usize>, cx: SpineCx<'_>) {
     if !out.insert(e as *const syn::Expr as usize) {
         return; // already seen — a shared address cannot recur, but this keeps the walk total
     }
     match e {
-        syn::Expr::Paren(p) => value_spine_addrs(&p.expr, out),
-        syn::Expr::Group(g) => value_spine_addrs(&g.expr, out),
+        syn::Expr::Paren(p) => value_spine_addrs(&p.expr, out, cx),
+        syn::Expr::Group(g) => value_spine_addrs(&g.expr, out, cx),
         // `(x?)?` / `X::new(..).await?` — the inner value is the outer operand's value.
-        syn::Expr::Try(t) => value_spine_addrs(&t.expr, out),
-        syn::Expr::Await(a) => value_spine_addrs(&a.base, out),
+        syn::Expr::Try(t) => value_spine_addrs(&t.expr, out, cx),
+        // R1127 — an awaited `async { .. }`'s value is its tail; its statements stay interior (`attack_async_inline`).
+        syn::Expr::Await(a) => match peel_paren_group(&a.base) {
+            syn::Expr::Async(b) => tail_expr_of(&b.block).into_iter().for_each(|t| value_spine_addrs(t, out, cx)),
+            other => value_spine_addrs(other, out, cx),
+        },
         // A block's value is its TAIL; its statements are not on the spine (see above).
-        syn::Expr::Block(b) => tail_expr_of(&b.block).into_iter().for_each(|t| value_spine_addrs(t, out)),
-        syn::Expr::Unsafe(u) => tail_expr_of(&u.block).into_iter().for_each(|t| value_spine_addrs(t, out)),
+        syn::Expr::Block(b) => tail_expr_of(&b.block).into_iter().for_each(|t| value_spine_addrs(t, out, cx)),
+        syn::Expr::Unsafe(u) => tail_expr_of(&u.block).into_iter().for_each(|t| value_spine_addrs(t, out, cx)),
+
         // A FORK: exactly one arm produced the operand's value, and whichever it was, an `Err` from it
         // constructed nothing. Every arm is therefore exempt, unlike `for_each_value_child`, which
         // refuses forks because it is asking the opposite question ("does this escape on EVERY path").
         syn::Expr::If(i) => {
-            tail_expr_of(&i.then_branch).into_iter().for_each(|t| value_spine_addrs(t, out));
+            tail_expr_of(&i.then_branch).into_iter().for_each(|t| value_spine_addrs(t, out, cx));
             if let Some((_, e)) = &i.else_branch {
-                value_spine_addrs(e, out);
+                value_spine_addrs(e, out, cx);
             }
         }
-        syn::Expr::Match(m) => m.arms.iter().for_each(|a| value_spine_addrs(&a.body, out)),
+        syn::Expr::Match(m) => m.arms.iter().for_each(|a| value_spine_addrs(&a.body, out, cx)),
         // A by-value ARGUMENT is moved into the callee and dies in ITS frame. The callee PATH is not a
         // construction site at all (`skip_sites`), so it is not listed.
-        syn::Expr::Call(c) => c.args.iter().for_each(|a| value_spine_addrs(a, out)),
-        syn::Expr::MethodCall(m) => m.args.iter().for_each(|a| value_spine_addrs(a, out)),
+        // SOUNDNESS R1129 — EXCEPT an argument the callee cannot carry: a parameter OPAQUE to it (`T`/`impl
+        // Trait` named nowhere else in its signature) is dropped there, but its row cannot say so, so the
+        // charge has to stay here. `eat_gen_r(H::new(), n)?` — EXECUTED 1 drop, ABSENT before.
+        syn::Expr::Call(c) => {
+            let opaque = opaque_call_positions(c, cx.0, cx.1, cx.2);
+            c.args.iter().enumerate().filter(|(i, _)| !opaque.contains(i)).for_each(|(_, a)| value_spine_addrs(a, out, cx))
+        }
+        syn::Expr::MethodCall(m) => m.args.iter().for_each(|a| value_spine_addrs(a, out, cx)),
         // Pure value composition: the parts move into the whole, which is the operand's value.
-        syn::Expr::Tuple(t) => t.elems.iter().for_each(|x| value_spine_addrs(x, out)),
-        syn::Expr::Array(a) => a.elems.iter().for_each(|x| value_spine_addrs(x, out)),
-        syn::Expr::Struct(st) => st.fields.iter().for_each(|f| value_spine_addrs(&f.expr, out)),
+        syn::Expr::Tuple(t) => t.elems.iter().for_each(|x| value_spine_addrs(x, out, cx)),
+        syn::Expr::Array(a) => a.elems.iter().for_each(|x| value_spine_addrs(x, out, cx)),
+        syn::Expr::Struct(st) => st.fields.iter().for_each(|f| value_spine_addrs(&f.expr, out, cx)),
         _ => {}
     }
 }

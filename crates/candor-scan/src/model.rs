@@ -517,6 +517,50 @@ pub(crate) fn ret_borrow_key(fn_leaf: &str) -> String {
 /// absence cannot say "no value-returning definition"; this key can.
 pub(crate) const RET_VALUE: &str = "<retvalue>";
 
+/// SOUNDNESS R1122 — "some fn with this leaf declares a return that mentions a shared-ownership or
+/// interior-mutability type" (`lang::type_mentions_shared_owner`). A constant value, filed by ANY such definition,
+/// so it cannot conflict: a `let x = mk(); peek(&x)` is read as a plain owned value only when no `mk` in the
+/// crate could hand out an `Rc`/`RefCell`-shaped one.
+/// SOUNDNESS R1123 — the OWNED drop-relevant leaves a fn's declared return hands its caller, as an encoding
+/// (`lang::owned_result_encoding`): `V` + comma-joined leaves for a non-tuple, `T` + `|`-joined per-position
+/// leaf lists for a tuple, `""` for a unit / borrowed / shared-ownership / leafless return. Filed for EVERY
+/// fn of the leaf under the index's conflict rule, so two same-leaf fns that disagree withdraw it. Read only
+/// by the collector's RELEASED-RESULT rule (a discarded call result, a never-consumed binding).
+pub(crate) const RET_OWNED_LEAVES: &str = "<retownedleaves>";
+
+pub(crate) fn ret_owned_key(fn_leaf: &str) -> String {
+    format!("{RET_OWNED_LEAVES}{fn_leaf}")
+}
+
+/// SOUNDNESS R1123 — `ret_owned_key`'s impl-qualified twin, for a METHOD whose receiver type the collector
+/// resolved (`s.take()` over `impl Slot { fn take(&mut self) -> G }`).
+pub(crate) fn impl_owned_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_OWNED_LEAVES}{type_leaf}\u{1f}{fn_leaf}")
+}
+
+/// SOUNDNESS R1129 — the argument positions of a FREE fn whose parameter is OPAQUE to it: a bare generic
+/// `T` (or an `impl Trait`) by value, whose type parameter is named nowhere else in the signature. The callee
+/// cannot name what it drops there (`fn eat<T>(_t: T, n: u32) -> Result<u32, ()>`), so its own row carries no
+/// charge, and the argument cannot travel back out through its return or another parameter. Comma-joined,
+/// `""` for none; filed for every fn of the leaf under the conflict rule.
+pub(crate) const PARAM_OPAQUE: &str = "<paramopaque>";
+
+pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
+    format!("{PARAM_OPAQUE}{fn_leaf}")
+}
+
+/// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
+/// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
+pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {
+    format!("<rhs>{trait_leaf}\u{1f}{ty_leaf}")
+}
+
+pub(crate) const RET_SHARED: &str = "<retshared>";
+
+pub(crate) fn ret_shared_key(fn_leaf: &str) -> String {
+    format!("{RET_SHARED}{fn_leaf}")
+}
+
 pub(crate) fn ret_value_key(fn_leaf: &str) -> String {
     format!("{RET_VALUE}{fn_leaf}")
 }

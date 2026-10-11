@@ -11,6 +11,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: values that provably die in a frame are charged there (SOUNDNESS R1122, R1123, R1124,
+  R1129).** A SHARED borrow of a value the frame owns is no longer read as carrying it out
+  (`let h = H::new(); std::mem::size_of_val(&h)`, `peek(&h)`, `size_of_val(&H::new())`); a borrow of an
+  `Rc`/`Arc`/`RefCell`/lock-shaped value, and every `&mut` borrow, keep the old reading. A call result that
+  is DISCARDED (`mk_pair();`, `let _ = s.take();`), bound and never consumed (`let p = mk_pair(); p.1`,
+  `let _x: H = src.into()`), left unbound in a tuple pattern, or projected out of a temporary
+  (`mk_pair().1`) now runs its owned leaves' destructors here — tuple, `Vec`, `Cow` and owned-method
+  results included. An argument passed at a generic / `impl Trait` parameter that the callee's signature
+  names nowhere else stays charged at a `?` (`eat(H::new(), n)?`), as does the default of `ok_or` /
+  `unwrap_or` / `and` / `or` / `map_or`, and a typed by-value closure parameter its body never consumes
+  (`let f = |_h: H| {}; f(H::new())`). Every cell EXECUTED and read ABSENT before; `deny Fs` now exits 1.
+  The hand-off gate's known-open register is empty and the lv fixture states no silence.
+- **candor-scan: four over-charges removed (SOUNDNESS R1125, R1127, R1128).** `Box::leak` / `Box::into_raw`
+  (and `Rc`/`Arc::into_raw`) suppress the destructor like `mem::forget`; an awaited `async { .. }` block's
+  tail is its value (`async { H::new() }.await` returned is not dropped here); an operator impl with a
+  foreign `Rhs` (`impl PartialEq<Value> for String`) is no longer what `String == String` runs, and a
+  `#[derive(PartialEq)]` beside such an impl is now reached (it was silent). Each removal was executed at 0.
+
 - ⚠ **candor-scan: a comparison or hash reaches the component's, key's and field's own impl (SOUNDNESS
   R1111).** A tuple's `==`/`<` runs each component's `PartialEq`/`PartialOrd`, a `HashMap`/`HashSet`
   comparison hashes and compares every key, and std's algorithms and collections run the element's or

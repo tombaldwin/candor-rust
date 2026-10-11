@@ -2852,7 +2852,12 @@ pub(crate) fn fninfo(
                 }
             }
         }
+        let released = crate::lang::released_let_bindings_full(sig, block);
         crate::collector::AssignDrop {
+            released_lets: released.0,
+            released_tuple_lets: released.1,
+            drop_types: elems.drop_types,
+            binop_rhs: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
             field_borrows: elems.field_borrows,
@@ -2883,8 +2888,17 @@ pub(crate) fn fninfo(
         syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "Result" | "Option")
             && matches!(s.arguments, syn::PathArguments::AngleBracketed(_)))));
     let future_impls: &[String] = traits.impls.get("Future").map(|v| v.as_slice()).unwrap_or(&[]);
+    // SOUNDNESS R1122 — by-value parameters whose shared borrow cannot carry them out (`plain_owned_param`).
+    let plain_params: Vec<String> = sig
+        .inputs
+        .iter()
+        .filter_map(|i| match i {
+            syn::FnArg::Typed(pt) if crate::lang::plain_owned_param(&pt.ty) => crate::lang::single_pat_ident(&pt.pat),
+            _ => None,
+        })
+        .collect();
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros, &param_names, ret_short,
-        crate::lang::ret_type_drop_free(&sig.output, uses).then_some(future_impls));
+        crate::lang::ret_type_drop_free(&sig.output, uses).then_some(future_impls), &plain_params);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
@@ -3274,6 +3288,48 @@ pub(crate) fn record_return(
     let unit_ty = matches!(&sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::Tuple(tt) if tt.elems.is_empty()));
     if !unit_ty && matches!(&sig.output, syn::ReturnType::Type(..)) {
         rets.insert(crate::model::ret_value_key(&sig.ident.to_string()), Some("1".to_string()));
+    }
+    // SOUNDNESS R1123 — the owned drop-relevant leaves the return hands the caller (`ret_owned_key`). Filed for
+    // EVERY fn of the leaf, unit included (as `""`), so a same-leaf fn that disagrees withdraws the fact.
+    {
+        let mut generics: std::collections::HashSet<String> = sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|g| match g {
+                syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        if let Some((_, ig)) = impl_key {
+            generics.extend(ig.iter().cloned());
+        }
+        let enc = match &sig.output {
+            syn::ReturnType::Type(_, t) => crate::lang::owned_result_encoding(t, uses, &generics, self_ty),
+            syn::ReturnType::Default => String::new(),
+        };
+        file_decl_fact(rets, crate::model::ret_owned_key(&sig.ident.to_string()), enc.clone());
+        if let Some((impl_ty, _)) = impl_key {
+            file_decl_fact(rets, crate::model::impl_owned_key(impl_ty, &sig.ident.to_string()), enc);
+        }
+    }
+    // SOUNDNESS R1129 — see `param_opaque_key`. Free fns only: a method's argument list is offset by its receiver.
+    {
+        let has_recv = sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Receiver(_)));
+        let enc = if has_recv || impl_key.is_some() || self_ty.is_some() {
+            None
+        } else {
+            Some(crate::lang::opaque_param_positions(sig).iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","))
+        };
+        if let Some(e) = enc {
+            file_decl_fact(rets, crate::model::param_opaque_key(&sig.ident.to_string()), e);
+        }
+    }
+    // SOUNDNESS R1122 — see `ret_shared_key`.
+    if let syn::ReturnType::Type(_, t) = &sig.output {
+        if crate::lang::type_mentions_shared_owner(t) {
+            rets.insert(crate::model::ret_shared_key(&sig.ident.to_string()), Some("1".to_string()));
+        }
     }
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
@@ -3825,6 +3881,33 @@ pub(crate) fn collect_decls(
         m
     });
     let uses_ty: &HashMap<String, String> = uses_ty_owned.as_ref().unwrap_or(&*uses);
+    // SOUNDNESS R1128 — an operator impl a MACRO generates (`forward_all_binop_to_ref_ref!(impl Rem for BigInt,
+    // rem)`, num-bigint) has no `impl` item this pass can read its `Rhs` from, so a refusal keyed on the
+    // visible impls alone would refuse the edge a macro-made `Rem<BigInt>` justifies. Any item-position macro
+    // whose tokens name an operator trait files `*` (any `Rhs`) for every type-like ident beside it.
+    for it in items {
+        let syn::Item::Macro(im) = it else { continue };
+        fn idents(ts: proc_macro2::TokenStream, out: &mut Vec<String>) {
+            for t in ts {
+                match t {
+                    proc_macro2::TokenTree::Ident(i) => out.push(i.to_string()),
+                    proc_macro2::TokenTree::Group(g) => idents(g.stream(), out),
+                    _ => {}
+                }
+            }
+        }
+        let mut ids = Vec::new();
+        idents(im.mac.tokens.clone(), &mut ids);
+        const OPS: &[&str] = &["PartialEq", "PartialOrd", "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr"];
+        for tr in ids.iter().filter(|i| OPS.contains(&i.as_str())) {
+            for ty in ids.iter().filter(|i| i.chars().next().is_some_and(|c| c.is_uppercase()) && !OPS.contains(&i.as_str())) {
+                let k = crate::model::impl_rhs_key(tr, ty);
+                if !matches!(rets.get(&k), Some(None)) {
+                    rets.insert(k, Some("*".to_string()));
+                }
+            }
+        }
+    }
     for it in items {
         // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
         // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be
@@ -4600,13 +4683,69 @@ pub(crate) fn collect_decls(
                         }
                     }
                 }
+                if let Some((_, tr, _)) = &im.trait_ {
+                    if let Some(leaf) = tr.segments.last() {
+                        // SOUNDNESS R1128 — an operator trait's written `Rhs` (`model::impl_rhs_key`), keyed by the
+                        // self type with REFERENCES PEELED: `impl Rem<&BigInt> for &BigInt` is the `BigInt % BigInt`
+                        // impl, and leaving it out (its own unit is not even `BigInt::rem`) read every `a % b` over
+                        // BigInt as having only the scalar `Rhs`es — a real edge refused (num-bigint, measured).
+                        let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
+                        let peeled_self = match crate::lang::peel_ty_refs(&im.self_ty) {
+                            syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
+                            _ => None,
+                        };
+                        if let (Some(ty), true) = (peeled_self.as_ref(), matches!(key.as_str(), "PartialEq" | "PartialOrd" | "Add" | "Sub" | "Mul" | "Div" | "Rem"
+                            | "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr"))
+                        {
+                            let tyl = ty.rsplit("::").next().unwrap_or(ty).to_string();
+                            let rhs = match &leaf.arguments {
+                                syn::PathArguments::AngleBracketed(a) => a.args.iter().find_map(|g| match g {
+                                    syn::GenericArgument::Type(t) => Some(t),
+                                    _ => None,
+                                }),
+                                _ => None,
+                            };
+                            let r = match rhs {
+                                None => "Self".to_string(),
+                                Some(t) => {
+                                    let t = crate::lang::peel_ty_refs(t);
+                                    match t {
+                                        syn::Type::Path(p) if p.qself.is_none() => {
+                                            let l = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                                            let generic = p.path.get_ident().is_some_and(|id| im.generics.params.iter().any(|g|
+                                                matches!(g, syn::GenericParam::Type(gt) if &gt.ident == id)));
+                                            if generic { "*".to_string() } else if l == "Self" || l == tyl { "Self".to_string() } else { l }
+                                        }
+                                        _ => "*".to_string(),
+                                    }
+                                }
+                            };
+                            // Filed in `rets` (a string fact), NOT `trait_impls`, whose every key is read as a trait
+                            // name by the CHA and local-type passes. One file unions its own impls; a second file's
+                            // different set withdraws the key at the merge, which reads as today's edge.
+                            let k = crate::model::impl_rhs_key(&key, &tyl);
+                            let mut set: Vec<String> = match rets.get(&k) {
+                                Some(Some(v)) => v.split(',').map(str::to_string).collect(),
+                                _ => Vec::new(),
+                            };
+                            if !set.contains(&r) {
+                                set.push(r);
+                                set.sort();
+                            }
+                            if !matches!(rets.get(&k), Some(None)) {
+                                rets.insert(k, Some(set.join(",")));
+                            }
+                        }
+                    }
+                }
                 // `impl Trait for Type` — a CHA edge from the trait leaf to the implementing type.
                 if let (Some((_, tr, _)), Some(ty)) = (&im.trait_, &self_ty) {
                     if let Some(leaf) = tr.segments.last() {
                         // SOUNDNESS R828 — keyed by the trait's REAL leaf: a renamed import
                         // (`use super::T10 as Renamed; impl Renamed for M10`) is filed under `T10`.
                         let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
-                        trait_impls.entry(key).or_default().push(ty.clone());
+                        trait_impls.entry(key.clone()).or_default().push(ty.clone());
+
                         // A LOCAL `impl Drop for Type` — its `drop` body runs at scope exit, an implicit
                         // edge the syntactic call graph doesn't otherwise model. Record the type leaf so a
                         // fn that BINDS a value of this type inherits the (already-scanned) `Type::drop`
