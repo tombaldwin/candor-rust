@@ -7279,6 +7279,126 @@ pub(crate) fn type_borrows(ty: &syn::Type) -> bool {
     v.0
 }
 
+/// SOUNDNESS R1121 — the type leaves a BY-VALUE value of type `ty` OWNS, i.e. whose destructors run when
+/// it is dropped. `type_path_b` answers one leaf and stops at a std wrapper (`Option<H>` -> `Option`), so
+/// `fn eat(o: Option<H>) {}` — which really runs `H::drop` (executed) — was ABSENT, and so was every
+/// caller that relied on inheriting it (`eat_opt_r(Some(H::new()), n)?`, where R194 exempts the by-value
+/// argument from the caller precisely because the callee is supposed to carry the charge).
+///
+/// Descends: a TUPLE's and an ARRAY's elements; std's owning wrappers and collections by their std PATH
+/// (`Option`, `Result` both arms, `Box`/`Rc`/`Arc`/`Pin`, the sequence and map containers incl. map KEYS,
+/// the interior-mutability and lazy cells, `Cow`'s owned arm). Answers NOTHING for: a reference or raw
+/// pointer, `Weak`, `ManuallyDrop`, `PhantomData`, a std lock/borrow GUARD, any other std type, a generic
+/// parameter, `impl Trait`/`dyn` (the callee cannot name what it drops — stated: those arms stay the
+/// caller's, closed in statement/tail position by R200's caller half and still SILENT as a `?` operand).
+/// Anything else is `type_path_b`'s answer, unchanged (so a local alias and a local generic type keep
+/// exactly today's leaf). `Rc`/`Arc` over-approximate (the pointee drops on the last reference only), the
+/// same reading the parameter route already gave a bare `Arc<H>`.
+pub(crate) fn owned_value_leaves(ty: &syn::Type, uses: &HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    owned_value_leaves_into(ty, uses, &mut out, 0);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn owned_value_leaves_into(ty: &syn::Type, uses: &HashMap<String, String>, out: &mut Vec<String>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    match ty {
+        syn::Type::Paren(p) => owned_value_leaves_into(&p.elem, uses, out, depth + 1),
+        syn::Type::Group(g) => owned_value_leaves_into(&g.elem, uses, out, depth + 1),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| owned_value_leaves_into(e, uses, out, depth + 1)),
+        syn::Type::Array(a) => owned_value_leaves_into(&a.elem, uses, out, depth + 1),
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let Some(seg) = p.path.segments.last() else { return };
+            let name = seg.ident.to_string();
+            let full = expand(&path_to_string_lc(&p.path), uses);
+            let prelude = p.path.segments.len() == 1
+                && matches!(name.as_str(), "Option" | "Result" | "Vec" | "Box" | "String")
+                && !uses.contains_key(&name);
+            let std_path = prelude || matches!(full.split("::").next(), Some("std" | "core" | "alloc"));
+            if !std_path {
+                if let Some((t, false)) = type_path_b(ty, uses) {
+                    out.push(t);
+                }
+                return;
+            }
+            let owning = matches!(
+                name.as_str(),
+                "Option" | "Result" | "Box" | "Rc" | "Arc" | "Pin" | "Cow" | "Cell" | "RefCell" | "UnsafeCell"
+                    | "Mutex" | "RwLock" | "OnceCell" | "OnceLock" | "LazyCell" | "LazyLock"
+            ) || is_sequence_container(&name)
+                || is_map_container(&name);
+            if !owning {
+                return;
+            }
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                for a in &args.args {
+                    if let syn::GenericArgument::Type(t) = a {
+                        owned_value_leaves_into(t, uses, out, depth + 1);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1121 — whether the body never CONSUMES parameter `name`: every mention of it is the operand
+/// of a borrow (`&o`, `&mut o`) or the argument of std's `drop`, the body binds no other entity of that
+/// name (a pattern, closure parameter or `let`), and no macro names it. An unused `_o` qualifies.
+fn param_never_consumed(name: &str, block: &syn::Block) -> bool {
+    struct V<'n> {
+        name: &'n str,
+        ok: bool,
+    }
+    impl<'x> syn::visit::Visit<'x> for V<'_> {
+        fn visit_expr(&mut self, e: &'x syn::Expr) {
+            let is_name = |x: &syn::Expr| matches!(x, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(self.name));
+            match e {
+                syn::Expr::Reference(r) if is_name(&r.expr) => return,
+                syn::Expr::Call(c) if c.args.len() == 1 && is_name(&c.args[0]) => {
+                    if let syn::Expr::Path(f) = &*c.func {
+                        let w = path_to_string(&f.path);
+                        if matches!(w.as_str(), "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop") {
+                            return;
+                        }
+                    }
+                }
+                _ if is_name(e) => {
+                    self.ok = false;
+                    return;
+                }
+                _ => {}
+            }
+            syn::visit::visit_expr(self, e);
+        }
+        fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+            if i.ident == self.name {
+                self.ok = false;
+            }
+            syn::visit::visit_pat_ident(self, i);
+        }
+        fn visit_macro(&mut self, m: &'x syn::Macro) {
+            fn mentions(ts: proc_macro2::TokenStream, n: &str) -> bool {
+                ts.into_iter().any(|t| match t {
+                    proc_macro2::TokenTree::Ident(i) => i == n,
+                    proc_macro2::TokenTree::Group(g) => mentions(g.stream(), n),
+                    _ => false,
+                })
+            }
+            if mentions(m.tokens.clone(), self.name) {
+                self.ok = false;
+            }
+        }
+    }
+    let mut v = V { name, ok: true };
+    syn::visit::Visit::visit_block(&mut v, block);
+    v.ok
+}
+
 /// PARAMETER-OWNED DROP — a mechanism construction-keying cannot reach BY DEFINITION. `fn take(g:
 /// Guard) {}` runs `Guard::drop` inside `take` (proven by executing the destructor against call/return
 /// markers), and the scan never saw the value built, so it read `take` PURE in every spelling.
@@ -7298,6 +7418,8 @@ pub(crate) fn owned_drop_params(
     self_ty: Option<&str>,
     uses: &HashMap<String, String>,
     escaping_names: &std::collections::HashSet<String>,
+    // SOUNDNESS R1121 — the body, read only for `param_never_consumed`.
+    block: &syn::Block,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let leaf_of = |t: String| t.rsplit("::").next().unwrap_or(&t).to_string();
@@ -7339,12 +7461,24 @@ pub(crate) fn owned_drop_params(
                 // build since R168. The RECEIVER arm above keeps `type_borrows` deliberately: there the
                 // charged leaf is `self_ty`, not the declared type, and `self: Pin<&mut Self>` is exactly
                 // the `&`-inside-a-generic case where the whole-type test is the right one.
-                let Some((t, borrowed)) = type_path_b(&pt.ty, uses) else { continue };
-                if borrowed {
+                let direct = type_path_b(&pt.ty, uses);
+                // SOUNDNESS R1121 — the leaves a wrapper owns (`owned_value_leaves`), ADDED beside
+                // `type_path`'s own leaf, which is pushed exactly as before. The first cut replaced the
+                // direct leaf with the walk and REMOVED 307 rows (io-lifetimes' `OwnedFd` leaf behind a
+                // std-rooted `use`, tokio `push_orphan`): this change is additive by construction.
+                let wrapped: Vec<String> = owned_value_leaves(&pt.ty, uses)
+                    .into_iter()
+                    .map(leaf_of)
+                    .filter(|t| direct.as_ref().is_none_or(|(d, b)| *b || leaf_of(d.clone()) != *t))
+                    .collect();
+                let direct = direct.filter(|(_, b)| !b).map(|(t, _)| t);
+                if direct.is_none() && wrapped.is_empty() {
                     continue;
                 }
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && type_borrows(&pt.ty) {
-                    eprintln!("R718OWNP {t}"); // §E1 REACH COUNTER — the changed branch only
+                if let Some(t) = &direct {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && type_borrows(&pt.ty) {
+                        eprintln!("R718OWNP {t}"); // §E1 REACH COUNTER — the changed branch only
+                    }
                 }
                 let Some(name) = single_pat_ident(&pt.pat) else { continue };
                 if escaping_names.contains(&name) && !crate::collector::charge_at_construction() {
@@ -7353,7 +7487,25 @@ pub(crate) fn owned_drop_params(
                 if escaping_names.contains(&name) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                     eprintln!("S2PARAM {name}");
                 }
-                out.push(leaf_of(t));
+                if let Some(t) = direct {
+                    out.push(leaf_of(t));
+                }
+                // SOUNDNESS R1121 — a leaf reached THROUGH a wrapper is charged only when the body never
+                // CONSUMES the parameter. Unlike a bare `Drop` type (which cannot be destructured, E0509),
+                // a wrapper hands its contents out by pattern (`if let Some(h) = o`, `let (h, _) = p`),
+                // by `?`, and by consuming methods (`o.unwrap()`, `v.into_iter()`), and the escape model
+                // tracks NAMES, not what a pattern moves out of them — measured: eight GT-0 consumers
+                // (`o.unwrap()`, `match o`, `o?`, `o.map(..)`, `v.into_iter()`, a destructuring `let`, ..)
+                // were charged by the unguarded first cut. The denylist direction: any use other than a
+                // borrow or std's `drop` keeps today's answer, which is silence.
+                if !wrapped.is_empty() && param_never_consumed(&name, block) {
+                    for t in wrapped {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R1121WRAP {t}"); // §E1 REACH COUNTER — a leaf only the unwrapping finds
+                        }
+                        out.push(t);
+                    }
+                }
             }
             _ => {}
         }

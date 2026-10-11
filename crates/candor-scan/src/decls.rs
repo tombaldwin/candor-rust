@@ -3010,7 +3010,7 @@ pub(crate) fn fninfo(
     // SOUNDNESS R168 — through `note_owned_param_drop`, NOT `note_construction`: the leaf-keyed escape
     // gate answers a question about a CONSTRUCTION, and a by-value parameter is not constructed here.
     // Its own escape gate is the `&escapes.names` argument two lines up, which is value-keyed.
-    for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
+    for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names, block) {
         c.note_owned_param_drop(Some(leaf));
     }
     // SOUNDNESS R1116 — a by-value parameter that leaves only through FIELD PROJECTIONS (`self.file`)

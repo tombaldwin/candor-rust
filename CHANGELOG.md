@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a by-value parameter of a WRAPPED drop type is released in the callee (SOUNDNESS
+  R1121, R200's callee half).** `fn eat(o: Option<H>) {}`, `(H, u32)`, `[H; N]`, `Vec<H>`, `Result` either
+  arm, a map, `RefCell<H>`, nested — executed, 1 drop each — were absent, and so was a caller that hands
+  one a construction on a `?` operand (`eat_opt_r(Some(H::new()), n)?`). Charged only when the body
+  never CONSUMES the parameter (only borrows it, or calls std's `drop`): a wrapper hands its contents out
+  by pattern, `?` and consuming methods, which the escape model does not follow. Stated residual: a
+  generic or `impl Into` parameter (the callee cannot name what it drops), and a wrapped parameter that
+  is consumed and still drops part of what it holds.
+
 - ⚠ **candor-scan: a unit-returning call in TAIL position no longer carries its arguments out (SOUNDNESS
   R200, caller half).** `pub fn f() { eat_opt(Some(H::new())) }` and `std::mem::drop(h)` as a tail were
   absent while the same call with a `;` was charged — executed, 1 drop either way. The arguments of a

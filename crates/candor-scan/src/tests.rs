@@ -2514,6 +2514,57 @@ pub fn u_memdrop() { std::mem::drop(H::new()) }
         assert!(effs(fn_entry(&u, "u_memdrop")).contains(&"Fs".to_string()), "std's drop still drops:\n{u:#}");
     }
 
+    /// SOUNDNESS R1121 — R200's CALLEE half: a by-value parameter of a WRAPPED drop type (`Option<H>`, a
+    /// tuple, an array, `Vec<H>`, `Result` either arm, a map, `RefCell`, nested) is released in the callee.
+    /// `type_path` stopped at the wrapper, so the callee's row was ABSENT, and so was a caller whose
+    /// construction R194 exempts on a `?` operand's spine on the ground that the callee carries the charge
+    /// (`f_opt_q`). EXECUTED (fixture `rustagent-v049/r1121`): every `w_*`/`f_*` cell drops 1 in the
+    /// callee's extent; every `c_*`/`k_*` cell drops 0. The `k_*` controls were written after the first cut
+    /// charged all eight of them: a wrapper hands its contents out by pattern, `?` and consuming methods, so
+    /// a wrapped leaf is charged only when the parameter is never consumed (borrowed, or std's `drop`).
+    #[test]
+    fn r1121_a_wrapped_by_value_parameter_is_released_in_the_callee() {
+        let v = scan_src_to_json("r1121", "\
+use std::collections::HashMap;
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } pub fn into_tag(self) -> u32 { let t = self.tag; std::mem::forget(self); t } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn gen(i: u32) -> Result<u32, ()> { if i == 99 { Err(()) } else { Ok(i) } }
+pub fn w_opt(_o: Option<H>) {}
+pub fn w_pair(_p: (H, u32)) {}
+pub fn w_arr(_a: [H; 1]) {}
+pub fn w_vec(_v: Vec<H>) {}
+pub fn w_res_err(_r: Result<u32, H>) {}
+pub fn w_map(_m: HashMap<u32, H>) {}
+pub fn w_nested(_v: Vec<Option<H>>) {}
+pub fn w_borrowed(o: Option<H>) -> bool { let r = &o; r.is_some() }
+fn eat_opt_r(_o: Option<H>, n: u32) -> Result<u32, ()> { gen(n) }
+pub fn f_opt_q(n: u32) -> Result<u32, ()> { let x = eat_opt_r(Some(H::new()), n)?; Ok(x) }
+pub fn c_weak(_w: std::rc::Weak<H>) {}
+pub fn c_md(_m: std::mem::ManuallyDrop<H>) {}
+pub fn c_optref(_o: Option<&H>) {}
+pub fn c_vecref(_v: Vec<&H>) {}
+pub fn c_ret(o: Option<H>) -> Option<H> { o }
+pub fn c_forget(o: Option<H>) { std::mem::forget(o) }
+pub fn k_unwrap(o: Option<H>) -> H { o.unwrap() }
+pub fn k_match(o: Option<H>) -> H { match o { Some(h) => h, None => panic!() } }
+pub fn k_iflet(o: Option<H>) -> H { if let Some(h) = o { return h; } panic!() }
+pub fn k_map(o: Option<H>) -> Option<u32> { o.map(|h| h.into_tag()) }
+pub fn k_q(o: Option<H>) -> Option<H> { let h = o?; Some(h) }
+pub fn k_iter(v: Vec<H>) -> Vec<u32> { v.into_iter().map(|h| h.into_tag()).collect() }
+pub fn k_destr(p: (H, u32)) -> H { let (h, _) = p; h }
+pub fn k_store(o: Option<H>, v: &mut Vec<Option<H>>) { v.push(o); }
+");
+        for f in ["w_opt", "w_pair", "w_arr", "w_vec", "w_res_err", "w_map", "w_nested", "w_borrowed", "f_opt_q"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` releases a wrapped `H` (executed: 1) and was silent:\n{v:#}");
+        }
+        for f in ["c_weak", "c_md", "c_optref", "c_vecref", "c_ret", "c_forget", "k_unwrap", "k_match", "k_iflet",
+                  "k_map", "k_q", "k_iter", "k_destr", "k_store"] {
+            assert!(row_absent(&v, f), "`{f}` releases nothing (executed: 0) — FABRICATION:\n{v:#}");
+        }
+    }
+
     /// SOUNDNESS R1118 — a DEPENDENCY's `Drop` type released in this frame, joined against the chained
     /// report's `G::drop` row: a by-value parameter, an overwritten place, a reassignment and the elements
     /// `Vec::clear` destroys. EXECUTED (`rustagent-v047/xd`): 1 drop each; all ABSENT on 0.40.5 chained.
@@ -17179,7 +17230,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17190,7 +17241,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev89/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev90/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
