@@ -2311,6 +2311,363 @@ pub fn e_pair_a(p: Pair) -> H { p.a }
         }
     }
 
+    /// SOUNDNESS R1120 — a call that returns a BORROW of a `Drop` type constructs nothing in the caller.
+    /// `fn globals() -> &'static G` (tokio's `signal::registry::globals()` shape) was read as a construction
+    /// of `G` by the R165 return route, because `record_return` filed `type_path`'s leaf and dropped the
+    /// reference it peeled on the way. EXECUTED with a drop counter (fixture `rustagent-v049/r1120`):
+    /// every `n_*` cell runs 0 destructors and every `y_*` cell runs exactly 1. The `y_*` cells were written
+    /// FIRST, as the must-stay-charged half, and include an OWNING same-leaf twin in another FILE and in
+    /// another inline MODULE — the borrow fact must withdraw on disagreement, never certify.
+    #[test]
+    fn r1120_a_borrowed_return_constructs_nothing_but_an_owned_one_still_does() {
+        let lib = "\
+use std::rc::Rc;
+use std::sync::OnceLock;
+pub struct G { pub tag: u32 }
+impl G { pub fn new() -> G { G { tag: 0 } } pub fn ping(&self) -> std::io::Result<()> { std::fs::write(\"/dev/null\", b\"p\") } }
+impl Drop for G { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+static GL: OnceLock<G> = OnceLock::new();
+static GM: std::sync::Mutex<G> = std::sync::Mutex::new(G { tag: 0 });
+pub fn globals() -> &'static G { GL.get_or_init(G::new) }
+pub fn gmut() -> &'static mut G { Box::leak(Box::new(G::new())) }
+pub fn gopt() -> Option<&'static G> { Some(globals()) }
+pub fn gres() -> Result<&'static G, ()> { Ok(globals()) }
+pub fn mk_ref<'a>(x: &'a G) -> &'a G { x }
+pub fn glock() -> std::sync::MutexGuard<'static, G> { GM.lock().unwrap() }
+pub fn gcell(c: &'static std::cell::RefCell<G>) -> std::cell::Ref<'static, G> { c.borrow() }
+pub fn gbox() -> Box<G> { Box::new(G::new()) }
+pub fn grc() -> Rc<G> { Rc::new(G::new()) }
+pub fn gown() -> Option<G> { Some(G::new()) }
+pub fn gplain() -> G { G::new() }
+pub fn n_ref() -> u32 { let g = globals(); let _ = { g.tag }; 0 }
+pub fn n_refmut() -> u32 { let g = gmut(); let _ = { g.tag }; 0 }
+pub fn n_optref() -> u32 { let g = gopt(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn n_resref() -> u32 { let g = gres(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn n_mkref(x: &G) -> u32 { let r = mk_ref(x); let _ = { r.tag }; 0 }
+pub fn n_stmt() { globals(); }
+pub fn n_inline() -> u32 { globals().tag }
+pub fn n_letwild() { let _ = globals(); }
+pub fn n_guard() -> u32 { let g = glock(); let _ = { g.tag }; 0 }
+pub fn n_cellref(c: &'static std::cell::RefCell<G>) -> u32 { let g = gcell(c); let _ = { g.tag }; 0 }
+pub fn n_guardstmt() { glock(); }
+pub fn n_pguard(g: std::sync::MutexGuard<'static, G>) { let _ = g.tag; }
+pub fn y_box() -> u32 { let g = gbox(); let _ = { g.tag }; 0 }
+pub fn y_rc() -> u32 { let g = grc(); let _ = { g.tag }; 0 }
+pub fn y_own() -> u32 { let g = gown(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn y_plain() -> u32 { let g = gplain(); let _ = { g.tag }; 0 }
+pub fn y_stmt() { gplain(); }
+pub fn y_boxstmt() { gbox(); }
+pub mod ta;
+pub mod tb;
+pub mod ia { pub fn itwin() -> &'static crate::G { crate::globals() } }
+pub mod ib { pub fn itwin() -> crate::G { crate::G::new() } }
+pub fn y_twin() { tb::twin(); }
+pub fn y_itwin() { ib::itwin(); }
+pub fn z_typed() { let g = globals(); let _ = g.ping(); }
+";
+        let v = scan_src_to_json_multi("r1120", &[
+            ("src/lib.rs", lib),
+            ("src/ta.rs", "pub fn twin() -> &'static crate::G { crate::globals() }\n"),
+            ("src/tb.rs", "pub fn twin() -> crate::G { crate::G::new() }\n"),
+        ]);
+        for f in ["n_ref", "n_refmut", "n_optref", "n_resref", "n_mkref", "n_stmt", "n_inline", "n_letwild",
+                  "n_guard", "n_cellref", "n_guardstmt", "n_pguard"] {
+            assert!(row_absent(&v, f),
+                    "`{f}` only BORROWS a `G` (executed: 0 drops) — charging `G::drop` FABRICATES:\n{v:#}");
+        }
+        for f in ["y_box", "y_rc", "y_own", "y_plain", "y_stmt", "y_boxstmt", "y_twin", "y_itwin"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` OWNS the `G` it was handed and drops it here (executed: 1 drop):\n{v:#}");
+        }
+        // R188's reader: the borrowed return still TYPES the binding — `g.ping()` resolves `G::ping`.
+        let z = fn_entry(&v, "z_typed");
+        assert!(effs(z).contains(&"Fs".to_string()), "a borrowed return must still type `g`:\n{v:#}");
+        assert!(!z["calls"].as_array().unwrap().iter().any(|c| c == "G::drop"),
+                "`z_typed` borrows `G` — no `G::drop` edge:\n{v:#}");
+    }
+
+    /// SOUNDNESS R323 — a let-bound closure's suppression is decided per BINDING, not per spelling. R304's
+    /// guard refused any name bound twice and fell back to SUPPRESSION, so a shadowed or sibling-scope
+    /// closure that really runs and drops here read ABSENT. EXECUTED (fixture `rustagent-v049/r323`): every
+    /// `k_*` cell drops 1-2 `H` in its own frame and was ABSENT on published 0.40.6; every `x_*` cell drops
+    /// none here and must stay absent — the controls were written first and include each binder the scope
+    /// stack does not model (a `match` arm, `if let`, a body-local `fn`), a closure moved out, one called
+    /// only inside another closure, and a closure never called.
+    #[test]
+    fn r323_a_shadowed_or_sibling_closure_is_judged_per_binding() {
+        let v = scan_src_to_json("r323", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn k_shadow() { let c = || H::new(); c(); let c = || H::new(); c(); }
+pub fn k_sibling() { { let c = || H::new(); c(); } { let c = || H::new(); c(); } }
+pub fn k_shadow_val() { let c = || H::new(); c(); let c = 5u32; let _ = c + 1; }
+pub fn k_sib_half() { { let c = || H::new(); c(); } { let c = || H::new(); let _ = &c; } }
+pub fn k_macro_other() { let c = || H::new(); c(); let c = || H::new(); let _ = format!(\"{:p}\", &c); }
+pub fn k_outer_after_inner() { let c = || H::new(); { let c = || 5u32; c(); } c(); }
+pub fn k_val_then_clos() { let c = 5u32; let _ = c; let c = || H::new(); c(); }
+pub fn k_letwild() { let c = || H::new(); let _ = c(); let c = || H::new(); let _ = c(); }
+pub fn k_ret_other(n: u32) -> u32 { let c = || H::new(); c(); let c = || n + 1; c() }
+pub fn x_shadow_ret() -> H { let c = || H::new(); let _ = &c; let c = || H::new(); c() }
+pub fn x_shadow_nocall() { let c = || H::new(); let _ = &c; let c = || H::new(); let _ = &c; }
+pub fn x_inner_shadow() { let c = || H::new(); let _ = &c; { let c = || 5u32; c(); } }
+pub fn x_match_pat() { let c = || H::new(); let _ = &c; match Some(1u32) { Some(c) => { let _ = c; } None => {} } }
+pub fn x_moved_into_box() -> Box<dyn Fn() -> H> { let c = || H::new(); let _ = &c; let c = || H::new(); Box::new(c) }
+pub fn x_called_in_closure() -> Box<dyn Fn()> { let c = || H::new(); let _ = &c; let c = move || H::new(); Box::new(move || { let k = c(); std::mem::forget(k); }) }
+pub fn x_never(n: u32) -> u32 { let c = || H::new(); let _ = &c; let c = || n; c() }
+pub fn x_bodyfn() { let c = || H::new(); let _ = &c; fn c2() {} c2(); }
+pub fn x_macro_shadow() { let c = || H::new(); let _ = &c; let c = || H::new(); let _ = format!(\"{:p}\", &c); c(); }
+pub fn x_ifl_shadow() { let c = || H::new(); c(); let c = || H::new(); let _ = &c; if let Some(c) = Some(1u32) { let _ = c; } }
+pub fn x_ifl_call(o: Option<fn()>) { let c = || H::new(); let _ = &c; let c = || H::new(); if let Some(c) = o { c(); } }
+");
+        for f in ["k_shadow", "k_sibling", "k_shadow_val", "k_sib_half", "k_macro_other", "k_outer_after_inner",
+                  "k_val_then_clos", "k_letwild", "k_ret_other"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` invokes a let-bound closure whose `H` dies here (executed) and was silent:\n{v:#}");
+        }
+        for f in ["x_shadow_ret", "x_shadow_nocall", "x_inner_shadow", "x_match_pat", "x_moved_into_box",
+                  "x_called_in_closure", "x_never", "x_bodyfn"] {
+            assert!(row_absent(&v, f), "`{f}` drops nothing in its own frame (executed: 0) — FABRICATION:\n{v:#}");
+        }
+        // STATED REFUSALS, the denylist direction: the binding is named in macro tokens, or the name is
+        // also bound by a pattern the scope stack does not model — the old suppression stands. Both really
+        // drop 1 here: a silence this row narrows and does not close, pinned so it cannot move unnoticed.
+        // `x_ifl_call` is the refusal that PREVENTS a fabrication: the `if let` binder is invisible to the
+        // scope stack, so its `c();` would resolve to the second `let c` — never called (executed: 0).
+        assert!(!effs(fn_entry(&v, "x_ifl_call")).contains(&"Fs".to_string()), "x_ifl_call FABRICATES:\n{v:#}");
+        for f in ["x_macro_shadow", "x_ifl_shadow"] {
+            assert!(row_absent(&v, f), "`{f}` is a stated refusal — it must not change silently:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R200, THE CALLER HALF — a call whose callee provably returns `()` cannot carry its by-value
+    /// arguments out in its value. In TAIL position every `Call`'s arguments were on the escape spine, so
+    /// `eat_opt(Some(H::new()))` and `std::mem::drop(h)` read ABSENT while the same call with a `;` charged.
+    /// EXECUTED (fixtures `rustagent-v049/r200`, `r200u`): every `t_*` cell drops 1 `H` during the call and
+    /// was ABSENT on published 0.40.6. Controls, written first, drop 0 here: a user `fn drop(h: H) -> H`
+    /// (it shadows the prelude crate-wide), a local `mymem::drop` returning its argument, a callable
+    /// PARAMETER and a CLOSURE named like a unit fn, a unit leaf with a value-returning twin, std's
+    /// `Vec::push` by UFCS, `mem::forget`, and a constructor tail.
+    #[test]
+    fn r200_a_unit_callee_in_tail_position_does_not_carry_its_arguments_out() {
+        let v = scan_src_to_json("r200c", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+fn eat_opt(_o: Option<H>) {}
+fn eat_pair(_p: (H, u32)) {}
+fn eat_vec(_v: Vec<H>) {}
+fn eat_gen<T>(_t: T) {}
+pub fn t_opt() { eat_opt(Some(H::new())) }
+pub fn t_pair() { eat_pair((H::new(), 1)) }
+pub fn t_vec() { eat_vec(vec![H::new()]) }
+pub fn t_gen() { eat_gen(H::new()) }
+pub fn t_memdrop() { std::mem::drop(H::new()) }
+pub fn t_memuse() { use std::mem; let h = H::new(); mem::drop(h) }
+pub fn t_coredrop() { let h = H::new(); core::mem::drop(h) }
+pub fn t_opt_let() { let o = Some(H::new()); eat_opt(o) }
+pub fn t_crate_path() { crate::eat_opt(Some(H::new())) }
+pub fn t_in_if(c: bool) { if c { eat_gen(H::new()) } else { eat_gen(H::new()) } }
+pub mod mymem { pub fn drop(h: crate::H) -> crate::H { h } }
+pub fn x_mymem() -> H { mymem::drop(H::new()) }
+fn pass(h: H) -> H { h }
+pub fn x_retval(h: H) -> H { pass(h) }
+fn f(_x: u32) {}
+pub fn x_param_fn(f: impl Fn(H) -> H) -> H { f(H::new()) }
+pub fn x_closure_named() -> H { let f = |h: H| h; f(H::new()) }
+mod tw1 { pub fn twin() {} }
+fn twin(h: H) -> H { h }
+pub fn x_unit_but_twin() -> H { twin(H::new()) }
+pub fn x_ufcs(v: &mut Vec<H>) { Vec::push(v, H::new()) }
+pub fn x_forget() { std::mem::forget(H::new()) }
+pub fn x_used() { tw1::twin(); f(1); }
+fn hold(h: H) { std::mem::forget(h) }
+pub fn x_spawn_hold() -> std::thread::JoinHandle<()> { let t = H::new(); std::thread::spawn(move || hold(t)) }
+pub fn x_let_hold() -> Box<dyn FnOnce()> { let t = H::new(); let f = move || hold(t); Box::new(f) }
+");
+        for f in ["t_opt", "t_pair", "t_vec", "t_gen", "t_memdrop", "t_memuse", "t_coredrop", "t_opt_let",
+                  "t_crate_path", "t_in_if"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` hands an `H` to a unit callee that drops it (executed: 1) and was silent:\n{v:#}");
+        }
+        // `x_spawn_hold`/`x_let_hold`: a unit callee in an ESCAPING closure's tail — the closure captured
+        // `t` and carries it away (futures-timer's `spawn(move || run(timer, done2))`, found by the A/B).
+        for f in ["x_mymem", "x_retval", "x_param_fn", "x_closure_named", "x_unit_but_twin", "x_ufcs", "x_forget",
+                  "x_spawn_hold", "x_let_hold"] {
+            let fs = v["functions"].as_array().unwrap().iter()
+                .any(|r| r["fn"] == f && effs(r).contains(&"Fs".to_string()));
+            assert!(!fs, "`{f}` drops nothing here (executed: 0) — charging `Fs` FABRICATES:\n{v:#}");
+        }
+        // A user `fn drop(h: H) -> H` shadows the prelude `drop` in its whole crate: the bare call RETURNS
+        // the value (executed: 0 drops), while `std::mem::drop` still drops it (executed: 1).
+        let u = scan_src_to_json("r200u", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+fn drop(h: H) -> H { h }
+pub fn u_userdrop() -> H { drop(H::new()) }
+pub fn u_memdrop() { std::mem::drop(H::new()) }
+");
+        assert!(!u["functions"].as_array().unwrap().iter()
+                    .any(|r| r["fn"] == "u_userdrop" && effs(r).contains(&"Fs".to_string())),
+                "a user `drop` that returns its argument FABRICATES:\n{u:#}");
+        assert!(effs(fn_entry(&u, "u_memdrop")).contains(&"Fs".to_string()), "std's drop still drops:\n{u:#}");
+    }
+
+    /// SOUNDNESS R1121 — R200's CALLEE half: a by-value parameter of a WRAPPED drop type (`Option<H>`, a
+    /// tuple, an array, `Vec<H>`, `Result` either arm, a map, `RefCell`, nested) is released in the callee.
+    /// `type_path` stopped at the wrapper, so the callee's row was ABSENT, and so was a caller whose
+    /// construction R194 exempts on a `?` operand's spine on the ground that the callee carries the charge
+    /// (`f_opt_q`). EXECUTED (fixture `rustagent-v049/r1121`): every `w_*`/`f_*` cell drops 1 in the
+    /// callee's extent; every `c_*`/`k_*` cell drops 0. The `k_*` controls were written after the first cut
+    /// charged all eight of them: a wrapper hands its contents out by pattern, `?` and consuming methods, so
+    /// a wrapped leaf is charged only when the parameter is never consumed (borrowed, or std's `drop`).
+    #[test]
+    fn r1121_a_wrapped_by_value_parameter_is_released_in_the_callee() {
+        let v = scan_src_to_json("r1121", "\
+use std::collections::HashMap;
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } pub fn into_tag(self) -> u32 { let t = self.tag; std::mem::forget(self); t } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn gen(i: u32) -> Result<u32, ()> { if i == 99 { Err(()) } else { Ok(i) } }
+pub fn w_opt(_o: Option<H>) {}
+pub fn w_pair(_p: (H, u32)) {}
+pub fn w_arr(_a: [H; 1]) {}
+pub fn w_vec(_v: Vec<H>) {}
+pub fn w_res_err(_r: Result<u32, H>) {}
+pub fn w_map(_m: HashMap<u32, H>) {}
+pub fn w_nested(_v: Vec<Option<H>>) {}
+pub fn w_borrowed(o: Option<H>) -> bool { let r = &o; r.is_some() }
+fn eat_opt_r(_o: Option<H>, n: u32) -> Result<u32, ()> { gen(n) }
+pub fn f_opt_q(n: u32) -> Result<u32, ()> { let x = eat_opt_r(Some(H::new()), n)?; Ok(x) }
+pub fn c_weak(_w: std::rc::Weak<H>) {}
+pub fn c_md(_m: std::mem::ManuallyDrop<H>) {}
+pub fn c_optref(_o: Option<&H>) {}
+pub fn c_vecref(_v: Vec<&H>) {}
+pub fn c_ret(o: Option<H>) -> Option<H> { o }
+pub fn c_forget(o: Option<H>) { std::mem::forget(o) }
+pub fn k_unwrap(o: Option<H>) -> H { o.unwrap() }
+pub fn k_match(o: Option<H>) -> H { match o { Some(h) => h, None => panic!() } }
+pub fn k_iflet(o: Option<H>) -> H { if let Some(h) = o { return h; } panic!() }
+pub fn k_map(o: Option<H>) -> Option<u32> { o.map(|h| h.into_tag()) }
+pub fn k_q(o: Option<H>) -> Option<H> { let h = o?; Some(h) }
+pub fn k_iter(v: Vec<H>) -> Vec<u32> { v.into_iter().map(|h| h.into_tag()).collect() }
+pub fn k_destr(p: (H, u32)) -> H { let (h, _) = p; h }
+pub fn k_store(o: Option<H>, v: &mut Vec<Option<H>>) { v.push(o); }
+");
+        for f in ["w_opt", "w_pair", "w_arr", "w_vec", "w_res_err", "w_map", "w_nested", "w_borrowed", "f_opt_q"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` releases a wrapped `H` (executed: 1) and was silent:\n{v:#}");
+        }
+        for f in ["c_weak", "c_md", "c_optref", "c_vecref", "c_ret", "c_forget", "k_unwrap", "k_match", "k_iflet",
+                  "k_map", "k_q", "k_iter", "k_destr", "k_store"] {
+            assert!(row_absent(&v, f), "`{f}` releases nothing (executed: 0) — FABRICATION:\n{v:#}");
+        }
+    }
+
+    /// SOUNDNESS R198 (`try_fold` arm) — a closure handed to an ACCUMULATING combinator is a loop body
+    /// whose previous output is its next input, so its `?` drops what an earlier invocation built. R187's
+    /// loop rule, one HOF over: the closure's own `?` vetoes its own body route, moved to the call's end.
+    /// EXECUTED (fixture `rustagent-v049/r198`, inputs that fail on the 2nd item): every `f_*` cell drops 1
+    /// and was ABSENT on published 0.40.6; every `c_*` cell drops 0 — no `?` at all, a once-called
+    /// `and_then`, a `map`, and a `?` in a closure NESTED inside the fold closure (that `?` is the inner
+    /// closure's exit). `o_byname` (closure passed by name) is out of the set and stays a stated silence.
+    #[test]
+    fn r198_an_accumulating_closure_question_mark_drops_the_previous_accumulator() {
+        let v = scan_src_to_json("r198", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn gen(i: u32) -> Result<u32, ()> { if i == 99 { Err(()) } else { Ok(i) } }
+pub fn f_tryfold(items: &[u32]) -> Result<Vec<H>, ()> {
+    items.iter().try_fold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })
+}
+pub fn f_tryrfold(items: &[u32]) -> Result<Vec<H>, ()> {
+    items.iter().try_rfold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })
+}
+pub fn f_replace(items: &[u32]) -> Result<Option<H>, ()> {
+    items.iter().try_fold(None, |acc: Option<H>, i| { gen(*i)?; let _ = &acc; Ok(Some(H::new())) })
+}
+pub fn f_fold_try(items: &[u32]) -> Result<Vec<H>, ()> {
+    items.iter().fold(Ok(Vec::new()), |acc: Result<Vec<H>, ()>, i| { let mut v = acc?; gen(*i)?; v.push(H::new()); Ok(v) })
+}
+pub fn c_fold_noq(items: &[u32]) -> Vec<H> { items.iter().fold(Vec::new(), |mut acc, _| { acc.push(H::new()); acc }) }
+pub fn c_tryfold_noq(items: &[u32]) -> Result<Vec<H>, ()> {
+    items.iter().try_fold(Vec::new(), |mut acc, _| { acc.push(H::new()); Ok::<_, ()>(acc) })
+}
+pub fn c_andthen(n: u32) -> Result<Vec<H>, ()> {
+    Ok::<Vec<H>, ()>(Vec::new()).and_then(|mut acc| { gen(n)?; acc.push(H::new()); Ok(acc) })
+}
+pub fn c_nested(items: &[u32]) -> Vec<H> {
+    items.iter().fold(Vec::new(), |mut acc, i| { let ok = (|| -> Result<u32, ()> { gen(*i)?; Ok(1) })().is_ok(); if ok || !ok { acc.push(H::new()); } acc })
+}
+pub fn o_byname(items: &[u32]) -> Result<Vec<H>, ()> {
+    let f = |mut acc: Vec<H>, i: &u32| { gen(*i)?; acc.push(H::new()); Ok(acc) };
+    items.iter().try_fold(Vec::new(), f)
+}
+");
+        for f in ["f_tryfold", "f_tryrfold", "f_replace", "f_fold_try"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}`'s closure `?` drops the accumulator an earlier call built (executed: 1):\n{v:#}");
+        }
+        for f in ["c_fold_noq", "c_tryfold_noq", "c_andthen", "c_nested"] {
+            let fs = v["functions"].as_array().unwrap().iter()
+                .any(|r| r["fn"] == f && effs(r).contains(&"Fs".to_string()));
+            assert!(!fs, "`{f}` drops nothing here (executed: 0) — FABRICATION:\n{v:#}");
+        }
+        assert!(row_absent(&v, "o_byname"), "stated: a closure passed BY NAME is out of the set:\n{v:#}");
+    }
+
+    /// SOUNDNESS R198 (`collect` arm) — `collect` into a `Result`/`Option` SHORT-CIRCUITS and std drops
+    /// what it already collected, so the inline closures feeding it do not certify their values' escape.
+    /// The target type is read where it is WRITTEN: a turbofish, a `let` annotation, or the fn's declared
+    /// return for a tail / `return` `collect()`. EXECUTED (fixture `rustagent-v049/r198c`, inputs [1, 99]):
+    /// every `k_*` cell drops 1 and was ABSENT on published 0.40.6; every `c_*` cell drops 0 (a
+    /// `Vec<Result<..>>` target, plain `Vec` targets in all three spellings). Stated silence: `o_arg`, whose
+    /// target is a callee's PARAMETER type, written nowhere the call can see.
+    #[test]
+    fn r198_a_short_circuiting_collect_drops_what_it_collected() {
+        let v = scan_src_to_json("r198c", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn gen(i: u32) -> Result<u32, ()> { if i == 99 { Err(()) } else { Ok(i) } }
+pub fn opt(i: u32) -> Option<u32> { if i == 99 { None } else { Some(i) } }
+pub fn k_turbo(items: &[u32]) -> Result<Vec<H>, ()> {
+    let v = items.iter().map(|i| { gen(*i)?; Ok(H::new()) }).collect::<Result<Vec<_>, ()>>()?;
+    Ok(v)
+}
+pub fn k_turbo_opt(items: &[u32]) -> Option<Vec<H>> {
+    items.iter().map(|i| { opt(*i)?; Some(H::new()) }).collect::<Option<Vec<H>>>()
+}
+pub fn k_let(items: &[u32]) -> Result<usize, ()> {
+    let v: Result<Vec<H>, ()> = items.iter().map(|i| { gen(*i)?; Ok(H::new()) }).collect();
+    let v = v?; let n = v.len(); std::mem::forget(v); Ok(n)
+}
+pub fn k_tail(items: &[u32]) -> Result<Vec<H>, ()> { items.iter().map(|i| { gen(*i)?; Ok(H::new()) }).collect() }
+pub fn k_return(items: &[u32], early: bool) -> Option<Vec<H>> {
+    if early { return items.iter().map(|i| { opt(*i)?; Some(H::new()) }).collect(); }
+    None
+}
+pub fn c_vecres(items: &[u32]) -> Vec<Result<H, ()>> {
+    items.iter().map(|i| { gen(*i)?; Ok(H::new()) }).collect::<Vec<Result<H, ()>>>()
+}
+pub fn c_vec(items: &[u32]) -> Vec<H> { items.iter().map(|_| H::new()).collect::<Vec<_>>() }
+pub fn c_let_vec(items: &[u32]) -> Vec<H> { let v: Vec<H> = items.iter().map(|_| H::new()).collect(); v }
+pub fn c_tail_vec(items: &[u32]) -> Vec<H> { items.iter().map(|_| H::new()).collect() }
+pub fn o_arg(items: &[u32]) -> usize { count_ok(items.iter().map(|i| { gen(*i)?; Ok(H::new()) }).collect()) }
+fn count_ok(r: Result<Vec<H>, ()>) -> usize { match r { Ok(v) => { let n = v.len(); std::mem::forget(v); n } Err(_) => 0 } }
+");
+        for f in ["k_turbo", "k_turbo_opt", "k_let", "k_tail", "k_return"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}`'s short-circuiting collect drops what it collected (executed: 1):\n{v:#}");
+        }
+        for f in ["c_vecres", "c_vec", "c_let_vec", "c_tail_vec"] {
+            assert!(row_absent(&v, f), "`{f}` drops nothing (executed: 0) — FABRICATION:\n{v:#}");
+        }
+        assert!(row_absent(&v, "o_arg"), "stated: a target written only on a callee's parameter:\n{v:#}");
+    }
+
     /// SOUNDNESS R1118 — a DEPENDENCY's `Drop` type released in this frame, joined against the chained
     /// report's `G::drop` row: a by-value parameter, an overwritten place, a reassignment and the elements
     /// `Vec::clear` destroys. EXECUTED (`rustagent-v047/xd`): 1 drop each; all ABSENT on 0.40.5 chained.
@@ -16976,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16987,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev88/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev93/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

@@ -872,7 +872,18 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                             syn::GenericArgument::Type(t) => Some(t),
                             _ => None,
                         }) {
-                            return type_path_b(inner, uses);
+                            // SOUNDNESS R1120 — a GUARD is a borrow of what it guards: dropping a
+                            // `MutexGuard<'_, G>`/`Ref<'_, G>` releases a lock or a borrow count and never
+                            // drops the `G`. The peel above is right for METHOD dispatch (R1036) and wrong
+                            // for OWNERSHIP, so the leaf comes back marked borrowed. Executed: 0 drops for a
+                            // guard returned (`let g = lock();`) and for a guard parameter, both charged
+                            // `G::drop` before. `Box`/`Arc`/`Rc`/`Pin<Box<_>>` OWN the pointee and keep
+                            // whatever the inner walk says (`Pin<&mut G>` is borrowed through its `&`).
+                            let r = type_path_b(inner, uses).map(|(t, b)| (t, b || guard));
+                            if guard && reach_debug() && r.as_ref().is_some_and(|(t, _)| local_type_leaf(t).is_some()) {
+                                eprintln!("R1120GUARD {t}", t = r.as_ref().map_or("", |(t, _)| t.as_str())); // §E1 reach
+                            }
+                            return r;
                         }
                     }
                 }
@@ -1677,6 +1688,19 @@ pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> 
         // otherwise have given, never on every unit fn.
         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && recorded_return_type(last, returns).is_some() {
             eprintln!("R174UNIT {last}");
+        }
+        return None;
+    }
+    // SOUNDNESS R1120 — A CALL THAT RETURNS A BORROW CONSTRUCTS NOTHING HERE. `fn globals() -> &'static G`
+    // hands this frame a reference; the index's leaf entry still answers `G` (it must — that is what types
+    // `g.method()`), and reading it as a construction charged `G::drop` to every `let g = globals();` —
+    // tokio's `signal::registry::globals()`, a fabrication over a value nobody here owns. Executed: 0 drops
+    // for `&G`, `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded `mk_ref<'a>(&'a G) -> &'a G`
+    // and a std lock/borrow guard, against 1 for `G`, `Box<G>`, `Rc<G>` and `Option<G>`. The key is filed
+    // only when every same-leaf definition agrees the return is a borrow, so an owning twin keeps the charge.
+    if returns.get(&crate::model::ret_borrow_key(last)).is_some_and(|v| v == crate::model::RET_BORROWED) {
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && recorded_return_type(last, returns).is_some() {
+            eprintln!("R1120BORROW {full}"); // §E1 HIT COUNTER — the changed branch only
         }
         return None;
     }
@@ -6427,6 +6451,7 @@ pub(crate) fn cross_ctor_leaf_from_struct_path(
 /// ordinals into the enclosing one's space. What this replaced was `macro_ctor_leaves`, a leaf-keyed
 /// set that made this gate CERTIFY the escape for any leaf a macro anywhere in the body constructed —
 /// an unevidenced licence, and the direction this file is not allowed to be wrong in.
+#[allow(clippy::too_many_arguments)] // the body's indexes plus three per-fn facts (params, ret_short, future_impls); each is named and documented at the parameter
 pub(crate) fn escaping_ctor_leaves<'a>(
     block: &'a syn::Block,
     uses: &'a HashMap<String, String>,
@@ -6436,26 +6461,46 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // builds for R48. Read ONLY inside a `?`'s operand, and only to decide what a macro CONSTRUCTS; the
     // expansion never becomes a construction SITE (see `note_local_macro_template_leaves`).
     local_macros: &'a HashMap<String, String>,
+    // SOUNDNESS R200 (caller half) — the enclosing fn's parameter names (see `MacroLens::shadow`).
+    params: &[String],
+    // SOUNDNESS R198 (collect arm) — the enclosing fn's declared return is a `Result`/`Option`, so a
+    // bare `.collect()` in return position short-circuits (see `short_circuit_target`).
+    ret_short: bool,
     // SOUNDNESS R201 — `Some(the crate's local impl Future types)` when `ret_type_drop_free` holds.
     future_impls: Option<&'a [String]>,
 ) -> Escapes {
-    escaping_ctor_full(block, uses, fields, returns, local_macros, future_impls).0
+    escaping_ctor_full(block, uses, fields, returns, local_macros, params, ret_short, future_impls).0
 }
 
 /// `escaping_ctor_leaves`, plus the body's construction SITES. SOUNDNESS R300 — a body-local `fn` item's
 /// sites are handed to the enclosing body, whose collector walks the nested body inline and charges what
 /// it builds (see `EscapeSites::note_nested_body`).
+#[allow(clippy::too_many_arguments)] // the body's indexes plus three per-fn facts (params, ret_short, future_impls); each is named and documented at the parameter
 fn escaping_ctor_full<'a>(
     block: &'a syn::Block,
     uses: &'a HashMap<String, String>,
     fields: &'a FieldIndex,
     returns: &'a ReturnIndex,
     local_macros: &'a HashMap<String, String>,
+    params: &[String],
+    ret_short: bool,
     future_impls: Option<&'a [String]>,
 ) -> (Escapes, HashMap<String, Vec<SiteId>>) {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
     let mut sites = EscapeSites::new(uses, fields, returns, local_macros);
+    {
+        struct Bound<'s>(&'s mut std::collections::HashSet<String>);
+        impl<'x> syn::visit::Visit<'x> for Bound<'_> {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.insert(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        syn::visit::Visit::visit_block(&mut Bound(&mut sites.call_shadow), block);
+        sites.call_shadow.extend(params.iter().cloned());
+    }
+    sites.ret_short = ret_short;
     sites.future_impls = future_impls;
     sites.walk_block(block, true);
     // SOUNDNESS R198/R209(b) — decide the LET-BOUND closures now that the whole body is walked.
@@ -6472,7 +6517,7 @@ fn escaping_ctor_full<'a>(
     //   · any other use of the name (stored, passed on, invoked with its value bound and kept) — not
     //     provably local, so it stays suppressed. This is a DENYLIST of the exemption: an unrecognised
     //     spelling keeps today's behaviour and stays silent rather than fabricating.
-    for (name, body, seq) in std::mem::take(&mut sites.pending_closure_escapes) {
+    for (name, bind, body, seq) in std::mem::take(&mut sites.pending_closure_escapes) {
         let uses_n = sites.path_uses.get(&name).copied().unwrap_or(0);
         let disc_n = sites.discarded_calls.get(&name).copied().unwrap_or(0);
         // R304 — the counters are keyed on a BARE IDENT with no scope, so they only describe one
@@ -6481,19 +6526,41 @@ fn escaping_ctor_full<'a>(
         // else entirely, and the only safe answer is the old unconditional escape.
         let one_entity = sites.name_bindings.get(&name).copied().unwrap_or(0) == 1
             && !sites.macro_idents.contains(&name);
+        // SOUNDNESS R323 — …and when the NAME is bound more than once, ask the same question of the
+        // BINDING. `let c = || H::new(); c(); let c = || H::new(); c();` and the sibling-block spelling
+        // are two entities that share a spelling; R304's guard fell back to SUPPRESSION for both, and
+        // both closures really run and drop here (EXECUTED: 2 drops, ABSENT). `bind_uses`/`bind_disc`
+        // count only the occurrences that RESOLVE to this `let` through the lexical scope stack, so the
+        // shadowed binding's calls are not this one's. Three ways the resolution could be wrong, each a
+        // refusal back to the old suppression (the denylist direction — an unrecognised shape stays as
+        // it shipped): the name is ALSO bound by any binder the scope stack does not model (a pattern,
+        // a closure parameter, a `match` arm, `if let`, a body-local `fn`); the binding is named inside
+        // macro tokens; or it has no use at all.
+        let per_binding = !one_entity
+            && bind.is_some_and(|b| {
+                let u = sites.bind_uses.get(&b).copied().unwrap_or(0);
+                u > 0
+                    && u == sites.bind_disc.get(&b).copied().unwrap_or(0)
+                    && !sites.bind_macro.contains(&b)
+                    && !sites.pat_bound_names.contains(&name)
+            });
+        if per_binding && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R323BIND {name}"); // §E1 REACH COUNTER — the changed branch only
+        }
         // SOUNDNESS R209(b) residual — EVERY use is a call in this frame, but some results are kept
         // (`let x = f(); x.0`, `v.push(f())`, two calls): the body runs at each call and its value IS that
         // call's value, so the value flow decides. Instead of the unconditional route, the body is reached
         // only through `mark_escape` following an escaping `f()` (an escaping call — returned, stored,
         // passed on — still suppresses, exactly as before). EXECUTED: `b_kept` 1 drop, `b_twice` 2,
-        // `b_vec` 1, all ABSENT before; `b_ok_ret` (`f()` returned) 0 drops and stays uncharged.
+        // `b_vec` 1, all ABSENT before; `b_ok_ret` (`f()` returned) 0 drops and stays uncharged. Asked
+        // AFTER R323's per-binding decision, which keeps its own (discarded-call) charging route.
         let call_n = sites.callee_calls.get(&name).copied().unwrap_or(0);
-        if one_entity && uses_n > 0 && uses_n == call_n && uses_n != disc_n {
+        if !per_binding && one_entity && uses_n > 0 && uses_n == call_n && uses_n != disc_n {
             if std::env::var_os("CANDOR_R209_INSTR").is_some() {
                 eprintln!("R209BKEPT {name}"); // §E1 REACH COUNTER, on the CHANGED branch only
             }
             sites.invoked_closures.insert(name, body);
-        } else if !(one_entity && uses_n > 0 && uses_n == disc_n) {
+        } else if !per_binding && !(one_entity && uses_n > 0 && uses_n == disc_n) {
             sites.escapes.push((seq, body));
         } else if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             // INSTRUMENTED, because an unchanged corpus row is not evidence the new code ran — the
@@ -6688,9 +6755,12 @@ fn escaping_ctor_full<'a>(
             .iter()
             .enumerate()
             .filter(|(i, t)| {
-                !t.in_closure
+                (!t.in_closure
                     && t.src_seq < q
-                    && !sites.route_inside.get(&q).is_some_and(|open| open.contains(i))
+                    && !sites.route_inside.get(&q).is_some_and(|open| open.contains(i)))
+                    // SOUNDNESS R198 — an accumulating closure's own `?` vetoes its own body route: the
+                    // value the body built on the previous invocation is live there and dies there.
+                    || t.fold_route == Some(q)
             })
             .map(|(i, _)| i)
             .collect();
@@ -6806,7 +6876,7 @@ fn escape_from_root(
     let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
     // The SAME macro indexes the site walk used. `body_macros` is complete by now — `walk_block` has
     // finished — so both walks resolve every invocation to the same template.
-    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros, root_drop_free: false, invoked: Some(&sites.invoked_closures), let_names: Some(&sites.first_bind_seq), futs: None };
+    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros, shadow: &sites.call_shadow, root_drop_free: false, invoked: Some(&sites.invoked_closures), let_names: Some(&sites.first_bind_seq), futs: None };
     // SOUNDNESS R201 — `X.await` yields the future's OUTPUT and DROPS THE FUTURE in this frame, so a value
     // the future owns (`FutH { h: H::new(), .. }.await`, `mk_fut(H::new(), n).await`) dies here, EXECUTED:
     // 1 drop, while `for_each_value_child`'s `Await` pass-through read every construction inside the
@@ -6861,7 +6931,9 @@ fn escape_from_root(
     };
     for (q, e) in &sites.escapes {
         if route_at(*q) {
-            let mut sub = Marks::default();
+            // R200 — an unconditional route is a closure body or a `forget`/`ManuallyDrop` operand; both
+            // keep every argument on the spine (`Marks::in_closure`).
+            let mut sub = Marks { in_closure: true, ..Default::default() };
             mark_escape(e, &lens, guard, uses, fields, returns, &mut sub);
             branch_filter(&mut sub, e);
             merge_direct(&mut m, sub);
@@ -6939,6 +7011,13 @@ fn escape_from_root(
 /// suppressed anyway and one executed `H::drop` vanished.
 #[derive(Default, Clone)]
 struct Marks {
+    /// SOUNDNESS R200 (caller half) — set while this walk is inside a CLOSURE body that escapes (an
+    /// unconditional route, or a let-bound closure the fixpoint found escaping). A closure CAPTURES what
+    /// its body names and carries it wherever the closure goes, so a unit callee in its tail
+    /// (`spawn(move || run(timer, done))`, futures-timer) does not mean the captured `timer` dies here.
+    /// While set, `call_returns_nothing` is not consulted and every argument stays on the spine, exactly
+    /// as before. Not merged — it describes the walk, not its findings.
+    in_closure: bool,
     names: std::collections::HashSet<String>,
     leaves: std::collections::HashSet<String>,
     sites: std::collections::HashSet<SiteId>,
@@ -6995,6 +7074,10 @@ fn macro_site_ordinals<'e>(exprs: impl IntoIterator<Item = &'e syn::Expr>) -> Ha
 struct MacroLens<'a> {
     local: &'a HashMap<String, String>,
     body: &'a HashMap<String, String>,
+    /// SOUNDNESS R200 (caller half) — names this body binds locally (every pattern ident, closure
+    /// parameter and fn parameter). A call through one of these is a call of a VALUE, never of the fn
+    /// item a crate-wide leaf fact describes, so `call_returns_nothing` refuses it.
+    shadow: &'a std::collections::HashSet<String>,
     /// SOUNDNESS R201 — `.await` is NOT a pass-through on this walk (see `escape_from_root`).
     root_drop_free: bool,
     /// SOUNDNESS R209(b) — let-bound closures every use of which is a call in this frame: a call's VALUE
@@ -7358,6 +7441,126 @@ pub(crate) fn type_borrows(ty: &syn::Type) -> bool {
     v.0
 }
 
+/// SOUNDNESS R1121 — the type leaves a BY-VALUE value of type `ty` OWNS, i.e. whose destructors run when
+/// it is dropped. `type_path_b` answers one leaf and stops at a std wrapper (`Option<H>` -> `Option`), so
+/// `fn eat(o: Option<H>) {}` — which really runs `H::drop` (executed) — was ABSENT, and so was every
+/// caller that relied on inheriting it (`eat_opt_r(Some(H::new()), n)?`, where R194 exempts the by-value
+/// argument from the caller precisely because the callee is supposed to carry the charge).
+///
+/// Descends: a TUPLE's and an ARRAY's elements; std's owning wrappers and collections by their std PATH
+/// (`Option`, `Result` both arms, `Box`/`Rc`/`Arc`/`Pin`, the sequence and map containers incl. map KEYS,
+/// the interior-mutability and lazy cells, `Cow`'s owned arm). Answers NOTHING for: a reference or raw
+/// pointer, `Weak`, `ManuallyDrop`, `PhantomData`, a std lock/borrow GUARD, any other std type, a generic
+/// parameter, `impl Trait`/`dyn` (the callee cannot name what it drops — stated: those arms stay the
+/// caller's, closed in statement/tail position by R200's caller half and still SILENT as a `?` operand).
+/// Anything else is `type_path_b`'s answer, unchanged (so a local alias and a local generic type keep
+/// exactly today's leaf). `Rc`/`Arc` over-approximate (the pointee drops on the last reference only), the
+/// same reading the parameter route already gave a bare `Arc<H>`.
+pub(crate) fn owned_value_leaves(ty: &syn::Type, uses: &HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    owned_value_leaves_into(ty, uses, &mut out, 0);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn owned_value_leaves_into(ty: &syn::Type, uses: &HashMap<String, String>, out: &mut Vec<String>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    match ty {
+        syn::Type::Paren(p) => owned_value_leaves_into(&p.elem, uses, out, depth + 1),
+        syn::Type::Group(g) => owned_value_leaves_into(&g.elem, uses, out, depth + 1),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| owned_value_leaves_into(e, uses, out, depth + 1)),
+        syn::Type::Array(a) => owned_value_leaves_into(&a.elem, uses, out, depth + 1),
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let Some(seg) = p.path.segments.last() else { return };
+            let name = seg.ident.to_string();
+            let full = expand(&path_to_string_lc(&p.path), uses);
+            let prelude = p.path.segments.len() == 1
+                && matches!(name.as_str(), "Option" | "Result" | "Vec" | "Box" | "String")
+                && !uses.contains_key(&name);
+            let std_path = prelude || matches!(full.split("::").next(), Some("std" | "core" | "alloc"));
+            if !std_path {
+                if let Some((t, false)) = type_path_b(ty, uses) {
+                    out.push(t);
+                }
+                return;
+            }
+            let owning = matches!(
+                name.as_str(),
+                "Option" | "Result" | "Box" | "Rc" | "Arc" | "Pin" | "Cow" | "Cell" | "RefCell" | "UnsafeCell"
+                    | "Mutex" | "RwLock" | "OnceCell" | "OnceLock" | "LazyCell" | "LazyLock"
+            ) || is_sequence_container(&name)
+                || is_map_container(&name);
+            if !owning {
+                return;
+            }
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                for a in &args.args {
+                    if let syn::GenericArgument::Type(t) = a {
+                        owned_value_leaves_into(t, uses, out, depth + 1);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1121 — whether the body never CONSUMES parameter `name`: every mention of it is the operand
+/// of a borrow (`&o`, `&mut o`) or the argument of std's `drop`, the body binds no other entity of that
+/// name (a pattern, closure parameter or `let`), and no macro names it. An unused `_o` qualifies.
+fn param_never_consumed(name: &str, block: &syn::Block) -> bool {
+    struct V<'n> {
+        name: &'n str,
+        ok: bool,
+    }
+    impl<'x> syn::visit::Visit<'x> for V<'_> {
+        fn visit_expr(&mut self, e: &'x syn::Expr) {
+            let is_name = |x: &syn::Expr| matches!(x, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(self.name));
+            match e {
+                syn::Expr::Reference(r) if is_name(&r.expr) => return,
+                syn::Expr::Call(c) if c.args.len() == 1 && is_name(&c.args[0]) => {
+                    if let syn::Expr::Path(f) = &*c.func {
+                        let w = path_to_string(&f.path);
+                        if matches!(w.as_str(), "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop") {
+                            return;
+                        }
+                    }
+                }
+                _ if is_name(e) => {
+                    self.ok = false;
+                    return;
+                }
+                _ => {}
+            }
+            syn::visit::visit_expr(self, e);
+        }
+        fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+            if i.ident == self.name {
+                self.ok = false;
+            }
+            syn::visit::visit_pat_ident(self, i);
+        }
+        fn visit_macro(&mut self, m: &'x syn::Macro) {
+            fn mentions(ts: proc_macro2::TokenStream, n: &str) -> bool {
+                ts.into_iter().any(|t| match t {
+                    proc_macro2::TokenTree::Ident(i) => i == n,
+                    proc_macro2::TokenTree::Group(g) => mentions(g.stream(), n),
+                    _ => false,
+                })
+            }
+            if mentions(m.tokens.clone(), self.name) {
+                self.ok = false;
+            }
+        }
+    }
+    let mut v = V { name, ok: true };
+    syn::visit::Visit::visit_block(&mut v, block);
+    v.ok
+}
+
 /// PARAMETER-OWNED DROP — a mechanism construction-keying cannot reach BY DEFINITION. `fn take(g:
 /// Guard) {}` runs `Guard::drop` inside `take` (proven by executing the destructor against call/return
 /// markers), and the scan never saw the value built, so it read `take` PURE in every spelling.
@@ -7377,6 +7580,8 @@ pub(crate) fn owned_drop_params(
     self_ty: Option<&str>,
     uses: &HashMap<String, String>,
     escaping_names: &std::collections::HashSet<String>,
+    // SOUNDNESS R1121 — the body, read only for `param_never_consumed`.
+    block: &syn::Block,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let leaf_of = |t: String| t.rsplit("::").next().unwrap_or(&t).to_string();
@@ -7418,12 +7623,24 @@ pub(crate) fn owned_drop_params(
                 // build since R168. The RECEIVER arm above keeps `type_borrows` deliberately: there the
                 // charged leaf is `self_ty`, not the declared type, and `self: Pin<&mut Self>` is exactly
                 // the `&`-inside-a-generic case where the whole-type test is the right one.
-                let Some((t, borrowed)) = type_path_b(&pt.ty, uses) else { continue };
-                if borrowed {
+                let direct = type_path_b(&pt.ty, uses);
+                // SOUNDNESS R1121 — the leaves a wrapper owns (`owned_value_leaves`), ADDED beside
+                // `type_path`'s own leaf, which is pushed exactly as before. The first cut replaced the
+                // direct leaf with the walk and REMOVED 307 rows (io-lifetimes' `OwnedFd` leaf behind a
+                // std-rooted `use`, tokio `push_orphan`): this change is additive by construction.
+                let wrapped: Vec<String> = owned_value_leaves(&pt.ty, uses)
+                    .into_iter()
+                    .map(leaf_of)
+                    .filter(|t| direct.as_ref().is_none_or(|(d, b)| *b || leaf_of(d.clone()) != *t))
+                    .collect();
+                let direct = direct.filter(|(_, b)| !b).map(|(t, _)| t);
+                if direct.is_none() && wrapped.is_empty() {
                     continue;
                 }
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && type_borrows(&pt.ty) {
-                    eprintln!("R718OWNP {t}"); // §E1 REACH COUNTER — the changed branch only
+                if let Some(t) = &direct {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && type_borrows(&pt.ty) {
+                        eprintln!("R718OWNP {t}"); // §E1 REACH COUNTER — the changed branch only
+                    }
                 }
                 let Some(name) = single_pat_ident(&pt.pat) else { continue };
                 if escaping_names.contains(&name) && !crate::collector::charge_at_construction() {
@@ -7432,7 +7649,25 @@ pub(crate) fn owned_drop_params(
                 if escaping_names.contains(&name) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                     eprintln!("S2PARAM {name}");
                 }
-                out.push(leaf_of(t));
+                if let Some(t) = direct {
+                    out.push(leaf_of(t));
+                }
+                // SOUNDNESS R1121 — a leaf reached THROUGH a wrapper is charged only when the body never
+                // CONSUMES the parameter. Unlike a bare `Drop` type (which cannot be destructured, E0509),
+                // a wrapper hands its contents out by pattern (`if let Some(h) = o`, `let (h, _) = p`),
+                // by `?`, and by consuming methods (`o.unwrap()`, `v.into_iter()`), and the escape model
+                // tracks NAMES, not what a pattern moves out of them — measured: eight GT-0 consumers
+                // (`o.unwrap()`, `match o`, `o?`, `o.map(..)`, `v.into_iter()`, a destructuring `let`, ..)
+                // were charged by the unguarded first cut. The denylist direction: any use other than a
+                // borrow or std's `drop` keeps today's answer, which is silence.
+                if !wrapped.is_empty() && param_never_consumed(&name, block) {
+                    for t in wrapped {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R1121WRAP {t}"); // §E1 REACH COUNTER — a leaf only the unwrapping finds
+                        }
+                        out.push(t);
+                    }
+                }
             }
             _ => {}
         }
@@ -7454,6 +7689,12 @@ struct TryExit {
     /// one iteration the lexical order is the evaluation order, so the route comparison reads this.
     src_seq: usize,
     in_closure: bool,
+    /// SOUNDNESS R198 — `Some(q)` when this `?` sits DIRECTLY in the body of a closure handed to an
+    /// ACCUMULATING iterator method (`ACCUMULATING_COMBINATORS`), `q` being that closure's escape-route
+    /// position. Such a closure is a loop body whose previous output is its next input, so its `?` vetoes
+    /// what the closure itself built on an earlier invocation — R187's rule, one HOF over. See the route
+    /// filter in `escaping_ctor_full` and the rewrite in `walk_expr`.
+    fold_route: Option<usize>,
     /// R194 — type leaves constructed inside this `?`'s operand at a position that is NOT on the
     /// operand's value spine. Evaluating the operand ran them, so they are live when this `?` takes
     /// its error exit, whatever their pre-order number says.
@@ -7494,7 +7735,34 @@ struct EscapeSites<'a> {
     /// `(name, closure body)` for each `let NAME = |…| …` whose body was NOT pushed onto `escapes`
     /// during the walk. The decision needs counts that only exist once the whole body has been walked,
     /// so it is deferred to `escape_sites` and applied there.
-    pending_closure_escapes: Vec<(String, &'a syn::Expr, usize)>,
+    pending_closure_escapes: Vec<(String, Option<usize>, &'a syn::Expr, usize)>,
+    /// SOUNDNESS R323 — LEXICAL BINDING IDENTITY for single-ident `let`s. A stack of scopes (one per
+    /// block) mapping a name to the id of the `let` that bound it; a use resolves to the innermost. The
+    /// per-binding twins of `path_uses`/`discarded_calls`/`macro_idents` count only what resolves to one
+    /// binding, so a shadowed or sibling-scope `let` of the same name is a different entity.
+    bind_scopes: Vec<HashMap<String, usize>>,
+    next_bind: usize,
+    bind_uses: HashMap<usize, usize>,
+    bind_disc: HashMap<usize, usize>,
+    bind_macro: std::collections::HashSet<usize>,
+    /// The closure expression (by address) a single-ident `let` initialises, and that `let`'s id.
+    closure_bind: HashMap<usize, usize>,
+    /// Names bound by any binder the scope stack does NOT model — a destructuring `let`, a `match`/`if
+    /// let`/`while let`/`for` pattern, a closure parameter, a body-local `fn`. A name in here makes the
+    /// per-binding answer untrustworthy, so R323's test refuses it.
+    pat_bound_names: std::collections::HashSet<String>,
+    /// SOUNDNESS R198 — closure arguments (by address) of an accumulating combinator call, and the stack of
+    /// such closures being walked: (escape-route position, `closure_depth` outside the closure).
+    fold_closures: std::collections::HashSet<usize>,
+    fold_stack: Vec<(usize, usize)>,
+    /// SOUNDNESS R198 (collect arm) — `.collect()` calls (by address) whose target type is written as a
+    /// `Result`/`Option` somewhere other than a turbofish (a `let` annotation, the fn's return type), and
+    /// the inline closures upstream of any short-circuiting `collect` (see `short_circuit_target`).
+    short_collects: std::collections::HashSet<usize>,
+    maydrop_closures: std::collections::HashSet<usize>,
+    ret_short: bool,
+    /// SOUNDNESS R200 (caller half) — see `MacroLens::shadow`. Filled before the walk.
+    call_shadow: std::collections::HashSet<String>,
     /// Every single-ident `Expr::Path` occurrence, counted.
     path_uses: HashMap<String, usize>,
     /// How many times each name is BOUND in this body — every `let NAME = …` and every body-local
@@ -7639,6 +7907,19 @@ impl<'a> EscapeSites<'a> {
             name_bindings: HashMap::new(),
             macro_idents: std::collections::HashSet::new(),
             discarded_calls: HashMap::new(),
+            bind_scopes: vec![HashMap::new()],
+            next_bind: 0,
+            bind_uses: HashMap::new(),
+            bind_disc: HashMap::new(),
+            bind_macro: std::collections::HashSet::new(),
+            closure_bind: HashMap::new(),
+            pat_bound_names: std::collections::HashSet::new(),
+            call_shadow: std::collections::HashSet::new(),
+            fold_closures: std::collections::HashSet::new(),
+            fold_stack: Vec::new(),
+            short_collects: std::collections::HashSet::new(),
+            maydrop_closures: std::collections::HashSet::new(),
+            ret_short: false,
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -7674,19 +7955,40 @@ impl<'a> EscapeSites<'a> {
     /// never an over-veto. Its operand spine is not opened (the operand lives in a re-parsed tree whose
     /// addresses the spine cannot hold), so `interior` is empty.
     fn note_macro_try_exit(&mut self, m: &syn::ExprMacro) {
-        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, root_drop_free: false, invoked: None, let_names: None, futs: None };
+        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
         if !macro_has_exit_try(m, &lens, 0) {
             return;
         }
         if std::env::var_os("CANDOR_R209_INSTR").is_some() {
             eprintln!("R209MACROTRY"); // §E1 REACH COUNTER, on the ADDED branch only
         }
+        // R198 — a macro-borne `?` directly inside an accumulating closure is that closure's loop exit,
+        // exactly as a written one is (the same derivation as `walk_expr`'s `Try` arm).
+        let fold_route = self.fold_stack.last().filter(|(_, d)| d + 1 == self.closure_depth).map(|(q, _)| *q);
         self.try_exits.push(TryExit {
             seq: self.seq,
             src_seq: self.seq,
             in_closure: self.closure_depth > 0,
+            fold_route,
             interior: std::collections::HashSet::new(),
         });
+    }
+
+    /// SOUNDNESS R323 — the `let` a bare name resolves to here, innermost scope first.
+    fn resolve_bind(&self, n: &str) -> Option<usize> {
+        self.bind_scopes.iter().rev().find_map(|m| m.get(n).copied())
+    }
+
+    /// SOUNDNESS R323 — every name a pattern binds, into `pat_bound_names` (see its doc).
+    fn note_unmodelled_binders(&mut self, p: &syn::Pat) {
+        struct V<'b>(&'b mut std::collections::HashSet<String>);
+        impl<'x> syn::visit::Visit<'x> for V<'_> {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.insert(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        syn::visit::Visit::visit_pat(&mut V(&mut self.pat_bound_names), p);
     }
 
     /// SOUNDNESS R829 — remember which branches enclose this edge's value expression.
@@ -7844,7 +8146,7 @@ impl<'a> EscapeSites<'a> {
                 };
                 let syn::Expr::Macro(em) = &inner_m else { unreachable!() };
                 let inner = {
-                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros, root_drop_free: false, invoked: None, let_names: None, futs: None };
+                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
                     macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                 };
                 let iords = macro_reading_ordinals(&inner);
@@ -7886,7 +8188,7 @@ impl<'a> EscapeSites<'a> {
     /// One macro invocation, read ONCE for both halves of this walk.
     fn note_macro_reading(&mut self, m: &syn::ExprMacro) {
         let reading = {
-            let lens = MacroLens { local: self.local_macros, body: &self.body_macros, root_drop_free: false, invoked: None, let_names: None, futs: None };
+            let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
             macro_reading(m, &lens, &|n| self.macro_expanding.contains(n))
         };
         self.note_reading_sites(&reading, m as *const syn::ExprMacro as usize);
@@ -8331,6 +8633,12 @@ impl<'a> EscapeSites<'a> {
 
     /// `tail` says whether this block's trailing expression is in RETURN position for the unit.
     fn walk_block(&mut self, b: &'a syn::Block, tail: bool) {
+        self.bind_scopes.push(HashMap::new()); // R323 — a block is a lexical scope
+        self.walk_block_stmts(b, tail);
+        self.bind_scopes.pop();
+    }
+
+    fn walk_block_stmts(&mut self, b: &'a syn::Block, tail: bool) {
         for (i, st) in b.stmts.iter().enumerate() {
             let last = i + 1 == b.stmts.len();
             match st {
@@ -8341,13 +8649,30 @@ impl<'a> EscapeSites<'a> {
                     // `one_entity` wrongly TRUE — the FABRICATION direction. `let (a, b) = ..`,
                     // `let Some(x) = .. else`, and a bare `let x;` all bind names the guard must see.
                     self.note_pat_bindings(&l.pat);
+                    // R323 — this `let`'s identity. Entered into the scope AFTER the initialiser is
+                    // walked: the initialiser cannot name the binding it is creating.
+                    let bind_id = self.next_bind;
+                    self.next_bind += 1;
+                    let single = single_pat_ident(&l.pat);
+                    if single.is_none() {
+                        self.note_unmodelled_binders(&l.pat);
+                    }
                     if let Some(init) = &l.init {
+                        // R198 (collect arm) — `let v: Result<Vec<H>, E> = it.collect();`
+                        if let syn::Pat::Type(pt) = &l.pat {
+                            if short_circuit_target(&pt.ty) {
+                                if let Some(c) = bare_collect(&init.expr) {
+                                    self.short_collects.insert(c);
+                                }
+                            }
+                        }
                         // R198/R209(b) — see `let_bound_closures`. Must be recorded BEFORE the walk,
                         // because the walk is what reaches the `Expr::Closure` arm that reads it.
                         if matches!(&*init.expr, syn::Expr::Closure(_)) {
                             if let Some(n) = single_pat_ident(&l.pat) {
                                 self.let_bound_closures
                                     .insert(&*init.expr as *const syn::Expr as usize, n);
+                                self.closure_bind.insert(&*init.expr as *const syn::Expr as usize, bind_id);
                             }
                         }
                         // `let _ = f();` discards the value exactly as `f();` does — but ONLY in THIS
@@ -8360,6 +8685,9 @@ impl<'a> EscapeSites<'a> {
                                             .discarded_calls
                                             .entry(id.to_string())
                                             .or_insert(0) += 1;
+                                        if let Some(b) = self.resolve_bind(&id.to_string()) {
+                                            *self.bind_disc.entry(b).or_insert(0) += 1;
+                                        }
                                     }
                                 }
                             }
@@ -8367,6 +8695,11 @@ impl<'a> EscapeSites<'a> {
                         self.walk_expr(&init.expr);
                         if let Some((_, d)) = &init.diverge {
                             self.walk_expr(d);
+                        }
+                        if let Some(n) = &single {
+                            if let Some(top) = self.bind_scopes.last_mut() {
+                                top.insert(n.clone(), bind_id);
+                            }
                         }
                         // R173 — the binder's position is AFTER its initialiser: in
                         // `let h = try_handle(p)?;` the `?` can take its early exit before `h` exists,
@@ -8381,6 +8714,12 @@ impl<'a> EscapeSites<'a> {
                     }
                 }
                 syn::Stmt::Expr(e, semi) => {
+                    if tail && last && semi.is_none() && self.ret_short {
+                        // R198 (collect arm) — the fn's tail `.collect()` into its declared `Result`/`Option`.
+                        if let Some(c) = bare_collect(e) {
+                            self.short_collects.insert(c);
+                        }
+                    }
                     if tail && last && semi.is_none() {
                         // R189 — the TAIL is evaluated after every statement before it, so
                         // `self.seq` here is greater than every binding's position, which is what makes
@@ -8403,6 +8742,9 @@ impl<'a> EscapeSites<'a> {
                             if let syn::Expr::Path(p) = &*c.func {
                                 if let Some(id) = p.path.get_ident() {
                                     *self.discarded_calls.entry(id.to_string()).or_insert(0) += 1;
+                                    if let Some(b) = self.resolve_bind(&id.to_string()) {
+                                        *self.bind_disc.entry(b).or_insert(0) += 1;
+                                    }
                                 }
                             }
                         }
@@ -8418,6 +8760,7 @@ impl<'a> EscapeSites<'a> {
                 // R304 — a body-local `fn NAME` binds that name too, and shadowing a let-bound
                 // closure with one (or vice versa) is the same collision.
                 syn::Stmt::Item(syn::Item::Fn(itf)) => {
+                    self.pat_bound_names.insert(itf.sig.ident.to_string()); // R323
                     *self
                         .name_bindings
                         .entry(itf.sig.ident.to_string())
@@ -8444,7 +8787,7 @@ impl<'a> EscapeSites<'a> {
                     let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                     let syn::Expr::Macro(em) = &host else { unreachable!() };
                     let reading = {
-                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, root_drop_free: false, invoked: None, let_names: None, futs: None };
+                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow, root_drop_free: false, invoked: None, let_names: None, futs: None };
                         macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                     };
                     self.note_reading_sites(&reading, m as *const syn::StmtMacro as usize);
@@ -8485,7 +8828,7 @@ impl<'a> EscapeSites<'a> {
     /// cannot be typed (`.map(|_| mk())` in an inline closure). Not taken here; stated, and the
     /// over-report stands as it shipped.
     fn note_nested_body(&mut self, b: &'a syn::Block) {
-        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, None);
+        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[], false, None);
         for (l, v) in inner_sites {
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 eprintln!("R300NESTED {l}"); // §E1 REACH COUNTER — the sites this change adds
@@ -8502,6 +8845,9 @@ impl<'a> EscapeSites<'a> {
                 proc_macro2::TokenTree::Ident(i) => {
                     for f in &self.branch_stack {
                         self.arm_idents.entry(*f).or_default().insert(i.to_string());
+                    }
+                    if let Some(b) = self.resolve_bind(&i.to_string()) {
+                        self.bind_macro.insert(b); // R323
                     }
                     self.macro_idents.insert(i.to_string());
                 }
@@ -8541,6 +8887,9 @@ impl<'a> EscapeSites<'a> {
             if p.qself.is_none() {
                 if let Some(id) = p.path.get_ident() {
                     *self.path_uses.entry(id.to_string()).or_insert(0) += 1;
+                    if let Some(b) = self.resolve_bind(&id.to_string()) {
+                        *self.bind_uses.entry(b).or_insert(0) += 1; // R323
+                    }
                     for f in &self.branch_stack {
                         self.arm_idents.entry(*f).or_default().insert(id.to_string());
                     }
@@ -8548,6 +8897,15 @@ impl<'a> EscapeSites<'a> {
             }
         }
         self.seq += 1; // R173 — pre-order position, read only for its ORDER
+        // SOUNDNESS R323 — the binders the scope stack does not model. Their names disqualify the
+        // per-binding answer (`pat_bound_names`), which keeps it a refinement that can only CHARGE in
+        // shapes where every same-named binder is a single-ident `let`.
+        match e {
+            syn::Expr::Let(l) => self.note_unmodelled_binders(&l.pat),
+            syn::Expr::Match(m) => m.arms.iter().for_each(|a| self.note_unmodelled_binders(&a.pat)),
+            syn::Expr::ForLoop(f) => self.note_unmodelled_binders(&f.pat),
+            _ => {}
+        }
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
             self.note_macro_idents(m.mac.tokens.clone());
@@ -8555,6 +8913,14 @@ impl<'a> EscapeSites<'a> {
             self.note_macro_try_exit(m);
         }
         match e {
+            syn::Expr::Return(r) if self.ret_short && r.expr.as_deref().and_then(bare_collect).is_some() => {
+                // R198 (collect arm) — `return it.collect();` into the declared `Result`/`Option`; then the
+                // exit itself, exactly as the arm below.
+                if let Some(c) = r.expr.as_deref().and_then(bare_collect) {
+                    self.short_collects.insert(c);
+                }
+                self.roots.push((self.seq, r.expr.as_deref()));
+            }
             syn::Expr::Return(r) => match &r.expr {
                 // R189 — the `return`'s OWN pre-order position, which is before its operand is
                 // walked: the exit is taken there, so a `let` bound later is not live at it.
@@ -8573,10 +8939,14 @@ impl<'a> EscapeSites<'a> {
             // `?` BEFORE its own operand, which is what makes `let c = make()?;` read as "the value
             // does not exist yet at this exit" while `let g = G::new(); f()?;` reads as "it does".
             syn::Expr::Try(t) => {
+                // R198 — directly inside an accumulating closure (not inside a closure nested in it).
+                let fold_route =
+                    self.fold_stack.last().filter(|(_, d)| d + 1 == self.closure_depth).map(|(q, _)| *q);
                 let e = TryExit {
                     seq: self.seq,
                     src_seq: self.seq,
                     in_closure: self.closure_depth > 0,
+                    fold_route,
                     interior: std::collections::HashSet::new(),
                 };
                 self.try_exits.push(e);
@@ -8674,12 +9044,26 @@ impl<'a> EscapeSites<'a> {
                 // something this scope cannot follow (sharded-slab's `shard.with_slot(key, |slot| …
                 // Some(Entry { .. }))`, the case this arm was written for), so it must stay suppressed.
                 self.note_frames(&c.body);
+                for ip in &c.inputs {
+                    self.note_unmodelled_binders(ip); // R323 — a closure parameter binds a name too
+                }
                 match self
                     .let_bound_closures
                     .get(&(e as *const syn::Expr as usize))
                     .cloned()
                 {
-                    Some(name) => self.pending_closure_escapes.push((name, &c.body, self.seq)),
+                    Some(name) => {
+                        let bind = self.closure_bind.get(&(e as *const syn::Expr as usize)).copied();
+                        self.pending_closure_escapes.push((name, bind, &c.body, self.seq))
+                    }
+                    // SOUNDNESS R198 (collect arm) — an inline closure feeding a SHORT-CIRCUITING
+                    // `collect` hands its value to std, which DROPS everything already collected when an
+                    // element is `Err`/`None`. Its constructions are therefore not certified to escape.
+                    None if self.maydrop_closures.contains(&(e as *const syn::Expr as usize)) => {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R198COLLECT"); // §E1 REACH COUNTER — the withdrawn route
+                        }
+                    }
                     None => self.escapes.push((self.seq, &c.body)),
                 }
                 self.note_route_position(); // R709 — a let-bound closure can become a route later
@@ -8702,6 +9086,49 @@ impl<'a> EscapeSites<'a> {
         // `closure_depth`. Nested loops rewrite twice, outermost last, which is correct and monotone.
         let loop_mark = matches!(e, syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_))
             .then(|| self.try_exits.len());
+        // SOUNDNESS R198 — an ACCUMULATING combinator's closure is a loop body. Its closure arguments are
+        // registered before the children are walked, and every `?` recorded directly in one of them is
+        // moved to the call's last position once it is walked (below), exactly as R187 moves a loop's.
+        let fold_mark = match e {
+            syn::Expr::MethodCall(m) if ACCUMULATING_COMBINATORS.contains(&m.method.to_string().as_str()) => {
+                for a in &m.args {
+                    if let syn::Expr::Closure(c) = a {
+                        // An `async` closure or an async-block body defers to a poller's frame (R324):
+                        // its `?` is not this frame's, so it is not registered.
+                        if c.asyncness.is_none() && !matches!(&*c.body, syn::Expr::Async(_)) {
+                            self.fold_closures.insert(a as *const syn::Expr as usize);
+                        }
+                    }
+                }
+                Some(self.try_exits.len())
+            }
+            _ => None,
+        };
+        if let syn::Expr::MethodCall(m) = e {
+            if m.method == "collect" {
+                let turbo = m.turbofish.as_ref().is_some_and(|tf| {
+                    tf.args.iter().any(|a| matches!(a, syn::GenericArgument::Type(t) if short_circuit_target(t)))
+                });
+                if turbo || self.short_collects.contains(&(e as *const syn::Expr as usize)) {
+                    let mut r: &syn::Expr = &m.receiver;
+                    while let syn::Expr::MethodCall(inner) = r {
+                        for a in &inner.args {
+                            if let syn::Expr::Closure(c) = a {
+                                if c.asyncness.is_none() && !matches!(&*c.body, syn::Expr::Async(_)) {
+                                    self.maydrop_closures.insert(a as *const syn::Expr as usize);
+                                }
+                            }
+                        }
+                        r = &inner.receiver;
+                    }
+                }
+            }
+        }
+        let fold_here = matches!(e, syn::Expr::Closure(_))
+            && self.fold_closures.contains(&(e as *const syn::Expr as usize));
+        if fold_here {
+            self.fold_stack.push((self.seq, self.closure_depth));
+        }
         // SOUNDNESS R324 — an ASYNC BLOCK defers execution exactly as a closure does, and
         // `for_each_child_block` descends `Async(x) => f(&x.block)`, so its statements were walked at
         // depth 0. R303 guarded the closure spelling of its own shape and left the async one open:
@@ -8772,6 +9199,20 @@ impl<'a> EscapeSites<'a> {
         }
         if matches!(e, syn::Expr::Try(_)) {
             self.open_tries.pop(); // R194 — the operand scope closes with the `?`
+        }
+        if fold_here {
+            self.fold_stack.pop();
+        }
+        if let Some(mark) = fold_mark {
+            let end = self.seq;
+            for t in &mut self.try_exits[mark..] {
+                if t.fold_route.is_some() && t.seq < end {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R198FOLD {} -> {end}", t.seq); // §E1 REACH COUNTER
+                    }
+                    t.seq = end;
+                }
+            }
         }
         if let Some(mark) = loop_mark {
             let end = self.seq; // every position inside this loop is <= this one
@@ -8844,7 +9285,7 @@ fn mark_escape(
         let reading = macro_reading(mac, lens, &|n| guard.iter().any(|x| x == n));
         let ords = macro_reading_ordinals(&reading);
         let base = mac as *const syn::ExprMacro as usize;
-        let mut sub = Marks::default();
+        let mut sub = Marks { in_closure: m.in_closure, ..Default::default() };
         // R172 — the parsed forms are OWNED TEMPORARIES, so an address recorded under them dies with
         // this call and a later allocation could reuse one. Marked into a scratch `Marks`, then each
         // site RENUMBERED onto `macro_reading_ordinals`, the numbering the body walk also uses —
@@ -8974,7 +9415,7 @@ fn mark_escape(
     }
     match e {
         syn::Expr::If(iff) => {
-            let mut then_m = Marks::default();
+            let mut then_m = Marks { in_closure: m.in_closure, ..Default::default() };
             if let Some(t) = tail_expr_of(&iff.then_branch) {
                 mark_escape(t, lens, guard, uses, fields, returns, &mut then_m);
             }
@@ -8984,11 +9425,11 @@ fn mark_escape(
             // leaf in practice; leaves are unioned regardless, per this fn's doc comment above.
             let else_m = match &iff.else_branch {
                 Some((_, eb)) => {
-                    let mut n = Marks::default();
+                    let mut n = Marks { in_closure: m.in_closure, ..Default::default() };
                     mark_escape(eb, lens, guard, uses, fields, returns, &mut n);
                     n
                 }
-                None => Marks::default(),
+                None => Marks { in_closure: m.in_closure, ..Default::default() },
             };
             m.names.extend(then_m.names.intersection(&else_m.names).cloned());
             // Leaves AND their sites ride the same union rule (see the comment above): a construction
@@ -9002,14 +9443,29 @@ fn mark_escape(
             m.via.extend(then_m.via.union(&else_m.via).cloned());
             return;
         }
+        // SOUNDNESS R200 (caller half) — A CALL WHOSE CALLEE PROVABLY RETURNS NOTHING CANNOT CARRY ITS
+        // ARGUMENTS OUT IN ITS VALUE. `for_each_value_child` hands every `Call`'s arguments to the escape
+        // walk (right for `Ok(g)`, `Box::new(g)`, a constructor), so in TAIL position `eat_opt(Some(H::new()))`
+        // and `std::mem::drop(h)` marked the `H` escaping and the caller read ABSENT, while the same call
+        // with a `;` charged (executed: 1 drop either way). See `call_returns_nothing` for what "provably"
+        // admits; anything it refuses keeps the old walk.
+        syn::Expr::Call(c) if !m.in_closure && call_returns_nothing(c, uses, returns, lens.shadow) => {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if let syn::Expr::Path(p) = &*c.func {
+                    eprintln!("R200UNIT {}", path_to_string(&p.path)); // §E1 REACH COUNTER
+                }
+            }
+            return;
+        }
         syn::Expr::Match(mt) => {
             let mut arms = mt.arms.iter().map(|a| {
-                let mut n = Marks::default();
+                let mut n = Marks { in_closure: m.in_closure, ..Default::default() };
                 mark_escape(&a.body, lens, guard, uses, fields, returns, &mut n);
                 n
             });
             if let Some(first) = arms.next() {
                 let folded = arms.fold(first, |a, n| Marks {
+                    in_closure: a.in_closure,
                     names: a.names.intersection(&n.names).cloned().collect(),
                     leaves: a.leaves.union(&n.leaves).cloned().collect(),
                     sites: a.sites.union(&n.sites).cloned().collect(),
@@ -9025,7 +9481,97 @@ fn mark_escape(
         }
         _ => {}
     }
+    // R200 — a closure's body carries its captures with it; see `Marks::in_closure`.
+    let was = m.in_closure;
+    if matches!(e, syn::Expr::Closure(_)) {
+        m.in_closure = true;
+    }
     for_each_value_child(e, &mut |c| mark_escape(c, lens, guard, uses, fields, returns, m));
+    m.in_closure = was;
+}
+
+/// SOUNDNESS R200 (caller half) — whether a call's value is `()` by a DECLARED fact, so that none of its
+/// arguments can travel out through it. Two routes, both refusing anything not proven:
+///
+///   * std's `drop`: the written path EXPANDS to `std::mem::drop`/`core::mem::drop` (so `mem::drop` under
+///     `use std::mem`, and any import alias, land); or it is the bare prelude `drop` — written as one
+///     segment, NOT imported, NOT a local binding, and NO fn named `drop` in this crate returns a value.
+///     That last clause is what makes a user's `fn drop(h: H) -> H { h }` win, and the expansion test is
+///     what keeps `mymem::drop` (a local module's fn, expanded under the crate, never under `std`) on the
+///     local route below instead of matching a suffix.
+///   * a LOCAL fn item whose every same-leaf definition in the crate returns `()`: `unit_twin_key` present
+///     and `ret_value_key` absent. Local means a bare, non-imported name that the body does not bind (a
+///     parameter or closure named like a unit fn is a VALUE call), or a path written or expanding under
+///     `crate::`/`self::`/`super::`.
+///     A `Type::assoc(..)`, a dependency's or std's path, a method, a fn pointer and a closure are all
+///     refused: a unit-returning leaf elsewhere in the crate says nothing about them.
+///
+/// STATED LIMIT: leaf-keyed, like the R165 route. A bare `f(h)` that resolves through a GLOB import to a
+/// dependency's value-returning `f` while some module of this crate declares a unit `f` reads as unit.
+fn call_returns_nothing(
+    c: &syn::ExprCall,
+    uses: &HashMap<String, String>,
+    returns: &ReturnIndex,
+    shadow: &std::collections::HashSet<String>,
+) -> bool {
+    let syn::Expr::Path(p) = &*c.func else { return false };
+    if p.qself.is_some() {
+        return false;
+    }
+    let written = path_to_string(&p.path);
+    let expanded = expand(&written, uses);
+    if matches!(expanded.as_str(), "std::mem::drop" | "core::mem::drop") {
+        return true;
+    }
+    let bare = !written.contains("::") && !uses.contains_key(&written) && !shadow.contains(&written);
+    let leaf = written.rsplit("::").next().unwrap_or(&written);
+    let has_value = returns.contains_key(&crate::model::ret_value_key(leaf));
+    if bare && written == "drop" && !has_value {
+        return true; // the prelude `drop`, with no local `drop` fn that returns anything
+    }
+    let local = bare
+        || expanded.starts_with("crate::")
+        || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
+    local && !has_value && returns.contains_key(&crate::model::unit_twin_key(leaf))
+}
+
+/// SOUNDNESS R198 — iterator methods whose closure argument receives its own previous OUTPUT by value as
+/// its next input (the accumulator), so a `?` inside that closure drops whatever the closure built on an
+/// earlier invocation: `try_fold`/`try_rfold` (std, and rayon's `try_fold` of the same shape), `fold`/
+/// `rfold` (a `?` there needs a `Try` accumulator, `fold(Ok(v), |acc, x| { let mut v = acc?; .. })`),
+/// `reduce`/`try_reduce` (the accumulator is the previous item, by value).
+///
+/// OUT, each for a stated reason: `scan` (its state is `&mut`, owned by the adapter and dropped with it,
+/// not at the closure's `?`); `try_for_each`/`for_each`/`map`/`filter_map`/`and_then`/`map_while` (no
+/// value carried between invocations — what they push into is a capture this frame owns, already charged:
+/// lv `a_tryforeach`); itertools' `fold_while`/`fold_ok` (the closure's return is not a `Try`, so it has
+/// no `?` to take); an async closure or async-block body (its `?` runs in a poller's frame — R324). A
+/// closure passed by NAME (`try_fold(v, f)`) is not seen: the let-bound closure route owns it.
+const ACCUMULATING_COMBINATORS: &[&str] = &["fold", "try_fold", "rfold", "try_rfold", "reduce", "try_reduce"];
+
+/// SOUNDNESS R198 (collect arm) — whether a written `collect` target SHORT-CIRCUITS: its outermost type
+/// is `Result<..>`/`Option<..>` (std's `FromIterator` for both stops at the first `Err`/`None` and DROPS
+/// what it had collected). `Vec<Result<..>>` does not, and is not matched.
+fn short_circuit_target(t: &syn::Type) -> bool {
+    match t {
+        syn::Type::Paren(p) => short_circuit_target(&p.elem),
+        syn::Type::Group(g) => short_circuit_target(&g.elem),
+        syn::Type::Path(p) => p.path.segments.last().is_some_and(|s| {
+            matches!(s.ident.to_string().as_str(), "Result" | "Option")
+                && matches!(s.arguments, syn::PathArguments::AngleBracketed(_))
+        }),
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R198 (collect arm) — the address of `e` when it is a `.collect()` with no turbofish (a
+/// turbofish answers for itself), looking through parentheses only.
+fn bare_collect(e: &syn::Expr) -> Option<usize> {
+    match e {
+        syn::Expr::Paren(p) => bare_collect(&p.expr),
+        syn::Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => Some(e as *const syn::Expr as usize),
+        _ => None,
+    }
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can

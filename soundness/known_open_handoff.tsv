@@ -1,0 +1,15 @@
+# soundness/known_open_handoff.tsv — the KNOWN-OPEN register for soundness/run_handoff.sh. Its own file because
+# soundness/baseline.sh regenerates known_open.tsv from the two property gates and would drop these.
+# kind h — soundness/run_handoff.sh (gen_drop.py --handoff), MEASURED over the full 120-cell grid at
+# candor-rust rustagent-v049 (published 0.40.6: 23 silent cells; this set: 6). Executed GT 1 drop each.
+#   closure-param target in TAIL position: `let f = |_h: H| {}; f(V)` — the callee is a local VALUE,
+#     so R200's unit-callee rule refuses it and the argument stays on the escape spine.
+#   qret + generic / closure, direct: `let x = callee(H::new(), n)?; Ok(x)` — R194 exempts the by-value
+#     argument on the `?` operand's spine because the callee is supposed to carry the charge, and a
+#     generic parameter or a closure parameter cannot (R1121's stated residual).
+h	SILENT	pos=tail,target=closure,binding=direct
+h	SILENT	pos=tail,target=closure,binding=let
+h	SILENT	pos=tail,target=closure,binding=shadow
+h	SILENT	pos=tail,target=closure,binding=sibling
+h	SILENT	pos=qret,target=generic,binding=direct
+h	SILENT	pos=qret,target=closure,binding=direct
