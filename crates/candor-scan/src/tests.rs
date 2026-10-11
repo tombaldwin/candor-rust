@@ -16976,7 +16976,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16987,7 +16987,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev87/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev88/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28357,7 +28357,251 @@ pub fn n_weak_drop(w: Weak<Closer>) { let _h = HoldsWeak { w }; }\n";
     for f in ["n_pure", "n_std", "n_none", "n_none_left", "n_empty", "n_weak_drop"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
     }
-    // THE STATED RESIDUAL (SOUNDNESS R1111): a TUPLE's `==` runs each component's `eq` (EXECUTED: logged),
-    // and the typer has no tuple element, so this still reads ABSENT. Pinned so a fix flips it on purpose.
-    assert!(veina_row_effs(&v, "r_tuple").is_empty(), "{v:#}");
+    // SOUNDNESS R1111 — a TUPLE's `==` runs each component's `eq` (EXECUTED: logged). This was pinned ABSENT
+    // as R1098's stated residual; the structural payload (`compare_payload`) flips it, on purpose.
+    assert_eq!(veina_row_effs(&v, "r_tuple"), vec!["Fs".to_string()], "{v:#}");
+}
+
+/// SOUNDNESS R1111 — the comparison payload past R1098's one wrapper layer, and the boundary audit's std
+/// shapes. Every `e_*` below was EXECUTED with a `Guard` whose `PartialEq`/`PartialOrd`/`Ord`/`Hash` each
+/// append to a file (scratchpad `rustagent-v048/fx`, `gt.raw`: every `e_*` logged at least one impl line)
+/// and every one read ABSENT on published 0.40.6, `deny Fs` exit 0. Every `n_*` EXECUTED with NO write, and
+/// is the over-charge control written before the fix: a shadowed tuple parameter, an INHERENT `max`/`ne`
+/// that wins method resolution, a user type with `contains`/`sort`/`insert`, a map whose VALUE (never
+/// compared) is the effectful type, a closure-keyed sort, a local `max` fn, and a tuple field projection
+/// onto a plain `i32`.
+#[test]
+fn r1111_a_comparison_reaches_tuple_components_map_keys_derives_and_std_algorithms() {
+    let src = "\
+use std::cmp::Ordering;\n\
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};\n\
+use std::hash::{Hash, Hasher};\n\
+fn note() { let _ = std::fs::write(\"/tmp/r1111\", b\"x\"); }\n\
+pub struct Guard(pub i32);\n\
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { note(); self.0 == o.0 } }\n\
+impl Eq for Guard {}\n\
+impl PartialOrd for Guard { fn partial_cmp(&self, o: &Guard) -> Option<Ordering> { note(); self.0.partial_cmp(&o.0) } }\n\
+impl Ord for Guard { fn cmp(&self, o: &Guard) -> Ordering { note(); self.0.cmp(&o.0) } }\n\
+impl Hash for Guard { fn hash<H: Hasher>(&self, h: &mut H) { note(); self.0.hash(h) } }\n\
+pub struct Pure(pub i32);\n\
+impl PartialEq for Pure { fn eq(&self, o: &Pure) -> bool { self.0 == o.0 } }\n\
+impl Eq for Pure {}\n\
+impl Hash for Pure { fn hash<H: Hasher>(&self, h: &mut H) { self.0.hash(h) } }\n\
+pub fn e_teq(a: (Guard, i32), b: (Guard, i32)) -> bool { a == b }\n\
+pub fn e_tsecond(a: (i32, Guard), b: (i32, Guard)) -> bool { a == b }\n\
+pub fn e_tlt(a: (Guard, i32), b: (Guard, i32)) -> bool { a < b }\n\
+pub fn e_trefs(a: &(Guard, i32), b: &(Guard, i32)) -> bool { a == b }\n\
+pub fn e_tinline(x: Guard, y: Guard) -> bool { (x, 1) == (y, 1) }\n\
+pub fn e_tnested(a: ((Guard, i32), i32), b: ((Guard, i32), i32)) -> bool { a == b }\n\
+pub fn e_topt(a: Option<(Guard, i32)>, b: Option<(Guard, i32)>) -> bool { a == b }\n\
+pub fn e_tvec(a: Vec<(Guard, i32)>, b: Vec<(Guard, i32)>) -> bool { a == b }\n\
+pub fn e_tvecidx(a: Vec<(Guard, i32)>, b: Vec<(Guard, i32)>) -> bool { a[0] == b[0] }\n\
+pub fn e_mhasheq(a: HashMap<Guard, i32>, b: HashMap<Guard, i32>) -> bool { a == b }\n\
+pub fn e_mbtreeeq(a: BTreeMap<Guard, i32>, b: BTreeMap<Guard, i32>) -> bool { a == b }\n\
+pub fn e_minsert(m: &mut HashMap<Guard, i32>, k: Guard) { m.insert(k, 1); }\n\
+pub fn e_mget(m: &HashMap<Guard, i32>, k: &Guard) -> bool { m.get(k).is_some() }\n\
+pub fn e_mentry(m: &mut HashMap<Guard, i32>, k: Guard) { *m.entry(k).or_insert(0) += 1; }\n\
+pub fn e_mindex(m: &HashMap<Guard, i32>, k: &Guard) -> i32 { m[k] }\n\
+pub fn e_msetinsert(s: &mut HashSet<Guard>, k: Guard) -> bool { s.insert(k) }\n\
+pub fn e_mbtinsert(m: &mut BTreeMap<Guard, i32>, k: Guard) { m.insert(k, 1); }\n\
+pub fn e_mbtsetinsert(s: &mut BTreeSet<Guard>, k: Guard) -> bool { s.insert(k) }\n\
+pub fn e_vcontains(v: &[Guard], g: &Guard) -> bool { v.contains(g) }\n\
+pub fn e_vsort(v: &mut Vec<Guard>) { v.sort(); }\n\
+pub fn e_vbsearch(v: &[Guard], g: &Guard) -> bool { v.binary_search(g).is_ok() }\n\
+pub fn e_vdedup(v: &mut Vec<Guard>) { v.dedup(); }\n\
+pub fn e_vitermax(v: &[Guard]) -> bool { v.iter().max().is_some() }\n\
+pub fn e_vheappush(h: &mut BinaryHeap<Guard>, g: Guard) { h.push(g); }\n\
+pub fn e_vrange(a: Guard, b: Guard, c: &Guard) -> bool { (a..b).contains(c) }\n\
+pub fn e_vcmpmax(a: Guard, b: Guard) -> Guard { std::cmp::max(a, b) }\n\
+pub fn e_bnemethod(a: &Guard, b: &Guard) -> bool { a.ne(b) }\n\
+pub fn e_bmaxmethod(a: Guard, b: Guard) -> Guard { a.max(b) }\n\
+pub fn e_basserteq(a: Guard, b: Guard) { assert_eq!(a, b); }\n\
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord)]\n\
+pub struct Wrap { pub g: Guard }\n\
+pub fn e_deq(a: &Wrap, b: &Wrap) -> bool { a == b }\n\
+pub fn e_dlt(a: &Wrap, b: &Wrap) -> bool { a < b }\n\
+pub fn e_dhashinsert(s: &mut HashSet<Wrap>, w: Wrap) -> bool { s.insert(w) }\n\
+#[derive(PartialEq)]\n\
+pub struct TupS(pub Guard, pub i32);\n\
+pub fn e_dtupstruct(a: &TupS, b: &TupS) -> bool { a == b }\n\
+pub fn n_tpure(a: (Pure, i32), b: (Pure, i32)) -> bool { a == b }\n\
+pub fn n_tstd(a: (String, i32), b: (String, i32)) -> bool { a == b }\n\
+pub fn n_shadow(a: (Guard, i32), b: (i32, i32)) -> bool { let _ = &a; let a = (1, 2); a == b }\n\
+pub struct Mx(pub i32);\n\
+impl PartialEq for Mx { fn eq(&self, o: &Mx) -> bool { note(); self.0 == o.0 } }\n\
+impl Eq for Mx {}\n\
+impl PartialOrd for Mx { fn partial_cmp(&self, o: &Mx) -> Option<Ordering> { note(); self.0.partial_cmp(&o.0) } }\n\
+impl Ord for Mx { fn cmp(&self, o: &Mx) -> Ordering { note(); self.0.cmp(&o.0) } }\n\
+impl Mx { pub fn max(self, o: Mx) -> Mx { if o.0 > self.0 { o } else { self } } pub fn ne(&self, o: &Mx) -> bool { self.0 != o.0 } }\n\
+pub fn n_inherentmax(a: Mx, b: Mx) -> Mx { a.max(b) }\n\
+pub fn n_inherentne(a: &Mx, b: &Mx) -> bool { a.ne(b) }\n\
+pub struct Bag(pub Vec<i32>);\n\
+impl Bag { pub fn contains(&self, g: &Guard) -> bool { self.0.contains(&g.0) } pub fn sort(&mut self) { self.0.sort() } }\n\
+pub fn n_bagcontains(b: &Bag, g: &Guard) -> bool { b.contains(g) }\n\
+pub fn n_bagsort(b: &mut Bag) { b.sort() }\n\
+pub fn n_valinsert(m: &mut HashMap<i32, Guard>, g: Guard) { m.insert(1, g); }\n\
+pub fn n_btval(m: &mut BTreeMap<i32, Guard>, g: Guard) { m.insert(1, g); }\n\
+pub fn n_pureinsert(m: &mut HashMap<Pure, i32>, k: Pure) { m.insert(k, 1); }\n\
+pub fn n_vecpush(v: &mut Vec<Guard>, g: Guard) -> usize { v.push(g); v.len() }\n\
+pub fn n_sortby(v: &mut Vec<Guard>) { v.sort_by(|a, b| a.0.cmp(&b.0)) }\n\
+pub fn n_maxbykey(v: &[Guard]) -> bool { v.iter().max_by_key(|g| g.0).is_some() }\n\
+pub mod my { pub struct HashMap(pub i32); impl HashMap { pub fn insert(&mut self, k: super::Guard) { self.0 = k.0 } } }\n\
+pub fn n_localmap(m: &mut my::HashMap, g: Guard) { m.insert(g) }\n\
+pub fn n_tupfield(a: &(Guard, i32), b: &(Guard, i32)) -> bool { a.1 == b.1 }\n";
+    let v = scan_src_to_json_multi("r1111", &[("Cargo.toml", "[package]\nname = \"r1111\"\n"), ("src/lib.rs", src)]);
+    let fns: Vec<String> = v["functions"].as_array().unwrap().iter().map(|r| r["fn"].as_str().unwrap().to_string()).collect();
+    let mut checked = 0;
+    for line in src.lines() {
+        let Some(rest) = line.strip_prefix("pub fn ") else { continue };
+        let name = rest.split(['(', '<']).next().unwrap();
+        let e = veina_row_effs(&v, name);
+        if name.starts_with("e_") {
+            assert_eq!(e, vec!["Fs".to_string()], "`{name}` EXECUTED runs an effectful impl; read {e:?}\n{fns:?}");
+            checked += 1;
+        } else if name.starts_with("n_") {
+            assert!(e.is_empty(), "`{name}` EXECUTED runs no effectful impl; read {e:?}\n{v:#}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 48, "the fixture's cell count moved — the loop above must still see every cell");
+    // STATED RESIDUALS, pinned ABSENT so a fix flips them on purpose (each EXECUTED: the impl runs):
+    //   a tuple-typed STRUCT FIELD (`self.p == o.p` — the field index holds no tuple type), a tuple bound
+    //   by an unannotated `let` from a PARAMETER (`let a = (x, 1)` — `tuple_of` types literal positions
+    //   only by construction), an ENUM's derive (variant payloads are not indexed per enum), and
+    //   `collect::<HashSet<_>>()` (the target is a turbofish/annotation, not a receiver).
+    let res = "\
+use std::collections::HashSet;\n\
+pub struct Guard(pub i32);\n\
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { let _ = std::fs::write(\"/tmp/r1111\", b\"x\"); self.0 == o.0 } }\n\
+impl Eq for Guard {}\n\
+impl std::hash::Hash for Guard { fn hash<H: std::hash::Hasher>(&self, h: &mut H) { let _ = std::fs::write(\"/tmp/r1111\", b\"x\"); self.0.hash(h) } }\n\
+pub struct Pair { pub p: (Guard, i32) }\n\
+impl Pair { pub fn r_field(&self, o: &Pair) -> bool { self.p == o.p } }\n\
+pub fn r_letlit(x: Guard, y: Guard) -> bool { let a = (x, 1); let b = (y, 1); a == b }\n\
+#[derive(PartialEq)]\n\
+pub enum E { A(Guard), B }\n\
+pub fn r_enumeq(a: &E, b: &E) -> bool { a == b }\n\
+pub fn r_collect(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }\n";
+    let r = scan_src_to_json_multi("r1111r", &[("Cargo.toml", "[package]\nname = \"r1111r\"\n"), ("src/lib.rs", res)]);
+    for f in ["Pair::r_field", "r_letlit", "r_enumeq", "r_collect"] {
+        assert!(veina_row_effs(&r, f).is_empty(), "{f} is a STATED residual; if it now charges, update the row\n{r:#}");
+    }
+}
+
+/// SOUNDNESS R201 / R209(a) / R209(b) residual — drop glue that EXECUTES in the frame and read ABSENT on
+/// published 0.40.6 (`deny Fs` exit 0). Fixture = scratchpad `rustagent-v048/fxd` (`gt.raw`: the in-frame
+/// drop count of every cell, from a hand-rolled `block_on`). Cells by prefix:
+///   * `aw_*`  — R201: `.await` drops the future, and a value a LOCAL HAND-WRITTEN future owns dies with it.
+///     Charged on the root route of a function whose declared return is drop-free.
+///   * `a7*`   — R209(a): a `?` inside macro tokens (statement, expression, `vec!`, `println!`, `assert!`,
+///     a single-arm template) is an exit; the value built before it dies there.
+///   * `b_*`   — R209(b)'s residual: a let-bound closure whose result is KEPT (`let x = f(); x.0`), called
+///     twice, or pushed into a local `Vec`.
+///   * `ok_*` / `a7_ok_*` / `b_ok_*` — EXECUTED 0 in-frame drops. `ok_asyncsink` is the one the first cut
+///     of R201 FABRICATED (it vetoed every `.await`, so an `async fn` call's argument, which the callee
+///     forgets, was charged to the caller); the R201 rule is now limited to futures the crate builds.
+///     `ok_block`, `ok_blockq`, `ok_slot`, `ok_letslot`, `ok_push`, `ok_letpush`, `ok_asynccall` are charged
+///     identically on published 0.40.6 — pre-existing over-charges, pinned so a change to them is a decision.
+#[test]
+fn r201_r209_await_owned_futures_macro_borne_try_and_kept_closure_results_are_charged() {
+    let src = "\
+use std::future::Future;\n\
+use std::pin::Pin;\n\
+use std::task::{Context, Poll};\n\
+\n\
+pub const LOG: &str = \"/tmp/r201\";\n\
+pub struct H(pub u32);\n\
+impl H { pub fn new() -> H { H(0) } }\n\
+impl Drop for H {\n\
+    fn drop(&mut self) {\n\
+        use std::io::Write;\n\
+        let mut f = std::fs::OpenOptions::new().append(true).create(true).open(LOG).unwrap();\n\
+        let _ = writeln!(f, \"drop\");\n\
+    }\n\
+}\n\
+pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }\n\
+\n\
+// ---------------- R201: .await consumes a future that OWNS a constructed value ----------------\n\
+pub struct FutH { pub h: Option<H>, pub n: u32 }\n\
+impl Future for FutH { type Output = u32; fn poll(self: Pin<&mut Self>, _c: &mut Context<'_>) -> Poll<u32> { Poll::Ready(self.n) } }\n\
+pub struct FutQ { pub h: H, pub n: u32 }\n\
+impl Future for FutQ { type Output = Result<u32, ()>; fn poll(self: Pin<&mut Self>, _c: &mut Context<'_>) -> Poll<Result<u32, ()>> { Poll::Ready(gen(self.n)) } }\n\
+pub fn mk_fut(h: H, n: u32) -> FutH { FutH { h: Some(h), n } }\n\
+pub fn mk_futq(h: H, n: u32) -> FutQ { FutQ { h, n } }\n\
+\n\
+pub async fn aw_struct_tail(n: u32) -> u32 { FutH { h: Some(H::new()), n }.await }\n\
+pub async fn aw_mkfut_tail(n: u32) -> u32 { mk_fut(H::new(), n).await }\n\
+pub async fn aw_struct_q(n: u32) -> Result<u32, ()> { let x = FutQ { h: H::new(), n }.await?; Ok(x) }\n\
+pub async fn aw_mkfut_q(n: u32) -> Result<u32, ()> { let x = mk_futq(H::new(), n).await?; Ok(x) }\n\
+pub async fn aw_boxpin(n: u32) -> u32 { Box::pin(mk_fut(H::new(), n)).await }\n\
+pub async fn aw_ret(n: u32) -> u32 { return FutH { h: Some(H::new()), n }.await; }\n\
+pub async fn aw_letret(n: u32) -> u32 { let v = FutH { h: Some(H::new()), n }.await; v }\n\
+// stated-charged controls in the row\n\
+pub async fn aw_stmt(n: u32) { FutH { h: Some(H::new()), n }.await; }\n\
+pub async fn aw_bindfirst(n: u32) -> u32 { let f = mk_fut(H::new(), n); f.await }\n\
+// fabrication controls: the awaited value IS the constructed one, handed to the caller (0 drops here)\n\
+pub async fn ok_block() -> H { async { H::new() }.await }\n\
+pub async fn ok_blockq() -> Result<H, ()> { let h = async { Ok::<H, ()>(H::new()) }.await?; Ok(h) }\n\
+pub async fn mk_h() -> H { H::new() }\n\
+pub async fn ok_callee() -> H { mk_h().await }\n\
+\n\
+// ---------------- R209(a): a `?` inside macro tokens ----------------\n\
+macro_rules! idm { ($e:expr) => { $e }; }\n\
+pub fn a7_stmt(n: u32) -> Result<H, ()> { let g = H::new(); idm!(gen(n)?); Ok(g) }\n\
+pub fn a7b_expr(n: u32) -> Result<H, ()> { let g = H::new(); let _x = idm!(gen(n)?); Ok(g) }\n\
+pub fn a7c_vec(n: u32) -> Result<H, ()> { let g = H::new(); let _v = vec![gen(n)?]; Ok(g) }\n\
+pub fn a7d_println(n: u32) -> Result<H, ()> { let g = H::new(); println!(\"{}\", gen(n)?); Ok(g) }\n\
+pub fn a7e_assert(n: u32) -> Result<H, ()> { let g = H::new(); assert!(gen(n)? > 0); Ok(g) }\n\
+// control: a `?` written outside the macro rescues it (row says CHARGED)\n\
+pub fn a7_ctl_plain(n: u32) -> Result<H, ()> { let g = H::new(); gen(n)?; Ok(g) }\n\
+// fabrication control: no `?` at all, the value escapes on the only exit (0 drops)\n\
+pub fn a7_ok_noq(n: u32) -> Result<H, ()> { let g = H::new(); let _ = idm!(n + 1); Ok(g) }\n\
+\n\
+// ---------------- R209(b) residual: invoked closure tail ----------------\n\
+pub fn b_kept(_n: u32) -> u32 { let f = || H::new(); let x = f(); x.0 }\n\
+pub fn b_inblock(_n: u32) { let f = || H::new(); { let _ = f(); } }\n\
+pub fn b_twice(_n: u32) { let f = || H::new(); let _a = f(); let _b = f(); }\n\
+pub fn b_vec(_n: u32) -> usize { let f = || H::new(); let mut v = Vec::new(); v.push(f()); v.len() }\n\
+pub fn b_discard(_n: u32) { let f = || H::new(); f(); }\n\
+// fabrication controls: never invoked (0), result returned (0)\n\
+pub fn b_ok_never(_n: u32) { let _f = || H::new(); }\n\
+pub fn b_ok_ret(_n: u32) -> H { let f = || H::new(); f() }\n\
+// R201 over-charge controls: the await OUTPUT really carries the constructed value out (0 drops here)\n\
+pub async fn wrap(h: H) -> H { h }\n\
+pub async fn ok_wrap() -> H { wrap(H::new()).await }\n\
+pub async fn ok_slot(slot: &mut Option<H>) -> u32 { *slot = Some(wrap(H::new()).await); 1 }\n\
+pub async fn ok_letslot(slot: &mut Option<H>) -> u32 { let x = wrap(H::new()).await; *slot = Some(x); 1 }\n\
+pub async fn ok_push(v: &mut Vec<H>) -> u32 { v.push(wrap(H::new()).await); 1 }\n\
+pub async fn ok_letpush(v: &mut Vec<H>) -> u32 { let x = wrap(H::new()).await; v.push(x); 1 }\n\
+pub async fn ok_forget() -> u32 { let x = wrap(H::new()).await; std::mem::forget(x); 1 }\n\
+macro_rules! tq { ($e:expr) => { $e? }; }\n\
+pub fn a7f_template(n: u32) -> Result<H, ()> { let g = H::new(); let _x = tq!(gen(n)); Ok(g) }\n\
+// R209(a) controls: the `?` is no exit of THIS function, or nothing is live when it fires (0 drops)\n\
+pub fn a7_ok_closure(n: u32) -> Result<H, ()> { let g = H::new(); let _r = idm!((|| -> Result<u32, ()> { gen(n)?; Ok(1) })()); Ok(g) }\n\
+pub fn a7_ok_after(n: u32) -> Result<H, ()> { let _x = idm!(gen(n)?); Ok(H::new()) }\n\
+macro_rules! two { (q $e:expr) => { $e? }; (p $e:expr) => { $e }; }\n\
+pub fn a7_ok_multiarm(n: u32) -> Result<H, ()> { let g = H::new(); let _x = two!(p gen(n)); Ok(g) }\n\
+// R201 control: an `async fn` call's argument is the CALLEE's to drop or hand on (0 drops here)\n\
+pub async fn hand_on(h: H, out: &mut Vec<H>) -> u32 { out.push(h); 1 }\n\
+pub async fn ok_asynccall(out: &mut Vec<H>) -> u32 { hand_on(H::new(), out).await }\n\
+pub async fn sink(h: H) -> u32 { std::mem::forget(h); 1 }\n\
+pub async fn ok_asyncsink() -> u32 { sink(H::new()).await }\n\
+";
+    let v = scan_src_to_json_multi("r201", &[("Cargo.toml", "[package]\nname = \"r201\"\nedition = \"2021\"\n"), ("src/lib.rs", src)]);
+    let charged = ["aw_struct_tail", "aw_mkfut_tail", "aw_struct_q", "aw_mkfut_q", "aw_boxpin", "aw_ret", "aw_letret",
+        "aw_stmt", "aw_bindfirst", "a7_stmt", "a7b_expr", "a7c_vec", "a7d_println", "a7e_assert", "a7_ctl_plain",
+        "a7f_template", "b_kept", "b_inblock", "b_twice", "b_vec", "b_discard",
+        // pre-existing over-charges (EXECUTED 0 drops), unchanged from published 0.40.6
+        "ok_block", "ok_blockq", "ok_slot", "ok_letslot", "ok_push", "ok_letpush", "ok_asynccall"];
+    for f in charged {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    for f in ["ok_callee", "ok_wrap", "ok_forget", "ok_asyncsink", "a7_ok_after", "a7_ok_noq", "b_ok_never", "b_ok_ret"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f} EXECUTED drops nothing in its frame\n{v:#}");
+    }
+    // Two controls read `Unknown` on published 0.40.6 too (an unexpandable closure / a multi-arm macro):
+    // never a concrete charge.
+    for f in ["a7_ok_closure", "a7_ok_multiarm"] {
+        assert!(!veina_row_effs(&v, f).contains(&"Fs".to_string()), "{f}\n{v:#}");
+    }
 }

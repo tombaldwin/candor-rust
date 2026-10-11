@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a comparison or hash reaches the component's, key's and field's own impl (SOUNDNESS
+  R1111).** A tuple's `==`/`<` runs each component's `PartialEq`/`PartialOrd`, a `HashMap`/`HashSet`
+  comparison hashes and compares every key, and std's algorithms and collections run the element's or
+  key's impl inside std: `contains`, `sort`, `binary_search`, `dedup`, `starts_with`, `iter().max()`,
+  `BinaryHeap::push`, `HashMap::insert`/`get`/`entry`/`remove`/`[k]`, `BTreeMap`/`BTreeSet` lookups,
+  `(a..b).contains`, `std::cmp::max`, the provided `a.ne(b)`/`a.max(b)`/`a.lt(b)` methods and
+  `assert_eq!`. A `#[derive(PartialEq, PartialOrd, Ord, Hash)]` struct now reaches its fields' impls.
+  Every shape was EXECUTED (an impl that writes a file logged a line) and read ABSENT; `deny Fs` now
+  exits 1. Stated residuals: a tuple-typed struct field, a tuple bound by an unannotated `let` from a
+  parameter, an enum's derive, and `collect::<HashSet<_>>()`.
+- ⚠ **candor-scan: three drop-glue silences closed (SOUNDNESS R201, R209(a), R209(b) residual).**
+  `.await` drops the future, so a value the future owns (`FutH { h: H::new(), .. }.await`,
+  `mk_fut(H::new(), n).await`) dies in the awaiting frame — now charged where the function's declared
+  return type cannot carry such a value. A `?` inside macro tokens (`idm!(gen(n)?)`, `vec![f()?]`,
+  `println!("{}", f()?)`, `assert!(f()? > 0)`, a single-arm template's `$e?`) is an exit, so a value
+  built before it dies there. A let-bound closure whose result is kept (`let x = f(); x.0`), called
+  twice, or pushed into a local `Vec` builds a value that dies here. Each was EXECUTED with a `Drop` that
+  writes a file and read ABSENT.
+
 ## [0.40.6] — 2026-10-11
 
 - ⚠ **A comparison over a std wrapper now reaches the element's own `PartialEq`/`PartialOrd` (SOUNDNESS

@@ -2860,7 +2860,9 @@ pub(crate) fn fninfo(
             twin_leaves: elems.twin_type_leaves,
         }
     };
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
+    let future_impls: &[String] = traits.impls.get("Future").map(|v| v.as_slice()).unwrap_or(&[]);
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros,
+        crate::lang::ret_type_drop_free(&sig.output, uses).then_some(future_impls));
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.

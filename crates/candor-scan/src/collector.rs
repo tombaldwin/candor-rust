@@ -615,6 +615,24 @@ pub(crate) struct CallCollector<'a> {
 /// (`closure_vars`/`fn_typed_vars`) because clearing them inside a shadow's body would let a shadowed
 /// `name()` resolve to a free fn — a fabrication. Here nothing is cleared: the pre-statement value is
 /// RESTORED, which for the RHS is simply what the name meant there, so both directions stay honest.
+/// SOUNDNESS R1111 — the position a comparison payload type was found in: a plain value, a HASHED key
+/// (`HashMap`/`HashSet` — equality also hashes it) or an ORDERED key (`BTreeMap`/`BTreeSet`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CmpRole {
+    Value,
+    HashKey,
+    OrdKey,
+}
+
+/// SOUNDNESS R1111 — the std collection families whose methods run an element's or key's comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdColl {
+    Seq,
+    Heap,
+    HashKeyed,
+    OrdKeyed,
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct BoundNameState {
     name: String,
@@ -3781,7 +3799,7 @@ impl<'a> CallCollector<'a> {
     /// `U`'s, so typing the right side could edge to the wrong body. A comparison against a literally EMPTY
     /// value (`None`, `[]`, `vec![]`) never reaches an element's `eq` and is skipped, so `opt == None` is
     /// not charged for code that cannot run.
-    fn charge_compare_payload(&mut self, node: &syn::ExprBinary, tr: &str, method: &str) {
+    fn charge_compare_payload(&mut self, left: &syn::Expr, right: &syn::Expr, tr: &str, method: &str) {
         fn statically_empty(e: &syn::Expr) -> bool {
             match peel_recv(e) {
                 syn::Expr::Path(p) => p.qself.is_none() && p.path.is_ident("None"),
@@ -3790,10 +3808,29 @@ impl<'a> CallCollector<'a> {
                 _ => false,
             }
         }
-        if statically_empty(&node.left) || statically_empty(&node.right) {
+        if statically_empty(left) || statically_empty(right) {
             return;
         }
-        let Some(raw) = self.resolve_elem_type_raw(&node.left) else { return };
+        // SOUNDNESS R1111 — the STRUCTURAL payload: a tuple's components, and every component of a std
+        // wrapper/container/map the DECLARED type names (see `compare_payload`). Formed beside the R1098
+        // element route below, never instead of it; a duplicate edge is the same edge.
+        let mut payload = Vec::new();
+        self.compare_payload(left, &mut payload, 0);
+        for (ty, role) in payload {
+            if self.std_payload(&ty) || !self.payload_reachable(&ty, tr) {
+                continue;
+            }
+            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
+                eprintln!("R1111PAYLOAD\t{tr}\t{ty}\t{role:?}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            self.charge_coercion_ty(&ty, tr, method);
+            // `HashMap`/`HashSet` equality looks each key up in the other side: `K::hash` then `K::eq`
+            // (EXECUTED: `m_hasheq` logs both).
+            if role == CmpRole::HashKey && tr == "PartialEq" {
+                self.charge_coercion_ty(&ty, "Hash", "hash");
+            }
+        }
+        let Some(raw) = self.resolve_elem_type_raw(left) else { return };
         let elem = crate::lang::strip_wrapped(&raw).to_string();
         if elem.is_empty() {
             return;
@@ -3802,6 +3839,401 @@ impl<'a> CallCollector<'a> {
             eprintln!("R1098PAYLOAD\t{tr}\t{elem}"); // §E1 REACH COUNTER, on the ADDED branch only
         }
         self.charge_coercion_ty(&elem, tr, method);
+    }
+
+    /// SOUNDNESS R1111 — the nominal types whose OWN `PartialEq`/`PartialOrd`/`Hash` a comparison of `e`
+    /// runs, found STRUCTURALLY. A tuple's `==` is `self.0 == other.0 && self.1 == other.1 ..`, a
+    /// `HashMap`'s is a lookup of every key (`K::hash`, `K::eq`) and a compare of every value, and so on
+    /// through `Option`/`Vec`/arrays/`Box`/`Rc`: each layer delegates to its components. The R1098 element
+    /// route answers one layer of a WRAPPER; nothing answered a TUPLE (the typer has no tuple element) or a
+    /// map KEY (`elem_type` answers a map's VALUE), so `(Guard, i32) == (Guard, i32)` read ABSENT over a
+    /// `Guard::eq` that EXECUTES.
+    ///
+    /// Where the payload comes from, and why each source cannot answer for the wrong binding:
+    ///  - a PARAMETER's declared type, through `assign_drop.params`, which holds a parameter ONLY while
+    ///    the body never re-binds its name — so no shadow can inherit it (the fabrication direction);
+    ///  - `tuple_of`, the per-position table every tuple binder already writes and scopes (one level);
+    ///  - a tuple LITERAL, component by component;
+    ///  - `x.N` / `x[i]` over a declared parameter, walked one projection into the declared type.
+    ///
+    /// Charging goes through `charge_coercion_ty`, so only a type with the crate's own impl (or a chained
+    /// dependency's) forms an edge: `(String, i32)` and `(Pure, i32)` contribute nothing.
+    fn compare_payload(&self, e: &syn::Expr, out: &mut Vec<(String, CmpRole)>, depth: u8) {
+        if depth > 4 {
+            return;
+        }
+        let e = peel_value(e);
+        match e {
+            syn::Expr::Path(p) if p.qself.is_none() => {
+                let Some(name) = p.path.get_ident().map(|i| i.to_string()) else { return };
+                if let Some(ty) = self.assign_drop.params.get(&name) {
+                    self.cmp_walk_ty(ty, CmpRole::Value, out, 0);
+                } else if let Some(t) = self.tuple_of.get(&name) {
+                    out.extend(t.iter().flatten().map(|t| (t.clone(), CmpRole::Value)));
+                }
+            }
+            syn::Expr::Tuple(t) => {
+                for el in &t.elems {
+                    if matches!(peel_value(el), syn::Expr::Tuple(_)) {
+                        self.compare_payload(el, out, depth + 1);
+                    } else if let Some(ty) = self.type_of(el) {
+                        out.push((ty, CmpRole::Value));
+                    } else {
+                        self.compare_payload(el, out, depth + 1);
+                    }
+                }
+            }
+            syn::Expr::Field(f) => {
+                let syn::Member::Unnamed(idx) = &f.member else { return };
+                let Some(base) = self.declared_param_ty(&f.base) else { return };
+                if let syn::Type::Tuple(tt) = crate::lang::peel_ty_refs(base) {
+                    if let Some(c) = tt.elems.iter().nth(idx.index as usize) {
+                        self.cmp_walk_ty(c, CmpRole::Value, out, 0);
+                    }
+                }
+            }
+            syn::Expr::Index(ix) => {
+                let Some(base) = self.declared_param_ty(&ix.expr) else { return };
+                if let Some(el) = crate::lang::seq_elem_ty(base) {
+                    self.cmp_walk_ty(el, CmpRole::Value, out, 0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// SOUNDNESS R1111 — a payload type that is std's own (`u64`, `String`, `std::path::PathBuf`, a
+    /// generic parameter). Comparing or hashing two values of such a type runs STD's impl: the orphan rule
+    /// lets a crate write `impl PartialEq<Local> for u64` but never `impl PartialEq<u64> for u64`, and
+    /// `trait_impls` is keyed by the implementing type's leaf alone — so an edge formed for a std payload
+    /// would land on the crate's `PartialEq<Value> for u64` (serde_json), a body that does not run here.
+    fn std_payload(&self, ty: &str) -> bool {
+        let root = ty.split("::").next().unwrap_or(ty);
+        if ty.contains("::") {
+            return matches!(root, "std" | "core" | "alloc");
+        }
+        if self.generic_bounds.contains_key(ty) || self.impl_generic_bounds.contains_key(ty) {
+            return true;
+        }
+        let prim = matches!(
+            ty,
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "f32" | "f64" | "bool" | "char" | "str"
+        );
+        prim || (matches!(ty, "String" | "Vec" | "Option" | "Box" | "Result") && !self.uses.contains_key(ty))
+    }
+
+    /// SOUNDNESS R1111 — whether a payload type's comparison can reach a body at all: the crate's own impl of
+    /// `tr` (or any of the comparison/hash traits), a std derive of one, or a DEPENDENCY type (whose impl a
+    /// chained report answers). A crate-path type with neither names no unit — rustix's `RawFd`/`c::c_int`
+    /// are aliases of a primitive behind a `#[path]`-redirected module — and an edge to it only raises a
+    /// wrong-reason `Unknown` (measured: 172 rows across rustix/bitvec on the first full corpus A/B).
+    fn payload_reachable(&self, ty: &str, tr: &str) -> bool {
+        let l = ty.rsplit("::").next().unwrap_or(ty);
+        let local = ["PartialEq", "PartialOrd", "Ord", "Hash", tr].iter().any(|t| {
+            self.trait_impls.get(*t).is_some_and(|v| v.iter().any(|x| x == l))
+                || self.impl_members.contains(&crate::model::derive_key(t, l))
+        });
+        local || self.is_dependency_type(ty)
+    }
+
+    /// The declared type of a bare PARAMETER the body never re-binds (`assign_drop.params`), else `None`.
+    fn declared_param_ty(&self, e: &syn::Expr) -> Option<&syn::Type> {
+        let syn::Expr::Path(p) = peel_value(e) else { return None };
+        if p.qself.is_some() {
+            return None;
+        }
+        let name = p.path.get_ident()?.to_string();
+        if name == "self" {
+            return None;
+        }
+        self.assign_drop.params.get(&name)
+    }
+
+    /// SOUNDNESS R1111 — walk a DECLARED type down to the nominal types a comparison of a value of it
+    /// reaches. A std wrapper/container/tuple/array/slice is a layer; a map's or set's first argument is a
+    /// KEY (it is also hashed, or ordered); anything else is a payload leaf as `type_path` names it. A
+    /// generic parameter is skipped (it has no impl of its own here), and so is a std name the crate has
+    /// shadowed with an import of its own.
+    fn cmp_walk_ty(&self, ty: &syn::Type, role: CmpRole, out: &mut Vec<(String, CmpRole)>, depth: u8) {
+        if depth > 6 {
+            return;
+        }
+        match ty {
+            syn::Type::Reference(r) => self.cmp_walk_ty(&r.elem, role, out, depth + 1),
+            syn::Type::Paren(p) => self.cmp_walk_ty(&p.elem, role, out, depth + 1),
+            syn::Type::Group(g) => self.cmp_walk_ty(&g.elem, role, out, depth + 1),
+            syn::Type::Tuple(t) => {
+                for el in &t.elems {
+                    self.cmp_walk_ty(el, role, out, depth + 1);
+                }
+            }
+            syn::Type::Array(a) => self.cmp_walk_ty(&a.elem, role, out, depth + 1),
+            syn::Type::Slice(s) => self.cmp_walk_ty(&s.elem, role, out, depth + 1),
+            syn::Type::Path(p) if p.qself.is_none() => {
+                let Some(seg) = p.path.segments.last() else { return };
+                let name = seg.ident.to_string();
+                let std_named = self.names_std_type(&p.path);
+                let args: Vec<&syn::Type> = match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(a) => a
+                        .args
+                        .iter()
+                        .filter_map(|g| match g {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let layer = std_named
+                    && matches!(
+                        name.as_str(),
+                        "Option" | "Vec" | "VecDeque" | "LinkedList" | "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
+                            | "Result" | "Reverse" | "Wrapping" | "Saturating"
+                    );
+                let map_key = |n: &str| match n {
+                    "HashMap" | "HashSet" | "IndexMap" | "IndexSet" | "FxHashMap" | "FxHashSet" | "AHashMap"
+                    | "AHashSet" => Some(CmpRole::HashKey),
+                    "BTreeMap" | "BTreeSet" => Some(CmpRole::OrdKey),
+                    _ => None,
+                };
+                if layer {
+                    for a in args {
+                        self.cmp_walk_ty(a, role, out, depth + 1);
+                    }
+                } else if let Some(k) = map_key(&name).filter(|_| std_named) {
+                    let mut it = args.into_iter();
+                    if let Some(key) = it.next() {
+                        self.cmp_walk_ty(key, k, out, depth + 1);
+                    }
+                    if let Some(val) = it.next() {
+                        self.cmp_walk_ty(val, role, out, depth + 1);
+                    }
+                } else if p.path.segments.len() == 1
+                    && (self.generic_bounds.contains_key(&name) || self.impl_generic_bounds.contains_key(&name))
+                {
+                } else if let Some(t) = crate::lang::type_path(ty, &self.uses) {
+                    out.push((t, role));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// SOUNDNESS R1111 (boundary) — a std ALGORITHM or COLLECTION method that runs the element's or the
+    /// key's own `PartialEq`/`PartialOrd`/`Ord`/`Hash` inside std: `v.contains(&g)`, `v.sort()`,
+    /// `v.dedup()`, `v.binary_search(&g)`, `heap.push(g)`, `m.insert(k, v)`, `m.get(&k)`, `set.contains(&k)`,
+    /// `xs.iter().max()`, and the provided comparison methods on a concrete value (`a.ne(&b)`,
+    /// `a.max(b)`, `a.lt(&b)`). Each was EXECUTED (fixture `rustagent-v048/fx`: the impl's write is logged)
+    /// and each read ABSENT, because std's body is not analysed and no edge reached the user's impl.
+    ///
+    /// The ORDERING family charges BOTH `PartialOrd::partial_cmp` and `Ord::cmp`: which of the two std
+    /// calls is an implementation detail that has moved between releases (measured on this toolchain:
+    /// `sort` and `Ord::max` go through `partial_cmp`, `binary_search` and `Iterator::max` through `cmp`),
+    /// and the two are normally one body (`partial_cmp` = `Some(self.cmp(o))`). Charging the union can
+    /// over-charge only a type whose two impls differ in effect AND do not call each other.
+    ///
+    /// Typing: the RECEIVER must be a std collection (its type leaf, or a declared slice/array parameter);
+    /// the payload type is the ARGUMENT's (`&Q` for a lookup, `K`/`T` for an insert — the impl std runs is
+    /// the argument's) and, failing that, the receiver's element. A method the crate itself defines on that
+    /// receiver type never reaches here, because the receiver must be a std type.
+    fn charge_std_cmp_method(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Fam {
+            Eq,
+            Ord,
+            Hash,
+        }
+        // The provided methods of `PartialEq`/`PartialOrd`/`Ord` on a concrete value. A type whose own impl
+        // or inherent block defines the name dispatches there by itself and is left alone.
+        // An explicit `a.eq(&b)` / `a.cmp(&b)` / `a.hash(h)` on a type whose impl is DERIVED: the typed
+        // call resolves to no body, so the derive's fields are reached here (a hand-written impl answers
+        // the call by itself and `charge_coercion_ty` adds only the same edge again).
+        if let Some((tr, m)) = match (leaf, node.args.len()) {
+            ("eq", 1) => Some(("PartialEq", "eq")),
+            ("partial_cmp", 1) => Some(("PartialOrd", "partial_cmp")),
+            ("cmp", 1) => Some(("Ord", "cmp")),
+            ("hash", 1) => Some(("Hash", "hash")),
+            _ => None,
+        } {
+            if let Some(ty) = self.resolve_recv_type(&node.receiver) {
+                let l = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                if self.impl_members.contains(&crate::model::derive_key(tr, &l)) {
+                    self.charge_coercion_ty(&ty, tr, m);
+                }
+            }
+            return;
+        }
+        let provided: Option<Fam> = match (leaf, node.args.len()) {
+            ("ne", 1) => Some(Fam::Eq),
+            ("lt" | "le" | "gt" | "ge" | "max" | "min", 1) | ("clamp", 2) => Some(Fam::Ord),
+            _ => None,
+        };
+        if let Some(f) = provided {
+            if let Some(ty) = self.resolve_recv_type(&node.receiver) {
+                let l = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                if !self.local_fn_on(&l, leaf) {
+                    self.charge_cmp_family(&ty, f == Fam::Eq, f == Fam::Ord, false);
+                }
+                return;
+            }
+        }
+        // `xs.iter().max()` — a ZERO-argument `max`/`min` can only be `Iterator::max`/`min` (`Ord::max`
+        // takes one), over whatever element the receiver chain yields.
+        if matches!(leaf, "max" | "min") && node.args.is_empty() {
+            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
+                let elem = crate::lang::strip_wrapped(&raw).to_string();
+                if !elem.is_empty() {
+                    self.charge_cmp_family(&elem, false, true, false);
+                }
+            }
+            return;
+        }
+        // `(a..b).contains(&x)` — `RangeBounds::contains` compares `x` against both ends (`PartialOrd`).
+        if leaf == "contains" && node.args.len() == 1 && matches!(peel_value(&node.receiver), syn::Expr::Range(_)) {
+            if let Some(t) = node.args.first().and_then(|a| self.type_of(a)) {
+                self.charge_cmp_family(&t, false, true, false);
+            }
+            return;
+        }
+        let kind = self.std_collection_kind(&node.receiver);
+        let Some(kind) = kind else { return };
+        let fam: Option<(Fam, bool)> = match (kind, leaf) {
+            // (family, payload from ARGUMENT 0 where there is one)
+            (StdColl::Seq, "contains" | "starts_with" | "ends_with") => Some((Fam::Eq, false)),
+            (StdColl::Seq, "dedup") => Some((Fam::Eq, false)),
+            (StdColl::Seq, "sort" | "sort_unstable" | "binary_search" | "is_sorted" | "select_nth_unstable") => {
+                Some((Fam::Ord, false))
+            }
+            (StdColl::Heap, "push") => Some((Fam::Ord, true)),
+            (StdColl::Heap, "pop" | "into_sorted_vec" | "peek_mut") => Some((Fam::Ord, false)),
+            (
+                StdColl::HashKeyed,
+                "insert" | "get" | "get_mut" | "contains_key" | "contains" | "remove" | "entry" | "get_key_value"
+                | "remove_entry" | "take" | "replace",
+            ) => Some((Fam::Hash, true)),
+            (
+                StdColl::OrdKeyed,
+                "insert" | "get" | "get_mut" | "contains_key" | "contains" | "remove" | "entry" | "get_key_value"
+                | "remove_entry" | "take" | "replace" | "range" | "range_mut" | "split_off",
+            ) => Some((Fam::Ord, true)),
+            _ => None,
+        };
+        let Some((fam, from_arg)) = fam else { return };
+        let mut tys: Vec<String> = Vec::new();
+        if from_arg {
+            if let Some(a) = node.args.first() {
+                if let Some(t) = self.type_of(a) {
+                    tys.push(t);
+                }
+            }
+        }
+        if tys.is_empty() && !matches!(kind, StdColl::HashKeyed | StdColl::OrdKeyed) || matches!(leaf, "dedup") {
+            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
+                let elem = crate::lang::strip_wrapped(&raw).to_string();
+                if !elem.is_empty() {
+                    tys.push(elem);
+                }
+            }
+        } else if tys.is_empty() && self.std_set_receiver(&node.receiver) {
+            // A SET's element IS its key, so `set.contains(&k)` over an untyped argument still has one.
+            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
+                let elem = crate::lang::strip_wrapped(&raw).to_string();
+                if !elem.is_empty() {
+                    tys.push(elem);
+                }
+            }
+        }
+        for t in tys {
+            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
+                eprintln!("R1111METHOD\t{leaf}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            match fam {
+                Fam::Eq => self.charge_cmp_family(&t, true, false, false),
+                Fam::Ord => self.charge_cmp_family(&t, false, true, false),
+                Fam::Hash => self.charge_cmp_family(&t, true, false, true),
+            }
+        }
+    }
+
+    /// The edges a comparison family forms on one payload type, each through `charge_coercion_ty` (so only
+    /// an impl the crate or a chained dependency has answers).
+    fn charge_cmp_family(&mut self, ty: &str, eq: bool, ord: bool, hash: bool) {
+        if self.std_payload(ty)
+            || !["PartialEq", "PartialOrd", "Ord", "Hash"].iter().any(|t| self.payload_reachable(ty, t))
+        {
+            return;
+        }
+        if eq {
+            self.charge_coercion_ty(ty, "PartialEq", "eq");
+        }
+        if ord {
+            self.charge_coercion_ty(ty, "PartialOrd", "partial_cmp");
+            self.charge_coercion_ty(ty, "Ord", "cmp");
+        }
+        if hash {
+            self.charge_coercion_ty(ty, "Hash", "hash");
+            self.charge_coercion_ty(ty, "PartialEq", "eq");
+        }
+    }
+
+    /// Whether the crate defines `leaf` as a member of the type `l` itself (an inherent or trait method of
+    /// that name), which is what a method call on it runs instead of a std provided method.
+    fn local_fn_on(&self, l: &str, leaf: &str) -> bool {
+        self.returns.contains_key(&crate::model::impl_fn_key(l, leaf))
+    }
+
+    /// Which std collection family the receiver is, by its type leaf, or by a declared slice/array/`Vec`
+    /// parameter. `None` for anything else — a user type of the same method name is not this route's.
+    fn std_collection_kind(&self, recv: &syn::Expr) -> Option<StdColl> {
+        let leaf_kind = |l: &str| match l {
+            "Vec" | "VecDeque" | "LinkedList" => Some(StdColl::Seq),
+            "BinaryHeap" => Some(StdColl::Heap),
+            "HashMap" | "HashSet" => Some(StdColl::HashKeyed),
+            "BTreeMap" | "BTreeSet" => Some(StdColl::OrdKeyed),
+            _ => None,
+        };
+        if let Some(t) = self.resolve_recv_type(recv) {
+            let root = t.split("::").next().unwrap_or(&t);
+            let l = t.rsplit("::").next().unwrap_or(&t);
+            let std_rooted = matches!(root, "std" | "core" | "alloc") || (!t.contains("::") && !self.uses.contains_key(l));
+            return if std_rooted { leaf_kind(l) } else { None };
+        }
+        let ty = self.declared_param_ty(recv)?;
+        match crate::lang::peel_ty_refs(ty) {
+            syn::Type::Slice(_) | syn::Type::Array(_) => Some(StdColl::Seq),
+            syn::Type::Path(p) => {
+                let seg = p.path.segments.last()?;
+                if !self.names_std_type(&p.path) {
+                    return None;
+                }
+                leaf_kind(&seg.ident.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a written type path names a `std`/`core`/`alloc` type (or a prelude/unimported name),
+    /// rather than one the crate declares or imports from elsewhere under the same leaf.
+    fn names_std_type(&self, path: &syn::Path) -> bool {
+        let written = crate::lang::path_to_string_lc(path);
+        let full = expand(&written, &self.uses);
+        let root = full.split("::").next().unwrap_or(&full);
+        if full.contains("::") {
+            return matches!(root, "std" | "core" | "alloc");
+        }
+        !self.uses.contains_key(&full) && !self.generic_bounds.contains_key(&full)
+    }
+
+    fn std_set_receiver(&self, recv: &syn::Expr) -> bool {
+        let leaf = |t: &str| t.rsplit("::").next().unwrap_or(t).to_string();
+        if let Some(t) = self.resolve_recv_type(recv) {
+            return matches!(leaf(&t).as_str(), "HashSet" | "BTreeSet");
+        }
+        self.declared_param_ty(recv).is_some_and(|ty| match crate::lang::peel_ty_refs(ty) {
+            syn::Type::Path(p) => p.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "HashSet" | "BTreeSet")),
+            _ => false,
+        })
     }
 
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
@@ -3846,12 +4278,53 @@ impl<'a> CallCollector<'a> {
     /// The concrete half of `charge_coercion`, split out so a NAMED/inline-captured format hole
     /// (`format!("{val}")`) — which names a binding rather than an operand expression — can reuse it.
     fn charge_coercion_ty(&mut self, ty: &str, trait_leaf: &str, method: &str) {
+        self.charge_coercion_ty_at(ty, trait_leaf, method, 0);
+    }
+
+    fn charge_coercion_ty_at(&mut self, ty: &str, trait_leaf: &str, method: &str, depth: u8) {
         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 self.push_coercion_edge(ty_leaf, method);
                 return;
             }
+        }
+        // SOUNDNESS R1111 — a DERIVED `PartialEq`/`PartialOrd`/`Ord`/`Hash` has no body to edge to: the
+        // derive compares (hashes) each FIELD with that field's own impl, so the comparison reaches the
+        // fields' impls directly (EXECUTED: `#[derive(PartialEq)] struct Wrap { g: Guard }` logs `Guard::eq`
+        // at `a == b`). A derived `PartialOrd` beside a derived `Ord` goes through `Ord::cmp` (EXECUTED: the
+        // field's `cmp` runs, not its `partial_cmp`), so the ordering family charges both. Fields come from
+        // the struct's field index (`fields`, and `field_elem` for a collection field); an enum's variant
+        // payloads are not indexed per enum and stay the stated residual.
+        if depth < 4
+            && matches!(trait_leaf, "PartialEq" | "PartialOrd" | "Ord" | "Hash")
+            && self.impl_members.contains(&crate::model::derive_key(trait_leaf, ty_leaf))
+        {
+            let mut field_tys: Vec<String> = Vec::new();
+            if let Some(fs) = self.fields.get(ty_leaf) {
+                field_tys.extend(fs.values().cloned());
+            }
+            if let Some(fs) = self.field_elem.get(ty_leaf) {
+                field_tys.extend(fs.values().map(|e| crate::lang::strip_wrapped(e).to_string()).filter(|e| !e.is_empty()));
+            }
+            field_tys.sort();
+            field_tys.dedup();
+            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
+                eprintln!("R1111DERIVE\t{trait_leaf}\t{ty_leaf}\t{}", field_tys.len()); // §E1 REACH COUNTER
+            }
+            for f in field_tys {
+                if f.rsplit("::").next() == Some(ty_leaf) || self.std_payload(&f) {
+                    continue;
+                }
+                if trait_leaf == "PartialOrd" {
+                    self.charge_coercion_ty_at(&f, "PartialOrd", "partial_cmp", depth + 1);
+                    self.charge_coercion_ty_at(&f, "Ord", "cmp", depth + 1);
+                } else {
+                    self.charge_coercion_ty_at(&f, trait_leaf, method, depth + 1);
+                }
+            }
+            // NOT a return: what the type answered before (a crate-anchored or dependency-qualified edge,
+            // and whatever hedge an unresolved one raises) is kept, so this branch only ever ADDS.
         }
         // NO LOCAL IMPL — the type may belong to a DEPENDENCY, whose `Display for Entry` is in its own
         // chained report under `deplib#Entry::fmt`. `trait_impls` is local-only, so the site emitted nothing
@@ -6162,6 +6635,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let syn::Expr::Path(p) = func {
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.edge_std_type_dep_trait_member(p, &node.args);
+            // SOUNDNESS R1111 (boundary) — `std::cmp::max(a, b)` / `min` / `max_by_key`-free spellings run
+            // `Ord` on the arguments' type (EXECUTED: `v_cmpmax` logs the impl). Only the std path, as the
+            // written path expands; a local `max` fn resolves as itself.
+            if p.qself.is_none() && node.args.len() == 2 {
+                let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
+                if matches!(full.as_str(), "std::cmp::max" | "std::cmp::min" | "core::cmp::max" | "core::cmp::min" | "cmp::max" | "cmp::min")
+                    && (full.starts_with("std::") || full.starts_with("core::") || !self.uses.contains_key("cmp"))
+                {
+                    if let Some(t) = node.args.first().and_then(|a| self.type_of(a)) {
+                        self.charge_cmp_family(&t, false, true, false);
+                    }
+                }
+            }
         }
         match func {
             syn::Expr::Path(p) => {
@@ -7514,6 +8000,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             Vec::new()
         };
         self.note_untyped_method(node, &leaf, r1095_start);
+        // SOUNDNESS R1111 (boundary) — a std algorithm/collection method or a provided comparison method
+        // that runs the element's or key's own `PartialEq`/`PartialOrd`/`Ord`/`Hash` inside std. AFTER the
+        // R1095 judgement on purpose: that judgement reads every call this SITE pushed as evidence the
+        // receiver was typed, and an edge into an element's impl says nothing about the receiver.
+        self.charge_std_cmp_method(node, &leaf);
         self.visit_expr(&node.receiver);
         if let Some(name) = closure_param {
             for a in &node.args {
@@ -9355,6 +9846,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if is_format_macro(&mleaf) {
                 self.charge_format_args(&mleaf, &exprs);
             }
+            // SOUNDNESS R1111 (boundary) — `assert_eq!(a, b)` evaluates `*left == *right`: the same
+            // `PartialEq::eq` a written `a == b` runs, through the same two routes.
+            //
+            // The operand edge is formed only where it can reach a body: the crate's own impl, a derive, or
+            // a dependency type. A crate-anchored type that is neither — rustix's `RawFd`/`c::c_int`, aliases
+            // of a primitive reached through a `#[path]`-redirected module — names no unit and would raise a
+            // wrong-reason `Unknown` (measured: 162 rows across rustix/bitvec on the first corpus A/B, every
+            // one a primitive comparison).
+            if matches!(mleaf.as_str(), "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne") && exprs.len() >= 2 {
+                // `type_of`, the DECLARED-value typer, not the receiver walk: `resolve_recv_type` answers
+                // `self.len()` with `self`'s own type (a builder-chain guess), which formed `BitSlice::eq`
+                // for a `usize` comparison in bitvec (measured: 12 wrong-reason `Unknown` rows).
+                if let Some(t) = self.type_of(&exprs[0]) {
+                    let l = t.rsplit("::").next().unwrap_or(&t).to_string();
+                    let local = self.trait_impls.get("PartialEq").is_some_and(|v| v.contains(&l))
+                        || self.impl_members.contains(&crate::model::derive_key("PartialEq", &l));
+                    if local || self.is_dependency_type(&t) {
+                        self.charge_coercion_ty(&t, "PartialEq", "eq");
+                    }
+                }
+                self.charge_compare_payload(&exprs[0], &exprs[1], "PartialEq", "eq");
+            }
             for e in &exprs {
                 self.visit_expr(e);
             }
@@ -9383,7 +9896,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let Some((tr, method)) = binop_trait(&node.op) {
             self.charge_coercion(&node.left, tr, method);
             if matches!(tr, "PartialEq" | "PartialOrd") {
-                self.charge_compare_payload(node, tr, method);
+                self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
         }
         syn::visit::visit_expr_binary(self, node);
@@ -9404,6 +9917,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // INDEX OVERLOAD (#4): `a[i]` on a concrete local `impl Index for A` runs `A::index`. (A std
         // collection / slice / array operand resolves to no local impl → no edge.)
         self.charge_coercion(&node.expr, "Index", "index");
+        // SOUNDNESS R1111 (boundary) — `map[&k]` is a lookup: it hashes (or orders) and compares the key.
+        match self.std_collection_kind(&node.expr) {
+            Some(StdColl::HashKeyed) => {
+                if let Some(t) = self.type_of(&node.index) {
+                    self.charge_cmp_family(&t, true, false, true);
+                }
+            }
+            Some(StdColl::OrdKeyed) => {
+                if let Some(t) = self.type_of(&node.index) {
+                    self.charge_cmp_family(&t, false, true, false);
+                }
+            }
+            _ => {}
+        }
         syn::visit::visit_expr_index(self, node);
     }
 }

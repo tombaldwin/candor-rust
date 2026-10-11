@@ -717,6 +717,16 @@ pub(crate) fn impl_opaque_key(trait_leaf: &str, ty: &str) -> String {
     format!("{trait_leaf}\u{1f}{ty}\u{1f}*")
 }
 
+/// SOUNDNESS R1111 — THE FIFTH KEY SHAPE: `\u{1f}derive\u{1f}<tr>\u{1f}<ty>` — `#[derive(<tr>)]` on the local
+/// type `<ty>`, for the std comparison/hash traits (`PartialEq`, `PartialOrd`, `Ord`, `Hash`). A derived
+/// impl has no body in the source, and it delegates to each FIELD's impl of the same trait; this key is
+/// what lets a comparison over the type reach its fields. The LEADING separator makes the first segment
+/// empty, so no reader that splits a key into `(trait, type, member)` can mistake it for an impl block
+/// (`""` is no trait leaf, and its "type" segment is the literal `derive`).
+pub(crate) fn derive_key(trait_leaf: &str, ty: &str) -> String {
+    format!("\u{1f}derive\u{1f}{trait_leaf}\u{1f}{ty}")
+}
+
 /// ⟨0.40⟩ SOUNDNESS R652 — THE FOURTH KEY SHAPE: `<tr>\u{1f}<ty>\u{1f}!<expanded trait path>` — the
 /// `impl <tr> for <ty>` block was seen and THIS is the path it wrote, expanded through its scope's
 /// `use` map. `!` is not a valid Rust identifier, so this can no more collide with a real member name
