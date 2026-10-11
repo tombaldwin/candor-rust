@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev96 (rustagent-v050): SOUNDNESS R1128 exactness — `FileDecls::rets` gains `nominal_key`, and the
+    // operator `Rhs` refusal reads it (cached `FnInfo`'s `calls`); a rev95 entry republishes the fx9 silences.
     // rev95 (rustagent-v050): SOUNDNESS R1134 — block-local const/static operator operands are typed, and an
     // untypeable right operand keeps its edge (cached `FnInfo`'s `calls`); a rev94 entry republishes the
     // 3684f51 regression.
@@ -459,7 +461,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev95/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev96/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

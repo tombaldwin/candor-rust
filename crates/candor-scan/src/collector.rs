@@ -4409,10 +4409,50 @@ impl<'a> CallCollector<'a> {
     /// `model::impl_rhs_key` lists each impl's written `Rhs` (`Self` for the default or the type itself, `*`
     /// for a generic one). No entry (an older index, a trait with no `Rhs`) and an unknown `rhs` both answer
     /// yes — today's edge; the edge is refused only when every recorded `Rhs` is a named type `rhs` is not.
+    /// SOUNDNESS R1128 (exactness) — a type NAME this crate's index pins to one type: a module-level struct /
+    /// enum / union declared under that name and never as an alias (`model::nominal_key` = `S`), or a std
+    /// primitive / `str` / `String` the crate declares nothing under. Everything else is not exact.
+    fn exact_type_name(&self, n: &str) -> bool {
+        if n.is_empty() || !n.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+        if self.generic_bounds.contains_key(n) || self.impl_generic_bounds.contains_key(n) || n == "Self" {
+            return false;
+        }
+        match self.returns.get(&crate::model::nominal_key(n)).map(String::as_str) {
+            Some("S") => true,
+            Some(_) => false,
+            None => matches!(
+                n,
+                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                    | "f32" | "f64" | "bool" | "char" | "str" | "String"
+            ),
+        }
+    }
+
     fn rhs_ok(&self, trait_leaf: &str, ty_leaf: &str, rhs: Option<&str>) -> bool {
         let Some(rs) = self.returns.get(&crate::model::impl_rhs_key(trait_leaf, ty_leaf)) else { return true };
         let Some(r) = rhs else { return true };
-        rs.split(',').any(|x| x == "*" || x == r || (x == "Self" && r == ty_leaf))
+        // EXACTNESS — the refusal may fire only when the right operand's type is POSITIVELY known and every
+        // recorded `Rhs` is too, so that "none of them" is a proof and not a spelling mismatch. An alias
+        // (`c: PrimAlias` for `Add<u64>`), an associated type, a generic, a sentinel, a dependency or
+        // block-local or macro-made type all answer "not exact", which keeps the edge (the over-charge, never a
+        // silence — fx9, executed Fs, ABSENT at 3684f51 through f0b83fb).
+        if !self.exact_type_name(r) {
+            return true;
+        }
+        let mut ok = false;
+        for x in rs.split(',') {
+            if x == "*" || x == r || (x == "Self" && r == ty_leaf) {
+                ok = true;
+            } else if x != "Self" && !self.exact_type_name(x) {
+                return true; // a recorded `Rhs` we cannot pin (an alias, a dependency type): keep the edge
+            }
+        }
+        if !ok && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R1128EXACT {ty_leaf} rhs={r}"); // §E1 REACH COUNTER — the refusal really fires
+        }
+        ok
     }
 
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
@@ -10170,7 +10210,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             };
             let rt = if assoc_const(&node.right) { None } else {
                 self.local_const_type(&node.right).or_else(|| self.type_of(&node.right))
-            }.map(|t| {
+            }
+            // A PROJECTION or qualified-self answer (`T::Item`, `<T as Tr>::Out`, `Self::Output`) names no type
+            // this crate declares; its last segment is a coincidence, not a resolution.
+            .filter(|t| {
+                let s = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
+                let first = s.split("::").next().unwrap_or("");
+                let projection = s.contains("::")
+                    && (first == "Self" || self.generic_bounds.contains_key(first) || self.impl_generic_bounds.contains_key(first));
+                !s.starts_with('<') && !projection
+            })
+            .map(|t| {
                 let t = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
                 let t = if t.starts_with('\'') { t.split_once(' ').map_or(t, |(_, r)| r.trim_start()) } else { t };
                 let t = t.strip_prefix("mut ").unwrap_or(t);
