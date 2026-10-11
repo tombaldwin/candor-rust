@@ -19,6 +19,28 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `FdGuard::eq` and was ABSENT; with libc chained, `deny Unknown watches::WatchDescriptor::eq` goes
   0 → 1. A concrete `Weak<T>` now also types `upgrade()`'s payload (resolving calls on it), and is
   never read as OWNING `T` for drop glue. Stated residual: a tuple's `==`.
+- ⚠ **candor-scan: five drop-glue silences closed per row (SOUNDNESS R297/R195, R300, R829, R1116,
+  R1118).** Each is a destructor that really runs in the reported function's frame (executed with a drop
+  counter) and was absent from `functions[]`; a `deny <effect>` gate over such a function can now go red.
+  - **R297/R195** — an assignment drops the value it overwrites: `*slot = v`, `s.f = ..`, `v[i] = ..`,
+    `g = w`, `g = Some(..)` in a loop, `*o = None`. Typed from either side (a construction or owned
+    parameter on the right, a parameter/field place on the left). Not charged: a deferred `let g;`'s
+    first write, a name already moved, a reference rebind, a borrowed (`&'a T`) field, and a type leaf
+    the crate declares twice (the drop join is leaf-keyed). An `Option` set from `None` is charged —
+    the previous value may be `Some`.
+  - **R300** — a construction inside a body-local `fn` (or `impl` method) is a site of the enclosing
+    body, so another escaping construction of the same type no longer suppresses it.
+  - **R829** — an escape edge inside a conditional arm (`if c { v.push(g) }`) no longer certifies a value
+    bound outside it unless every sibling arm also mentions the value.
+  - **R1116** — a by-value parameter used only through field projections (`fn into_file(self) -> F {
+    self.file }`) drops its remaining fields here; a type with its own `Drop` drops whole. tempfile's
+    `NamedTempFile::into_file` now reads `Fs` (it deletes the temp file).
+  - **R1118** — a chained DEPENDENCY's `Drop` type released in frame (an unmoved by-value parameter, an
+    overwritten place, a reassignment, `Vec::clear`/`truncate`/`retain`/`dedup*`/`resize` on a param or
+    field) joins the dependency report's `Type::drop` row. The same container rule applies to local
+    types. A dependency-typed parameter is charged only when never moved (R230 not copied across).
+  - Corpus A/B against published 0.40.5 (registry corpus, 3,230 entries): REMOVED 0, no effect,
+    `Unknown`, `invisible` or call edge lost; see the commit for the counts and the audit.
 
 ## [0.40.5] — 2026-10-11
 

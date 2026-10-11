@@ -955,6 +955,13 @@ pub(crate) struct ElemIndexes<'a> {
     /// contributor (R213's class), so there the recorded type may be the other twin's; the vein-B typing
     /// routes refuse to answer through one.
     pub(crate) ambiguous_type_leaves: &'a HashSet<String>,
+    /// SOUNDNESS R297 — the R718 field-borrow index, for the assignment-drop rule's field places. `None`
+    /// (tests, synthetic indexes) reads every field as owned, the over-charging direction.
+    pub(crate) field_borrows: Option<&'a HashMap<String, HashMap<String, FieldBorrow>>>,
+    /// SOUNDNESS R1116 — the types with their OWN `impl Drop` (`merged.drop_types`). `None` in tests.
+    pub(crate) drop_types: Option<&'a HashSet<String>>,
+    /// SOUNDNESS R1116 — type leaves declared at two or more quals (any fields). `None` in tests.
+    pub(crate) twin_type_leaves: Option<&'a HashSet<String>>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

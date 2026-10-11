@@ -2825,6 +2825,41 @@ pub(crate) fn fninfo(
             (*ptr, f2, e2, own)
         })
         .collect();
+    // SOUNDNESS R297/R195 — the assignment-drop rule's inputs. Parameters keep their DECLARED type only
+    // while the body never re-binds the name (a shadowing `let`/pattern makes the name something else).
+    let assign_drop = {
+        struct Bound(std::collections::HashSet<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Bound {
+            fn visit_pat_ident(&mut self, n: &'ast syn::PatIdent) {
+                self.0.insert(n.ident.to_string());
+                syn::visit::visit_pat_ident(self, n);
+            }
+        }
+        let mut b = Bound(Default::default());
+        syn::visit::Visit::visit_block(&mut b, block);
+        let mut params: HashMap<String, syn::Type> = HashMap::new();
+        for input in &sig.inputs {
+            match input {
+                syn::FnArg::Receiver(r) => {
+                    params.insert("self".to_string(), (*r.ty).clone());
+                }
+                syn::FnArg::Typed(pt) => {
+                    if let Some(n) = crate::lang::single_pat_ident(&pt.pat) {
+                        if !b.0.contains(&n) {
+                            params.insert(n, (*pt.ty).clone());
+                        }
+                    }
+                }
+            }
+        }
+        crate::collector::AssignDrop {
+            exempt: crate::lang::assign_drop_exempt(block),
+            params,
+            field_borrows: elems.field_borrows,
+            self_leaf: self_ty.map(|t| t.rsplit("::").next().unwrap_or(t).to_string()),
+            twin_leaves: elems.twin_type_leaves,
+        }
+    };
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
@@ -2940,6 +2975,7 @@ pub(crate) fn fninfo(
         foreign_dispatch_sites: std::collections::BTreeSet::new(),
         unresolved_why: std::collections::BTreeSet::new(),
         drop_relevant,
+        assign_drop,
         // Computed ONCE per body, before the walk, because the answer is a property of the whole
         // function (a value constructed on line 2 may escape through a `return` on line 40) and the
         // visitor sees each expression without its ancestors. (See `escapes`, hoisted above.)
@@ -2958,6 +2994,26 @@ pub(crate) fn fninfo(
     // Its own escape gate is the `&escapes.names` argument two lines up, which is value-keyed.
     for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
         c.note_owned_param_drop(Some(leaf));
+    }
+    // SOUNDNESS R1116 — a by-value parameter that leaves only through FIELD PROJECTIONS (`self.file`)
+    // is PARTIALLY moved: the fields not moved drop here, at the end of this frame.
+    for leaf in partial_move_leaves(
+        sig,
+        self_ty,
+        uses,
+        &escapes.names,
+        block,
+        fields,
+        field_elem_ix,
+        elems.field_borrows,
+        elems.drop_types,
+        elems.twin_type_leaves,
+    ) {
+        c.note_owned_param_drop(Some(leaf));
+    }
+    // SOUNDNESS R1118 — a by-value parameter of a DEPENDENCY's type that this body never moves.
+    for (cr, leaf) in dep_param_releases(sig, uses, &escapes.names, block) {
+        c.note_cross_release(cr, leaf);
     }
     c.walk_stmts(&block.stmts);
     let ret_idents = match &sig.output {
@@ -4819,4 +4875,251 @@ fn join_impl_bound_pending(
     // A type whose ONLY entries were reserved would otherwise leave an empty inner map behind, which
     // flips `resolve_recv_traits`' `trait_fields.is_empty()` hot-path guard open for nothing.
     idx.retain(|_, m| !m.is_empty());
+}
+
+/// SOUNDNESS R1116 — the drop-relevant leaves left behind when a by-value parameter is PARTIALLY MOVED.
+///
+///     pub fn into_file(self) -> F { self.file }        // tempfile's `NamedTempFile`
+///
+/// `self.path` (a `TempPath`, whose `Drop` deletes the file) is not moved and drops at the end of this
+/// frame — EXECUTED: the temp file is gone after `into_file` returns. `owned_drop_params` refuses the
+/// whole parameter because its NAME reaches the tail (`mark_escape` counts a field projection as handing
+/// the name's storage outward, which is right for the projected field and wrong for the rest), so the
+/// unit read pure and `deny Fs Unknown NamedTempFile::into_file` exited 0.
+///
+/// The rule, and every refusal reads as "nothing left behind" (the shipped answer):
+///   · the parameter is owned (by-value `self` without a reference in its type; a typed parameter whose
+///     `type_path_b` leaf is not borrowed) and its name is in `escaping_names`;
+///   · EVERY mention of the name in the body is the base of a field projection (`n.f`, `n.f.g`,
+///     `n.f.m()`). A bare mention anywhere — returned, passed, a method receiver, destructured
+///     (`let S { a, b } = self`), or any appearance in macro tokens — reads as the whole value leaving;
+///   · the fields left behind are the type's indexed fields minus EVERY field projected anywhere (a
+///     projection that only borrows is still counted as a move — the under-charging side), minus a field
+///     declared through a reference (R718's index);
+///   · if the type has its OWN `Drop`, no field can be moved out of it at all, so a projection is a copy
+///     or a borrow and the whole value drops here: its own leaf is returned;
+///   · a type leaf declared twice with different fields is refused outright (see the parameter).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn partial_move_leaves(
+    sig: &syn::Signature,
+    self_ty: Option<&str>,
+    uses: &HashMap<String, String>,
+    escaping_names: &std::collections::HashSet<String>,
+    block: &syn::Block,
+    fields: &FieldIndex,
+    field_elem: &FieldElemIndex,
+    field_borrows: Option<&HashMap<String, HashMap<String, crate::model::FieldBorrow>>>,
+    drop_types: Option<&std::collections::HashSet<String>>,
+    // Type leaves this crate declares at two or more quals. Every input above is LEAF-keyed, so for such
+    // a leaf the field list and the own-`Drop` fact may be another twin's — measured on tokio, where
+    // `sync::oneshot::State(usize)` (a `Copy` newtype) read `time_alt::entry::State`'s fields, and
+    // `as_usize(self) { self.0 }` was charged through a `Sender` it does not own. Refused for such a
+    // leaf: the shipped (silent) answer, stated.
+    twin_type_leaves: Option<&std::collections::HashSet<String>>,
+) -> Vec<String> {
+    let mut owned: Vec<(String, String)> = Vec::new(); // (name, type leaf)
+    for input in &sig.inputs {
+        match input {
+            syn::FnArg::Receiver(r) if r.reference.is_none() && !crate::lang::type_borrows(&r.ty) => {
+                if let Some(t) = self_ty {
+                    owned.push(("self".to_string(), t.rsplit("::").next().unwrap_or(t).to_string()));
+                }
+            }
+            syn::FnArg::Typed(pt) => {
+                let Some((t, borrowed)) = crate::lang::type_path_b(&pt.ty, uses) else { continue };
+                if borrowed {
+                    continue;
+                }
+                if let Some(n) = crate::lang::single_pat_ident(&pt.pat) {
+                    owned.push((n, t.rsplit("::").next().unwrap_or(&t).to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    owned.retain(|(n, _)| escaping_names.contains(n));
+    if owned.is_empty() {
+        return Vec::new();
+    }
+    struct Uses<'n> {
+        names: std::collections::HashSet<&'n str>,
+        whole: std::collections::HashSet<String>,
+        projected: HashMap<String, std::collections::HashSet<String>>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Uses<'_> {
+        fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
+            if let syn::Expr::Path(p) = &*f.base {
+                if let Some(id) = p.path.get_ident() {
+                    let id = id.to_string();
+                    if self.names.contains(id.as_str()) {
+                        let key = match &f.member {
+                            syn::Member::Named(m) => m.to_string(),
+                            syn::Member::Unnamed(i) => i.index.to_string(),
+                        };
+                        self.projected.entry(id).or_default().insert(key);
+                        return;
+                    }
+                }
+            }
+            syn::visit::visit_expr_field(self, f);
+        }
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if let Some(id) = p.path.get_ident() {
+                self.whole.insert(id.to_string());
+            }
+            syn::visit::visit_expr_path(self, p);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            fn idents(ts: proc_macro2::TokenStream, out: &mut std::collections::HashSet<String>) {
+                for t in ts {
+                    match t {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            out.insert(i.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(g) => idents(g.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            idents(m.tokens.clone(), &mut self.whole);
+        }
+    }
+    let mut v = Uses {
+        names: owned.iter().map(|(n, _)| n.as_str()).collect(),
+        whole: Default::default(),
+        projected: HashMap::new(),
+    };
+    syn::visit::Visit::visit_block(&mut v, block);
+    let mut out = Vec::new();
+    for (n, t) in &owned {
+        if v.whole.contains(n) {
+            continue;
+        }
+        let Some(moved) = v.projected.get(n) else { continue };
+        if twin_type_leaves.is_some_and(|tw| tw.contains(t)) {
+            continue;
+        }
+        if drop_types.is_some_and(|d| d.contains(t)) {
+            out.push(t.clone());
+            continue;
+        }
+        let borrow = |field: &str, elem: bool| -> bool {
+            field_borrows
+                .and_then(|fb| fb.get(t))
+                .and_then(|m| m.get(field))
+                .and_then(|b| if elem { b.elem } else { b.leaf })
+                .unwrap_or(false)
+        };
+        for (elem, idx) in [(false, fields.get(t)), (true, field_elem.get(t))] {
+            let Some(idx) = idx else { continue };
+            for (f, ft) in idx {
+                if moved.contains(f) || borrow(f, elem) {
+                    continue;
+                }
+                let ft = crate::lang::strip_wrapped(ft);
+                out.push(ft.rsplit("::").next().unwrap_or(ft).to_string());
+            }
+        }
+    }
+    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && !out.is_empty() {
+        eprintln!("R1116PARTIAL {} -> {:?}", sig.ident, out); // §E1 REACH COUNTER
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// SOUNDNESS R1118 — `(crate, leaf)` for each by-value parameter whose declared type holds a
+/// DEPENDENCY's type and whose value provably dies in this frame. `owned_drop_params` answers only for
+/// types with a LOCAL `impl Drop` (`drop_relevant` is built from this scan's own items), so
+/// `fn eat(_g: dgdep::G) {}` read pure in a chained scan whose dependency report publishes `G::drop`
+/// (EXECUTED: 1 drop).
+///
+/// STRICTER than the in-crate rule, on purpose: R230 measured that `owned_drop_params` charges a
+/// parameter that is only STORED (`v.push(h)`), a fabrication, and this must not copy it across the
+/// boundary. So the parameter is charged only when its name never appears except under `&`/`&mut` —
+/// no move, no method receiver (a consuming method is indistinguishable from a borrowing one here), no
+/// field projection, no macro token. Anything else reads as "the value went somewhere" and is not
+/// charged, which is the shipped answer.
+pub(crate) fn dep_param_releases(
+    sig: &syn::Signature,
+    uses: &HashMap<String, String>,
+    escaping_names: &std::collections::HashSet<String>,
+    block: &syn::Block,
+) -> Vec<(String, String)> {
+    let mut cands: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for input in &sig.inputs {
+        let syn::FnArg::Typed(pt) = input else { continue };
+        let Some(n) = crate::lang::single_pat_ident(&pt.pat) else {
+            // `_` binds nothing: the argument is dropped at the end of the call, in this frame.
+            if matches!(&*pt.pat, syn::Pat::Wild(_)) {
+                let x: Vec<(String, String)> = crate::lang::owned_type_paths(&pt.ty, uses, None)
+                    .iter()
+                    .filter_map(|p| crate::lang::cross_type(p))
+                    .collect();
+                if !x.is_empty() {
+                    cands.push((String::new(), x));
+                }
+            }
+            continue;
+        };
+        if escaping_names.contains(&n) {
+            continue;
+        }
+        let x: Vec<(String, String)> = crate::lang::owned_type_paths(&pt.ty, uses, None)
+            .iter()
+            .filter_map(|p| crate::lang::cross_type(p))
+            .collect();
+        if !x.is_empty() {
+            cands.push((n, x));
+        }
+    }
+    if cands.is_empty() {
+        return Vec::new();
+    }
+    struct Moves {
+        used: std::collections::HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Moves {
+        fn visit_expr_reference(&mut self, r: &'ast syn::ExprReference) {
+            if let syn::Expr::Path(p) = &*r.expr {
+                if p.path.get_ident().is_some() {
+                    return; // `&n` / `&mut n` — a borrow
+                }
+            }
+            syn::visit::visit_expr_reference(self, r);
+        }
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if let Some(id) = p.path.get_ident() {
+                self.used.insert(id.to_string());
+            }
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            fn idents(ts: proc_macro2::TokenStream, out: &mut std::collections::HashSet<String>) {
+                for t in ts {
+                    match t {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            out.insert(i.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(g) => idents(g.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            idents(m.tokens.clone(), &mut self.used);
+        }
+    }
+    let mut mv = Moves { used: Default::default() };
+    syn::visit::Visit::visit_block(&mut mv, block);
+    let mut out: Vec<(String, String)> = cands
+        .into_iter()
+        .filter(|(n, _)| n.is_empty() || !mv.used.contains(n))
+        .flat_map(|(_, x)| x)
+        .collect();
+    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && !out.is_empty() {
+        eprintln!("R1118PARAM {} -> {:?}", sig.ident, out); // §E1 REACH COUNTER
+    }
+    out.sort();
+    out.dedup();
+    out
 }

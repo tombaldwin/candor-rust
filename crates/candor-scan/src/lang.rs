@@ -6386,6 +6386,19 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // expansion never becomes a construction SITE (see `note_local_macro_template_leaves`).
     local_macros: &'a HashMap<String, String>,
 ) -> Escapes {
+    escaping_ctor_full(block, uses, fields, returns, local_macros).0
+}
+
+/// `escaping_ctor_leaves`, plus the body's construction SITES. SOUNDNESS R300 — a body-local `fn` item's
+/// sites are handed to the enclosing body, whose collector walks the nested body inline and charges what
+/// it builds (see `EscapeSites::note_nested_body`).
+fn escaping_ctor_full<'a>(
+    block: &'a syn::Block,
+    uses: &'a HashMap<String, String>,
+    fields: &'a FieldIndex,
+    returns: &'a ReturnIndex,
+    local_macros: &'a HashMap<String, String>,
+) -> (Escapes, HashMap<String, Vec<SiteId>>) {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
     let mut sites = EscapeSites::new(uses, fields, returns, local_macros);
@@ -6659,6 +6672,7 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // does not reach) keeps the old answer — the site set is an added refusal, never a new licence.
     let mut escaped_sites: std::collections::HashSet<SiteId> = std::mem::take(&mut acc.sites);
     escaped_sites.extend(std::mem::take(&mut acc.via));
+
     // R189 — what the pre-change code would have handed the gate. Only the hit counter reads it.
     via_union.extend(escaped_sites.iter().copied());
     acc.leaves.retain(|l| {
@@ -6704,7 +6718,7 @@ pub(crate) fn escaping_ctor_leaves<'a>(
             None => true,
         }
     });
-    Escapes { leaves: acc.leaves, names: acc.names }
+    (Escapes { leaves: acc.leaves, names: acc.names }, std::mem::take(&mut sites.ctor_sites))
 }
 
 /// The escape fixpoint (root use, then the `lets`/`assigns`/`method_args` transitive closure — same
@@ -6734,9 +6748,27 @@ fn escape_from_root(
     // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
     // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
     // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
+    // SOUNDNESS R829 — a route or edge inside a conditional branch carries out only the names that branch
+    // owns, or that every sibling arm also carries (`EscapeSites::edge_effective`). Names only: a
+    // construction written INSIDE the branch is built only when the branch runs, so its site stays.
+    let branch_filter = |sub: &mut Marks, e: &syn::Expr| {
+        let addr = e as *const syn::Expr as usize;
+        if sites.frames_of.contains_key(&addr) {
+            sub.names.retain(|n| sites.edge_effective(addr, n));
+        }
+    };
+    let merge_direct = |m: &mut Marks, sub: Marks| {
+        m.names.extend(sub.names);
+        m.leaves.extend(sub.leaves);
+        m.sites.extend(sub.sites);
+        m.via.extend(sub.via);
+    };
     for (q, e) in &sites.escapes {
         if route_at(*q) {
-            mark_escape(e, &lens, guard, uses, fields, returns, &mut m);
+            let mut sub = Marks::default();
+            mark_escape(e, &lens, guard, uses, fields, returns, &mut sub);
+            branch_filter(&mut sub, e);
+            merge_direct(&mut m, sub);
         }
     }
     // SOUNDNESS R189 — EVERY MARK BELOW THIS LINE IS BINDING-MEDIATED, so its sites are `via`, not
@@ -6750,6 +6782,7 @@ fn escape_from_root(
             if m.names.contains(name) {
                 let mut sub = Marks::default();
                 mark_escape(init, &lens, guard, uses, fields, returns, &mut sub);
+                branch_filter(&mut sub, init);
                 m.absorb_via(sub);
             }
         }
@@ -6760,6 +6793,7 @@ fn escape_from_root(
                     if m.names.contains(n) {
                         let mut sub = Marks::default();
                         mark_escape(rhs, &lens, guard, uses, fields, returns, &mut sub);
+                        branch_filter(&mut sub, rhs);
                         m.absorb_via(sub);
                     }
                 }
@@ -6769,7 +6803,10 @@ fn escape_from_root(
                 // store's own position, because a store that has not happened yet stores nothing.
                 None => {
                     if route_at(*q) {
-                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut m);
+                        let mut sub = Marks::default();
+                        mark_escape(rhs, &lens, guard, uses, fields, returns, &mut sub);
+                        branch_filter(&mut sub, rhs);
+                        merge_direct(&mut m, sub);
                     }
                 }
             }
@@ -6779,6 +6816,7 @@ fn escape_from_root(
                 for a in args {
                     let mut sub = Marks::default();
                     mark_escape(a, &lens, guard, uses, fields, returns, &mut sub);
+                    branch_filter(&mut sub, a);
                     m.absorb_via(sub);
                 }
             }
@@ -7403,6 +7441,20 @@ struct EscapeSites<'a> {
     /// numbers charged it. A route in the operand has run — or, for a closure the callee never invoked,
     /// built nothing at all — by the time that `?` decides, either way nothing live dies there.
     route_inside: HashMap<usize, std::collections::HashSet<usize>>,
+    /// SOUNDNESS R829 — the CONDITIONAL BRANCHES enclosing the expression being walked, as
+    /// `(branch node id, arm index)`. An `if` has two arms (the `else` may be absent, which is an arm
+    /// that mentions nothing), a `match` one per arm, a `for`/`while` body is arm 0 of two (the loop
+    /// may run zero times).
+    branch_stack: Vec<(usize, usize)>,
+    next_branch: usize,
+    branch_arms: HashMap<usize, usize>,
+    /// R829 — every bare identifier mentioned anywhere inside each arm (macro tokens included).
+    arm_idents: HashMap<(usize, usize), std::collections::HashSet<String>>,
+    /// R829 — the branches enclosing a `let` name's FIRST binding.
+    name_frames: HashMap<String, Vec<(usize, usize)>>,
+    /// R829 — the branches enclosing each escape EDGE, by the address of the edge's value expression
+    /// (a `let` initialiser, an assignment's RHS, a method argument, a route operand). Absent = none.
+    frames_of: HashMap<usize, Vec<(usize, usize)>>,
 }
 
 impl<'a> EscapeSites<'a> {
@@ -7442,7 +7494,63 @@ impl<'a> EscapeSites<'a> {
             assigns: Vec::new(),
             method_args: Vec::new(),
             route_inside: HashMap::new(),
+            branch_stack: Vec::new(),
+            next_branch: 0,
+            branch_arms: HashMap::new(),
+            arm_idents: HashMap::new(),
+            name_frames: HashMap::new(),
+            frames_of: HashMap::new(),
         }
+    }
+
+    /// SOUNDNESS R829 — remember which branches enclose this edge's value expression.
+    fn note_frames(&mut self, e: &syn::Expr) {
+        if !self.branch_stack.is_empty() {
+            self.frames_of.insert(e as *const syn::Expr as usize, self.branch_stack.clone());
+        }
+    }
+
+    /// SOUNDNESS R829 — does the edge at `addr` carry NAME out on EVERY path that reaches it from the
+    /// name's binding? An edge inside a branch the binding is outside of runs only on that branch, so on
+    /// a sibling arm that never mentions the name the value is still here when the scope ends, and dies
+    /// (`let g = H::new(); if c { v.push(g) }; v` — executed 1 drop with `c == false`, ABSENT). Such an
+    /// edge certifies nothing about the name.
+    ///
+    /// COVERAGE IS GENEROUS, deliberately: a sibling arm that MENTIONS the name in any way (another
+    /// store, a call argument, a borrow) is taken as carrying it too, which keeps the shipped
+    /// suppression for `if c { a.push(g) } else { b.push(g) }`. That is the old answer, never a new
+    /// charge — the denylist direction.
+    fn edge_effective(&self, addr: usize, name: &str) -> bool {
+        let Some(fr) = self.frames_of.get(&addr) else { return true };
+        let bind: &[(usize, usize)] = self.name_frames.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+        for f in fr {
+            if bind.contains(f) {
+                continue;
+            }
+            let (node, arm) = *f;
+            let n = self.branch_arms.get(&node).copied().unwrap_or(2);
+            for a in (0..n).filter(|a| *a != arm) {
+                if !self.arm_idents.get(&(node, a)).is_some_and(|s| s.contains(name)) {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R829BRANCH {name}"); // §E1 REACH COUNTER — the withdrawn certification
+                    }
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// R829 — one arm of a conditional, walked inside its frame.
+    fn walk_arm_expr(&mut self, node: usize, arm: usize, e: &'a syn::Expr) {
+        self.branch_stack.push((node, arm));
+        self.walk_expr(e);
+        self.branch_stack.pop();
+    }
+    fn walk_arm_block(&mut self, node: usize, arm: usize, b: &'a syn::Block) {
+        self.branch_stack.push((node, arm));
+        self.walk_block(b, false);
+        self.branch_stack.pop();
     }
 
     /// R709 — record that any unconditional route at the CURRENT position sits inside the operand of
@@ -8080,6 +8188,8 @@ impl<'a> EscapeSites<'a> {
                         if let Some(n) = single_pat_ident(&l.pat) {
                             let seq = self.seq;
                             self.first_bind_seq.entry(n.clone()).or_insert(seq);
+                            self.name_frames.entry(n.clone()).or_insert_with(|| self.branch_stack.clone());
+                            self.note_frames(&init.expr);
                             self.lets.push((n, &init.expr));
                         }
                     }
@@ -8126,6 +8236,16 @@ impl<'a> EscapeSites<'a> {
                         .name_bindings
                         .entry(itf.sig.ident.to_string())
                         .or_insert(0) += 1;
+                    self.note_nested_body(&itf.block);
+                }
+                // SOUNDNESS R300 — and a body-local `impl`'s methods, the same item one kind over: the
+                // collector walks their bodies inline too (`visit_item_impl`).
+                syn::Stmt::Item(syn::Item::Impl(imp)) => {
+                    for it in &imp.items {
+                        if let syn::ImplItem::Fn(f) = it {
+                            self.note_nested_body(&f.block);
+                        }
+                    }
                 }
                 syn::Stmt::Macro(m) => {
                     self.note_macro_idents(m.mac.tokens.clone());
@@ -8162,12 +8282,39 @@ impl<'a> EscapeSites<'a> {
             }
         }
     }
+    /// SOUNDNESS R300 — a BODY-LOCAL `fn`'s constructions are sites of THIS body too. The collector walks
+    /// the nested body inline and charges what it builds to the enclosing unit; before this the site walk
+    /// discarded `Stmt::Item`, so the nested construction had no site and R172's gate suppressed its leaf
+    /// whenever some OTHER construction of it here escaped (`fn inner() { let _h = H::new(); } inner();
+    /// Ok(H::new())` — executed 1 drop, ABSENT; `fn mk() -> H { H::new() } let _a = mk(); Ok(H::new())`
+    /// likewise).
+    ///
+    /// Recorded as NON-ESCAPING sites, never as escaping ones: no exit of THIS body can reach inside the
+    /// nested item, so the site gate can only ever be refused by them — a pure CHARGING change. The more
+    /// precise reading (a nested site that escapes the nested fn's own return is charged, or not, at its
+    /// call site here) would also REMOVE the charge that today over-reports `fn outer() -> H { fn mk() ->
+    /// H { H::new() } mk() }` — and that removal is exactly the shape that silences when the call site
+    /// cannot be typed (`.map(|_| mk())` in an inline closure). Not taken here; stated, and the
+    /// over-report stands as it shipped.
+    fn note_nested_body(&mut self, b: &'a syn::Block) {
+        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros);
+        for (l, v) in inner_sites {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("R300NESTED {l}"); // §E1 REACH COUNTER — the sites this change adds
+            }
+            self.ctor_sites.entry(l).or_default().extend(v);
+        }
+    }
+
     /// Every identifier in a macro's tokens, flattened through nested groups. R304: the escape walk
     /// does not read macro tokens as expressions, so a use spelled there is invisible to `path_uses`.
     fn note_macro_idents(&mut self, ts: proc_macro2::TokenStream) {
         for t in ts {
             match t {
                 proc_macro2::TokenTree::Ident(i) => {
+                    for f in &self.branch_stack {
+                        self.arm_idents.entry(*f).or_default().insert(i.to_string());
+                    }
                     self.macro_idents.insert(i.to_string());
                 }
                 proc_macro2::TokenTree::Group(g) => self.note_macro_idents(g.stream()),
@@ -8206,6 +8353,9 @@ impl<'a> EscapeSites<'a> {
             if p.qself.is_none() {
                 if let Some(id) = p.path.get_ident() {
                     *self.path_uses.entry(id.to_string()).or_insert(0) += 1;
+                    for f in &self.branch_stack {
+                        self.arm_idents.entry(*f).or_default().insert(id.to_string());
+                    }
                 }
             }
         }
@@ -8250,11 +8400,13 @@ impl<'a> EscapeSites<'a> {
                 // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
                 // static/const (`GLOBAL = …`), which is storage this scope does not own.
                 syn::Expr::Path(p) if p.qself.is_none() => {
+                    self.note_frames(&a.right);
                     self.assigns
                         .push((p.path.get_ident().map(|i| i.to_string()), &a.right, self.seq));
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own.
                 syn::Expr::Field(_) | syn::Expr::Index(_) | syn::Expr::Unary(_) => {
+                    self.note_frames(&a.right);
                     self.assigns.push((None, &a.right, self.seq));
                     self.note_route_position(); // R709
                 }
@@ -8268,6 +8420,9 @@ impl<'a> EscapeSites<'a> {
             syn::Expr::MethodCall(m) => {
                 if let syn::Expr::Path(p) = &*m.receiver {
                     if let Some(id) = p.path.get_ident() {
+                        for a in &m.args {
+                            self.note_frames(a);
+                        }
                         self.method_args
                             .push((id.to_string(), m.args.iter().collect()));
                     }
@@ -8296,6 +8451,7 @@ impl<'a> EscapeSites<'a> {
                         // an unrelated return/tail and could be vetoed by a path that never reaches this
                         // call at all.
                         for a in &c.args {
+                            self.note_frames(a);
                             self.escapes.push((self.seq, a));
                         }
                         self.note_route_position(); // R709
@@ -8320,6 +8476,7 @@ impl<'a> EscapeSites<'a> {
                 // construction. An INLINE closure keeps the unconditional push: its value is handed to
                 // something this scope cannot follow (sharded-slab's `shard.with_slot(key, |slot| …
                 // Some(Entry { .. }))`, the case this arm was written for), so it must stay suppressed.
+                self.note_frames(&c.body);
                 match self
                     .let_bound_closures
                     .get(&(e as *const syn::Expr as usize))
@@ -8358,6 +8515,52 @@ impl<'a> EscapeSites<'a> {
         if in_closure {
             self.closure_depth += 1;
         }
+        // SOUNDNESS R829 — a conditional's ARMS are walked inside their own branch frames; everything
+        // else (and an `if`'s condition, a `match` scrutinee, a `for` iterable) exactly as before.
+        let branched = match e {
+            syn::Expr::If(x) => {
+                let id = self.next_branch;
+                self.next_branch += 1;
+                self.branch_arms.insert(id, 2);
+                // The ORDER the generic traversal used (condition, `else`, then-block) is kept: the
+                // pre-order numbers are R173/R189's evaluation-order stand-in, and this change is not
+                // allowed to move them.
+                self.walk_expr(&x.cond);
+                if let Some((_, el)) = &x.else_branch {
+                    self.walk_arm_expr(id, 1, el);
+                }
+                self.walk_arm_block(id, 0, &x.then_branch);
+                true
+            }
+            syn::Expr::Match(x) => {
+                let id = self.next_branch;
+                self.next_branch += 1;
+                self.branch_arms.insert(id, x.arms.len());
+                self.walk_expr(&x.expr);
+                for (k, a) in x.arms.iter().enumerate() {
+                    self.walk_arm_expr(id, k, &a.body);
+                }
+                true
+            }
+            syn::Expr::ForLoop(x) => {
+                let id = self.next_branch;
+                self.next_branch += 1;
+                self.branch_arms.insert(id, 2);
+                self.walk_expr(&x.expr);
+                self.walk_arm_block(id, 0, &x.body);
+                true
+            }
+            syn::Expr::While(x) => {
+                let id = self.next_branch;
+                self.next_branch += 1;
+                self.branch_arms.insert(id, 2);
+                self.walk_expr(&x.cond);
+                self.walk_arm_block(id, 0, &x.body);
+                true
+            }
+            _ => false,
+        };
+        if !branched {
         for_each_child_expr(e, &mut |c| self.walk_expr(c));
         // A nested block is walked ONLY to find further escape SITES (`return`, an assignment, a method
         // call on an escaping name). Its trailing expression is NOT a root: `let x = if c { Guard::new()
@@ -8366,6 +8569,7 @@ impl<'a> EscapeSites<'a> {
         // construction spellings. Tail position propagates through `mark_escape`'s value-child walk
         // instead, which only ever descends from a genuine root.
         for_each_child_block(e, &mut |b| self.walk_block(b, false));
+        }
         if in_closure {
             self.closure_depth -= 1;
         }
@@ -9999,4 +10203,253 @@ pub(crate) fn splice_pin_project(items: &mut Vec<syn::Item>) {
         }
     }
     items.extend(add);
+}
+
+/// SOUNDNESS R297/R195 — the OWNED types a declared type holds by value: the type's own path and,
+/// recursively, every type argument, tuple element and array/slice element — stopping at a reference or
+/// raw pointer (whatever is behind one is someone else's), at `Weak` (R1098: a `Weak` does not own its
+/// pointee), and at `NonNull`/`PhantomData`/`ManuallyDrop`/`MaybeUninit`. A leaf here is only a CANDIDATE: the caller intersects with `drop_relevant`, so `Vec`, `u32`
+/// and `String` cost nothing. `Self` is answered with the impl's own leaf when one is known.
+///
+/// Over-reach is in the charging direction and stated: an `Rc<H>`/`Arc<H>` reads as owning it outright although a reference count may keep it alive. Both say
+/// "this value's destruction CAN reach `H::drop`", which is what the deep engine's drop glue says too.
+///
+/// Each answer is the full (use-expanded) PATH, so a DEPENDENCY's type (`dgdep::G`) can be told apart
+/// from a local one and joined against the chained report (R1118).
+pub(crate) fn owned_type_paths(ty: &syn::Type, uses: &HashMap<String, String>, self_leaf: Option<&str>) -> Vec<String> {
+    fn go(ty: &syn::Type, uses: &HashMap<String, String>, self_leaf: Option<&str>, out: &mut Vec<String>) {
+        match ty {
+            syn::Type::Reference(_) | syn::Type::Ptr(_) => {}
+            syn::Type::Paren(p) => go(&p.elem, uses, self_leaf, out),
+            syn::Type::Group(g) => go(&g.elem, uses, self_leaf, out),
+            syn::Type::Tuple(t) => t.elems.iter().for_each(|e| go(e, uses, self_leaf, out)),
+            syn::Type::Array(a) => go(&a.elem, uses, self_leaf, out),
+            syn::Type::Slice(s) => go(&s.elem, uses, self_leaf, out),
+            syn::Type::Path(p) if p.qself.is_none() => {
+                let Some(last) = p.path.segments.last() else { return };
+                let name = last.ident.to_string();
+                // Wrappers that do NOT own (drop) what they name: a raw/non-null pointer, a marker, and
+                // the two std wrappers whose whole point is that the payload's `Drop` does not run.
+                // MEASURED: tokio's `set_next(&self, next: Option<NonNull<Header>>)` read as owning a
+                // `Header` and charged its drop glue to a pointer store.
+                if matches!(name.as_str(), "Weak" | "NonNull" | "PhantomData" | "ManuallyDrop" | "MaybeUninit") {
+                    return;
+                }
+                if name == "Self" && p.path.segments.len() == 1 {
+                    if let Some(s) = self_leaf {
+                        out.push(s.to_string());
+                    }
+                    return;
+                }
+                out.push(expand(&path_to_string_lc(&p.path), uses));
+                if let syn::PathArguments::AngleBracketed(a) = &last.arguments {
+                    for g in &a.args {
+                        if let syn::GenericArgument::Type(t) = g {
+                            go(t, uses, self_leaf, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(ty, uses, self_leaf, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// SOUNDNESS R1118 — `(crate, type leaf)` for an expanded type path rooted in another crate, the shape
+/// the cross-crate drop marker (`cr::<drop>::Type`) carries. `None` for a local, `std`/`core`/`alloc`, or
+/// single-segment path. Not validated against the dependency graph here: the join in `scan.rs` consumes
+/// the marker only for a CHAINED crate whose report publishes `Type::drop`, so anything else is inert.
+pub(crate) fn cross_type(full: &str) -> Option<(String, String)> {
+    let head = cross_crate_head(full)?;
+    Some((head.to_string(), full.rsplit("::").next().unwrap_or(full).to_string()))
+}
+
+/// SOUNDNESS R297/R195 — the assignments to a bare local NAME that provably do NOT drop a previous value,
+/// by the address of their `syn::ExprAssign`. Everything not listed here is charged: an assignment to an
+/// owned place drops the value it overwrites, in this frame, whether or not anything in this body
+/// constructed that value (R297's point — `*slot = v` has no construction anywhere).
+///
+/// A DENYLIST, and each entry is a case where the place holds NO value when the assignment runs:
+///   · a DEFERRED binding (`let g;` / `let mut g;`, no initialiser) bound once, assigned once, and not
+///     assigned inside a loop the declaration is outside of — the first and only write initialises.
+///   · a name MOVED before the assignment (`v.push(g); g = H::new();`), or moved anywhere inside a loop
+///     that also contains the assignment (`loop { g = H::new(); out.push(g); }` re-initialises on each
+///     iteration). A move is any bare use of the name that is not a borrow (`&g`), a field/index base
+///     (`g.f`, `g[i]`), a comparison operand, the LHS of an assignment, or a method RECEIVER — a receiver
+///     counts as a move only for `into*`/`finish`, the consuming spellings. Macro tokens are not read.
+///
+/// What is NOT exempt, deliberately (the row's own words): an `Option` initialised to `None` — the
+/// previous value may be `Some`, and over-charging is the acceptable direction there. Assignments
+/// through a place (`*p =`, `x.f =`, `v[i] =`) are never exempt: a place behind a reference always holds
+/// a value. The flow model is lexical and name-keyed, so a shadowed name is one name — the over-exempt
+/// direction, which is today's (silent) answer and never a new charge.
+pub(crate) fn assign_drop_exempt(block: &syn::Block) -> std::collections::HashSet<usize> {
+    #[derive(Default)]
+    struct V {
+        seq: usize,
+        loops: Vec<usize>,
+        next_loop: usize,
+        deferred: HashMap<String, Vec<usize>>,
+        bindings: HashMap<String, usize>,
+        assigns: Vec<(usize, String, usize, Vec<usize>)>,
+        moves: HashMap<String, Vec<(usize, Vec<usize>)>>,
+    }
+    impl V {
+        fn pat(&mut self, p: &syn::Pat) {
+            struct B<'b>(&'b mut HashMap<String, usize>);
+            impl<'ast> syn::visit::Visit<'ast> for B<'_> {
+                fn visit_pat_ident(&mut self, n: &'ast syn::PatIdent) {
+                    *self.0.entry(n.ident.to_string()).or_insert(0) += 1;
+                    syn::visit::visit_pat_ident(self, n);
+                }
+            }
+            syn::visit::Visit::visit_pat(&mut B(&mut self.bindings), p);
+        }
+        fn block(&mut self, b: &syn::Block) {
+            for s in &b.stmts {
+                match s {
+                    syn::Stmt::Local(l) => {
+                        self.pat(&l.pat);
+                        match &l.init {
+                            Some(init) => {
+                                self.expr(&init.expr, false);
+                                if let Some((_, d)) = &init.diverge {
+                                    self.expr(d, false);
+                                }
+                            }
+                            None => {
+                                if let Some(n) = single_pat_ident(&l.pat) {
+                                    self.deferred.insert(n, self.loops.clone());
+                                }
+                            }
+                        }
+                    }
+                    syn::Stmt::Expr(e, _) => self.expr(e, false),
+                    syn::Stmt::Item(syn::Item::Fn(f)) => self.block(&f.block),
+                    _ => {}
+                }
+            }
+        }
+        // `nonmove`: this expression sits in a position that borrows rather than moves its value.
+        fn expr(&mut self, e: &syn::Expr, nonmove: bool) {
+            self.seq += 1;
+            match e {
+                syn::Expr::Path(p) if p.qself.is_none() => {
+                    if let Some(id) = p.path.get_ident() {
+                        if !nonmove {
+                            self.moves.entry(id.to_string()).or_default().push((self.seq, self.loops.clone()));
+                        }
+                    }
+                }
+                syn::Expr::Assign(a) => {
+                    // RHS first: it is evaluated before the place is written.
+                    self.expr(&a.right, false);
+                    if let syn::Expr::Path(p) = &*a.left {
+                        if let Some(id) = p.path.get_ident() {
+                            self.seq += 1;
+                            self.assigns.push((a as *const syn::ExprAssign as usize, id.to_string(), self.seq, self.loops.clone()));
+                            return;
+                        }
+                    }
+                    self.expr(&a.left, true);
+                }
+                syn::Expr::Reference(r) => self.expr(&r.expr, true),
+                syn::Expr::Field(f) => self.expr(&f.base, true),
+                syn::Expr::Index(i) => {
+                    self.expr(&i.expr, true);
+                    self.expr(&i.index, false);
+                }
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.expr(&u.expr, true),
+                syn::Expr::Binary(b)
+                    if matches!(
+                        b.op,
+                        syn::BinOp::Eq(_) | syn::BinOp::Ne(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_)
+                            | syn::BinOp::Gt(_) | syn::BinOp::Ge(_)
+                    ) =>
+                {
+                    self.expr(&b.left, true);
+                    self.expr(&b.right, true);
+                }
+                syn::Expr::MethodCall(m) => {
+                    let n = m.method.to_string();
+                    let consuming = n.starts_with("into") || n == "finish";
+                    self.expr(&m.receiver, !consuming);
+                    for a in &m.args {
+                        self.expr(a, false);
+                    }
+                }
+                syn::Expr::ForLoop(f) => {
+                    self.expr(&f.expr, false);
+                    self.next_loop += 1;
+                    self.loops.push(self.next_loop);
+                    self.pat(&f.pat);
+                    self.block(&f.body);
+                    self.loops.pop();
+                }
+                syn::Expr::While(w) => {
+                    self.next_loop += 1;
+                    self.loops.push(self.next_loop);
+                    self.expr(&w.cond, false);
+                    self.block(&w.body);
+                    self.loops.pop();
+                }
+                syn::Expr::Loop(l) => {
+                    self.next_loop += 1;
+                    self.loops.push(self.next_loop);
+                    self.block(&l.body);
+                    self.loops.pop();
+                }
+                syn::Expr::Let(l) => {
+                    self.pat(&l.pat);
+                    self.expr(&l.expr, false);
+                }
+                syn::Expr::Match(m) => {
+                    self.expr(&m.expr, false);
+                    for a in &m.arms {
+                        self.pat(&a.pat);
+                        if let Some((_, g)) = &a.guard {
+                            self.expr(g, false);
+                        }
+                        self.expr(&a.body, false);
+                    }
+                }
+                syn::Expr::Closure(c) => {
+                    for p in &c.inputs {
+                        self.pat(p);
+                    }
+                    self.expr(&c.body, false);
+                }
+                _ => {
+                    for_each_child_expr(e, &mut |c| self.expr(c, false));
+                    for_each_child_block(e, &mut |b| self.block(b));
+                }
+            }
+        }
+    }
+    let mut v = V::default();
+    v.block(block);
+    let mut out = std::collections::HashSet::new();
+    let mut assign_count: HashMap<&str, usize> = HashMap::new();
+    for (_, n, _, _) in &v.assigns {
+        *assign_count.entry(n.as_str()).or_insert(0) += 1;
+    }
+    for (addr, n, seq, loops) in &v.assigns {
+        let deferred_once = v.deferred.get(n).is_some_and(|decl_loops| {
+            v.bindings.get(n).copied().unwrap_or(0) == 1
+                && assign_count.get(n.as_str()).copied().unwrap_or(0) == 1
+                && loops.iter().all(|l| decl_loops.contains(l))
+        });
+        let moved = v.moves.get(n).is_some_and(|ms| {
+            ms.iter().any(|(ms_seq, ms_loops)| ms_seq < seq || ms_loops.iter().any(|l| loops.contains(l)))
+        });
+        if deferred_once || moved {
+            out.insert(*addr);
+        }
+    }
+    out
 }
