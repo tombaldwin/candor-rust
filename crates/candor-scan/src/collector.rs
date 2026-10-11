@@ -127,6 +127,24 @@ fn is_self_deref(expr: &syn::Expr) -> bool {
     }
 }
 
+/// SOUNDNESS R297/R195 — what the ASSIGNMENT-DROP rule needs beyond the walk's own typing. Bundled so the
+/// collector carries one field for it; `Default` is the inert state (no exemptions computed, no params,
+/// no field-borrow index), which can only withhold charges, never add one.
+#[derive(Default)]
+pub(crate) struct AssignDrop<'a> {
+    /// `lang::assign_drop_exempt` — addresses of the `syn::ExprAssign`s that provably overwrite nothing.
+    pub(crate) exempt: std::collections::HashSet<usize>,
+    /// Parameter NAME -> its declared type, for the names the body never re-binds (a shadowing `let`
+    /// removes the entry: the declared type no longer describes the name).
+    pub(crate) params: HashMap<String, syn::Type>,
+    /// The R718 field-borrow index, so a `&'a T` field reached by `x.f = ..` is not read as owning `T`.
+    pub(crate) field_borrows: Option<&'a HashMap<String, HashMap<String, crate::model::FieldBorrow>>>,
+    /// The enclosing impl's type leaf, for `Self` in a parameter type.
+    pub(crate) self_leaf: Option<String>,
+    /// Type leaves declared at two or more quals (`ElemIndexes::twin_type_leaves`).
+    pub(crate) twin_leaves: Option<&'a std::collections::HashSet<String>>,
+}
+
 pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
@@ -509,6 +527,8 @@ pub(crate) struct CallCollector<'a> {
     /// The gate is here, not at consumption, purely so the marker stream stays tiny: without it every
     /// `Some(..)`/`Ok(..)`/`Vec::new()` in the tree would push a synthetic call nobody reads.
     pub(crate) drop_relevant: &'a std::collections::HashSet<String>,
+    /// SOUNDNESS R297/R195 — see `AssignDrop`.
+    pub(crate) assign_drop: AssignDrop<'a>,
     /// …and the leaves whose construction ESCAPES this body, which must NOT be marked. See
     /// `lang::escaping_ctor_leaves` for what counts as an escape and why this half is load-bearing.
     pub(crate) escaping_ctors: std::collections::HashSet<String>,
@@ -1442,6 +1462,310 @@ impl<'a> CallCollector<'a> {
     /// removal of a SECOND gate that was answering about a different value. Direction: it can only ADD
     /// charges, never withdraw one, and the direction it fails in is over-charging a consuming method
     /// that moves `self` into a callee through a method call syntax cannot distinguish from a borrow.
+    /// SOUNDNESS R297/R195 — the types of the value an assignment OVERWRITES: local drop-relevant LEAVES,
+    /// and (R1118) `(crate, leaf)` pairs for a DEPENDENCY's type, joined later against the chained report.
+    ///
+    /// Rust requires the right-hand side to have the place's type, so the old value's type is read off
+    /// EITHER side, whichever this scan can type: the RHS when it is a construction (`H::new()`,
+    /// `Some(H::new())`, `Own { .. }`) or a by-value parameter whose declared type is owned; the LHS when
+    /// it is `*p` for a parameter `p: &mut T`, a by-value parameter itself, a FIELD of a typed base (via
+    /// the field indexes, refusing an R718-borrowed field), or an index into one of those.
+    ///
+    /// Refusals, each of which reads as "nothing dropped": a discard (`_ = ..`) and a destructuring
+    /// assignment (`(a, b) = ..`, which drops too — not modelled, stated); a RHS that is a reference
+    /// (`r = &x` — the old value was a reference as well); a place the scan cannot type.
+    fn assigned_drop_targets(&self, a: &syn::ExprAssign) -> (Vec<String>, Vec<(String, String)>) {
+        let mut paths: Vec<String> = Vec::new();
+        let mut cross: Vec<(String, String)> = Vec::new();
+        let mut local: Vec<String> = Vec::new();
+        let mut rhs: &syn::Expr = &a.right;
+        while let syn::Expr::Paren(p) = rhs {
+            rhs = &p.expr;
+        }
+        if matches!(rhs, syn::Expr::Reference(_)) {
+            return (Vec::new(), Vec::new());
+        }
+        let self_leaf = self.assign_drop.self_leaf.as_deref();
+        let param_paths = |name: &str, deref: bool| -> Vec<String> {
+            let Some(ty) = self.assign_drop.params.get(name) else { return Vec::new() };
+            let mut t = ty;
+            if deref {
+                // `*p = ..` — the place is the POINTEE of a `&mut T`-typed parameter.
+                match t {
+                    syn::Type::Reference(r) => t = &r.elem,
+                    _ => return Vec::new(),
+                }
+            }
+            crate::lang::owned_type_paths(t, &self.uses, self_leaf)
+        };
+        // RHS — a construction, possibly under an owning wrapper's constructor, or an owned parameter.
+        let mut e = rhs;
+        for _ in 0..5 {
+            let inner = match e {
+                syn::Expr::Paren(p) => Some(&*p.expr),
+                syn::Expr::Group(g) => Some(&*g.expr),
+                syn::Expr::Call(call) => match &*call.func {
+                    syn::Expr::Path(p) => {
+                        let w = path_to_string(&p.path);
+                        let last = w.rsplit("::").next().unwrap_or(&w);
+                        let wrapper_ctor = matches!(last, "Some" | "Ok" | "Err")
+                            || ["Box::new", "Rc::new", "Arc::new", "RefCell::new", "Cell::new", "Mutex::new",
+                                "RwLock::new"]
+                                .iter()
+                                .any(|s| w == *s || w.ends_with(&format!("::{s}")));
+                        if wrapper_ctor { call.args.first() } else { None }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            match inner {
+                Some(i) => e = i,
+                None => break,
+            }
+        }
+        match e {
+            syn::Expr::Path(p) if p.path.get_ident().is_some() => {
+                let id = p.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+                paths.extend(param_paths(&id, false));
+            }
+            _ => {
+                if let Some(l) = crate::lang::ctor_leaf_of_expr(e, &self.uses, self.fields, self.returns) {
+                    local.push(l);
+                }
+                let x = match e {
+                    syn::Expr::Call(c) => match &*c.func {
+                        syn::Expr::Path(p) => crate::lang::cross_ctor_leaf_from_call_path(
+                            &crate::lang::expand(&path_to_string(&p.path), &self.uses),
+                            &self.uses,
+                        ),
+                        _ => None,
+                    },
+                    syn::Expr::Struct(st) => {
+                        crate::lang::cross_ctor_leaf_from_struct_path(&path_to_string(&st.path), &self.uses)
+                    }
+                    syn::Expr::Path(p) => crate::lang::cross_ctor_leaf_from_value_path(
+                        &path_to_string(&p.path),
+                        &self.uses,
+                        self.fields,
+                    ),
+                    _ => None,
+                };
+                cross.extend(x);
+            }
+        }
+        // LHS — the place's own declared type.
+        let mut lhs: &syn::Expr = &a.left;
+        while let syn::Expr::Paren(p) = lhs {
+            lhs = &p.expr;
+        }
+        match lhs {
+            syn::Expr::Infer(_) | syn::Expr::Tuple(_) | syn::Expr::Array(_) | syn::Expr::Struct(_)
+            | syn::Expr::Call(_) => return (Vec::new(), Vec::new()),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                if let syn::Expr::Path(p) = &*u.expr {
+                    if let Some(id) = p.path.get_ident() {
+                        paths.extend(param_paths(&id.to_string(), true));
+                    }
+                }
+            }
+            syn::Expr::Path(p) => {
+                if let Some(id) = p.path.get_ident() {
+                    paths.extend(param_paths(&id.to_string(), false));
+                }
+            }
+            syn::Expr::Field(f) => paths.extend(self.field_owned_paths(&f.base, &f.member)),
+            syn::Expr::Index(ix) if !is_range_index(ix) => match &*ix.expr {
+                syn::Expr::Path(p) => {
+                    if let Some(id) = p.path.get_ident() {
+                        let id = id.to_string();
+                        let mut v = param_paths(&id, false);
+                        if v.is_empty() {
+                            v = param_paths(&id, true);
+                        }
+                        paths.extend(v);
+                    }
+                }
+                syn::Expr::Field(f) => paths.extend(self.field_owned_paths(&f.base, &f.member)),
+                _ => {}
+            },
+            _ => {}
+        }
+        for p in paths {
+            match crate::lang::cross_type(&p) {
+                Some(x) => cross.push(x),
+                None => local.push(p.rsplit("::").next().unwrap_or(&p).to_string()),
+            }
+        }
+        local.retain(|l| self.drop_relevant.contains(l));
+        // A LEAF this crate declares twice is refused: the drop join is leaf-keyed (`owned_drops`), so the
+        // marker would charge every twin's destructors. MEASURED on h2: `self.inner = Closed(..)` in
+        // `proto::streams::state::State` charged `Counts::drop`/`Store::drop`, which only the OTHER `Inner`
+        // (`proto::streams::streams::Inner`) owns — a fabrication. Refusing costs real charges where the
+        // twin is the right one (tokio's `io::blocking::State::Busy(JoinHandle)` overwrite), stated.
+        local.retain(|l| !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(l)));
+        local.sort();
+        local.dedup();
+        cross.sort();
+        cross.dedup();
+        (local, cross)
+    }
+
+    /// SOUNDNESS R297 — what a FIELD place of a typed base owns, read off the field indexes (the field's
+    /// own type and its element/wrapped type), refusing a field the R718 index records as a borrow.
+    /// Paths as the index stores them, so a dependency-typed field keeps its crate (R1118).
+    fn field_owned_paths(&self, base: &syn::Expr, member: &syn::Member) -> Vec<String> {
+        let Some(bt) = self.type_of(base) else { return Vec::new() };
+        if self.field_ambiguous(&bt, member) || self.is_dependency_type(&bt) {
+            return Vec::new();
+        }
+        let key = match member {
+            syn::Member::Named(f) => f.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let t = bt.rsplit("::").next().unwrap_or(&bt).to_string();
+        let borrow = |elem: bool| -> bool {
+            self.assign_drop
+                .field_borrows
+                .and_then(|fb| fb.get(&t))
+                .and_then(|m| m.get(&key))
+                .and_then(|b| if elem { b.elem } else { b.leaf })
+                .unwrap_or(false)
+        };
+        let mut v = Vec::new();
+        if let Some(ft) = self.fields.get(&t).and_then(|m| m.get(&key)) {
+            if !borrow(false) {
+                v.push(crate::lang::strip_wrapped(ft).to_string());
+            }
+        }
+        if let Some(et) = self.field_elem.get(&t).and_then(|m| m.get(&key)) {
+            if !borrow(true) {
+                v.push(crate::lang::strip_wrapped(et).to_string());
+            }
+        }
+        v
+    }
+
+    /// SOUNDNESS R1118 — a DEPENDENCY value released in this frame: `cr::<drop>::Type`, the marker the
+    /// cross-crate join resolves against the chained report's `Type::drop` row. No escape gate: callers
+    /// pass a value that provably dies here (an overwritten place, an unmoved by-value parameter, the
+    /// elements a container method destroys). Deduplicated with the construction route's markers.
+    pub(crate) fn note_cross_release(&mut self, cr: String, leaf: String) {
+        if !self.marked_cross_ctors.insert(format!("{cr}\u{0}{leaf}")) {
+            return;
+        }
+        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+            eprintln!("CTOR-RELEASE-CROSS {cr}::{leaf} in {}", self.modpath);
+        }
+        self.calls.push(Call { argc: 0, entropy_arg: false,
+            path: format!("{cr}::{DROP_MARKER}::{leaf}"),
+            leaf: "drop".to_string(),
+            str_arg: None,
+            path_lits_partial: false,
+            path_lit2: None,
+            typed: false,
+            method: false,
+            is_macro: false,
+        });
+    }
+
+    /// SOUNDNESS R1118 (and its in-crate twin) — a std CONTAINER method that destroys elements in this
+    /// frame: `v.clear()`, `truncate`, `retain`, `dedup*`, `resize`. EXECUTED: `v.clear()` over a
+    /// `Vec<G>` runs `G::drop` once per element inside the calling frame, ABSENT before. The receiver
+    /// must be a parameter (through `&mut`) or a field whose declared OUTER type is a std container —
+    /// a crate's own `clear` method is that crate's code, never this rule's.
+    fn note_container_release(&mut self, m: &syn::ExprMethodCall) {
+        let name = m.method.to_string();
+        if !matches!(
+            name.as_str(),
+            "clear" | "truncate" | "retain" | "retain_mut" | "dedup" | "dedup_by" | "dedup_by_key" | "resize"
+        ) {
+            return;
+        }
+        let mut recv: &syn::Expr = &m.receiver;
+        while let syn::Expr::Paren(p) = recv {
+            recv = &p.expr;
+        }
+        let container = |outer: &str| {
+            matches!(
+                outer.rsplit("::").next().unwrap_or(outer),
+                "Vec" | "VecDeque" | "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList"
+            ) && matches!(outer.split("::").next(), Some("std" | "alloc" | "core") | None)
+                || !outer.contains("::")
+        };
+        let mut elems: Vec<String> = Vec::new();
+        match recv {
+            syn::Expr::Path(p) => {
+                let Some(id) = p.path.get_ident() else { return };
+                let Some(mut ty) = self.assign_drop.params.get(&id.to_string()) else { return };
+                if let syn::Type::Reference(r) = ty {
+                    ty = &r.elem;
+                }
+                let syn::Type::Path(tp) = ty else { return };
+                let Some(last) = tp.path.segments.last() else { return };
+                let outer = crate::lang::expand(&path_to_string_lc(&tp.path), &self.uses);
+                if !container(&outer) || !matches!(last.ident.to_string().as_str(),
+                    "Vec" | "VecDeque" | "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList")
+                {
+                    return;
+                }
+                if let syn::PathArguments::AngleBracketed(a) = &last.arguments {
+                    for g in &a.args {
+                        if let syn::GenericArgument::Type(t) = g {
+                            elems.extend(crate::lang::owned_type_paths(t, &self.uses, self.assign_drop.self_leaf.as_deref()));
+                        }
+                    }
+                }
+            }
+            syn::Expr::Field(f) => {
+                let Some(bt) = self.type_of(&f.base) else { return };
+                let t = bt.rsplit("::").next().unwrap_or(&bt).to_string();
+                let key = match &f.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(i) => i.index.to_string(),
+                };
+                let Some(outer) = self.fields.get(&t).and_then(|m| m.get(&key)) else { return };
+                if !matches!(outer.rsplit("::").next().unwrap_or(outer),
+                    "Vec" | "VecDeque" | "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList")
+                {
+                    return;
+                }
+                if self.field_ambiguous(&bt, &f.member) || self.is_dependency_type(&bt) {
+                    return;
+                }
+                let borrowed = self
+                    .assign_drop
+                    .field_borrows
+                    .and_then(|fb| fb.get(&t))
+                    .and_then(|m| m.get(&key))
+                    .and_then(|b| b.elem)
+                    .unwrap_or(false);
+                if borrowed {
+                    return;
+                }
+                if let Some(et) = self.field_elem.get(&t).and_then(|m| m.get(&key)) {
+                    elems.push(crate::lang::strip_wrapped(et).to_string());
+                }
+            }
+            _ => return,
+        }
+        for p in elems {
+            match crate::lang::cross_type(&p) {
+                Some((cr, leaf)) => self.note_cross_release(cr, leaf),
+                None => {
+                    let leaf = p.rsplit("::").next().unwrap_or(&p).to_string();
+                    let twin = self.assign_drop.twin_leaves.is_some_and(|t| t.contains(&leaf));
+                    if self.drop_relevant.contains(&leaf) && !twin {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R1118CONTAINER {leaf} in {}", self.modpath); // §E1 REACH COUNTER
+                        }
+                        self.note_owned_param_drop(Some(leaf));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn note_owned_param_drop(&mut self, leaf: Option<String>) {
         self.note_release(leaf, false)
     }
@@ -6059,6 +6383,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.note_container_release(node); // SOUNDNESS R1118
         let leaf = node.method.to_string();
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
@@ -7756,6 +8081,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 crate::lang::cross_ctor_leaf_from_value_path(&full, &self.uses, self.fields)).flatten());
         }
         syn::visit::visit_expr_path(self, node);
+    }
+    /// SOUNDNESS R297/R195 — AN ASSIGNMENT DROPS THE VALUE IT OVERWRITES, in this frame. `*slot = v`,
+    /// `s.f = H::new()`, `v[i] = ..`, `g = w` and `g = Some(H::new())` in a loop each run the old value's
+    /// `Drop` here (EXECUTED: 1 drop each), and none of them is a construction this body made, so no
+    /// construction-keyed or site-keyed rule could ever see it. Charged through the PARAMETER-drop route
+    /// (`note_owned_param_drop`): the dying value is the OLD one, so the construction escape gate — a
+    /// question about the NEW value — does not apply. `lang::assign_drop_exempt` lists the assignments
+    /// that overwrite nothing (a deferred `let g;`'s first write, a name already moved).
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if !self.assign_drop.exempt.contains(&(node as *const syn::ExprAssign as usize)) {
+            let (local, cross) = self.assigned_drop_targets(node);
+            for leaf in local {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R297ASSIGN {leaf} in {}", self.modpath); // §E1 REACH COUNTER
+                }
+                self.note_owned_param_drop(Some(leaf));
+            }
+            // R1118 — a DEPENDENCY's type, joined against its chained report's `Type::drop`.
+            for (cr, leaf) in cross {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R1118ASSIGN {cr}::{leaf} in {}", self.modpath); // §E1 REACH COUNTER
+                }
+                self.note_cross_release(cr, leaf);
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
     /// DROP-GLUE, spelling 2 of 3: a STRUCT LITERAL (`Guard { .. }`, or `E::V { .. }`, typed as the
     /// enum). syn walks the literal's `Path` as a `Path`, never as an `ExprPath`, so neither of the

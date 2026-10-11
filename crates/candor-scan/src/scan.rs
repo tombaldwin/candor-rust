@@ -1904,6 +1904,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // twins sit in ONE file the per-file index has already merged them, so every field of that leaf
     // counts (`"<leaf>\u{1f}*"`). The ⟨0.40⟩ per-file declared-type surface records every struct by its
     // module-qualified path; a `#[cfg]` twin of ONE path is one type and does not count.
+    // SOUNDNESS R1116 — every type LEAF this crate declares at two or more quals, whatever their fields.
+    let mut twin_type_leaves: HashSet<String> = HashSet::new();
     let ambiguous_type_leaves: HashSet<String> = {
         let mut quals: HashMap<String, BTreeSet<&str>> = HashMap::new();
         let mut files_of: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1923,6 +1925,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if qs.len() < 2 {
                 continue;
             }
+            twin_type_leaves.insert(leaf.clone());
             let fis = files_of.get(leaf).cloned().unwrap_or_default();
             let same_file = fis.iter().any(|&fi| {
                 decls_per_file[fi].2.ts.types.iter()
@@ -1983,7 +1986,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         out
     };
-    let elems = ElemIndexes { ambiguous_type_leaves: &ambiguous_type_leaves, field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins };
+    let elems = ElemIndexes { ambiguous_type_leaves: &ambiguous_type_leaves, field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins, field_borrows: Some(&merged.field_borrows), drop_types: Some(&merged.drop_types), twin_type_leaves: Some(&twin_type_leaves) };
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
