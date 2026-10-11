@@ -1095,7 +1095,11 @@ fn elem_type_b_plain(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(
                 // at all: `w.upgrade() == v.upgrade()` and `if let Some(g) = w.upgrade() { g.go() }` reached
                 // nothing. Not `is_value_wrapper`: that list also drives the `lock`/`borrow` accessor kinds,
                 // and `Weak` has none of them. Same nominal-only filter, so a `Weak<Vec<G>>` adds nothing.
-                "Weak" => type_path_b(first_ty, uses).filter(|(t, _)| is_held_nominal(t)),
+                // The element is NOT OWNED — dropping a `Weak` never runs `T::drop` — so it is answered as
+                // reached through a reference: R718's flag, which is what keeps it out of drop glue.
+                // Measured without it: `struct HoldsWeak { w: Weak<Closer> }` charged `Closer::drop` (never
+                // runs, EXECUTED) and futures-util's `FuturesUnordered::push` gained `ReadyToRunQueue::drop`.
+                "Weak" => type_path_b(first_ty, uses).filter(|(t, _)| is_held_nominal(t)).map(|(t, _)| (t, true)),
                 // SOUNDNESS R893 / R1023 — a wrapper of a container or of an `Option` (`Mutex<Vec<G>>`,
                 // `Mutex<Option<G>>`) is TWO std layers deep and is recorded LAYERED by `elem_type_b`'s
                 // fallback below, never here: the plain form means "the held value is G" to

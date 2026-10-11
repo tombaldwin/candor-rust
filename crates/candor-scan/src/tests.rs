@@ -28212,7 +28212,11 @@ pub fn n_std(a: Vec<String>, b: Vec<String>) -> bool { a == b }\n\
 pub fn n_none(a: Option<Guard>) -> bool { a == None }\n\
 pub fn n_none_left(a: Option<Guard>) -> bool { None == a }\n\
 pub fn n_empty(a: Vec<Guard>) -> bool { a == vec![] }\n\
-pub fn r_tuple(a: (Guard, i32), b: (Guard, i32)) -> bool { a == b }\n";
+pub fn r_tuple(a: (Guard, i32), b: (Guard, i32)) -> bool { a == b }\n\
+pub struct Closer;\n\
+impl Drop for Closer { fn drop(&mut self) { let _ = std::fs::write(\"/tmp/r1098d\", b\"x\"); } }\n\
+pub struct HoldsWeak { pub w: Weak<Closer> }\n\
+pub fn n_weak_drop(w: Weak<Closer>) { let _h = HoldsWeak { w }; }\n";
     let v = scan_src_to_json_multi("r1098", &[("Cargo.toml", "[package]\nname = \"r1098\"\n"), ("src/lib.rs", src)]);
     for f in ["c_ref", "c_arc", "e_opt", "e_optarc", "e_upgrade_let", "e_upgrade_inline", "Holder::eq", "e_holder",
               "Registry::e_owns", "e_vec", "e_slice", "e_array", "e_result", "e_ne", "e_lt"] {
@@ -28220,7 +28224,11 @@ pub fn r_tuple(a: (Guard, i32), b: (Guard, i32)) -> bool { a == b }\n";
     }
     // A pure impl and a std element contribute nothing; a comparison against a literally EMPTY value never
     // runs the element's `eq` (EXECUTED: `opt == None` logs no `Guard::eq`), so it is not charged.
-    for f in ["n_pure", "n_std", "n_none", "n_none_left", "n_empty"] {
+    // A `Weak` does not OWN its element: dropping a struct that holds one never runs the element's `Drop`
+    // (EXECUTED, scratchpad `rustagent-r1098/fx-weakdrop`: no write). The first cut of this fix recorded the
+    // element for typing and drop glue read it as owned — `n_weak_drop` charged `Fs`, and futures-util's
+    // `FuturesUnordered::push` gained `ReadyToRunQueue::drop` on the corpus.
+    for f in ["n_pure", "n_std", "n_none", "n_none_left", "n_empty", "n_weak_drop"] {
         assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
     }
     // THE STATED RESIDUAL (SOUNDNESS R1111): a TUPLE's `==` runs each component's `eq` (EXECUTED: logged),
