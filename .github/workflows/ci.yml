@@ -452,6 +452,14 @@ jobs:
         run: bash soundness/run_q.sh 60
       - name: Soundness property gate (macro equivalence)
         run: bash soundness/run_macro.sh 60
+      # THE HAND-OFF GATE (rustagent-v049), candor-scan with EXECUTED ground truth: a value handed to a
+      # callee / wrapper / generic / closure parameter / std `drop` / a storing callee, at four call
+      # positions and four bindings, plus the checked-in 68-cell lv fixture. Every gate above that
+      # measures a drop drives the DEEP engine or compares two spellings, so a value that dies in a
+      # CALLEE (R198/R200/R323/R1121) reached none of them. `--calibrate` seeds a known silence outside
+      # the register and must be caught, so a green run below cannot be an asleep checker.
+      - name: Soundness hand-off gate (candor-scan, executed)
+        run: bash soundness/run_handoff.sh --calibrate && bash soundness/run_handoff.sh --all && bash soundness/run_handoff.sh --lv && bash soundness/run_handoff.sh 20
       # The known-open register those two subtract is MEASURED, and a register that has silently gone
       # stale hides the next regression on any shape it lists. `--check` re-measures it exhaustively
       # and fails on any difference — including an improvement, which means the register must be

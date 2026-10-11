@@ -11,6 +11,53 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a `collect` into `Result`/`Option` drops what it already collected (SOUNDNESS R198,
+  collect arm).** `it.map(|i| { gen(*i)?; Ok(H::new()) }).collect::<Result<Vec<_>, _>>()` drops the
+  `H`s collected before the first `Err` (executed) and was absent. The target type is read where it is
+  written: a turbofish, a `let` annotation, or the fn's declared return for a tail/`return` `collect()`.
+  Stated: a target written only on a callee's parameter type stays silent.
+
+- ⚠ **candor-scan: a `?` inside a `try_fold`/`fold` closure drops what an earlier call built (SOUNDNESS R198,
+  fold arm).** `items.iter().try_fold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })`
+  drops the accumulator on the error path (executed) and was absent. The closure of an accumulating
+  combinator (`fold`, `try_fold`, `rfold`, `try_rfold`, `reduce`, `try_reduce`) is now treated as a loop
+  body, R187's rule. Out, stated: `scan`, `for_each`/`try_for_each`/`map`/`and_then`, async closure
+  bodies, and a closure passed by name.
+
+- ⚠ **candor-scan: a by-value parameter of a WRAPPED drop type is released in the callee (SOUNDNESS
+  R1121, R200's callee half).** `fn eat(o: Option<H>) {}`, `(H, u32)`, `[H; N]`, `Vec<H>`, `Result` either
+  arm, a map, `RefCell<H>`, nested — executed, 1 drop each — were absent, and so was a caller that hands
+  one a construction on a `?` operand (`eat_opt_r(Some(H::new()), n)?`). Charged only when the body
+  never CONSUMES the parameter (only borrows it, or calls std's `drop`): a wrapper hands its contents out
+  by pattern, `?` and consuming methods, which the escape model does not follow. Stated residual: a
+  generic or `impl Into` parameter (the callee cannot name what it drops), and a wrapped parameter that
+  is consumed and still drops part of what it holds.
+
+- ⚠ **candor-scan: a unit-returning call in TAIL position no longer carries its arguments out (SOUNDNESS
+  R200, caller half).** `pub fn f() { eat_opt(Some(H::new())) }` and `std::mem::drop(h)` as a tail were
+  absent while the same call with a `;` was charged — executed, 1 drop either way. The arguments of a
+  call whose callee provably returns `()` (std's `drop`, or a local fn whose every same-leaf definition
+  returns `()`) are no longer on the escape spine. A user `fn drop(h: H) -> H`, a local `mymem::drop`, a
+  callable parameter or closure named like a unit fn, and a unit call inside an escaping closure keep the
+  old reading. Stated: this widens R230's store-not-drop over-charge to the tail spelling.
+
+- ⚠ **candor-scan: a shadowed or sibling-scope let-bound closure that runs and drops here is charged
+  (SOUNDNESS R323).** `let c = || H::new(); c(); let c = || H::new(); c();` and `{ let c = ..; c(); } {
+  let c = ..; c(); }` drop in the function's own frame (executed) and were absent: a name bound twice
+  fell back to suppression. The decision is now made per lexical binding. Still refused (stated): a name
+  also bound by a pattern, closure parameter, `match`/`if let` arm or body-local `fn`, and a binding
+  named inside macro tokens.
+
+- ⚠ **candor-scan: a call that returns a BORROW of a `Drop` type no longer charges that type's destructor
+  (SOUNDNESS R1120).** `let g = globals();` over `fn globals() -> &'static G` was read as constructing
+  a `G` and charged `G::drop`; so were `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded
+  `fn mk_ref<'a>(x: &'a G) -> &'a G`, and a std lock/borrow guard (`MutexGuard<'_, G>`, `Ref<'_, G>`)
+  returned or taken by value — executed, 0 drops each. A `deny <effect>` over such a caller can go
+  GREEN. Measured on 1,201 registry crates with a local `Drop`: 0 added, 3 removed, 90 changed, every
+  one traced to source (tokio `signal::registry::globals()`/`registry()`, crossbeam-epoch
+  `unprotected() -> &'static Guard`, polling's `MutexGuard<SocketState>` parameter). An owning
+  same-leaf twin anywhere keeps the charge; the binding is still typed (`g.method()` resolves).
+
 ## [0.40.6] — 2026-10-11
 
 - ⚠ **A comparison over a std wrapper now reaches the element's own `PartialEq`/`PartialOrd` (SOUNDNESS

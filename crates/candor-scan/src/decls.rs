@@ -2860,7 +2860,29 @@ pub(crate) fn fninfo(
             twin_leaves: elems.twin_type_leaves,
         }
     };
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
+    // SOUNDNESS R200 (caller half) — every name a parameter pattern binds: a call through one is a call
+    // of a VALUE, never of a same-named unit fn item.
+    let param_names: Vec<String> = {
+        struct P(Vec<String>);
+        impl<'x> syn::visit::Visit<'x> for P {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.push(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        let mut p = P(Vec::new());
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                syn::visit::Visit::visit_pat(&mut p, &pt.pat);
+            }
+        }
+        p.0
+    };
+    // SOUNDNESS R198 (collect arm) — a declared `Result`/`Option` return makes a tail `.collect()` short-circuit.
+    let ret_short = matches!(&sig.output, syn::ReturnType::Type(_, t) if matches!(&**t,
+        syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "Result" | "Option")
+            && matches!(s.arguments, syn::PathArguments::AngleBracketed(_)))));
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros, &param_names, ret_short);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
@@ -2992,7 +3014,7 @@ pub(crate) fn fninfo(
     // SOUNDNESS R168 — through `note_owned_param_drop`, NOT `note_construction`: the leaf-keyed escape
     // gate answers a question about a CONSTRUCTION, and a by-value parameter is not constructed here.
     // Its own escape gate is the `&escapes.names` argument two lines up, which is value-keyed.
-    for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
+    for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names, block) {
         c.note_owned_param_drop(Some(leaf));
     }
     // SOUNDNESS R1116 — a by-value parameter that leaves only through FIELD PROJECTIONS (`self.file`)
@@ -3244,6 +3266,13 @@ pub(crate) fn record_return(
             pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
         );
     }
+    // SOUNDNESS R200 (caller half) — "some fn of this leaf returns a value". An explicit `-> ()` files
+    // neither this nor `unit_twin_key` (exactly as before: it never reached the unit branch), so such a
+    // leaf is simply not provably unit — the refusing direction.
+    let unit_ty = matches!(&sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::Tuple(tt) if tt.elems.is_empty()));
+    if !unit_ty && matches!(&sig.output, syn::ReturnType::Type(..)) {
+        rets.insert(crate::model::ret_value_key(&sig.ident.to_string()), Some("1".to_string()));
+    }
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This
         // used to `return` before recording anything, so the ambiguity rule below could not see the
@@ -3369,7 +3398,15 @@ pub(crate) fn record_return(
             }
         }
     }
-    let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
+    let Some((mut tp, borrowed)) = crate::lang::type_path_b(unwrap_result_option(ty), uses) else { return };
+    // SOUNDNESS R1120 — and WHETHER that type is reached through a borrow, under its own key, so the drop
+    // route can tell `fn globals() -> &'static G` (hands out a reference; nothing dies in the caller) from
+    // `fn mk() -> G` (hands out the value). Asked of the SAME walk that produced `tp` (§G, R718's argument).
+    file_decl_fact(
+        rets,
+        crate::model::ret_borrow_key(&sig.ident.to_string()),
+        if borrowed { crate::model::RET_BORROWED } else { crate::model::RET_OWNED }.to_string(),
+    );
     // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
     // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local
     // def — so an ordinary `let agent = Agent::new_with_defaults(); agent.run(..)` silently dropped

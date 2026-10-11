@@ -3944,12 +3944,14 @@ fn s2_inferred(charge: bool) -> std::collections::BTreeMap<String, Vec<String>> 
 fn charge_at_construction_is_off_by_default() {
     // THE INERTNESS ARM. Measured at corpus scale too — flag-off vs the pre-change binary over 300
     // crates, 17,419 rows per arm, ADDED 0 / REMOVED 0 / CHANGED 0 — but that measurement is not in
-    // the repo and this is. `oc_factory` returning its construction must stay uncharged, and the
-    // R323 shadowed-closure silence must stay silent: the flag changes NOTHING while unset, INCLUDING
-    // the open rows, which is what makes it a switch rather than a half-landed fix.
+    // the repo and this is. `oc_factory` returning its construction must stay uncharged. SOUNDNESS
+    // R323 is now CLOSED in the escape model itself (per-binding identity), so `r323_shadowed` charges
+    // with the flag OFF too — it used to be pinned silent here as the open row; the flag still changes
+    // nothing else while unset.
     let off = s2_inferred(false);
     assert!(!off.contains_key("oc_factory"), "escape model ON: a returned construction is not charged, got {off:?}");
-    assert!(!off.contains_key("r323_shadowed"), "escape model ON: R323 is still OPEN, got {off:?}");
+    assert_eq!(off.get("r323_shadowed").map(Vec::as_slice), Some(&["Fs".to_string()][..]),
+               "escape model ON: R323 is closed per binding (2 executed in-frame drops), got {off:?}");
     assert_eq!(off.get("H::drop").map(Vec::as_slice), Some(&["Fs".to_string()][..]), "the Drop impl itself is always charged");
 }
 

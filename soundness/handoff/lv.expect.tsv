@@ -1,0 +1,15 @@
+# soundness/handoff/lv.expect.tsv — the lv fixture's STATED residue (soundness/run_handoff.sh --lv).
+# SILENT = executed drops > 0 and candor-scan reports nothing: an open debt, printed every run; a cell
+#          NOT listed here that goes silent FAILS the gate. OVER = charged at 0 executed drops (the
+#          over-report direction; reported, never a failure). Measured at rustagent-v049 (b176f8f).
+b_clos_bare	SILENT	closure by-value PARAMETER in tail position (`let f = |_h: H| {}; f(H::new())`): the callee is a local value, so R200's unit-callee rule refuses it
+b_clos_bare_let	SILENT	same as b_clos_bare, the argument let-bound
+b_clos_opt	SILENT	same, a wrapped (`Option<H>`) closure parameter
+b_okor	SILENT	std combinator drops an argument (`opt(n).ok_or(H::new())?` on Some): needs a std ownership table
+b_unwrapor	SILENT	std combinator drops an argument (`o.unwrap_or(H::new())` on Some): needs a std ownership table
+b_and_row	SILENT	std combinator drops an argument (`gen(n).and(Ok(H::new()))?` on Err): needs a std ownership table
+c_keep	OVER	SOUNDNESS R230 — a callee that STORES its by-value parameter is charged as dropping it
+c_keep_only	OVER	SOUNDNESS R230 — the storing callee itself
+c_keep_opt_semi	OVER	SOUNDNESS R230, wrapped parameter, statement position (published 0.40.6 too)
+c_keep_opt	OVER	SOUNDNESS R230 widened to the TAIL spelling by R200's caller half
+h_tryfold_ok	OVER	a may-drop: a_tryfold's body on inputs whose `?` never fires (charged for its error path)
