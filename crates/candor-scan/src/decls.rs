@@ -3369,7 +3369,15 @@ pub(crate) fn record_return(
             }
         }
     }
-    let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
+    let Some((mut tp, borrowed)) = crate::lang::type_path_b(unwrap_result_option(ty), uses) else { return };
+    // SOUNDNESS R1120 — and WHETHER that type is reached through a borrow, under its own key, so the drop
+    // route can tell `fn globals() -> &'static G` (hands out a reference; nothing dies in the caller) from
+    // `fn mk() -> G` (hands out the value). Asked of the SAME walk that produced `tp` (§G, R718's argument).
+    file_decl_fact(
+        rets,
+        crate::model::ret_borrow_key(&sig.ident.to_string()),
+        if borrowed { crate::model::RET_BORROWED } else { crate::model::RET_OWNED }.to_string(),
+    );
     // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
     // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local
     // def — so an ordinary `let agent = Agent::new_with_defaults(); agent.run(..)` silently dropped

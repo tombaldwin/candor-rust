@@ -490,6 +490,26 @@ pub(crate) fn ret_generic_key(fn_leaf: &str) -> String {
     format!("{RET_GENERIC}{fn_leaf}")
 }
 
+/// SOUNDNESS R1120 — whether a fn leaf's recorded return type is reached THROUGH A BORROW (`-> &G`,
+/// `-> &'a mut G`, `-> Option<&G>`, `-> Result<&G, E>`, `-> MutexGuard<'_, G>`): `RET_BORROWED` when it
+/// is, `RET_OWNED` when it is not. The leaf-keyed entry beside it answers `G` either way, and must —
+/// `let g = globals(); g.method()` resolves `G::method` on a `&G` exactly as on a `G`, and R188 measured
+/// what making that typing reader ambiguous costs. This key is read by the DROP route alone
+/// (`ctor_leaf_from_call_returns`), for which a borrowed return is not a construction at all: the call
+/// hands this frame a REFERENCE, and dropping a reference runs nothing.
+///
+/// Filed with the index's one conflict rule (`file_decl_fact`, and `merge_amb` across files): two
+/// same-leaf fns that disagree WITHDRAW it, and an absent key reads as OWNED — so a leaf with one owning
+/// definition anywhere keeps the charge. That is the R718 "owned wins" direction: the refusal this key
+/// licenses can only fire when every definition of the leaf provably hands out a borrow.
+pub(crate) const RET_BORROW: &str = "<retborrow>";
+pub(crate) const RET_BORROWED: &str = "&";
+pub(crate) const RET_OWNED: &str = "-";
+
+pub(crate) fn ret_borrow_key(fn_leaf: &str) -> String {
+    format!("{RET_BORROW}{fn_leaf}")
+}
+
 /// SOUNDNESS R893 — a FREE fn's declared return, keyed by its crate-anchored QUALIFIED path
 /// (`crate::a::mkv`), beside the leaf-keyed entry. Two same-named factories in different modules
 /// (`a::mkv -> Vec<G>`, `b::mkv -> Vec<H>`) withdraw the leaf entry, which is right for a bare call and
@@ -565,6 +585,8 @@ pub(crate) fn is_impl_ret_key(key: &str) -> bool {
         || key.starts_with(RET_GENERIC)
         || key.starts_with(RET_ELEM)
         || key.starts_with(RET_IMPL_ELEM)
+        // SOUNDNESS R1120 — likewise a fact about a declaration, not a fn leaf.
+        || key.starts_with(RET_BORROW)
 }
 
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl

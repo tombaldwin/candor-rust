@@ -872,7 +872,18 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                             syn::GenericArgument::Type(t) => Some(t),
                             _ => None,
                         }) {
-                            return type_path_b(inner, uses);
+                            // SOUNDNESS R1120 — a GUARD is a borrow of what it guards: dropping a
+                            // `MutexGuard<'_, G>`/`Ref<'_, G>` releases a lock or a borrow count and never
+                            // drops the `G`. The peel above is right for METHOD dispatch (R1036) and wrong
+                            // for OWNERSHIP, so the leaf comes back marked borrowed. Executed: 0 drops for a
+                            // guard returned (`let g = lock();`) and for a guard parameter, both charged
+                            // `G::drop` before. `Box`/`Arc`/`Rc`/`Pin<Box<_>>` OWN the pointee and keep
+                            // whatever the inner walk says (`Pin<&mut G>` is borrowed through its `&`).
+                            let r = type_path_b(inner, uses).map(|(t, b)| (t, b || guard));
+                            if guard && reach_debug() && r.as_ref().is_some_and(|(t, _)| local_type_leaf(t).is_some()) {
+                                eprintln!("R1120GUARD {t}", t = r.as_ref().map_or("", |(t, _)| t.as_str())); // §E1 reach
+                            }
+                            return r;
                         }
                     }
                 }
@@ -1646,6 +1657,19 @@ pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> 
         // otherwise have given, never on every unit fn.
         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && recorded_return_type(last, returns).is_some() {
             eprintln!("R174UNIT {last}");
+        }
+        return None;
+    }
+    // SOUNDNESS R1120 — A CALL THAT RETURNS A BORROW CONSTRUCTS NOTHING HERE. `fn globals() -> &'static G`
+    // hands this frame a reference; the index's leaf entry still answers `G` (it must — that is what types
+    // `g.method()`), and reading it as a construction charged `G::drop` to every `let g = globals();` —
+    // tokio's `signal::registry::globals()`, a fabrication over a value nobody here owns. Executed: 0 drops
+    // for `&G`, `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded `mk_ref<'a>(&'a G) -> &'a G`
+    // and a std lock/borrow guard, against 1 for `G`, `Box<G>`, `Rc<G>` and `Option<G>`. The key is filed
+    // only when every same-leaf definition agrees the return is a borrow, so an owning twin keeps the charge.
+    if returns.get(&crate::model::ret_borrow_key(last)).is_some_and(|v| v == crate::model::RET_BORROWED) {
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && recorded_return_type(last, returns).is_some() {
+            eprintln!("R1120BORROW {full}"); // §E1 HIT COUNTER — the changed branch only
         }
         return None;
     }

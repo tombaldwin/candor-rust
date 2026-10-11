@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a call that returns a BORROW of a `Drop` type no longer charges that type's destructor
+  (SOUNDNESS R1120).** `let g = globals();` over `fn globals() -> &'static G` was read as constructing
+  a `G` and charged `G::drop`; so were `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded
+  `fn mk_ref<'a>(x: &'a G) -> &'a G`, and a std lock/borrow guard (`MutexGuard<'_, G>`, `Ref<'_, G>`)
+  returned or taken by value — executed, 0 drops each. A `deny <effect>` over such a caller can go
+  GREEN. Measured on 1,201 registry crates with a local `Drop`: 0 added, 3 removed, 90 changed, every
+  one traced to source (tokio `signal::registry::globals()`/`registry()`, crossbeam-epoch
+  `unprotected() -> &'static Guard`, polling's `MutexGuard<SocketState>` parameter). An owning
+  same-leaf twin anywhere keeps the charge; the binding is still typed (`g.method()` resolves).
+
 ## [0.40.6] — 2026-10-11
 
 - ⚠ **A comparison over a std wrapper now reaches the element's own `PartialEq`/`PartialOrd` (SOUNDNESS

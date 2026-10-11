@@ -2311,6 +2311,81 @@ pub fn e_pair_a(p: Pair) -> H { p.a }
         }
     }
 
+    /// SOUNDNESS R1120 — a call that returns a BORROW of a `Drop` type constructs nothing in the caller.
+    /// `fn globals() -> &'static G` (tokio's `signal::registry::globals()` shape) was read as a construction
+    /// of `G` by the R165 return route, because `record_return` filed `type_path`'s leaf and dropped the
+    /// reference it peeled on the way. EXECUTED with a drop counter (fixture `rustagent-v049/r1120`):
+    /// every `n_*` cell runs 0 destructors and every `y_*` cell runs exactly 1. The `y_*` cells were written
+    /// FIRST, as the must-stay-charged half, and include an OWNING same-leaf twin in another FILE and in
+    /// another inline MODULE — the borrow fact must withdraw on disagreement, never certify.
+    #[test]
+    fn r1120_a_borrowed_return_constructs_nothing_but_an_owned_one_still_does() {
+        let lib = "\
+use std::rc::Rc;
+use std::sync::OnceLock;
+pub struct G { pub tag: u32 }
+impl G { pub fn new() -> G { G { tag: 0 } } pub fn ping(&self) -> std::io::Result<()> { std::fs::write(\"/dev/null\", b\"p\") } }
+impl Drop for G { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+static GL: OnceLock<G> = OnceLock::new();
+static GM: std::sync::Mutex<G> = std::sync::Mutex::new(G { tag: 0 });
+pub fn globals() -> &'static G { GL.get_or_init(G::new) }
+pub fn gmut() -> &'static mut G { Box::leak(Box::new(G::new())) }
+pub fn gopt() -> Option<&'static G> { Some(globals()) }
+pub fn gres() -> Result<&'static G, ()> { Ok(globals()) }
+pub fn mk_ref<'a>(x: &'a G) -> &'a G { x }
+pub fn glock() -> std::sync::MutexGuard<'static, G> { GM.lock().unwrap() }
+pub fn gcell(c: &'static std::cell::RefCell<G>) -> std::cell::Ref<'static, G> { c.borrow() }
+pub fn gbox() -> Box<G> { Box::new(G::new()) }
+pub fn grc() -> Rc<G> { Rc::new(G::new()) }
+pub fn gown() -> Option<G> { Some(G::new()) }
+pub fn gplain() -> G { G::new() }
+pub fn n_ref() -> u32 { let g = globals(); let _ = { g.tag }; 0 }
+pub fn n_refmut() -> u32 { let g = gmut(); let _ = { g.tag }; 0 }
+pub fn n_optref() -> u32 { let g = gopt(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn n_resref() -> u32 { let g = gres(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn n_mkref(x: &G) -> u32 { let r = mk_ref(x); let _ = { r.tag }; 0 }
+pub fn n_stmt() { globals(); }
+pub fn n_inline() -> u32 { globals().tag }
+pub fn n_letwild() { let _ = globals(); }
+pub fn n_guard() -> u32 { let g = glock(); let _ = { g.tag }; 0 }
+pub fn n_cellref(c: &'static std::cell::RefCell<G>) -> u32 { let g = gcell(c); let _ = { g.tag }; 0 }
+pub fn n_guardstmt() { glock(); }
+pub fn n_pguard(g: std::sync::MutexGuard<'static, G>) { let _ = g.tag; }
+pub fn y_box() -> u32 { let g = gbox(); let _ = { g.tag }; 0 }
+pub fn y_rc() -> u32 { let g = grc(); let _ = { g.tag }; 0 }
+pub fn y_own() -> u32 { let g = gown(); g.map(|x| x.tag).unwrap_or(0) }
+pub fn y_plain() -> u32 { let g = gplain(); let _ = { g.tag }; 0 }
+pub fn y_stmt() { gplain(); }
+pub fn y_boxstmt() { gbox(); }
+pub mod ta;
+pub mod tb;
+pub mod ia { pub fn itwin() -> &'static crate::G { crate::globals() } }
+pub mod ib { pub fn itwin() -> crate::G { crate::G::new() } }
+pub fn y_twin() { tb::twin(); }
+pub fn y_itwin() { ib::itwin(); }
+pub fn z_typed() { let g = globals(); let _ = g.ping(); }
+";
+        let v = scan_src_to_json_multi("r1120", &[
+            ("src/lib.rs", lib),
+            ("src/ta.rs", "pub fn twin() -> &'static crate::G { crate::globals() }\n"),
+            ("src/tb.rs", "pub fn twin() -> crate::G { crate::G::new() }\n"),
+        ]);
+        for f in ["n_ref", "n_refmut", "n_optref", "n_resref", "n_mkref", "n_stmt", "n_inline", "n_letwild",
+                  "n_guard", "n_cellref", "n_guardstmt", "n_pguard"] {
+            assert!(row_absent(&v, f),
+                    "`{f}` only BORROWS a `G` (executed: 0 drops) — charging `G::drop` FABRICATES:\n{v:#}");
+        }
+        for f in ["y_box", "y_rc", "y_own", "y_plain", "y_stmt", "y_boxstmt", "y_twin", "y_itwin"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` OWNS the `G` it was handed and drops it here (executed: 1 drop):\n{v:#}");
+        }
+        // R188's reader: the borrowed return still TYPES the binding — `g.ping()` resolves `G::ping`.
+        let z = fn_entry(&v, "z_typed");
+        assert!(effs(z).contains(&"Fs".to_string()), "a borrowed return must still type `g`:\n{v:#}");
+        assert!(!z["calls"].as_array().unwrap().iter().any(|c| c == "G::drop"),
+                "`z_typed` borrows `G` — no `G::drop` edge:\n{v:#}");
+    }
+
     /// SOUNDNESS R1118 — a DEPENDENCY's `Drop` type released in this frame, joined against the chained
     /// report's `G::drop` row: a by-value parameter, an overwritten place, a reassignment and the elements
     /// `Vec::clear` destroys. EXECUTED (`rustagent-v047/xd`): 1 drop each; all ABSENT on 0.40.5 chained.
@@ -16976,7 +17051,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -16987,7 +17062,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev87/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev88/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
