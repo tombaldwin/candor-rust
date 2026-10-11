@@ -510,6 +510,17 @@ pub(crate) fn ret_borrow_key(fn_leaf: &str) -> String {
     format!("{RET_BORROW}{fn_leaf}")
 }
 
+/// SOUNDNESS R200 (caller half) — "some fn with this leaf returns a VALUE" (anything but `()`), the
+/// complement of `unit_twin_key`. The value is a constant, so it can never conflict: one value-returning
+/// definition anywhere in the crate files it, and a leaf is UNIT-ONLY exactly when `unit_twin_key` is
+/// present and this is not. `ReturnIndex` drops a withdrawn (`None`) leaf entry, so the leaf's own
+/// absence cannot say "no value-returning definition"; this key can.
+pub(crate) const RET_VALUE: &str = "<retvalue>";
+
+pub(crate) fn ret_value_key(fn_leaf: &str) -> String {
+    format!("{RET_VALUE}{fn_leaf}")
+}
+
 /// SOUNDNESS R893 — a FREE fn's declared return, keyed by its crate-anchored QUALIFIED path
 /// (`crate::a::mkv`), beside the leaf-keyed entry. Two same-named factories in different modules
 /// (`a::mkv -> Vec<G>`, `b::mkv -> Vec<H>`) withdraw the leaf entry, which is right for a bare call and
@@ -587,6 +598,7 @@ pub(crate) fn is_impl_ret_key(key: &str) -> bool {
         || key.starts_with(RET_IMPL_ELEM)
         // SOUNDNESS R1120 — likewise a fact about a declaration, not a fn leaf.
         || key.starts_with(RET_BORROW)
+        || key.starts_with(RET_VALUE)
 }
 
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl

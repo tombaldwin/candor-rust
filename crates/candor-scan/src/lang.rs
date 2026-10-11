@@ -6409,8 +6409,10 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // builds for R48. Read ONLY inside a `?`'s operand, and only to decide what a macro CONSTRUCTS; the
     // expansion never becomes a construction SITE (see `note_local_macro_template_leaves`).
     local_macros: &'a HashMap<String, String>,
+    // SOUNDNESS R200 (caller half) — the enclosing fn's parameter names (see `MacroLens::shadow`).
+    params: &[String],
 ) -> Escapes {
-    escaping_ctor_full(block, uses, fields, returns, local_macros).0
+    escaping_ctor_full(block, uses, fields, returns, local_macros, params).0
 }
 
 /// `escaping_ctor_leaves`, plus the body's construction SITES. SOUNDNESS R300 — a body-local `fn` item's
@@ -6422,10 +6424,22 @@ fn escaping_ctor_full<'a>(
     fields: &'a FieldIndex,
     returns: &'a ReturnIndex,
     local_macros: &'a HashMap<String, String>,
+    params: &[String],
 ) -> (Escapes, HashMap<String, Vec<SiteId>>) {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
     let mut sites = EscapeSites::new(uses, fields, returns, local_macros);
+    {
+        struct Bound<'s>(&'s mut std::collections::HashSet<String>);
+        impl<'x> syn::visit::Visit<'x> for Bound<'_> {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.insert(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        syn::visit::Visit::visit_block(&mut Bound(&mut sites.call_shadow), block);
+        sites.call_shadow.extend(params.iter().cloned());
+    }
     sites.walk_block(block, true);
     // SOUNDNESS R198/R209(b) — decide the LET-BOUND closures now that the whole body is walked.
     //
@@ -6784,7 +6798,7 @@ fn escape_from_root(
     let (uses, fields, returns) = (sites.uses, sites.fields, sites.returns);
     // The SAME macro indexes the site walk used. `body_macros` is complete by now — `walk_block` has
     // finished — so both walks resolve every invocation to the same template.
-    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros };
+    let lens = MacroLens { local: sites.local_macros, body: &sites.body_macros, shadow: &sites.call_shadow };
     let guard = &mut Vec::new();
     let mut m = Marks::default();
     if let Some(e) = root {
@@ -6810,7 +6824,9 @@ fn escape_from_root(
     };
     for (q, e) in &sites.escapes {
         if route_at(*q) {
-            let mut sub = Marks::default();
+            // R200 — an unconditional route is a closure body or a `forget`/`ManuallyDrop` operand; both
+            // keep every argument on the spine (`Marks::in_closure`).
+            let mut sub = Marks { in_closure: true, ..Default::default() };
             mark_escape(e, &lens, guard, uses, fields, returns, &mut sub);
             branch_filter(&mut sub, e);
             merge_direct(&mut m, sub);
@@ -6888,6 +6904,13 @@ fn escape_from_root(
 /// suppressed anyway and one executed `H::drop` vanished.
 #[derive(Default, Clone)]
 struct Marks {
+    /// SOUNDNESS R200 (caller half) — set while this walk is inside a CLOSURE body that escapes (an
+    /// unconditional route, or a let-bound closure the fixpoint found escaping). A closure CAPTURES what
+    /// its body names and carries it wherever the closure goes, so a unit callee in its tail
+    /// (`spawn(move || run(timer, done))`, futures-timer) does not mean the captured `timer` dies here.
+    /// While set, `call_returns_nothing` is not consulted and every argument stays on the spine, exactly
+    /// as before. Not merged — it describes the walk, not its findings.
+    in_closure: bool,
     names: std::collections::HashSet<String>,
     leaves: std::collections::HashSet<String>,
     sites: std::collections::HashSet<SiteId>,
@@ -6944,6 +6967,10 @@ fn macro_site_ordinals<'e>(exprs: impl IntoIterator<Item = &'e syn::Expr>) -> Ha
 struct MacroLens<'a> {
     local: &'a HashMap<String, String>,
     body: &'a HashMap<String, String>,
+    /// SOUNDNESS R200 (caller half) — names this body binds locally (every pattern ident, closure
+    /// parameter and fn parameter). A call through one of these is a call of a VALUE, never of the fn
+    /// item a crate-wide leaf fact describes, so `call_returns_nothing` refuses it.
+    shadow: &'a std::collections::HashSet<String>,
 }
 
 /// ONE READING OF ONE MACRO INVOCATION, produced by `macro_reading` and consumed by BOTH walks.
@@ -7404,6 +7431,8 @@ struct EscapeSites<'a> {
     /// let`/`while let`/`for` pattern, a closure parameter, a body-local `fn`. A name in here makes the
     /// per-binding answer untrustworthy, so R323's test refuses it.
     pat_bound_names: std::collections::HashSet<String>,
+    /// SOUNDNESS R200 (caller half) — see `MacroLens::shadow`. Filled before the walk.
+    call_shadow: std::collections::HashSet<String>,
     /// Every single-ident `Expr::Path` occurrence, counted.
     path_uses: HashMap<String, usize>,
     /// How many times each name is BOUND in this body — every `let NAME = …` and every body-local
@@ -7548,6 +7577,7 @@ impl<'a> EscapeSites<'a> {
             bind_macro: std::collections::HashSet::new(),
             closure_bind: HashMap::new(),
             pat_bound_names: std::collections::HashSet::new(),
+            call_shadow: std::collections::HashSet::new(),
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -7742,7 +7772,7 @@ impl<'a> EscapeSites<'a> {
                 };
                 let syn::Expr::Macro(em) = &inner_m else { unreachable!() };
                 let inner = {
-                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+                    let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow };
                     macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                 };
                 let iords = macro_reading_ordinals(&inner);
@@ -7784,7 +7814,7 @@ impl<'a> EscapeSites<'a> {
     /// One macro invocation, read ONCE for both halves of this walk.
     fn note_macro_reading(&mut self, m: &syn::ExprMacro) {
         let reading = {
-            let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+            let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow };
             macro_reading(m, &lens, &|n| self.macro_expanding.contains(n))
         };
         self.note_reading_sites(&reading, m as *const syn::ExprMacro as usize);
@@ -8369,7 +8399,7 @@ impl<'a> EscapeSites<'a> {
                     let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                     let syn::Expr::Macro(em) = &host else { unreachable!() };
                     let reading = {
-                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros };
+                        let lens = MacroLens { local: self.local_macros, body: &self.body_macros, shadow: &self.call_shadow };
                         macro_reading(em, &lens, &|n| self.macro_expanding.contains(n))
                     };
                     self.note_reading_sites(&reading, m as *const syn::StmtMacro as usize);
@@ -8408,7 +8438,7 @@ impl<'a> EscapeSites<'a> {
     /// cannot be typed (`.map(|_| mk())` in an inline closure). Not taken here; stated, and the
     /// over-report stands as it shipped.
     fn note_nested_body(&mut self, b: &'a syn::Block) {
-        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros);
+        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[]);
         for (l, v) in inner_sites {
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 eprintln!("R300NESTED {l}"); // §E1 REACH COUNTER — the sites this change adds
@@ -8770,7 +8800,7 @@ fn mark_escape(
         let reading = macro_reading(mac, lens, &|n| guard.iter().any(|x| x == n));
         let ords = macro_reading_ordinals(&reading);
         let base = mac as *const syn::ExprMacro as usize;
-        let mut sub = Marks::default();
+        let mut sub = Marks { in_closure: m.in_closure, ..Default::default() };
         // R172 — the parsed forms are OWNED TEMPORARIES, so an address recorded under them dies with
         // this call and a later allocation could reuse one. Marked into a scratch `Marks`, then each
         // site RENUMBERED onto `macro_reading_ordinals`, the numbering the body walk also uses —
@@ -8872,7 +8902,7 @@ fn mark_escape(
     // children stays correct there too — `If`/`Match` are the only node kinds needing a NAME/leaf split.
     match e {
         syn::Expr::If(iff) => {
-            let mut then_m = Marks::default();
+            let mut then_m = Marks { in_closure: m.in_closure, ..Default::default() };
             if let Some(t) = tail_expr_of(&iff.then_branch) {
                 mark_escape(t, lens, guard, uses, fields, returns, &mut then_m);
             }
@@ -8882,11 +8912,11 @@ fn mark_escape(
             // leaf in practice; leaves are unioned regardless, per this fn's doc comment above.
             let else_m = match &iff.else_branch {
                 Some((_, eb)) => {
-                    let mut n = Marks::default();
+                    let mut n = Marks { in_closure: m.in_closure, ..Default::default() };
                     mark_escape(eb, lens, guard, uses, fields, returns, &mut n);
                     n
                 }
-                None => Marks::default(),
+                None => Marks { in_closure: m.in_closure, ..Default::default() },
             };
             m.names.extend(then_m.names.intersection(&else_m.names).cloned());
             // Leaves AND their sites ride the same union rule (see the comment above): a construction
@@ -8900,14 +8930,29 @@ fn mark_escape(
             m.via.extend(then_m.via.union(&else_m.via).cloned());
             return;
         }
+        // SOUNDNESS R200 (caller half) — A CALL WHOSE CALLEE PROVABLY RETURNS NOTHING CANNOT CARRY ITS
+        // ARGUMENTS OUT IN ITS VALUE. `for_each_value_child` hands every `Call`'s arguments to the escape
+        // walk (right for `Ok(g)`, `Box::new(g)`, a constructor), so in TAIL position `eat_opt(Some(H::new()))`
+        // and `std::mem::drop(h)` marked the `H` escaping and the caller read ABSENT, while the same call
+        // with a `;` charged (executed: 1 drop either way). See `call_returns_nothing` for what "provably"
+        // admits; anything it refuses keeps the old walk.
+        syn::Expr::Call(c) if !m.in_closure && call_returns_nothing(c, uses, returns, lens.shadow) => {
+            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if let syn::Expr::Path(p) = &*c.func {
+                    eprintln!("R200UNIT {}", path_to_string(&p.path)); // §E1 REACH COUNTER
+                }
+            }
+            return;
+        }
         syn::Expr::Match(mt) => {
             let mut arms = mt.arms.iter().map(|a| {
-                let mut n = Marks::default();
+                let mut n = Marks { in_closure: m.in_closure, ..Default::default() };
                 mark_escape(&a.body, lens, guard, uses, fields, returns, &mut n);
                 n
             });
             if let Some(first) = arms.next() {
                 let folded = arms.fold(first, |a, n| Marks {
+                    in_closure: a.in_closure,
                     names: a.names.intersection(&n.names).cloned().collect(),
                     leaves: a.leaves.union(&n.leaves).cloned().collect(),
                     sites: a.sites.union(&n.sites).cloned().collect(),
@@ -8923,7 +8968,58 @@ fn mark_escape(
         }
         _ => {}
     }
+    // R200 — a closure's body carries its captures with it; see `Marks::in_closure`.
+    let was = m.in_closure;
+    if matches!(e, syn::Expr::Closure(_)) {
+        m.in_closure = true;
+    }
     for_each_value_child(e, &mut |c| mark_escape(c, lens, guard, uses, fields, returns, m));
+    m.in_closure = was;
+}
+
+/// SOUNDNESS R200 (caller half) — whether a call's value is `()` by a DECLARED fact, so that none of its
+/// arguments can travel out through it. Two routes, both refusing anything not proven:
+///
+///   * std's `drop`: the written path EXPANDS to `std::mem::drop`/`core::mem::drop` (so `mem::drop` under
+///     `use std::mem`, and any import alias, land); or it is the bare prelude `drop` — written as one
+///     segment, NOT imported, NOT a local binding, and NO fn named `drop` in this crate returns a value.
+///     That last clause is what makes a user's `fn drop(h: H) -> H { h }` win, and the expansion test is
+///     what keeps `mymem::drop` (a local module's fn, expanded under the crate, never under `std`) on the
+///     local route below instead of matching a suffix.
+///   * a LOCAL fn item whose every same-leaf definition in the crate returns `()`: `unit_twin_key` present
+///     and `ret_value_key` absent. Local means a bare, non-imported name that the body does not bind (a
+///     parameter or closure named like a unit fn is a VALUE call), or a path written or expanding under
+///     `crate::`/`self::`/`super::`.
+///     A `Type::assoc(..)`, a dependency's or std's path, a method, a fn pointer and a closure are all
+///     refused: a unit-returning leaf elsewhere in the crate says nothing about them.
+///
+/// STATED LIMIT: leaf-keyed, like the R165 route. A bare `f(h)` that resolves through a GLOB import to a
+/// dependency's value-returning `f` while some module of this crate declares a unit `f` reads as unit.
+fn call_returns_nothing(
+    c: &syn::ExprCall,
+    uses: &HashMap<String, String>,
+    returns: &ReturnIndex,
+    shadow: &std::collections::HashSet<String>,
+) -> bool {
+    let syn::Expr::Path(p) = &*c.func else { return false };
+    if p.qself.is_some() {
+        return false;
+    }
+    let written = path_to_string(&p.path);
+    let expanded = expand(&written, uses);
+    if matches!(expanded.as_str(), "std::mem::drop" | "core::mem::drop") {
+        return true;
+    }
+    let bare = !written.contains("::") && !uses.contains_key(&written) && !shadow.contains(&written);
+    let leaf = written.rsplit("::").next().unwrap_or(&written);
+    let has_value = returns.contains_key(&crate::model::ret_value_key(leaf));
+    if bare && written == "drop" && !has_value {
+        return true; // the prelude `drop`, with no local `drop` fn that returns anything
+    }
+    let local = bare
+        || expanded.starts_with("crate::")
+        || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
+    local && !has_value && returns.contains_key(&crate::model::unit_twin_key(leaf))
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can

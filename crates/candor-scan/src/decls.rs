@@ -2860,7 +2860,25 @@ pub(crate) fn fninfo(
             twin_leaves: elems.twin_type_leaves,
         }
     };
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
+    // SOUNDNESS R200 (caller half) — every name a parameter pattern binds: a call through one is a call
+    // of a VALUE, never of a same-named unit fn item.
+    let param_names: Vec<String> = {
+        struct P(Vec<String>);
+        impl<'x> syn::visit::Visit<'x> for P {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.push(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        let mut p = P(Vec::new());
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                syn::visit::Visit::visit_pat(&mut p, &pt.pat);
+            }
+        }
+        p.0
+    };
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros, &param_names);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
@@ -3243,6 +3261,13 @@ pub(crate) fn record_return(
             crate::model::ret_generic_key(&sig.ident.to_string()),
             pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
         );
+    }
+    // SOUNDNESS R200 (caller half) — "some fn of this leaf returns a value". An explicit `-> ()` files
+    // neither this nor `unit_twin_key` (exactly as before: it never reached the unit branch), so such a
+    // leaf is simply not provably unit — the refusing direction.
+    let unit_ty = matches!(&sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::Tuple(tt) if tt.elems.is_empty()));
+    if !unit_ty && matches!(&sig.output, syn::ReturnType::Type(..)) {
+        rets.insert(crate::model::ret_value_key(&sig.ident.to_string()), Some("1".to_string()));
     }
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         // SOUNDNESS R174(b) — A UNIT RETURN IS A CONFLICTING DEFINITION, not an absence of one. This

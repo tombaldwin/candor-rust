@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a unit-returning call in TAIL position no longer carries its arguments out (SOUNDNESS
+  R200, caller half).** `pub fn f() { eat_opt(Some(H::new())) }` and `std::mem::drop(h)` as a tail were
+  absent while the same call with a `;` was charged — executed, 1 drop either way. The arguments of a
+  call whose callee provably returns `()` (std's `drop`, or a local fn whose every same-leaf definition
+  returns `()`) are no longer on the escape spine. A user `fn drop(h: H) -> H`, a local `mymem::drop`, a
+  callable parameter or closure named like a unit fn, and a unit call inside an escaping closure keep the
+  old reading. Stated: this widens R230's store-not-drop over-charge to the tail spelling.
+
 - ⚠ **candor-scan: a shadowed or sibling-scope let-bound closure that runs and drops here is charged
   (SOUNDNESS R323).** `let c = || H::new(); c(); let c = || H::new(); c();` and `{ let c = ..; c(); } {
   let c = ..; c(); }` drop in the function's own frame (executed) and were absent: a name bound twice

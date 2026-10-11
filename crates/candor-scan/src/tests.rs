@@ -2440,6 +2440,80 @@ pub fn x_ifl_call(o: Option<fn()>) { let c = || H::new(); let _ = &c; let c = ||
         }
     }
 
+    /// SOUNDNESS R200, THE CALLER HALF — a call whose callee provably returns `()` cannot carry its by-value
+    /// arguments out in its value. In TAIL position every `Call`'s arguments were on the escape spine, so
+    /// `eat_opt(Some(H::new()))` and `std::mem::drop(h)` read ABSENT while the same call with a `;` charged.
+    /// EXECUTED (fixtures `rustagent-v049/r200`, `r200u`): every `t_*` cell drops 1 `H` during the call and
+    /// was ABSENT on published 0.40.6. Controls, written first, drop 0 here: a user `fn drop(h: H) -> H`
+    /// (it shadows the prelude crate-wide), a local `mymem::drop` returning its argument, a callable
+    /// PARAMETER and a CLOSURE named like a unit fn, a unit leaf with a value-returning twin, std's
+    /// `Vec::push` by UFCS, `mem::forget`, and a constructor tail.
+    #[test]
+    fn r200_a_unit_callee_in_tail_position_does_not_carry_its_arguments_out() {
+        let v = scan_src_to_json("r200c", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+fn eat_opt(_o: Option<H>) {}
+fn eat_pair(_p: (H, u32)) {}
+fn eat_vec(_v: Vec<H>) {}
+fn eat_gen<T>(_t: T) {}
+pub fn t_opt() { eat_opt(Some(H::new())) }
+pub fn t_pair() { eat_pair((H::new(), 1)) }
+pub fn t_vec() { eat_vec(vec![H::new()]) }
+pub fn t_gen() { eat_gen(H::new()) }
+pub fn t_memdrop() { std::mem::drop(H::new()) }
+pub fn t_memuse() { use std::mem; let h = H::new(); mem::drop(h) }
+pub fn t_coredrop() { let h = H::new(); core::mem::drop(h) }
+pub fn t_opt_let() { let o = Some(H::new()); eat_opt(o) }
+pub fn t_crate_path() { crate::eat_opt(Some(H::new())) }
+pub fn t_in_if(c: bool) { if c { eat_gen(H::new()) } else { eat_gen(H::new()) } }
+pub mod mymem { pub fn drop(h: crate::H) -> crate::H { h } }
+pub fn x_mymem() -> H { mymem::drop(H::new()) }
+fn pass(h: H) -> H { h }
+pub fn x_retval(h: H) -> H { pass(h) }
+fn f(_x: u32) {}
+pub fn x_param_fn(f: impl Fn(H) -> H) -> H { f(H::new()) }
+pub fn x_closure_named() -> H { let f = |h: H| h; f(H::new()) }
+mod tw1 { pub fn twin() {} }
+fn twin(h: H) -> H { h }
+pub fn x_unit_but_twin() -> H { twin(H::new()) }
+pub fn x_ufcs(v: &mut Vec<H>) { Vec::push(v, H::new()) }
+pub fn x_forget() { std::mem::forget(H::new()) }
+pub fn x_used() { tw1::twin(); f(1); }
+fn hold(h: H) { std::mem::forget(h) }
+pub fn x_spawn_hold() -> std::thread::JoinHandle<()> { let t = H::new(); std::thread::spawn(move || hold(t)) }
+pub fn x_let_hold() -> Box<dyn FnOnce()> { let t = H::new(); let f = move || hold(t); Box::new(f) }
+");
+        for f in ["t_opt", "t_pair", "t_vec", "t_gen", "t_memdrop", "t_memuse", "t_coredrop", "t_opt_let",
+                  "t_crate_path", "t_in_if"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` hands an `H` to a unit callee that drops it (executed: 1) and was silent:\n{v:#}");
+        }
+        // `x_spawn_hold`/`x_let_hold`: a unit callee in an ESCAPING closure's tail — the closure captured
+        // `t` and carries it away (futures-timer's `spawn(move || run(timer, done2))`, found by the A/B).
+        for f in ["x_mymem", "x_retval", "x_param_fn", "x_closure_named", "x_unit_but_twin", "x_ufcs", "x_forget",
+                  "x_spawn_hold", "x_let_hold"] {
+            let fs = v["functions"].as_array().unwrap().iter()
+                .any(|r| r["fn"] == f && effs(r).contains(&"Fs".to_string()));
+            assert!(!fs, "`{f}` drops nothing here (executed: 0) — charging `Fs` FABRICATES:\n{v:#}");
+        }
+        // A user `fn drop(h: H) -> H` shadows the prelude `drop` in its whole crate: the bare call RETURNS
+        // the value (executed: 0 drops), while `std::mem::drop` still drops it (executed: 1).
+        let u = scan_src_to_json("r200u", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+fn drop(h: H) -> H { h }
+pub fn u_userdrop() -> H { drop(H::new()) }
+pub fn u_memdrop() { std::mem::drop(H::new()) }
+");
+        assert!(!u["functions"].as_array().unwrap().iter()
+                    .any(|r| r["fn"] == "u_userdrop" && effs(r).contains(&"Fs".to_string())),
+                "a user `drop` that returns its argument FABRICATES:\n{u:#}");
+        assert!(effs(fn_entry(&u, "u_memdrop")).contains(&"Fs".to_string()), "std's drop still drops:\n{u:#}");
+    }
+
     /// SOUNDNESS R1118 — a DEPENDENCY's `Drop` type released in this frame, joined against the chained
     /// report's `G::drop` row: a by-value parameter, an overwritten place, a reassignment and the elements
     /// `Vec::clear` destroys. EXECUTED (`rustagent-v047/xd`): 1 drop each; all ABSENT on 0.40.5 chained.
@@ -17105,7 +17179,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17116,7 +17190,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev88/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev89/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
