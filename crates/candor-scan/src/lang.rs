@@ -1089,6 +1089,13 @@ fn elem_type_b_plain(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(
                 // `inner.lock().await.as_ref()?.cache` lost its ⟨0.40⟩ `dispatch:` disclosure. R347's
                 // guard-chain half (`Mutex<Vec<Guard>>`) stays open, as it was.
                 n if is_value_wrapper(n) => type_path_b(first_ty, uses).filter(|(t, _)| is_held_nominal(t)),
+                // SOUNDNESS R1098 — `Weak<T>` holds one `T`, reached only through `upgrade()` (an
+                // element-yielding accessor already), so its element is `T` exactly as `elem_trait_leaves`
+                // has answered for a `Weak<dyn _>` since R401. Without it a CONCRETE `Weak<G>` had no element
+                // at all: `w.upgrade() == v.upgrade()` and `if let Some(g) = w.upgrade() { g.go() }` reached
+                // nothing. Not `is_value_wrapper`: that list also drives the `lock`/`borrow` accessor kinds,
+                // and `Weak` has none of them. Same nominal-only filter, so a `Weak<Vec<G>>` adds nothing.
+                "Weak" => type_path_b(first_ty, uses).filter(|(t, _)| is_held_nominal(t)),
                 // SOUNDNESS R893 / R1023 — a wrapper of a container or of an `Option` (`Mutex<Vec<G>>`,
                 // `Mutex<Option<G>>`) is TWO std layers deep and is recorded LAYERED by `elem_type_b`'s
                 // fallback below, never here: the plain form means "the held value is G" to
