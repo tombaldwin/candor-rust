@@ -6441,7 +6441,7 @@ fn escaping_ctor_full<'a>(
     //   · any other use of the name (stored, passed on, invoked with its value bound and kept) — not
     //     provably local, so it stays suppressed. This is a DENYLIST of the exemption: an unrecognised
     //     spelling keeps today's behaviour and stays silent rather than fabricating.
-    for (name, body, seq) in std::mem::take(&mut sites.pending_closure_escapes) {
+    for (name, bind, body, seq) in std::mem::take(&mut sites.pending_closure_escapes) {
         let uses_n = sites.path_uses.get(&name).copied().unwrap_or(0);
         let disc_n = sites.discarded_calls.get(&name).copied().unwrap_or(0);
         // R304 — the counters are keyed on a BARE IDENT with no scope, so they only describe one
@@ -6450,7 +6450,28 @@ fn escaping_ctor_full<'a>(
         // else entirely, and the only safe answer is the old unconditional escape.
         let one_entity = sites.name_bindings.get(&name).copied().unwrap_or(0) == 1
             && !sites.macro_idents.contains(&name);
-        if !(one_entity && uses_n > 0 && uses_n == disc_n) {
+        // SOUNDNESS R323 — …and when the NAME is bound more than once, ask the same question of the
+        // BINDING. `let c = || H::new(); c(); let c = || H::new(); c();` and the sibling-block spelling
+        // are two entities that share a spelling; R304's guard fell back to SUPPRESSION for both, and
+        // both closures really run and drop here (EXECUTED: 2 drops, ABSENT). `bind_uses`/`bind_disc`
+        // count only the occurrences that RESOLVE to this `let` through the lexical scope stack, so the
+        // shadowed binding's calls are not this one's. Three ways the resolution could be wrong, each a
+        // refusal back to the old suppression (the denylist direction — an unrecognised shape stays as
+        // it shipped): the name is ALSO bound by any binder the scope stack does not model (a pattern,
+        // a closure parameter, a `match` arm, `if let`, a body-local `fn`); the binding is named inside
+        // macro tokens; or it has no use at all.
+        let per_binding = !one_entity
+            && bind.is_some_and(|b| {
+                let u = sites.bind_uses.get(&b).copied().unwrap_or(0);
+                u > 0
+                    && u == sites.bind_disc.get(&b).copied().unwrap_or(0)
+                    && !sites.bind_macro.contains(&b)
+                    && !sites.pat_bound_names.contains(&name)
+            });
+        if per_binding && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R323BIND {name}"); // §E1 REACH COUNTER — the changed branch only
+        }
+        if !per_binding && !(one_entity && uses_n > 0 && uses_n == disc_n) {
             sites.escapes.push((seq, body));
         } else if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             // INSTRUMENTED, because an unchanged corpus row is not evidence the new code ran — the
@@ -7367,7 +7388,22 @@ struct EscapeSites<'a> {
     /// `(name, closure body)` for each `let NAME = |…| …` whose body was NOT pushed onto `escapes`
     /// during the walk. The decision needs counts that only exist once the whole body has been walked,
     /// so it is deferred to `escape_sites` and applied there.
-    pending_closure_escapes: Vec<(String, &'a syn::Expr, usize)>,
+    pending_closure_escapes: Vec<(String, Option<usize>, &'a syn::Expr, usize)>,
+    /// SOUNDNESS R323 — LEXICAL BINDING IDENTITY for single-ident `let`s. A stack of scopes (one per
+    /// block) mapping a name to the id of the `let` that bound it; a use resolves to the innermost. The
+    /// per-binding twins of `path_uses`/`discarded_calls`/`macro_idents` count only what resolves to one
+    /// binding, so a shadowed or sibling-scope `let` of the same name is a different entity.
+    bind_scopes: Vec<HashMap<String, usize>>,
+    next_bind: usize,
+    bind_uses: HashMap<usize, usize>,
+    bind_disc: HashMap<usize, usize>,
+    bind_macro: std::collections::HashSet<usize>,
+    /// The closure expression (by address) a single-ident `let` initialises, and that `let`'s id.
+    closure_bind: HashMap<usize, usize>,
+    /// Names bound by any binder the scope stack does NOT model — a destructuring `let`, a `match`/`if
+    /// let`/`while let`/`for` pattern, a closure parameter, a body-local `fn`. A name in here makes the
+    /// per-binding answer untrustworthy, so R323's test refuses it.
+    pat_bound_names: std::collections::HashSet<String>,
     /// Every single-ident `Expr::Path` occurrence, counted.
     path_uses: HashMap<String, usize>,
     /// How many times each name is BOUND in this body — every `let NAME = …` and every body-local
@@ -7505,6 +7541,13 @@ impl<'a> EscapeSites<'a> {
             name_bindings: HashMap::new(),
             macro_idents: std::collections::HashSet::new(),
             discarded_calls: HashMap::new(),
+            bind_scopes: vec![HashMap::new()],
+            next_bind: 0,
+            bind_uses: HashMap::new(),
+            bind_disc: HashMap::new(),
+            bind_macro: std::collections::HashSet::new(),
+            closure_bind: HashMap::new(),
+            pat_bound_names: std::collections::HashSet::new(),
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -7525,6 +7568,23 @@ impl<'a> EscapeSites<'a> {
             name_frames: HashMap::new(),
             frames_of: HashMap::new(),
         }
+    }
+
+    /// SOUNDNESS R323 — the `let` a bare name resolves to here, innermost scope first.
+    fn resolve_bind(&self, n: &str) -> Option<usize> {
+        self.bind_scopes.iter().rev().find_map(|m| m.get(n).copied())
+    }
+
+    /// SOUNDNESS R323 — every name a pattern binds, into `pat_bound_names` (see its doc).
+    fn note_unmodelled_binders(&mut self, p: &syn::Pat) {
+        struct V<'b>(&'b mut std::collections::HashSet<String>);
+        impl<'x> syn::visit::Visit<'x> for V<'_> {
+            fn visit_pat_ident(&mut self, i: &'x syn::PatIdent) {
+                self.0.insert(i.ident.to_string());
+                syn::visit::visit_pat_ident(self, i);
+            }
+        }
+        syn::visit::Visit::visit_pat(&mut V(&mut self.pat_bound_names), p);
     }
 
     /// SOUNDNESS R829 — remember which branches enclose this edge's value expression.
@@ -8169,6 +8229,12 @@ impl<'a> EscapeSites<'a> {
 
     /// `tail` says whether this block's trailing expression is in RETURN position for the unit.
     fn walk_block(&mut self, b: &'a syn::Block, tail: bool) {
+        self.bind_scopes.push(HashMap::new()); // R323 — a block is a lexical scope
+        self.walk_block_stmts(b, tail);
+        self.bind_scopes.pop();
+    }
+
+    fn walk_block_stmts(&mut self, b: &'a syn::Block, tail: bool) {
         for (i, st) in b.stmts.iter().enumerate() {
             let last = i + 1 == b.stmts.len();
             match st {
@@ -8179,6 +8245,14 @@ impl<'a> EscapeSites<'a> {
                     // `one_entity` wrongly TRUE — the FABRICATION direction. `let (a, b) = ..`,
                     // `let Some(x) = .. else`, and a bare `let x;` all bind names the guard must see.
                     self.note_pat_bindings(&l.pat);
+                    // R323 — this `let`'s identity. Entered into the scope AFTER the initialiser is
+                    // walked: the initialiser cannot name the binding it is creating.
+                    let bind_id = self.next_bind;
+                    self.next_bind += 1;
+                    let single = single_pat_ident(&l.pat);
+                    if single.is_none() {
+                        self.note_unmodelled_binders(&l.pat);
+                    }
                     if let Some(init) = &l.init {
                         // R198/R209(b) — see `let_bound_closures`. Must be recorded BEFORE the walk,
                         // because the walk is what reaches the `Expr::Closure` arm that reads it.
@@ -8186,6 +8260,7 @@ impl<'a> EscapeSites<'a> {
                             if let Some(n) = single_pat_ident(&l.pat) {
                                 self.let_bound_closures
                                     .insert(&*init.expr as *const syn::Expr as usize, n);
+                                self.closure_bind.insert(&*init.expr as *const syn::Expr as usize, bind_id);
                             }
                         }
                         // `let _ = f();` discards the value exactly as `f();` does — but ONLY in THIS
@@ -8198,6 +8273,9 @@ impl<'a> EscapeSites<'a> {
                                             .discarded_calls
                                             .entry(id.to_string())
                                             .or_insert(0) += 1;
+                                        if let Some(b) = self.resolve_bind(&id.to_string()) {
+                                            *self.bind_disc.entry(b).or_insert(0) += 1;
+                                        }
                                     }
                                 }
                             }
@@ -8205,6 +8283,11 @@ impl<'a> EscapeSites<'a> {
                         self.walk_expr(&init.expr);
                         if let Some((_, d)) = &init.diverge {
                             self.walk_expr(d);
+                        }
+                        if let Some(n) = &single {
+                            if let Some(top) = self.bind_scopes.last_mut() {
+                                top.insert(n.clone(), bind_id);
+                            }
                         }
                         // R173 — the binder's position is AFTER its initialiser: in
                         // `let h = try_handle(p)?;` the `?` can take its early exit before `h` exists,
@@ -8241,6 +8324,9 @@ impl<'a> EscapeSites<'a> {
                             if let syn::Expr::Path(p) = &*c.func {
                                 if let Some(id) = p.path.get_ident() {
                                     *self.discarded_calls.entry(id.to_string()).or_insert(0) += 1;
+                                    if let Some(b) = self.resolve_bind(&id.to_string()) {
+                                        *self.bind_disc.entry(b).or_insert(0) += 1;
+                                    }
                                 }
                             }
                         }
@@ -8256,6 +8342,7 @@ impl<'a> EscapeSites<'a> {
                 // R304 — a body-local `fn NAME` binds that name too, and shadowing a let-bound
                 // closure with one (or vice versa) is the same collision.
                 syn::Stmt::Item(syn::Item::Fn(itf)) => {
+                    self.pat_bound_names.insert(itf.sig.ident.to_string()); // R323
                     *self
                         .name_bindings
                         .entry(itf.sig.ident.to_string())
@@ -8339,6 +8426,9 @@ impl<'a> EscapeSites<'a> {
                     for f in &self.branch_stack {
                         self.arm_idents.entry(*f).or_default().insert(i.to_string());
                     }
+                    if let Some(b) = self.resolve_bind(&i.to_string()) {
+                        self.bind_macro.insert(b); // R323
+                    }
                     self.macro_idents.insert(i.to_string());
                 }
                 proc_macro2::TokenTree::Group(g) => self.note_macro_idents(g.stream()),
@@ -8377,6 +8467,9 @@ impl<'a> EscapeSites<'a> {
             if p.qself.is_none() {
                 if let Some(id) = p.path.get_ident() {
                     *self.path_uses.entry(id.to_string()).or_insert(0) += 1;
+                    if let Some(b) = self.resolve_bind(&id.to_string()) {
+                        *self.bind_uses.entry(b).or_insert(0) += 1; // R323
+                    }
                     for f in &self.branch_stack {
                         self.arm_idents.entry(*f).or_default().insert(id.to_string());
                     }
@@ -8384,6 +8477,15 @@ impl<'a> EscapeSites<'a> {
             }
         }
         self.seq += 1; // R173 — pre-order position, read only for its ORDER
+        // SOUNDNESS R323 — the binders the scope stack does not model. Their names disqualify the
+        // per-binding answer (`pat_bound_names`), which keeps it a refinement that can only CHARGE in
+        // shapes where every same-named binder is a single-ident `let`.
+        match e {
+            syn::Expr::Let(l) => self.note_unmodelled_binders(&l.pat),
+            syn::Expr::Match(m) => m.arms.iter().for_each(|a| self.note_unmodelled_binders(&a.pat)),
+            syn::Expr::ForLoop(f) => self.note_unmodelled_binders(&f.pat),
+            _ => {}
+        }
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
             self.note_macro_idents(m.mac.tokens.clone());
@@ -8501,12 +8603,18 @@ impl<'a> EscapeSites<'a> {
                 // something this scope cannot follow (sharded-slab's `shard.with_slot(key, |slot| …
                 // Some(Entry { .. }))`, the case this arm was written for), so it must stay suppressed.
                 self.note_frames(&c.body);
+                for ip in &c.inputs {
+                    self.note_unmodelled_binders(ip); // R323 — a closure parameter binds a name too
+                }
                 match self
                     .let_bound_closures
                     .get(&(e as *const syn::Expr as usize))
                     .cloned()
                 {
-                    Some(name) => self.pending_closure_escapes.push((name, &c.body, self.seq)),
+                    Some(name) => {
+                        let bind = self.closure_bind.get(&(e as *const syn::Expr as usize)).copied();
+                        self.pending_closure_escapes.push((name, bind, &c.body, self.seq))
+                    }
                     None => self.escapes.push((self.seq, &c.body)),
                 }
                 self.note_route_position(); // R709 — a let-bound closure can become a route later

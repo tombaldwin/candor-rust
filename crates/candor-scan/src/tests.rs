@@ -2386,6 +2386,60 @@ pub fn z_typed() { let g = globals(); let _ = g.ping(); }
                 "`z_typed` borrows `G` — no `G::drop` edge:\n{v:#}");
     }
 
+    /// SOUNDNESS R323 — a let-bound closure's suppression is decided per BINDING, not per spelling. R304's
+    /// guard refused any name bound twice and fell back to SUPPRESSION, so a shadowed or sibling-scope
+    /// closure that really runs and drops here read ABSENT. EXECUTED (fixture `rustagent-v049/r323`): every
+    /// `k_*` cell drops 1-2 `H` in its own frame and was ABSENT on published 0.40.6; every `x_*` cell drops
+    /// none here and must stay absent — the controls were written first and include each binder the scope
+    /// stack does not model (a `match` arm, `if let`, a body-local `fn`), a closure moved out, one called
+    /// only inside another closure, and a closure never called.
+    #[test]
+    fn r323_a_shadowed_or_sibling_closure_is_judged_per_binding() {
+        let v = scan_src_to_json("r323", "\
+pub struct H { pub tag: u32 }
+impl H { pub fn new() -> H { H { tag: 0 } } }
+impl Drop for H { fn drop(&mut self) { let _ = std::fs::write(\"/dev/null\", b\"x\"); } }
+pub fn k_shadow() { let c = || H::new(); c(); let c = || H::new(); c(); }
+pub fn k_sibling() { { let c = || H::new(); c(); } { let c = || H::new(); c(); } }
+pub fn k_shadow_val() { let c = || H::new(); c(); let c = 5u32; let _ = c + 1; }
+pub fn k_sib_half() { { let c = || H::new(); c(); } { let c = || H::new(); let _ = &c; } }
+pub fn k_macro_other() { let c = || H::new(); c(); let c = || H::new(); let _ = format!(\"{:p}\", &c); }
+pub fn k_outer_after_inner() { let c = || H::new(); { let c = || 5u32; c(); } c(); }
+pub fn k_val_then_clos() { let c = 5u32; let _ = c; let c = || H::new(); c(); }
+pub fn k_letwild() { let c = || H::new(); let _ = c(); let c = || H::new(); let _ = c(); }
+pub fn k_ret_other(n: u32) -> u32 { let c = || H::new(); c(); let c = || n + 1; c() }
+pub fn x_shadow_ret() -> H { let c = || H::new(); let _ = &c; let c = || H::new(); c() }
+pub fn x_shadow_nocall() { let c = || H::new(); let _ = &c; let c = || H::new(); let _ = &c; }
+pub fn x_inner_shadow() { let c = || H::new(); let _ = &c; { let c = || 5u32; c(); } }
+pub fn x_match_pat() { let c = || H::new(); let _ = &c; match Some(1u32) { Some(c) => { let _ = c; } None => {} } }
+pub fn x_moved_into_box() -> Box<dyn Fn() -> H> { let c = || H::new(); let _ = &c; let c = || H::new(); Box::new(c) }
+pub fn x_called_in_closure() -> Box<dyn Fn()> { let c = || H::new(); let _ = &c; let c = move || H::new(); Box::new(move || { let k = c(); std::mem::forget(k); }) }
+pub fn x_never(n: u32) -> u32 { let c = || H::new(); let _ = &c; let c = || n; c() }
+pub fn x_bodyfn() { let c = || H::new(); let _ = &c; fn c2() {} c2(); }
+pub fn x_macro_shadow() { let c = || H::new(); let _ = &c; let c = || H::new(); let _ = format!(\"{:p}\", &c); c(); }
+pub fn x_ifl_shadow() { let c = || H::new(); c(); let c = || H::new(); let _ = &c; if let Some(c) = Some(1u32) { let _ = c; } }
+pub fn x_ifl_call(o: Option<fn()>) { let c = || H::new(); let _ = &c; let c = || H::new(); if let Some(c) = o { c(); } }
+");
+        for f in ["k_shadow", "k_sibling", "k_shadow_val", "k_sib_half", "k_macro_other", "k_outer_after_inner",
+                  "k_val_then_clos", "k_letwild", "k_ret_other"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                    "`{f}` invokes a let-bound closure whose `H` dies here (executed) and was silent:\n{v:#}");
+        }
+        for f in ["x_shadow_ret", "x_shadow_nocall", "x_inner_shadow", "x_match_pat", "x_moved_into_box",
+                  "x_called_in_closure", "x_never", "x_bodyfn"] {
+            assert!(row_absent(&v, f), "`{f}` drops nothing in its own frame (executed: 0) — FABRICATION:\n{v:#}");
+        }
+        // STATED REFUSALS, the denylist direction: the binding is named in macro tokens, or the name is
+        // also bound by a pattern the scope stack does not model — the old suppression stands. Both really
+        // drop 1 here: a silence this row narrows and does not close, pinned so it cannot move unnoticed.
+        // `x_ifl_call` is the refusal that PREVENTS a fabrication: the `if let` binder is invisible to the
+        // scope stack, so its `c();` would resolve to the second `let c` — never called (executed: 0).
+        assert!(!effs(fn_entry(&v, "x_ifl_call")).contains(&"Fs".to_string()), "x_ifl_call FABRICATES:\n{v:#}");
+        for f in ["x_macro_shadow", "x_ifl_shadow"] {
+            assert!(row_absent(&v, f), "`{f}` is a stated refusal — it must not change silently:\n{v:#}");
+        }
+    }
+
     /// SOUNDNESS R1118 — a DEPENDENCY's `Drop` type released in this frame, joined against the chained
     /// report's `G::drop` row: a by-value parameter, an overwritten place, a reassignment and the elements
     /// `Vec::clear` destroys. EXECUTED (`rustagent-v047/xd`): 1 drop each; all ABSENT on 0.40.5 chained.

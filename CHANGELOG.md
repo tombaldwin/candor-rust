@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a shadowed or sibling-scope let-bound closure that runs and drops here is charged
+  (SOUNDNESS R323).** `let c = || H::new(); c(); let c = || H::new(); c();` and `{ let c = ..; c(); } {
+  let c = ..; c(); }` drop in the function's own frame (executed) and were absent: a name bound twice
+  fell back to suppression. The decision is now made per lexical binding. Still refused (stated): a name
+  also bound by a pattern, closure parameter, `match`/`if let` arm or body-local `fn`, and a binding
+  named inside macro tokens.
+
 - ⚠ **candor-scan: a call that returns a BORROW of a `Drop` type no longer charges that type's destructor
   (SOUNDNESS R1120).** `let g = globals();` over `fn globals() -> &'static G` was read as constructing
   a `G` and charged `G::drop`; so were `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded
