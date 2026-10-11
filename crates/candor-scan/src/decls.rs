@@ -2878,7 +2878,11 @@ pub(crate) fn fninfo(
         }
         p.0
     };
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros, &param_names);
+    // SOUNDNESS R198 (collect arm) — a declared `Result`/`Option` return makes a tail `.collect()` short-circuit.
+    let ret_short = matches!(&sig.output, syn::ReturnType::Type(_, t) if matches!(&**t,
+        syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "Result" | "Option")
+            && matches!(s.arguments, syn::PathArguments::AngleBracketed(_)))));
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros, &param_names, ret_short);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.

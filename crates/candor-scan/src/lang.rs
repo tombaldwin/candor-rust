@@ -6411,8 +6411,11 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     local_macros: &'a HashMap<String, String>,
     // SOUNDNESS R200 (caller half) — the enclosing fn's parameter names (see `MacroLens::shadow`).
     params: &[String],
+    // SOUNDNESS R198 (collect arm) — the enclosing fn's declared return is a `Result`/`Option`, so a
+    // bare `.collect()` in return position short-circuits (see `short_circuit_target`).
+    ret_short: bool,
 ) -> Escapes {
-    escaping_ctor_full(block, uses, fields, returns, local_macros, params).0
+    escaping_ctor_full(block, uses, fields, returns, local_macros, params, ret_short).0
 }
 
 /// `escaping_ctor_leaves`, plus the body's construction SITES. SOUNDNESS R300 — a body-local `fn` item's
@@ -6425,6 +6428,7 @@ fn escaping_ctor_full<'a>(
     returns: &'a ReturnIndex,
     local_macros: &'a HashMap<String, String>,
     params: &[String],
+    ret_short: bool,
 ) -> (Escapes, HashMap<String, Vec<SiteId>>) {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
@@ -6440,6 +6444,7 @@ fn escaping_ctor_full<'a>(
         syn::visit::Visit::visit_block(&mut Bound(&mut sites.call_shadow), block);
         sites.call_shadow.extend(params.iter().cloned());
     }
+    sites.ret_short = ret_short;
     sites.walk_block(block, true);
     // SOUNDNESS R198/R209(b) — decide the LET-BOUND closures now that the whole body is walked.
     //
@@ -7596,6 +7601,12 @@ struct EscapeSites<'a> {
     /// such closures being walked: (escape-route position, `closure_depth` outside the closure).
     fold_closures: std::collections::HashSet<usize>,
     fold_stack: Vec<(usize, usize)>,
+    /// SOUNDNESS R198 (collect arm) — `.collect()` calls (by address) whose target type is written as a
+    /// `Result`/`Option` somewhere other than a turbofish (a `let` annotation, the fn's return type), and
+    /// the inline closures upstream of any short-circuiting `collect` (see `short_circuit_target`).
+    short_collects: std::collections::HashSet<usize>,
+    maydrop_closures: std::collections::HashSet<usize>,
+    ret_short: bool,
     /// SOUNDNESS R200 (caller half) — see `MacroLens::shadow`. Filled before the walk.
     call_shadow: std::collections::HashSet<String>,
     /// Every single-ident `Expr::Path` occurrence, counted.
@@ -7745,6 +7756,9 @@ impl<'a> EscapeSites<'a> {
             call_shadow: std::collections::HashSet::new(),
             fold_closures: std::collections::HashSet::new(),
             fold_stack: Vec::new(),
+            short_collects: std::collections::HashSet::new(),
+            maydrop_closures: std::collections::HashSet::new(),
+            ret_short: false,
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -8451,6 +8465,14 @@ impl<'a> EscapeSites<'a> {
                         self.note_unmodelled_binders(&l.pat);
                     }
                     if let Some(init) = &l.init {
+                        // R198 (collect arm) — `let v: Result<Vec<H>, E> = it.collect();`
+                        if let syn::Pat::Type(pt) = &l.pat {
+                            if short_circuit_target(&pt.ty) {
+                                if let Some(c) = bare_collect(&init.expr) {
+                                    self.short_collects.insert(c);
+                                }
+                            }
+                        }
                         // R198/R209(b) — see `let_bound_closures`. Must be recorded BEFORE the walk,
                         // because the walk is what reaches the `Expr::Closure` arm that reads it.
                         if matches!(&*init.expr, syn::Expr::Closure(_)) {
@@ -8499,6 +8521,12 @@ impl<'a> EscapeSites<'a> {
                     }
                 }
                 syn::Stmt::Expr(e, semi) => {
+                    if tail && last && semi.is_none() && self.ret_short {
+                        // R198 (collect arm) — the fn's tail `.collect()` into its declared `Result`/`Option`.
+                        if let Some(c) = bare_collect(e) {
+                            self.short_collects.insert(c);
+                        }
+                    }
                     if tail && last && semi.is_none() {
                         // R189 — the TAIL is evaluated after every statement before it, so
                         // `self.seq` here is greater than every binding's position, which is what makes
@@ -8605,7 +8633,7 @@ impl<'a> EscapeSites<'a> {
     /// cannot be typed (`.map(|_| mk())` in an inline closure). Not taken here; stated, and the
     /// over-report stands as it shipped.
     fn note_nested_body(&mut self, b: &'a syn::Block) {
-        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[]);
+        let (_, inner_sites) = escaping_ctor_full(b, self.uses, self.fields, self.returns, self.local_macros, &[], false);
         for (l, v) in inner_sites {
             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                 eprintln!("R300NESTED {l}"); // §E1 REACH COUNTER — the sites this change adds
@@ -8689,6 +8717,14 @@ impl<'a> EscapeSites<'a> {
             self.note_macro_ctor_leaves(m, e); // R172 — address-keying cannot reach inside a macro
         }
         match e {
+            syn::Expr::Return(r) if self.ret_short && r.expr.as_deref().and_then(bare_collect).is_some() => {
+                // R198 (collect arm) — `return it.collect();` into the declared `Result`/`Option`; then the
+                // exit itself, exactly as the arm below.
+                if let Some(c) = r.expr.as_deref().and_then(bare_collect) {
+                    self.short_collects.insert(c);
+                }
+                self.roots.push((self.seq, r.expr.as_deref()));
+            }
             syn::Expr::Return(r) => match &r.expr {
                 // R189 — the `return`'s OWN pre-order position, which is before its operand is
                 // walked: the exit is taken there, so a `let` bound later is not live at it.
@@ -8816,6 +8852,14 @@ impl<'a> EscapeSites<'a> {
                         let bind = self.closure_bind.get(&(e as *const syn::Expr as usize)).copied();
                         self.pending_closure_escapes.push((name, bind, &c.body, self.seq))
                     }
+                    // SOUNDNESS R198 (collect arm) — an inline closure feeding a SHORT-CIRCUITING
+                    // `collect` hands its value to std, which DROPS everything already collected when an
+                    // element is `Err`/`None`. Its constructions are therefore not certified to escape.
+                    None if self.maydrop_closures.contains(&(e as *const syn::Expr as usize)) => {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R198COLLECT"); // §E1 REACH COUNTER — the withdrawn route
+                        }
+                    }
                     None => self.escapes.push((self.seq, &c.body)),
                 }
                 self.note_route_position(); // R709 — a let-bound closure can become a route later
@@ -8856,6 +8900,26 @@ impl<'a> EscapeSites<'a> {
             }
             _ => None,
         };
+        if let syn::Expr::MethodCall(m) = e {
+            if m.method == "collect" {
+                let turbo = m.turbofish.as_ref().is_some_and(|tf| {
+                    tf.args.iter().any(|a| matches!(a, syn::GenericArgument::Type(t) if short_circuit_target(t)))
+                });
+                if turbo || self.short_collects.contains(&(e as *const syn::Expr as usize)) {
+                    let mut r: &syn::Expr = &m.receiver;
+                    while let syn::Expr::MethodCall(inner) = r {
+                        for a in &inner.args {
+                            if let syn::Expr::Closure(c) = a {
+                                if c.asyncness.is_none() && !matches!(&*c.body, syn::Expr::Async(_)) {
+                                    self.maydrop_closures.insert(a as *const syn::Expr as usize);
+                                }
+                            }
+                        }
+                        r = &inner.receiver;
+                    }
+                }
+            }
+        }
         let fold_here = matches!(e, syn::Expr::Closure(_))
             && self.fold_closures.contains(&(e as *const syn::Expr as usize));
         if fold_here {
@@ -9243,6 +9307,31 @@ fn call_returns_nothing(
 /// no `?` to take); an async closure or async-block body (its `?` runs in a poller's frame — R324). A
 /// closure passed by NAME (`try_fold(v, f)`) is not seen: the let-bound closure route owns it.
 const ACCUMULATING_COMBINATORS: &[&str] = &["fold", "try_fold", "rfold", "try_rfold", "reduce", "try_reduce"];
+
+/// SOUNDNESS R198 (collect arm) — whether a written `collect` target SHORT-CIRCUITS: its outermost type
+/// is `Result<..>`/`Option<..>` (std's `FromIterator` for both stops at the first `Err`/`None` and DROPS
+/// what it had collected). `Vec<Result<..>>` does not, and is not matched.
+fn short_circuit_target(t: &syn::Type) -> bool {
+    match t {
+        syn::Type::Paren(p) => short_circuit_target(&p.elem),
+        syn::Type::Group(g) => short_circuit_target(&g.elem),
+        syn::Type::Path(p) => p.path.segments.last().is_some_and(|s| {
+            matches!(s.ident.to_string().as_str(), "Result" | "Option")
+                && matches!(s.arguments, syn::PathArguments::AngleBracketed(_))
+        }),
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R198 (collect arm) — the address of `e` when it is a `.collect()` with no turbofish (a
+/// turbofish answers for itself), looking through parentheses only.
+fn bare_collect(e: &syn::Expr) -> Option<usize> {
+    match e {
+        syn::Expr::Paren(p) => bare_collect(&p.expr),
+        syn::Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => Some(e as *const syn::Expr as usize),
+        _ => None,
+    }
+}
 
 /// Value-position children of an expression — the positions through which a constructed value can
 /// travel OUT of the expression it was written in (`Ok(g)`, `Owner { g }`, `(g, 1)`, `[g]`, `&g`,

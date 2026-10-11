@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a `collect` into `Result`/`Option` drops what it already collected (SOUNDNESS R198,
+  collect arm).** `it.map(|i| { gen(*i)?; Ok(H::new()) }).collect::<Result<Vec<_>, _>>()` drops the
+  `H`s collected before the first `Err` (executed) and was absent. The target type is read where it is
+  written: a turbofish, a `let` annotation, or the fn's declared return for a tail/`return` `collect()`.
+  Stated: a target written only on a callee's parameter type stays silent.
+
 - ⚠ **candor-scan: a `?` inside a `try_fold`/`fold` closure drops what an earlier call built (SOUNDNESS R198,
   fold arm).** `items.iter().try_fold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })`
   drops the accumulator on the error path (executed) and was absent. The closure of an accumulating
