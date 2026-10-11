@@ -6680,9 +6680,12 @@ fn escaping_ctor_full<'a>(
             .iter()
             .enumerate()
             .filter(|(i, t)| {
-                !t.in_closure
+                (!t.in_closure
                     && t.src_seq < q
-                    && !sites.route_inside.get(&q).is_some_and(|open| open.contains(i))
+                    && !sites.route_inside.get(&q).is_some_and(|open| open.contains(i)))
+                    // SOUNDNESS R198 — an accumulating closure's own `?` vetoes its own body route: the
+                    // value the body built on the previous invocation is live there and dies there.
+                    || t.fold_route == Some(q)
             })
             .map(|(i, _)| i)
             .collect();
@@ -7527,6 +7530,12 @@ struct TryExit {
     /// one iteration the lexical order is the evaluation order, so the route comparison reads this.
     src_seq: usize,
     in_closure: bool,
+    /// SOUNDNESS R198 — `Some(q)` when this `?` sits DIRECTLY in the body of a closure handed to an
+    /// ACCUMULATING iterator method (`ACCUMULATING_COMBINATORS`), `q` being that closure's escape-route
+    /// position. Such a closure is a loop body whose previous output is its next input, so its `?` vetoes
+    /// what the closure itself built on an earlier invocation — R187's rule, one HOF over. See the route
+    /// filter in `escaping_ctor_full` and the rewrite in `walk_expr`.
+    fold_route: Option<usize>,
     /// R194 — type leaves constructed inside this `?`'s operand at a position that is NOT on the
     /// operand's value spine. Evaluating the operand ran them, so they are live when this `?` takes
     /// its error exit, whatever their pre-order number says.
@@ -7583,6 +7592,10 @@ struct EscapeSites<'a> {
     /// let`/`while let`/`for` pattern, a closure parameter, a body-local `fn`. A name in here makes the
     /// per-binding answer untrustworthy, so R323's test refuses it.
     pat_bound_names: std::collections::HashSet<String>,
+    /// SOUNDNESS R198 — closure arguments (by address) of an accumulating combinator call, and the stack of
+    /// such closures being walked: (escape-route position, `closure_depth` outside the closure).
+    fold_closures: std::collections::HashSet<usize>,
+    fold_stack: Vec<(usize, usize)>,
     /// SOUNDNESS R200 (caller half) — see `MacroLens::shadow`. Filled before the walk.
     call_shadow: std::collections::HashSet<String>,
     /// Every single-ident `Expr::Path` occurrence, counted.
@@ -7730,6 +7743,8 @@ impl<'a> EscapeSites<'a> {
             closure_bind: HashMap::new(),
             pat_bound_names: std::collections::HashSet::new(),
             call_shadow: std::collections::HashSet::new(),
+            fold_closures: std::collections::HashSet::new(),
+            fold_stack: Vec::new(),
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
@@ -8692,10 +8707,14 @@ impl<'a> EscapeSites<'a> {
             // `?` BEFORE its own operand, which is what makes `let c = make()?;` read as "the value
             // does not exist yet at this exit" while `let g = G::new(); f()?;` reads as "it does".
             syn::Expr::Try(t) => {
+                // R198 — directly inside an accumulating closure (not inside a closure nested in it).
+                let fold_route =
+                    self.fold_stack.last().filter(|(_, d)| d + 1 == self.closure_depth).map(|(q, _)| *q);
                 let e = TryExit {
                     seq: self.seq,
                     src_seq: self.seq,
                     in_closure: self.closure_depth > 0,
+                    fold_route,
                     interior: std::collections::HashSet::new(),
                 };
                 self.try_exits.push(e);
@@ -8819,6 +8838,29 @@ impl<'a> EscapeSites<'a> {
         // `closure_depth`. Nested loops rewrite twice, outermost last, which is correct and monotone.
         let loop_mark = matches!(e, syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_))
             .then(|| self.try_exits.len());
+        // SOUNDNESS R198 — an ACCUMULATING combinator's closure is a loop body. Its closure arguments are
+        // registered before the children are walked, and every `?` recorded directly in one of them is
+        // moved to the call's last position once it is walked (below), exactly as R187 moves a loop's.
+        let fold_mark = match e {
+            syn::Expr::MethodCall(m) if ACCUMULATING_COMBINATORS.contains(&m.method.to_string().as_str()) => {
+                for a in &m.args {
+                    if let syn::Expr::Closure(c) = a {
+                        // An `async` closure or an async-block body defers to a poller's frame (R324):
+                        // its `?` is not this frame's, so it is not registered.
+                        if c.asyncness.is_none() && !matches!(&*c.body, syn::Expr::Async(_)) {
+                            self.fold_closures.insert(a as *const syn::Expr as usize);
+                        }
+                    }
+                }
+                Some(self.try_exits.len())
+            }
+            _ => None,
+        };
+        let fold_here = matches!(e, syn::Expr::Closure(_))
+            && self.fold_closures.contains(&(e as *const syn::Expr as usize));
+        if fold_here {
+            self.fold_stack.push((self.seq, self.closure_depth));
+        }
         // SOUNDNESS R324 — an ASYNC BLOCK defers execution exactly as a closure does, and
         // `for_each_child_block` descends `Async(x) => f(&x.block)`, so its statements were walked at
         // depth 0. R303 guarded the closure spelling of its own shape and left the async one open:
@@ -8889,6 +8931,20 @@ impl<'a> EscapeSites<'a> {
         }
         if matches!(e, syn::Expr::Try(_)) {
             self.open_tries.pop(); // R194 — the operand scope closes with the `?`
+        }
+        if fold_here {
+            self.fold_stack.pop();
+        }
+        if let Some(mark) = fold_mark {
+            let end = self.seq;
+            for t in &mut self.try_exits[mark..] {
+                if t.fold_route.is_some() && t.seq < end {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R198FOLD {} -> {end}", t.seq); // §E1 REACH COUNTER
+                    }
+                    t.seq = end;
+                }
+            }
         }
         if let Some(mark) = loop_mark {
             let end = self.seq; // every position inside this loop is <= this one
@@ -9173,6 +9229,20 @@ fn call_returns_nothing(
         || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
     local && !has_value && returns.contains_key(&crate::model::unit_twin_key(leaf))
 }
+
+/// SOUNDNESS R198 — iterator methods whose closure argument receives its own previous OUTPUT by value as
+/// its next input (the accumulator), so a `?` inside that closure drops whatever the closure built on an
+/// earlier invocation: `try_fold`/`try_rfold` (std, and rayon's `try_fold` of the same shape), `fold`/
+/// `rfold` (a `?` there needs a `Try` accumulator, `fold(Ok(v), |acc, x| { let mut v = acc?; .. })`),
+/// `reduce`/`try_reduce` (the accumulator is the previous item, by value).
+///
+/// OUT, each for a stated reason: `scan` (its state is `&mut`, owned by the adapter and dropped with it,
+/// not at the closure's `?`); `try_for_each`/`for_each`/`map`/`filter_map`/`and_then`/`map_while` (no
+/// value carried between invocations — what they push into is a capture this frame owns, already charged:
+/// lv `a_tryforeach`); itertools' `fold_while`/`fold_ok` (the closure's return is not a `Try`, so it has
+/// no `?` to take); an async closure or async-block body (its `?` runs in a poller's frame — R324). A
+/// closure passed by NAME (`try_fold(v, f)`) is not seen: the let-bound closure route owns it.
+const ACCUMULATING_COMBINATORS: &[&str] = &["fold", "try_fold", "rfold", "try_rfold", "reduce", "try_reduce"];
 
 /// Value-position children of an expression — the positions through which a constructed value can
 /// travel OUT of the expression it was written in (`Ok(g)`, `Owner { g }`, `(g, 1)`, `[g]`, `&g`,

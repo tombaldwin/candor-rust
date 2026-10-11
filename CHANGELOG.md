@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a `?` inside a `try_fold`/`fold` closure drops what an earlier call built (SOUNDNESS R198,
+  fold arm).** `items.iter().try_fold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })`
+  drops the accumulator on the error path (executed) and was absent. The closure of an accumulating
+  combinator (`fold`, `try_fold`, `rfold`, `try_rfold`, `reduce`, `try_reduce`) is now treated as a loop
+  body, R187's rule. Out, stated: `scan`, `for_each`/`try_for_each`/`map`/`and_then`, async closure
+  bodies, and a closure passed by name.
+
 - ⚠ **candor-scan: a by-value parameter of a WRAPPED drop type is released in the callee (SOUNDNESS
   R1121, R200's callee half).** `fn eat(o: Option<H>) {}`, `(H, u32)`, `[H; N]`, `Vec<H>`, `Result` either
   arm, a map, `RefCell<H>`, nested — executed, 1 drop each — were absent, and so was a caller that hands
