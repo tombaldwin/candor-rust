@@ -29242,3 +29242,71 @@ pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() 
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` is now charged — shrink the residual list:\n{v:#}");
     }
 }
+
+/// SOUNDNESS R1134 / R1137 / R1135 — the independent MIR audit's fixtures (scratchpad `auditagent-v050/fx5`,
+/// `fx2`; EXECUTED: every `*_local_*` and `c_*` cell performs the `Fs` its operator impl writes).
+///   * R1134 — a BLOCK-LOCAL `const`/`static` operand. As the RIGHT operand (`a + ONE`, `a == ONE`) R1128's
+///     `Rhs` check read the typer's body-item sentinel as a named type and REFUSED the edge (a regression the
+///     audit found: `deny Fs eq_local_const` 1 -> 0 at 3684f51); as the LEFT operand (`ONE + a`) it was
+///     silent on 0.40.6 and afd77fa too. Both are now typed from the block's own declaration.
+///   * PINNED, NOT FIXED here (their fixes reach thousands of corpus rows and are their own rows):
+///     R1137 `a.get_id() == Id::HELP` (executed Fs, ABSENT: the builder-chain walk types the getter as
+///     `Arg`), and R1135 a `std::thread::JoinHandle` FIELD joined to a crate's `task::JoinHandle` by leaf
+///     name (`t3`, executed 0 writes, charged).
+#[test]
+fn r1134_local_const_operands_and_pinned_r1137_r1135() {
+    let v5 = scan_src_to_json_multi("v050fx5", &[("Cargo.toml", "[package]\nname = \"v050fx5\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+#[derive(Clone, Copy)]
+pub struct D { pub m: u64 }
+impl Add<D> for D { type Output = D; fn add(self, r: D) -> D { let _ = std::fs::write("/tmp/auditfx5", b"x"); D { m: self.m + r.m } } }
+impl PartialEq for D { fn eq(&self, o: &D) -> bool { let _ = std::fs::write("/tmp/auditfx5", b"x"); self.m == o.m } }
+pub fn rhs_local_const(a: D) -> D { const ONE: D = D { m: 1 }; a + ONE }
+pub fn lhs_local_const(a: D) -> D { const ONE: D = D { m: 1 }; ONE + a }
+pub fn eq_local_const(a: D) -> bool { const ONE: D = D { m: 1 }; a == ONE }
+pub fn rhs_local_static(a: D) -> D { static ONE: D = D { m: 1 }; a + ONE }
+pub fn rhs_local_const_typed_param(a: D) -> D { const ONE: D = D { m: 1 }; let b: D = ONE; a + b }
+"##)]);
+    for f in ["rhs_local_const", "lhs_local_const", "eq_local_const", "rhs_local_static", "rhs_local_const_typed_param"] {
+        assert!(!veina_row_effs(&v5, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v5:#}");
+    }
+    let v2 = scan_src_to_json_multi("v050fx2", &[("Cargo.toml", "[package]\nname = \"v050fx2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+#[derive(Clone, Copy)]
+pub struct D { pub m: u64 }
+impl D { pub fn new_from(x: u64) -> D { D { m: x } } }
+impl Add<D> for D { type Output = D; fn add(self, r: D) -> D { let _ = std::fs::write("/tmp/auditfx2-add", b"x"); D { m: self.m + r.m } } }
+// pxfm shape: block-local const as the RHS
+pub fn b_local_const_rhs(x: u64) -> D {
+    const ONES: D = D { m: 1 };
+    D::new_from(x) + ONES
+}
+// control: module const as RHS
+pub const TWO: D = D { m: 2 };
+pub fn b_mod_const_rhs(x: u64) -> D { D::new_from(x) + TWO }
+
+// clap shape: both PartialEq<str> (the one that really runs) and PartialEq<&str>
+pub struct Id(pub String);
+impl Id { pub const HELP: &'static str = "help"; }
+impl PartialEq<str> for Id { fn eq(&self, o: &str) -> bool { let _ = std::fs::write("/tmp/auditfx2-id", b"x"); self.0 == o } }
+impl PartialEq<&'_ str> for Id { fn eq(&self, o: &&str) -> bool { self.0 == *o } }
+pub struct Arg { pub id: Id }
+impl Arg { pub fn get_id(&self) -> &Id { &self.id } }
+pub fn c_getter_eq_str(a: &Arg) -> bool { a.get_id() == Id::HELP }
+pub fn c_local_eq_str(a: &Arg) -> bool { let i: &Id = a.get_id(); i == Id::HELP }
+"##)]);
+    assert!(veina_row_effs(&v2, "c_getter_eq_str").is_empty(), "R1137 closed — move it to the charged list:\n{v2:#}");
+    for f in ["b_local_const_rhs", "b_mod_const_rhs", "c_local_eq_str"] {
+        assert!(!veina_row_effs(&v2, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v2:#}");
+    }
+    let v3 = scan_src_to_json_multi("v050t3", &[("Cargo.toml", "[package]\nname = \"v050t3\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::thread;
+pub mod task { pub struct JoinHandle(pub u32); impl Drop for JoinHandle { fn drop(&mut self) { let _ = std::fs::write("/tmp/rustagent-v050-t3", b"x"); } } }
+pub struct Pool { pub workers: Vec<thread::JoinHandle<()>>, pub n: u32 }
+impl Drop for Pool { fn drop(&mut self) { self.n = 0; } }
+pub struct Guard { pub p: Pool }
+impl Guard { pub fn mk() -> Guard { Guard { p: Pool { workers: Vec::new(), n: 1 } } } }
+pub fn ctor_direct() -> u32 { let g = Guard { p: Pool { workers: Vec::new(), n: 1 } }; g.p.n }
+pub fn released() { let _g = Guard::mk(); }
+"##)]);
+    for f in ["ctor_direct", "released"] {
+        assert!(!veina_row_effs(&v3, f).is_empty(), "R1135 moved (executed 0 writes; pinned over-charge) — decide it:\n{v3:#}");
+    }
+}

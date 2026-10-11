@@ -51,6 +51,11 @@ under-report, never a wrong label.
   reached only via a `for`-loop desugar, and cross-crate propagation by stable identity. These need the
   semantic resolution only the nightly lint has (the soundness fuzzer locks the desugar forms against
   the lint: `op_add`/`index`/`deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
+  Named explicitly because neither looks like a call: an operator on a GENERIC type parameter
+  (`fn f<T: PartialEq>(a: T, b: T) { a == b }` runs `T`'s `eq`, which may be effectful) and the implicit
+  `Drop` of a value of a generic type `T` (`fn eat<T>(_t: T) {}`) are SILENT in that generic body — the
+  scan cannot name `T`'s impl (SPEC §4's external-abstraction dispatch, SOUNDNESS R1126). A caller that
+  passes a concrete value by value to an otherwise-unnamed generic parameter is charged instead.
   The Deref and generic-field shapes are measured in the wild (the PROVE-IT dogfood on `ureq`): 14 of a
   16-function blast radius found, those two shapes the remainder — under-reported, never fabricated.
 

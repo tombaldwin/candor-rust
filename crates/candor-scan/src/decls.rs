@@ -2858,6 +2858,7 @@ pub(crate) fn fninfo(
             released_tuple_lets: released.1,
             drop_types: elems.drop_types,
             binop_rhs: Default::default(),
+            local_consts: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
             field_borrows: elems.field_borrows,

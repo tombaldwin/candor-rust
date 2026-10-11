@@ -144,6 +144,10 @@ pub(crate) struct AssignDrop<'a> {
     /// and the right operand's (`None` when untyped). Read only for a comparison whose dispatch type IS that
     /// left leaf; every other comparison here (a tuple component, a collection element) is `T` against `T`.
     pub(crate) binop_rhs: std::cell::RefCell<Option<(String, Option<String>)>>,
+    /// SOUNDNESS R1134 — the BLOCK-LOCAL `const`/`static` items in scope, NAME -> declared type (a plain path),
+    /// pushed and popped by `visit_block`: an operator operand that names one (`a + ONE`, `ONE + a`) is typed
+    /// by its declaration, which no crate-wide index holds.
+    pub(crate) local_consts: std::cell::RefCell<HashMap<String, String>>,
     /// `lang::assign_drop_exempt` — addresses of the `syn::ExprAssign`s that provably overwrite nothing.
     pub(crate) exempt: std::collections::HashSet<usize>,
     /// Parameter NAME -> its declared type, for the names the body never re-binds (a shadowing `let`
@@ -1115,6 +1119,21 @@ impl<'a> CallCollector<'a> {
     /// come through here — with SOUNDNESS R1080's pre-pass: an inferred `Vec`'s element, read from every
     /// exact push in the rest of the block (`inferred_vec_elems`), recorded the moment its `let` has bound it.
     pub(crate) fn walk_stmts(&mut self, stmts: &[syn::Stmt]) {
+        // SOUNDNESS R1134 — this block's own `const`/`static` items are in scope for the whole block (Rust hoists
+        // items); `visit_block` restores the enclosing set on the way out.
+        for st in stmts {
+            let (id, ty) = match st {
+                syn::Stmt::Item(syn::Item::Const(c)) => (&c.ident, &*c.ty),
+                syn::Stmt::Item(syn::Item::Static(s)) => (&s.ident, &*s.ty),
+                _ => continue,
+            };
+            if let syn::Type::Path(p) = ty {
+                if p.qself.is_none() {
+                    let t = crate::lang::expand(&path_to_string(&p.path), &self.uses);
+                    self.assign_drop.local_consts.borrow_mut().insert(id.to_string(), t);
+                }
+            }
+        }
         let pre_elems = self.inferred_vec_elems(stmts);
         for (i, st) in stmts.iter().enumerate() {
             self.visit_stmt(st);
@@ -4367,6 +4386,25 @@ impl<'a> CallCollector<'a> {
         })
     }
 
+    /// SOUNDNESS R1134 — the declared type of a block-local `const`/`static` an operand names (`ONE`, `&ONE`).
+    fn local_const_type(&self, e: &syn::Expr) -> Option<String> {
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                _ => break,
+            }
+        }
+        let syn::Expr::Path(p) = e else { return None };
+        let id = p.path.get_ident()?.to_string();
+        if self.locally_bound(&id) {
+            return None;
+        }
+        self.assign_drop.local_consts.borrow().get(&id).cloned()
+    }
+
     /// SOUNDNESS R1128 — may an operator impl of `trait_leaf` for `ty_leaf` be the one `ty_leaf OP rhs` runs?
     /// `model::impl_rhs_key` lists each impl's written `Rhs` (`Self` for the default or the type itself, `*`
     /// for a generic one). No entry (an older index, a trait with no `Rhs`) and an unknown `rhs` both answer
@@ -6694,6 +6732,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // certified (exit 0) after, so R416 WIDENED this to the dominant rust path spelling; the plain
         // `&str` spelling was already certified at both commits. This restore closes both.
         let saved_str_locals = self.str_locals.clone();
+        let saved_local_consts = self.assign_drop.local_consts.borrow().clone();
         let saved_fields = self.block_field_variants.get(&(node as *const syn::Block as usize)).map(|&(f, e, names)| {
             let old = (self.fields, self.field_elem);
             self.fields = f;
@@ -6723,6 +6762,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         self.str_locals = saved_str_locals;
+        *self.assign_drop.local_consts.borrow_mut() = saved_local_consts;
         self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;
     }
@@ -10118,7 +10158,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let Some((tr, method)) = binop_trait(&node.op) {
             // The right operand's type LEAF, with references and generic arguments peeled (`&'a str` -> `str`,
             // `IndexSet<T, S2>` -> `IndexSet`) — the same spelling `impl_rhs_key` records.
-            let rt = self.type_of(&node.right).map(|t| {
+            // An ASSOCIATED or module-qualified CONST (`Id::HELP`) is typed by the path walk as its OWNER type,
+            // which is not the const's type: unknown, which keeps the edge (never refuses on a guessed type).
+            let assoc_const = |e: &syn::Expr| {
+                let mut e = e;
+                while let syn::Expr::Reference(r) = e {
+                    e = &r.expr;
+                }
+                matches!(e, syn::Expr::Path(p) if p.path.segments.len() > 1
+                    && p.path.segments.last().is_some_and(|s| crate::lang::caps_only_ident(&s.ident.to_string())))
+            };
+            let rt = if assoc_const(&node.right) { None } else {
+                self.local_const_type(&node.right).or_else(|| self.type_of(&node.right))
+            }.map(|t| {
                 let t = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
                 let t = if t.starts_with('\'') { t.split_once(' ').map_or(t, |(_, r)| r.trim_start()) } else { t };
                 let t = t.strip_prefix("mut ").unwrap_or(t);
@@ -10126,12 +10178,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 t.rsplit("::").next().unwrap_or(t).trim().to_string()
             })
             // A GENERIC right operand (`x.key == key` over `K` with `KeyType: PartialEq<K>`, clap) can be any of
-            // the `Rhs`es: unknown, which keeps the edge.
-            .filter(|t| !self.generic_bounds.contains_key(t) && !self.impl_generic_bounds.contains_key(t)
+            // the `Rhs`es: unknown, which keeps the edge. So is anything that is not a plain type NAME — a typer
+            // sentinel (`<body-item>ONE` for a block-local const read as `""` here, which refused the edge on
+            // `a + ONE`: SOUNDNESS R1134's right half, an R1128 regression the MIR audit found).
+            .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !self.generic_bounds.contains_key(t) && !self.impl_generic_bounds.contains_key(t)
                 && !(t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase())));
-            let lt = self.resolve_recv_type(&node.left).map(|t| t.rsplit("::").next().unwrap_or(&t).to_string());
+            let lconst = self.local_const_type(&node.left);
+            let lt = lconst
+                .clone()
+                .or_else(|| self.resolve_recv_type(&node.left))
+                .map(|t| t.rsplit("::").next().unwrap_or(&t).to_string());
             *self.assign_drop.binop_rhs.borrow_mut() = lt.map(|l| (l, rt));
-            self.charge_coercion(&node.left, tr, method);
+            // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
+            // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
+            match &lconst {
+                Some(t) => self.charge_coercion_ty(t, tr, method),
+                None => self.charge_coercion(&node.left, tr, method),
+            }
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
