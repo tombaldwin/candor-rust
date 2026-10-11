@@ -28173,3 +28173,65 @@ fn r986_an_unresolved_call_through_a_path_redirected_module_is_disclosed() {
     let c = scan_src_to_json_multi("r986c", &files(false));
     assert!(c["functions"].as_array().unwrap().iter().all(|r| !r["unknownWhy"].to_string().contains("path-redirected")), "{c:#}");
 }
+
+/// SOUNDNESS R1098 — a comparison over a std CONTAINER or WRAPPER runs the element's own `PartialEq` /
+/// `PartialOrd`, and no edge reached it: inotify's `WatchDescriptor::eq` compares two
+/// `Option<Arc<FdGuard>>` from `Weak::upgrade()` and `FdGuard::eq` issues `kcmp` (EXECUTED on Linux under
+/// strace, scratchpad `rustagent-r1098/fx-consumer`), and the caller was ABSENT. Every `e_*` shape below was
+/// EXECUTED with a `Guard::eq` that appends to a file (scratchpad `rustagent-r1098/fx-wrap`: 16 of 16
+/// comparisons logged a `Guard::eq` line); on published 0.40.5 twelve of them read ABSENT while the
+/// `&Guard`/`Arc`/`Box`/`Rc` controls charged `Fs`.
+#[test]
+fn r1098_a_comparison_over_a_std_wrapper_reaches_the_elements_impl() {
+    let src = "\
+use std::sync::{Arc, Weak};\n\
+pub struct Guard(pub i32);\n\
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { let _ = std::fs::write(\"/tmp/r1098\", b\"x\"); self.0 == o.0 } }\n\
+impl PartialOrd for Guard { fn partial_cmp(&self, o: &Guard) -> Option<std::cmp::Ordering> { let _ = std::fs::write(\"/tmp/r1098\", b\"x\"); self.0.partial_cmp(&o.0) } }\n\
+pub struct Holder { pub id: i32, pub fd: Weak<Guard> }\n\
+impl PartialEq for Holder { fn eq(&self, other: &Self) -> bool { let a = self.fd.upgrade(); let b = other.fd.upgrade(); self.id == other.id && a.is_some() && a == b } }\n\
+pub struct Registry { pub fd: Arc<Guard> }\n\
+impl Registry { pub fn e_owns(&self, h: &Holder) -> bool { h.fd.upgrade().as_ref() != Some(&self.fd) } }\n\
+pub fn e_opt(a: Option<Guard>, b: Option<Guard>) -> bool { a == b }\n\
+pub fn e_optarc(a: Option<Arc<Guard>>, b: Option<Arc<Guard>>) -> bool { a == b }\n\
+pub fn e_upgrade_let(w: &Weak<Guard>, v: &Weak<Guard>) -> bool { let x = w.upgrade(); let y = v.upgrade(); x == y }\n\
+pub fn e_upgrade_inline(w: &Weak<Guard>, v: &Weak<Guard>) -> bool { w.upgrade() == v.upgrade() }\n\
+pub fn e_holder(a: &Holder, b: &Holder) -> bool { a == b }\n\
+pub fn e_vec(a: Vec<Guard>, b: Vec<Guard>) -> bool { a == b }\n\
+pub fn e_slice(a: &[Guard], b: &[Guard]) -> bool { a == b }\n\
+pub fn e_array(a: [Guard; 2], b: [Guard; 2]) -> bool { a == b }\n\
+pub fn e_result(a: Result<Guard, ()>, b: Result<Guard, ()>) -> bool { a == b }\n\
+pub fn e_ne(a: Option<Guard>, b: Option<Guard>) -> bool { a != b }\n\
+pub fn e_lt(a: Option<Guard>, b: Option<Guard>) -> bool { a < b }\n\
+pub fn c_ref(a: &Guard, b: &Guard) -> bool { a == b }\n\
+pub fn c_arc(a: Arc<Guard>, b: Arc<Guard>) -> bool { a == b }\n\
+pub struct Pure(pub i32);\n\
+impl PartialEq for Pure { fn eq(&self, o: &Pure) -> bool { self.0 == o.0 } }\n\
+pub fn n_pure(a: Option<Pure>, b: Option<Pure>) -> bool { a == b }\n\
+pub fn n_std(a: Vec<String>, b: Vec<String>) -> bool { a == b }\n\
+pub fn n_none(a: Option<Guard>) -> bool { a == None }\n\
+pub fn n_none_left(a: Option<Guard>) -> bool { None == a }\n\
+pub fn n_empty(a: Vec<Guard>) -> bool { a == vec![] }\n\
+pub fn r_tuple(a: (Guard, i32), b: (Guard, i32)) -> bool { a == b }\n\
+pub struct Closer;\n\
+impl Drop for Closer { fn drop(&mut self) { let _ = std::fs::write(\"/tmp/r1098d\", b\"x\"); } }\n\
+pub struct HoldsWeak { pub w: Weak<Closer> }\n\
+pub fn n_weak_drop(w: Weak<Closer>) { let _h = HoldsWeak { w }; }\n";
+    let v = scan_src_to_json_multi("r1098", &[("Cargo.toml", "[package]\nname = \"r1098\"\n"), ("src/lib.rs", src)]);
+    for f in ["c_ref", "c_arc", "e_opt", "e_optarc", "e_upgrade_let", "e_upgrade_inline", "Holder::eq", "e_holder",
+              "Registry::e_owns", "e_vec", "e_slice", "e_array", "e_result", "e_ne", "e_lt"] {
+        assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "{f}\n{v:#}");
+    }
+    // A pure impl and a std element contribute nothing; a comparison against a literally EMPTY value never
+    // runs the element's `eq` (EXECUTED: `opt == None` logs no `Guard::eq`), so it is not charged.
+    // A `Weak` does not OWN its element: dropping a struct that holds one never runs the element's `Drop`
+    // (EXECUTED, scratchpad `rustagent-r1098/fx-weakdrop`: no write). The first cut of this fix recorded the
+    // element for typing and drop glue read it as owned — `n_weak_drop` charged `Fs`, and futures-util's
+    // `FuturesUnordered::push` gained `ReadyToRunQueue::drop` on the corpus.
+    for f in ["n_pure", "n_std", "n_none", "n_none_left", "n_empty", "n_weak_drop"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "{f}\n{v:#}");
+    }
+    // THE STATED RESIDUAL (SOUNDNESS R1111): a TUPLE's `==` runs each component's `eq` (EXECUTED: logged),
+    // and the typer has no tuple element, so this still reads ABSENT. Pinned so a fix flips it on purpose.
+    assert!(veina_row_effs(&v, "r_tuple").is_empty(), "{v:#}");
+}

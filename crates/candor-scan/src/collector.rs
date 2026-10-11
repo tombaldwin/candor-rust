@@ -3437,6 +3437,49 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1098 — a COMPARISON whose left operand is a std CONTAINER or WRAPPER of a type runs that
+    /// type's own comparison: `Option<T> == Option<T>`, `Vec<T>`, `[T]`, `[T; N]`, `Result<T, E>`,
+    /// `RefCell<T>`, a map's values, and `Weak::upgrade()`'s `Option<Arc<T>>` all delegate to
+    /// `<T as PartialEq>::eq` (and `<`/`>` to `partial_cmp`) element by element. `charge_coercion` types the
+    /// operand ITSELF, which answers the wrapper and finds no impl, so the user's `impl PartialEq` was
+    /// reached by nothing — EXECUTED: inotify's `WatchDescriptor::eq` compares two `Option<Arc<FdGuard>>`
+    /// and the `kcmp` syscall in `FdGuard::eq` runs; a local `Guard::eq` that writes a file runs through
+    /// twelve wrapper spellings, every one read ABSENT while `&Guard`/`Arc`/`Box`/`Rc` charged `Fs`.
+    ///
+    /// This is NOT SPEC §4's conventionally-pure-trait permission: that covers DISPATCH the engine cannot
+    /// resolve (`dyn`/generic), and here the payload type is concrete and its impl is the crate's own —
+    /// the same resolution `a == b` over a bare `Guard` already makes. The element is the one the
+    /// collection typer already answers (`resolve_elem_type_raw`, every layer peeled to the value), and the
+    /// edge is formed by the same `charge_coercion_ty` the bare operand uses: a pure impl, a std element or
+    /// no impl at all contributes nothing, so this cannot flood.
+    ///
+    /// The LEFT operand only, as for the bare coercion: `Vec<T>: PartialEq<Vec<U>>` runs `T`'s impl, never
+    /// `U`'s, so typing the right side could edge to the wrong body. A comparison against a literally EMPTY
+    /// value (`None`, `[]`, `vec![]`) never reaches an element's `eq` and is skipped, so `opt == None` is
+    /// not charged for code that cannot run.
+    fn charge_compare_payload(&mut self, node: &syn::ExprBinary, tr: &str, method: &str) {
+        fn statically_empty(e: &syn::Expr) -> bool {
+            match peel_recv(e) {
+                syn::Expr::Path(p) => p.qself.is_none() && p.path.is_ident("None"),
+                syn::Expr::Array(a) => a.elems.is_empty(),
+                syn::Expr::Macro(m) => m.mac.path.is_ident("vec") && m.mac.tokens.is_empty(),
+                _ => false,
+            }
+        }
+        if statically_empty(&node.left) || statically_empty(&node.right) {
+            return;
+        }
+        let Some(raw) = self.resolve_elem_type_raw(&node.left) else { return };
+        let elem = crate::lang::strip_wrapped(&raw).to_string();
+        if elem.is_empty() {
+            return;
+        }
+        if std::env::var_os("CANDOR_R1098_INSTR").is_some() {
+            eprintln!("R1098PAYLOAD\t{tr}\t{elem}"); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+        self.charge_coercion_ty(&elem, tr, method);
+    }
+
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -8988,6 +9031,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
             self.charge_coercion(&node.left, tr, method);
+            if matches!(tr, "PartialEq" | "PartialOrd") {
+                self.charge_compare_payload(node, tr, method);
+            }
         }
         syn::visit::visit_expr_binary(self, node);
     }

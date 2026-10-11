@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A comparison over a std wrapper now reaches the element's own `PartialEq`/`PartialOrd` (SOUNDNESS
+  R1098).** `a == b` (and `!=`, `<`, `<=`, `>`, `>=`) over `Option<T>`, `Result<T, _>`, `Vec<T>`, slices,
+  arrays, map values, and `Weak::upgrade()`'s `Option<Arc<T>>` runs `T`'s impl element by element; the
+  operator edge typed only the wrapper, found no impl on it, and formed no edge, so an effectful `eq`
+  read silent. Executed: inotify's `WatchDescriptor::eq` issues the `kcmp` syscall through
+  `FdGuard::eq` and was ABSENT; with libc chained, `deny Unknown watches::WatchDescriptor::eq` goes
+  0 → 1. A concrete `Weak<T>` now also types `upgrade()`'s payload (resolving calls on it), and is
+  never read as OWNING `T` for drop glue. Stated residual: a tuple's `==`.
+
 ## [0.40.5] — 2026-10-11
 
 - **Version-only cut to keep the family on one build line — no change to candor-rust since 0.40.4.**
