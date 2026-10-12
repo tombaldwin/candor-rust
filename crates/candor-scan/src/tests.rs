@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev97/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev101/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28840,8 +28840,9 @@ pub enum E { A(Guard), B }\n\
 pub fn r_enumeq(a: &E, b: &E) -> bool { a == b }\n\
 pub fn r_collect(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }\n";
     let r = scan_src_to_json_multi("r1111r", &[("Cargo.toml", "[package]\nname = \"r1111r\"\n"), ("src/lib.rs", res)]);
+    // SOUNDNESS R1130 (rustagent-v051) — all four now reach `Guard`'s impls (EXECUTED: each writes).
     for f in ["Pair::r_field", "r_letlit", "r_enumeq", "r_collect"] {
-        assert!(veina_row_effs(&r, f).is_empty(), "{f} is a STATED residual; if it now charges, update the row\n{r:#}");
+        assert!(!veina_row_effs(&r, f).is_empty(), "{f} runs `Guard::eq`/`Guard::hash` (executed; R1130)\n{r:#}");
     }
 }
 
@@ -29235,11 +29236,12 @@ pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() 
     ] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` moved — decide it:\n{v:#}");
     }
+    // SOUNDNESS R1130 (rustagent-v051) — the comparison residuals, closed (executed > 0 each).
+    for f in ["Pair::e30_field", "e30_letparam", "e30_letlit", "e30_enum", "e30_collect", "e30_collect_ann"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs `Guard`'s impl (executed; R1130):\n{v:#}");
+    }
     // Stated residual silences (executed > 0) — a change to them closes a residual; shrink this list.
-    for f in [
-        "a29_gen", "a29_impl", "Pair::e30_field", "e30_letparam", "e30_letlit", "e30_enum", "e30_collect",
-        "e30_collect_ann", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut",
-    ] {
+    for f in ["a29_gen", "a29_impl", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` is now charged — shrink the residual list:\n{v:#}");
     }
 }
@@ -29294,8 +29296,8 @@ impl Arg { pub fn get_id(&self) -> &Id { &self.id } }
 pub fn c_getter_eq_str(a: &Arg) -> bool { a.get_id() == Id::HELP }
 pub fn c_local_eq_str(a: &Arg) -> bool { let i: &Id = a.get_id(); i == Id::HELP }
 "##)]);
-    assert!(veina_row_effs(&v2, "c_getter_eq_str").is_empty(), "R1137 closed — move it to the charged list:\n{v2:#}");
-    for f in ["b_local_const_rhs", "b_mod_const_rhs", "c_local_eq_str"] {
+    // SOUNDNESS R1137 (rustagent-v051) — the getter's DECLARED return (`&Id`) is charged beside the builder answer.
+    for f in ["b_local_const_rhs", "b_mod_const_rhs", "c_local_eq_str", "c_getter_eq_str"] {
         assert!(!veina_row_effs(&v2, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v2:#}");
     }
     let v3 = scan_src_to_json_multi("v050t3", &[("Cargo.toml", "[package]\nname = \"v050t3\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::thread;
@@ -29352,7 +29354,8 @@ pub fn v_path_alias(d: D, c: inner::InAlias) -> D { d + c }
               "v_module_const_prim_alias", "v_eq_prim_alias", "v_std_alias_param", "v_path_alias"] {
         assert!(!veina_row_effs(&v9, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v9:#}");
     }
-    assert!(veina_row_effs(&v9, "v_lhs_prim_alias").is_empty(), "left-alias residual closed — move it:\n{v9:#}");
+    // SOUNDNESS R1139 (rustagent-v051) — the LEFT primitive-alias operand reaches `impl Add<D> for u64`.
+    assert!(!veina_row_effs(&v9, "v_lhs_prim_alias").is_empty(), "left-alias operand (executed; R1139):\n{v9:#}");
     let v10 = scan_src_to_json_multi("v050fx10", &[("Cargo.toml", "[package]\nname = \"v050fx10\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
 pub fn mark() { let _ = std::fs::write("/tmp/rustagent-v050-fx10", b"x"); }
 #[derive(Clone, Copy)] pub struct D { pub m: u64 }
@@ -29397,8 +29400,9 @@ pub fn k_exact_keep(a: W, b: V) -> bool { a == b }
     for f in ["k_assoc", "k_macro", "k_reexport", "k_alias_chain", "k_block_local", "k_exact_keep"] {
         assert!(!veina_row_effs(&v10, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v10:#}");
     }
+    // SOUNDNESS R1140 (rustagent-v051) — a `where D: Add<T>` bound on the CONCRETE `D` no longer makes `d` generic.
     for f in ["k_generic", "k_proj"] {
-        assert!(veina_row_effs(&v10, f).is_empty(), "`{f}` residual closed — move it:\n{v10:#}");
+        assert!(!veina_row_effs(&v10, f).is_empty(), "`{f}` runs `D::add` (executed; R1140):\n{v10:#}");
     }
     assert!(veina_row_effs(&v10, "k_exact_refuse").is_empty(), "k_exact_refuse executes 0:\n{v10:#}");
     // auditagent-v050/fx13 (EXECUTED, every cell writes): a renamed two-hop re-export the third version refused.
@@ -29430,4 +29434,692 @@ pub fn rg(l: L, w: hopa::Pinned) -> bool { l == w }
     for f in ["ra::f", "rb::f", "rc::f", "rd::f", "re", "rf", "rg"] {
         assert!(!veina_row_effs(&v13, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v13:#}");
     }
+}
+
+
+/// SOUNDNESS R1130 / R1131 / R1137 / R1139 / R1140 (rustagent-v051) — scratchpad `rustagent-v051/fxa`, EXECUTED
+/// (`gt.tsv`: the number of effectful operator / comparison / hash bodies each cell runs). Every `r3x_*` /
+/// `r40_*` / `e30_*` cell with GT > 0 was ABSENT on published 0.40.6 and on 03a3adc; every one is charged now.
+///   * R1131 — an operator impl on `&B` is keyed `&B::op` and reached BESIDE the by-value edge.
+///   * R1139 — a left operand typed by a PRIMITIVE alias also reaches the primitive's impl.
+///   * R1140 — a `where` predicate on a CONCRETE type no longer types its parameters as generic.
+///   * R1137 — a method-call left operand is also charged by its DECLARED return type.
+///   * R1130 — tuple-typed fields, `let`-carried payloads, enum variant payloads and `collect` into a keyed
+///     collection reach the components' impls.
+///
+/// CONTROLS (GT 0): `r40_ctl_pure`, `r39_ctl_alias` (the alias route forms no primitive edge when the right
+/// operand is certainly a primitive) and every `n30_*` stay uncharged, and `r40_impl_param` (a where-bound on
+/// the enclosing impl's REAL type parameter) keeps its dispatch. PINNED OVER-CHARGES (GT 0, a union, the safe
+/// direction): `r31_p_byval` (a by-value `a + b` over `P` also edges `&P`'s impl — withholding it on a name-level
+/// "by-value and readable" test silenced real calls twice, auditagent-v051 fxsg/fxv), and the pre-existing
+/// `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`.
+#[test]
+fn r1130_r1140_operator_and_comparison_reaches() {
+    let v = scan_src_to_json_multi("v051fxa", &[("Cargo.toml", "[package]\nname = \"v051fxa\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::ops::{Add, Mul, Rem, Sub};
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+
+// ===== R1131: operator impls on a REFERENCE self type =====
+pub struct B(pub u32);
+impl Rem<&B> for &B { type Output = B; fn rem(self, o: &B) -> B { hit(); B(self.0 % o.0) } }
+pub fn r31_refref(a: &B, b: &B) -> B { a % b }
+pub fn r31_refref_amp(a: B, b: B) -> u32 { (&a % &b).0 }
+pub struct Bl(pub u32);
+impl<'a> Rem<&'a Bl> for &'a Bl { type Output = u32; fn rem(self, o: &'a Bl) -> u32 { hit(); self.0 % o.0 } }
+pub fn r31_lifetime(a: &Bl, b: &Bl) -> u32 { a % b }
+pub struct C(pub u32);
+impl Sub<C> for &C { type Output = C; fn sub(self, o: C) -> C { hit(); C(self.0 - o.0) } }
+pub fn r31_ref_owned(a: &C, b: C) -> C { a - b }
+pub struct P(pub u32);
+impl Add for P { type Output = P; fn add(self, o: P) -> P { P(self.0 + o.0) } }
+impl Add<&P> for &P { type Output = P; fn add(self, o: &P) -> P { hit(); P(self.0 + o.0) } }
+pub fn r31_p_byref(a: &P, b: &P) -> P { a + b }
+pub fn r31_p_byval(a: P, b: P) -> P { a + b }
+pub struct Q(pub u32);
+impl Add for Q { type Output = Q; fn add(self, o: Q) -> Q { hit(); Q(self.0 + o.0) } }
+impl Add<&Q> for &Q { type Output = Q; fn add(self, o: &Q) -> Q { Q(self.0 + o.0) } }
+pub fn r31_q_byval(a: Q, b: Q) -> Q { a + b }
+pub fn r31_q_byref(a: &Q, b: &Q) -> Q { a + b }
+pub struct Ee(pub u32);
+impl PartialEq for &Ee { fn eq(&self, o: &&Ee) -> bool { hit(); self.0 == o.0 } }
+pub fn r31_eq_refself(a: &Ee, b: &Ee) -> bool { a == b }
+
+// ===== R1139: a LEFT operand typed by a PRIMITIVE alias =====
+#[derive(Clone, Copy)] pub struct Dd { pub m: u64 }
+pub type PrimAlias = u64;
+pub type A2 = PrimAlias;
+pub mod inner { pub type InAlias = u64; }
+impl Add<Dd> for u64 { type Output = Dd; fn add(self, r: Dd) -> Dd { hit(); Dd { m: self + r.m } } }
+pub fn r39_alias(c: PrimAlias, d: Dd) -> Dd { c + d }
+pub fn r39_prim(c: u64, d: Dd) -> Dd { c + d }
+pub fn r39_chain(c: A2, d: Dd) -> Dd { c + d }
+pub fn r39_path_alias(c: inner::InAlias, d: Dd) -> Dd { c + d }
+pub fn r39_let_alias(d: Dd) -> Dd { let c: PrimAlias = 2; c + d }
+pub fn r39_ctl_prim(c: u64, e: u64) -> u64 { c + e }
+pub fn r39_ctl_alias(c: PrimAlias, e: u64) -> u64 { c + e }
+pub type DdAlias = Dd;
+impl Mul<u64> for Dd { type Output = Dd; fn mul(self, r: u64) -> Dd { hit(); Dd { m: self.m * r } } }
+pub fn r39_struct_alias(a: DdAlias, n: u64) -> Dd { a * n }
+
+// ===== R1140: an operator supplied by a WHERE bound on a CONCRETE type =====
+#[derive(Clone, Copy)] pub struct G { pub m: u32 }
+impl Add<u32> for G { type Output = G; fn add(self, r: u32) -> G { hit(); G { m: self.m + r } } }
+impl G { pub fn eff(&self) -> u32 { hit(); self.m } }
+pub fn r40_generic<T>(d: G, t: T) -> G where G: Add<T, Output = G> { d + t }
+pub fn r40_call(d: G) -> G { r40_generic(d, 2u32) }
+pub trait Tr { type Out; }
+pub struct U;
+impl Tr for U { type Out = u32; }
+pub fn r40_proj<T: Tr>(d: G, x: T::Out) -> G where G: Add<T::Out, Output = G> { d + x }
+pub fn r40_call_proj(d: G) -> G { r40_proj::<U>(d, 2) }
+pub fn r40_where_concrete(d: G, n: u32) -> G where G: Add<u32, Output = G> { d + n }
+pub fn r40_method<T>(d: G, _t: T) -> u32 where G: Add<T, Output = G> { d.eff() }
+pub struct Sw<X>(pub X);
+impl<X> Sw<X> { pub fn r40_impl_method(&self, d: G) -> u32 where G: Add<u32> { d.eff() } }
+#[derive(Clone, Copy)] pub struct Gp { pub m: u32 }
+impl Add<u32> for Gp { type Output = Gp; fn add(self, r: u32) -> Gp { Gp { m: self.m + r } } }
+pub fn r40_ctl_pure<T>(d: Gp, t: T) -> Gp where Gp: Add<T, Output = Gp> { d + t }
+// a where-bound on a REAL type parameter of the enclosing impl stays dispatch-typed (control for the scope test)
+pub trait Shout { fn shout(&self) -> u32; }
+impl Shout for G { fn shout(&self) -> u32 { hit(); 1 } }
+pub struct Hw<X>(pub X);
+impl<X> Hw<X> { pub fn r40_impl_param(&self, x: &X) -> u32 where X: Shout { x.shout() } }
+
+// ===== R1137: a METHOD-CALL left operand =====
+pub struct Id(pub String);
+impl Id { pub const HELP: &'static str = "help"; }
+impl PartialEq<str> for Id { fn eq(&self, o: &str) -> bool { hit(); self.0 == o } }
+pub struct Arg { pub id: Id }
+impl Arg { pub fn get_id(&self) -> &Id { &self.id } pub fn me(&self) -> &Arg { self } }
+pub fn r37_getter(a: &Arg) -> bool { a.get_id() == Id::HELP }
+pub fn r37_chain(a: &Arg) -> bool { a.me().get_id() == Id::HELP }
+pub fn mk_id() -> Id { Id(String::new()) }
+pub fn r37_freefn() -> bool { mk_id() == *"x" }
+pub struct Id2(pub String);
+impl PartialEq<str> for Id2 { fn eq(&self, o: &str) -> bool { self.0 == o } }
+pub struct Arg2 { pub id: Id2 }
+impl PartialEq<str> for Arg2 { fn eq(&self, _o: &str) -> bool { hit(); true } }
+impl Arg2 { pub fn get_id(&self) -> &Id2 { &self.id } }
+pub fn r37_ctl_pure(a: &Arg2) -> bool { a.get_id() == "x" }
+
+// ===== R1130: comparison payloads =====
+#[derive(Debug)]
+pub struct Guard(pub i32);
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { hit(); self.0 == o.0 } }
+impl Eq for Guard {}
+impl Hash for Guard { fn hash<Hs: Hasher>(&self, h: &mut Hs) { hit(); self.0.hash(h) } }
+pub struct Pair { pub p: (Guard, i32) }
+impl Pair { pub fn e30_field(&self, o: &Pair) -> bool { self.p == o.p } }
+pub fn e30_field_free(a: &Pair, b: &Pair) -> bool { a.p == b.p }
+pub fn e30_letparam(a: (Guard, i32), b: (Guard, i32)) -> bool { let x = a; x == b }
+pub fn e30_letlit(x: Guard, y: Guard) -> bool { let a = (x, 1); let b = (y, 1); a == b }
+#[derive(PartialEq)]
+pub enum E { A(Guard), B }
+pub fn e30_enum(a: &E, b: &E) -> bool { a == b }
+#[derive(PartialEq)]
+pub enum Es { A { g: Guard }, B }
+pub fn e30_enum_struct(a: &Es, b: &Es) -> bool { a == b }
+pub fn e30_collect(v: Vec<Guard>) -> usize { v.into_iter().collect::<HashSet<_>>().len() }
+pub fn e30_collect_ann(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }
+// controls GT 0
+pub fn n30_tupint(a: (i32, i32), b: (i32, i32)) -> bool { a == b }
+#[derive(PartialEq, Eq, Hash)] pub struct Pure(pub i32);
+pub struct PairP { pub p: (Pure, i32) }
+pub fn n30_field_pure(a: &PairP, b: &PairP) -> bool { a.p == b.p }
+#[derive(PartialEq)] pub enum EP { A(Pure), B }
+pub fn n30_enum_pure(a: &EP, b: &EP) -> bool { a == b }
+pub fn n30_collect_vec(v: Vec<Guard>) -> usize { v.into_iter().collect::<Vec<_>>().len() }
+"##)]);
+    for f in [
+        "r31_refref", "r31_refref_amp", "r31_lifetime", "r31_ref_owned", "r31_p_byref", "r31_q_byval", "r31_eq_refself",
+        "r39_alias", "r39_prim", "r39_chain", "r39_path_alias", "r39_let_alias", "r39_struct_alias",
+        "r40_generic", "r40_call", "r40_proj", "r40_call_proj", "r40_where_concrete", "r40_method",
+        "Sw::r40_impl_method", "Hw::r40_impl_param",
+        "r37_getter", "r37_chain", "r37_freefn",
+        "Pair::e30_field", "e30_field_free", "e30_letparam", "e30_letlit", "e30_enum", "e30_enum_struct", "e30_collect",
+        "e30_collect_ann",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
+    }
+    for f in ["r40_ctl_pure", "r39_ctl_alias", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
+    }
+    for f in ["r31_p_byval", "r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` pinned over-charge moved — decide it:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1136 (rustagent-v051) — a dependency EXTENSION-TRAIT method on a std-typed receiver discloses the
+/// dependency in `invisible`, as the qualified spelling already did (`ctl_*`). Scratchpad `rustagent-v051/fx36`
+/// (from `auditagent-v050/fx4`). `it_join` is the stated residual: `join/1` is also a std method
+/// (`[T]::join`), so the generated denylist answers it. Controls: a std method (`n36_std`), a crate trait on
+/// the primitive (`n36_local`) and a module importing no dependency (`clean::n36_noimport`) disclose nothing.
+#[test]
+fn r1136_dependency_extension_methods_are_disclosed() {
+    let toml = "[package]\nname = \"v051fx36\"\nedition = \"2021\"\n[dependencies]\nnum-conv = \"0.1\"\nitertools = \"0.14\"\n";
+    let v = scan_src_to_json_multi("v051fx36", &[("Cargo.toml", toml), ("src/lib.rs", r##"use num_conv::prelude::*;
+use core::num::NonZero;
+pub fn ext_only(d: NonZero<u8>) -> usize { d.get().extend() }
+pub fn ext_and_fmul(d: NonZero<u8>, v: f64, t: f64) -> (usize, f64) { let x = f64::trunc(v * t) / t; (d.get().extend(), x) }
+pub fn ext_let(d: u8) -> usize { let u: usize = d.extend(); u }
+pub fn ctl_qualified(d: u8) -> usize { num_conv::Extend::extend(d) }
+pub fn ctl_path_trait(d: u8) -> usize { <u8 as num_conv::Extend>::extend(d) }
+pub mod ext;
+// R1136 over-disclosure controls (GT: no dependency body runs)
+pub fn n36_std(d: u8) -> u32 { d.count_ones() }
+pub trait Twice { fn twice(self) -> u16; }
+impl Twice for u8 { fn twice(self) -> u16 { self as u16 * 2 } }
+pub fn n36_local(d: u8) -> u16 { d.twice() }
+pub mod clean { pub fn n36_noimport(d: u8) -> u32 { d.leading_zeros() } }
+"##), ("src/ext.rs", r##"use itertools::Itertools;
+pub fn it_sorted(v: Vec<u32>) -> Vec<u32> { v.into_iter().sorted().collect() }
+pub fn it_join(v: &[u32]) -> String { v.iter().join(",") }
+pub fn it_param(v: std::vec::IntoIter<u32>) -> Vec<u32> { v.sorted().collect() }
+"##)]);
+    let inv = |f: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f)
+            .and_then(|r| r["invisible"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+            .unwrap_or_default()
+    };
+    for f in ["ext_only", "ext_and_fmul", "ext_let", "ctl_qualified", "ctl_path_trait"] {
+        assert_eq!(inv(f), vec!["num_conv".to_string()], "`{f}` calls into num_conv:\n{v:#}");
+    }
+    for f in ["ext::it_sorted", "ext::it_param"] {
+        assert_eq!(inv(f), vec!["itertools".to_string()], "`{f}` calls into itertools:\n{v:#}");
+    }
+    for f in ["ext::it_join", "n36_std", "n36_local", "clean::n36_noimport"] {
+        assert!(inv(f).is_empty(), "`{f}`: no disclosure expected:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1131 / R1140 SECOND FIXTURES (rustagent-v051) — scratchpad `rustagent-v051/fxr`, EXECUTED. Written
+/// for the REMOVAL direction of the two changes that move something rather than only add: R1131 re-keys the
+/// `&B` impl's unit (bare `rem` -> `&B::rem`), and a first cut of it LOST `k31_method` (`a.rem(b)`) and
+/// `k31_path` (`<&B>::rem(a, b)`), both charged on 03a3adc through the non-path referent fallback; R1140
+/// retypes a where-bounded parameter from generic to concrete, so a trait answered by a BLANKET impl, a
+/// `Display` formatter, a type alias and a `Self` bound beside it must still be reached. `k31_ufcs`,
+/// `k31_qself`, `k31_neg`, `k31_assign` and `k31_x1` were ABSENT on 03a3adc and are charged now.
+/// `k31_generic*` is SPEC section 4's generic dispatch over a std trait (R1126's clause), left as it was.
+#[test]
+fn r1131_r1140_second_fixtures_keep_what_the_old_keys_reached() {
+    let v = scan_src_to_json_multi("v051fxr", &[("Cargo.toml", "[package]\nname = \"v051fxr\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
+use std::fmt::{self, Display};
+use std::ops::{Add, Neg, Rem};
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+// ---- R1131 second fixture: OTHER spellings that reached the formerly bare-keyed `rem` unit must still reach it
+pub struct B(pub u32);
+impl Rem<&B> for &B { type Output = B; fn rem(self, o: &B) -> B { hit(); B(self.0 % o.0) } }
+impl Neg for &B { type Output = B; fn neg(self) -> B { hit(); B(self.0) } }
+pub fn k31_method(a: &B, b: &B) -> B { a.rem(b) }
+pub fn k31_ufcs(a: &B, b: &B) -> B { Rem::rem(a, b) }
+pub fn k31_qself(a: &B, b: &B) -> B { <&B as Rem<&B>>::rem(a, b) }
+pub fn k31_neg(a: &B) -> B { -a }
+pub fn k31_assign(a: &B, b: &B) -> u32 { let c = a % b; c.0 }
+pub fn k31_generic<T: Rem<T, Output = B> + Copy>(a: T, b: T) -> B { a % b }
+pub fn k31_generic_call(a: &B, b: &B) -> B { k31_generic(a, b) }
+// two ref impls in ONE module used to MERGE into one bare `add` unit
+pub struct X1(pub u32);
+pub struct X2(pub u32);
+impl Add<&X1> for &X1 { type Output = u32; fn add(self, o: &X1) -> u32 { hit(); self.0 + o.0 } }
+impl Add<&X2> for &X2 { type Output = u32; fn add(self, o: &X2) -> u32 { self.0 + o.0 } }
+pub fn k31_x1(a: &X1, b: &X1) -> u32 { a + b }
+pub fn k31_x2(a: &X2, b: &X2) -> u32 { a + b }
+// ---- R1140 second fixture: a where-bound on a CONCRETE type whose trait is answered other ways
+#[derive(Clone, Copy)] pub struct G(pub u32);
+pub trait Tb { fn tb(&self) -> u32; }
+impl<T: Copy> Tb for T { fn tb(&self) -> u32 { hit(); 1 } }
+pub fn k40_blanket<X>(d: G, _x: X) -> u32 where G: Tb { d.tb() }
+impl Display for G { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { hit(); write!(f, "{}", self.0) } }
+pub fn k40_display<X>(d: G, _x: X) -> String where G: Display { format!("{}", d) }
+pub trait Tl { fn tl(&self) -> u32; }
+impl Tl for G { fn tl(&self) -> u32 { hit(); 2 } }
+pub fn k40_trait<X>(d: G, _x: X) -> u32 where G: Tl { d.tl() }
+pub fn k40_tostring<X>(d: G, _x: X) -> String where G: Display { d.to_string() }
+pub fn k40_string<X>(s: String, x: X) -> String where String: From<X> { s + &String::from(x) }
+pub type GA = G;
+pub fn k40_alias<X>(d: GA, _x: X) -> u32 where GA: Tl { d.tl() }
+pub struct Wr<T>(pub T);
+impl<T> Wr<T> { pub fn k40_selfbound(&self, d: G) -> u32 where Self: Sized, G: Tl { d.tl() } }
+pub fn k31_path(a: &B, b: &B) -> B { <&B>::rem(a, b) }
+pub struct Rf(pub u32);
+pub trait Tk { fn tk(&self) -> u32; }
+impl Tk for &Rf { fn tk(&self) -> u32 { hit(); 1 } }
+pub fn k31_nonop(f: &Rf) -> u32 { f.tk() }
+// a where-bound whose trait has its OWN generic parameter: dispatch is on `T` (the `cast` crate's shape)
+pub trait Cv<S> { fn cv(s: S) -> u32; }
+impl Cv<u8> for u32 { fn cv(s: S8) -> u32 { hit(); s as u32 } }
+pub type S8 = u8;
+pub fn k40_qself<T>(x: T) -> u32 where u32: Cv<T> { <u32 as Cv<T>>::cv(x) }
+"##)]);
+    for f in [
+        "k31_method", "k31_path", "k31_nonop", "k31_ufcs", "k31_qself", "k31_neg", "k31_assign", "k31_x1",
+        "k40_blanket", "k40_display", "k40_trait", "k40_tostring", "k40_alias", "Wr::k40_selfbound", "k40_qself",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful body (executed):\n{v:#}");
+    }
+    for f in ["k31_x2", "k40_string"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
+    }
+    // `where u32: Cv<T>` dispatches on `T`, which a consumer can supply: the `dispatchesOn` key (the ⟨0.39⟩ join)
+    // must survive R1140 — a first cut that stripped the predicate from the collector's bounds dropped it
+    // (the `cast` crate's 14 `fns!` rows).
+    let r = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "k40_qself").expect("k40_qself row");
+    assert!(!veina_row_effs(&v, "k40_qself").is_empty(), "k40_qself runs `Cv::cv` (executed):\n{v:#}");
+    assert!(r["dispatchesOn"].as_array().is_some_and(|a| a.iter().any(|k| k == "v051fxr#Cv::cv")), "dispatch key lost:\n{r:#}");
+}
+
+/// SOUNDNESS R1140, PRIMITIVE HALF (rustagent-v051) — scratchpad `rustagent-v051/fxs`, EXECUTED. A `where` predicate on
+/// a PRIMITIVE (`where u32: Add<T>`) is left in place — stripping it cost rkyv's `where str: SerializeUnsized<S>`
+/// its dispatch edge and join key — so `x + t` over `x: u32` is charged by the declared primitive beside the
+/// dispatch typing (`w_prim`, ABSENT on 0.40.6 and 03a3adc). The `s_*` cells pin the crate's own trait on `str`
+/// / `u32` receivers (charged, or disclosed `Unknown`, on every arm).
+#[test]
+fn r1140_primitive_where_bound_operator() {
+    let v = scan_src_to_json_multi("v051fxs", &[("Cargo.toml", "[package]\nname = \"v051fxs\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+pub trait Ser { fn ser(&self) -> usize; }
+impl Ser for str { fn ser(&self) -> usize { hit(); self.len() } }
+impl Ser for u32 { fn ser(&self) -> usize { hit(); 4 } }
+pub fn s_str(v: &str) -> usize { v.ser() }
+pub fn s_string(v: String) -> usize { v.as_str().ser() }
+pub fn s_u32(v: u32) -> usize { v.ser() }
+pub fn s_lit() -> usize { "abc".ser() }
+#[derive(Clone, Copy)] pub struct Lc(pub u32);
+impl std::ops::Add<Lc> for u32 { type Output = u32; fn add(self, r: Lc) -> u32 { hit(); self + r.0 } }
+pub fn w_prim<T>(x: u32, t: T) -> u32 where u32: std::ops::Add<T, Output = u32> { x + t }
+pub fn w_prim_call(x: u32) -> u32 { w_prim(x, Lc(1)) }
+"##)]);
+    for f in ["w_prim", "w_prim_call", "s_str", "s_u32"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1131 / R1137 / R1139 / R1140 — the v051 AUDIT's fixtures (scratchpad `auditagent-v051/fxg`, `fxg2`,
+/// `fxchain`; `rustagent-v051/fxn`), every cell EXECUTED and writing a file.
+///   * `fxg2` — a crate type NAMED like a primitive (`pub struct u8(i64)`): a const/static of it is no longer
+///     read as a primitive right operand (`a::f`, `c::f`, `e::f` were ABSENT; `model::PRIM_SHADOW_KEY`).
+///   * `fxg`/`fxn` — a NESTED fn's concrete parameters are typed (`g10`, `g12`–`g14`, `n_plain`, `n_where`).
+///     STATED RESIDUAL: `W::g9`/`g9_call`/`g9e_call` — there `D` is the IMPL's type parameter (it shadows the
+///     struct `D`), so `d + t` is a generic dispatch over std's `Add` (SPEC section 4, R1126's clause).
+///   * `fxchain` — a dependency's `&B` operator impl is reached from a CHAINED consumer (`dep::&B::rem`): all
+///     nine consumer cells are charged (they were ABSENT chained, `invisible` only unchained).
+#[test]
+fn v051_audit_named_primitive_nested_params_and_chained_ref_operators() {
+    let g2 = scan_src_to_json_multi("v051fxg2", &[("Cargo.toml", "[package]\nname = \"v051fxg2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051g2", b"x"); }
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub i64); #[derive(Clone, Copy)] pub struct Tiny(pub i64); }
+pub type Word = u64;
+impl Add<s::u8> for u64 { type Output = u64; fn add(self, r: s::u8) -> u64 { mark(); self + r.0 as u64 } }
+impl Add<s::Tiny> for u64 { type Output = u64; fn add(self, r: s::Tiny) -> u64 { mark(); self + r.0 as u64 } }
+// the one variable: the const's declared type is a crate struct NAMED like a primitive (`u8`) vs not (`Tiny`)
+pub mod a { use crate::s::u8; use crate::Word; pub const KA: u8 = u8(1); pub fn f(c: Word) -> u64 { c + KA } }
+pub mod b { use crate::s::Tiny; use crate::Word; pub const KB: Tiny = Tiny(1); pub fn f(c: Word) -> u64 { c + KB } }
+// same with a method-call left operand (R1137 route) and a static
+pub struct G; impl G { pub fn word(&self) -> u64 { 7 } }
+pub mod c { use crate::s::u8; pub const KC: u8 = u8(1); pub fn f(g: &crate::G) -> u64 { g.word() + KC } }
+pub mod e { use crate::s::u8; use crate::Word; pub static SE: u8 = u8(1); pub fn f(c: Word) -> u64 { c + SE } }
+// nested fn control (no generics)
+pub fn nested() { fn inner() { crate::mark() } inner() }
+"##)]);
+    for f in ["a::f", "b::f", "c::f", "e::f", "nested"] {
+        assert!(!veina_row_effs(&g2, f).is_empty(), "`{f}` writes (executed):\n{g2:#}");
+    }
+    let g = scan_src_to_json_multi("v051fxg", &[("Cargo.toml", "[package]\nname = \"v051fxg\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051g", b"x"); }
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub i64); #[derive(Clone, Copy)] pub struct Tiny(pub i64); }
+pub type Word = u64;
+// effectful impls with a primitive LEFT side and a crate-struct RIGHT side
+impl Add<s::u8> for u64 { type Output = u64; fn add(self, r: s::u8) -> u64 { mark(); self + r.0 as u64 } }
+impl Add<s::Tiny> for u64 { type Output = u64; fn add(self, r: s::Tiny) -> u64 { mark(); self + r.0 as u64 } }
+
+// --- R1139 route: left operand is a primitive ALIAS ---
+pub fn g1_control(c: Word, r: s::Tiny) -> u64 { c + r }                       // right plainly crate-typed
+pub mod g2 { use crate::s::u8; use crate::Word; pub fn f(c: Word, r: u8) -> u64 { c + r } }   // right: crate struct named `u8`
+pub mod g3 { use crate::s::u8; use crate::Word; pub const K: u8 = u8(1); pub fn f(c: Word) -> u64 { c + K } } // const of it
+pub mod g4 { use crate::s::u8; use crate::Word; pub fn mk() -> u8 { u8(1) } pub fn f(c: Word) -> u64 { c + mk() } } // fn returning it
+pub struct H; impl H { pub fn small(&self) -> crate::s::u8 { crate::s::u8(1) } }
+pub mod g5 { use crate::s::u8; use crate::Word; pub fn f(c: Word, h: &crate::H) -> u64 { c + h.small() } } // method returning it
+pub mod g6 { use crate::s::u8; use crate::Word; pub fn f(c: Word, r: &u8) -> u64 { c + *r } }  // deref of it
+// --- R1137 route: left operand is a METHOD CALL whose declared return is a primitive ---
+pub struct G; impl G { pub fn word(&self) -> u64 { 7 } }
+pub fn g7_control(g: &G, r: s::Tiny) -> u64 { g.word() + r }
+pub mod g8 { use crate::s::u8; pub fn f(g: &crate::G, r: u8) -> u64 { g.word() + r } }
+// --- R1140 attacks ---
+#[derive(Clone, Copy)] pub struct D(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { mark(); D(self.0 + r) } }
+pub struct W<D>(pub D);
+// D is the IMPL's generic parameter AND a module struct; the where-bound is on the generic
+impl<D: Copy> W<D> { pub fn g9<T>(&self, d: D, t: T) -> D where D: Add<T, Output = D> { d + t } }
+pub fn g9_call(w: &W<D>, d: D) -> D { w.g9(d, 3u64) }
+// nested fn: outer generic named D is NOT visible inside; D there is the struct
+pub fn g10_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } inner(crate::D(1), 2u64).0 }
+pub fn g11<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t }
+pub fn g11_call(d: D) -> D { g11(d, 5u64) }
+pub mod g3c { use crate::s::Tiny; use crate::Word; pub const K: Tiny = Tiny(1); pub fn f(c: Word) -> u64 { c + K } }
+pub mod g3l { use crate::s::u8; use crate::Word; pub fn f(c: Word) -> u64 { let k: u8 = u8(1); c + k } }
+pub fn g10b_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } let _ = 0; inner(crate::D(1), 2u64).0 }
+pub fn g10_bare<T>(d: D, t: T) -> D where crate::D: Add<T, Output = D> { d + t }
+pub fn g10_bare_call(d: D) -> D { g10_bare(d, 1u64) }
+pub struct W2<E>(pub E);
+impl<E: Copy> W2<E> { pub fn g9e<T>(&self, d: E, t: T) -> E where E: Add<T, Output = E> { d + t } }
+pub fn g9e_call(w: &W2<D>, d: D) -> D { w.g9e(d, 3u64) }
+pub fn g12_outer<Q: Copy>(_x: Q) -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+pub fn g13_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } inner(crate::D(1), 2u64).0 }
+pub fn g14_nogeneric() -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+"##)]);
+    for f in ["g1_control", "g2::f", "g3::f", "g4::f", "g5::f", "g6::f", "g7_control", "g8::f", "g10_outer", "g11", "g11_call",
+              "g3c::f", "g3l::f", "g10_bare", "g10_bare_call", "g12_outer", "g13_outer", "g14_nogeneric"] {
+        assert!(!veina_row_effs(&g, f).is_empty(), "`{f}` writes (executed):\n{g:#}");
+    }
+    for f in ["W::g9", "g9_call", "g9e_call"] {
+        assert!(veina_row_effs(&g, f).is_empty(), "`{f}` generic-parameter residual (R1126 clause) moved — decide it:\n{g:#}");
+    }
+    let n = scan_src_to_json_multi("v051fxn", &[("Cargo.toml", "[package]\nname = \"v051fxn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/dev/null", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { mark(); D(self.0 + r) } }
+impl D { pub fn eff(&self) { mark(); } }
+pub fn n_plain() -> u64 { fn inner(d: D, t: u64) -> D { d + t } inner(D(1), 2).0 }
+pub fn n_method() { fn inner(d: D) { d.eff() } inner(D(1)) }
+pub fn n_where() -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+"##)]);
+    for f in ["n_plain", "n_method", "n_where"] {
+        assert!(veina_row_effs(&n, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{n:#}");
+    }
+    // the chained arm: scan the dependency, chain its report, scan the consumer
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v051chain-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    let dep = root.join("cdep");
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), "[package]\nname = \"cdep\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dep.join("src/lib.rs"), r##"use std::ops::Rem;
+pub struct B(pub u8);
+impl<'a> Rem<&'a B> for &'a B { type Output = u8; fn rem(self, o: &'a B) -> u8 { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); self.0 % o.0.max(1) } }
+impl<'a> PartialEq<&'a B> for &'a B { fn eq(&self, o: &&'a B) -> bool { let _ = std::fs::write("/tmp/auditv051-eq", b"x"); self.0 == o.0 } }
+pub fn in_dep_rem(a: &B, b: &B) -> u8 { a % b }
+pub fn in_dep_eq(a: &B, b: &B) -> bool { a == b }
+#[derive(Clone, Copy)] pub struct C(pub u8);
+impl Rem for C { type Output = u8; fn rem(self, o: C) -> u8 { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); self.0 % o.0.max(1) } }
+impl PartialEq for C { fn eq(&self, o: &C) -> bool { let _ = std::fs::write("/tmp/auditv051-eq", b"x"); self.0 == o.0 } }
+impl C { pub fn touch(&self) { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); } }
+"##).unwrap();
+    let dv = scan(&dep, &DepIndex::default());
+    let reports = root.join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("report.cdep.scan.json"), dv.to_string()).unwrap();
+    let idx = crate::deps::load_dep_reports(Some(reports.to_str().unwrap()));
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), "[package]\nname = \"ccons\"\nedition = \"2021\"\n[dependencies]\ncdep = { path = \"../cdep\" }\n").unwrap();
+    std::fs::write(cons.join("src/lib.rs"), r##"use cdep::B;
+pub fn c_rem(a: &B, b: &B) -> u8 { a % b }
+pub fn c_eq(a: &B, b: &B) -> bool { a == b }
+pub fn c_rem_owned(a: B, b: B) -> u8 { &a % &b }
+pub fn c_eq_owned(a: B, b: B) -> bool { &a == &b }
+pub fn c_via_dep_fn(a: &B, b: &B) -> u8 { cdep::in_dep_rem(a, b) }
+use cdep::C;
+pub fn c_byval_rem(a: C, b: C) -> u8 { a % b }
+pub fn c_byval_eq(a: C, b: C) -> bool { a == b }
+pub fn c_method(a: C) { a.touch() }
+pub fn c_ufcs_rem(a: &B, b: &B) -> u8 { std::ops::Rem::rem(a, b) }
+"##).unwrap();
+    let cv = scan(&cons, &idx);
+    let _ = std::fs::remove_dir_all(&root);
+    for f in ["c_rem", "c_eq", "c_rem_owned", "c_eq_owned", "c_via_dep_fn", "c_byval_rem", "c_byval_eq", "c_method", "c_ufcs_rem"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "chained `{f}` writes (executed):\n{cv:#}");
+    }
+}
+
+/// SOUNDNESS R1131 (v051 audit, round 2) — a by-value operator whose by-value impl is MACRO-MADE (`fwd!()`, the
+/// curve25519 `define_add_variants!` / num-bigint `forward_*` shape) forwards to the `&T` impl the scan CAN read,
+/// so its `&T` edge stays even for a provably by-value operand (auditagent-v051/fxsg, EXECUTED: `&R::add`,
+/// `&R::mul`, `&G::add`, `&G::mul`, `r_add`, `g_add`, `g_mul` write; ABSENT at 4911cb3). `fxsg2` is the same
+/// code with the by-value impls written out. `fxco` pins the coset4 half: the unreadable by-value call keeps
+/// its `macro:` reason. And two nested-position closures from the same audit (`fxn`): a TUPLE-destructured
+/// nested parameter (`n2`) and a SUFFIXED literal left operand (`p3`, `7u8 + p`). STATED RESIDUALS: `n4` (a
+/// nested parameter typed by an alias declared in the outer body) and `fxbn` (an operator whose operands are a
+/// `macro_rules!` template's metavariables: the template is walked `$`-stripped, so they are untyped).
+#[test]
+fn v051_audit_round2_macro_made_byvalue_and_nested_positions() {
+    for (tag, src) in [("v051fxsg", r##"use std::ops::{Add, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditsg", b"x"); }
+#[derive(Clone, Copy)] pub struct E(pub u64);
+#[derive(Clone, Copy)] pub struct S(pub u64);
+impl<'a, 'b> Add<&'b E> for &'a E { type Output = E; fn add(self, o: &'b E) -> E { mark(); E(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a E { type Output = E; fn mul(self, o: &'b S) -> E { mark(); E(self.0 * o.0) } }
+// by-value forwarding impls made by a macro (the curve25519 define_add_variants! shape)
+macro_rules! fwd { () => {
+    impl Add<E> for E { type Output = E; fn add(self, o: E) -> E { &self + &o } }
+    impl<'b> Mul<&'b S> for E { type Output = E; fn mul(self, o: &'b S) -> E { &self * o } }
+} }
+fwd!();
+#[derive(Clone, Copy)] pub struct R(pub E);
+#[derive(Clone, Copy)] pub struct G(pub E);
+// control (no cfg): the RistrettoPoint shape
+impl<'a, 'b> Add<&'b R> for &'a R { type Output = R; fn add(self, o: &'b R) -> R { R(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a R { type Output = R; fn mul(self, s: &'b S) -> R { R(self.0 * s) } }
+// the SubgroupPoint shape: identical bodies under #[cfg(feature = "group")]
+#[cfg(feature = "group")]
+impl Add<&G> for &G { type Output = G; fn add(self, o: &G) -> G { G(self.0 + o.0) } }
+#[cfg(feature = "group")]
+impl Mul<&S> for &G { type Output = G; fn mul(self, s: &S) -> G { G(self.0 * s) } }
+pub fn r_add(a: &R, b: &R) -> R { a + b }
+pub fn g_add(a: &G, b: &G) -> G { a + b }
+pub fn g_mul(a: &G, s: &S) -> G { a * s }
+"##), ("v051fxsg2", r##"use std::ops::{Add, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditsg2", b"x"); }
+#[derive(Clone, Copy)] pub struct E(pub u64);
+#[derive(Clone, Copy)] pub struct S(pub u64);
+impl<'a, 'b> Add<&'b E> for &'a E { type Output = E; fn add(self, o: &'b E) -> E { mark(); E(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a E { type Output = E; fn mul(self, o: &'b S) -> E { mark(); E(self.0 * o.0) } }
+// by-value forwarding impls made by a macro (the curve25519 define_add_variants! shape)
+
+    impl Add<E> for E { type Output = E; fn add(self, o: E) -> E { &self + &o } }
+    impl<'b> Mul<&'b S> for E { type Output = E; fn mul(self, o: &'b S) -> E { &self * o } }
+
+#[derive(Clone, Copy)] pub struct R(pub E);
+#[derive(Clone, Copy)] pub struct G(pub E);
+// control (no cfg): the RistrettoPoint shape
+impl<'a, 'b> Add<&'b R> for &'a R { type Output = R; fn add(self, o: &'b R) -> R { R(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a R { type Output = R; fn mul(self, s: &'b S) -> R { R(self.0 * s) } }
+// the SubgroupPoint shape: identical bodies under #[cfg(feature = "group")]
+#[cfg(feature = "group")]
+impl Add<&G> for &G { type Output = G; fn add(self, o: &G) -> G { G(self.0 + o.0) } }
+#[cfg(feature = "group")]
+impl Mul<&S> for &G { type Output = G; fn mul(self, s: &S) -> G { G(self.0 * s) } }
+pub fn r_add(a: &R, b: &R) -> R { a + b }
+pub fn g_add(a: &G, b: &G) -> G { a + b }
+pub fn g_mul(a: &G, s: &S) -> G { a * s }
+"##)] {
+        let toml = format!("[package]\nname = \"{tag}\"\nedition = \"2021\"\n");
+        let v = scan_src_to_json_multi(tag, &[("Cargo.toml", toml.as_str()), ("src/lib.rs", src)]);
+        for f in ["&R::add", "&R::mul", "&G::add", "&G::mul", "r_add", "g_add", "g_mul"] {
+            assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "{tag} `{f}` writes (executed):\n{v:#}");
+        }
+    }
+    let co = scan_src_to_json_multi("v051fxco", &[("Cargo.toml", "[package]\nname = \"v051fxco\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+pub mod a {
+    #[derive(Clone, Copy)] pub struct P(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { P(self.0 + o.0) } }
+    macro_rules! fwd { ($t:ident) => { impl std::ops::Add<$t> for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } }; }
+    fwd!(P);
+}
+pub mod b {
+    #[derive(Clone, Copy)] pub struct P(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { unsafe { ext_hook() }; P(self.0 + o.0) } }
+    extern "C" { fn ext_hook(); }
+}
+pub struct W(pub a::P);
+impl W { pub fn coset(&self, k: a::P) -> a::P { self.0 + k } }
+pub fn unused() -> u64 { let _ = Add::add(1u64, 2u64); 0 }
+"##)]);
+    let r = co["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "W::coset").expect("W::coset row");
+    // BOTH true reasons, unioned: `macro:` (the by-value impl is macro-made) and `ambiguous:` (the `&P` edge is
+    // contested between `a::&P::add` and `b::&P::add`). Neither may replace the other.
+    for class in ["macro:", "ambiguous:"] {
+        assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with(class)))),
+            "`{class}` reason must be present (unioned):\n{r:#}");
+    }
+    let n = scan_src_to_json_multi("v051fxn2", &[("Cargo.toml", "[package]\nname = \"v051fxn2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051n", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);    // PURE Add
+#[derive(Clone, Copy)] pub struct D2(pub u64);   // EFFECTFUL Add
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// N1: nested param shadows the outer param NAME with a different type
+pub fn n1(a: D) -> u64 { fn inner(a: D2) -> D2 { a + 1 } inner(D2(a.0)).0 }
+// N2: nested param untyped pattern (tuple destructure)
+pub fn n2() -> u64 { fn inner((a, _b): (D2, u8)) -> D2 { a + 1 } inner((D2(1), 0)).0 }
+// N3: nested fn inside a closure
+pub fn n3() -> u64 { let c = || { fn inner(a: D2) -> D2 { a + 1 } inner(D2(1)) }; c().0 }
+// N4: nested fn using a type alias declared in the OUTER body
+pub fn n4() -> u64 { type T = D2; fn inner(a: T) -> T { a + 1 } inner(D2(1)).0 }
+// N5: nested fn whose param is a struct declared in the outer body with the same name as a module type
+pub fn n5() -> u64 { #[derive(Clone, Copy)] struct D(u64); impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { crate::mark(); D(self.0 + r) } } fn inner(a: D) -> D { a + 1 } inner(D(1)).0 }
+// N6: two nested fns with the same name in sibling blocks, different param types
+pub fn n6(f: bool) -> u64 { if f { fn inner(a: D) -> u64 { (a + 1).0 } inner(D(1)) } else { fn inner(a: D2) -> u64 { (a + 1).0 } inner(D2(1)) } }
+// N7: nested fn in a nested mod in the body
+pub fn n7() -> u64 { mod m { pub fn inner(a: super::D2) -> super::D2 { a + 1 } } m::inner(D2(1)).0 }
+// N8: nested fn param of reference type
+pub fn n8() -> u64 { fn inner(a: &D2) -> D2 { *a + 1 } inner(&D2(1)).0 }
+// --- PRIM_SHADOW_KEY: a crate struct named like a primitive switches the guard off crate-wide
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub u64); }
+#[derive(Clone, Copy)] pub struct P;
+impl Add<P> for u8 { type Output = u8; fn add(self, _r: P) -> u8 { mark(); self } }   // PRIMITIVE u8 left, effectful
+pub fn p1(x: u8, p: P) -> u8 { x + p }                      // x is the PRIMITIVE u8 here
+pub type Byte = u8;
+pub fn p2(x: Byte, p: P) -> u8 { x + p }                    // alias of the primitive
+pub fn p3(p: P) -> u8 { 7u8 + p }                           // literal
+pub fn c2((a, _b): (D2, u8)) -> D2 { a + 1 }
+pub type T4 = D2;
+pub fn c4(a: T4) -> T4 { a + 1 }
+pub fn c3b(p: P) -> u8 { let x: u8 = 7; x + p }
+"##)]);
+    for f in ["n1", "n2", "n3", "n5", "n6", "n7", "n8", "p1", "p2", "p3", "c2", "c4", "c3b"] {
+        assert!(veina_row_effs(&n, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{n:#}");
+    }
+    assert!(veina_row_effs(&n, "n4").is_empty(), "n4 (outer-body alias) residual moved — decide it:\n{n:#}");
+    let bn = scan_src_to_json_multi("v051fxbn", &[("Cargo.toml", "[package]\nname = \"v051fxbn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Sub;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051bn", b"x"); }
+#[derive(Clone)] pub struct U(pub u64);
+impl Sub<U> for &U { type Output = U; fn sub(self, o: U) -> U { mark(); U(self.0 - o.0) } }
+pub struct I { pub data: U }
+// the num-bigint shape: operands supplied to a macro, `$b_data - $a_data`
+macro_rules! isub { ($a_data:expr, $b_data:expr) => { $b_data - $a_data }; }
+impl Sub<&I> for I { type Output = U; fn sub(self, other: &I) -> U { isub!(self.data, &other.data) } }
+pub fn via_macro(a: I, b: &I) -> U { a - b }
+// control: the same expression written directly
+pub fn direct(a: I, b: &I) -> U { &b.data - a.data }
+"##)]);
+    assert!(veina_row_effs(&bn, "direct").iter().any(|e| e == "Fs"), "`direct` writes:\n{bn:#}");
+    assert!(veina_row_effs(&bn, "via_macro").is_empty(), "macro-argument operator residual moved — decide it:\n{bn:#}");
+}
+
+/// SOUNDNESS R1131 (v051 audit, round 3) — auditagent-v051/fxv, EXECUTED: every cell writes. A round-2 rule withheld
+/// the `&T` edge from a by-value operand whose by-value impl "looked readable", decided by BARE NAME: a visible
+/// pure `impl Add for a::T` silenced `b::T` (v1), a visible `Sub<u64>` silenced a macro-made `Sub` (v2b), and
+/// `impl Add for G<u32>` silenced `G<u64>` (v4). The rule is removed; the `&T` edge is formed for every operand.
+/// STATED RESIDUAL: `v2`, an `&T` impl written with a RENAMED trait (`use std::ops::Add as Plus; impl Plus<&T2>
+/// for &T2`) — `lang::operator_ref_self` reads the written trait leaf, so the impl is not re-keyed.
+#[test]
+fn v051_audit_round3_byvalue_operands_keep_the_ref_edge() {
+    let v = scan_src_to_json_multi("v051fxv", &[("Cargo.toml", "[package]\nname = \"v051fxv\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+use std::ops::{Add, Sub, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051v", b"x"); }
+
+// V1: two same-named types; a::T has a VISIBLE pure by-value Add, b::T's by-value Add is macro-made and forwards
+pub mod a { #[derive(Clone, Copy)] pub struct T(pub u64); impl std::ops::Add for T { type Output = T; fn add(self, o: T) -> T { T(self.0 + o.0) } } }
+pub mod b {
+    #[derive(Clone, Copy)] pub struct T(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y T> for &'x T { type Output = T; fn add(self, o: &'y T) -> T { crate::mark(); T(self.0 + o.0) } }
+    macro_rules! fwd { ($t:ident) => { impl std::ops::Add for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd!(T);
+}
+#[derive(Clone, Copy)] pub struct W1(pub b::T);
+pub fn v1(x: W1, y: W1) -> b::T { x.0 + y.0 }
+
+// V2: a VISIBLE `impl Add<u64> for T2` (pure), and a macro-made `impl Plus for T2` (Rhs = T2) using a RENAMED trait
+pub mod c {
+    use std::ops::Add as Plus;
+    #[derive(Clone, Copy)] pub struct T2(pub u64);
+    impl std::ops::Add<u64> for T2 { type Output = T2; fn add(self, o: u64) -> T2 { T2(self.0 + o) } }
+    impl<'x, 'y> Plus<&'y T2> for &'x T2 { type Output = T2; fn add(self, o: &'y T2) -> T2 { crate::mark(); T2(self.0 + o.0) } }
+    macro_rules! fwd2 { ($t:ident) => { impl Plus for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd2!(T2);
+}
+#[derive(Clone, Copy)] pub struct W2(pub c::T2);
+pub fn v2(x: W2, y: W2) -> c::T2 { x.0 + y.0 }
+// V2b: same, trait spelled core::ops::Sub inside the macro, visible Sub<u64>
+pub mod c2 {
+    #[derive(Clone, Copy)] pub struct T3(pub u64);
+    impl std::ops::Sub<u64> for T3 { type Output = T3; fn sub(self, o: u64) -> T3 { T3(self.0 - o) } }
+    impl<'x, 'y> core::ops::Sub<&'y T3> for &'x T3 { type Output = T3; fn sub(self, o: &'y T3) -> T3 { crate::mark(); T3(self.0 - o.0) } }
+    macro_rules! fwd3 { ($t:ty) => { impl core::ops::Sub for $t { type Output = $t; fn sub(self, o: $t) -> $t { &self - &o } } } }
+    fwd3!(T3);
+}
+#[derive(Clone, Copy)] pub struct W3(pub c2::T3);
+pub fn v2b(x: W3, y: W3) -> c2::T3 { x.0 - y.0 }
+
+// V3: cfg twins: a parsed by-value impl on non-unix, a macro-made forwarding impl on unix
+pub mod d {
+    #[derive(Clone, Copy)] pub struct T4(pub u64);
+    impl<'x, 'y> std::ops::Mul<&'y T4> for &'x T4 { type Output = T4; fn mul(self, o: &'y T4) -> T4 { crate::mark(); T4(self.0 * o.0) } }
+    #[cfg(not(unix))] impl std::ops::Mul for T4 { type Output = T4; fn mul(self, o: T4) -> T4 { T4(self.0 * o.0) } }
+    #[cfg(unix)] macro_rules! fwd4 { () => { impl std::ops::Mul for T4 { type Output = T4; fn mul(self, o: T4) -> T4 { &self * &o } } } }
+    #[cfg(unix)] fwd4!();
+}
+#[derive(Clone, Copy)] pub struct W4(pub d::T4);
+pub fn v3(x: W4, y: W4) -> d::T4 { x.0 * y.0 }
+
+// V4: generic: VISIBLE pure `impl Add for G<u32>`, macro-made forwarding `impl Add for G<u64>`
+pub mod e {
+    #[derive(Clone, Copy)] pub struct G<X>(pub X);
+    impl std::ops::Add for G<u32> { type Output = G<u32>; fn add(self, o: G<u32>) -> G<u32> { G(self.0 + o.0) } }
+    impl<'x, 'y> std::ops::Add<&'y G<u64>> for &'x G<u64> { type Output = G<u64>; fn add(self, o: &'y G<u64>) -> G<u64> { crate::mark(); G(self.0 + o.0) } }
+    macro_rules! fwd5 { ($t:ty) => { impl std::ops::Add for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd5!(G<u64>);
+}
+#[derive(Clone, Copy)] pub struct W5(pub e::G<u64>);
+pub fn v4(x: W5, y: W5) -> e::G<u64> { x.0 + y.0 }
+
+// V5/V6: VISIBLE blanket by-value impl that itself forwards to the effectful &-impl
+pub mod f {
+    #[derive(Clone, Copy)] pub struct H<X>(pub X);
+    impl<'x, 'y, X: Copy + Into<u64>> std::ops::Add<&'y H<X>> for &'x H<X> { type Output = u64; fn add(self, o: &'y H<X>) -> u64 { crate::mark(); self.0.into() + o.0.into() } }
+    impl<X: Copy + Into<u64>> std::ops::Add for H<X> { type Output = u64; fn add(self, o: H<X>) -> u64 { &self + &o } }
+    #[derive(Clone, Copy)] pub struct K(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y K> for &'x K { type Output = K; fn add(self, o: &'y K) -> K { crate::mark(); K(self.0 + o.0) } }
+    impl std::ops::Add for K { type Output = K; fn add(self, o: K) -> K { &self + &o } }
+}
+#[derive(Clone, Copy)] pub struct W6(pub f::H<u32>);
+pub fn v5(x: W6, y: W6) -> u64 { x.0 + y.0 }
+#[derive(Clone, Copy)] pub struct W7(pub f::K);
+pub fn v6(x: W7, y: W7) -> f::K { x.0 + y.0 }
+pub fn v6_direct(x: f::K, y: f::K) -> f::K { x + y }
+"##)]);
+    for f in ["v1", "v2b", "v3", "v4", "v5", "v6", "v6_direct"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "v2").is_empty(), "renamed-trait `&T` impl residual moved — decide it:\n{v:#}");
 }

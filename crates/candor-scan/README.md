@@ -56,6 +56,10 @@ under-report, never a wrong label.
   `Drop` of a value of a generic type `T` (`fn eat<T>(_t: T) {}`) are SILENT in that generic body — the
   scan cannot name `T`'s impl (SPEC §4's external-abstraction dispatch, SOUNDNESS R1126). A caller that
   passes a concrete value by value to an otherwise-unnamed generic parameter is charged instead.
+  A dependency's EXTENSION-TRAIT method called on a std or primitive value (`n.extend()` with
+  `num_conv::prelude::*`, `it.sorted()` with `itertools::Itertools`) discloses the importing module's
+  dependencies in `invisible` (SOUNDNESS R1136), except where std itself has a stable method of the same
+  name and arity (`v.iter().join(",")` reads as `[T]::join`), which stays undisclosed.
   The Deref and generic-field shapes are measured in the wild (the PROVE-IT dogfood on `ureq`): 14 of a
   16-function blast radius found, those two shapes the remainder — under-reported, never fabricated.
 

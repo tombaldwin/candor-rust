@@ -206,9 +206,12 @@ fn every_trait_vars_writer_is_in_a_region_that_clears_the_r571_denylist() {
     assert!(src.contains("mono_recv_traits"),
             "R571 CENSUS VACUOUS: `mono_recv_traits` is not in collector.rs at all, so every count \
              below is over a table that no longer exists under that name.");
+    // 11 since SOUNDNESS R1140 (v051 audit): `visit_item_fn` RESTORES the enclosing scope's `trait_vars` entry
+    // for a name a nested fn's parameter shadowed. It writes back the OUTER binding, and the same function
+    // restores the outer `mono_recv_traits` wholesale (`outer_m`), so the pair is put back together.
     let writers = src.matches("self.trait_vars.insert(").count();
-    assert_eq!(writers, 10,
-               "a `trait_vars` writer was ADDED or REMOVED ({writers} found, 10 expected). Each one \
+    assert_eq!(writers, 11,
+               "a `trait_vars` writer was ADDED or REMOVED ({writers} found, 11 expected). Each one \
                 binds a NAME to a dispatch meaning, and if that meaning is ERASED while a stale R571 \
                 `mono_recv_traits` entry survives for the same name, the CHA is subtracted and a real \
                 dispatch is lost with nothing disclosed. Confirm the new site is inside \

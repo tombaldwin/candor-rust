@@ -44,6 +44,17 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev101 (rustagent-v051, audit round 3): the by-value `&Type` skip is removed (cached `calls`).
+    // rev100 (rustagent-v051, audit round 2): a by-value operand keeps its `&Type` edge where the by-value impl is
+    // macro-made; tuple-destructured nested parameters and suffixed literal operands are typed (cached `calls`).
+    // rev99 (rustagent-v051, audit): nested-fn parameter typing, by-value operands, `PRIM_SHADOW_KEY`, chained
+    // `&Type` operator keys — all in the cached `FnInfo`'s `calls` / `FileDecls::rets`; a rev98 entry from b3f93a8
+    // republishes the fxg/fxg2/fxchain silences.
+    // rev98 (rustagent-v051): SOUNDNESS R1130/R1131/R1136/R1137/R1139/R1140 — `FileDecls::rets` gains
+    // `impl_ref_self_key`, `prim_alias_key`, `cmp_field_key`/`cmp_type_key`; operator `&Type` impls are keyed
+    // `&Type::m`; a concrete-type `where` predicate no longer types a parameter as generic; and the cached
+    // `FnInfo`'s `calls` gain the operator, comparison-payload and extension-method edges. A rev97 entry
+    // republishes every silence this closes.
     // rev97 (rustagent-v050): SOUNDNESS R1128's `Rhs` refusal WITHDRAWN and the `nominal_key` fact dropped
     // (cached `FnInfo`'s `calls` and `FileDecls::rets`); a rev96 entry republishes the fx13 silences.
     // rev96 (rustagent-v050): SOUNDNESS R1128 exactness — `FileDecls::rets` gains `nominal_key`, and the
@@ -463,7 +474,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev97/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev101/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

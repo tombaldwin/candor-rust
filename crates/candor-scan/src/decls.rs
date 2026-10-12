@@ -140,7 +140,16 @@ pub(crate) fn scan_items(
                 // Self::touch() } }` must produce `inner::Far::touch`, which is exactly what writing
                 // `Far::touch()` produces. `Self` is a reserved word, so this binding can never shadow a
                 // real import (asserted below rather than assumed).
-                let self_alias = tyname.as_deref().map(|t| crate::lang::expand_noalias(t, uses)); // VEIN A — the impl's OWN written type: its units are keyed under it, so an alias it names (`impl TzifOwned`) must not be followed here; a path through `Self` is still followed by `expand`, and the call site keeps the unfollowed reading beside it
+                // SOUNDNESS R1131 — an operator impl on `&Name` is KEYED `&Name::m`, but its `self` / `Self` are typed as
+                // the referent `Name`: method resolution auto-derefs `self` to `Name` (`(**self).partial_cmp(o)` runs
+                // `Name::partial_cmp`), and no unit is keyed by a `&Name` receiver. Typing `self` by the key left that
+                // call unresolved — a first cut read http's `&HeaderValue::partial_cmp` PURE, dropping the `bytes`
+                // disclosure its old bare-keyed unit carried.
+                let self_name: Option<String> = match crate::lang::operator_ref_self(im) {
+                    Some((_, referent)) => Some(referent),
+                    None => tyname.clone(),
+                };
+                let self_alias = self_name.as_deref().map(|t| crate::lang::expand_noalias(t, uses)); // VEIN A — the impl's OWN written type: its units are keyed under it, so an alias it names (`impl TzifOwned`) must not be followed here; a path through `Self` is still followed by `expand`, and the call site keeps the unfollowed reading beside it
                 if let Some(alias) = &self_alias {
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
@@ -175,7 +184,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -2612,6 +2621,12 @@ pub(crate) fn fninfo(
     // Dispatch-typing WINS where both could apply: `x: X` under `X: Store` also looks like a
     // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
     // the CHA route with a meaningless receiver type.
+    // SOUNDNESS R1140 — a `where` predicate on a CONCRETE type (`where D: Add<T>`) does not make `D` generic;
+    // every TYPING seed below reads the signature without it (`lang::strip_concrete_where`). The trait-name
+    // index (`bound_trait_leaves`) keeps the written signature: it only ever adds a route.
+    let sig_written = sig;
+    let sig_stripped = crate::lang::strip_concrete_where(sig, impl_generics, impl_generics.is_none() && self_ty.is_some());
+    let sig: &syn::Signature = sig_stripped.as_ref().unwrap_or(sig);
     let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
@@ -2858,6 +2873,7 @@ pub(crate) fn fninfo(
             released_tuple_lets: released.1,
             drop_types: elems.drop_types,
             local_consts: Default::default(),
+            let_payload: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
             field_borrows: elems.field_borrows,
@@ -2920,7 +2936,11 @@ pub(crate) fn fninfo(
         mono_recv_traits: seed_mono_trait_vars(sig),
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
         // a LOCAL `let`'s type annotation.
-        generic_bounds: crate::lang::generic_bounds_of(sig),
+        // SOUNDNESS R1140 — the WRITTEN signature here, not the stripped one: a path call through a concrete type
+        // that a `where` predicate bounds by a trait with its OWN generic parameter (`<u8 as From<T>>::cast(x)`
+        // under `where u8: From<T>`, the `cast` crate) dispatches on `T`, which a consumer can supply — its
+        // `dispatchesOn` key is the ⟨0.39⟩ join, and the stripped map dropped it (measured: 14 `cast` rows).
+        generic_bounds: crate::lang::generic_bounds_of(sig_written),
         // R570/R776 — the impl block's generics, read only by the trait-member path router.
         impl_generic_bounds: impl_generics.map(crate::lang::generic_bounds_of_generics).unwrap_or_default(),
         // R576(a)/R629 — a trait DEFAULT body is the one `fninfo` call with a self type and no impl
@@ -2931,7 +2951,7 @@ pub(crate) fn fninfo(
         trait_quals: crate::lang::sig_trait_quals(sig),
         bound_trait_leaves: {
             let mut v = std::collections::HashSet::new();
-            crate::lang::bound_trait_leaves(&sig.generics, &mut v);
+            crate::lang::bound_trait_leaves(&sig_written.generics, &mut v);
             if let Some(g) = impl_generics {
                 crate::lang::bound_trait_leaves(g, &mut v);
             }
@@ -4008,6 +4028,70 @@ pub(crate) fn collect_decls(
             }
             _ => {}
         }
+        // SOUNDNESS R1137/R1139 (v051 audit) — a crate TYPE declared under a primitive's name (`pub struct u8(i64)`):
+        // from here on a typer answer of `u8` no longer identifies the primitive (`model::PRIM_SHADOW_KEY`).
+        let shadow_ident = match it {
+            syn::Item::Struct(x) => Some(&x.ident),
+            syn::Item::Enum(x) => Some(&x.ident),
+            syn::Item::Union(x) => Some(&x.ident),
+            syn::Item::Type(x) => Some(&x.ident),
+            _ => None,
+        };
+        if shadow_ident.is_some_and(|i| {
+            let n = i.to_string();
+            crate::model::PRIMITIVE_LEAVES.contains(&n.as_str()) || n == "str"
+        }) {
+            rets.insert(crate::model::PRIM_SHADOW_KEY.to_string(), Some("1".to_string()));
+        }
+        // SOUNDNESS R1130 — the COMPARISON PAYLOAD of what the field indexes cannot hold: a struct field of TUPLE
+        // type (`p: (Guard, i32)`, which `type_path` names nothing for) and every payload of an ENUM's variants
+        // (`enum E { A(Guard), B { g: Guard } }`, which no per-enum field index records). A derived or
+        // structural comparison runs each component's own impl; the collector reads these at `a.p == b.p` and
+        // in the derive route. Walked by the collector's own `cmp_walk_decl`, under this file's `uses`.
+        match it {
+            syn::Item::Struct(s) if include_tests || !is_cfg_test(&s.attrs) => {
+                let own: Vec<String> = s.generics.type_params().map(|t| t.ident.to_string()).collect();
+                let is_param = |n: &str| own.iter().any(|o| o == n);
+                let mut all = Vec::new();
+                for (i, f) in s.fields.iter().enumerate() {
+                    if has_cfg(&f.attrs) || !matches!(crate::lang::peel_ty_refs(&f.ty), syn::Type::Tuple(_)) {
+                        continue;
+                    }
+                    let mut out = Vec::new();
+                    crate::collector::cmp_walk_decl(&f.ty, uses, &is_param, &is_param, crate::collector::CmpRole::Value, &mut out, 0);
+                    if out.is_empty() {
+                        continue;
+                    }
+                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_else(|| i.to_string());
+                    file_decl_fact(rets, crate::model::cmp_field_key(&s.ident.to_string(), &fname), crate::collector::encode_cmp_payload(&out));
+                    all.extend(out);
+                }
+                if !all.is_empty() {
+                    all.sort_by(|a, b| a.0.cmp(&b.0));
+                    all.dedup();
+                    file_decl_fact(rets, crate::model::cmp_type_key(&s.ident.to_string()), crate::collector::encode_cmp_payload(&all));
+                }
+            }
+            syn::Item::Enum(en) if include_tests || !is_cfg_test(&en.attrs) => {
+                let own: Vec<String> = en.generics.type_params().map(|t| t.ident.to_string()).collect();
+                let is_param = |n: &str| own.iter().any(|o| o == n);
+                let mut all = Vec::new();
+                for v in &en.variants {
+                    if has_cfg(&v.attrs) {
+                        continue;
+                    }
+                    for f in v.fields.iter().filter(|f| !has_cfg(&f.attrs)) {
+                        crate::collector::cmp_walk_decl(&f.ty, uses, &is_param, &is_param, crate::collector::CmpRole::Value, &mut all, 0);
+                    }
+                }
+                if !all.is_empty() {
+                    all.sort_by(|a, b| a.0.cmp(&b.0));
+                    all.dedup();
+                    file_decl_fact(rets, crate::model::cmp_type_key(&en.ident.to_string()), crate::collector::encode_cmp_payload(&all));
+                }
+            }
+            _ => {}
+        }
         match it {
             syn::Item::Struct(s) => {
                 // VEIN A — A STRUCT'S GENERIC PARAMETER SHADOWS AN IMPORT OF THE SAME NAME. tower-http
@@ -4530,6 +4614,20 @@ pub(crate) fn collect_decls(
                 if is_non_nominal_type(&it.ty) {
                     prim_aliases.insert(it.ident.to_string());
                 }
+                // SOUNDNESS R1139 — and WHICH primitive, for a bare primitive alias (`type Word = u64`), so an
+                // operator over a `Word`-typed value also reaches the crate's own `impl Add<D> for u64`
+                // (`model::prim_alias_key`). One key per (alias, primitive), so two files that alias the name to
+                // different primitives keep both instead of withdrawing the fact.
+                if it.generics.params.is_empty() {
+                    if let syn::Type::Path(tp) = &*it.ty {
+                        if let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()) {
+                            let p = id.to_string();
+                            if crate::model::PRIMITIVE_LEAVES.contains(&p.as_str()) {
+                                rets.insert(crate::model::prim_alias_key(&it.ident.to_string(), &p), Some("1".to_string()));
+                            }
+                        }
+                    }
+                }
                 // SOUNDNESS R161 — and, independently, whether the alias names a CALLABLE. The two
                 // questions overlap but neither implies the other: `type Inner = [u8; N]` is
                 // non-nominal and not callable; `type Cb = Box<dyn Fn()>` is NOMINAL and callable, so
@@ -4683,6 +4781,18 @@ pub(crate) fn collect_decls(
                         }
                     }
                 }
+                // SOUNDNESS R1131 — an operator impl on `&Name`, whose methods are keyed `&Name::m`
+                // (`lang::operator_ref_self`): filed so the operator site can reach it ADDITIVELY. Keyed by the
+                // trait's resolved leaf, as `trait_impls` is.
+                if let (Some((_, tr, _)), Some((_, ty))) = (&im.trait_, crate::lang::operator_ref_self(im)) {
+                    if let Some(leaf) = tr.segments.last() {
+                        let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
+                        let k = crate::model::impl_ref_self_key(&key, &ty);
+                        if !matches!(rets.get(&k), Some(None)) {
+                            rets.insert(k, Some("&".to_string()));
+                        }
+                    }
+                }
                 if let Some((_, tr, _)) = &im.trait_ {
                     if let Some(leaf) = tr.segments.last() {
                         // SOUNDNESS R1128 — an operator trait's written `Rhs` (`model::impl_rhs_key`), keyed by the
@@ -4816,6 +4926,10 @@ pub(crate) fn collect_decls(
                         // call is dropped as silently as an unresolvable one. So the second occurrence
                         // WITHDRAWS the key rather than re-affirming it; the cross-file half of the
                         // same rule is in `cache::merge_decls`.
+                        // SOUNDNESS R1136 — and, under a key that never conflicts, that SOME crate impl defines a
+                        // method of this name: a receiver the typer answers wrongly as a std type
+                        // (`x.leaf_decor()`, typed `str`) must not read as a dependency extension method.
+                        rets.insert(crate::model::any_method_key(&m.sig.ident.to_string()), Some("1".to_string()));
                         if let Some(ty) = &impl_key_ty {
                             let k = crate::model::impl_fn_key(ty, &m.sig.ident.to_string());
                             match rets.get(&k) {

@@ -776,6 +776,59 @@ pub(crate) fn generic_bounds_of(sig: &syn::Signature) -> HashMap<String, Vec<Str
     generic_bounds_of_generics(&sig.generics)
 }
 
+/// SOUNDNESS R1140 — a `where` predicate whose bounded type is a bare name that is NOT a type parameter in
+/// scope bounds a CONCRETE type (`fn f<T>(d: D, t: T) where D: Add<T>`), not a generic one. Rust resolves a
+/// bare name in a `where` clause to a generic parameter only when one of that name is declared by the fn or
+/// by its enclosing `impl` (a nested fn cannot name an outer fn's parameters, E0401); otherwise it is the
+/// type. `generic_bounds_of_generics` files every predicate under its name, so `d: D` was read as
+/// dispatch-typed over `Add`: `d + t` formed no edge to `D`'s own impl and `d.method()` none to `D::method`
+/// (EXECUTED: both write; both ABSENT on 0.40.6).
+///
+/// Returns a copy of `sig` without those predicates, or `None` when there are none. The test is the
+/// DECLARATION scope, which the syntax gives completely: the fn's own parameters, the enclosing impl's
+/// (`impl_generics`), and `Self`. A trait's DEFAULT body is left alone (`in_trait_default`): its trait's own
+/// generics are not passed here, so a predicate on one of them could not be told from a concrete type.
+pub(crate) fn strip_concrete_where(
+    sig: &syn::Signature,
+    impl_generics: Option<&syn::Generics>,
+    in_trait_default: bool,
+) -> Option<syn::Signature> {
+    if in_trait_default {
+        return None;
+    }
+    let w = sig.generics.where_clause.as_ref()?;
+    let declared = |id: &syn::Ident| {
+        id == "Self"
+            || sig.generics.type_params().any(|t| t.ident == *id)
+            || impl_generics.is_some_and(|g| g.type_params().any(|t| t.ident == *id))
+    };
+    let concrete = |p: &syn::WherePredicate| match p {
+        syn::WherePredicate::Type(pt) => match &pt.bounded_ty {
+            // A PRIMITIVE or `str` is left alone: its values' methods resolve through the crate's own trait
+            // impls only weakly (a `&str` receiver of `value.serialize_unsized(s)` reached nothing), so the
+            // generic reading — dispatch over the bound's local implementors, with its `dispatchesOn` key —
+            // is the better answer there (measured: rkyv `ArchivedString::serialize_from_str` under
+            // `where str: SerializeUnsized<S>` lost its edge to `str::serialize_unsized` and its join key).
+            syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().is_some_and(|id| {
+                !declared(id) && !crate::model::PRIMITIVE_LEAVES.contains(&id.to_string().as_str()) && id != "str"
+            }),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !w.predicates.iter().any(concrete) {
+        return None;
+    }
+    let mut out = sig.clone();
+    if let Some(wc) = out.generics.where_clause.as_mut() {
+        wc.predicates = std::mem::take(&mut wc.predicates).into_pairs().filter(|p| !concrete(p.value())).collect();
+        if std::env::var_os("CANDOR_R1140_INSTR").is_some() {
+            eprintln!("R1140WHERE\t{}", sig.ident); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+    }
+    Some(out)
+}
+
 /// Generic `T -> [trait bounds]` for any `syn::Generics` — a fn signature's OR a TYPE's own generics
 /// (`struct Pipe<T: Saver>`), covering both the inline `<T: P>` bound and the `where T: P` clause. Reused so
 /// a struct field typed `T` resolves to its bound (else `self.item.save()` on such a field read silent-pure).
@@ -3804,6 +3857,11 @@ pub(crate) fn impl_key_avoiding_free_fns(im: &syn::ItemImpl, items: &[syn::Item]
     if let Some(t) = impl_type_name(&im.self_ty) {
         return Some(t);
     }
+    // SOUNDNESS R1131 — an OPERATOR impl on a reference to a nominal type is keyed `&Name` too, whether or not
+    // its method collides with a free fn (see `operator_ref_self`).
+    if operator_ref_self(im).is_some() {
+        return impl_unit_type_name(&im.self_ty, &im.generics);
+    }
     let methods: Vec<String> = im
         .items
         .iter()
@@ -3878,6 +3936,43 @@ pub(crate) fn impl_unit_type_name(ty: &syn::Type, generics: &syn::Generics) -> O
         }
         _ => elem(ty, &own),
     }
+}
+
+/// The operator traits whose method an operator expression runs (`binop_trait`, plus unary `-`/`!`).
+pub(crate) const OPERATOR_TRAITS: &[&str] = &[
+    "PartialEq", "PartialOrd", "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Neg", "Not",
+];
+
+/// SOUNDNESS R1131 — `impl Rem<&B> for &B` (and `&'a B`, `&mut B`): an OPERATOR trait implemented for a
+/// REFERENCE to a nominal type the crate names. Returns `(trait leaf as written, the referent's leaf)`.
+///
+/// `impl_type_name` answers only a path self type, so such an impl's methods were filed under the bare
+/// module-level qual (`rem`), and `a % b` over `a: &B` — typed `B`, references collapsed — edged to `B::rem`
+/// (a by-value impl, or nothing). EXECUTED: the reference impl's write runs and the caller read ABSENT
+/// (num-bigint writes all its arithmetic this way). Keyed `&B` by R1034's existing scheme (`&Name`, never
+/// `Name`, which would merge it into the by-value impl's unit), and reached ADDITIVELY from the operator
+/// site (`model::impl_ref_self_key`): the edge to `B::op` is kept, so a value that is not a reference still
+/// reaches the by-value body. A self type built from the impl's OWN parameter (`impl<T> Add for &T`) is a
+/// forwarder, not this, and keeps its old key.
+pub(crate) fn operator_ref_self(im: &syn::ItemImpl) -> Option<(String, String)> {
+    let (None, tr, _) = im.trait_.as_ref()? else { return None };
+    let tr_leaf = tr.segments.last()?.ident.to_string();
+    if !OPERATOR_TRAITS.contains(&tr_leaf.as_str()) {
+        return None;
+    }
+    let syn::Type::Reference(r) = &*im.self_ty else { return None };
+    let syn::Type::Path(p) = &*r.elem else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let leaf = p.path.segments.last()?.ident.to_string();
+    if p.path.segments.len() == 1 && im.generics.type_params().any(|t| t.ident == leaf) {
+        return None;
+    }
+    if is_non_nominal_type(&r.elem) {
+        return None;
+    }
+    Some((tr_leaf, leaf))
 }
 
 pub(crate) fn impl_type_name(ty: &syn::Type) -> Option<String> {
@@ -10621,6 +10716,28 @@ pub(crate) fn is_format_macro(leaf: &str) -> bool {
 /// route through `PartialOrd::partial_cmp`/`PartialEq::eq` (the impl method, not the per-op `lt`/`gt`
 /// which forward to it). Lazy boolean `&&`/`||`, assignment, and the compound-assign ops (`+=` is
 /// `AddAssign`, a distinct family left as an honest residual) return None — no overload edge.
+/// SOUNDNESS R1131 — the operator trait (and the method its impl defines) an EXPLICIT method call spells:
+/// `a.rem(b)` is `Rem::rem`, `a.ne(&b)` runs `PartialEq::eq`'s provided `ne`, `a.lt(&b)` `PartialOrd::partial_cmp`.
+pub(crate) fn operator_method_trait(method: &str, argc: usize) -> Option<(&'static str, &'static str)> {
+    Some(match (method, argc) {
+        ("add", 1) => ("Add", "add"),
+        ("sub", 1) => ("Sub", "sub"),
+        ("mul", 1) => ("Mul", "mul"),
+        ("div", 1) => ("Div", "div"),
+        ("rem", 1) => ("Rem", "rem"),
+        ("bitand", 1) => ("BitAnd", "bitand"),
+        ("bitor", 1) => ("BitOr", "bitor"),
+        ("bitxor", 1) => ("BitXor", "bitxor"),
+        ("shl", 1) => ("Shl", "shl"),
+        ("shr", 1) => ("Shr", "shr"),
+        ("eq" | "ne", 1) => ("PartialEq", "eq"),
+        ("partial_cmp" | "lt" | "le" | "gt" | "ge", 1) => ("PartialOrd", "partial_cmp"),
+        ("neg", 0) => ("Neg", "neg"),
+        ("not", 0) => ("Not", "not"),
+        _ => return None,
+    })
+}
+
 pub(crate) fn binop_trait(op: &syn::BinOp) -> Option<(&'static str, &'static str)> {
     use syn::BinOp;
     Some(match op {
@@ -10987,6 +11104,16 @@ pub(crate) fn collect_nonpath_receivers(
                 }
             }
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                // SOUNDNESS R1131 — an operator impl on `&Name` is keyed `&Name::m`, and is NOT given the referent
+                // fallback (`Name::m` -> `&Name::m`) the other non-path impls get: that fallback answered a BY-VALUE
+                // operator's `Name::m` edge with the `&Name` units it never dispatches to (curve25519 `coset4`'s
+                // three `self.0 + ..` run the macro-made by-value `<EdwardsPoint as Add>::add`; the fallback took
+                // them to two `&EdwardsPoint::add` units and replaced a true `macro:` reason with `ambiguous:`).
+                // The spellings that do reach the `&Name` impl are edged explicitly by the collector: the operator,
+                // `a.rem(b)`, `Rem::rem(a, b)`, `<&B as Rem<&B>>::rem` and `<&B>::rem` (`edge_ufcs_operator`).
+                if operator_ref_self(im).is_some() {
+                    continue;
+                }
                 if let Some(k) = impl_key_avoiding_free_fns(im, items) {
                     // SOUNDNESS R1056 (residual) — a COLLIDING non-path impl is keyed under its own type
                     // (`str::m`, `[u8]::m`), a tail the typed call reaches with no alias. It is recorded with an

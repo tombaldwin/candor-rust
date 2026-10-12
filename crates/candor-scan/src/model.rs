@@ -555,6 +555,41 @@ pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {
     format!("<rhs>{trait_leaf}\u{1f}{ty_leaf}")
 }
 
+/// SOUNDNESS R1131 — a `ReturnIndex` key: the crate has an operator impl of `trait` on `&ty` (`lang::operator_ref_self`),
+/// whose methods are keyed `&ty::m`. Value `&`.
+pub(crate) fn impl_ref_self_key(trait_leaf: &str, ty_leaf: &str) -> String {
+    format!("<refself>{trait_leaf}\u{1f}{ty_leaf}")
+}
+
+/// The built-in primitive type names a crate can implement its own operator traits on (`impl Add<D> for u64`).
+pub(crate) const PRIMITIVE_LEAVES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool", "char",
+];
+
+/// SOUNDNESS R1139 — a `ReturnIndex` key: `type alias = prim;` is declared somewhere in the crate. Value `1`.
+pub(crate) fn prim_alias_key(alias: &str, prim: &str) -> String {
+    format!("<primalias>{alias}\u{1f}{prim}")
+}
+
+/// SOUNDNESS R1130 — `ReturnIndex` keys: the comparison payload (`collector::encode_cmp_payload`) of one TUPLE-typed
+/// field of a struct, and the union over a type's tuple fields (a struct) or its variants' payloads (an enum).
+pub(crate) fn cmp_field_key(ty_leaf: &str, field: &str) -> String {
+    format!("<cmpfield>{ty_leaf}\u{1f}{field}")
+}
+
+pub(crate) fn cmp_type_key(ty_leaf: &str) -> String {
+    format!("<cmptype>{ty_leaf}")
+}
+
+/// SOUNDNESS R1136 — a `ReturnIndex` key: some `impl` block of the crate defines a method named `leaf`. Value `1`.
+pub(crate) fn any_method_key(leaf: &str) -> String {
+    format!("<anymethod>{leaf}")
+}
+
+/// SOUNDNESS R1137/R1139 (v051 audit) — a `ReturnIndex` key filed when the crate declares a type under a primitive's
+/// name; a typer answer naming a primitive is then not evidence of one. Value `1`.
+pub(crate) const PRIM_SHADOW_KEY: &str = "<primshadow>";
+
 pub(crate) const RET_SHARED: &str = "<retshared>";
 
 pub(crate) fn ret_shared_key(fn_leaf: &str) -> String {
