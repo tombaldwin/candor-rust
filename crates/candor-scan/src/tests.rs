@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev97/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev98/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28840,8 +28840,9 @@ pub enum E { A(Guard), B }\n\
 pub fn r_enumeq(a: &E, b: &E) -> bool { a == b }\n\
 pub fn r_collect(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }\n";
     let r = scan_src_to_json_multi("r1111r", &[("Cargo.toml", "[package]\nname = \"r1111r\"\n"), ("src/lib.rs", res)]);
+    // SOUNDNESS R1130 (rustagent-v051) — all four now reach `Guard`'s impls (EXECUTED: each writes).
     for f in ["Pair::r_field", "r_letlit", "r_enumeq", "r_collect"] {
-        assert!(veina_row_effs(&r, f).is_empty(), "{f} is a STATED residual; if it now charges, update the row\n{r:#}");
+        assert!(!veina_row_effs(&r, f).is_empty(), "{f} runs `Guard::eq`/`Guard::hash` (executed; R1130)\n{r:#}");
     }
 }
 
@@ -29235,11 +29236,12 @@ pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() 
     ] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` moved — decide it:\n{v:#}");
     }
+    // SOUNDNESS R1130 (rustagent-v051) — the comparison residuals, closed (executed > 0 each).
+    for f in ["Pair::e30_field", "e30_letparam", "e30_letlit", "e30_enum", "e30_collect", "e30_collect_ann"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs `Guard`'s impl (executed; R1130):\n{v:#}");
+    }
     // Stated residual silences (executed > 0) — a change to them closes a residual; shrink this list.
-    for f in [
-        "a29_gen", "a29_impl", "Pair::e30_field", "e30_letparam", "e30_letlit", "e30_enum", "e30_collect",
-        "e30_collect_ann", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut",
-    ] {
+    for f in ["a29_gen", "a29_impl", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` is now charged — shrink the residual list:\n{v:#}");
     }
 }
@@ -29294,8 +29296,8 @@ impl Arg { pub fn get_id(&self) -> &Id { &self.id } }
 pub fn c_getter_eq_str(a: &Arg) -> bool { a.get_id() == Id::HELP }
 pub fn c_local_eq_str(a: &Arg) -> bool { let i: &Id = a.get_id(); i == Id::HELP }
 "##)]);
-    assert!(veina_row_effs(&v2, "c_getter_eq_str").is_empty(), "R1137 closed — move it to the charged list:\n{v2:#}");
-    for f in ["b_local_const_rhs", "b_mod_const_rhs", "c_local_eq_str"] {
+    // SOUNDNESS R1137 (rustagent-v051) — the getter's DECLARED return (`&Id`) is charged beside the builder answer.
+    for f in ["b_local_const_rhs", "b_mod_const_rhs", "c_local_eq_str", "c_getter_eq_str"] {
         assert!(!veina_row_effs(&v2, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v2:#}");
     }
     let v3 = scan_src_to_json_multi("v050t3", &[("Cargo.toml", "[package]\nname = \"v050t3\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::thread;
@@ -29352,7 +29354,8 @@ pub fn v_path_alias(d: D, c: inner::InAlias) -> D { d + c }
               "v_module_const_prim_alias", "v_eq_prim_alias", "v_std_alias_param", "v_path_alias"] {
         assert!(!veina_row_effs(&v9, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v9:#}");
     }
-    assert!(veina_row_effs(&v9, "v_lhs_prim_alias").is_empty(), "left-alias residual closed — move it:\n{v9:#}");
+    // SOUNDNESS R1139 (rustagent-v051) — the LEFT primitive-alias operand reaches `impl Add<D> for u64`.
+    assert!(!veina_row_effs(&v9, "v_lhs_prim_alias").is_empty(), "left-alias operand (executed; R1139):\n{v9:#}");
     let v10 = scan_src_to_json_multi("v050fx10", &[("Cargo.toml", "[package]\nname = \"v050fx10\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
 pub fn mark() { let _ = std::fs::write("/tmp/rustagent-v050-fx10", b"x"); }
 #[derive(Clone, Copy)] pub struct D { pub m: u64 }
@@ -29397,8 +29400,9 @@ pub fn k_exact_keep(a: W, b: V) -> bool { a == b }
     for f in ["k_assoc", "k_macro", "k_reexport", "k_alias_chain", "k_block_local", "k_exact_keep"] {
         assert!(!veina_row_effs(&v10, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v10:#}");
     }
+    // SOUNDNESS R1140 (rustagent-v051) — a `where D: Add<T>` bound on the CONCRETE `D` no longer makes `d` generic.
     for f in ["k_generic", "k_proj"] {
-        assert!(veina_row_effs(&v10, f).is_empty(), "`{f}` residual closed — move it:\n{v10:#}");
+        assert!(!veina_row_effs(&v10, f).is_empty(), "`{f}` runs `D::add` (executed; R1140):\n{v10:#}");
     }
     assert!(veina_row_effs(&v10, "k_exact_refuse").is_empty(), "k_exact_refuse executes 0:\n{v10:#}");
     // auditagent-v050/fx13 (EXECUTED, every cell writes): a renamed two-hop re-export the third version refused.
@@ -29429,5 +29433,309 @@ pub fn rg(l: L, w: hopa::Pinned) -> bool { l == w }
 "##)]);
     for f in ["ra::f", "rb::f", "rc::f", "rd::f", "re", "rf", "rg"] {
         assert!(!veina_row_effs(&v13, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v13:#}");
+    }
+}
+
+
+/// SOUNDNESS R1130 / R1131 / R1137 / R1139 / R1140 (rustagent-v051) — scratchpad `rustagent-v051/fxa`, EXECUTED
+/// (`gt.tsv`: the number of effectful operator / comparison / hash bodies each cell runs). Every `r3x_*` /
+/// `r40_*` / `e30_*` cell with GT > 0 was ABSENT on published 0.40.6 and on 03a3adc; every one is charged now.
+///   * R1131 — an operator impl on `&B` is keyed `&B::op` and reached BESIDE the by-value edge.
+///   * R1139 — a left operand typed by a PRIMITIVE alias also reaches the primitive's impl.
+///   * R1140 — a `where` predicate on a CONCRETE type no longer types its parameters as generic.
+///   * R1137 — a method-call left operand is also charged by its DECLARED return type.
+///   * R1130 — tuple-typed fields, `let`-carried payloads, enum variant payloads and `collect` into a keyed
+///     collection reach the components' impls.
+///
+/// CONTROLS (GT 0): `r40_ctl_pure`, `r39_ctl_alias` (the alias route forms no primitive edge when the right
+/// operand is certainly a primitive) and every `n30_*` stay uncharged, and `r40_impl_param` (a where-bound on
+/// the enclosing impl's REAL type parameter) keeps its dispatch. PINNED OVER-CHARGES (GT 0, a union, the safe
+/// direction): `r31_p_byval` (the `&P` impl is edged beside `P`'s: the typer collapses references), and the
+/// pre-existing `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`.
+#[test]
+fn r1130_r1140_operator_and_comparison_reaches() {
+    let v = scan_src_to_json_multi("v051fxa", &[("Cargo.toml", "[package]\nname = \"v051fxa\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::ops::{Add, Mul, Rem, Sub};
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+
+// ===== R1131: operator impls on a REFERENCE self type =====
+pub struct B(pub u32);
+impl Rem<&B> for &B { type Output = B; fn rem(self, o: &B) -> B { hit(); B(self.0 % o.0) } }
+pub fn r31_refref(a: &B, b: &B) -> B { a % b }
+pub fn r31_refref_amp(a: B, b: B) -> u32 { (&a % &b).0 }
+pub struct Bl(pub u32);
+impl<'a> Rem<&'a Bl> for &'a Bl { type Output = u32; fn rem(self, o: &'a Bl) -> u32 { hit(); self.0 % o.0 } }
+pub fn r31_lifetime(a: &Bl, b: &Bl) -> u32 { a % b }
+pub struct C(pub u32);
+impl Sub<C> for &C { type Output = C; fn sub(self, o: C) -> C { hit(); C(self.0 - o.0) } }
+pub fn r31_ref_owned(a: &C, b: C) -> C { a - b }
+pub struct P(pub u32);
+impl Add for P { type Output = P; fn add(self, o: P) -> P { P(self.0 + o.0) } }
+impl Add<&P> for &P { type Output = P; fn add(self, o: &P) -> P { hit(); P(self.0 + o.0) } }
+pub fn r31_p_byref(a: &P, b: &P) -> P { a + b }
+pub fn r31_p_byval(a: P, b: P) -> P { a + b }
+pub struct Q(pub u32);
+impl Add for Q { type Output = Q; fn add(self, o: Q) -> Q { hit(); Q(self.0 + o.0) } }
+impl Add<&Q> for &Q { type Output = Q; fn add(self, o: &Q) -> Q { Q(self.0 + o.0) } }
+pub fn r31_q_byval(a: Q, b: Q) -> Q { a + b }
+pub fn r31_q_byref(a: &Q, b: &Q) -> Q { a + b }
+pub struct Ee(pub u32);
+impl PartialEq for &Ee { fn eq(&self, o: &&Ee) -> bool { hit(); self.0 == o.0 } }
+pub fn r31_eq_refself(a: &Ee, b: &Ee) -> bool { a == b }
+
+// ===== R1139: a LEFT operand typed by a PRIMITIVE alias =====
+#[derive(Clone, Copy)] pub struct Dd { pub m: u64 }
+pub type PrimAlias = u64;
+pub type A2 = PrimAlias;
+pub mod inner { pub type InAlias = u64; }
+impl Add<Dd> for u64 { type Output = Dd; fn add(self, r: Dd) -> Dd { hit(); Dd { m: self + r.m } } }
+pub fn r39_alias(c: PrimAlias, d: Dd) -> Dd { c + d }
+pub fn r39_prim(c: u64, d: Dd) -> Dd { c + d }
+pub fn r39_chain(c: A2, d: Dd) -> Dd { c + d }
+pub fn r39_path_alias(c: inner::InAlias, d: Dd) -> Dd { c + d }
+pub fn r39_let_alias(d: Dd) -> Dd { let c: PrimAlias = 2; c + d }
+pub fn r39_ctl_prim(c: u64, e: u64) -> u64 { c + e }
+pub fn r39_ctl_alias(c: PrimAlias, e: u64) -> u64 { c + e }
+pub type DdAlias = Dd;
+impl Mul<u64> for Dd { type Output = Dd; fn mul(self, r: u64) -> Dd { hit(); Dd { m: self.m * r } } }
+pub fn r39_struct_alias(a: DdAlias, n: u64) -> Dd { a * n }
+
+// ===== R1140: an operator supplied by a WHERE bound on a CONCRETE type =====
+#[derive(Clone, Copy)] pub struct G { pub m: u32 }
+impl Add<u32> for G { type Output = G; fn add(self, r: u32) -> G { hit(); G { m: self.m + r } } }
+impl G { pub fn eff(&self) -> u32 { hit(); self.m } }
+pub fn r40_generic<T>(d: G, t: T) -> G where G: Add<T, Output = G> { d + t }
+pub fn r40_call(d: G) -> G { r40_generic(d, 2u32) }
+pub trait Tr { type Out; }
+pub struct U;
+impl Tr for U { type Out = u32; }
+pub fn r40_proj<T: Tr>(d: G, x: T::Out) -> G where G: Add<T::Out, Output = G> { d + x }
+pub fn r40_call_proj(d: G) -> G { r40_proj::<U>(d, 2) }
+pub fn r40_where_concrete(d: G, n: u32) -> G where G: Add<u32, Output = G> { d + n }
+pub fn r40_method<T>(d: G, _t: T) -> u32 where G: Add<T, Output = G> { d.eff() }
+pub struct Sw<X>(pub X);
+impl<X> Sw<X> { pub fn r40_impl_method(&self, d: G) -> u32 where G: Add<u32> { d.eff() } }
+#[derive(Clone, Copy)] pub struct Gp { pub m: u32 }
+impl Add<u32> for Gp { type Output = Gp; fn add(self, r: u32) -> Gp { Gp { m: self.m + r } } }
+pub fn r40_ctl_pure<T>(d: Gp, t: T) -> Gp where Gp: Add<T, Output = Gp> { d + t }
+// a where-bound on a REAL type parameter of the enclosing impl stays dispatch-typed (control for the scope test)
+pub trait Shout { fn shout(&self) -> u32; }
+impl Shout for G { fn shout(&self) -> u32 { hit(); 1 } }
+pub struct Hw<X>(pub X);
+impl<X> Hw<X> { pub fn r40_impl_param(&self, x: &X) -> u32 where X: Shout { x.shout() } }
+
+// ===== R1137: a METHOD-CALL left operand =====
+pub struct Id(pub String);
+impl Id { pub const HELP: &'static str = "help"; }
+impl PartialEq<str> for Id { fn eq(&self, o: &str) -> bool { hit(); self.0 == o } }
+pub struct Arg { pub id: Id }
+impl Arg { pub fn get_id(&self) -> &Id { &self.id } pub fn me(&self) -> &Arg { self } }
+pub fn r37_getter(a: &Arg) -> bool { a.get_id() == Id::HELP }
+pub fn r37_chain(a: &Arg) -> bool { a.me().get_id() == Id::HELP }
+pub fn mk_id() -> Id { Id(String::new()) }
+pub fn r37_freefn() -> bool { mk_id() == *"x" }
+pub struct Id2(pub String);
+impl PartialEq<str> for Id2 { fn eq(&self, o: &str) -> bool { self.0 == o } }
+pub struct Arg2 { pub id: Id2 }
+impl PartialEq<str> for Arg2 { fn eq(&self, _o: &str) -> bool { hit(); true } }
+impl Arg2 { pub fn get_id(&self) -> &Id2 { &self.id } }
+pub fn r37_ctl_pure(a: &Arg2) -> bool { a.get_id() == "x" }
+
+// ===== R1130: comparison payloads =====
+#[derive(Debug)]
+pub struct Guard(pub i32);
+impl PartialEq for Guard { fn eq(&self, o: &Guard) -> bool { hit(); self.0 == o.0 } }
+impl Eq for Guard {}
+impl Hash for Guard { fn hash<Hs: Hasher>(&self, h: &mut Hs) { hit(); self.0.hash(h) } }
+pub struct Pair { pub p: (Guard, i32) }
+impl Pair { pub fn e30_field(&self, o: &Pair) -> bool { self.p == o.p } }
+pub fn e30_field_free(a: &Pair, b: &Pair) -> bool { a.p == b.p }
+pub fn e30_letparam(a: (Guard, i32), b: (Guard, i32)) -> bool { let x = a; x == b }
+pub fn e30_letlit(x: Guard, y: Guard) -> bool { let a = (x, 1); let b = (y, 1); a == b }
+#[derive(PartialEq)]
+pub enum E { A(Guard), B }
+pub fn e30_enum(a: &E, b: &E) -> bool { a == b }
+#[derive(PartialEq)]
+pub enum Es { A { g: Guard }, B }
+pub fn e30_enum_struct(a: &Es, b: &Es) -> bool { a == b }
+pub fn e30_collect(v: Vec<Guard>) -> usize { v.into_iter().collect::<HashSet<_>>().len() }
+pub fn e30_collect_ann(v: Vec<Guard>) -> usize { let s: HashSet<Guard> = v.into_iter().collect(); s.len() }
+// controls GT 0
+pub fn n30_tupint(a: (i32, i32), b: (i32, i32)) -> bool { a == b }
+#[derive(PartialEq, Eq, Hash)] pub struct Pure(pub i32);
+pub struct PairP { pub p: (Pure, i32) }
+pub fn n30_field_pure(a: &PairP, b: &PairP) -> bool { a.p == b.p }
+#[derive(PartialEq)] pub enum EP { A(Pure), B }
+pub fn n30_enum_pure(a: &EP, b: &EP) -> bool { a == b }
+pub fn n30_collect_vec(v: Vec<Guard>) -> usize { v.into_iter().collect::<Vec<_>>().len() }
+"##)]);
+    for f in [
+        "r31_refref", "r31_refref_amp", "r31_lifetime", "r31_ref_owned", "r31_p_byref", "r31_q_byval", "r31_eq_refself",
+        "r39_alias", "r39_prim", "r39_chain", "r39_path_alias", "r39_let_alias", "r39_struct_alias",
+        "r40_generic", "r40_call", "r40_proj", "r40_call_proj", "r40_where_concrete", "r40_method",
+        "Sw::r40_impl_method", "Hw::r40_impl_param",
+        "r37_getter", "r37_chain", "r37_freefn",
+        "Pair::e30_field", "e30_field_free", "e30_letparam", "e30_letlit", "e30_enum", "e30_enum_struct", "e30_collect",
+        "e30_collect_ann",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
+    }
+    for f in ["r40_ctl_pure", "r39_ctl_alias", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
+    }
+    for f in ["r31_p_byval", "r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` pinned over-charge moved — decide it:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1136 (rustagent-v051) — a dependency EXTENSION-TRAIT method on a std-typed receiver discloses the
+/// dependency in `invisible`, as the qualified spelling already did (`ctl_*`). Scratchpad `rustagent-v051/fx36`
+/// (from `auditagent-v050/fx4`). `it_join` is the stated residual: `join/1` is also a std method
+/// (`[T]::join`), so the generated denylist answers it. Controls: a std method (`n36_std`), a crate trait on
+/// the primitive (`n36_local`) and a module importing no dependency (`clean::n36_noimport`) disclose nothing.
+#[test]
+fn r1136_dependency_extension_methods_are_disclosed() {
+    let toml = "[package]\nname = \"v051fx36\"\nedition = \"2021\"\n[dependencies]\nnum-conv = \"0.1\"\nitertools = \"0.14\"\n";
+    let v = scan_src_to_json_multi("v051fx36", &[("Cargo.toml", toml), ("src/lib.rs", r##"use num_conv::prelude::*;
+use core::num::NonZero;
+pub fn ext_only(d: NonZero<u8>) -> usize { d.get().extend() }
+pub fn ext_and_fmul(d: NonZero<u8>, v: f64, t: f64) -> (usize, f64) { let x = f64::trunc(v * t) / t; (d.get().extend(), x) }
+pub fn ext_let(d: u8) -> usize { let u: usize = d.extend(); u }
+pub fn ctl_qualified(d: u8) -> usize { num_conv::Extend::extend(d) }
+pub fn ctl_path_trait(d: u8) -> usize { <u8 as num_conv::Extend>::extend(d) }
+pub mod ext;
+// R1136 over-disclosure controls (GT: no dependency body runs)
+pub fn n36_std(d: u8) -> u32 { d.count_ones() }
+pub trait Twice { fn twice(self) -> u16; }
+impl Twice for u8 { fn twice(self) -> u16 { self as u16 * 2 } }
+pub fn n36_local(d: u8) -> u16 { d.twice() }
+pub mod clean { pub fn n36_noimport(d: u8) -> u32 { d.leading_zeros() } }
+"##), ("src/ext.rs", r##"use itertools::Itertools;
+pub fn it_sorted(v: Vec<u32>) -> Vec<u32> { v.into_iter().sorted().collect() }
+pub fn it_join(v: &[u32]) -> String { v.iter().join(",") }
+pub fn it_param(v: std::vec::IntoIter<u32>) -> Vec<u32> { v.sorted().collect() }
+"##)]);
+    let inv = |f: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f)
+            .and_then(|r| r["invisible"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+            .unwrap_or_default()
+    };
+    for f in ["ext_only", "ext_and_fmul", "ext_let", "ctl_qualified", "ctl_path_trait"] {
+        assert_eq!(inv(f), vec!["num_conv".to_string()], "`{f}` calls into num_conv:\n{v:#}");
+    }
+    for f in ["ext::it_sorted", "ext::it_param"] {
+        assert_eq!(inv(f), vec!["itertools".to_string()], "`{f}` calls into itertools:\n{v:#}");
+    }
+    for f in ["ext::it_join", "n36_std", "n36_local", "clean::n36_noimport"] {
+        assert!(inv(f).is_empty(), "`{f}`: no disclosure expected:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1131 / R1140 SECOND FIXTURES (rustagent-v051) — scratchpad `rustagent-v051/fxr`, EXECUTED. Written
+/// for the REMOVAL direction of the two changes that move something rather than only add: R1131 re-keys the
+/// `&B` impl's unit (bare `rem` -> `&B::rem`), and a first cut of it LOST `k31_method` (`a.rem(b)`) and
+/// `k31_path` (`<&B>::rem(a, b)`), both charged on 03a3adc through the non-path referent fallback; R1140
+/// retypes a where-bounded parameter from generic to concrete, so a trait answered by a BLANKET impl, a
+/// `Display` formatter, a type alias and a `Self` bound beside it must still be reached. `k31_ufcs`,
+/// `k31_qself`, `k31_neg`, `k31_assign` and `k31_x1` were ABSENT on 03a3adc and are charged now.
+/// `k31_generic*` is SPEC section 4's generic dispatch over a std trait (R1126's clause), left as it was.
+#[test]
+fn r1131_r1140_second_fixtures_keep_what_the_old_keys_reached() {
+    let v = scan_src_to_json_multi("v051fxr", &[("Cargo.toml", "[package]\nname = \"v051fxr\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
+use std::fmt::{self, Display};
+use std::ops::{Add, Neg, Rem};
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+// ---- R1131 second fixture: OTHER spellings that reached the formerly bare-keyed `rem` unit must still reach it
+pub struct B(pub u32);
+impl Rem<&B> for &B { type Output = B; fn rem(self, o: &B) -> B { hit(); B(self.0 % o.0) } }
+impl Neg for &B { type Output = B; fn neg(self) -> B { hit(); B(self.0) } }
+pub fn k31_method(a: &B, b: &B) -> B { a.rem(b) }
+pub fn k31_ufcs(a: &B, b: &B) -> B { Rem::rem(a, b) }
+pub fn k31_qself(a: &B, b: &B) -> B { <&B as Rem<&B>>::rem(a, b) }
+pub fn k31_neg(a: &B) -> B { -a }
+pub fn k31_assign(a: &B, b: &B) -> u32 { let c = a % b; c.0 }
+pub fn k31_generic<T: Rem<T, Output = B> + Copy>(a: T, b: T) -> B { a % b }
+pub fn k31_generic_call(a: &B, b: &B) -> B { k31_generic(a, b) }
+// two ref impls in ONE module used to MERGE into one bare `add` unit
+pub struct X1(pub u32);
+pub struct X2(pub u32);
+impl Add<&X1> for &X1 { type Output = u32; fn add(self, o: &X1) -> u32 { hit(); self.0 + o.0 } }
+impl Add<&X2> for &X2 { type Output = u32; fn add(self, o: &X2) -> u32 { self.0 + o.0 } }
+pub fn k31_x1(a: &X1, b: &X1) -> u32 { a + b }
+pub fn k31_x2(a: &X2, b: &X2) -> u32 { a + b }
+// ---- R1140 second fixture: a where-bound on a CONCRETE type whose trait is answered other ways
+#[derive(Clone, Copy)] pub struct G(pub u32);
+pub trait Tb { fn tb(&self) -> u32; }
+impl<T: Copy> Tb for T { fn tb(&self) -> u32 { hit(); 1 } }
+pub fn k40_blanket<X>(d: G, _x: X) -> u32 where G: Tb { d.tb() }
+impl Display for G { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { hit(); write!(f, "{}", self.0) } }
+pub fn k40_display<X>(d: G, _x: X) -> String where G: Display { format!("{}", d) }
+pub trait Tl { fn tl(&self) -> u32; }
+impl Tl for G { fn tl(&self) -> u32 { hit(); 2 } }
+pub fn k40_trait<X>(d: G, _x: X) -> u32 where G: Tl { d.tl() }
+pub fn k40_tostring<X>(d: G, _x: X) -> String where G: Display { d.to_string() }
+pub fn k40_string<X>(s: String, x: X) -> String where String: From<X> { s + &String::from(x) }
+pub type GA = G;
+pub fn k40_alias<X>(d: GA, _x: X) -> u32 where GA: Tl { d.tl() }
+pub struct Wr<T>(pub T);
+impl<T> Wr<T> { pub fn k40_selfbound(&self, d: G) -> u32 where Self: Sized, G: Tl { d.tl() } }
+pub fn k31_path(a: &B, b: &B) -> B { <&B>::rem(a, b) }
+pub struct Rf(pub u32);
+pub trait Tk { fn tk(&self) -> u32; }
+impl Tk for &Rf { fn tk(&self) -> u32 { hit(); 1 } }
+pub fn k31_nonop(f: &Rf) -> u32 { f.tk() }
+// a where-bound whose trait has its OWN generic parameter: dispatch is on `T` (the `cast` crate's shape)
+pub trait Cv<S> { fn cv(s: S) -> u32; }
+impl Cv<u8> for u32 { fn cv(s: S8) -> u32 { hit(); s as u32 } }
+pub type S8 = u8;
+pub fn k40_qself<T>(x: T) -> u32 where u32: Cv<T> { <u32 as Cv<T>>::cv(x) }
+"##)]);
+    for f in [
+        "k31_method", "k31_path", "k31_nonop", "k31_ufcs", "k31_qself", "k31_neg", "k31_assign", "k31_x1",
+        "k40_blanket", "k40_display", "k40_trait", "k40_tostring", "k40_alias", "Wr::k40_selfbound", "k40_qself",
+    ] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful body (executed):\n{v:#}");
+    }
+    for f in ["k31_x2", "k40_string"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
+    }
+    // `where u32: Cv<T>` dispatches on `T`, which a consumer can supply: the `dispatchesOn` key (the ⟨0.39⟩ join)
+    // must survive R1140 — a first cut that stripped the predicate from the collector's bounds dropped it
+    // (the `cast` crate's 14 `fns!` rows).
+    let r = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "k40_qself").expect("k40_qself row");
+    assert!(!veina_row_effs(&v, "k40_qself").is_empty(), "k40_qself runs `Cv::cv` (executed):\n{v:#}");
+    assert!(r["dispatchesOn"].as_array().is_some_and(|a| a.iter().any(|k| k == "v051fxr#Cv::cv")), "dispatch key lost:\n{r:#}");
+}
+
+/// SOUNDNESS R1140, PRIMITIVE HALF (rustagent-v051) — scratchpad `rustagent-v051/fxs`, EXECUTED. A `where` predicate on
+/// a PRIMITIVE (`where u32: Add<T>`) is left in place — stripping it cost rkyv's `where str: SerializeUnsized<S>`
+/// its dispatch edge and join key — so `x + t` over `x: u32` is charged by the declared primitive beside the
+/// dispatch typing (`w_prim`, ABSENT on 0.40.6 and 03a3adc). The `s_*` cells pin the crate's own trait on `str`
+/// / `u32` receivers (charged, or disclosed `Unknown`, on every arm).
+#[test]
+fn r1140_primitive_where_bound_operator() {
+    let v = scan_src_to_json_multi("v051fxs", &[("Cargo.toml", "[package]\nname = \"v051fxs\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::sync::atomic::{AtomicUsize, Ordering};
+pub static EFF: AtomicUsize = AtomicUsize::new(0);
+pub fn hit() { EFF.fetch_add(1, Ordering::SeqCst); let _ = std::fs::write("/dev/null", b"x"); }
+pub trait Ser { fn ser(&self) -> usize; }
+impl Ser for str { fn ser(&self) -> usize { hit(); self.len() } }
+impl Ser for u32 { fn ser(&self) -> usize { hit(); 4 } }
+pub fn s_str(v: &str) -> usize { v.ser() }
+pub fn s_string(v: String) -> usize { v.as_str().ser() }
+pub fn s_u32(v: u32) -> usize { v.ser() }
+pub fn s_lit() -> usize { "abc".ser() }
+#[derive(Clone, Copy)] pub struct Lc(pub u32);
+impl std::ops::Add<Lc> for u32 { type Output = u32; fn add(self, r: Lc) -> u32 { hit(); self + r.0 } }
+pub fn w_prim<T>(x: u32, t: T) -> u32 where u32: std::ops::Add<T, Output = u32> { x + t }
+pub fn w_prim_call(x: u32) -> u32 { w_prim(x, Lc(1)) }
+"##)]);
+    for f in ["w_prim", "w_prim_call", "s_str", "s_u32"] {
+        assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
     }
 }

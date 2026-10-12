@@ -3004,6 +3004,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || alt.contains(CONSTRUCT_MARKER)
                         || alt.contains(UNTYPED_RECV_MARKER)
                         || alt.contains(CHAIN_GUESS_MARKER)
+                        || alt.contains(EXT_METHOD_MARKER)
                     {
                         continue;
                     }
@@ -3114,6 +3115,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // index does not cover, or a dep with no such unit, resolves to nothing and costs nothing.
             // Cross-crate DROP GLUE: `cr::<drop>::Type` — binding a dependency's value runs its `Drop` at
             // scope exit. Joined here and nowhere else, for the same reason as the lazy marker below.
+            // SOUNDNESS R1136 — a DEPENDENCY EXTENSION-TRAIT method on a std-typed receiver (`EXT_METHOD_MARKER`):
+            // recorded in the κ ledger exactly as a floored qualified call into `cr` is, so the coverage filter
+            // downstream decides whether it surfaces as `invisible` (a chained or calibrated crate is dropped
+            // there). Nothing else: no effect, no `Unknown`.
+            if c.path.starts_with(&format!("{cr}::{EXT_METHOD_MARKER}::")) {
+                if deps.contains(cr) {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                continue;
+            }
             if let Some(ty) = c.path.strip_prefix(&format!("{cr}::{DROP_MARKER}::")) {
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{ty}::drop")) {

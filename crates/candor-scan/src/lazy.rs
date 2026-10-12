@@ -33,6 +33,12 @@ pub(crate) const CONSTRUCT_MARKER: &str = "<construct>";
 /// effect across. See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md (half 1).
 pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
 
+/// SOUNDNESS R1136 — `cr::<extmethod>::leaf`: a method call on a std-typed receiver that no std method and no
+/// crate definition answers (`collector::note_dep_ext_method`), so it is an extension-trait method of a
+/// dependency the module imports. Consumed only by the ledger, which records `cr` as reached-and-unseen; it
+/// resolves to nothing, and the angle-bracket segment keeps it out of every key lookup.
+pub(crate) const EXT_METHOD_MARKER: &str = "<extmethod>";
+
 /// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
 /// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
 /// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a

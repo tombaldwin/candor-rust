@@ -144,6 +144,11 @@ pub(crate) struct AssignDrop<'a> {
     /// pushed and popped by `visit_block`: an operator operand that names one (`a + ONE`, `ONE + a`) is typed
     /// by its declaration, which no crate-wide index holds.
     pub(crate) local_consts: std::cell::RefCell<HashMap<String, String>>,
+    /// SOUNDNESS R1130 — a `let` binding NAME -> the comparison payload of its initializer (`compare_payload` of
+    /// `let x = a;` / `let a = (x, 1);`), so `x == b` reaches the components the initializer's own spelling
+    /// would. Rewritten (or cleared) at every `let` that binds the name; flow-insensitive like `vars`, so a
+    /// stale entry can only over-charge.
+    pub(crate) let_payload: HashMap<String, Vec<(String, CmpRole)>>,
     /// `lang::assign_drop_exempt` — addresses of the `syn::ExprAssign`s that provably overwrite nothing.
     pub(crate) exempt: std::collections::HashSet<usize>,
     /// Parameter NAME -> its declared type, for the names the body never re-binds (a shadowing `let`
@@ -634,6 +639,126 @@ pub(crate) enum CmpRole {
     Value,
     HashKey,
     OrdKey,
+}
+
+/// SOUNDNESS R1111 — walk a DECLARED type down to the nominal types a comparison of a value of it reaches. A std
+/// wrapper/container/tuple/array/slice is a layer; a map's or set's first argument is a KEY (it is also hashed,
+/// or ordered); anything else is a payload leaf as `type_path` names it. A generic parameter is skipped (it has
+/// no impl of its own here), and so is a std name the crate has shadowed with an import of its own.
+///
+/// A free function (R1130) so Pass A can ask it of a struct's tuple-typed FIELD and an enum's variant payloads
+/// with the declaring file's `uses` — one walk for both passes, not a second copy (§G). `shadows_std` is the
+/// names that hide a std name (`names_std_type`), `is_param` the generic parameters to skip.
+pub(crate) fn cmp_walk_decl(
+    ty: &syn::Type,
+    uses: &HashMap<String, String>,
+    shadows_std: &dyn Fn(&str) -> bool,
+    is_param: &dyn Fn(&str) -> bool,
+    role: CmpRole,
+    out: &mut Vec<(String, CmpRole)>,
+    depth: u8,
+) {
+    if depth > 6 {
+        return;
+    }
+    let names_std_type = |path: &syn::Path| {
+        let written = crate::lang::path_to_string_lc(path);
+        let full = expand(&written, uses);
+        let root = full.split("::").next().unwrap_or(&full);
+        if full.contains("::") {
+            return matches!(root, "std" | "core" | "alloc");
+        }
+        !uses.contains_key(&full) && !shadows_std(&full)
+    };
+    let walk = |t: &syn::Type, r: CmpRole, out: &mut Vec<(String, CmpRole)>| {
+        cmp_walk_decl(t, uses, shadows_std, is_param, r, out, depth + 1)
+    };
+    match ty {
+        syn::Type::Reference(r) => walk(&r.elem, role, out),
+        syn::Type::Paren(p) => walk(&p.elem, role, out),
+        syn::Type::Group(g) => walk(&g.elem, role, out),
+        syn::Type::Tuple(t) => {
+            for el in &t.elems {
+                walk(el, role, out);
+            }
+        }
+        syn::Type::Array(a) => walk(&a.elem, role, out),
+        syn::Type::Slice(s) => walk(&s.elem, role, out),
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let Some(seg) = p.path.segments.last() else { return };
+            let name = seg.ident.to_string();
+            let std_named = names_std_type(&p.path);
+            let args: Vec<&syn::Type> = match &seg.arguments {
+                syn::PathArguments::AngleBracketed(a) => a
+                    .args
+                    .iter()
+                    .filter_map(|g| match g {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let layer = std_named
+                && matches!(
+                    name.as_str(),
+                    "Option" | "Vec" | "VecDeque" | "LinkedList" | "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
+                        | "Result" | "Reverse" | "Wrapping" | "Saturating"
+                );
+            let map_key = |n: &str| match n {
+                "HashMap" | "HashSet" | "IndexMap" | "IndexSet" | "FxHashMap" | "FxHashSet" | "AHashMap"
+                | "AHashSet" => Some(CmpRole::HashKey),
+                "BTreeMap" | "BTreeSet" => Some(CmpRole::OrdKey),
+                _ => None,
+            };
+            if layer {
+                for a in args {
+                    walk(a, role, out);
+                }
+            } else if let Some(k) = map_key(&name).filter(|_| std_named) {
+                let mut it = args.into_iter();
+                if let Some(key) = it.next() {
+                    walk(key, k, out);
+                }
+                if let Some(val) = it.next() {
+                    walk(val, role, out);
+                }
+            } else if p.path.segments.len() == 1 && is_param(&name) {
+            } else if let Some(t) = crate::lang::type_path(ty, uses) {
+                out.push((t, role));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1130 — encode / decode a comparison payload for a Pass A fact (`model::cmp_field_key` and kin).
+pub(crate) fn encode_cmp_payload(p: &[(String, CmpRole)]) -> String {
+    p.iter()
+        .map(|(t, r)| {
+            let r = match r {
+                CmpRole::Value => 'V',
+                CmpRole::HashKey => 'H',
+                CmpRole::OrdKey => 'O',
+            };
+            format!("{t}\u{1e}{r}")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(crate) fn decode_cmp_payload(s: &str) -> Vec<(String, CmpRole)> {
+    s.split(',')
+        .filter_map(|x| {
+            let (t, r) = x.split_once('\u{1e}')?;
+            let r = match r {
+                "H" => CmpRole::HashKey,
+                "O" => CmpRole::OrdKey,
+                _ => CmpRole::Value,
+            };
+            Some((t.to_string(), r))
+        })
+        .collect()
 }
 
 /// SOUNDNESS R1111 — the std collection families whose methods run an element's or key's comparison.
@@ -1202,6 +1327,117 @@ impl<'a> CallCollector<'a> {
     /// its children are walked) typed nothing: no receiver type, no call beyond the bare-leaf
     /// twin, and no disclosure (`unresolved`, `unresolved_why`, a dispatch site). The exact routes stay the
     /// precision layer; this only records what reached none of them.
+    /// SOUNDNESS R1131 — a fully-qualified OPERATOR call, `Rem::rem(a, b)` / `<&B as Rem<&B>>::rem(a, b)` /
+    /// `std::ops::Add::add(a, b)`: the same dispatch as `a % b`, on the FIRST argument's type, so it is charged
+    /// exactly as the operator is (`charge_coercion_ty`: the by-value impl, the `&Type` impl, a derive's fields).
+    /// EXECUTED: both spellings run `&B`'s `rem`; both read ABSENT on 0.40.6 and on 03a3adc.
+    fn edge_ufcs_operator(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        let segs: Vec<&syn::PathSegment> = p.path.segments.iter().collect();
+        let Some(last) = segs.last() else { return };
+        let method = last.ident.to_string();
+        let trait_seg = match &p.qself {
+            Some(q) if q.position >= 1 && q.position < segs.len() => Some(segs[q.position - 1]),
+            Some(_) => None,
+            None if segs.len() >= 2 => Some(segs[segs.len() - 2]),
+            None => None,
+        };
+        let Some(ts) = trait_seg else { return };
+        let Some((tr, m)) = crate::lang::operator_method_trait(&method, args.len().saturating_sub(1)) else { return };
+        if ts.ident != tr {
+            return;
+        }
+        let Some(first) = args.first() else { return };
+        if let Some(t) = self.resolve_recv_type(first) {
+            if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
+                eprintln!("R1131UFCS\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            self.charge_coercion_ty(&t, tr, m);
+        }
+    }
+
+    /// SOUNDNESS R1136 — a DEPENDENCY EXTENSION-TRAIT method on a std-typed receiver. `d.extend()` over a `u8`
+    /// with `use num_conv::prelude::*` in scope runs `num_conv`'s body, and nothing said so: the qualified
+    /// spelling (`num_conv::Extend::extend(d)`) carried `invisible: ["num_conv"]`, the method spelling carried
+    /// nothing — no edge, no ledger entry (EXECUTED fixture: both run the same body; one row is ABSENT).
+    ///
+    /// The call is one only an imported trait can answer when: the receiver is typed as a std/core/alloc or
+    /// primitive type; no stable public std method has that name and arity (`std_methods`, a GENERATED
+    /// denylist — a std method it lacks only over-discloses); and the crate defines no method of that name on
+    /// the type or in any trait of its own. The traits in scope cannot be told apart by name, so every
+    /// dependency the module imports a TRAIT-SHAPED name from — a glob, an `as _` import, or a capitalised
+    /// name — is disclosed (a union over what could answer, never a pick). Disclosure only: the ledger records
+    /// the crate and the coverage filter decides whether it surfaces; no effect and no `Unknown` is formed.
+    fn note_dep_ext_method(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        if crate::std_methods::is_std_method(leaf, node.args.len()) {
+            return;
+        }
+        // A receiver no route types, but which is a std ITERATOR adapter over a collection whose element is known
+        // (`v.into_iter().sorted()`), is std's too.
+        let std_iter = |s: &Self| match peel_value(&node.receiver) {
+            syn::Expr::MethodCall(m) => {
+                matches!(
+                    m.method.to_string().as_str(),
+                    "iter" | "into_iter" | "iter_mut" | "drain" | "keys" | "values" | "values_mut" | "chars" | "bytes"
+                        | "lines" | "map" | "filter" | "filter_map" | "flat_map" | "enumerate" | "zip" | "rev" | "skip"
+                        | "take" | "cloned" | "copied" | "chain" | "peekable" | "windows" | "chunks"
+                ) && s.resolve_elem_type_raw(&node.receiver).is_some()
+            }
+            _ => false,
+        };
+        let Some(t) = self.resolve_recv_type(&node.receiver).or_else(|| std_iter(self).then(|| "core::iter::Iterator".to_string()))
+        else {
+            return;
+        };
+        let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
+        let std_typed = if t.contains("::") {
+            matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
+        } else {
+            crate::model::PRIMITIVE_LEAVES.contains(&t.as_str())
+                || t == "str"
+                || (matches!(t.as_str(), "String" | "Vec" | "Option" | "Result" | "Box") && !self.uses.contains_key(&t))
+        };
+        if !std_typed
+            || self.local_fn_on(&tl, leaf)
+            || self.returns.contains_key(&crate::model::any_method_key(leaf))
+            || self.local_traits.values().any(|lt| lt.methods.contains(leaf))
+        {
+            return;
+        }
+        let mut crates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut note = |v: &str| {
+            let root = v.split("::").next().unwrap_or(v);
+            if !root.is_empty() && !matches!(root, "crate" | "self" | "super" | "std" | "core" | "alloc") && !root.contains('<') {
+                crates.insert(root.to_string());
+            }
+        };
+        if let Some(g) = self.uses.get(crate::lang::GLOB_KEY) {
+            for v in g.split('\u{1}') {
+                note(v);
+            }
+        }
+        for (k, v) in self.uses.iter() {
+            let trait_shaped = k == "_" || k.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+            if trait_shaped && v.contains("::") && !k.starts_with('*') {
+                note(v);
+            }
+        }
+        if let Some(alts) = self.use_alts.get("_") {
+            for v in alts {
+                note(v);
+            }
+        }
+        for cr in crates {
+            if std::env::var_os("CANDOR_R1136_INSTR").is_some() {
+                eprintln!("R1136EXT\t{cr}\t{t}\t.{leaf}/{}", node.args.len()); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            self.calls.push(Call { argc: 0, entropy_arg: false,
+                path: format!("{cr}::{EXT_METHOD_MARKER}::{leaf}"),
+                leaf: leaf.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                typed: false, method: false, is_macro: false,
+            });
+        }
+    }
+
     fn note_untyped_method(&mut self, node: &syn::ExprMethodCall, leaf: &str,
         start: (usize, usize, bool, usize, usize)) {
         let (c0, w0, u0, d0, f0) = start;
@@ -4016,6 +4252,11 @@ impl<'a> CallCollector<'a> {
                     self.cmp_walk_ty(ty, CmpRole::Value, out, 0);
                 } else if let Some(t) = self.tuple_of.get(&name) {
                     out.extend(t.iter().flatten().map(|t| (t.clone(), CmpRole::Value)));
+                } else if let Some(p) = self.assign_drop.let_payload.get(&name) {
+                    if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                        eprintln!("R1130LET\t{name}"); // §E1 REACH COUNTER, on the ADDED branch only
+                    }
+                    out.extend(p.iter().cloned());
                 }
             }
             syn::Expr::Tuple(t) => {
@@ -4030,6 +4271,21 @@ impl<'a> CallCollector<'a> {
                 }
             }
             syn::Expr::Field(f) => {
+                // SOUNDNESS R1130 — a TUPLE-typed field of a typed struct value (`self.p == o.p`, `p: (Guard, i32)`):
+                // the field's declared components, filed by Pass A (`model::cmp_field_key`).
+                if let Some(t) = self.resolve_recv_type(&f.base) {
+                    let l = t.rsplit("::").next().unwrap_or(&t);
+                    let m = match &f.member {
+                        syn::Member::Named(n) => n.to_string(),
+                        syn::Member::Unnamed(i) => i.index.to_string(),
+                    };
+                    if let Some(enc) = self.returns.get(&crate::model::cmp_field_key(l, &m)) {
+                        if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                            eprintln!("R1130FIELD\t{l}\t{m}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        out.extend(decode_cmp_payload(enc));
+                    }
+                }
                 let syn::Member::Unnamed(idx) = &f.member else { return };
                 let Some(base) = self.declared_param_ty(&f.base) else { return };
                 if let syn::Type::Tuple(tt) = crate::lang::peel_ty_refs(base) {
@@ -4102,68 +4358,15 @@ impl<'a> CallCollector<'a> {
     /// generic parameter is skipped (it has no impl of its own here), and so is a std name the crate has
     /// shadowed with an import of its own.
     fn cmp_walk_ty(&self, ty: &syn::Type, role: CmpRole, out: &mut Vec<(String, CmpRole)>, depth: u8) {
-        if depth > 6 {
-            return;
-        }
-        match ty {
-            syn::Type::Reference(r) => self.cmp_walk_ty(&r.elem, role, out, depth + 1),
-            syn::Type::Paren(p) => self.cmp_walk_ty(&p.elem, role, out, depth + 1),
-            syn::Type::Group(g) => self.cmp_walk_ty(&g.elem, role, out, depth + 1),
-            syn::Type::Tuple(t) => {
-                for el in &t.elems {
-                    self.cmp_walk_ty(el, role, out, depth + 1);
-                }
-            }
-            syn::Type::Array(a) => self.cmp_walk_ty(&a.elem, role, out, depth + 1),
-            syn::Type::Slice(s) => self.cmp_walk_ty(&s.elem, role, out, depth + 1),
-            syn::Type::Path(p) if p.qself.is_none() => {
-                let Some(seg) = p.path.segments.last() else { return };
-                let name = seg.ident.to_string();
-                let std_named = self.names_std_type(&p.path);
-                let args: Vec<&syn::Type> = match &seg.arguments {
-                    syn::PathArguments::AngleBracketed(a) => a
-                        .args
-                        .iter()
-                        .filter_map(|g| match g {
-                            syn::GenericArgument::Type(t) => Some(t),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                let layer = std_named
-                    && matches!(
-                        name.as_str(),
-                        "Option" | "Vec" | "VecDeque" | "LinkedList" | "Box" | "Rc" | "Arc" | "RefCell" | "Cell"
-                            | "Result" | "Reverse" | "Wrapping" | "Saturating"
-                    );
-                let map_key = |n: &str| match n {
-                    "HashMap" | "HashSet" | "IndexMap" | "IndexSet" | "FxHashMap" | "FxHashSet" | "AHashMap"
-                    | "AHashSet" => Some(CmpRole::HashKey),
-                    "BTreeMap" | "BTreeSet" => Some(CmpRole::OrdKey),
-                    _ => None,
-                };
-                if layer {
-                    for a in args {
-                        self.cmp_walk_ty(a, role, out, depth + 1);
-                    }
-                } else if let Some(k) = map_key(&name).filter(|_| std_named) {
-                    let mut it = args.into_iter();
-                    if let Some(key) = it.next() {
-                        self.cmp_walk_ty(key, k, out, depth + 1);
-                    }
-                    if let Some(val) = it.next() {
-                        self.cmp_walk_ty(val, role, out, depth + 1);
-                    }
-                } else if p.path.segments.len() == 1
-                    && (self.generic_bounds.contains_key(&name) || self.impl_generic_bounds.contains_key(&name))
-                {
-                } else if let Some(t) = crate::lang::type_path(ty, &self.uses) {
-                    out.push((t, role));
-                }
-            }
-            _ => {}
-        }
+        cmp_walk_decl(
+            ty,
+            &self.uses,
+            &|n: &str| self.generic_bounds.contains_key(n),
+            &|n: &str| self.generic_bounds.contains_key(n) || self.impl_generic_bounds.contains_key(n),
+            role,
+            out,
+            depth,
+        );
     }
 
     /// SOUNDNESS R1111 (boundary) — a std ALGORITHM or COLLECTION method that runs the element's or the
@@ -4189,6 +4392,14 @@ impl<'a> CallCollector<'a> {
             Eq,
             Ord,
             Hash,
+        }
+        // SOUNDNESS R1130 — `xs.into_iter().collect::<HashSet<_>>()`: the TURBOFISH form of collecting into a
+        // keyed collection (the `let s: HashSet<G> = ..collect()` form is `visit_local`'s).
+        if leaf == "collect" && node.args.is_empty() {
+            if let Some(syn::GenericArgument::Type(t)) = node.turbofish.as_ref().and_then(|tf| tf.args.first()) {
+                self.charge_collect_into(node, t);
+            }
+            return;
         }
         // The provided methods of `PartialEq`/`PartialOrd`/`Ord` on a concrete value. A type whose own impl
         // or inherent block defines the name dispatches there by itself and is left alone.
@@ -4299,6 +4510,93 @@ impl<'a> CallCollector<'a> {
                 Fam::Ord => self.charge_cmp_family(&t, false, true, false),
                 Fam::Hash => self.charge_cmp_family(&t, true, false, true),
             }
+        }
+    }
+
+    /// SOUNDNESS R1137/R1139 — whether an operator on a value of type `ty` can reach a body this crate (or a
+    /// chained dependency) supplies: the crate's own impl of `tr` for the leaf, a derive of it, an `&Type` impl,
+    /// or a dependency type. Anything else answers with std's impl or none.
+    fn operator_reachable(&self, ty: &str, tr: &str) -> bool {
+        let l = ty.rsplit("::").next().unwrap_or(ty);
+        self.trait_impls.get(tr).is_some_and(|v| v.iter().any(|x| x == l))
+            || self.impl_members.contains(&crate::model::derive_key(tr, l))
+            || self.returns.contains_key(&crate::model::impl_ref_self_key(tr, l))
+            || self.is_dependency_type(ty)
+    }
+
+    /// SOUNDNESS R1137/R1139 — an operand that is CERTAINLY a primitive value: a literal, a cast to a primitive,
+    /// or one the typer answers with a primitive's own name (through `&`, `*`, parentheses and unary `-`/`!`).
+    fn certainly_primitive(&self, e: &syn::Expr) -> bool {
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                syn::Expr::Unary(u) => e = &u.expr,
+                _ => break,
+            }
+        }
+        match e {
+            syn::Expr::Lit(l) => matches!(
+                l.lit,
+                syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Byte(_) | syn::Lit::Str(_)
+            ),
+            syn::Expr::Cast(c) => matches!(&*c.ty, syn::Type::Path(p) if p.qself.is_none()
+                && p.path.get_ident().is_some_and(|i| crate::model::PRIMITIVE_LEAVES.contains(&i.to_string().as_str()))),
+            _ => self
+                .type_of(e)
+                .or_else(|| self.resolve_recv_type(e))
+                .is_some_and(|t| crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()) || t == "str"),
+        }
+    }
+
+    /// SOUNDNESS R1130 — collecting into a KEYED std collection inserts every element: a `HashSet`/`HashMap` hashes
+    /// and compares each key (`K::hash`, `K::eq`), a `BTreeSet`/`BTreeMap` orders it (EXECUTED: `Guard::hash` runs
+    /// per element; ABSENT before). `target` is the collected-into type as WRITTEN (turbofish or `let`
+    /// annotation). The key is that type's first argument when it names one, else — for a SET, whose element
+    /// is its key — the receiver chain's element. A map collected through `_` has a tuple element the typer
+    /// does not split, and is the stated residual. Charged through `charge_cmp_family`, so a std or pure key
+    /// forms nothing.
+    fn charge_collect_into(&mut self, node: &syn::ExprMethodCall, target: &syn::Type) {
+        let syn::Type::Path(p) = crate::lang::peel_ty_refs(target) else { return };
+        if p.qself.is_some() || !self.names_std_type(&p.path) {
+            return;
+        }
+        let Some(seg) = p.path.segments.last() else { return };
+        let name = seg.ident.to_string();
+        let (hashed, set) = match name.as_str() {
+            "HashSet" => (true, true),
+            "HashMap" => (true, false),
+            "BTreeSet" => (false, true),
+            "BTreeMap" => (false, false),
+            _ => return,
+        };
+        let key_arg = match &seg.arguments {
+            syn::PathArguments::AngleBracketed(a) => a.args.iter().find_map(|g| match g {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let mut tys: Vec<String> = Vec::new();
+        if let Some(k) = key_arg.filter(|k| !matches!(k, syn::Type::Infer(_))) {
+            let mut out = Vec::new();
+            self.cmp_walk_ty(k, CmpRole::Value, &mut out, 0);
+            tys.extend(out.into_iter().map(|(t, _)| t));
+        } else if set {
+            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
+                let elem = crate::lang::strip_wrapped(&raw).to_string();
+                if !elem.is_empty() {
+                    tys.push(elem);
+                }
+            }
+        }
+        for t in tys {
+            if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                eprintln!("R1130COLLECT\t{name}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            self.charge_cmp_family(&t, hashed, !hashed, hashed);
         }
     }
 
@@ -4448,6 +4746,15 @@ impl<'a> CallCollector<'a> {
 
     fn charge_coercion_ty_at(&mut self, ty: &str, trait_leaf: &str, method: &str, depth: u8) {
         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+        // SOUNDNESS R1131 — the crate's operator impl on `&Type` (`lang::operator_ref_self`), keyed `&Type::m`. The
+        // typer collapses references, so whether this operand is `&Type` or `Type` is not known here: the edge
+        // is formed BESIDE whatever the by-value impl answers below (a union, never a choice).
+        if self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
+            if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
+                eprintln!("R1131REFSELF\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            self.push_coercion_edge(&format!("&{ty_leaf}"), method);
+        }
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 // SOUNDNESS R1128 — WITHDRAWN to the pre-existing over-charge. A refusal of this edge when the
@@ -4486,6 +4793,28 @@ impl<'a> CallCollector<'a> {
             }
             if let Some(fs) = self.field_elem.get(ty_leaf) {
                 field_tys.extend(fs.values().map(|e| crate::lang::strip_wrapped(e).to_string()).filter(|e| !e.is_empty()));
+            }
+            // SOUNDNESS R1130 — what those indexes cannot hold: a struct's TUPLE-typed fields and an ENUM's variant
+            // payloads (`model::cmp_type_key`; EXECUTED: `#[derive(PartialEq)] enum E { A(Guard), .. }` runs
+            // `Guard::eq` at `a == b`, ABSENT before). A hashed key reached this way is also hashed by `==`.
+            let mut hashed_keys: Vec<String> = Vec::new();
+            if let Some(enc) = self.returns.get(&crate::model::cmp_type_key(ty_leaf)) {
+                if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                    eprintln!("R1130DERIVE\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                for (t, role) in decode_cmp_payload(enc) {
+                    if role == CmpRole::HashKey {
+                        hashed_keys.push(t.clone());
+                    }
+                    field_tys.push(t);
+                }
+            }
+            if trait_leaf == "PartialEq" {
+                for k in hashed_keys {
+                    if k.rsplit("::").next() != Some(ty_leaf) && !self.std_payload(&k) {
+                        self.charge_coercion_ty_at(&k, "Hash", "hash", depth + 1);
+                    }
+                }
             }
             field_tys.sort();
             field_tys.dedup();
@@ -6875,6 +7204,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let syn::Expr::Path(p) = func {
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.edge_std_type_dep_trait_member(p, &node.args);
+            self.edge_ufcs_operator(p, &node.args);
             // SOUNDNESS R1111 (boundary) — `std::cmp::max(a, b)` / `min` / `max_by_key`-free spellings run
             // `Ord` on the arguments' type (EXECUTED: `v_cmpmax` logs the impl). Only the std path, as the
             // written path expands; a local `max` fn resolves as itself.
@@ -8245,6 +8575,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // R1095 judgement on purpose: that judgement reads every call this SITE pushed as evidence the
         // receiver was typed, and an edge into an element's impl says nothing about the receiver.
         self.charge_std_cmp_method(node, &leaf);
+        self.note_dep_ext_method(node, &leaf);
+        // SOUNDNESS R1131 — `a.rem(b)` over `a: &B`: the typed call forms `B::rem`, which names the BY-VALUE impl;
+        // the crate's `&B` impl is keyed `&B::rem` (`lang::operator_ref_self`) and is edged beside it. Before the
+        // `&B` key existed the impl's unit was the bare `rem` and this spelling reached it by leaf.
+        if let Some((tr, m)) = crate::lang::operator_method_trait(&leaf, node.args.len()) {
+            if let Some(t) = self.resolve_recv_type(&node.receiver) {
+                let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
+                if self.returns.contains_key(&crate::model::impl_ref_self_key(tr, &tl)) {
+                    self.push_coercion_edge(&format!("&{tl}"), m);
+                }
+            }
+        }
         self.visit_expr(&node.receiver);
         if let Some(name) = closure_param {
             for a in &node.args {
@@ -9100,6 +9442,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // rather than argued about, because the argument is the thing that has been wrong three times.
         let bound_names = crate::decls::pat_bound_idents(&node.pat);
         let pre_bindings = self.capture_bindings(&bound_names);
+        // SOUNDNESS R1130 — a plain `let x = <init>;` carries its initializer's comparison payload to `x`. Computed
+        // under the PRE-statement bindings (`let x = x;` reads the outer `x`), then every name this statement
+        // binds is rewritten.
+        {
+            let payload = match (&node.pat, &node.init) {
+                (syn::Pat::Ident(pi), Some(init)) if pi.subpat.is_none() => {
+                    let mut out = Vec::new();
+                    self.with_pre_bindings(&pre_bindings, |s| s.compare_payload(&init.expr, &mut out, 0));
+                    Some((pi.ident.to_string(), out))
+                }
+                _ => None,
+            };
+            for n in &bound_names {
+                self.assign_drop.let_payload.remove(n);
+            }
+            if let Some((n, p)) = payload.filter(|(_, p)| !p.is_empty()) {
+                self.assign_drop.let_payload.insert(n, p);
+            }
+        }
+        // SOUNDNESS R1130 — `let s: HashSet<G> = xs.into_iter().collect();`: the annotation is the collected-into
+        // type (`charge_collect_into`). Read before any binder below runs, so the RHS sees the OUTER bindings.
+        if let (syn::Pat::Type(pt), Some(init)) = (&node.pat, &node.init) {
+            if let syn::Expr::MethodCall(mc) = peel_value(&init.expr) {
+                if mc.method == "collect" && mc.args.is_empty() && mc.turbofish.is_none() {
+                    let ty = (*pt.ty).clone();
+                    self.with_pre_bindings(&pre_bindings, |s| s.charge_collect_into(mc, &ty));
+                }
+            }
+        }
         // SOUNDNESS R571 — CLEAR the per-name monomorphization denylist for every name this statement
         // binds, BEFORE any of the ~10 `trait_vars` binders below runs. Enumerating the STATE rather than
         // the binders, for the reason `BoundNameState` gives one screen up: `visit_local` rebinds a name
@@ -10148,6 +10519,75 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
                 None => self.charge_coercion(&node.left, tr, method),
+            }
+            // The two ADDITIVE left-operand typings below (R1137, R1139) can each name a PRIMITIVE, and a crate's
+            // own `impl Op<X> for u64` is only ever run when the right operand is that crate's `X` (the orphan
+            // rule forbids `impl Op<u64> for u64`; std owns it). So neither forms a primitive edge when the right
+            // operand is CERTAINLY a primitive: a literal, a cast to a primitive, or a value the typer answers
+            // with a primitive's own name. This withholds only an edge these two routes would ADD — the
+            // pre-existing `charge_coercion` above is untouched — so it cannot remove anything 03a3adc formed.
+            // Measured: without it, `self.as_u16() == *other` (http `StatusCode::eq`) edged to the crate's two
+            // `PartialEq<_> for u16` impls and raised `ambiguous:same-name local defs` on 59 rows.
+            let right_prim = self.certainly_primitive(&node.right);
+            // SOUNDNESS R1137 — a METHOD-CALL left operand (`a.get_id() == Id::HELP`): the receiver resolver walks a
+            // method chain as a BUILDER (each link returns its receiver's type), so `a.get_id()` answered `Arg`
+            // and the edge went to `Arg`'s impl, not `Id`'s (EXECUTED: `Id: PartialEq<str>` writes; ABSENT).
+            // `type_of` reads the method's DECLARED return. Formed BESIDE the builder answer, never instead of
+            // it: replacing it was measured to remove several hundred `Unknown`/`invisible` rows, and an
+            // operand both answers cover keeps both edges. Only where the declared type has something the
+            // operator can REACH (`operator_reachable`): an alias of a primitive behind a redirected module
+            // (socket2's `socklen_t`) otherwise minted an unresolvable `crate::sys::socklen_t::eq` and an
+            // `ambiguous:path-redirected module` `Unknown` on code that compares two integers.
+            if lconst.is_none() && matches!(peel_value(&node.left), syn::Expr::MethodCall(_)) {
+                if let Some(t) = self.type_of(&node.left) {
+                    let prim = crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()) || t == "str";
+                    if self.resolve_recv_type(&node.left).as_deref() != Some(t.as_str())
+                        && self.operator_reachable(&t, tr)
+                        && !(prim && right_prim)
+                    {
+                        if std::env::var_os("CANDOR_R1137_INSTR").is_some() {
+                            eprintln!("R1137DECLRET\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        self.charge_coercion_ty(&t, tr, method);
+                    }
+                }
+            }
+            // SOUNDNESS R1140 (primitive half) — `x + t` over `x: u32` under `where u32: Add<T>`: a primitive's where
+            // predicate is left in place (`lang::strip_concrete_where` keeps it, so its other dispatches keep their
+            // keys), which leaves `x` dispatch-typed and untyped here. The declared primitive is charged BESIDE
+            // that (EXECUTED: the crate's `impl Add<Lc> for u32` writes; ABSENT before).
+            if !right_prim && lconst.is_none() && self.resolve_recv_type(&node.left).is_none() {
+                if let Some(syn::Type::Path(tp)) = self.declared_param_ty(&node.left).map(crate::lang::peel_ty_refs) {
+                    if let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()) {
+                        let p = id.to_string();
+                        if crate::model::PRIMITIVE_LEAVES.contains(&p.as_str()) && self.generic_bounds.contains_key(&p) {
+                            if std::env::var_os("CANDOR_R1140_INSTR").is_some() {
+                                eprintln!("R1140PRIMWHERE\t{tr}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
+                            }
+                            self.charge_coercion_ty(&p, tr, method);
+                        }
+                    }
+                }
+            }
+            // SOUNDNESS R1139 — a PRIMITIVE-ALIAS left operand (`c + d`, `c: Word`, `type Word = u64`): the typer
+            // answers the alias's name, which no impl is keyed by, so the crate's `impl Add<D> for u64` formed no
+            // edge (EXECUTED: the impl writes; ABSENT). The primitive the alias names is charged too, BESIDE the
+            // name's own answer (a same-named nominal type keeps its edge).
+            if !right_prim {
+                let lt = lconst.clone().or_else(|| self.resolve_recv_type(&node.left));
+                if let Some(lt) = lt {
+                    let leaf = lt.rsplit("::").next().unwrap_or(&lt).to_string();
+                    if !crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str()) {
+                        for p in crate::model::PRIMITIVE_LEAVES {
+                            if self.returns.contains_key(&crate::model::prim_alias_key(&leaf, p)) {
+                                if std::env::var_os("CANDOR_R1139_INSTR").is_some() {
+                                    eprintln!("R1139PRIMALIAS\t{tr}\t{leaf}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
+                                }
+                                self.charge_coercion_ty(p, tr, method);
+                            }
+                        }
+                    }
+                }
             }
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);

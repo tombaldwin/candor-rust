@@ -11,6 +11,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: operator, comparison and extension-method reaches (SOUNDNESS R1130, R1131, R1136, R1137,
+  R1139, R1140).** Each cell EXECUTED and read ABSENT on 0.40.6; `deny Fs` now exits 1 on every one.
+  An operator impl on a REFERENCE (`impl Rem<&B> for &B`, num-bigint's arithmetic) has its own unit
+  (`&B::rem`, no longer a bare module-level `rem` that merged every such impl in the module) and is reached
+  from `a % b`, `a.rem(b)`, `Rem::rem(a, b)` and `<&B as Rem<&B>>::rem(a, b)`; the by-value impl is reached
+  beside it (the typer collapses references, so `a + b` over `P` also charges `&P`'s impl: an over-charge).
+  A `where` predicate on a CONCRETE type (`where D: Add<T>`, `where f64: Powf`) no longer types `D`'s values
+  as generic. A left operand typed by a primitive alias (`c: Word`, `type Word = u64`) reaches the crate's
+  `impl Add<D> for u64`, and a method-call left operand (`a.get_id() == Id::HELP`) is also charged by its
+  DECLARED return type; neither forms a primitive edge when the right operand is certainly primitive. A
+  comparison reaches a tuple-typed struct field's, a `let`-carried tuple's and an enum's variant payloads'
+  own impls, and `collect` into a `HashSet`/`HashMap`/`BTreeSet`/`BTreeMap` hashes or orders each element.
+  A dependency's extension-trait method on a std or primitive value (`n.extend()` under
+  `num_conv::prelude::*`, `it.sorted()` under `itertools::Itertools`) now discloses the module's imported
+  dependencies in `invisible`, as the qualified spelling already did (a generated table of std's stable
+  methods decides what std answers).
+
 - ⚠ **candor-scan: values that provably die in a frame are charged there (SOUNDNESS R1122, R1123, R1124,
   R1129).** A SHARED borrow of a value the frame owns is no longer read as carrying it out
   (`let h = H::new(); std::mem::size_of_val(&h)`, `peek(&h)`, `size_of_val(&H::new())`); a borrow of an
