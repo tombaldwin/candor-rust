@@ -1394,6 +1394,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) {
                 crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
+            crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -2024,6 +2025,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) {
                         crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
+                    crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
                     Some(f)
                 })
                 .map(|file| {

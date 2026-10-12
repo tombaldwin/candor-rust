@@ -11,6 +11,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: renamed operator traits, body-local type aliases, macro expansion at expression position,
+  generic callers, and macro-made / derived operator impls (SOUNDNESS R1142, R1143, R1144, R1145, R1146).** Each
+  cell EXECUTED and read ABSENT on 0.40.7; `deny Fs` now exits 1 on every one. An `&T` operator impl written with a
+  RENAMED trait (`use std::ops::Add as Plus; impl Plus<&T> for &T`) is keyed `&T` like the plainly-spelled one, and a
+  renamed UFCS path (`use std::ops::Rem as Mo; Mo::rem(a, b)`) is an operator call. A `type` alias declared in a fn
+  body binds its target for that block (nested `fn` items included); a nested parameter typed by a body-declared
+  ITEM keeps the `dispatch:` disclosure 0.40.7 gave it (0282a87 had withdrawn it). A local `macro_rules!` invocation
+  in a body is ALSO expanded macro-by-example and the expansion walked (beside the existing `$`-stripped walk, whose
+  hedges stay), so an operator or call on a metavariable reaches its impl. A caller that instantiates a generic whose
+  body applies an operator to a generic parameter (`fn g<E: Add<u64>>(d: E) { d + 3 }`, `w.g9e(d, 3u64)`) is charged
+  on its concrete argument's impl (the generic body stays SPEC §4's documented miss). A `macro_rules!`-made impl of
+  a std operator trait on a nominal type is now analysed (it was silent in its own crate too), and a derived
+  `PartialEq`/`PartialOrd` gets a published `Type::eq` / `Type::partial_cmp` unit, so a CHAINED consumer's comparison
+  or arithmetic on a dependency value joins them instead of reading ABSENT. Verdict effects: new concrete charges
+  from macro expansion (mio/memchr/h2/hyper/jni/bindgen `log!`/`syscall!` wrappers), and new `Unknown` where the newly
+  visible operator bodies reach existing hedges or collide by name (`ambiguous:same-name local defs`).
+
 - ⚠ **candor-scan: operator, comparison and extension-method reaches (SOUNDNESS R1130, R1131, R1136, R1137,
   R1139, R1140).** Each cell EXECUTED and read ABSENT on 0.40.6; `deny Fs` now exits 1 on every one.
   An operator impl on a REFERENCE (`impl Rem<&B> for &B`, num-bigint's arithmetic) has its own unit

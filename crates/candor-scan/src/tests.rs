@@ -6424,9 +6424,13 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // the assertion now says what it means. `p` and `m_call` are untouched by that cut (a pure
         // single-arm template, and a single-arm template whose metavar sits in CALLEE position) and
         // stay exactly empty, which is what keeps this from being a blanket weakening.
-        for f in ["p", "m_call"] {
-            assert!(eff(f).is_empty(), "macro fabrication control `{f}` must stay pure:\n{body}");
-        }
+        // SOUNDNESS R1144 (rustagent-v052) — `m_call` is NOT a fabrication control and never was: `runc!(secret)`
+        // expands to `secret()`, which writes (EXECUTED, rustagent-v052/fx44 `m_callee`). The `$`-stripped walk read
+        // `x()` and suppressed it (`is_macro`), which kept a stripped NAME from resolving to a same-named local fn —
+        // that protection still holds (the stripped walk is unchanged); the macro-by-example expansion walked beside it
+        // calls what rustc calls. `p` (a pure template) stays exactly empty.
+        assert!(eff("p").is_empty(), "macro fabrication control `p` must stay pure:\n{body}");
+        assert!(eff("m_call").contains(&"Fs".to_string()), "`runc!(secret)` expands to `secret()`, which writes:\n{body}");
         assert!(!eff("m_pure").contains(&"Fs".to_string()),
                 "THE FABRICATION CONTROL: `m_pure` matches `multi!`'s EMPTY arm, and the `Fs` its \
                  OTHER arm performs must not be charged here. (It carries `Unknown` since R143 — a \
@@ -17333,7 +17337,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17348,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev101/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev102/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -22609,9 +22613,10 @@ pub fn go() {{ imp::doit(); }}
                 pub fn in_stmt() -> usize { fire!(); 0 }\n\
                 pub fn self_spelling() -> usize { macro_rules! m { () => { Self::eff() } } m!() }\n\
             }\n");
-        for absent in ["B::tail", "B::in_let", "B::in_stmt", "B::self_spelling"] {
-            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
-                    "RESIDUAL, not a guarantee: `{absent}` really does perform Fs and is silent:\n{v:#}");
+        // SOUNDNESS R1144 (rustagent-v052) — CLOSED: the invocation is expanded macro-by-example and the expansion
+        // walked, so the call it makes is the call rustc compiles, in every position.
+        for f in ["B::tail", "B::in_let", "B::in_stmt", "B::self_spelling"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()), "`{f}` performs Fs through `B::eff`:\n{v:#}");
         }
     }
 
@@ -29241,9 +29246,12 @@ pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() 
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs `Guard`'s impl (executed; R1130):\n{v:#}");
     }
     // Stated residual silences (executed > 0) — a change to them closes a residual; shrink this list.
-    for f in ["a29_gen", "a29_impl", "e26_gen", "e26_call", "e26_genref", "a22_downgrade", "a22_refmut"] {
+    for f in ["a29_gen", "a29_impl", "e26_gen", "e26_genref", "a22_downgrade", "a22_refmut"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` is now charged — shrink the residual list:\n{v:#}");
     }
+    // SOUNDNESS R1145 (rustagent-v052) — the CALLER that instantiates `T = Guard` is charged (the generic body,
+    // `e26_gen`, stays SPEC §4's documented miss).
+    assert!(!veina_row_effs(&v, "e26_call").is_empty(), "`e26_call` runs `Guard::eq` (executed; R1145):\n{v:#}");
 }
 
 /// SOUNDNESS R1134 / R1137 / R1135 — the independent MIR audit's fixtures (scratchpad `auditagent-v050/fx5`,
@@ -29820,8 +29828,11 @@ pub fn g14_nogeneric() -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Out
               "g3c::f", "g3l::f", "g10_bare", "g10_bare_call", "g12_outer", "g13_outer", "g14_nogeneric"] {
         assert!(!veina_row_effs(&g, f).is_empty(), "`{f}` writes (executed):\n{g:#}");
     }
-    for f in ["W::g9", "g9_call", "g9e_call"] {
-        assert!(veina_row_effs(&g, f).is_empty(), "`{f}` generic-parameter residual (R1126 clause) moved — decide it:\n{g:#}");
+    // `W::g9` stays SPEC §4's documented miss (the generic body); SOUNDNESS R1145 (rustagent-v052) charges the CALLERS
+    // that instantiate the parameter with `D`.
+    assert!(veina_row_effs(&g, "W::g9").is_empty(), "`W::g9` generic-parameter residual (R1126 clause) moved — decide it:\n{g:#}");
+    for f in ["g9_call", "g9e_call"] {
+        assert!(veina_row_effs(&g, f).iter().any(|e| e == "Fs"), "`{f}` runs `D::add` (executed; R1145):\n{g:#}");
     }
     let n = scan_src_to_json_multi("v051fxn", &[("Cargo.toml", "[package]\nname = \"v051fxn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
 pub fn mark() { let _ = std::fs::write("/dev/null", b"x"); }
@@ -29974,12 +29985,13 @@ impl W { pub fn coset(&self, k: a::P) -> a::P { self.0 + k } }
 pub fn unused() -> u64 { let _ = Add::add(1u64, 2u64); 0 }
 "##)]);
     let r = co["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "W::coset").expect("W::coset row");
-    // BOTH true reasons, unioned: `macro:` (the by-value impl is macro-made) and `ambiguous:` (the `&P` edge is
-    // contested between `a::&P::add` and `b::&P::add`). Neither may replace the other.
-    for class in ["macro:", "ambiguous:"] {
-        assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with(class)))),
-            "`{class}` reason must be present (unioned):\n{r:#}");
-    }
+    // `ambiguous:` (the `&P` edge is contested between `a::&P::add` and `b::&P::add`) stays. SOUNDNESS R1146
+    // (rustagent-v052): the macro-made by-value `impl Add<P> for P` is now SPLICED and read, so the `macro:` reason it
+    // carried while unreadable is RESOLVED — the by-value call edges to `a::P::add`, whose body (`&self + &o`) is
+    // the contested `&P` edge itself, so the row keeps `Unknown` with its true reason.
+    assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with("ambiguous:")))),
+        "`ambiguous:` reason must be present:\n{r:#}");
+    assert!(r["calls"].as_array().is_some_and(|a| a.iter().any(|c| c == "a::P::add")), "the spliced by-value impl is reached:\n{r:#}");
     let n = scan_src_to_json_multi("v051fxn2", &[("Cargo.toml", "[package]\nname = \"v051fxn2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
 use std::ops::Add;
 pub fn mark() { let _ = std::fs::write("/tmp/auditv051n", b"x"); }
@@ -30019,7 +30031,8 @@ pub fn c3b(p: P) -> u8 { let x: u8 = 7; x + p }
     for f in ["n1", "n2", "n3", "n5", "n6", "n7", "n8", "p1", "p2", "p3", "c2", "c4", "c3b"] {
         assert!(veina_row_effs(&n, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{n:#}");
     }
-    assert!(veina_row_effs(&n, "n4").is_empty(), "n4 (outer-body alias) residual moved — decide it:\n{n:#}");
+    // SOUNDNESS R1143 (rustagent-v052) — CLOSED: a body-declared `type` alias binds its target for the block.
+    assert!(veina_row_effs(&n, "n4").iter().any(|e| e == "Fs"), "`n4` writes (executed; R1143):\n{n:#}");
     let bn = scan_src_to_json_multi("v051fxbn", &[("Cargo.toml", "[package]\nname = \"v051fxbn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Sub;
 pub fn mark() { let _ = std::fs::write("/tmp/auditv051bn", b"x"); }
 #[derive(Clone)] pub struct U(pub u64);
@@ -30033,7 +30046,10 @@ pub fn via_macro(a: I, b: &I) -> U { a - b }
 pub fn direct(a: I, b: &I) -> U { &b.data - a.data }
 "##)]);
     assert!(veina_row_effs(&bn, "direct").iter().any(|e| e == "Fs"), "`direct` writes:\n{bn:#}");
-    assert!(veina_row_effs(&bn, "via_macro").is_empty(), "macro-argument operator residual moved — decide it:\n{bn:#}");
+    // SOUNDNESS R1144 (rustagent-v052) — CLOSED: the invocation is expanded with its metavariables substituted.
+    for f in ["via_macro", "I::sub"] {
+        assert!(veina_row_effs(&bn, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed; R1144):\n{bn:#}");
+    }
 }
 
 /// SOUNDNESS R1131 (v051 audit, round 3) — auditagent-v051/fxv, EXECUTED: every cell writes. A round-2 rule withheld
@@ -30121,5 +30137,288 @@ pub fn v6_direct(x: f::K, y: f::K) -> f::K { x + y }
     for f in ["v1", "v2b", "v3", "v4", "v5", "v6", "v6_direct"] {
         assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{v:#}");
     }
-    assert!(veina_row_effs(&v, "v2").is_empty(), "renamed-trait `&T` impl residual moved — decide it:\n{v:#}");
+    // SOUNDNESS R1142 (rustagent-v052) — CLOSED: the renamed trait resolves through the module's `use` map.
+    assert!(veina_row_effs(&v, "v2").iter().any(|e| e == "Fs"), "`v2` writes through the renamed-trait `&T2` impl:\n{v:#}");
+}
+
+/// SOUNDNESS R1142 / R1143 / R1144 / R1145 / R1146 (rustagent-v052) — scratchpad `rustagent-v052/fx42`..`fx45`, `fxch3b`,
+/// `auditagent-v051/fxchain2`, every cell EXECUTED (the named cells write a file; the `z*` / `qe_op` controls do not).
+///   * R1142 (`fx42`) — a RENAMED operator trait (`use std::ops::Rem as Modulo; impl Modulo<&A> for &A`) is keyed `&A`, in
+///     every spelling that reaches it (operator, method, UFCS, a renamed UFCS path; a `use` written after the impl; a
+///     rename reaching the module by `use super::*`). A LOCAL non-operator trait with an `add` method is unaffected.
+///   * R1143 (`fx43`) — a body-declared `type` alias binds its target for its block (nested `fn` items included), and a
+///     nested parameter typed by a body ITEM keeps the `dispatch:` hedge it had on 0.40.7 (0282a87 dropped it).
+///   * R1144 (`fx44`) — a local macro invocation is expanded macro-by-example and the expansion walked: multi-arm (the
+///     selected arm only), a metavariable in callee position, a repetition, a nested invocation, a body-local macro.
+///   * R1145 (`fx45`) — a caller instantiating a generic whose body runs an operator on it is charged on its argument.
+///   * R1146 (`fxch3b`, `fxchain2`) — macro-made operator impls and derived comparisons are published, so a CHAINED
+///     consumer joins them. STATED RESIDUALS: `w3_call` (an operator on a generic-typed FIELD — the documented
+///     generic-field miss), `c_h` (a derive beside an inherent method of the same name is not synthesised).
+#[test]
+fn v052_renamed_traits_body_aliases_macro_expansion_generic_callers_chained_operators() {
+    let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
+    let v42 = scan_src_to_json_multi("v052fx42", &[("Cargo.toml", toml("v052fx42").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent52_fx42", b"x"); }
+// A: renamed trait, NO by-value impl at all (the referent-fallback route), every spelling that reaches the &impl
+pub mod a {
+    use std::ops::Rem as Modulo;
+    #[derive(Clone, Copy)] pub struct A(pub u8);
+    impl<'x> Modulo<&'x A> for &'x A { type Output = u8; fn rem(self, o: &'x A) -> u8 { crate::mark(); self.0 % o.0.max(1) } }
+}
+pub fn qa_op(x: &a::A, y: &a::A) -> u8 { x % y }
+pub fn qa_meth(x: &a::A, y: &a::A) -> u8 { use std::ops::Rem; x.rem(y) }
+pub fn qa_ufcs(x: &a::A, y: &a::A) -> u8 { std::ops::Rem::rem(x, y) }
+pub fn qa_ufcs_ren(x: &a::A, y: &a::A) -> u8 { use std::ops::Rem as Mo; Mo::rem(x, y) }
+// B: the `use` is written AFTER the impl
+pub mod b {
+    #[derive(Clone, Copy)] pub struct B(pub u8);
+    impl<'x> Mn<&'x B> for &'x B { type Output = u8; fn sub(self, o: &'x B) -> u8 { crate::mark(); self.0.wrapping_sub(o.0) } }
+    use core::ops::Sub as Mn;
+}
+pub fn qb_op(x: &b::B, y: &b::B) -> u8 { x - y }
+// C: the rename is in the PARENT module and reaches the child by `use super::*`
+use std::ops::Mul as Times;
+pub mod c {
+    use super::*;
+    #[derive(Clone, Copy)] pub struct C(pub u8);
+    impl<'x> Times<&'x C> for &'x C { type Output = u8; fn mul(self, o: &'x C) -> u8 { crate::mark(); self.0.wrapping_mul(o.0) } }
+}
+pub fn qc_op(x: &c::C, y: &c::C) -> u8 { x * y }
+// D: a LOCAL non-operator trait whose method is called `add` on &D (must stay reached by its method call)
+pub mod d {
+    pub trait Plus { fn add(self, o: u8) -> u8; }
+    #[derive(Clone, Copy)] pub struct D(pub u8);
+    impl<'x> Plus for &'x D { fn add(self, o: u8) -> u8 { crate::mark(); self.0 + o } }
+}
+pub fn qd_meth(x: &d::D) -> u8 { use d::Plus; x.add(1) }
+// E: over-charge control — renamed PURE &impl, effectful by-value impl absent; pure by-value caller
+pub mod e {
+    use std::ops::BitXor as Xr;
+    #[derive(Clone, Copy)] pub struct E(pub u8);
+    impl<'x> Xr<&'x E> for &'x E { type Output = u8; fn bitxor(self, o: &'x E) -> u8 { self.0 ^ o.0 } }
+}
+pub fn qe_op(x: &e::E, y: &e::E) -> u8 { x ^ y }
+"##)]);
+    for f in ["qa_op", "qa_meth", "qa_ufcs", "qa_ufcs_ren", "qb_op", "qc_op", "qd_meth"] {
+        assert!(veina_row_effs(&v42, f).iter().any(|e| e == "Fs"), "R1142 `{f}` writes (executed):\n{v42:#}");
+    }
+    assert!(veina_row_effs(&v42, "qe_op").is_empty(), "R1142 control `qe_op` is pure (executed):\n{v42:#}");
+    let v43 = scan_src_to_json_multi("v052fx43", &[("Cargo.toml", toml("v052fx43").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports, non_camel_case_types)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent52_fx43", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);    // PURE Add
+#[derive(Clone, Copy)] pub struct D2(pub u64);   // EFFECTFUL Add + effectful method
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+impl D2 { pub fn eff(&self) -> u64 { mark(); self.0 } }
+impl D { pub fn eff(&self) -> u64 { self.0 } }
+pub fn n4() -> u64 { type T = D2; fn inner(a: T) -> T { a + 1 } inner(D2(1)).0 }
+pub fn m4() -> u64 { type T = D2; fn inner(a: &T) -> u64 { a.eff() } inner(&D2(1)) }
+pub fn k4b() -> u64 { type T = D2; let a: T = D2(1); (a + 1).0 }
+pub fn k4c() -> u64 { fn inner() -> u64 { type T = D2; let a: T = D2(1); (a + 1).0 } inner() }
+pub fn k4d() -> u64 { type T = D2; fn inner(a: T) -> u64 { let b: T = a; b.eff() } inner(D2(1)) }
+pub fn k4e(a: D) -> u64 { type T = D2; fn inner(a: T) -> u64 { a.eff() } inner(D2(a.0)) }
+pub mod q { pub type T = super::D; }
+// controls: an outer-body alias of the PURE type must not charge; a module alias `T` of the pure type with a body alias T of the effectful one
+pub fn z4() -> u64 { type T = D; fn inner(a: T) -> T { a + 1 } inner(D(1)).0 }
+pub fn z4b() -> u64 { use q::T; fn inner(a: T) -> u64 { a.eff() } inner(D(1)) }
+pub fn k4f() -> u64 { use q::T as _Unused; type T = D2; fn inner(a: T) -> u64 { a.eff() } inner(D2(1)) }
+// sibling blocks with different alias meanings
+pub fn k4g(f: bool) -> u64 { if f { type T = D; fn inner(a: T) -> u64 { a.eff() } inner(D(1)) } else { type T = D2; fn inner(a: T) -> u64 { a.eff() } inner(D2(1)) } }
+pub fn z4g() -> u64 { { type T = D2; let _ = std::mem::size_of::<T>(); } type T = D; fn inner(a: T) -> u64 { a.eff() } inner(D(1)) }
+"##)]);
+    for f in ["n4", "m4", "k4b", "k4c", "k4d", "k4e", "k4f", "k4g"] {
+        assert!(veina_row_effs(&v43, f).iter().any(|e| e == "Fs"), "R1143 `{f}` writes (executed):\n{v43:#}");
+    }
+    for f in ["z4", "z4b", "z4g"] {
+        assert!(!veina_row_effs(&v43, f).iter().any(|e| e == "Fs"), "R1143 control `{f}` is pure (executed):\n{v43:#}");
+    }
+    let v44 = scan_src_to_json_multi("v052fx44", &[("Cargo.toml", toml("v052fx44").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports, unused_macros)]
+use std::ops::Sub;
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent52_fx44", b"x"); }
+#[derive(Clone, Copy)] pub struct U(pub u64);
+impl Sub<U> for U { type Output = U; fn sub(self, o: U) -> U { mark(); U(self.0.wrapping_sub(o.0)) } }
+#[derive(Clone, Copy)] pub struct P(pub u64);
+impl Sub<P> for P { type Output = P; fn sub(self, o: P) -> P { P(self.0.wrapping_sub(o.0)) } }
+pub fn eff_helper(u: U) -> u64 { mark(); u.0 }
+pub fn pure_helper(u: U) -> u64 { u.0 }
+// multi-arm: the invocation selects the `sub` arm
+macro_rules! op2 { (sub $a:expr, $b:expr) => { $a - $b }; (keep $a:expr, $b:expr) => { $a }; }
+pub fn m_multi(a: U, b: U) -> U { op2!(sub a, b) }
+// control: multi-arm, invocation selects the PURE arm; the other arm would be effectful
+macro_rules! op3 { (eff $a:expr) => { eff_helper($a) }; (pure $a:expr) => { pure_helper($a) }; }
+pub fn z_multi_pure(a: U) -> u64 { op3!(pure a) }
+// metavariable in CALLEE position, the substituted callee is effectful
+macro_rules! call1 { ($f:ident, $x:expr) => { $f($x) }; }
+pub fn m_callee(a: U) -> u64 { call1!(eff_helper, a) }
+// control: same macro, pure callee
+pub fn z_callee(a: U) -> u64 { call1!(pure_helper, a) }
+// repetition
+macro_rules! subs { ($($a:expr => $b:expr),*) => { { let mut v = Vec::new(); $( v.push($a - $b); )* v } }; }
+pub fn m_rep(a: U, b: U) -> usize { subs!(a => b, b => a).len() }
+// control: operator on a PURE type via metavars
+macro_rules! isub { ($a:expr, $b:expr) => { $b - $a }; }
+pub fn z_pure(a: P, b: P) -> P { isub!(a, b) }
+// nested macro invocation
+macro_rules! outer { ($a:expr, $b:expr) => { isub!($b, $a) }; }
+pub fn m_nested(a: U, b: U) -> U { outer!(a, b) }
+// macro defined in the fn body
+pub fn m_body(a: U, b: U) -> U { macro_rules! bs { ($x:expr, $y:expr) => { $x - $y }; } bs!(a, b) }
+"##)]);
+    for f in ["m_multi", "m_callee", "m_rep", "m_nested", "m_body"] {
+        assert!(veina_row_effs(&v44, f).iter().any(|e| e == "Fs"), "R1144 `{f}` writes (executed):\n{v44:#}");
+    }
+    for f in ["z_multi_pure", "z_callee", "z_pure"] {
+        assert!(!veina_row_effs(&v44, f).iter().any(|e| e == "Fs"), "R1144 control `{f}` is pure (executed):\n{v44:#}");
+    }
+    // the multi-arm skip still discloses: the expansion is walked BESIDE it, never instead of it
+    assert!(veina_row_effs(&v44, "z_multi_pure").iter().any(|e| e == "Unknown"), "R143's disclosure kept:\n{v44:#}");
+    let v45 = scan_src_to_json_multi("v052fx45", &[("Cargo.toml", toml("v052fx45").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports, non_camel_case_types)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent52_fx45", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { mark(); D(self.0 + r) } }
+pub trait Eff { fn eff(&self) -> u64; }
+impl Eff for D { fn eff(&self) -> u64 { mark(); self.0 } }
+// fn-level generic operator, caller instantiates
+pub fn ga<E: Add<u64, Output = E>>(d: E) -> E { d + 3 }
+pub fn ga_call(d: D) -> D { ga(d) }
+// fn-level generic METHOD dispatch, caller instantiates
+pub fn gm<E: Eff>(d: &E) -> u64 { d.eff() }
+pub fn gm_call(d: &D) -> u64 { gm(d) }
+// impl-level generic METHOD dispatch, caller instantiates
+pub struct W<E>(pub E);
+impl<E: Eff> W<E> { pub fn wm(&self) -> u64 { self.0.eff() } }
+pub fn wm_call(w: &W<D>) -> u64 { w.wm() }
+// impl-level generic OPERATOR (R1145)
+pub struct W2<E>(pub E);
+impl<E: Copy> W2<E> { pub fn g9e<T>(&self, d: E, t: T) -> E where E: Add<T, Output = E> { d + t } }
+pub fn gx_call(w: &W2<D>, d: D) -> D { w.g9e(d, 3u64) }
+// impl-level bound, operator on a field
+pub struct W3<E>(pub E);
+impl<E: Copy + Add<u64, Output = E>> W3<E> { pub fn op(&self) -> E { self.0 + 1 } }
+pub fn w3_call(w: &W3<D>) -> D { w.op() }
+// impl-level generic operator, fn-generic instantiated by a literal; caller of pure type (control)
+#[derive(Clone, Copy)] pub struct P(pub u64);
+impl Add<u64> for P { type Output = P; fn add(self, r: u64) -> P { P(self.0 + r) } }
+impl Eff for P { fn eff(&self) -> u64 { self.0 } }
+pub fn zx_call(w: &W2<P>, d: P) -> P { w.g9e(d, 3u64) }
+pub fn zw3_call(w: &W3<P>) -> P { w.op() }
+pub fn zwm_call(w: &W<P>) -> u64 { w.wm() }
+"##)]);
+    for f in ["ga_call", "gm_call", "wm_call", "gx_call"] {
+        assert!(veina_row_effs(&v45, f).iter().any(|e| e == "Fs"), "R1145 `{f}` writes (executed):\n{v45:#}");
+    }
+    for f in ["zx_call", "zw3_call"] {
+        assert!(veina_row_effs(&v45, f).is_empty(), "R1145 control `{f}` is pure (executed):\n{v45:#}");
+    }
+    assert!(veina_row_effs(&v45, "w3_call").is_empty(), "R1145 generic-FIELD residual moved — decide it:\n{v45:#}");
+    // R1146, chained: scan the dependency, chain its report, scan the consumer
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    // (dependency crate, its source, the consumer's source, cells that write, pure controls, stated residuals)
+    type Case<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str], &'a [&'a str]);
+    let cases: [Case; 2] = [
+        ("cdep3", r##"#![allow(dead_code)]
+use std::ops::{Add, Neg};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent52_ch3", b"x"); }
+// macro-made by $t:ty on a GENERIC type, by-value and &T
+pub struct G<X>(pub X);
+macro_rules! mk_add { ($t:ty) => {
+    impl Add for $t { type Output = u8; fn add(self, o: $t) -> u8 { mark(); 1 } }
+    impl<'a> Add<&'a $t> for &'a $t { type Output = u8; fn add(self, o: &'a $t) -> u8 { mark(); 1 } }
+} }
+mk_add!(G<u8>);
+// macro-made unary
+pub struct N(pub i8);
+macro_rules! mk_neg { ($t:ident) => { impl Neg for $t { type Output = i8; fn neg(self) -> i8 { mark(); -self.0 } } } }
+mk_neg!(N);
+// derived PartialEq on an ENUM whose payload has an effectful eq
+pub struct Inner(pub u8);
+impl PartialEq for Inner { fn eq(&self, o: &Inner) -> bool { mark(); self.0 == o.0 } }
+#[derive(PartialEq)] pub enum E { A(Inner), B }
+// derived on a GENERIC struct with a concrete effectful field
+#[derive(PartialEq)] pub struct GS<T> { pub t: T, pub i: Inner }
+// derived on a type that ALSO has an inherent `eq` method (synthesis skipped)
+#[derive(PartialEq)] pub struct H { pub i: Inner }
+impl H { pub fn eq(&self, _o: &H) -> bool { false } }
+// CONTROLS: derived over pure fields; macro-made pure operator
+#[derive(PartialEq, PartialOrd)] pub struct Pz { pub a: u8 }
+pub struct Q(pub u8);
+macro_rules! mk_pure { ($t:ident) => { impl Add for $t { type Output = u8; fn add(self, o: $t) -> u8 { self.0 + o.0 } } } }
+mk_pure!(Q);
+"##, r##"use cdep3::{G, N, E, GS, H, Pz, Q};
+pub fn c_gadd(a: G<u8>, b: G<u8>) -> u8 { a + b }
+pub fn c_gref(a: &G<u8>, b: &G<u8>) -> u8 { a + b }
+pub fn c_neg(a: N) -> i8 { -a }
+pub fn c_enum(a: &E, b: &E) -> bool { a == b }
+pub fn c_gs(a: &GS<u8>, b: &GS<u8>) -> bool { a == b }
+pub fn c_h(a: &H, b: &H) -> bool { a == b }
+pub fn z_pz(a: &Pz, b: &Pz) -> bool { a == b || a < b }
+pub fn z_q(a: Q, b: Q) -> u8 { a + b }
+"##,
+         &["c_gadd", "c_gref", "c_neg", "c_enum", "c_gs"], &["z_pz", "z_q"], &["c_h"]),
+        ("cdep", r##"use std::ops::Rem;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051c2", b"x"); }
+// macro-made operator impls (by value and on &T)
+macro_rules! mk_rem { ($t:ident) => {
+    impl Rem for $t { type Output = u8; fn rem(self, o: $t) -> u8 { mark(); self.0 % o.0.max(1) } }
+    impl<'a> Rem<&'a $t> for &'a $t { type Output = u8; fn rem(self, o: &'a $t) -> u8 { mark(); self.0 % o.0.max(1) } }
+} }
+#[derive(Clone, Copy)] pub struct M(pub u8);
+mk_rem!(M);
+// derived PartialEq whose field has an effectful eq
+pub struct Inner(pub u8);
+impl PartialEq for Inner { fn eq(&self, o: &Inner) -> bool { mark(); self.0 == o.0 } }
+#[derive(PartialEq)] pub struct Outer { pub i: Inner }
+// derived PartialOrd/Ord whose field has an effectful cmp
+#[derive(PartialEq, Eq)] pub struct K(pub u8);
+impl PartialOrd for K { fn partial_cmp(&self, o: &K) -> Option<std::cmp::Ordering> { mark(); self.0.partial_cmp(&o.0) } }
+#[derive(PartialEq, Eq, PartialOrd)] pub struct KO { pub k: K }
+"##, r##"use cdep::{M, Outer, KO};
+pub fn m_byval(a: M, b: M) -> u8 { a % b }
+pub fn m_ref(a: &M, b: &M) -> u8 { a % b }
+pub fn outer_eq(a: &Outer, b: &Outer) -> bool { a == b }
+pub fn ko_lt(a: &KO, b: &KO) -> bool { a < b }
+pub mod g { use cdep::*; pub fn m_byval_glob(a: M, b: M) -> u8 { a % b } }
+"##,
+         &["m_byval", "m_ref", "outer_eq", "ko_lt", "g::m_byval_glob"], &[], &[]),
+    ];
+    for (dname, dsrc, csrc, hits, ctl, resid) in cases {
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("candor-v052chain-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dep = root.join("cdep");
+        std::fs::create_dir_all(dep.join("src")).unwrap();
+        std::fs::write(dep.join("Cargo.toml"), toml(dname)).unwrap();
+        std::fs::write(dep.join("src/lib.rs"), dsrc).unwrap();
+        let dv = scan(&dep, &DepIndex::default());
+        let reports = root.join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join(format!("report.{dname}.scan.json")), dv.to_string()).unwrap();
+        let idx = crate::deps::load_dep_reports(Some(reports.to_str().unwrap()));
+        let cons = root.join("ccons");
+        std::fs::create_dir_all(cons.join("src")).unwrap();
+        std::fs::write(cons.join("Cargo.toml"), format!("{}[dependencies]\n{dname} = {{ path = \"../cdep\" }}\n", toml("ccons"))).unwrap();
+        std::fs::write(cons.join("src/lib.rs"), csrc).unwrap();
+        let cv = scan(&cons, &idx);
+        let _ = std::fs::remove_dir_all(&root);
+        for f in hits {
+            assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1146 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+        }
+        for f in ctl {
+            assert!(veina_row_effs(&cv, f).is_empty(), "R1146 chained control `{f}` is pure (executed):\n{cv:#}");
+        }
+        for f in resid {
+            assert!(veina_row_effs(&cv, f).is_empty(), "R1146 chained residual `{f}` moved — decide it:\n{cv:#}");
+        }
+    }
 }

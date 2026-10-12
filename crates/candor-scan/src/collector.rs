@@ -1236,6 +1236,73 @@ impl<'a> CallCollector<'a> {
         self.elem_of.insert(name, e);
     }
 
+    /// SOUNDNESS R1143 — a `type` ALIAS declared in this block names its TARGET for the whole block (an item is
+    /// visible throughout its enclosing block, nested `fn` items included), exactly as a module-level alias does
+    /// through `seed_mod_aliases`. R106 rebinds every body-declared name to `ITEM_SENTINEL` so an import it
+    /// shadows cannot fabricate, and for a STRUCT that is right (its `impl` is walked into this unit); for an
+    /// alias it threw the target away: `type T = D2; fn inner(a: T) -> T { a + 1 }` and `let a: T = ..; a + 1`
+    /// typed `a` by a name no unit has — ABSENT over a write (auditagent-v051/fxn `n4`, rustagent-v052/fx43,
+    /// EXECUTED). Bound here, per block, and restored on exit, so a sibling block's own `type T` is its own.
+    /// Only a plain path target, never one of the alias's own parameters or `Self`; anything else keeps the
+    /// sentinel (the pre-existing answer).
+    /// A name aliased TWICE among the live statements (`#[cfg]` twins this walk cannot tell apart) is not bound:
+    /// one target would be a pick, so it keeps the sentinel.
+    pub(crate) fn bind_block_aliases<'s>(&mut self, stmts: &'s [syn::Stmt]) -> Vec<(String, Option<String>)> {
+        fn live_alias(st: &syn::Stmt, include_tests: bool) -> Option<&syn::ItemType> {
+            match st {
+                syn::Stmt::Item(syn::Item::Type(t))
+                    if !stmt_cfg_inactive(st) && (include_tests || !crate::lang::is_cfg_test(&t.attrs)) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            }
+        }
+        let inc = self.include_tests;
+        let live_alias = |st: &'s syn::Stmt| live_alias(st, inc);
+        let mut alias_count: HashMap<String, usize> = HashMap::new();
+        for t in stmts.iter().filter_map(live_alias) {
+            *alias_count.entry(t.ident.to_string()).or_default() += 1;
+        }
+        let mut alias_prev: Vec<(String, Option<String>)> = Vec::new();
+        for t in stmts.iter().filter_map(live_alias) {
+            if alias_count.get(&t.ident.to_string()) != Some(&1) {
+                continue;
+            }
+            let syn::Type::Path(p) = &*t.ty else { continue };
+            if p.qself.is_some()
+                || crate::lang::is_non_nominal_type(&t.ty)
+                || p.path.get_ident().is_some_and(|i| i == "Self" || t.generics.type_params().any(|tp| tp.ident == *i))
+            {
+                continue;
+            }
+            let target = crate::lang::expand(&crate::lang::path_to_string(&p.path), &self.uses);
+            if target.starts_with(crate::decls::ITEM_SENTINEL) {
+                continue;
+            }
+            if std::env::var_os("CANDOR_R1143_INSTR").is_some() {
+                eprintln!("R1143ALIAS\t{}\t{target}", t.ident); // §E1 REACH COUNTER
+            }
+            let n = t.ident.to_string();
+            let prev = self.uses.to_mut().insert(n.clone(), target);
+            alias_prev.push((n, prev));
+        }
+        alias_prev
+    }
+
+    pub(crate) fn unbind_block_aliases(&mut self, alias_prev: Vec<(String, Option<String>)>) {
+        for (n, p) in alias_prev.into_iter().rev() {
+            match p {
+                Some(v) => {
+                    self.uses.to_mut().insert(n, v);
+                }
+                None => {
+                    self.uses.to_mut().remove(&n);
+                }
+            }
+        }
+    }
+
     /// Walk a block's statements in order — the root body (`decls`) and every nested block (`visit_block`)
     /// come through here — with SOUNDNESS R1080's pre-pass: an inferred `Vec`'s element, read from every
     /// exact push in the rest of the block (`inferred_vec_elems`), recorded the moment its `let` has bound it.
@@ -1345,8 +1412,16 @@ impl<'a> CallCollector<'a> {
         // `<&B>::rem(a, b)` names no trait: a qualified-self path on a REFERENCE type whose member is an operator
         // method is that operator on `&B` (the only impl it can name).
         let ref_qself = matches!(&p.qself, Some(q) if q.position == 0 && matches!(&*q.ty, syn::Type::Reference(_)));
+        // SOUNDNESS R1142 — the trait as written OR as the `use` map resolves it (`use std::ops::Rem as Mo;
+        // Mo::rem(a, b)` is `Rem::rem`), the same resolution the impl side files its `&Type` key under.
+        let renamed = |ts: &syn::PathSegment| {
+            p.qself.is_none()
+                && segs.len() == 2
+                && p.path.leading_colon.is_none()
+                && crate::lang::expand(&ts.ident.to_string(), &self.uses).rsplit("::").next() == Some(tr)
+        };
         match trait_seg {
-            Some(ts) if ts.ident == tr => {}
+            Some(ts) if ts.ident == tr || renamed(ts) => {}
             None if ref_qself && segs.len() == 1 => {}
             _ => return,
         }
@@ -1356,6 +1431,125 @@ impl<'a> CallCollector<'a> {
                 eprintln!("R1131UFCS\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.charge_coercion_ty(&t, tr, m);
+        }
+    }
+
+    /// SOUNDNESS R1144 — walk one macro EXPANSION for its edges only. Every name-keyed binding table is restored
+    /// afterwards: the expansion's own `let`s are hygienic in rustc (invisible to the code around the invocation), and
+    /// leaving them in place re-typed the caller's later statements.
+    fn walk_expansion(&mut self, mname: &str, block: &syn::Block) {
+        if std::env::var_os("CANDOR_R1144_INSTR").is_some() {
+            eprintln!("R1144EXPAND\t{mname}"); // §E1 REACH COUNTER
+        }
+        let snap = (
+            self.vars.clone(),
+            self.trait_vars.clone(),
+            self.elem_of.clone(),
+            self.elem_trait_of.clone(),
+            self.tuple_of.clone(),
+            self.tuple_trait_of.clone(),
+            self.closure_vars.clone(),
+            self.fn_typed_vars.clone(),
+            self.dep_bound_vars.clone(),
+            self.ctor_bound.clone(),
+            self.fn_alias.clone(),
+            self.str_locals.clone(),
+            self.local_uses.clone(),
+            self.bound_names.clone(),
+        );
+        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone());
+        self.macro_expanding.insert(mname.to_string());
+        self.visit_block(block);
+        self.macro_expanding.remove(mname);
+        (
+            self.vars,
+            self.trait_vars,
+            self.elem_of,
+            self.elem_trait_of,
+            self.tuple_of,
+            self.tuple_trait_of,
+            self.closure_vars,
+            self.fn_typed_vars,
+            self.dep_bound_vars,
+            self.ctor_bound,
+            self.fn_alias,
+            self.str_locals,
+            self.local_uses,
+            self.bound_names,
+        ) = snap;
+        (self.veinb_typed, self.local_use_seen, self.use_alts) = snap2;
+    }
+
+    /// SOUNDNESS R1145 — a CALLER instantiating a generic whose body runs an operator on it. `fn ga<E: Add<u64>>(d: E)
+    /// { d + 3 }` cannot name `E`'s impl (SPEC §4's external-abstraction dispatch, R1126 — that body's row is the
+    /// documented miss), but `ga(d)` with `d: D` runs `<D as Add<u64>>::add`, and the caller read ABSENT over it
+    /// (EXECUTED: auditagent-v051/fxg `g9e_call`, rustagent-v052/fx45 `ga_call`/`gx_call`). The callee's Pass A summary
+    /// (`lang::generic_operator_uses`) names which argument the operator dispatches on; that argument's type is charged
+    /// exactly as the operator itself would be (`charge_coercion_ty`). An argument the typer cannot answer forms
+    /// nothing (the pre-existing state); a receiver the summary says the callee takes shifts a path call's arguments.
+    fn charge_generic_operators(&mut self, key: &str, args: &[&syn::Expr], method_syntax: bool) {
+        let Some(v) = self.returns.get(key).cloned() else { return };
+        if v.is_empty() {
+            return;
+        }
+        let entries: Vec<(usize, String, String, bool)> = v
+            .split(',')
+            .filter_map(|e| {
+                let mut it = e.split('/');
+                let pos = it.next()?.parse().ok()?;
+                let tr = it.next()?.to_string();
+                let m = it.next()?.to_string();
+                let recv = it.next()? == "1";
+                Some((pos, tr, m, recv))
+            })
+            .collect();
+        for (pos, tr, m, recv) in entries {
+            if method_syntax && !recv {
+                continue; // an associated fn with no receiver is not what method syntax calls
+            }
+            let idx = if recv && !method_syntax { pos + 1 } else { pos };
+            let Some(arg) = args.get(idx) else { continue };
+            if let Some(t) = self.resolve_recv_type(arg) {
+                if std::env::var_os("CANDOR_R1145_INSTR").is_some() {
+                    eprintln!("R1145GENOP\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                self.charge_coercion_ty(&t, &tr, &m);
+            }
+        }
+    }
+
+    /// SOUNDNESS R1145 — the path-call half: a crate-local free fn (`ga(d)`, `crate::m::ga(d)`), or an associated /
+    /// UFCS call on a type the module names (`W2::g9e(&w, d, 3)`, `Self::op(d)`).
+    fn edge_generic_operator_call(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        if p.qself.is_some() {
+            return;
+        }
+        let args: Vec<&syn::Expr> = args.iter().collect();
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(leaf) = segs.last() else { return };
+        let written = crate::lang::path_to_string(&p.path);
+        let expanded = expand(&written, &self.uses);
+        if segs.len() == 1 {
+            // A bare name the module does not import and the body does not bind is the crate's own free fn.
+            if self.uses.contains_key(leaf) || self.vars.contains_key(leaf) || self.local_uses.contains_key(leaf) {
+                return;
+            }
+            self.charge_generic_operators(&crate::model::gen_op_key(leaf), &args, false);
+            return;
+        }
+        let local = expanded.starts_with("crate::")
+            || ["crate", "self", "super"].contains(&segs[0].as_str());
+        // `Type::f(..)`: the type segment, resolved (`Self` is the enclosing impl's type).
+        let ty_seg = expanded.rsplit("::").nth(1).unwrap_or("");
+        if !ty_seg.is_empty() && ty_seg.chars().next().is_some_and(|c| c.is_uppercase()) {
+            let key = crate::model::impl_gen_op_key(ty_seg, leaf);
+            if self.returns.contains_key(&key) && !self.is_dependency_type(ty_seg) {
+                self.charge_generic_operators(&key, &args, false);
+                return;
+            }
+        }
+        if local {
+            self.charge_generic_operators(&crate::model::gen_op_key(leaf), &args, false);
         }
     }
 
@@ -7009,6 +7203,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 continue;
             }
             let Some(t) = crate::lang::type_path(pty, &self.uses) else { continue };
+            // SOUNDNESS R1143 — a parameter typed by a BODY-DECLARED item name (`ITEM_SENTINEL`, R106) names no unit,
+            // so typing it formed a dead edge and withdrew the `dispatch:untyped receiver` hedge the untyped
+            // parameter carried on 0.40.7 (`fn inner(a: &T) -> u64 { a.eff() }`, `T` a body alias: Unknown on
+            // 0.40.7, ABSENT on 0282a87, EXECUTED rustagent-v052/fx43 `m4`/`k4f`/`k4g`). Left untyped instead.
+            if t.contains(crate::decls::ITEM_SENTINEL) {
+                continue;
+            }
             let n = ident.to_string();
             saved_vars.push((n.clone(), self.vars.remove(&n), self.trait_vars.remove(&n)));
             self.vars.insert(n, t);
@@ -7160,7 +7361,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 .collect();
             (old, prev)
         });
+        let alias_prev = self.bind_block_aliases(&node.stmts);
         self.walk_stmts(&node.stmts);
+        self.unbind_block_aliases(alias_prev);
         if let Some(((f, e), prev)) = saved_fields {
             self.fields = f;
             self.field_elem = e;
@@ -7301,6 +7504,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         if let syn::Expr::Path(p) = func {
+            self.edge_generic_operator_call(p, &node.args);
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.edge_std_type_dep_trait_member(p, &node.args);
             self.edge_ufcs_operator(p, &node.args);
@@ -7666,6 +7870,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         if is_read_provided(&leaf) {
             self.charge_coercion(&node.receiver, "Read", "read");
+        }
+        // SOUNDNESS R1145 — the callee applies an operator to a parameter of a generic type; charge it on this call's
+        // concrete argument (`w.g9e(d, 3u64)`, `d: D`).
+        if let Some(t) = self.resolve_recv_type(&node.receiver) {
+            let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
+            let args: Vec<&syn::Expr> = node.args.iter().collect();
+            self.charge_generic_operators(&crate::model::impl_gen_op_key(&tl, &leaf), &args, true);
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { argc: 0, entropy_arg: false, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -10449,8 +10660,30 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else {
             None
         };
+        let mut expansion: Option<(String, syn::Block)> = None;
         {
             if let Some(body) = mbody {
+                // SOUNDNESS R1144 — the invocation EXPANDED, macro-by-example (`mbe::expand_invocation`): the
+                // arm its own tokens select, with every metavariable replaced by the tokens the call supplies.
+                // The `$`-stripped template walk below sees `$b - $a` as `b - a`, two names nothing binds, so an
+                // operator (or any typed call) on a metavariable formed no edge: num-bigint's `bigint_sub!($b -
+                // $a)`, ABSENT over a write (auditagent-v051/fxbn, EXECUTED). Its calls are not `is_macro`: a
+                // substituted `$f()` is the caller's own `f()` (what rustc compiles), not a stripped name. It is
+                // walked LAST (`walk_expansion`, end of this fn), after everything this site did before, and with
+                // the bindings it makes discarded, so it only ADDS edges: a macro's `let` is hygienic, and a first
+                // cut that walked it first leaked `let s: String` into the stripped walk and changed what that
+                // walk disclosed (winreg `deserialize_f32`, the corpus A/B). Not where the crate defines the name
+                // twice (R208): which template applies is then a pick.
+                if !self.macro_twins.contains(&mleaf) {
+                    if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
+                        let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
+                            proc_macro2::Group::new(proc_macro2::Delimiter::Brace, ts),
+                        ));
+                        if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+                            expansion = Some((mname.clone(), block));
+                        }
+                    }
+                }
                 let (arm_count, blocks) = macro_template_blocks(&body);
                 // Only a genuinely SINGLE-arm macro (one arm total, and it parsed) — multi-arm is skipped to
                 // avoid charging a non-matching arm's effect (the review-caught fabrication).
@@ -10589,6 +10822,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             for e in &exprs {
                 self.visit_expr(e);
             }
+        }
+        if let Some((mname, block)) = expansion {
+            self.walk_expansion(&mname, &block);
         }
     }
     fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {

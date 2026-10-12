@@ -486,6 +486,15 @@ fn expand(arms: &[Arm], input: &TokenStream) -> Option<TokenStream> {
     None
 }
 
+/// SOUNDNESS R1144 — one EXPRESSION/STATEMENT-position invocation of a `macro_rules!` whose arms are `def` (the
+/// definition's tokens as `local_macros` / `body_macros` record them): macro-by-example exactly as for an item-position
+/// invocation (`expand`: the first arm that matches the whole input, `None` on anything this module does not read).
+pub(crate) fn expand_invocation(def: &str, input: &TokenStream) -> Option<TokenStream> {
+    let t: TokenStream = def.parse().ok()?;
+    let arms = parse_arms(&t)?;
+    expand(&arms, input)
+}
+
 /// The file's `macro_rules!` definitions by name — a name defined more than once (a `#[cfg]` twin, a
 /// textual redefinition) is dropped: which one an invocation sees depends on order and configuration.
 fn collect_defs(items: &[syn::Item], defs: &mut HashMap<String, Option<TokenStream>>) {
@@ -693,7 +702,7 @@ impl Ctx<'_> {
                                 // reached BY PATH (`W::touch(&w)`) and by a typed receiver, exactly as a
                                 // free fn is, and no dispatch universe holds them, so splicing it cannot
                                 // move a CHA fan-out. A TRAIT impl stays unexpanded (see above).
-                                syn::Item::Impl(i) => i.trait_.is_none(),
+                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i),
                                 _ => false,
                             })
                             .collect();
@@ -714,9 +723,20 @@ impl Ctx<'_> {
                                 if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
                                     eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
                                 }
-                                while let syn::Type::Group(gr) = &*i.self_ty {
-                                    let inner = (*gr.elem).clone();
-                                    *i.self_ty = inner;
+                                // R1146 — at every depth, not only the top: `impl Add<&'a $t> for &'a $t` holds the
+                                // group under a reference (and in the trait's `Rhs`), which `operator_ref_self` and
+                                // the `Rhs` index read through.
+                                peel_groups(&mut i.self_ty);
+                                if let Some((_, tp, _)) = &mut i.trait_ {
+                                    for seg in tp.segments.iter_mut() {
+                                        if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                                            for a in ab.args.iter_mut() {
+                                                if let syn::GenericArgument::Type(t) = a {
+                                                    peel_groups(t);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             if let Some(a) = crate::lang::item_attrs_mut(g) {
@@ -741,6 +761,160 @@ impl Ctx<'_> {
         }
         *items = out;
     }
+}
+
+/// A `$t:ty` fragment transcribes as an invisible-delimited `Type::Group`; replace each, at any depth, by its content.
+fn peel_groups(t: &mut syn::Type) {
+    while let syn::Type::Group(g) = t {
+        let inner = (*g.elem).clone();
+        *t = inner;
+    }
+    match t {
+        syn::Type::Reference(r) => peel_groups(&mut r.elem),
+        syn::Type::Paren(p) => peel_groups(&mut p.elem),
+        syn::Type::Slice(s) => peel_groups(&mut s.elem),
+        syn::Type::Array(a) => peel_groups(&mut a.elem),
+        syn::Type::Ptr(p) => peel_groups(&mut p.elem),
+        syn::Type::Tuple(tu) => tu.elems.iter_mut().for_each(peel_groups),
+        syn::Type::Path(p) => {
+            for seg in p.path.segments.iter_mut() {
+                if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                    for a in ab.args.iter_mut() {
+                        if let syn::GenericArgument::Type(x) = a {
+                            peel_groups(x);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1146 — a macro-generated impl of a std OPERATOR trait (`lang::OPERATOR_TRAITS`, by the trait path's
+/// written last segment: `impl Rem for $t`, `impl<'a> Rem<&'a $t> for &'a $t`). Spliced like an inherent impl: the
+/// trait is std's, so no LOCAL dispatch universe (the bounded CHA, SPEC §4) holds it and splicing moves no fan-out —
+/// the R1004 refusal above is about local traits. Unspliced, the impl had no unit: `a % b` over a macro-made `Rem`
+/// read ABSENT in the defining crate, and its report published neither `M::rem` nor `&M::rem`, so a chained
+/// consumer's join found nothing and coverage deleted the `invisible` disclosure (auditagent-v051/fxchain2, EXECUTED).
+///
+/// Only a NOMINAL self type (through references) that is not one of the impl's own parameters: a macro-made
+/// `impl PartialEq<Value> for u64` (serde_json) would put the primitive in the operator index, and every `x != 0` over a
+/// `u64` would then edge to it although the orphan rule means only a `Value` right operand can run it — those stay
+/// unspliced, exactly as before.
+fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
+    let op = matches!(&i.trait_, Some((None, p, _))
+        if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
+    let mut t: &syn::Type = &i.self_ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            _ => break,
+        }
+    }
+    let nominal = match t {
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            !crate::lang::is_non_nominal_type(t)
+                && !(p.path.segments.len() == 1 && i.generics.type_params().any(|tp| tp.ident == leaf))
+        }
+        _ => false,
+    };
+    op && nominal
+}
+
+/// SOUNDNESS R1146 — a `#[derive(PartialEq)]` / `#[derive(PartialOrd)]` has no body in the source, so the crate's
+/// report published no `Type::eq` / `Type::partial_cmp`: inside the crate the comparison reaches the fields through
+/// the derive route (`CallCollector::charge_coercion_ty_at`, R1111), but a CHAINED consumer joins the dependency's
+/// report by that key, found nothing, and coverage deleted the `invisible` disclosure — `a == b` over a derived
+/// `cdep::Outer` whose field's `eq` writes read ABSENT (auditagent-v051/fxchain2 `outer_eq`/`ko_lt`, EXECUTED).
+///
+/// Each such type gets an INHERENT impl holding one method of that name whose body is the comparison itself
+/// (`::core::cmp::PartialEq::eq(self, other)`), so the unit's edges are exactly the derive route's, it is keyed and
+/// published as `Type::eq`, and — being inherent — it joins no dispatch universe and does not enter `trait_impls`
+/// (the derive route keeps running at every operator site). Not synthesised where the module already declares an
+/// inherent method of that name on the type (two `Type::eq` definitions would make each call ambiguous).
+pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
+    fn derives(attrs: &[syn::Attribute]) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for a in attrs.iter().filter(|a| a.path().is_ident("derive")) {
+            let _ = a.parse_nested_meta(|m| {
+                match m.path.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                    Some("PartialEq") => out.push("PartialEq"),
+                    Some("PartialOrd") => out.push("PartialOrd"),
+                    _ => {}
+                }
+                Ok(())
+            });
+        }
+        out
+    }
+    let inherent: std::collections::HashSet<(String, String)> = items
+        .iter()
+        .filter_map(|it| match it {
+            syn::Item::Impl(i) if i.trait_.is_none() => crate::lang::impl_type_name(&i.self_ty).map(|t| (t, i)),
+            _ => None,
+        })
+        .flat_map(|(t, i)| {
+            i.items.iter().filter_map(move |ii| match ii {
+                syn::ImplItem::Fn(f) => Some((t.clone(), f.sig.ident.to_string())),
+                _ => None,
+            })
+        })
+        .collect();
+    let mut out: Vec<syn::Item> = Vec::with_capacity(items.len());
+    for mut it in std::mem::take(items) {
+        let (attrs, ident, generics) = match &mut it {
+            syn::Item::Mod(md) => {
+                if let Some((_, inner)) = &mut md.content {
+                    splice_derived_comparisons(inner);
+                }
+                out.push(it);
+                continue;
+            }
+            syn::Item::Struct(st) => (st.attrs.clone(), st.ident.clone(), st.generics.clone()),
+            syn::Item::Enum(en) => (en.attrs.clone(), en.ident.clone(), en.generics.clone()),
+            _ => {
+                out.push(it);
+                continue;
+            }
+        };
+        let ds = derives(&attrs);
+        out.push(it);
+        for d in ds {
+            let (m, ret) = if d == "PartialEq" { ("eq", "bool") } else { ("partial_cmp", "::core::option::Option<::core::cmp::Ordering>") };
+            if inherent.contains(&(ident.to_string(), m.to_string())) {
+                continue;
+            }
+            let args: Vec<String> = generics
+                .params
+                .iter()
+                .map(|g| match g {
+                    syn::GenericParam::Type(t) => t.ident.to_string(),
+                    syn::GenericParam::Lifetime(l) => l.lifetime.to_string(),
+                    syn::GenericParam::Const(c) => c.ident.to_string(),
+                })
+                .collect();
+            let self_ty = if args.is_empty() { ident.to_string() } else { format!("{ident}<{}>", args.join(", ")) };
+            // The body is the comparison itself, written as the operator: `*self == *other` reaches the fields through
+            // the derive route exactly as `a == b` does, and names no path (a `::core::cmp::..` spelling would be
+            // read as a call into a crate and disclose it).
+            let body = if d == "PartialEq" { "let _ = *self == *other; true" } else { "let _ = *self < *other; None" };
+            let src = format!("impl {self_ty} {{ fn {m}(&self, other: &Self) -> {ret} {{ {body} }} }}");
+            let Ok(ts) = src.parse::<TokenStream>() else { continue };
+            let Ok(mut im) = syn::parse2::<syn::ItemImpl>(respan_to(ts, ident.span())) else { continue };
+            im.generics = generics.clone();
+            // The type's own `#[cfg]`s govern the impl, as the derive's expansion would.
+            im.attrs = attrs.iter().filter(|a| a.path().is_ident("cfg")).cloned().collect();
+            if std::env::var_os("CANDOR_R1146_INSTR").is_some() {
+                eprintln!("R1146DERIVE\t{ident}\t{m}"); // §E1 REACH COUNTER
+            }
+            out.push(syn::Item::Impl(im));
+        }
+    }
+    *items = out;
 }
 
 /// Splice, beside every item-position invocation of a `macro_rules!` this file defines exactly once, the

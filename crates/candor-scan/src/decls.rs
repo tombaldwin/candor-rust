@@ -123,7 +123,7 @@ pub(crate) fn scan_items(
                     continue; // a `#[cfg(test)] impl` block — test-only
                 }
                 // SOUNDNESS R1034 — a non-path self type gets its own key (see `impl_unit_type_name`).
-                let tyname = crate::lang::impl_key_avoiding_free_fns(im, items);
+                let tyname = crate::lang::impl_key_avoiding_free_fns(im, items, uses);
                 // SOUNDNESS R160 — `Self` IS the enclosing impl's type, and nothing told the resolver so.
                 // Every path in a body reaches `lang::expand` through this one `uses` map, so binding
                 // `Self` HERE makes `Self::assoc()`, `Self::CONST`, `Self::Variant(..)`, `Self { .. }` and
@@ -145,7 +145,7 @@ pub(crate) fn scan_items(
                 // `Name::partial_cmp`), and no unit is keyed by a `&Name` receiver. Typing `self` by the key left that
                 // call unresolved — a first cut read http's `&HeaderValue::partial_cmp` PURE, dropping the `bytes`
                 // disclosure its old bare-keyed unit carried.
-                let self_name: Option<String> = match crate::lang::operator_ref_self(im) {
+                let self_name: Option<String> = match crate::lang::operator_ref_self(im, uses) {
                     Some((_, referent)) => Some(referent),
                     None => tyname.clone(),
                 };
@@ -3073,7 +3073,9 @@ pub(crate) fn fninfo(
     for (cr, leaf) in dep_param_releases(sig, uses, &escapes.names, block) {
         c.note_cross_release(cr, leaf);
     }
+    let alias_prev = c.bind_block_aliases(&block.stmts); // R1143 — the body's own `type` aliases
     c.walk_stmts(&block.stmts);
+    c.unbind_block_aliases(alias_prev);
     let ret_idents = match &sig.output {
         syn::ReturnType::Type(_, ty) => {
             let mut v = Vec::new();
@@ -4467,7 +4469,12 @@ pub(crate) fn collect_decls(
                     syn::Fields::Unit => {}
                 }
             }
-            syn::Item::Fn(f) => record_return(&f.sig, uses_ty, rets, None, callable_aliases, None),
+            syn::Item::Fn(f) => {
+                record_return(&f.sig, uses_ty, rets, None, callable_aliases, None);
+                // SOUNDNESS R1145 — see `model::gen_op_key`. Filed for every free fn, so a same-leaf twin withdraws it.
+                let g = crate::lang::generic_operator_uses(&f.sig, &f.block, &Default::default());
+                file_decl_fact(rets, crate::model::gen_op_key(&f.sig.ident.to_string()), g.join(","));
+            }
             // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
             // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
@@ -4711,7 +4718,7 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Impl(im) => {
-                let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items); // R1034
+                let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items, uses); // R1034
                 // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only
                 // when it is NOT one of them. A blanket `impl<T> Trait for T` names every type at once,
                 // so an impl-qualified return key written from it would claim `T::get -> R` for whatever
@@ -4784,7 +4791,7 @@ pub(crate) fn collect_decls(
                 // SOUNDNESS R1131 — an operator impl on `&Name`, whose methods are keyed `&Name::m`
                 // (`lang::operator_ref_self`): filed so the operator site can reach it ADDITIVELY. Keyed by the
                 // trait's resolved leaf, as `trait_impls` is.
-                if let (Some((_, tr, _)), Some((_, ty))) = (&im.trait_, crate::lang::operator_ref_self(im)) {
+                if let (Some((_, tr, _)), Some((_, ty))) = (&im.trait_, crate::lang::operator_ref_self(im, uses)) {
                     if let Some(leaf) = tr.segments.last() {
                         let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
                         let k = crate::model::impl_ref_self_key(&key, &ty);
@@ -4915,6 +4922,12 @@ pub(crate) fn collect_decls(
                         }
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
+                        // SOUNDNESS R1145 — see `model::impl_gen_op_key`.
+                        if let Some(ty) = &impl_key_ty {
+                            let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params);
+                            let tl = ty.rsplit("::").next().unwrap_or(ty);
+                            file_decl_fact(rets, crate::model::impl_gen_op_key(tl, &m.sig.ident.to_string()), g.join(","));
+                        }
                         // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
                         // whatever it returns (inherent or trait impl). `record_return` above cannot
                         // carry this: it files the impl-qualified RETURN only from its nominal branch,

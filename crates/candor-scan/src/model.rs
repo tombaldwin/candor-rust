@@ -549,6 +549,20 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
     format!("{PARAM_OPAQUE}{fn_leaf}")
 }
 
+/// SOUNDNESS R1145 — a `ReturnIndex` key: the OPERATORS a fn applies to a value of one of its GENERIC type
+/// parameters (its own or its impl's), as `lang::generic_operator_uses` encodes them (`{pos}/{Trait}/{method}/{recv}`,
+/// comma-joined; `""` for none). The generic body cannot name the impl (SPEC §4, R1126), but a caller that
+/// instantiates the parameter with a concrete argument can, so the call site charges that argument's type.
+/// `gen_op_key` is a FREE fn's (filed for every free fn of the leaf under the conflict rule), `impl_gen_op_key`
+/// a method's or associated fn's, keyed by its impl's type leaf.
+pub(crate) fn gen_op_key(fn_leaf: &str) -> String {
+    format!("<genop>{fn_leaf}")
+}
+
+pub(crate) fn impl_gen_op_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("<genop>{type_leaf}\u{1f}{fn_leaf}")
+}
+
 /// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
 pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {

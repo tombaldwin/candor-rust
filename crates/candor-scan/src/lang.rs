@@ -3853,13 +3853,17 @@ pub(crate) fn stmt_cfg_inactive(stmt: &syn::Stmt) -> bool {
 /// declares — the merge R1034 is. Keying every non-path impl (the first cut) renamed thousands of units and
 /// moved CHA fan-outs past their cap (jni lost `Log` on 34 rows to a `dispatch:` hedge, bstr/bumpalo traded
 /// hedges for resolutions); keying only the colliding ones changes exactly the units that were wrong.
-pub(crate) fn impl_key_avoiding_free_fns(im: &syn::ItemImpl, items: &[syn::Item]) -> Option<String> {
+pub(crate) fn impl_key_avoiding_free_fns(
+    im: &syn::ItemImpl,
+    items: &[syn::Item],
+    uses: &HashMap<String, String>,
+) -> Option<String> {
     if let Some(t) = impl_type_name(&im.self_ty) {
         return Some(t);
     }
     // SOUNDNESS R1131 — an OPERATOR impl on a reference to a nominal type is keyed `&Name` too, whether or not
     // its method collides with a free fn (see `operator_ref_self`).
-    if operator_ref_self(im).is_some() {
+    if operator_ref_self(im, uses).is_some() {
         return impl_unit_type_name(&im.self_ty, &im.generics);
     }
     let methods: Vec<String> = im
@@ -3954,10 +3958,19 @@ pub(crate) const OPERATOR_TRAITS: &[&str] = &[
 /// site (`model::impl_ref_self_key`): the edge to `B::op` is kept, so a value that is not a reference still
 /// reaches the by-value body. A self type built from the impl's OWN parameter (`impl<T> Add for &T`) is a
 /// forwarder, not this, and keeps its old key.
-pub(crate) fn operator_ref_self(im: &syn::ItemImpl) -> Option<(String, String)> {
+///
+/// SOUNDNESS R1142 — the trait is recognised by its WRITTEN leaf or by the leaf the module's `use` map resolves
+/// it to (`impl_trait_leaf`, the resolution Pass A already files the `&Name` return key under): `use std::ops::Add
+/// as Plus; impl Plus<&T2> for &T2` is the `&T2 + &T2` impl, and reading only `Plus` left it bare-keyed, so
+/// `x.0 + y.0` reached neither it nor (the by-value `T2::add` being claimed) the referent fallback — ABSENT over
+/// a write (auditagent-v051/fxv `v2`, EXECUTED). Either spelling suffices, so no impl recognised before stops
+/// being recognised: the change only re-keys impls the written-leaf test missed.
+pub(crate) fn operator_ref_self(im: &syn::ItemImpl, uses: &HashMap<String, String>) -> Option<(String, String)> {
     let (None, tr, _) = im.trait_.as_ref()? else { return None };
     let tr_leaf = tr.segments.last()?.ident.to_string();
-    if !OPERATOR_TRAITS.contains(&tr_leaf.as_str()) {
+    if !OPERATOR_TRAITS.contains(&tr_leaf.as_str())
+        && !impl_trait_leaf(tr, uses).is_some_and(|l| OPERATOR_TRAITS.contains(&l.as_str()))
+    {
         return None;
     }
     let syn::Type::Reference(r) = &*im.self_ty else { return None };
@@ -7610,6 +7623,118 @@ fn owned_value_leaves_into(ty: &syn::Type, uses: &HashMap<String, String>, out: 
     }
 }
 
+/// SOUNDNESS R1145 — the operators `block` applies with a LEFT operand (the dispatch receiver) that is a
+/// parameter of `sig` typed by a GENERIC type parameter — the fn's own, or its impl's (`impl_generics`) — by value
+/// or through references: `fn g9e<T>(&self, d: E, t: T) where E: Add<T> { d + t }` yields `0/Add/add/1` (`d` is
+/// typed input 0; `1`: the fn takes a receiver). Operator expressions (`+`, `==`, `<`, unary `-`/`!`) and the
+/// explicit method spellings (`d.add(t)`) count. A parameter the body RE-BINDS anywhere (`let d = ..`) is left
+/// out, as are nested `fn`/`impl` items (their parameters are their own). Sorted, deduplicated.
+pub(crate) fn generic_operator_uses(
+    sig: &syn::Signature,
+    block: &syn::Block,
+    impl_generics: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let gens: std::collections::HashSet<String> = sig
+        .generics
+        .type_params()
+        .map(|t| t.ident.to_string())
+        .chain(impl_generics.iter().cloned())
+        .collect();
+    if gens.is_empty() {
+        return Vec::new();
+    }
+    let recv = sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Receiver(_)));
+    let mut params: HashMap<String, usize> = HashMap::new();
+    for (i, pt) in sig
+        .inputs
+        .iter()
+        .filter_map(|a| match a {
+            syn::FnArg::Typed(pt) => Some(pt),
+            _ => None,
+        })
+        .enumerate()
+    {
+        let syn::Pat::Ident(id) = &*pt.pat else { continue };
+        if let syn::Type::Path(tp) = peel_ty_refs(&pt.ty) {
+            if tp.qself.is_none() && tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string())) {
+                params.insert(id.ident.to_string(), i);
+            }
+        }
+    }
+    if params.is_empty() {
+        return Vec::new();
+    }
+    struct V<'p> {
+        params: &'p HashMap<String, usize>,
+        rebound: std::collections::HashSet<String>,
+        hits: Vec<(String, &'static str, &'static str)>,
+    }
+    fn operand(e: &syn::Expr) -> Option<String> {
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(x) => e = &x.expr,
+                syn::Expr::Group(x) => e = &x.expr,
+                syn::Expr::Reference(x) => e = &x.expr,
+                syn::Expr::Unary(x) if matches!(x.op, syn::UnOp::Deref(_)) => e = &x.expr,
+                syn::Expr::Path(p) if p.qself.is_none() => return p.path.get_ident().map(|i| i.to_string()),
+                _ => return None,
+            }
+        }
+    }
+    impl<'x> syn::visit::Visit<'x> for V<'_> {
+        fn visit_expr_binary(&mut self, b: &'x syn::ExprBinary) {
+            if let (Some((tr, m)), Some(n)) = (binop_trait(&b.op), operand(&b.left)) {
+                if self.params.contains_key(&n) {
+                    self.hits.push((n, tr, m));
+                }
+            }
+            syn::visit::visit_expr_binary(self, b);
+        }
+        fn visit_expr_unary(&mut self, u: &'x syn::ExprUnary) {
+            let tm = match u.op {
+                syn::UnOp::Neg(_) => Some(("Neg", "neg")),
+                syn::UnOp::Not(_) => Some(("Not", "not")),
+                _ => None,
+            };
+            if let (Some((tr, m)), Some(n)) = (tm, operand(&u.expr)) {
+                if self.params.contains_key(&n) {
+                    self.hits.push((n, tr, m));
+                }
+            }
+            syn::visit::visit_expr_unary(self, u);
+        }
+        fn visit_expr_method_call(&mut self, c: &'x syn::ExprMethodCall) {
+            if let (Some((tr, m)), Some(n)) =
+                (operator_method_trait(&c.method.to_string(), c.args.len()), operand(&c.receiver))
+            {
+                if self.params.contains_key(&n) {
+                    self.hits.push((n, tr, m));
+                }
+            }
+            syn::visit::visit_expr_method_call(self, c);
+        }
+        fn visit_pat_ident(&mut self, p: &'x syn::PatIdent) {
+            self.rebound.insert(p.ident.to_string());
+            syn::visit::visit_pat_ident(self, p);
+        }
+        fn visit_item_fn(&mut self, _: &'x syn::ItemFn) {}
+        fn visit_item_impl(&mut self, _: &'x syn::ItemImpl) {}
+        fn visit_item_mod(&mut self, _: &'x syn::ItemMod) {}
+    }
+    let mut v = V { params: &params, rebound: Default::default(), hits: Vec::new() };
+    syn::visit::Visit::visit_block(&mut v, block);
+    let mut out: Vec<String> = v
+        .hits
+        .into_iter()
+        .filter(|(n, _, _)| !v.rebound.contains(n))
+        .map(|(n, tr, m)| format!("{}/{tr}/{m}/{}", params[&n], u8::from(recv)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// SOUNDNESS R1129 — `model::param_opaque_key`'s positions for `sig` (see there).
 pub(crate) fn opaque_param_positions(sig: &syn::Signature) -> Vec<usize> {
     fn idents_in(t: &syn::Type, out: &mut Vec<String>) {
@@ -11015,7 +11140,7 @@ pub(crate) fn collect_opaque_trait_impls(
                     if let Some(leaf) = impl_trait_leaf(tr, uses) {
                         // SOUNDNESS R1034 — the unit is minted under the impl's own key now (`&str` → `str::m`),
                         // never as the free fn `{modpath}::{m}` it used to merge with.
-                        let key = impl_key_avoiding_free_fns(im, items);
+                        let key = impl_key_avoiding_free_fns(im, items, uses);
                         for m in &members {
                             let q = match &key {
                                 Some(k) => crate::decls::qualify(modpath, &format!("{k}::{m}")),
@@ -11092,6 +11217,7 @@ pub(crate) fn collect_nonpath_receivers(
     items: &[syn::Item],
     include_tests: bool,
     modpath: &str,
+    uses: &HashMap<String, String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
     for it in items {
@@ -11100,7 +11226,12 @@ pub(crate) fn collect_nonpath_receivers(
                 if let Some((_, inner)) = &m.content {
                     let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977
                     let sub_mod = crate::decls::qualify(modpath, &m.ident.to_string());
-                    collect_nonpath_receivers(inner, include_tests, &sub_mod, out);
+                    // R1142 — the child's own `use` map (the scope `scan_items` / `collect_decls` give it), so the
+                    // operator-impl test below resolves a renamed trait exactly as the unit's KEY was resolved.
+                    let mut sub = crate::decls::submodule_uses(uses, inner, include_tests);
+                    let mut alts = HashMap::new();
+                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    collect_nonpath_receivers(inner, include_tests, &sub_mod, &sub, out);
                 }
             }
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
@@ -11111,10 +11242,10 @@ pub(crate) fn collect_nonpath_receivers(
                 // them to two `&EdwardsPoint::add` units and replaced a true `macro:` reason with `ambiguous:`).
                 // The spellings that do reach the `&Name` impl are edged explicitly by the collector: the operator,
                 // `a.rem(b)`, `Rem::rem(a, b)`, `<&B as Rem<&B>>::rem` and `<&B>::rem` (`edge_ufcs_operator`).
-                if operator_ref_self(im).is_some() {
+                if operator_ref_self(im, uses).is_some() {
                     continue;
                 }
-                if let Some(k) = impl_key_avoiding_free_fns(im, items) {
+                if let Some(k) = impl_key_avoiding_free_fns(im, items, uses) {
                     // SOUNDNESS R1056 (residual) — a COLLIDING non-path impl is keyed under its own type
                     // (`str::m`, `[u8]::m`), a tail the typed call reaches with no alias. It is recorded with an
                     // EMPTY unit qual (which Pass B's alias builder skips) only so `NONPATH_RECV_TAILS` knows the
@@ -11144,7 +11275,7 @@ pub(crate) fn collect_nonpath_receivers(
                 let shared_count = |m: &str| {
                     items.iter().filter(|o| match o {
                         syn::Item::Impl(oi) if (include_tests || !is_cfg_test(&oi.attrs))
-                            && impl_key_avoiding_free_fns(oi, items).is_none() =>
+                            && impl_key_avoiding_free_fns(oi, items, uses).is_none() =>
                         {
                             oi.items.iter().any(|x| matches!(x, syn::ImplItem::Fn(f) if f.sig.ident == m))
                         }
