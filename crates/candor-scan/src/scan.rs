@@ -5498,8 +5498,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         for (caller, claimants) in &veina_contested {
             let empty = BTreeSet::new();
             let have = inferred.get(caller).unwrap_or(&empty);
+            // SOUNDNESS R1131 (v051 audit) — `Unknown` is not one fact but one per REASON CLASS, and a reason-scoped
+            // gate (`deny Unknown[ambiguous]`) reads the class. A caller already `Unknown` for ANOTHER reason (a
+            // `macro:` hidden by-value impl, curve25519 `coset4`) still loses this contest's true `ambiguous:`
+            // hit unless a claimant's `Unknown` counts as missing while the caller lacks that class. So it does:
+            // the two reasons are UNIONED, never one replacing the other. (`Unknown` itself is unchanged; only
+            // the reason list grows.)
+            let has_ambig = unknown_why.get(caller).is_some_and(|w| w.contains("ambiguous:same-name local defs"));
             let missing = claimants.iter().any(|c| {
-                c != caller && inferred.get(c).is_some_and(|ce| ce.iter().any(|e| !have.contains(e)))
+                c != caller
+                    && inferred.get(c).is_some_and(|ce| {
+                        ce.iter().any(|e| !have.contains(e) || (*e == "Unknown" && !has_ambig))
+                    })
             });
             if missing && !direct.get(caller).is_some_and(|d| d.contains("Unknown"))
                 || missing && !unknown_why.get(caller).is_some_and(|w| w.contains("ambiguous:same-name local defs"))

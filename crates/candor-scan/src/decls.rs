@@ -2874,7 +2874,6 @@ pub(crate) fn fninfo(
             drop_types: elems.drop_types,
             local_consts: Default::default(),
             let_payload: Default::default(),
-            operand_by_value: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
             field_borrows: elems.field_borrows,

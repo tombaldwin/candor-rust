@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev100/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev101/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -29450,8 +29450,9 @@ pub fn rg(l: L, w: hopa::Pinned) -> bool { l == w }
 /// CONTROLS (GT 0): `r40_ctl_pure`, `r39_ctl_alias` (the alias route forms no primitive edge when the right
 /// operand is certainly a primitive) and every `n30_*` stay uncharged, and `r40_impl_param` (a where-bound on
 /// the enclosing impl's REAL type parameter) keeps its dispatch. PINNED OVER-CHARGES (GT 0, a union, the safe
-/// direction), all pre-existing: `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`. `r31_p_byval` (a by-value `a + b`
-/// over `P` with only `&P`'s impl effectful) is a control: an operand PROVABLY a value forms no `&P` edge.
+/// direction): `r31_p_byval` (a by-value `a + b` over `P` also edges `&P`'s impl — withholding it on a name-level
+/// "by-value and readable" test silenced real calls twice, auditagent-v051 fxsg/fxv), and the pre-existing
+/// `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`.
 #[test]
 fn r1130_r1140_operator_and_comparison_reaches() {
     let v = scan_src_to_json_multi("v051fxa", &[("Cargo.toml", "[package]\nname = \"v051fxa\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
@@ -29584,10 +29585,10 @@ pub fn n30_collect_vec(v: Vec<Guard>) -> usize { v.into_iter().collect::<Vec<_>>
     ] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
     }
-    for f in ["r40_ctl_pure", "r39_ctl_alias", "r31_p_byval", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
+    for f in ["r40_ctl_pure", "r39_ctl_alias", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
     }
-    for f in ["r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
+    for f in ["r31_p_byval", "r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` pinned over-charge moved — decide it:\n{v:#}");
     }
 }
@@ -29965,15 +29966,20 @@ pub mod a {
 }
 pub mod b {
     #[derive(Clone, Copy)] pub struct P(pub u64);
-    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { P(self.0 + o.0) } }
+    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { unsafe { ext_hook() }; P(self.0 + o.0) } }
+    extern "C" { fn ext_hook(); }
 }
 pub struct W(pub a::P);
 impl W { pub fn coset(&self, k: a::P) -> a::P { self.0 + k } }
 pub fn unused() -> u64 { let _ = Add::add(1u64, 2u64); 0 }
 "##)]);
     let r = co["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "W::coset").expect("W::coset row");
-    assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with("macro:")))),
-        "the unreadable by-value impl's `macro:` reason must survive:\n{r:#}");
+    // BOTH true reasons, unioned: `macro:` (the by-value impl is macro-made) and `ambiguous:` (the `&P` edge is
+    // contested between `a::&P::add` and `b::&P::add`). Neither may replace the other.
+    for class in ["macro:", "ambiguous:"] {
+        assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with(class)))),
+            "`{class}` reason must be present (unioned):\n{r:#}");
+    }
     let n = scan_src_to_json_multi("v051fxn2", &[("Cargo.toml", "[package]\nname = \"v051fxn2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
 use std::ops::Add;
 pub fn mark() { let _ = std::fs::write("/tmp/auditv051n", b"x"); }
@@ -30028,4 +30034,92 @@ pub fn direct(a: I, b: &I) -> U { &b.data - a.data }
 "##)]);
     assert!(veina_row_effs(&bn, "direct").iter().any(|e| e == "Fs"), "`direct` writes:\n{bn:#}");
     assert!(veina_row_effs(&bn, "via_macro").is_empty(), "macro-argument operator residual moved — decide it:\n{bn:#}");
+}
+
+/// SOUNDNESS R1131 (v051 audit, round 3) — auditagent-v051/fxv, EXECUTED: every cell writes. A round-2 rule withheld
+/// the `&T` edge from a by-value operand whose by-value impl "looked readable", decided by BARE NAME: a visible
+/// pure `impl Add for a::T` silenced `b::T` (v1), a visible `Sub<u64>` silenced a macro-made `Sub` (v2b), and
+/// `impl Add for G<u32>` silenced `G<u64>` (v4). The rule is removed; the `&T` edge is formed for every operand.
+/// STATED RESIDUAL: `v2`, an `&T` impl written with a RENAMED trait (`use std::ops::Add as Plus; impl Plus<&T2>
+/// for &T2`) — `lang::operator_ref_self` reads the written trait leaf, so the impl is not re-keyed.
+#[test]
+fn v051_audit_round3_byvalue_operands_keep_the_ref_edge() {
+    let v = scan_src_to_json_multi("v051fxv", &[("Cargo.toml", "[package]\nname = \"v051fxv\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+use std::ops::{Add, Sub, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051v", b"x"); }
+
+// V1: two same-named types; a::T has a VISIBLE pure by-value Add, b::T's by-value Add is macro-made and forwards
+pub mod a { #[derive(Clone, Copy)] pub struct T(pub u64); impl std::ops::Add for T { type Output = T; fn add(self, o: T) -> T { T(self.0 + o.0) } } }
+pub mod b {
+    #[derive(Clone, Copy)] pub struct T(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y T> for &'x T { type Output = T; fn add(self, o: &'y T) -> T { crate::mark(); T(self.0 + o.0) } }
+    macro_rules! fwd { ($t:ident) => { impl std::ops::Add for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd!(T);
+}
+#[derive(Clone, Copy)] pub struct W1(pub b::T);
+pub fn v1(x: W1, y: W1) -> b::T { x.0 + y.0 }
+
+// V2: a VISIBLE `impl Add<u64> for T2` (pure), and a macro-made `impl Plus for T2` (Rhs = T2) using a RENAMED trait
+pub mod c {
+    use std::ops::Add as Plus;
+    #[derive(Clone, Copy)] pub struct T2(pub u64);
+    impl std::ops::Add<u64> for T2 { type Output = T2; fn add(self, o: u64) -> T2 { T2(self.0 + o) } }
+    impl<'x, 'y> Plus<&'y T2> for &'x T2 { type Output = T2; fn add(self, o: &'y T2) -> T2 { crate::mark(); T2(self.0 + o.0) } }
+    macro_rules! fwd2 { ($t:ident) => { impl Plus for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd2!(T2);
+}
+#[derive(Clone, Copy)] pub struct W2(pub c::T2);
+pub fn v2(x: W2, y: W2) -> c::T2 { x.0 + y.0 }
+// V2b: same, trait spelled core::ops::Sub inside the macro, visible Sub<u64>
+pub mod c2 {
+    #[derive(Clone, Copy)] pub struct T3(pub u64);
+    impl std::ops::Sub<u64> for T3 { type Output = T3; fn sub(self, o: u64) -> T3 { T3(self.0 - o) } }
+    impl<'x, 'y> core::ops::Sub<&'y T3> for &'x T3 { type Output = T3; fn sub(self, o: &'y T3) -> T3 { crate::mark(); T3(self.0 - o.0) } }
+    macro_rules! fwd3 { ($t:ty) => { impl core::ops::Sub for $t { type Output = $t; fn sub(self, o: $t) -> $t { &self - &o } } } }
+    fwd3!(T3);
+}
+#[derive(Clone, Copy)] pub struct W3(pub c2::T3);
+pub fn v2b(x: W3, y: W3) -> c2::T3 { x.0 - y.0 }
+
+// V3: cfg twins: a parsed by-value impl on non-unix, a macro-made forwarding impl on unix
+pub mod d {
+    #[derive(Clone, Copy)] pub struct T4(pub u64);
+    impl<'x, 'y> std::ops::Mul<&'y T4> for &'x T4 { type Output = T4; fn mul(self, o: &'y T4) -> T4 { crate::mark(); T4(self.0 * o.0) } }
+    #[cfg(not(unix))] impl std::ops::Mul for T4 { type Output = T4; fn mul(self, o: T4) -> T4 { T4(self.0 * o.0) } }
+    #[cfg(unix)] macro_rules! fwd4 { () => { impl std::ops::Mul for T4 { type Output = T4; fn mul(self, o: T4) -> T4 { &self * &o } } } }
+    #[cfg(unix)] fwd4!();
+}
+#[derive(Clone, Copy)] pub struct W4(pub d::T4);
+pub fn v3(x: W4, y: W4) -> d::T4 { x.0 * y.0 }
+
+// V4: generic: VISIBLE pure `impl Add for G<u32>`, macro-made forwarding `impl Add for G<u64>`
+pub mod e {
+    #[derive(Clone, Copy)] pub struct G<X>(pub X);
+    impl std::ops::Add for G<u32> { type Output = G<u32>; fn add(self, o: G<u32>) -> G<u32> { G(self.0 + o.0) } }
+    impl<'x, 'y> std::ops::Add<&'y G<u64>> for &'x G<u64> { type Output = G<u64>; fn add(self, o: &'y G<u64>) -> G<u64> { crate::mark(); G(self.0 + o.0) } }
+    macro_rules! fwd5 { ($t:ty) => { impl std::ops::Add for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } } }
+    fwd5!(G<u64>);
+}
+#[derive(Clone, Copy)] pub struct W5(pub e::G<u64>);
+pub fn v4(x: W5, y: W5) -> e::G<u64> { x.0 + y.0 }
+
+// V5/V6: VISIBLE blanket by-value impl that itself forwards to the effectful &-impl
+pub mod f {
+    #[derive(Clone, Copy)] pub struct H<X>(pub X);
+    impl<'x, 'y, X: Copy + Into<u64>> std::ops::Add<&'y H<X>> for &'x H<X> { type Output = u64; fn add(self, o: &'y H<X>) -> u64 { crate::mark(); self.0.into() + o.0.into() } }
+    impl<X: Copy + Into<u64>> std::ops::Add for H<X> { type Output = u64; fn add(self, o: H<X>) -> u64 { &self + &o } }
+    #[derive(Clone, Copy)] pub struct K(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y K> for &'x K { type Output = K; fn add(self, o: &'y K) -> K { crate::mark(); K(self.0 + o.0) } }
+    impl std::ops::Add for K { type Output = K; fn add(self, o: K) -> K { &self + &o } }
+}
+#[derive(Clone, Copy)] pub struct W6(pub f::H<u32>);
+pub fn v5(x: W6, y: W6) -> u64 { x.0 + y.0 }
+#[derive(Clone, Copy)] pub struct W7(pub f::K);
+pub fn v6(x: W7, y: W7) -> f::K { x.0 + y.0 }
+pub fn v6_direct(x: f::K, y: f::K) -> f::K { x + y }
+"##)]);
+    for f in ["v1", "v2b", "v3", "v4", "v5", "v6", "v6_direct"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "v2").is_empty(), "renamed-trait `&T` impl residual moved — decide it:\n{v:#}");
 }
