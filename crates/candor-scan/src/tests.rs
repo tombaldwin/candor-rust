@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev99/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev100/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -29887,4 +29887,145 @@ pub fn c_ufcs_rem(a: &B, b: &B) -> u8 { std::ops::Rem::rem(a, b) }
     for f in ["c_rem", "c_eq", "c_rem_owned", "c_eq_owned", "c_via_dep_fn", "c_byval_rem", "c_byval_eq", "c_method", "c_ufcs_rem"] {
         assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "chained `{f}` writes (executed):\n{cv:#}");
     }
+}
+
+/// SOUNDNESS R1131 (v051 audit, round 2) — a by-value operator whose by-value impl is MACRO-MADE (`fwd!()`, the
+/// curve25519 `define_add_variants!` / num-bigint `forward_*` shape) forwards to the `&T` impl the scan CAN read,
+/// so its `&T` edge stays even for a provably by-value operand (auditagent-v051/fxsg, EXECUTED: `&R::add`,
+/// `&R::mul`, `&G::add`, `&G::mul`, `r_add`, `g_add`, `g_mul` write; ABSENT at 4911cb3). `fxsg2` is the same
+/// code with the by-value impls written out. `fxco` pins the coset4 half: the unreadable by-value call keeps
+/// its `macro:` reason. And two nested-position closures from the same audit (`fxn`): a TUPLE-destructured
+/// nested parameter (`n2`) and a SUFFIXED literal left operand (`p3`, `7u8 + p`). STATED RESIDUALS: `n4` (a
+/// nested parameter typed by an alias declared in the outer body) and `fxbn` (an operator whose operands are a
+/// `macro_rules!` template's metavariables: the template is walked `$`-stripped, so they are untyped).
+#[test]
+fn v051_audit_round2_macro_made_byvalue_and_nested_positions() {
+    for (tag, src) in [("v051fxsg", r##"use std::ops::{Add, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditsg", b"x"); }
+#[derive(Clone, Copy)] pub struct E(pub u64);
+#[derive(Clone, Copy)] pub struct S(pub u64);
+impl<'a, 'b> Add<&'b E> for &'a E { type Output = E; fn add(self, o: &'b E) -> E { mark(); E(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a E { type Output = E; fn mul(self, o: &'b S) -> E { mark(); E(self.0 * o.0) } }
+// by-value forwarding impls made by a macro (the curve25519 define_add_variants! shape)
+macro_rules! fwd { () => {
+    impl Add<E> for E { type Output = E; fn add(self, o: E) -> E { &self + &o } }
+    impl<'b> Mul<&'b S> for E { type Output = E; fn mul(self, o: &'b S) -> E { &self * o } }
+} }
+fwd!();
+#[derive(Clone, Copy)] pub struct R(pub E);
+#[derive(Clone, Copy)] pub struct G(pub E);
+// control (no cfg): the RistrettoPoint shape
+impl<'a, 'b> Add<&'b R> for &'a R { type Output = R; fn add(self, o: &'b R) -> R { R(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a R { type Output = R; fn mul(self, s: &'b S) -> R { R(self.0 * s) } }
+// the SubgroupPoint shape: identical bodies under #[cfg(feature = "group")]
+#[cfg(feature = "group")]
+impl Add<&G> for &G { type Output = G; fn add(self, o: &G) -> G { G(self.0 + o.0) } }
+#[cfg(feature = "group")]
+impl Mul<&S> for &G { type Output = G; fn mul(self, s: &S) -> G { G(self.0 * s) } }
+pub fn r_add(a: &R, b: &R) -> R { a + b }
+pub fn g_add(a: &G, b: &G) -> G { a + b }
+pub fn g_mul(a: &G, s: &S) -> G { a * s }
+"##), ("v051fxsg2", r##"use std::ops::{Add, Mul};
+pub fn mark() { let _ = std::fs::write("/tmp/auditsg2", b"x"); }
+#[derive(Clone, Copy)] pub struct E(pub u64);
+#[derive(Clone, Copy)] pub struct S(pub u64);
+impl<'a, 'b> Add<&'b E> for &'a E { type Output = E; fn add(self, o: &'b E) -> E { mark(); E(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a E { type Output = E; fn mul(self, o: &'b S) -> E { mark(); E(self.0 * o.0) } }
+// by-value forwarding impls made by a macro (the curve25519 define_add_variants! shape)
+
+    impl Add<E> for E { type Output = E; fn add(self, o: E) -> E { &self + &o } }
+    impl<'b> Mul<&'b S> for E { type Output = E; fn mul(self, o: &'b S) -> E { &self * o } }
+
+#[derive(Clone, Copy)] pub struct R(pub E);
+#[derive(Clone, Copy)] pub struct G(pub E);
+// control (no cfg): the RistrettoPoint shape
+impl<'a, 'b> Add<&'b R> for &'a R { type Output = R; fn add(self, o: &'b R) -> R { R(self.0 + o.0) } }
+impl<'a, 'b> Mul<&'b S> for &'a R { type Output = R; fn mul(self, s: &'b S) -> R { R(self.0 * s) } }
+// the SubgroupPoint shape: identical bodies under #[cfg(feature = "group")]
+#[cfg(feature = "group")]
+impl Add<&G> for &G { type Output = G; fn add(self, o: &G) -> G { G(self.0 + o.0) } }
+#[cfg(feature = "group")]
+impl Mul<&S> for &G { type Output = G; fn mul(self, s: &S) -> G { G(self.0 * s) } }
+pub fn r_add(a: &R, b: &R) -> R { a + b }
+pub fn g_add(a: &G, b: &G) -> G { a + b }
+pub fn g_mul(a: &G, s: &S) -> G { a * s }
+"##)] {
+        let toml = format!("[package]\nname = \"{tag}\"\nedition = \"2021\"\n");
+        let v = scan_src_to_json_multi(tag, &[("Cargo.toml", toml.as_str()), ("src/lib.rs", src)]);
+        for f in ["&R::add", "&R::mul", "&G::add", "&G::mul", "r_add", "g_add", "g_mul"] {
+            assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "{tag} `{f}` writes (executed):\n{v:#}");
+        }
+    }
+    let co = scan_src_to_json_multi("v051fxco", &[("Cargo.toml", "[package]\nname = \"v051fxco\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+pub mod a {
+    #[derive(Clone, Copy)] pub struct P(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { P(self.0 + o.0) } }
+    macro_rules! fwd { ($t:ident) => { impl std::ops::Add<$t> for $t { type Output = $t; fn add(self, o: $t) -> $t { &self + &o } } }; }
+    fwd!(P);
+}
+pub mod b {
+    #[derive(Clone, Copy)] pub struct P(pub u64);
+    impl<'x, 'y> std::ops::Add<&'y P> for &'x P { type Output = P; fn add(self, o: &'y P) -> P { P(self.0 + o.0) } }
+}
+pub struct W(pub a::P);
+impl W { pub fn coset(&self, k: a::P) -> a::P { self.0 + k } }
+pub fn unused() -> u64 { let _ = Add::add(1u64, 2u64); 0 }
+"##)]);
+    let r = co["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "W::coset").expect("W::coset row");
+    assert!(r["unknownWhy"].as_array().is_some_and(|a| a.iter().any(|w| w.as_str().is_some_and(|w| w.starts_with("macro:")))),
+        "the unreadable by-value impl's `macro:` reason must survive:\n{r:#}");
+    let n = scan_src_to_json_multi("v051fxn2", &[("Cargo.toml", "[package]\nname = \"v051fxn2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051n", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);    // PURE Add
+#[derive(Clone, Copy)] pub struct D2(pub u64);   // EFFECTFUL Add
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// N1: nested param shadows the outer param NAME with a different type
+pub fn n1(a: D) -> u64 { fn inner(a: D2) -> D2 { a + 1 } inner(D2(a.0)).0 }
+// N2: nested param untyped pattern (tuple destructure)
+pub fn n2() -> u64 { fn inner((a, _b): (D2, u8)) -> D2 { a + 1 } inner((D2(1), 0)).0 }
+// N3: nested fn inside a closure
+pub fn n3() -> u64 { let c = || { fn inner(a: D2) -> D2 { a + 1 } inner(D2(1)) }; c().0 }
+// N4: nested fn using a type alias declared in the OUTER body
+pub fn n4() -> u64 { type T = D2; fn inner(a: T) -> T { a + 1 } inner(D2(1)).0 }
+// N5: nested fn whose param is a struct declared in the outer body with the same name as a module type
+pub fn n5() -> u64 { #[derive(Clone, Copy)] struct D(u64); impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { crate::mark(); D(self.0 + r) } } fn inner(a: D) -> D { a + 1 } inner(D(1)).0 }
+// N6: two nested fns with the same name in sibling blocks, different param types
+pub fn n6(f: bool) -> u64 { if f { fn inner(a: D) -> u64 { (a + 1).0 } inner(D(1)) } else { fn inner(a: D2) -> u64 { (a + 1).0 } inner(D2(1)) } }
+// N7: nested fn in a nested mod in the body
+pub fn n7() -> u64 { mod m { pub fn inner(a: super::D2) -> super::D2 { a + 1 } } m::inner(D2(1)).0 }
+// N8: nested fn param of reference type
+pub fn n8() -> u64 { fn inner(a: &D2) -> D2 { *a + 1 } inner(&D2(1)).0 }
+// --- PRIM_SHADOW_KEY: a crate struct named like a primitive switches the guard off crate-wide
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub u64); }
+#[derive(Clone, Copy)] pub struct P;
+impl Add<P> for u8 { type Output = u8; fn add(self, _r: P) -> u8 { mark(); self } }   // PRIMITIVE u8 left, effectful
+pub fn p1(x: u8, p: P) -> u8 { x + p }                      // x is the PRIMITIVE u8 here
+pub type Byte = u8;
+pub fn p2(x: Byte, p: P) -> u8 { x + p }                    // alias of the primitive
+pub fn p3(p: P) -> u8 { 7u8 + p }                           // literal
+pub fn c2((a, _b): (D2, u8)) -> D2 { a + 1 }
+pub type T4 = D2;
+pub fn c4(a: T4) -> T4 { a + 1 }
+pub fn c3b(p: P) -> u8 { let x: u8 = 7; x + p }
+"##)]);
+    for f in ["n1", "n2", "n3", "n5", "n6", "n7", "n8", "p1", "p2", "p3", "c2", "c4", "c3b"] {
+        assert!(veina_row_effs(&n, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{n:#}");
+    }
+    assert!(veina_row_effs(&n, "n4").is_empty(), "n4 (outer-body alias) residual moved — decide it:\n{n:#}");
+    let bn = scan_src_to_json_multi("v051fxbn", &[("Cargo.toml", "[package]\nname = \"v051fxbn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Sub;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051bn", b"x"); }
+#[derive(Clone)] pub struct U(pub u64);
+impl Sub<U> for &U { type Output = U; fn sub(self, o: U) -> U { mark(); U(self.0 - o.0) } }
+pub struct I { pub data: U }
+// the num-bigint shape: operands supplied to a macro, `$b_data - $a_data`
+macro_rules! isub { ($a_data:expr, $b_data:expr) => { $b_data - $a_data }; }
+impl Sub<&I> for I { type Output = U; fn sub(self, other: &I) -> U { isub!(self.data, &other.data) } }
+pub fn via_macro(a: I, b: &I) -> U { a - b }
+// control: the same expression written directly
+pub fn direct(a: I, b: &I) -> U { &b.data - a.data }
+"##)]);
+    assert!(veina_row_effs(&bn, "direct").iter().any(|e| e == "Fs"), "`direct` writes:\n{bn:#}");
+    assert!(veina_row_effs(&bn, "via_macro").is_empty(), "macro-argument operator residual moved — decide it:\n{bn:#}");
 }

@@ -4809,7 +4809,20 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1131 — the crate's operator impl on `&Type` (`lang::operator_ref_self`), keyed `&Type::m`. The
         // typer collapses references, so whether this operand is `&Type` or `Type` is not known here: the edge
         // is formed BESIDE whatever the by-value impl answers below (a union, never a choice).
-        if !self.assign_drop.operand_by_value.get() && self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
+        // A by-value operand skips the `&Type` edge ONLY where the by-value impl's own body is VISIBLE (a parsed
+        // `impl Op for Type`, and no item macro naming the trait beside the type). A macro-made by-value impl
+        // (`define_add_variants!`, num-bigint's `forward_*`) is exactly the one that forwards to the `&Type`
+        // impl, and the scan cannot read it: its edge must stay (auditagent-v051/fxsg, EXECUTED — `r_add`,
+        // `g_add`, `g_mul` ABSENT at 4911cb3). The by-value call keeps its own edge, so an unreadable by-value
+        // body still contributes its `macro:` reason beside whatever the `&Type` units answer (coset4).
+        let byvalue_visible = self.trait_impls.get(trait_leaf).is_some_and(|v| v.iter().any(|t| t == ty_leaf))
+            && !self
+                .returns
+                .get(&crate::model::impl_rhs_key(trait_leaf, ty_leaf))
+                .is_some_and(|rs| rs.split(',').any(|x| x == "*"));
+        if !(self.assign_drop.operand_by_value.get() && byvalue_visible)
+            && self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf))
+        {
             if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
                 eprintln!("R1131REFSELF\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
@@ -4924,11 +4937,11 @@ impl<'a> CallCollector<'a> {
                 typed: false, method: false, is_macro: false,
             });
             // SOUNDNESS R1131 (v051 audit, chained) — a dependency's operator impl on `&Type` is published under
-            // `&Type::m`, so an OPERATOR on a dependency value asks for that key too (beside the by-value one,
-            // unless the operand is provably a value). Without it a chained consumer's `a % b` over
+            // `&Type::m`, so an OPERATOR on a dependency value asks for that key too, beside the by-value one
+            // (always: whether the dependency's by-value impl is readable is not known here). Without it a chained consumer's `a % b` over
             // `a: &dep::B` joined nothing, and chaining's coverage then deleted the `invisible: [dep]` the
             // unchained arm carried: ABSENT over a write (auditagent-v051/fxchain, every arm).
-            if crate::lang::OPERATOR_TRAITS.contains(&trait_leaf) && !self.assign_drop.operand_by_value.get() {
+            if crate::lang::OPERATOR_TRAITS.contains(&trait_leaf) {
                 self.calls.push(Call { argc: 0, entropy_arg: false,
                     path: format!("{}::&{}::{}", segs[0], ty_leaf, method),
                     leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
@@ -7009,16 +7022,31 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let own_params: std::collections::HashSet<String> =
             sig_t.generics.type_params().map(|t| t.ident.to_string()).collect();
         let mut saved_vars: Vec<(String, Option<String>, Option<Vec<String>>)> = Vec::new();
+        // A plain `name: Type` parameter, and each name of a TUPLE-destructured one (`(a, _b): (D2, u8)`)
+        // paired with its own component type.
+        let mut binds: Vec<(&syn::Ident, &syn::Type)> = Vec::new();
         for arg in &node.sig.inputs {
             let syn::FnArg::Typed(pt) = arg else { continue };
-            let syn::Pat::Ident(id) = &*pt.pat else { continue };
+            match (&*pt.pat, &*pt.ty) {
+                (syn::Pat::Ident(id), ty) => binds.push((&id.ident, ty)),
+                (syn::Pat::Tuple(tp), syn::Type::Tuple(tt)) if tp.elems.len() == tt.elems.len() => {
+                    for (p, t) in tp.elems.iter().zip(tt.elems.iter()) {
+                        if let syn::Pat::Ident(id) = p {
+                            binds.push((&id.ident, t));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (ident, pty) in binds {
             // ONLY a plainly NOMINAL parameter type is typed: a path (through `&`) with no generic arguments,
             // naming none of the fn's own generics, no trait object / `impl` / fn pointer, and not a std wrapper
             // the typer would answer by its element. Everything else is left exactly as it was before —
             // including whatever the enclosing scope bound to the name, which the measured corpus relied on
             // (lettre's nested `try_connect<T: ToSocketAddrs>(server: T, ..)` kept its `Net` only through it,
             // and objc2's `closure: &mut Option<F>` its `callback:` hedge).
-            let mut ty: &syn::Type = &pt.ty;
+            let mut ty: &syn::Type = pty;
             while let syn::Type::Reference(r) = ty {
                 ty = &r.elem;
             }
@@ -7036,8 +7064,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             {
                 continue;
             }
-            let Some(t) = crate::lang::type_path(&pt.ty, &self.uses) else { continue };
-            let n = id.ident.to_string();
+            let Some(t) = crate::lang::type_path(pty, &self.uses) else { continue };
+            let n = ident.to_string();
             saved_vars.push((n.clone(), self.vars.remove(&n), self.trait_vars.remove(&n)));
             self.vars.insert(n, t);
         }
@@ -10643,6 +10671,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let lconst = self.local_const_type(&node.left);
             // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
             // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
+            // SOUNDNESS (v051 audit) — a SUFFIXED literal left operand (`7u8 + p`) is typed by its suffix: the
+            // suffix IS the type, so the crate's `impl Add<P> for u8` is reached (EXECUTED fxn `p3`, ABSENT on
+            // every arm). An unsuffixed literal's type is inferred and stays the residual.
+            // Not when the right operand is certainly a primitive too: `7u8 + 1u8` runs std's impl.
+            let lconst = lconst.or_else(|| if self.certainly_primitive(&node.right) { None } else { match peel_value(&node.left) {
+                syn::Expr::Lit(l) => match &l.lit {
+                    syn::Lit::Int(i) if !i.suffix().is_empty() => Some(i.suffix().to_string()),
+                    syn::Lit::Float(f) if !f.suffix().is_empty() => Some(f.suffix().to_string()),
+                    _ => None,
+                },
+                _ => None,
+            } });
             self.assign_drop.operand_by_value.set(lconst.is_some() || self.operand_is_value(&node.left));
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
