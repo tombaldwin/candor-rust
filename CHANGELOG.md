@@ -11,92 +11,118 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
-- ⚠ **candor-scan: values that provably die in a frame are charged there (SOUNDNESS R1122, R1123, R1124,
-  R1129).** A SHARED borrow of a value the frame owns is no longer read as carrying it out
-  (`let h = H::new(); std::mem::size_of_val(&h)`, `peek(&h)`, `size_of_val(&H::new())`); a borrow of an
-  `Rc`/`Arc`/`RefCell`/lock-shaped value, and every `&mut` borrow, keep the old reading. A call result that
-  is DISCARDED (`mk_pair();`, `let _ = s.take();`), bound and never consumed (`let p = mk_pair(); p.1`,
-  `let _x: H = src.into()`), left unbound in a tuple pattern, or projected out of a temporary
-  (`mk_pair().1`) now runs its owned leaves' destructors here — tuple, `Vec`, `Cow` and owned-method
-  results included. An argument passed at a generic / `impl Trait` parameter that the callee's signature
-  names nowhere else stays charged at a `?` (`eat(H::new(), n)?`), as does the default of `ok_or` /
-  `unwrap_or` / `and` / `or` / `map_or`, and a typed by-value closure parameter its body never consumes
-  (`let f = |_h: H| {}; f(H::new())`). Every cell EXECUTED and read ABSENT before; `deny Fs` now exits 1.
-  The hand-off gate's known-open register is empty and the lv fixture states no silence.
-- **candor-scan: over-charges removed (SOUNDNESS R1125, R1127).** `Box::leak` / `Box::into_raw` (and
-  `Rc`/`Arc::into_raw`) suppress the destructor like `mem::forget`; an awaited `async { .. }` block's tail is
-  its value (`async { H::new() }.await` returned is not dropped here). Each removal was executed at 0.
-- ⚠ **candor-scan: operator operands (SOUNDNESS R1128, R1134).** A `#[derive(PartialEq)]` beside an
-  operator impl with only a foreign `Rhs` is now reached, and a block-local `const`/`static` operand
-  (`ONE + a`) is typed from its declaration — both were silent. R1128's over-charge (`String == String`
-  edging to `impl PartialEq<Value> for String`) is kept: refusing it needs the defining type of both
-  operands, and every narrower rule measured silenced a real call (an alias, a renamed re-export).
+## [0.40.7] — 2026-10-12
 
-- ⚠ **candor-scan: a comparison or hash reaches the component's, key's and field's own impl (SOUNDNESS
-  R1111).** A tuple's `==`/`<` runs each component's `PartialEq`/`PartialOrd`, a `HashMap`/`HashSet`
-  comparison hashes and compares every key, and std's algorithms and collections run the element's or
-  key's impl inside std: `contains`, `sort`, `binary_search`, `dedup`, `starts_with`, `iter().max()`,
-  `BinaryHeap::push`, `HashMap::insert`/`get`/`entry`/`remove`/`[k]`, `BTreeMap`/`BTreeSet` lookups,
-  `(a..b).contains`, `std::cmp::max`, the provided `a.ne(b)`/`a.max(b)`/`a.lt(b)` methods and
-  `assert_eq!`. A `#[derive(PartialEq, PartialOrd, Ord, Hash)]` struct now reaches its fields' impls.
-  Every shape was EXECUTED (an impl that writes a file logged a line) and read ABSENT; `deny Fs` now
-  exits 1. Stated residuals: a tuple-typed struct field, a tuple bound by an unannotated `let` from a
-  parameter, an enum's derive, and `collect::<HashSet<_>>()`.
-- ⚠ **candor-scan: three drop-glue silences closed (SOUNDNESS R201, R209(a), R209(b) residual).**
-  `.await` drops the future, so a value the future owns (`FutH { h: H::new(), .. }.await`,
-  `mk_fut(H::new(), n).await`) dies in the awaiting frame — now charged where the function's declared
-  return type cannot carry such a value. A `?` inside macro tokens (`idm!(gen(n)?)`, `vec![f()?]`,
-  `println!("{}", f()?)`, `assert!(f()? > 0)`, a single-arm template's `$e?`) is an exit, so a value
-  built before it dies there. A let-bound closure whose result is kept (`let x = f(); x.0`), called
-  twice, or pushed into a local `Vec` builds a value that dies here. Each was EXECUTED with a `Drop` that
-  writes a file and read ABSENT.
+candor-scan only; the deep engine and candor-query are unchanged apart from the version. Most entries close a
+**silent under-report**: a destructor (`Drop`) or a comparison (`PartialEq`/`PartialOrd`/`Hash`) that really
+runs in a function was missing from that function's row. Two entries remove **over-charges**. Every closed
+shape was run with a `Drop`/`eq` that writes a file, and the effect was missing from the published 0.40.6
+report before this release.
 
-- ⚠ **candor-scan: a `collect` into `Result`/`Option` drops what it already collected (SOUNDNESS R198,
-  collect arm).** `it.map(|i| { gen(*i)?; Ok(H::new()) }).collect::<Result<Vec<_>, _>>()` drops the
-  `H`s collected before the first `Err` (executed) and was absent. The target type is read where it is
-  written: a turbofish, a `let` annotation, or the fn's declared return for a tail/`return` `collect()`.
-  Stated: a target written only on a callee's parameter type stays silent.
+- ⚠ **Gates that change verdict on real code.** Measured against published 0.40.6 over the 3,584-crate
+  registry corpus, with each gate scoped to the function named. These now **fail where 0.40.6 passed**:
+  - `deny Log` over jni 0.21.1's `JNIEnv` and `JList`/`JMap` wrappers: `call_method`, `get_field`,
+    `get_field_unchecked`, `alloc_object`, `is_instance_of`, `throw`, `throw_new`, `register_native_methods`,
+    `JList::get`/`insert`/`remove`/`pop`/`size`/`iter`, `JListIter::next`, `JMapIter::next`, and others
+    (49 functions). Each binds `let class = self.auto_local(..)`, or calls a function that does. The
+    `AutoLocal` destructor deletes the JNI local reference and logs.
+  - `deny Log` over tokio's `Runtime::block_on`, `LocalRuntime::block_on`, `LocalSet::block_on` and their
+    `block_on_inner` (40 rows, tokio 1.48–1.53). `let _enter = self.enter();` drops an `EnterGuard` at scope end.
+  - `deny Rand` and `deny Unknown` over mongodb 3.9.1 `SessionRawBatchCursor::generic_new`. Its unused
+    `Option<ClientSession>` parameter is dropped there, and `ClientSession`'s destructor runs.
+  - `deny Unknown` over sqlx-core 0.9.0's `fs::read`/`read_to_string`/`remove_file`/`remove_dir`/
+    `remove_dir_all`/`create_dir_all` and `CertificateInput::data`. Each awaits a future, and awaiting it
+    drops a `JoinHandle`. The same flip happens over hickory-proto 0.26's `update_message::zone_transfer`
+    (an `assert_eq!` over `Name`), over ascii 1.0.0's comparisons and serde visitors, and over windows-core's
+    `OsString::from`.
 
-- ⚠ **candor-scan: a `?` inside a `try_fold`/`fold` closure drops what an earlier call built (SOUNDNESS R198,
-  fold arm).** `items.iter().try_fold(Vec::new(), |mut acc, i| { gen(*i)?; acc.push(H::new()); Ok(acc) })`
-  drops the accumulator on the error path (executed) and was absent. The closure of an accumulating
-  combinator (`fold`, `try_fold`, `rfold`, `try_rfold`, `reduce`, `try_reduce`) is now treated as a loop
-  body, R187's rule. Out, stated: `scan`, `for_each`/`try_for_each`/`map`/`and_then`, async closure
-  bodies, and a closure passed by name.
+  These now **pass where 0.40.6 failed**, because a charge was removed and every removed charge was
+  traced to source:
+  - `deny Log` over tokio's runtime drivers: `time`/`process`/`signal` `Driver::park`, `park_timeout`,
+    `park_internal` and `signal::Driver::process` (48 rows, tokio 1.52–1.53). 0.40.6 charged a
+    `Globals` destructor through `globals() -> &'static Globals`, but a reference destroys nothing (R1120).
+  - tokio's Windows `signal::windows::sys::handler` and signal-hook-registry's `GlobalData::ensure` leave
+    the report, and arrow-data's `FFI_ArrowArray::new` loses `Unknown`. These are R1120 and R1125.
 
-- ⚠ **candor-scan: a by-value parameter of a WRAPPED drop type is released in the callee (SOUNDNESS
-  R1121, R200's callee half).** `fn eat(o: Option<H>) {}`, `(H, u32)`, `[H; N]`, `Vec<H>`, `Result` either
-  arm, a map, `RefCell<H>`, nested — executed, 1 drop each — were absent, and so was a caller that hands
-  one a construction on a `?` operand (`eat_opt_r(Some(H::new()), n)?`). Charged only when the body
-  never CONSUMES the parameter (only borrows it, or calls std's `drop`): a wrapper hands its contents out
-  by pattern, `?` and consuming methods, which the escape model does not follow. Stated residual: a
-  generic or `impl Into` parameter (the callee cannot name what it drops), and a wrapped parameter that
-  is consumed and still drops part of what it holds.
+  Counts: corpus A/B (`bin/corpus-ab.py`) against published 0.40.6 gives ADDED 354, REMOVED 5,
+  CHANGED 1,641. No concrete effect is lost outside the R1120/R1125 removals above, and those were audited.
 
-- ⚠ **candor-scan: a unit-returning call in TAIL position no longer carries its arguments out (SOUNDNESS
-  R200, caller half).** `pub fn f() { eat_opt(Some(H::new())) }` and `std::mem::drop(h)` as a tail were
-  absent while the same call with a `;` was charged — executed, 1 drop either way. The arguments of a
-  call whose callee provably returns `()` (std's `drop`, or a local fn whose every same-leaf definition
-  returns `()`) are no longer on the escape spine. A user `fn drop(h: H) -> H`, a local `mymem::drop`, a
-  callable parameter or closure named like a unit fn, and a unit call inside an escaping closure keep the
-  old reading. Stated: this widens R230's store-not-drop over-charge to the tail spelling.
+- ⚠ **A comparison or hash reaches the component's, key's and field's own impl (SOUNDNESS R1111).** A
+  tuple's `==`/`<` runs each component's `PartialEq`/`PartialOrd`. A `HashMap`/`HashSet` comparison hashes
+  and compares every key. std's algorithms and collections run the element's or key's impl inside std:
+  - `contains`, `sort`, `binary_search`, `dedup`, `starts_with`, `iter().max()`;
+  - `BinaryHeap::push`;
+  - `HashMap::insert`/`get`/`entry`/`remove`/`[k]`, and `BTreeMap`/`BTreeSet` lookups;
+  - `(a..b).contains`, `std::cmp::max`;
+  - the provided `a.ne(b)`/`a.max(b)`/`a.lt(b)` methods, and `assert_eq!`.
 
-- ⚠ **candor-scan: a shadowed or sibling-scope let-bound closure that runs and drops here is charged
-  (SOUNDNESS R323).** `let c = || H::new(); c(); let c = || H::new(); c();` and `{ let c = ..; c(); } {
-  let c = ..; c(); }` drop in the function's own frame (executed) and were absent: a name bound twice
-  fell back to suppression. The decision is now made per lexical binding. Still refused (stated): a name
-  also bound by a pattern, closure parameter, `match`/`if let` arm or body-local `fn`, and a binding
-  named inside macro tokens.
+  A `#[derive(PartialEq, PartialOrd, Ord, Hash)]` struct now reaches its fields' impls. Still silent, and
+  tracked as R1130: a tuple-typed struct field, a tuple bound by an unannotated `let` from a parameter, an
+  enum's derive, and `collect::<HashSet<_>>()`.
 
-- ⚠ **candor-scan: a call that returns a BORROW of a `Drop` type no longer charges that type's destructor
-  (SOUNDNESS R1120).** `let g = globals();` over `fn globals() -> &'static G` was read as constructing
-  a `G` and charged `G::drop`; so were `&mut G`, `Option<&G>`, `Result<&G, E>`, a lifetime-threaded
-  `fn mk_ref<'a>(x: &'a G) -> &'a G`, and a std lock/borrow guard (`MutexGuard<'_, G>`, `Ref<'_, G>`)
-  returned or taken by value — executed, 0 drops each. A `deny <effect>` over such a caller can go
-  GREEN. Measured on 1,201 registry crates with a local `Drop`: 0 added, 3 removed, 90 changed, every
-  one traced to source (tokio `signal::registry::globals()`/`registry()`, crossbeam-epoch
-  `unprotected() -> &'static Guard`, polling's `MutexGuard<SocketState>` parameter). An owning
-  same-leaf twin anywhere keeps the charge; the binding is still typed (`g.method()` resolves).
+- ⚠ **Operator operands (SOUNDNESS R1128's derive route, R1134).** A `#[derive(PartialEq)]` beside an
+  operator impl whose only `Rhs` is foreign is now reached. A block-local `const`/`static` operand (`ONE + a`,
+  `a == ONE`) is now typed from its declaration. Both were silent in 0.40.6. **R1128 itself is not fixed:**
+  `String == String` with serde_json in scope still edges to `impl PartialEq<Value> for String`. That
+  over-charge is in the safe direction. A refusal for it was tried during this cycle, and every version of
+  it silenced a real call (an alias, a renamed re-export, a block-local const), so it was withdrawn
+  before release.
+
+- ⚠ **Values that provably die in a frame are charged there (SOUNDNESS R1122, R1123, R1124, R1129).**
+  - **Shared borrows.** A shared borrow of a value the frame owns no longer counts as carrying it out
+    (`let h = H::new(); std::mem::size_of_val(&h)`, `peek(&h)`, `size_of_val(&H::new())`). Borrows of
+    `Rc`/`Arc`/`RefCell`/lock-shaped values, and every `&mut` borrow, keep the old reading.
+  - **Released results.** A call result drops here in each of these cases:
+    - it is discarded (`mk_pair();`, `let _ = s.take();`);
+    - it is bound and never consumed (`let p = mk_pair(); p.1`, `let _x: H = src.into()`);
+    - it is left unbound in a tuple pattern;
+    - it is projected out of a temporary (`mk_pair().1`).
+
+    The owned values that drop include tuple, `Vec`, `Cow` and owned-method results.
+  - **Opaque parameters and defaults.** An argument passed at a generic or `impl Trait` parameter, where
+    the callee's signature names that type nowhere else, stays the caller's charge at a `?`
+    (`eat(H::new(), n)?`). So does the default of `ok_or`/`unwrap_or`/`and`/`or`/`map_or`. A typed
+    by-value closure parameter that the body never consumes is released in the closure
+    (`let f = |_h: H| {}; f(H::new())`).
+  - **Still open:** `Rc::downgrade(&rc)`, `bump(&mut h)`, and the generic callee's own row. That last
+    one is the SPEC §4 external-abstraction permission.
+
+- ⚠ **Drop-glue silences closed (SOUNDNESS R198, R200, R1121, R201, R209, R323).**
+  - **R198:** a `?` inside a `try_fold`/`fold`/`rfold`/`reduce` closure drops the accumulator. So does a
+    `collect` into `Result`/`Option` that stops early: it drops what it had already collected. The target
+    type is read from a turbofish, a `let` annotation, or the function's declared return. Still silent: a
+    target written only on a callee's parameter type, and a closure passed by name.
+  - **R200 / R1121:** a by-value parameter wrapped in `Option`, a tuple, an array, `Vec`, `Result`, a map
+    or `RefCell` is dropped in the callee. This applies when the body only borrows the parameter or
+    passes it to std's `drop`. A unit-returning call in tail position, such as
+    `pub fn f() { eat_opt(Some(H::new())) }` or a tail `std::mem::drop(h)`, no longer carries its
+    arguments out. Side effect: R230's store-not-drop over-charge now also reaches the tail spelling.
+  - **R201:** `.await` drops the future, so a value that a hand-written future owns
+    (`FutH { h: H::new(), .. }.await`, `mk_fut(H::new(), n).await`) dies in the awaiting function. This is
+    charged where that function's declared return cannot carry such a value.
+  - **R209:** a `?` inside macro tokens (`idm!(gen(n)?)`, `vec![f()?]`, `println!("{}", f()?)`,
+    `assert!(f()? > 0)`) is an exit, so a value built before it dies there. So does the value from a
+    let-bound closure whose result is kept, that is called twice, or whose result is pushed into a local
+    `Vec`.
+  - **R323:** a shadowed or sibling-scope let-bound closure (`let c = || H::new(); c(); let c = ..; c();`)
+    is decided per binding. Still refused: a name also bound by a pattern, a closure parameter, a match
+    arm or a body-local `fn`, or a name used inside macro tokens.
+
+- **Over-charges removed (SOUNDNESS R1120, R1125, R1127's fabrication half).** Each removed shape was
+  executed at 0 drops.
+  - **R1120:** a call that returns a borrow of a `Drop` type no longer charges that type's destructor. This
+    covers `&'static G`, `&mut G`, `Option<&G>`, `Result<&G, _>` and a lifetime-threaded `&'a G`. A std
+    guard (`MutexGuard<'_, G>`, `Ref<'_, G>`) that is returned or taken by value is not read as owning `G`
+    either.
+  - **R1125:** `Box::leak`, `Box::into_raw` and `Rc`/`Arc::into_raw` suppress the destructor the way
+    `mem::forget` does.
+  - **R1127:** an awaited `async { .. }` block's tail is its value, so `async { H::new() }.await` returned
+    from the function is not dropped here.
+
+- **For maintainers: a new CI gate, `soundness/run_handoff.sh`.** It runs a 120-cell grid of a value
+  handed across a call, plus the checked-in `lv` fixture. Each cell is executed against a drop counter,
+  and the gate fails on any cell that drops while its row is neither charged nor disclosed.
+  `--calibrate` seeds a known silence and must fail on it. Published 0.40.6 has 23 silent grid cells.
 
 ## [0.40.6] — 2026-10-11
 
