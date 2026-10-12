@@ -11104,19 +11104,14 @@ pub(crate) fn collect_nonpath_receivers(
                 }
             }
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
-                // SOUNDNESS R1131 — an operator impl on `&Name` is keyed `&Name::m` now, but a receiver-typed call
-                // still spells `Name::m` (`a.rem(b)`, `B::rem(&a, &b)`): the referent fallback this function
-                // records for every other non-path impl is recorded for it too, pointing at the new qual, so
-                // whatever reached the old module-level unit by that fallback reaches the same body.
-                if let (Some((_, referent)), Some(k)) = (operator_ref_self(im), impl_key_avoiding_free_fns(im, items)) {
-                    for ii in &im.items {
-                        if let syn::ImplItem::Fn(f) = ii {
-                            if include_tests || !is_cfg_test(&f.attrs) {
-                                let m = f.sig.ident.to_string();
-                                out.insert(format!("{referent}::{m}\u{1f}{}\u{1f}0", crate::decls::qualify(modpath, &format!("{k}::{m}"))));
-                            }
-                        }
-                    }
+                // SOUNDNESS R1131 — an operator impl on `&Name` is keyed `&Name::m`, and is NOT given the referent
+                // fallback (`Name::m` -> `&Name::m`) the other non-path impls get: that fallback answered a BY-VALUE
+                // operator's `Name::m` edge with the `&Name` units it never dispatches to (curve25519 `coset4`'s
+                // three `self.0 + ..` run the macro-made by-value `<EdwardsPoint as Add>::add`; the fallback took
+                // them to two `&EdwardsPoint::add` units and replaced a true `macro:` reason with `ambiguous:`).
+                // The spellings that do reach the `&Name` impl are edged explicitly by the collector: the operator,
+                // `a.rem(b)`, `Rem::rem(a, b)`, `<&B as Rem<&B>>::rem` and `<&B>::rem` (`edge_ufcs_operator`).
+                if operator_ref_self(im).is_some() {
                     continue;
                 }
                 if let Some(k) = impl_key_avoiding_free_fns(im, items) {

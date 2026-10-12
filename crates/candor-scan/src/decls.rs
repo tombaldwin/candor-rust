@@ -2874,6 +2874,7 @@ pub(crate) fn fninfo(
             drop_types: elems.drop_types,
             local_consts: Default::default(),
             let_payload: Default::default(),
+            operand_by_value: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
             field_borrows: elems.field_borrows,
@@ -4027,6 +4028,21 @@ pub(crate) fn collect_decls(
                 }
             }
             _ => {}
+        }
+        // SOUNDNESS R1137/R1139 (v051 audit) — a crate TYPE declared under a primitive's name (`pub struct u8(i64)`):
+        // from here on a typer answer of `u8` no longer identifies the primitive (`model::PRIM_SHADOW_KEY`).
+        let shadow_ident = match it {
+            syn::Item::Struct(x) => Some(&x.ident),
+            syn::Item::Enum(x) => Some(&x.ident),
+            syn::Item::Union(x) => Some(&x.ident),
+            syn::Item::Type(x) => Some(&x.ident),
+            _ => None,
+        };
+        if shadow_ident.is_some_and(|i| {
+            let n = i.to_string();
+            crate::model::PRIMITIVE_LEAVES.contains(&n.as_str()) || n == "str"
+        }) {
+            rets.insert(crate::model::PRIM_SHADOW_KEY.to_string(), Some("1".to_string()));
         }
         // SOUNDNESS R1130 — the COMPARISON PAYLOAD of what the field indexes cannot hold: a struct field of TUPLE
         // type (`p: (Guard, i32)`, which `type_path` names nothing for) and every payload of an ENUM's variants

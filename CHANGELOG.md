@@ -26,7 +26,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   A dependency's extension-trait method on a std or primitive value (`n.extend()` under
   `num_conv::prelude::*`, `it.sorted()` under `itertools::Itertools`) now discloses the module's imported
   dependencies in `invisible`, as the qualified spelling already did (a generated table of std's stable
-  methods decides what std answers).
+  methods decides what std answers). A chained consumer's operator on a dependency value also asks for the
+  dependency's `&Type::op` key (it was ABSENT chained). A by-value operand (a by-value parameter, an owned
+  field) never reaches a `&Type` impl. A NESTED fn's plainly nominal parameters are typed (`fn which(..) {
+  fn check_exe(exe: PathBuf) { exe.exists() } .. }`, cc / grep-cli / figment / git2: real `Fs`/`Net` that
+  read ABSENT). A crate type named like a primitive (`struct u8`) no longer reads as the primitive.
 
 - ⚠ **candor-scan: values that provably die in a frame are charged there (SOUNDNESS R1122, R1123, R1124,
   R1129).** A SHARED borrow of a value the frame owns is no longer read as carrying it out

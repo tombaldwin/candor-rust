@@ -149,6 +149,10 @@ pub(crate) struct AssignDrop<'a> {
     /// would. Rewritten (or cleared) at every `let` that binds the name; flow-insensitive like `vars`, so a
     /// stale entry can only over-charge.
     pub(crate) let_payload: HashMap<String, Vec<(String, CmpRole)>>,
+    /// SOUNDNESS R1131 (v051 audit) — set by an OPERATOR site while it charges an operand that is PROVABLY a
+    /// value, not a reference (`operand_is_value`): operators do not auto-ref, so such an operand never runs a
+    /// `&Type` impl and its `&Type::op` edge (with whatever reason its units carry) is not formed.
+    pub(crate) operand_by_value: std::cell::Cell<bool>,
     /// `lang::assign_drop_exempt` — addresses of the `syn::ExprAssign`s that provably overwrite nothing.
     pub(crate) exempt: std::collections::HashSet<usize>,
     /// Parameter NAME -> its declared type, for the names the body never re-binds (a shadowing `let`
@@ -1341,10 +1345,14 @@ impl<'a> CallCollector<'a> {
             None if segs.len() >= 2 => Some(segs[segs.len() - 2]),
             None => None,
         };
-        let Some(ts) = trait_seg else { return };
         let Some((tr, m)) = crate::lang::operator_method_trait(&method, args.len().saturating_sub(1)) else { return };
-        if ts.ident != tr {
-            return;
+        // `<&B>::rem(a, b)` names no trait: a qualified-self path on a REFERENCE type whose member is an operator
+        // method is that operator on `&B` (the only impl it can name).
+        let ref_qself = matches!(&p.qself, Some(q) if q.position == 0 && matches!(&*q.ty, syn::Type::Reference(_)));
+        match trait_seg {
+            Some(ts) if ts.ident == tr => {}
+            None if ref_qself && segs.len() == 1 => {}
+            _ => return,
         }
         let Some(first) = args.first() else { return };
         if let Some(t) = self.resolve_recv_type(first) {
@@ -4524,6 +4532,52 @@ impl<'a> CallCollector<'a> {
             || self.is_dependency_type(ty)
     }
 
+    /// SOUNDNESS R1131 (v051 audit) — whether an operator operand is PROVABLY a value of its type rather than a
+    /// reference to it, from a DECLARATION the operand names, never from a type name alone:
+    ///  - a parameter whose declared type is a path (no `&`) that the `use` map leaves alone (no alias could
+    ///    turn it into a reference), and whose leaf is the type the receiver typer answered;
+    ///  - a field of a typed struct (not one whose leaf two modules declare) recorded as OWNED, not reached
+    ///    through a reference (`model::FieldBorrow`, the drop rules' own fact) — `self.0 + x` moves or copies
+    ///    the field, whatever `self` is.
+    ///
+    /// Anything else answers `false` and keeps the union. MIR (curve25519 `RistrettoPoint::coset4`): the three
+    /// `self.0 + ..` run the macro-made by-value `<EdwardsPoint as Add>::add`, never a `&EdwardsPoint` impl.
+    fn operand_is_value(&self, e: &syn::Expr) -> bool {
+        let mut e = e;
+        while let syn::Expr::Paren(p) = e {
+            e = &p.expr;
+        }
+        let Some(t) = self.resolve_recv_type(e) else { return false };
+        let leaf = t.rsplit("::").next().unwrap_or(&t).to_string();
+        match e {
+            syn::Expr::Path(_) => match self.declared_param_ty(e) {
+                Some(syn::Type::Path(tp)) if tp.qself.is_none() => {
+                    let written = tp.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                    written == leaf && !self.uses.contains_key(&written)
+                        || written == leaf && self.uses.get(&written).is_some_and(|v| v.rsplit("::").next() == Some(written.as_str()))
+                }
+                _ => false,
+            },
+            syn::Expr::Field(f) => {
+                let Some(bt) = self.resolve_recv_type(&f.base) else { return false };
+                let bl = bt.rsplit("::").next().unwrap_or(&bt).to_string();
+                if self.assign_drop.twin_leaves.is_some_and(|tw| tw.contains(&bl)) {
+                    return false;
+                }
+                let m = match &f.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(i) => i.index.to_string(),
+                };
+                self.assign_drop
+                    .field_borrows
+                    .and_then(|fb| fb.get(&bl))
+                    .and_then(|fs| fs.get(&m))
+                    .is_some_and(|b| b.leaf == Some(false))
+            }
+            _ => false,
+        }
+    }
+
     /// SOUNDNESS R1137/R1139 — an operand that is CERTAINLY a primitive value: a literal, a cast to a primitive,
     /// or one the typer answers with a primitive's own name (through `&`, `*`, parentheses and unary `-`/`!`).
     fn certainly_primitive(&self, e: &syn::Expr) -> bool {
@@ -4544,10 +4598,16 @@ impl<'a> CallCollector<'a> {
             ),
             syn::Expr::Cast(c) => matches!(&*c.ty, syn::Type::Path(p) if p.qself.is_none()
                 && p.path.get_ident().is_some_and(|i| crate::model::PRIMITIVE_LEAVES.contains(&i.to_string().as_str()))),
-            _ => self
-                .type_of(e)
-                .or_else(|| self.resolve_recv_type(e))
-                .is_some_and(|t| crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()) || t == "str"),
+            // A typer answer is a NAME; it identifies a primitive only while no crate type is declared under a
+            // primitive's name (`pub struct u8(i64)`: a `const K: u8` of it answered `u8` and the guard
+            // withheld a real edge — auditagent-v051/fxg2). `model::PRIM_SHADOW_KEY` is filed by Pass A for any
+            // such declaration, crate-wide, and turns this route off. A cast cannot name a struct, so the
+            // arm above stands.
+            _ => !self.returns.contains_key(crate::model::PRIM_SHADOW_KEY)
+                && self
+                    .type_of(e)
+                    .or_else(|| self.resolve_recv_type(e))
+                    .is_some_and(|t| crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()) || t == "str"),
         }
     }
 
@@ -4749,7 +4809,7 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1131 — the crate's operator impl on `&Type` (`lang::operator_ref_self`), keyed `&Type::m`. The
         // typer collapses references, so whether this operand is `&Type` or `Type` is not known here: the edge
         // is formed BESIDE whatever the by-value impl answers below (a union, never a choice).
-        if self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
+        if !self.assign_drop.operand_by_value.get() && self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
             if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
                 eprintln!("R1131REFSELF\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
@@ -4863,6 +4923,18 @@ impl<'a> CallCollector<'a> {
                 leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
             });
+            // SOUNDNESS R1131 (v051 audit, chained) — a dependency's operator impl on `&Type` is published under
+            // `&Type::m`, so an OPERATOR on a dependency value asks for that key too (beside the by-value one,
+            // unless the operand is provably a value). Without it a chained consumer's `a % b` over
+            // `a: &dep::B` joined nothing, and chaining's coverage then deleted the `invisible: [dep]` the
+            // unchained arm carried: ABSENT over a write (auditagent-v051/fxchain, every arm).
+            if crate::lang::OPERATOR_TRAITS.contains(&trait_leaf) && !self.assign_drop.operand_by_value.get() {
+                self.calls.push(Call { argc: 0, entropy_arg: false,
+                    path: format!("{}::&{}::{}", segs[0], ty_leaf, method),
+                    leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                    typed: false, method: false, is_macro: false,
+                });
+            }
         }
     }
 
@@ -6924,7 +6996,62 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // R570/R576(a) — a nested fn has no `self` and no enclosing impl's generics.
         let outer_ts = self.trait_self.take();
         let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
+        // SOUNDNESS R1140 (v051 audit) — a NESTED fn's own CONCRETE-typed parameters (`fn inner<T>(d: D, t: T)
+        // where D: Add<T>`), typed for its body exactly as a top-level fn's are by `decls::seed_vars` (from the
+        // signature with its concrete-type `where` predicates set aside, `lang::strip_concrete_where`). They
+        // were typed by NOTHING — "the nested-parameter position" — so `d + t` and `d.eff()` there reached no
+        // body (EXECUTED, auditagent-v051/fxg `g12`–`g14`; also without any `where`). A parameter typed by the
+        // fn's own generic is cleared instead, so an outer binding of the same name cannot leak in. Restored
+        // on exit: the names are the nested fn's alone.
+        let sig_typing = crate::lang::strip_concrete_where(&node.sig, None, false);
+        let sig_t: &syn::Signature = sig_typing.as_ref().unwrap_or(&node.sig);
+        let own_gen = crate::lang::generic_bounds_of(sig_t);
+        let own_params: std::collections::HashSet<String> =
+            sig_t.generics.type_params().map(|t| t.ident.to_string()).collect();
+        let mut saved_vars: Vec<(String, Option<String>, Option<Vec<String>>)> = Vec::new();
+        for arg in &node.sig.inputs {
+            let syn::FnArg::Typed(pt) = arg else { continue };
+            let syn::Pat::Ident(id) = &*pt.pat else { continue };
+            // ONLY a plainly NOMINAL parameter type is typed: a path (through `&`) with no generic arguments,
+            // naming none of the fn's own generics, no trait object / `impl` / fn pointer, and not a std wrapper
+            // the typer would answer by its element. Everything else is left exactly as it was before —
+            // including whatever the enclosing scope bound to the name, which the measured corpus relied on
+            // (lettre's nested `try_connect<T: ToSocketAddrs>(server: T, ..)` kept its `Net` only through it,
+            // and objc2's `closure: &mut Option<F>` its `callback:` hedge).
+            let mut ty: &syn::Type = &pt.ty;
+            while let syn::Type::Reference(r) = ty {
+                ty = &r.elem;
+            }
+            let syn::Type::Path(tp) = ty else { continue };
+            if tp.qself.is_some()
+                || tp.path.segments.iter().any(|sg| !matches!(sg.arguments, syn::PathArguments::None))
+            {
+                continue;
+            }
+            let head = tp.path.segments.first().map(|sg| sg.ident.to_string()).unwrap_or_default();
+            let last = tp.path.segments.last().map(|sg| sg.ident.to_string()).unwrap_or_default();
+            if own_params.contains(&head) || own_gen.contains_key(&head)
+                || crate::model::PRIMITIVE_LEAVES.contains(&last.as_str())
+                || matches!(last.as_str(), "str" | "String" | "Self")
+            {
+                continue;
+            }
+            let Some(t) = crate::lang::type_path(&pt.ty, &self.uses) else { continue };
+            let n = id.ident.to_string();
+            saved_vars.push((n.clone(), self.vars.remove(&n), self.trait_vars.remove(&n)));
+            self.vars.insert(n, t);
+        }
         syn::visit::visit_item_fn(self, node);
+        for (n, v, tv) in saved_vars {
+            self.vars.remove(&n);
+            self.trait_vars.remove(&n);
+            if let Some(v) = v {
+                self.vars.insert(n.clone(), v);
+            }
+            if let Some(tv) = tv {
+                self.trait_vars.insert(n, tv);
+            }
+        }
         self.trait_self = outer_ts;
         self.impl_generic_bounds = outer_ig;
         self.dyn_sig_traits = outer;
@@ -10516,10 +10643,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let lconst = self.local_const_type(&node.left);
             // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
             // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
+            self.assign_drop.operand_by_value.set(lconst.is_some() || self.operand_is_value(&node.left));
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
                 None => self.charge_coercion(&node.left, tr, method),
             }
+            self.assign_drop.operand_by_value.set(false);
             // The two ADDITIVE left-operand typings below (R1137, R1139) can each name a PRIMITIVE, and a crate's
             // own `impl Op<X> for u64` is only ever run when the right operand is that crate's `X` (the orphan
             // rule forbids `impl Op<u64> for u64`; std owns it). So neither forms a primitive edge when the right
@@ -10598,6 +10727,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_unary(&mut self, node: &'ast syn::ExprUnary) {
         // UNARY OPERATOR OVERLOADS (#4): `-a`→`Neg::neg`, `!a`→`Not::not`, and the DEREF coercion
         // `*w`→`Deref::deref` (#3) on a concrete local impl. (`&a`/`Borrow` is not an operator overload.)
+        self.assign_drop.operand_by_value.set(matches!(node.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) && self.operand_is_value(&node.expr));
         match &node.op {
             syn::UnOp::Neg(_) => self.charge_coercion(&node.expr, "Neg", "neg"),
             syn::UnOp::Not(_) => self.charge_coercion(&node.expr, "Not", "not"),
@@ -10605,6 +10735,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             syn::UnOp::Deref(_) => self.charge_coercion(&node.expr, "Deref", "deref"),
             _ => {}
         }
+        self.assign_drop.operand_by_value.set(false);
         syn::visit::visit_expr_unary(self, node);
     }
     fn visit_expr_index(&mut self, node: &'ast syn::ExprIndex) {

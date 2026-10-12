@@ -586,6 +586,10 @@ pub(crate) fn any_method_key(leaf: &str) -> String {
     format!("<anymethod>{leaf}")
 }
 
+/// SOUNDNESS R1137/R1139 (v051 audit) — a `ReturnIndex` key filed when the crate declares a type under a primitive's
+/// name; a typer answer naming a primitive is then not evidence of one. Value `1`.
+pub(crate) const PRIM_SHADOW_KEY: &str = "<primshadow>";
+
 pub(crate) const RET_SHARED: &str = "<retshared>";
 
 pub(crate) fn ret_shared_key(fn_leaf: &str) -> String {

@@ -29450,8 +29450,8 @@ pub fn rg(l: L, w: hopa::Pinned) -> bool { l == w }
 /// CONTROLS (GT 0): `r40_ctl_pure`, `r39_ctl_alias` (the alias route forms no primitive edge when the right
 /// operand is certainly a primitive) and every `n30_*` stay uncharged, and `r40_impl_param` (a where-bound on
 /// the enclosing impl's REAL type parameter) keeps its dispatch. PINNED OVER-CHARGES (GT 0, a union, the safe
-/// direction): `r31_p_byval` (the `&P` impl is edged beside `P`'s: the typer collapses references), and the
-/// pre-existing `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`.
+/// direction), all pre-existing: `r31_q_byref`, `r39_ctl_prim`, `r37_ctl_pure`. `r31_p_byval` (a by-value `a + b`
+/// over `P` with only `&P`'s impl effectful) is a control: an operand PROVABLY a value forms no `&P` edge.
 #[test]
 fn r1130_r1140_operator_and_comparison_reaches() {
     let v = scan_src_to_json_multi("v051fxa", &[("Cargo.toml", "[package]\nname = \"v051fxa\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, clippy::all)]
@@ -29584,10 +29584,10 @@ pub fn n30_collect_vec(v: Vec<Guard>) -> usize { v.into_iter().collect::<Vec<_>>
     ] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
     }
-    for f in ["r40_ctl_pure", "r39_ctl_alias", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
+    for f in ["r40_ctl_pure", "r39_ctl_alias", "r31_p_byval", "n30_tupint", "n30_field_pure", "n30_enum_pure", "n30_collect_vec"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` executes 0 — FABRICATION:\n{v:#}");
     }
-    for f in ["r31_p_byval", "r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
+    for f in ["r31_q_byref", "r39_ctl_prim", "r37_ctl_pure"] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` pinned over-charge moved — decide it:\n{v:#}");
     }
 }
@@ -29737,5 +29737,154 @@ pub fn w_prim_call(x: u32) -> u32 { w_prim(x, Lc(1)) }
 "##)]);
     for f in ["w_prim", "w_prim_call", "s_str", "s_u32"] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` runs an effectful impl (executed):\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1131 / R1137 / R1139 / R1140 — the v051 AUDIT's fixtures (scratchpad `auditagent-v051/fxg`, `fxg2`,
+/// `fxchain`; `rustagent-v051/fxn`), every cell EXECUTED and writing a file.
+///   * `fxg2` — a crate type NAMED like a primitive (`pub struct u8(i64)`): a const/static of it is no longer
+///     read as a primitive right operand (`a::f`, `c::f`, `e::f` were ABSENT; `model::PRIM_SHADOW_KEY`).
+///   * `fxg`/`fxn` — a NESTED fn's concrete parameters are typed (`g10`, `g12`–`g14`, `n_plain`, `n_where`).
+///     STATED RESIDUAL: `W::g9`/`g9_call`/`g9e_call` — there `D` is the IMPL's type parameter (it shadows the
+///     struct `D`), so `d + t` is a generic dispatch over std's `Add` (SPEC section 4, R1126's clause).
+///   * `fxchain` — a dependency's `&B` operator impl is reached from a CHAINED consumer (`dep::&B::rem`): all
+///     nine consumer cells are charged (they were ABSENT chained, `invisible` only unchained).
+#[test]
+fn v051_audit_named_primitive_nested_params_and_chained_ref_operators() {
+    let g2 = scan_src_to_json_multi("v051fxg2", &[("Cargo.toml", "[package]\nname = \"v051fxg2\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051g2", b"x"); }
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub i64); #[derive(Clone, Copy)] pub struct Tiny(pub i64); }
+pub type Word = u64;
+impl Add<s::u8> for u64 { type Output = u64; fn add(self, r: s::u8) -> u64 { mark(); self + r.0 as u64 } }
+impl Add<s::Tiny> for u64 { type Output = u64; fn add(self, r: s::Tiny) -> u64 { mark(); self + r.0 as u64 } }
+// the one variable: the const's declared type is a crate struct NAMED like a primitive (`u8`) vs not (`Tiny`)
+pub mod a { use crate::s::u8; use crate::Word; pub const KA: u8 = u8(1); pub fn f(c: Word) -> u64 { c + KA } }
+pub mod b { use crate::s::Tiny; use crate::Word; pub const KB: Tiny = Tiny(1); pub fn f(c: Word) -> u64 { c + KB } }
+// same with a method-call left operand (R1137 route) and a static
+pub struct G; impl G { pub fn word(&self) -> u64 { 7 } }
+pub mod c { use crate::s::u8; pub const KC: u8 = u8(1); pub fn f(g: &crate::G) -> u64 { g.word() + KC } }
+pub mod e { use crate::s::u8; use crate::Word; pub static SE: u8 = u8(1); pub fn f(c: Word) -> u64 { c + SE } }
+// nested fn control (no generics)
+pub fn nested() { fn inner() { crate::mark() } inner() }
+"##)]);
+    for f in ["a::f", "b::f", "c::f", "e::f", "nested"] {
+        assert!(!veina_row_effs(&g2, f).is_empty(), "`{f}` writes (executed):\n{g2:#}");
+    }
+    let g = scan_src_to_json_multi("v051fxg", &[("Cargo.toml", "[package]\nname = \"v051fxg\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(non_camel_case_types, dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv051g", b"x"); }
+pub mod s { #[derive(Clone, Copy)] pub struct u8(pub i64); #[derive(Clone, Copy)] pub struct Tiny(pub i64); }
+pub type Word = u64;
+// effectful impls with a primitive LEFT side and a crate-struct RIGHT side
+impl Add<s::u8> for u64 { type Output = u64; fn add(self, r: s::u8) -> u64 { mark(); self + r.0 as u64 } }
+impl Add<s::Tiny> for u64 { type Output = u64; fn add(self, r: s::Tiny) -> u64 { mark(); self + r.0 as u64 } }
+
+// --- R1139 route: left operand is a primitive ALIAS ---
+pub fn g1_control(c: Word, r: s::Tiny) -> u64 { c + r }                       // right plainly crate-typed
+pub mod g2 { use crate::s::u8; use crate::Word; pub fn f(c: Word, r: u8) -> u64 { c + r } }   // right: crate struct named `u8`
+pub mod g3 { use crate::s::u8; use crate::Word; pub const K: u8 = u8(1); pub fn f(c: Word) -> u64 { c + K } } // const of it
+pub mod g4 { use crate::s::u8; use crate::Word; pub fn mk() -> u8 { u8(1) } pub fn f(c: Word) -> u64 { c + mk() } } // fn returning it
+pub struct H; impl H { pub fn small(&self) -> crate::s::u8 { crate::s::u8(1) } }
+pub mod g5 { use crate::s::u8; use crate::Word; pub fn f(c: Word, h: &crate::H) -> u64 { c + h.small() } } // method returning it
+pub mod g6 { use crate::s::u8; use crate::Word; pub fn f(c: Word, r: &u8) -> u64 { c + *r } }  // deref of it
+// --- R1137 route: left operand is a METHOD CALL whose declared return is a primitive ---
+pub struct G; impl G { pub fn word(&self) -> u64 { 7 } }
+pub fn g7_control(g: &G, r: s::Tiny) -> u64 { g.word() + r }
+pub mod g8 { use crate::s::u8; pub fn f(g: &crate::G, r: u8) -> u64 { g.word() + r } }
+// --- R1140 attacks ---
+#[derive(Clone, Copy)] pub struct D(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { mark(); D(self.0 + r) } }
+pub struct W<D>(pub D);
+// D is the IMPL's generic parameter AND a module struct; the where-bound is on the generic
+impl<D: Copy> W<D> { pub fn g9<T>(&self, d: D, t: T) -> D where D: Add<T, Output = D> { d + t } }
+pub fn g9_call(w: &W<D>, d: D) -> D { w.g9(d, 3u64) }
+// nested fn: outer generic named D is NOT visible inside; D there is the struct
+pub fn g10_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } inner(crate::D(1), 2u64).0 }
+pub fn g11<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t }
+pub fn g11_call(d: D) -> D { g11(d, 5u64) }
+pub mod g3c { use crate::s::Tiny; use crate::Word; pub const K: Tiny = Tiny(1); pub fn f(c: Word) -> u64 { c + K } }
+pub mod g3l { use crate::s::u8; use crate::Word; pub fn f(c: Word) -> u64 { let k: u8 = u8(1); c + k } }
+pub fn g10b_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } let _ = 0; inner(crate::D(1), 2u64).0 }
+pub fn g10_bare<T>(d: D, t: T) -> D where crate::D: Add<T, Output = D> { d + t }
+pub fn g10_bare_call(d: D) -> D { g10_bare(d, 1u64) }
+pub struct W2<E>(pub E);
+impl<E: Copy> W2<E> { pub fn g9e<T>(&self, d: E, t: T) -> E where E: Add<T, Output = E> { d + t } }
+pub fn g9e_call(w: &W2<D>, d: D) -> D { w.g9e(d, 3u64) }
+pub fn g12_outer<Q: Copy>(_x: Q) -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+pub fn g13_outer<D: Copy>(_x: D) -> u64 { fn inner<T>(d: crate::D, t: T) -> crate::D where crate::D: Add<T, Output = crate::D> { d + t } inner(crate::D(1), 2u64).0 }
+pub fn g14_nogeneric() -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+"##)]);
+    for f in ["g1_control", "g2::f", "g3::f", "g4::f", "g5::f", "g6::f", "g7_control", "g8::f", "g10_outer", "g11", "g11_call",
+              "g3c::f", "g3l::f", "g10_bare", "g10_bare_call", "g12_outer", "g13_outer", "g14_nogeneric"] {
+        assert!(!veina_row_effs(&g, f).is_empty(), "`{f}` writes (executed):\n{g:#}");
+    }
+    for f in ["W::g9", "g9_call", "g9e_call"] {
+        assert!(veina_row_effs(&g, f).is_empty(), "`{f}` generic-parameter residual (R1126 clause) moved — decide it:\n{g:#}");
+    }
+    let n = scan_src_to_json_multi("v051fxn", &[("Cargo.toml", "[package]\nname = \"v051fxn\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/dev/null", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { mark(); D(self.0 + r) } }
+impl D { pub fn eff(&self) { mark(); } }
+pub fn n_plain() -> u64 { fn inner(d: D, t: u64) -> D { d + t } inner(D(1), 2).0 }
+pub fn n_method() { fn inner(d: D) { d.eff() } inner(D(1)) }
+pub fn n_where() -> u64 { fn inner<T>(d: D, t: T) -> D where D: Add<T, Output = D> { d + t } inner(D(1), 2u64).0 }
+"##)]);
+    for f in ["n_plain", "n_method", "n_where"] {
+        assert!(veina_row_effs(&n, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{n:#}");
+    }
+    // the chained arm: scan the dependency, chain its report, scan the consumer
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v051chain-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    let dep = root.join("cdep");
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), "[package]\nname = \"cdep\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dep.join("src/lib.rs"), r##"use std::ops::Rem;
+pub struct B(pub u8);
+impl<'a> Rem<&'a B> for &'a B { type Output = u8; fn rem(self, o: &'a B) -> u8 { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); self.0 % o.0.max(1) } }
+impl<'a> PartialEq<&'a B> for &'a B { fn eq(&self, o: &&'a B) -> bool { let _ = std::fs::write("/tmp/auditv051-eq", b"x"); self.0 == o.0 } }
+pub fn in_dep_rem(a: &B, b: &B) -> u8 { a % b }
+pub fn in_dep_eq(a: &B, b: &B) -> bool { a == b }
+#[derive(Clone, Copy)] pub struct C(pub u8);
+impl Rem for C { type Output = u8; fn rem(self, o: C) -> u8 { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); self.0 % o.0.max(1) } }
+impl PartialEq for C { fn eq(&self, o: &C) -> bool { let _ = std::fs::write("/tmp/auditv051-eq", b"x"); self.0 == o.0 } }
+impl C { pub fn touch(&self) { let _ = std::fs::write("/tmp/auditv051-rem", b"x"); } }
+"##).unwrap();
+    let dv = scan(&dep, &DepIndex::default());
+    let reports = root.join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("report.cdep.scan.json"), dv.to_string()).unwrap();
+    let idx = crate::deps::load_dep_reports(Some(reports.to_str().unwrap()));
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), "[package]\nname = \"ccons\"\nedition = \"2021\"\n[dependencies]\ncdep = { path = \"../cdep\" }\n").unwrap();
+    std::fs::write(cons.join("src/lib.rs"), r##"use cdep::B;
+pub fn c_rem(a: &B, b: &B) -> u8 { a % b }
+pub fn c_eq(a: &B, b: &B) -> bool { a == b }
+pub fn c_rem_owned(a: B, b: B) -> u8 { &a % &b }
+pub fn c_eq_owned(a: B, b: B) -> bool { &a == &b }
+pub fn c_via_dep_fn(a: &B, b: &B) -> u8 { cdep::in_dep_rem(a, b) }
+use cdep::C;
+pub fn c_byval_rem(a: C, b: C) -> u8 { a % b }
+pub fn c_byval_eq(a: C, b: C) -> bool { a == b }
+pub fn c_method(a: C) { a.touch() }
+pub fn c_ufcs_rem(a: &B, b: &B) -> u8 { std::ops::Rem::rem(a, b) }
+"##).unwrap();
+    let cv = scan(&cons, &idx);
+    let _ = std::fs::remove_dir_all(&root);
+    for f in ["c_rem", "c_eq", "c_rem_owned", "c_eq_owned", "c_via_dep_fn", "c_byval_rem", "c_byval_eq", "c_method", "c_ufcs_rem"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "chained `{f}` writes (executed):\n{cv:#}");
     }
 }
