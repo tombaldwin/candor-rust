@@ -2857,7 +2857,6 @@ pub(crate) fn fninfo(
             released_lets: released.0,
             released_tuple_lets: released.1,
             drop_types: elems.drop_types,
-            binop_rhs: Default::default(),
             local_consts: Default::default(),
             exempt: crate::lang::assign_drop_exempt(block),
             params,
@@ -3887,17 +3886,6 @@ pub(crate) fn collect_decls(
     // visible impls alone would refuse the edge a macro-made `Rem<BigInt>` justifies. Any item-position macro
     // whose tokens name an operator trait files `*` (any `Rhs`) for every type-like ident beside it.
     for it in items {
-        // SOUNDNESS R1128 (exactness) — see `model::nominal_key`.
-        let decl = match it {
-            syn::Item::Struct(s) => Some((s.ident.to_string(), "S")),
-            syn::Item::Enum(e) => Some((e.ident.to_string(), "S")),
-            syn::Item::Union(un) => Some((un.ident.to_string(), "S")),
-            syn::Item::Type(ty) => Some((ty.ident.to_string(), "A")),
-            _ => None,
-        };
-        if let Some((n, k)) = decl {
-            file_decl_fact(rets, crate::model::nominal_key(&n), k.to_string());
-        }
         let syn::Item::Macro(im) = it else { continue };
         fn idents(ts: proc_macro2::TokenStream, out: &mut Vec<String>) {
             for t in ts {

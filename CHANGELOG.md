@@ -23,11 +23,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `unwrap_or` / `and` / `or` / `map_or`, and a typed by-value closure parameter its body never consumes
   (`let f = |_h: H| {}; f(H::new())`). Every cell EXECUTED and read ABSENT before; `deny Fs` now exits 1.
   The hand-off gate's known-open register is empty and the lv fixture states no silence.
-- **candor-scan: four over-charges removed (SOUNDNESS R1125, R1127, R1128).** `Box::leak` / `Box::into_raw`
-  (and `Rc`/`Arc::into_raw`) suppress the destructor like `mem::forget`; an awaited `async { .. }` block's
-  tail is its value (`async { H::new() }.await` returned is not dropped here); an operator impl with a
-  foreign `Rhs` (`impl PartialEq<Value> for String`) is no longer what `String == String` runs, and a
-  `#[derive(PartialEq)]` beside such an impl is now reached (it was silent). Each removal was executed at 0.
+- **candor-scan: over-charges removed (SOUNDNESS R1125, R1127).** `Box::leak` / `Box::into_raw` (and
+  `Rc`/`Arc::into_raw`) suppress the destructor like `mem::forget`; an awaited `async { .. }` block's tail is
+  its value (`async { H::new() }.await` returned is not dropped here). Each removal was executed at 0.
+- ⚠ **candor-scan: operator operands (SOUNDNESS R1128, R1134).** A `#[derive(PartialEq)]` beside an
+  operator impl with only a foreign `Rhs` is now reached, and a block-local `const`/`static` operand
+  (`ONE + a`) is typed from its declaration — both were silent. R1128's over-charge (`String == String`
+  edging to `impl PartialEq<Value> for String`) is kept: refusing it needs the defining type of both
+  operands, and every narrower rule measured silenced a real call (an alias, a renamed re-export).
 
 - ⚠ **candor-scan: a comparison or hash reaches the component's, key's and field's own impl (SOUNDNESS
   R1111).** A tuple's `==`/`<` runs each component's `PartialEq`/`PartialOrd`, a `HashMap`/`HashSet`

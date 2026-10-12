@@ -549,14 +549,6 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
     format!("{PARAM_OPAQUE}{fn_leaf}")
 }
 
-/// SOUNDNESS R1128 (exactness) — what this crate DECLARES under a type name at module level: `S` for a
-/// struct / enum / union, `A` for a `type` alias. Filed under the index's conflict rule, so a name declared
-/// both ways (or an alias in one module, a struct in another) is withdrawn — and an absent or withdrawn name
-/// is never treated as a positively resolved type by the operator `Rhs` refusal.
-pub(crate) fn nominal_key(name: &str) -> String {
-    format!("<nominal>{name}")
-}
-
 /// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
 pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {

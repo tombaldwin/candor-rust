@@ -17333,7 +17333,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17344,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev96/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev97/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28979,8 +28979,9 @@ pub async fn ok_asyncsink() -> u32 { sink(H::new()).await }\n\
 ///   * `a25_*` — R1125: `Box::leak` / `Box::into_raw` suppress the destructor like `mem::forget`.
 ///   * `o27_block*` — R1127: an AWAITED `async { .. }`'s tail is its value. `k27_*` still drop here, incl. a
 ///     future consumed by `.await` inside a RETURNED async block (`k27_retfut`, async-std's `OpenOptions::open`).
-///   * `o28_strstr` / `o28_idstr` — R1128: `impl PartialEq<Value> for String` is not what `String == String`
-///     runs; `k28_derived` — a DERIVED `PartialEq` beside a foreign-`Rhs` impl is (it was ABSENT on 0.40.6).
+///   * `k28_derived` — a DERIVED `PartialEq` beside a foreign-`Rhs` impl is reached (ABSENT on 0.40.6).
+///     R1128's refusal (`o28_strstr`/`o28_idstr`) was WITHDRAWN after three audited silences: both are
+///     pinned below as the pre-existing over-charge.
 ///   * `a29_*_q` / `a29_gen_tailq` — R1129: a generic / `impl Trait` parameter named nowhere else in the
 ///     callee's signature is dropped by a callee whose row cannot say so; the caller keeps the charge.
 ///
@@ -29223,14 +29224,14 @@ pub async fn k27_awaited_h() -> H { async { let _j = spawn_jh().await; H::new() 
         "c23_pair_ret", "c23_pair_h", "c23_take_ret", "c23_cow_ret", "c24_into_ret", "c24_into_letret",
         "c29_keep_q", "c29_ret", "n30_tupint", "a25_leak", "a25_leak_plain", "a25_leak_mut", "o27_block",
         "o27_blockq", "s27_block", "c22_rcclone_f", "c22_mkrc", "c22_cell_take", "c22_memtake",
-        "c22_memreplace", "c22_temp_rc", "k25_bound_leak", "o28_strstr", "o28_idstr",
+        "c22_memreplace", "c22_temp_rc", "k25_bound_leak",
     ] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` performs nothing (executed 0) — FABRICATION:\n{v:#}");
     }
     // Pinned over-charges (executed 0, charged on published 0.40.6 too) — a change to them is a decision.
     for f in [
         "o27_slot", "o27_letslot", "o27_push", "o27_letpush", "o27_asynccall", "s27_slot", "s27_push",
-        "s27_letpush", "s27_call", "c22_rcclone_m", "c22_cell_m", "c22_swap", "o28_g2g2",
+        "s27_letpush", "s27_call", "c22_rcclone_m", "c22_cell_m", "c22_swap", "o28_g2g2", "o28_strstr", "o28_idstr",
     ] {
         assert!(!veina_row_effs(&v, f).is_empty(), "`{f}` moved — decide it:\n{v:#}");
     }
@@ -29311,8 +29312,8 @@ pub fn released() { let _g = Guard::mk(); }
     }
 }
 
-/// SOUNDNESS R1128 (exactness) — the `Rhs` refusal fires ONLY when the right operand's type is POSITIVELY
-/// resolved and provably none of the recorded `Rhs` (`CallCollector::exact_type_name`). The MIR audit's
+/// SOUNDNESS R1128 — the `Rhs` refusal is WITHDRAWN (the typer answers by name and cannot supply definition
+/// identity); these are the executed cells its versions silenced, kept as the regression net, plus fx13. The MIR audit's
 /// `auditagent-v050/fx9` (EXECUTED, every `v_*` cell writes) was ABSENT from 3684f51 through f0b83fb for an
 /// alias right operand (`c: PrimAlias` against `Add<u64>`, as a const, param, `let`, module const, `==`,
 /// a module-path alias); `fx10` (rustagent-v050, EXECUTED) holds one cell per other answer the typer can
@@ -29320,7 +29321,7 @@ pub fn released() { let _g = Guard::mk(); }
 /// chain, a block-local type. All are charged. `v_lhs_prim_alias` (a LEFT alias operand), `k_generic` and
 /// `k_proj` (a `where D: Add<T>` bound) are silent on afd77fa as well: pinned residuals, not this rule.
 #[test]
-fn r1128_rhs_refusal_fires_only_on_an_exactly_typed_operand() {
+fn r1128_withdrawn_operator_edges_survive_every_operand_typing() {
     let v9 = scan_src_to_json_multi("v050fx9", &[("Cargo.toml", "[package]\nname = \"v050fx9\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"use std::ops::Add;
 #[derive(Clone, Copy)] pub struct D { pub m: u64 }
 #[derive(Clone, Copy)] pub struct E { pub m: u64 }
@@ -29400,4 +29401,33 @@ pub fn k_exact_keep(a: W, b: V) -> bool { a == b }
         assert!(veina_row_effs(&v10, f).is_empty(), "`{f}` residual closed — move it:\n{v10:#}");
     }
     assert!(veina_row_effs(&v10, "k_exact_refuse").is_empty(), "k_exact_refuse executes 0:\n{v10:#}");
+    // auditagent-v050/fx13 (EXECUTED, every cell writes): a renamed two-hop re-export the third version refused.
+    let v13 = scan_src_to_json_multi("v050fx13", &[("Cargo.toml", "[package]\nname = \"v050fx13\"\nedition = \"2021\"\n"), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditfx13", b"x"); }
+pub mod m { #[derive(Clone, Copy)] pub struct Wk(pub i32); }
+impl Add<m::Wk> for i32 { type Output = i32; fn add(self, r: m::Wk) -> i32 { mark(); self + r.0 } }
+pub mod pin { pub struct Pinned; }
+// A: two-hop rename, target name pinned by an unrelated struct
+pub mod hopa { pub use crate::m::Wk as Pinned; }
+pub mod ra { use crate::hopa::Pinned; pub fn f(a: i32, w: Pinned) -> i32 { a + w } }
+// B: identical, but the target name is NOT declared as a struct anywhere
+pub mod hopb { pub use crate::m::Wk as Free; }
+pub mod rb { use crate::hopb::Free; pub fn f(a: i32, w: Free) -> i32 { a + w } }
+// C: two-hop re-export WITHOUT rename
+pub mod hopc { pub use crate::m::Wk; }
+pub mod rc { use crate::hopc::Wk; pub fn f(a: i32, w: Wk) -> i32 { a + w } }
+// D: one-hop rename (same module), pinned name
+pub mod rd { use crate::m::Wk as Pinned; pub fn f(a: i32, w: Pinned) -> i32 { a + w } }
+// E: two-hop rename used by path, not imported
+pub fn re(a: i32, w: hopa::Pinned) -> i32 { a + w }
+#[derive(Clone, Copy)] pub struct L;
+impl Add<m::Wk> for L { type Output = L; fn add(self, _r: m::Wk) -> L { mark(); L } }
+impl PartialEq<m::Wk> for L { fn eq(&self, _o: &m::Wk) -> bool { mark(); true } }
+pub fn rf(l: L, w: hopa::Pinned) -> L { l + w }
+pub fn rg(l: L, w: hopa::Pinned) -> bool { l == w }
+"##)]);
+    for f in ["ra::f", "rb::f", "rc::f", "rd::f", "re", "rf", "rg"] {
+        assert!(!veina_row_effs(&v13, f).is_empty(), "`{f}` runs an effectful operator impl (executed):\n{v13:#}");
+    }
 }

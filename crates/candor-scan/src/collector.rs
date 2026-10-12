@@ -140,10 +140,6 @@ pub(crate) struct AssignDrop<'a> {
     /// The leaves with their OWN local `impl Drop` (`ElemIndexes::drop_types`) — a field cannot be moved out
     /// of one (E0509), so a field read of a released binding of that type takes nothing.
     pub(crate) drop_types: Option<&'a std::collections::HashSet<String>>,
-    /// SOUNDNESS R1128 — set only while `visit_expr_binary` charges its operands: the LEFT operand's type leaf
-    /// and the right operand's (`None` when untyped). Read only for a comparison whose dispatch type IS that
-    /// left leaf; every other comparison here (a tuple component, a collection element) is `T` against `T`.
-    pub(crate) binop_rhs: std::cell::RefCell<Option<(String, Option<String>)>>,
     /// SOUNDNESS R1134 — the BLOCK-LOCAL `const`/`static` items in scope, NAME -> declared type (a plain path),
     /// pushed and popped by `visit_block`: an operator operand that names one (`a + ONE`, `ONE + a`) is typed
     /// by its declaration, which no crate-wide index holds.
@@ -4405,56 +4401,6 @@ impl<'a> CallCollector<'a> {
         self.assign_drop.local_consts.borrow().get(&id).cloned()
     }
 
-    /// SOUNDNESS R1128 — may an operator impl of `trait_leaf` for `ty_leaf` be the one `ty_leaf OP rhs` runs?
-    /// `model::impl_rhs_key` lists each impl's written `Rhs` (`Self` for the default or the type itself, `*`
-    /// for a generic one). No entry (an older index, a trait with no `Rhs`) and an unknown `rhs` both answer
-    /// yes — today's edge; the edge is refused only when every recorded `Rhs` is a named type `rhs` is not.
-    /// SOUNDNESS R1128 (exactness) — a type NAME this crate's index pins to one type: a module-level struct /
-    /// enum / union declared under that name and never as an alias (`model::nominal_key` = `S`), or a std
-    /// primitive / `str` / `String` the crate declares nothing under. Everything else is not exact.
-    fn exact_type_name(&self, n: &str) -> bool {
-        if n.is_empty() || !n.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return false;
-        }
-        if self.generic_bounds.contains_key(n) || self.impl_generic_bounds.contains_key(n) || n == "Self" {
-            return false;
-        }
-        match self.returns.get(&crate::model::nominal_key(n)).map(String::as_str) {
-            Some("S") => true,
-            Some(_) => false,
-            None => matches!(
-                n,
-                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                    | "f32" | "f64" | "bool" | "char" | "str" | "String"
-            ),
-        }
-    }
-
-    fn rhs_ok(&self, trait_leaf: &str, ty_leaf: &str, rhs: Option<&str>) -> bool {
-        let Some(rs) = self.returns.get(&crate::model::impl_rhs_key(trait_leaf, ty_leaf)) else { return true };
-        let Some(r) = rhs else { return true };
-        // EXACTNESS — the refusal may fire only when the right operand's type is POSITIVELY known and every
-        // recorded `Rhs` is too, so that "none of them" is a proof and not a spelling mismatch. An alias
-        // (`c: PrimAlias` for `Add<u64>`), an associated type, a generic, a sentinel, a dependency or
-        // block-local or macro-made type all answer "not exact", which keeps the edge (the over-charge, never a
-        // silence — fx9, executed Fs, ABSENT at 3684f51 through f0b83fb).
-        if !self.exact_type_name(r) {
-            return true;
-        }
-        let mut ok = false;
-        for x in rs.split(',') {
-            if x == "*" || x == r || (x == "Self" && r == ty_leaf) {
-                ok = true;
-            } else if x != "Self" && !self.exact_type_name(x) {
-                return true; // a recorded `Rhs` we cannot pin (an alias, a dependency type): keep the edge
-            }
-        }
-        if !ok && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-            eprintln!("R1128EXACT {ty_leaf} rhs={r}"); // §E1 REACH COUNTER — the refusal really fires
-        }
-        ok
-    }
-
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
         self.calls.push(Call { argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
@@ -4504,22 +4450,22 @@ impl<'a> CallCollector<'a> {
         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
-                // SOUNDNESS R1128 — an operator impl with an explicit FOREIGN `Rhs` (`impl PartialEq<Value> for
-                // String`, serde_json) runs only when the other operand IS that `Rhs`. `s == t` over two
-                // `String`s edged to it (an over-charge, 0 executed calls of that body). The right operand's
-                // type comes from the bare-operand site; every other comparison here is `T` against `T`.
-                let rhs = match self.assign_drop.binop_rhs.borrow().clone() {
-                    Some((l, r)) if depth == 0 && l == ty_leaf => r,
-                    _ => Some(ty_leaf.to_string()),
-                };
-                if self.rhs_ok(trait_leaf, ty_leaf, rhs.as_deref()) {
-                    self.push_coercion_edge(ty_leaf, method);
+                // SOUNDNESS R1128 — WITHDRAWN to the pre-existing over-charge. A refusal of this edge when the
+                // other operand is not the impl's `Rhs` was tried three ways (3684f51, f0b83fb, 379176a) and each
+                // produced an executed silence the MIR audit found (a block-local const, a primitive alias, a
+                // renamed two-hop re-export): the typer answers by NAME, and an exact refusal needs DEFINITION
+                // identity it cannot supply. So the edge is always formed (`String == String` over serde_json's
+                // `impl PartialEq<Value> for String` stays over-charged, NOTSILENT). What remains is ADDITIVE:
+                // when every recorded `Rhs` of this type's impls is FOREIGN (`model::impl_rhs_key`), a
+                // `#[derive(PartialEq)]` beside them is the `Self` comparison, so the derive route below runs
+                // too (`k28_derived`, silent on 0.40.6).
+                self.push_coercion_edge(ty_leaf, method);
+                let foreign_only = self
+                    .returns
+                    .get(&crate::model::impl_rhs_key(trait_leaf, ty_leaf))
+                    .is_some_and(|rs| !rs.split(',').any(|x| x == "Self" || x == "*"));
+                if !foreign_only {
                     return;
-                }
-                // Not this impl — but a DERIVED `PartialEq`/`PartialOrd` beside it (which `trait_impls` does
-                // not record) still runs; fall through to the derive route below rather than stop here.
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-                    eprintln!("R1128RHS {ty_leaf}::{method}"); // §E1 REACH COUNTER
                 }
             }
         }
@@ -10196,50 +10142,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
-            // The right operand's type LEAF, with references and generic arguments peeled (`&'a str` -> `str`,
-            // `IndexSet<T, S2>` -> `IndexSet`) — the same spelling `impl_rhs_key` records.
-            // An ASSOCIATED or module-qualified CONST (`Id::HELP`) is typed by the path walk as its OWNER type,
-            // which is not the const's type: unknown, which keeps the edge (never refuses on a guessed type).
-            let assoc_const = |e: &syn::Expr| {
-                let mut e = e;
-                while let syn::Expr::Reference(r) = e {
-                    e = &r.expr;
-                }
-                matches!(e, syn::Expr::Path(p) if p.path.segments.len() > 1
-                    && p.path.segments.last().is_some_and(|s| crate::lang::caps_only_ident(&s.ident.to_string())))
-            };
-            let rt = if assoc_const(&node.right) { None } else {
-                self.local_const_type(&node.right).or_else(|| self.type_of(&node.right))
-            }
-            // A PROJECTION or qualified-self answer (`T::Item`, `<T as Tr>::Out`, `Self::Output`) names no type
-            // this crate declares; its last segment is a coincidence, not a resolution.
-            .filter(|t| {
-                let s = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
-                let first = s.split("::").next().unwrap_or("");
-                let projection = s.contains("::")
-                    && (first == "Self" || self.generic_bounds.contains_key(first) || self.impl_generic_bounds.contains_key(first));
-                !s.starts_with('<') && !projection
-            })
-            .map(|t| {
-                let t = t.trim_start_matches(|c: char| c == '&' || c.is_whitespace());
-                let t = if t.starts_with('\'') { t.split_once(' ').map_or(t, |(_, r)| r.trim_start()) } else { t };
-                let t = t.strip_prefix("mut ").unwrap_or(t);
-                let t = t.split('<').next().unwrap_or(t);
-                t.rsplit("::").next().unwrap_or(t).trim().to_string()
-            })
-            // A GENERIC right operand (`x.key == key` over `K` with `KeyType: PartialEq<K>`, clap) can be any of
-            // the `Rhs`es: unknown, which keeps the edge. So is anything that is not a plain type NAME — a typer
-            // sentinel (`<body-item>ONE` for a block-local const read as `""` here, which refused the edge on
-            // `a + ONE`: SOUNDNESS R1134's right half, an R1128 regression the MIR audit found).
-            .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && !self.generic_bounds.contains_key(t) && !self.impl_generic_bounds.contains_key(t)
-                && !(t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase())));
             let lconst = self.local_const_type(&node.left);
-            let lt = lconst
-                .clone()
-                .or_else(|| self.resolve_recv_type(&node.left))
-                .map(|t| t.rsplit("::").next().unwrap_or(&t).to_string());
-            *self.assign_drop.binop_rhs.borrow_mut() = lt.map(|l| (l, rt));
             // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
             // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
             match &lconst {
@@ -10249,7 +10152,6 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
-            *self.assign_drop.binop_rhs.borrow_mut() = None;
         }
         syn::visit::visit_expr_binary(self, node);
     }
