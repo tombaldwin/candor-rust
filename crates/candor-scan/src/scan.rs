@@ -4033,7 +4033,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 None => (c.path.as_str(), cr, cr_real),
             };
-            if classified.is_none() && (!resolved_local || dep_default_path.is_some()) && !suppress_bare_leaf
+            // SOUNDNESS R1152 — A LOCAL RESOLUTION THAT IS ONLY A TAIL2 COLLISION DOES NOT SPEAK FOR THE
+            // DEPENDENCY. `use cdep3::Tool; fn dep_tool(t: &Tool) { t.run() }` beside an unrelated
+            // `mod local { struct Tool; impl Tool { fn run(&self) {} } }` forms `cdep3::Tool::run`, whose
+            // tail `Tool::run` the local method alone claims, so `resolve_target` linked it and
+            // `resolved_local` closed the join: chained, `dep_tool` was ABSENT over the dependency's real
+            // `Fs` and `deny Fs` exited 0 (executed). R223 already withdrew that local edge's AUTHORITY
+            // over the classifier (`extern_dep_qualified`); the join is the other half of the same
+            // authority and was left gated on the bare `resolved_local`. The local edge is KEPT — this
+            // only ADDS the dependency's answer beside it (a union, the R223 direction), so a call whose
+            // head merely looks like a dependency costs at most an over-report, never a silence.
+            let r1152_union = resolved_local && extern_dep_qualified && dep_default_path.is_none();
+            if r1152_union && std::env::var_os("CANDOR_R1152_INSTR").is_some() && deps_idx.crates.contains(cr_real) {
+                eprintln!("R1152UNION\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+            }
+            if classified.is_none() && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
                 && jpath.contains("::") && deps_idx.crates.contains(cr_real)
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);

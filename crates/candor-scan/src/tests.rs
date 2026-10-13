@@ -30542,3 +30542,66 @@ pub mod two { use cdep3::*; use std::collections::*; pub fn g_two(t: &Tool) { t.
         assert!(!inv(f), "control `{f}` never calls cdep3 (executed):\n{g:#}");
     }
 }
+
+/// v053 — scan a dependency `dname` from `dsrc`, chain its report, and scan a consumer from `csrc` (which
+/// depends on it), returning (dependency report, CHAINED consumer report, UNCHAINED consumer report).
+fn v053_chain(dname: &str, dsrc: &str, csrc: &str) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v053chain-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dep = root.join("cdep");
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), toml(dname)).unwrap();
+    std::fs::write(dep.join("src/lib.rs"), dsrc).unwrap();
+    let dv = scan(&dep, &DepIndex::default());
+    let reports = root.join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join(format!("report.{dname}.scan.json")), dv.to_string()).unwrap();
+    let idx = crate::deps::load_dep_reports(Some(reports.to_str().unwrap()));
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), format!("{}[dependencies]\n{dname} = {{ path = \"../cdep\" }}\n", toml("ccons"))).unwrap();
+    std::fs::write(cons.join("src/lib.rs"), csrc).unwrap();
+    let cv = scan(&cons, &idx);
+    let uv = scan(&cons, &DepIndex::default());
+    let _ = std::fs::remove_dir_all(&root);
+    (dv, cv, uv)
+}
+
+/// SOUNDNESS R1152 (v053; fixture rustagent-v053/fx/r1152, every cell EXECUTED). A dependency type's method whose
+/// `Type::method` tail a crate-local same-named type also claims was linked to the local method alone, and that
+/// resolution closed the chained join: `dep_tool` / `sub::dep_gizmo` were ABSENT chained (`deny Fs` exit 0). The
+/// local edge is kept; the join now answers beside it. Controls name the local type and stay pure.
+#[test]
+fn v053_r1152_dependency_method_shadowed_by_local_tail() {
+    let (dv, cv, _) = v053_chain("cdep3", r##"pub struct Tool;
+impl Tool { pub fn run(&self) { let _ = std::fs::write("/tmp/rustagent53_1152", b"x"); } }
+pub struct Gizmo;
+impl Gizmo { pub fn run(&self) { let _ = std::fs::write("/tmp/rustagent53_1152", b"x"); } }
+"##, r##"use cdep3::Tool;
+pub mod local { pub struct Tool; impl Tool { pub fn run(&self) {} } }
+pub fn dep_tool(t: &Tool) { t.run() }
+pub struct Gizmo; impl Gizmo { pub fn run(&self) {} }
+pub mod sub { use cdep3::Gizmo; pub fn dep_gizmo(g: &Gizmo) { g.run() } }
+pub fn ctl_local(t: &local::Tool) { t.run() }
+pub mod cmod { use crate::local::Tool as LT; pub fn ctl_alias(t: &LT) { t.run() } }
+pub fn ctl_root(g: &Gizmo) { g.run() }
+"##);
+    for f in ["dep_tool", "sub::dep_gizmo"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1152 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+    }
+    for f in ["ctl_local", "cmod::ctl_alias", "ctl_root"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1152 control `{f}` is pure (executed):\n{cv:#}");
+    }
+}

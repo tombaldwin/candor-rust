@@ -11,6 +11,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a dependency method whose `Type::method` tail a crate-local same-named type also claims is joined
+  against the dependency's report (SOUNDNESS R1152).** `use cdep3::Tool; fn f(t: &Tool) { t.run() }` beside an
+  unrelated `mod local { struct Tool; impl Tool { fn run(&self) {} } }` linked only the local method, and that local
+  resolution closed the chained join, so `f` was ABSENT chained and `deny Fs f` exited 0 over an executed write. The
+  local edge is kept; the dependency's answer is added beside it (the R223 union). Unchained output is unchanged.
 - ⚠ **candor-scan: renamed operator traits, body-local type aliases, macro expansion at expression position,
   generic callers, and macro-made / derived operator impls (SOUNDNESS R1142, R1143, R1144, R1145, R1146).** Each
   cell EXECUTED and read ABSENT on 0.40.7; `deny Fs` now exits 1 on every one. An `&T` operator impl written with a
