@@ -2669,6 +2669,41 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1153 — a method receiver typed by a BARE name (`let t = Tool;`, a parameter whose module also has
+    /// a crate-local glob, a `#[cfg]`-only local twin, a prelude type a glob can shadow) that only a glob in scope
+    /// can supply. Exclusive (one external glob, nothing local): the type IS the glob's, exactly as R1149 types a
+    /// parameter. Otherwise the written type is kept and the candidates are returned for `GLOB_CAND_MARKER` calls
+    /// beside it. A prelude type is asked only for a method std does not define, the population R1136 already
+    /// discloses.
+    fn glob_retype(&self, ty: String, leaf: &str, argc: usize) -> (String, Vec<String>) {
+        if ty.contains("::")
+            || ty.contains(crate::decls::ALIAS_ALT_SEP)
+            || ty.contains(crate::decls::ITEM_SENTINEL)
+            || !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            || !ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return (ty, Vec::new());
+        }
+        let is_generic = |h: &str| {
+            self.generic_bounds.contains_key(h) || self.impl_generic_bounds.contains_key(h)
+                || self.trait_self.as_deref() == Some(h)
+        };
+        let prelude = crate::lang::PRELUDE_SHADOWABLE_TYPES.contains(&ty.as_str());
+        if prelude && crate::std_methods::is_std_method(leaf, argc) {
+            return (ty, Vec::new());
+        }
+        match crate::lang::glob_candidates_ext(&[ty.as_str()], &self.uses, &is_generic, prelude) {
+            Some((mut c, true)) if c.len() == 1 => {
+                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    eprintln!("R1153EXCL\t{ty}\t{}", c[0]); // §E1 REACH COUNTER
+                }
+                (c.pop().unwrap_or(ty), Vec::new())
+            }
+            Some((c, false)) => (ty, c),
+            _ => (ty, Vec::new()),
+        }
+    }
+
     /// VEIN A — the NON-exclusive glob candidates for a written call path (see `lang::glob_candidates`):
     /// pushed BESIDE the written path, never instead of it, because a local glob or a second external
     /// one may be the name's real origin.
@@ -8152,6 +8187,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
+            let (ty, glob_extra) = self.glob_retype(ty, &leaf, node.args.len());
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
             // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…
@@ -8243,6 +8279,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
                                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                // SOUNDNESS R1153 — the glob candidates `glob_retype` could not prove exclusive, BESIDE the written
+                // type's call (see `GLOB_CAND_MARKER`).
+                for g in &glob_extra {
+                    let (root, rest) = g.split_once("::").unwrap_or((g.as_str(), ""));
+                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1153CAND\t{g}\t.{leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { argc: 0, entropy_arg: false,
+                        path: format!("{root}::{GLOB_CAND_MARKER}::{rest}::{leaf}"),
+                        leaf: leaf.clone(), str_arg: None, typed: false, method: false,
+                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                }
                 // ⟨0.40⟩ SOUNDNESS R861 — A GUESSED OWNER. When the receiver is a method CHAIN, the type
                 // above is the chain's BASE type: the builder-chain walk ASSUMED every step returns its
                 // receiver's type. For a dependency's type that is a guess (`n.get_parent().visit()` with

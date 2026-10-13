@@ -30647,3 +30647,48 @@ fn main() {}
 "##)]);
     assert!(veina_row_effs(&w, "bin_local").is_empty(), "R1154 control: a local module of the lib's name answers:\n{w:#}");
 }
+
+/// SOUNDNESS R1153 (v053; fixture rustagent-v053/fx/r1153, every cell EXECUTED). A method receiver typed by a bare
+/// name only a glob can supply: an external plus a local glob (g1), a `#[cfg(windows)]` local twin (g2), a glob's
+/// `String` shadowing the prelude (g4), `let t = Tool;` (g6) — and a `#[cfg]`-duplicated alias whose arms are both
+/// dependency types (`al`). All ABSENT chained on 0.40.7 and 0ef4c2d; each now joins the dependency's own entry.
+/// Controls: the local glob's own type, a std method on the prelude `String`, a local unit-struct `let`.
+#[test]
+fn v053_r1153_glob_candidates_and_alias_arms_join_chained() {
+    let (dv, cv, uv) = v053_chain("cdep4", r##"pub fn mark() { let _ = std::fs::write("/tmp/auditv052gA", b"x"); }
+pub struct Tool; impl Tool { pub fn run(&self) { mark(); } }
+pub mod inner { pub struct Deep; impl Deep { pub fn run(&self) { crate::mark(); } } }
+pub use inner::*;
+#[allow(non_camel_case_types)] pub struct String; impl String { pub fn run(&self) { mark(); } }
+pub struct Made;
+macro_rules! mk { () => { impl Made { pub fn run(&self) { crate::mark(); } } }; }
+mk!();
+"##, r##"#![allow(unused_imports)]
+pub mod loc { pub struct Gadget; impl Gadget { pub fn run(&self) {} } }
+// g1: an external glob plus a LOCAL glob (the local one supplies other names)
+pub mod g1 { use cdep4::*; use crate::loc::*; pub fn f(t: &Tool) { t.run() } }
+// g2: a cfg twin of a same-named local type that is NOT compiled on this target
+pub mod g2 { use cdep4::*; #[cfg(windows)] pub struct Tool; pub fn f(t: &Tool) { t.run() } }
+// g4: the glob shadows a std prelude name
+pub mod g4 { use cdep4::*; pub fn f(s: &String) { s.run() } }
+// g6: the type reached through a let, not a param
+pub mod g6 { use cdep4::*; pub fn f() { let t = Tool; t.run() } }
+// a cfg-duplicated alias whose arms are both dependency types
+pub mod al { #[cfg(unix)] use cdep4::Tool as T; #[cfg(windows)] use cdep4::inner::Deep as T; pub fn f(t: &T) { t.run() } }
+// controls (executed pure): the local glob's own type; a std method on the prelude String; the local cfg twin path
+pub mod c1 { use cdep4::*; use crate::loc::*; pub fn ctl_local(g: &Gadget) { g.run() } }
+pub mod c2 { use cdep4::inner::*; pub fn ctl_len(s: &String) -> usize { s.len() } }
+pub mod c3 { use cdep4::*; pub fn ctl_let() { let g = crate::loc::Gadget; g.run() } }
+"##);
+    for f in ["g1::f", "g2::f", "g4::f", "g6::f", "al::f"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1153 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+    }
+    let inv = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "cdep4")));
+    for f in ["g1::f", "g2::f", "g4::f", "g6::f", "al::f"] {
+        assert!(inv(&uv, f), "R1153 unchained `{f}` must disclose cdep4:\n{uv:#}");
+    }
+    for f in ["c1::ctl_local", "c2::ctl_len", "c3::ctl_let"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1153 control `{f}` is pure (executed):\n{cv:#}");
+    }
+}

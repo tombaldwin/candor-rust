@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a method receiver typed by a bare name only a glob can supply, and a `#[cfg]`-duplicated alias over
+  dependency types, now reach the dependency (SOUNDNESS R1153).** An external glob beside a crate-local one (g1), a
+  `#[cfg(windows)]` local twin of the name (g2), a glob's `String` shadowing the prelude for a method std lacks (g4),
+  and `let t = Tool;` (g6) were ABSENT chained and unchained; a `#[cfg(unix)] use dep::A as T; #[cfg(windows)] use
+  dep::B as T;` alias was ABSENT chained. An exclusive glob retypes the receiver; a non-exclusive candidate is
+  joined against a chained dependency's own entry where it exists (a miss adds nothing) and recorded in `invisible`
+  unchained; each dependency arm of a duplicated alias is joined. Cost: `invisible` gains where a glob candidate is
+  not the real origin of the name.
 - ⚠ **candor-scan: a bin, example or test reaching its own package's library by the library's name, and a crate-root
   free fn imported into a module, now form their edges (SOUNDNESS R1154).** `mylib::f()` / `use mylib::f` from
   `src/main.rs` was read as another crate's path: no edge, no `invisible`, nothing in `coverage.uncovered`, so the

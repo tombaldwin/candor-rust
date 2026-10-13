@@ -3029,6 +3029,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // spelling and an unrelated local one costs a missing edge, not a fabricated one — the
                 // honest under-report this file takes everywhere else. The synthetic LAZY marker is not
                 // a call site and is skipped by name.
+                // SOUNDNESS (v053, the R1153 vein) — …AND THE CHAINED JOIN, once per arm. The ledger above records a
+                // dependency arm's crate, and the coverage filter drops it when that crate is CHAINED — so a
+                // `#[cfg]`-duplicated alias whose arms are dependency types (`#[cfg(unix)] use cdep4::Tool as T;
+                // #[cfg(windows)] use cdep4::inner::Deep as T;` then `t.run()`) answered NOTHING chained: ABSENT,
+                // `deny Fs` exit 0 over an executed write, on 0.40.7 and 0ef4c2d alike, while the single-arm
+                // spelling joined. Each unclassified dependency arm now asks the chained report exactly as the
+                // single-arm path does (its `cr#tail2` key, then the ⟨0.40⟩ walk's rows); every answer is ADDED, as
+                // the arms are a union. A miss adds nothing, as on the single-arm path.
+                for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
+                    let acr = alt.split("::").next().unwrap_or("");
+                    let acr_real: &str = dep_renames.get(acr).map(String::as_str).unwrap_or(acr);
+                    if !alt.contains("::") || !deps_idx.crates.contains(acr_real)
+                        || candor_classify::classify(acr_real, alt).is_some()
+                    {
+                        continue;
+                    }
+                    let rel = alt.strip_prefix(&format!("{acr}::")).unwrap_or(alt);
+                    let key = if rel.contains("::") {
+                        tail2(rel).map(|t2| format!("{acr_real}#{t2}"))
+                    } else {
+                        Some(format!("{acr_real}#{rel}"))
+                    };
+                    let mut rows: Vec<&crate::deps::DepFn> = Vec::new();
+                    if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
+                        rows.push(de);
+                    } else if c.method && c.typed {
+                        if let Some((tpath, member)) = rel.rsplit_once("::") {
+                            let start = deps_idx.surface.type_key(acr_real, tpath)
+                                .unwrap_or_else(|| format!("{acr_real}#{tpath}"));
+                            rows = crate::typesurf::join_through(deps_idx, &start, member, false).0;
+                        }
+                    }
+                    if !rows.is_empty() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1153ARMJOIN\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
+                    }
+                    for de in rows {
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
+                }
                 let mut r438_gained_edge = false;
                 for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
                     // Every synthetic marker, not just the lazy one: these are not call sites, they
@@ -3040,6 +3084,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || alt.contains(UNTYPED_RECV_MARKER)
                         || alt.contains(CHAIN_GUESS_MARKER)
                         || alt.contains(EXT_METHOD_MARKER)
+                        || alt.contains(GLOB_CAND_MARKER)
                     {
                         continue;
                     }
@@ -3154,6 +3199,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // recorded in the κ ledger exactly as a floored qualified call into `cr` is, so the coverage filter
             // downstream decides whether it surfaces as `invisible` (a chained or calibrated crate is dropped
             // there). Nothing else: no effect, no `Unknown`.
+            // SOUNDNESS R1153 — a GLOB CANDIDATE for a bare receiver type (`GLOB_CAND_MARKER`): chained, the
+            // dependency's own `Type::leaf` entry is joined where it exists and a miss adds nothing (the glob may not
+            // be the origin); unchained, the crate is recorded in the κ ledger like any floored call into it.
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{GLOB_CAND_MARKER}::")) {
+                if deps_idx.crates.contains(cr_real) {
+                    let key = tail2(rest).map(|t2| format!("{cr_real}#{t2}"));
+                    if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
+                        if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                            eprintln!("R1153JOIN\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
+                } else if deps.contains(cr) {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                continue;
+            }
             if c.path.starts_with(&format!("{cr}::{EXT_METHOD_MARKER}::")) {
                 if deps.contains(cr) {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;

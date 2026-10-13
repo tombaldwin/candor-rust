@@ -370,6 +370,7 @@ pub(crate) fn submodule_uses(
     subuses.remove(crate::lang::MODPATH_KEY);
     subuses.remove(crate::lang::MODDECL_KEY);
     subuses.remove(crate::lang::MODDECL_ALL_KEY);
+    subuses.remove(crate::lang::MODDECL_CFGONLY_KEY);
     subuses.remove(crate::lang::MODMACRO_KEY);
     subuses.remove(crate::lang::MODEXTERN_KEY);
     // A parent's glob imports do not reach an inline child in rustc (only `use super::*` brings them,

@@ -2447,6 +2447,16 @@ pub(crate) fn seed_moddecls(items: &[syn::Item], include_tests: bool, uses: &mut
     let all: Vec<String> =
         items.iter().filter_map(|it| crate::decls::declared_item_name(it, include_tests)).collect();
     uses.insert(MODDECL_ALL_KEY.to_string(), all.join("\u{1}"));
+    // SOUNDNESS R1153 (g2) — the names EVERY declaration of which carries a `#[cfg(...)]` (see `glob_candidates_ext`).
+    let mut gated: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for it in items {
+        if let Some(n) = crate::decls::declared_item_name(it, include_tests) {
+            let cfgd = item_attrs(it).iter().any(|a| a.path().is_ident("cfg"));
+            *gated.entry(n).or_insert(true) &= cfgd;
+        }
+    }
+    let cfg_only: Vec<&str> = gated.iter().filter(|(_, g)| **g).map(|(n, _)| n.as_str()).collect();
+    uses.insert(MODDECL_CFGONLY_KEY.to_string(), cfg_only.join("\u{1}"));
     // `extern crate X;` written IN this module binds `X` here to the EXTERN crate (log-0.4.20's
     // `kv/value.rs`: `extern crate value_bag; use self::value_bag::ValueBag;`) — a `self::X::…` path names
     // that crate, not a child module, and must not be anchored (`absolutise`).
@@ -2469,6 +2479,8 @@ pub(crate) fn seed_moddecls(items: &[syn::Item], include_tests: bool, uses: &mut
 
 /// VEIN A — the names this module binds with `extern crate` (see `seed_moddecls`); same lifecycle.
 pub(crate) const MODEXTERN_KEY: &str = "*modextern";
+/// SOUNDNESS R1153 — the declared names whose every declaration is `#[cfg]`-gated (see `seed_moddecls`).
+pub(crate) const MODDECL_CFGONLY_KEY: &str = "*moddeclscfg";
 /// VEIN A — every-namespace declaration list (see `seed_moddecls`); same lifecycle as `MODDECL_KEY`.
 pub(crate) const MODDECL_ALL_KEY: &str = "*moddeclsall";
 /// VEIN A — present when the module holds an item-position macro invocation (see `seed_moddecls`).
@@ -2545,6 +2557,20 @@ pub(crate) fn glob_candidates(
     uses: &HashMap<String, String>,
     is_generic: &dyn Fn(&str) -> bool,
 ) -> Option<(Vec<String>, bool)> {
+    glob_candidates_ext(segs, uses, is_generic, false)
+}
+
+/// SOUNDNESS R1153 — the std prelude's TYPE names a glob import SHADOWS (rustc: a glob outranks the prelude).
+pub(crate) const PRELUDE_SHADOWABLE_TYPES: [&str; 5] = ["String", "Vec", "Option", "Result", "Box"];
+
+/// `glob_candidates`, and with `prelude` set also for a prelude TYPE name (`PRELUDE_SHADOWABLE_TYPES`), whose
+/// glob candidates are never exclusive: the prelude is still a possible origin.
+pub(crate) fn glob_candidates_ext(
+    segs: &[&str],
+    uses: &HashMap<String, String>,
+    is_generic: &dyn Fn(&str) -> bool,
+    prelude: bool,
+) -> Option<(Vec<String>, bool)> {
     let head = *segs.first()?;
     let all = uses.get(MODDECL_ALL_KEY)?;
     // SOUNDNESS R989 — an item-position macro may declare `head` locally, so the module's declaration list
@@ -2553,11 +2579,16 @@ pub(crate) fn glob_candidates(
     // keychain::*;`, beside `declare_TCFType!`) with no edge and no disclosure, while the qualified
     // spelling disclosed. Non-exclusive candidates are ADDED beside the written path, never instead of it.
     let macro_hidden = uses.contains_key(MODMACRO_KEY);
-    if all.split('\u{1}').any(|n| n == head) || uses.contains_key(head) {
+    // SOUNDNESS R1153 (g2) — a name this module declares ONLY under `#[cfg(...)]` (`#[cfg(windows)] struct Tool;`
+    // beside `use cdep4::*;`) is not declared in every build: where the cfg is off, the glob supplies it. The
+    // declaration is still a possible origin, so the glob is a CANDIDATE, never the exclusive answer.
+    let cfg_only = uses.get(MODDECL_CFGONLY_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == head));
+    if (all.split('\u{1}').any(|n| n == head) && !cfg_only) || uses.contains_key(head) {
         return None;
     }
+    let prelude_ty = prelude && PRELUDE_SHADOWABLE_TYPES.contains(&head);
     if matches!(head, "std" | "core" | "alloc" | "proc_macro" | "crate" | "self" | "super")
-        || PRELUDE_AND_PRIMS.contains(&head)
+        || (PRELUDE_AND_PRIMS.contains(&head) && !prelude_ty)
         || PRIMS_MORE.contains(&head)
         || is_generic(head)
         || uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == head))
@@ -2565,7 +2596,7 @@ pub(crate) fn glob_candidates(
         return None;
     }
     let globs = uses.get(ALLGLOB_KEY)?;
-    let mut local = 0usize;
+    let mut local = usize::from(cfg_only || prelude_ty);
     let mut external: Vec<String> = Vec::new();
     for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
         let groot = g.split("::").next().unwrap_or(g);
