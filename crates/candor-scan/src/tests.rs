@@ -30605,3 +30605,45 @@ pub fn ctl_root(g: &Gizmo) { g.run() }
         assert!(veina_row_effs(&cv, f).is_empty(), "R1152 control `{f}` is pure (executed):\n{cv:#}");
     }
 }
+
+/// SOUNDNESS R1154 (v053; fixture rustagent-v053/fx/r1154, every cell EXECUTED). A bin target reaching its own
+/// library by the library's NAME (`v053selflib::write_it()`, `use v053selflib::write_it`, a group, a rename, a
+/// macro argument, a `::`-rooted path) was ABSENT with no `invisible`; and the shape the `use` spelling reduces to —
+/// importing a crate-ROOT free fn into a module (`use crate::write_it; write_it()`) — was ABSENT inside the
+/// library too. Controls: the pure lib fn through the same spellings, and a bin that declares its own module of
+/// the library's name (whole file refused, the local module answers).
+#[test]
+fn v053_r1154_bin_calls_own_lib_by_crate_name_and_crate_root_imports() {
+    let lib = r##"pub fn write_it() { let _ = std::fs::write("/tmp/rustagent53_1154", b"x"); }
+pub fn pure_it() -> u8 { 7 }
+pub mod a { pub fn g() { let _ = std::fs::write("/tmp/rustagent53_1154", b"x"); } }
+pub mod lm { use crate::write_it; pub fn lib_use_root() { write_it() } }
+pub mod lp { use crate::pure_it; pub fn lib_use_pure() -> u8 { pure_it() } }
+mod other;
+"##;
+    let v = scan_src_to_json_multi("v053selflib", &[("src/lib.rs", lib),
+        ("src/other.rs", "use crate::write_it; pub fn lib_file_root() { write_it() }\n"),
+        ("src/main.rs", r##"pub fn bin_path() { v053selflib::write_it() }
+pub fn bin_colon() { ::v053selflib::write_it() }
+mod bm { use v053selflib::write_it; pub fn bin_use() { write_it() } }
+mod bn { use v053selflib::{a::g, pure_it}; pub fn bin_group() { g() } pub fn bin_pure() -> u8 { pure_it() } }
+mod bo { use v053selflib::write_it as w; pub fn bin_rename() { w() } }
+pub fn bin_macro() { println!("{:?}", v053selflib::write_it()) }
+pub fn bin_pure_path() -> u8 { v053selflib::pure_it() }
+fn main() {}
+"##)]);
+    for f in ["bin_path", "bin_colon", "bm::bin_use", "bn::bin_group", "bo::bin_rename", "bin_macro",
+              "lm::lib_use_root", "other::lib_file_root"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1154 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["bn::bin_pure", "bin_pure_path", "lp::lib_use_pure"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1154 control `{f}` is pure (executed):\n{v:#}");
+    }
+    // a bin that binds the library's name itself: the local module is what the path names
+    let w = scan_src_to_json_multi("v053selflibb", &[("src/lib.rs", lib),
+        ("src/main.rs", r##"mod v053selflibb { pub fn write_it() {} }
+pub fn bin_local() { v053selflibb::write_it() }
+fn main() {}
+"##)]);
+    assert!(veina_row_effs(&w, "bin_local").is_empty(), "R1154 control: a local module of the lib's name answers:\n{w:#}");
+}

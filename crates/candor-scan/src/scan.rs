@@ -1331,6 +1331,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .collect::<Vec<_>>(),
     );
     let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
+    // SOUNDNESS R1154 — the package's own library name, as its bins/examples/tests spell it (`mylib::f()`). Not
+    // when a manifest dependency carries the same name: then the head is ambiguous and today's reading stands.
+    let self_lib: Option<String> = crate::deps::self_lib_name(root)
+        .filter(|l| !crate::deps::cargo_deps(dir).0.contains(l));
+    let self_lib_rewrite = |file: &mut syn::File, text: &str| {
+        if let Some(l) = &self_lib {
+            if text.contains(l.as_str()) {
+                crate::lang::rewrite_self_lib_paths(file, l);
+            }
+        }
+    };
     // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
     // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
@@ -1347,6 +1358,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
             let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
             let key = match &xmacros_key { Some(x) => format!("{key}+xmac{x}"), None => key };
+            // R1154 — the rewrite depends on the manifest's library name, not on this file's bytes alone.
+            let key = match &self_lib { Some(l) => format!("{key}+selflib{l}"), None => key };
             (rel.clone(), key)
         })
         .collect();
@@ -1395,6 +1408,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
             crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
+            self_lib_rewrite(&mut file, &text); // R1154
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -2026,6 +2040,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
+                    self_lib_rewrite(&mut f, &t); // R1154 — the round-2 twin
                     Some(f)
                 })
                 .map(|file| {
@@ -2287,6 +2302,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1154 — the crate ROOT's own free fns, by their exact (one-segment) qual.
+    let mut by_root: HashMap<String, Vec<String>> = HashMap::new();
     // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
     // receiver-typed method call resolves to a local method ONLY if its type is in here, so an external
     // `reqwest::Client::send` can't mis-link to a same-named local `Client::send` (an inverse fabrication).
@@ -2360,6 +2377,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let vl = by_leaf.entry(f.leaf.clone()).or_default();
             if !vl.contains(&f.qual) {
                 vl.push(f.qual.clone());
+            }
+            if !f.qual.contains("::") && f.qual == f.leaf {
+                by_root.entry(f.qual.clone()).or_insert_with(|| vec![f.qual.clone()]);
             }
         }
         if let Some(t2) = tail2(&f.qual) {
@@ -3740,7 +3760,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut dep_default_path: Option<String> = None;
             if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
-                    .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport));
+                    .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport))
+                    // SOUNDNESS R1154 (and the crate-root import it reduces to) — `use crate::write_it;`
+                    // then `write_it()` keeps the `use`-map value `crate::write_it`, whose one-segment
+                    // remainder has no tail2 key and is not a bare leaf, so the call named NOTHING: every
+                    // caller importing a crate-ROOT free fn into a module (`use crate::f`, `use super::f`
+                    // from a direct child, a bin's `use mylib::f`) was ABSENT over the fn's effect
+                    // (executed). A surviving `crate::` head is crate-root ABSOLUTE (it only comes from a
+                    // `use` value, see `macro_hidden_owner`), so `crate::f` names the root's own `f` and
+                    // nothing else: the lookup is the EXACT qual, never a leaf guess.
+                    .or_else(|| {
+                        let r = c.path.strip_prefix("crate::").filter(|r| !r.contains("::") && !c.method)?;
+                        let hit = by_root.get(r);
+                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                            eprintln!("R1154ROOT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        hit
+                    });
                 if let Some(targets) = targets {
                     resolved_local = true;
                     for t in targets {

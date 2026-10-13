@@ -1384,6 +1384,30 @@ pub(crate) fn read_crate_name(root: &Path) -> Option<String> {
     Some(name.replace('-', "_"))
 }
 
+/// SOUNDNESS R1154 — the name this package's LIBRARY target is reached by from its own bins, examples and
+/// tests (`[lib] name`, else the package name with `-` -> `_`), but only when that library's root is the
+/// default `src/lib.rs`: this scanner places `src/lib.rs` (and `src/main.rs`) at the crate-root module, so
+/// `<lib>::f` and `crate::f` then name one definition. A custom `[lib] path` keys the library's items under
+/// another module, and `None` keeps today's answer there.
+pub(crate) fn self_lib_name(root: &Path) -> Option<String> {
+    let doc = read_manifest_table(root)?;
+    let lib = doc.get("lib").and_then(|l| l.as_table());
+    if lib.and_then(|l| l.get("path")).and_then(|p| p.as_str()).is_some_and(|p| {
+        p.trim_start_matches("./") != "src/lib.rs"
+    }) {
+        return None;
+    }
+    if !root.join("src/lib.rs").is_file() {
+        return None;
+    }
+    let name = lib
+        .and_then(|l| l.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_string)
+        .or_else(|| doc.get("package")?.as_table()?.get("name")?.as_str().map(str::to_string))?;
+    Some(name.replace('-', "_"))
+}
+
 /// True if the manifest declares a `[workspace]` table at all (distinct from "has members"): a
 /// workspace root with zero RESOLVED members must warn, not silently fall through to a single-crate
 /// scan whose nested-package filter then prunes every member into an empty report.

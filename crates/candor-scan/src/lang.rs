@@ -3473,6 +3473,140 @@ pub(crate) fn is_nonlib_target_file(rel: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R1154 — a bin, example or test target reaches its own package's library by the LIBRARY'S NAME
+/// (`mylib::f()`, `use mylib::f;`), which this scanner read as some other crate's path: no edge, no
+/// `invisible` (it is not a manifest dependency) and nothing in `coverage.uncovered`, so the caller was
+/// ABSENT over the library's real effect. Within one package that name and `crate::` name the same
+/// definitions here (`deps::self_lib_name`), so every path whose FIRST segment is `lib` and that has a
+/// second segment is rewritten to `crate::…` — in paths, in `use` trees (`use mylib::{a, b}`) and in macro
+/// token streams (`println!("{}", mylib::f())`), where the scanner parses arguments itself.
+///
+/// Refused for a whole file that binds `lib` itself (`mod mylib`, `… as mylib`, `extern crate … as mylib`,
+/// a `fn`/`struct`/… named `mylib`), because there the name is that local item, not the library.
+pub(crate) fn rewrite_self_lib_paths(file: &mut syn::File, lib: &str) -> usize {
+    use syn::visit_mut::VisitMut;
+    if binds_name_locally(&file.items, lib) {
+        return 0;
+    }
+    struct R<'a> {
+        lib: &'a str,
+        n: usize,
+    }
+    fn rewrite_ts(ts: proc_macro2::TokenStream, lib: &str, n: &mut usize) -> proc_macro2::TokenStream {
+        use proc_macro2::{Group, Ident, TokenTree};
+        let toks: Vec<TokenTree> = ts.into_iter().collect();
+        let mut out: Vec<TokenTree> = Vec::with_capacity(toks.len());
+        for i in 0..toks.len() {
+            match &toks[i] {
+                TokenTree::Ident(id) if id == lib => {
+                    let path_sep = matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == proc_macro2::Spacing::Joint)
+                        && matches!(toks.get(i + 2), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                    // not the tail of a longer path (`other::mylib::f`) nor a `$mylib` metavariable
+                    let prev_sep = i >= 1 && matches!(&toks[i - 1], TokenTree::Punct(p) if p.as_char() == ':' || p.as_char() == '$');
+                    if path_sep && !prev_sep {
+                        *n += 1;
+                        out.push(TokenTree::Ident(Ident::new("crate", id.span())));
+                    } else {
+                        out.push(toks[i].clone());
+                    }
+                }
+                TokenTree::Group(g) => {
+                    let mut ng = Group::new(g.delimiter(), rewrite_ts(g.stream(), lib, n));
+                    ng.set_span(g.span());
+                    out.push(TokenTree::Group(ng));
+                }
+                t => out.push(t.clone()),
+            }
+        }
+        out.into_iter().collect()
+    }
+    impl VisitMut for R<'_> {
+        fn visit_path_mut(&mut self, p: &mut syn::Path) {
+            if p.segments.len() >= 2 && p.segments[0].ident == self.lib && p.segments[0].arguments.is_none() {
+                let sp = p.segments[0].ident.span();
+                p.segments[0].ident = syn::Ident::new("crate", sp);
+                p.leading_colon = None;
+                self.n += 1;
+            }
+            syn::visit_mut::visit_path_mut(self, p);
+        }
+        fn visit_item_use_mut(&mut self, u: &mut syn::ItemUse) {
+            fn top(t: &mut syn::UseTree, lib: &str, n: &mut usize) -> bool {
+                match t {
+                    syn::UseTree::Path(p) if p.ident == lib => {
+                        p.ident = syn::Ident::new("crate", p.ident.span());
+                        *n += 1;
+                        true
+                    }
+                    syn::UseTree::Group(g) => g.items.iter_mut().fold(false, |a, t| top(t, lib, n) | a),
+                    _ => false,
+                }
+            }
+            if top(&mut u.tree, self.lib, &mut self.n) {
+                u.leading_colon = None;
+            }
+            syn::visit_mut::visit_item_use_mut(self, u);
+        }
+        fn visit_macro_mut(&mut self, m: &mut syn::Macro) {
+            let ts = std::mem::take(&mut m.tokens);
+            m.tokens = rewrite_ts(ts, self.lib, &mut self.n);
+            syn::visit_mut::visit_macro_mut(self, m);
+        }
+    }
+    let mut r = R { lib, n: 0 };
+    r.visit_file_mut(file);
+    if r.n > 0 && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+        eprintln!("R1154SELFLIB\t{lib}\t{}", r.n); // §E1 REACH COUNTER
+    }
+    r.n
+}
+
+/// Does any item in `items` (at any module depth, including fn bodies' items) BIND `name` — declare a module,
+/// item, `use … as name`, a `use` whose last segment is `name`, or `extern crate … as name`?
+fn binds_name_locally(items: &[syn::Item], name: &str) -> bool {
+    use syn::visit::Visit;
+    struct B<'a> {
+        name: &'a str,
+        hit: bool,
+    }
+    impl<'ast> Visit<'ast> for B<'_> {
+        fn visit_item(&mut self, it: &'ast syn::Item) {
+            let id = match it {
+                syn::Item::Mod(m) => Some(&m.ident),
+                syn::Item::Fn(f) => Some(&f.sig.ident),
+                syn::Item::Struct(x) => Some(&x.ident),
+                syn::Item::Enum(x) => Some(&x.ident),
+                syn::Item::Union(x) => Some(&x.ident),
+                syn::Item::Trait(x) => Some(&x.ident),
+                syn::Item::Type(x) => Some(&x.ident),
+                syn::Item::Const(x) => Some(&x.ident),
+                syn::Item::Static(x) => Some(&x.ident),
+                syn::Item::ExternCrate(x) => Some(x.rename.as_ref().map(|r| &r.1).unwrap_or(&x.ident)),
+                _ => None,
+            };
+            if id.is_some_and(|i| i == self.name) {
+                self.hit = true;
+            }
+            syn::visit::visit_item(self, it);
+        }
+        fn visit_use_rename(&mut self, r: &'ast syn::UseRename) {
+            if r.rename == self.name {
+                self.hit = true;
+            }
+        }
+        fn visit_use_name(&mut self, n: &'ast syn::UseName) {
+            if n.ident == self.name {
+                self.hit = true;
+            }
+        }
+    }
+    let mut b = B { name, hit: false };
+    for it in items {
+        b.visit_item(it);
+    }
+    b.hit
+}
+
 pub(crate) fn is_test_attr_fn(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         matches!(
