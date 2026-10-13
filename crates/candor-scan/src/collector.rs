@@ -2669,6 +2669,57 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1153 — a method receiver typed by a BARE name (`let t = Tool;`, a parameter whose module also has
+    /// a crate-local glob, a `#[cfg]`-only local twin, a prelude type a glob can shadow) that only a glob in scope
+    /// can supply. Exclusive (one external glob, nothing local): the type IS the glob's, exactly as R1149 types a
+    /// parameter. Otherwise the written type is kept and the candidates are returned for `GLOB_CAND_MARKER` calls
+    /// beside it. A prelude type is asked only for a method std does not define, the population R1136 already
+    /// discloses.
+    fn glob_retype(&self, ty: String, leaf: &str, argc: usize) -> (String, Vec<String>) {
+        if ty.contains("::")
+            || ty.contains(crate::decls::ALIAS_ALT_SEP)
+            || ty.contains(crate::decls::ITEM_SENTINEL)
+            || !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            || !ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return (ty, Vec::new());
+        }
+        let is_generic = |h: &str| {
+            self.generic_bounds.contains_key(h) || self.impl_generic_bounds.contains_key(h)
+                || self.trait_self.as_deref() == Some(h)
+        };
+        let prelude = crate::lang::PRELUDE_SHADOWABLE_TYPES.contains(&ty.as_str());
+        if prelude && crate::std_methods::is_std_method(leaf, argc) {
+            return (ty, Vec::new());
+        }
+        // A receiver type is not always a name WRITTEN in this module: a recorded return type (`f.frame()` ->
+        // `BacktraceFrameFmt`, declared in another module) arrives bare too. Where the crate itself defines this
+        // method on a type of this name, the name is that local type (measured: backtrace's `Backtrace::fmt` lost
+        // its `BacktraceFrameFmt::backtrace_frame` edge to `use std::prelude::v1::*` on the first cut).
+        if self.local_fn_on(&ty, leaf)
+            || self.fields.contains_key(ty.as_str())
+            || self.trait_impls.values().any(|v| v.contains(&ty))
+        {
+            return (ty, Vec::new());
+        }
+        // A std/core/alloc glob (`use std::prelude::v1::*`) never retypes: a std type reached by a glob is the
+        // classifier's by its full path elsewhere, and a bare name the glob does not export would be renamed into
+        // a std path no rule or unit answers.
+        let not_std = |c: &String| !matches!(c.split("::").next(), Some("std" | "core" | "alloc"));
+        match crate::lang::glob_candidates_ext(&[ty.as_str()], &self.uses, &is_generic, prelude)
+            .map(|(c, e)| (c.into_iter().filter(not_std).collect::<Vec<_>>(), e))
+        {
+            Some((mut c, true)) if c.len() == 1 => {
+                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    eprintln!("R1153EXCL\t{ty}\t{}", c[0]); // §E1 REACH COUNTER
+                }
+                (c.pop().unwrap_or(ty), Vec::new())
+            }
+            Some((c, false)) => (ty, c),
+            _ => (ty, Vec::new()),
+        }
+    }
+
     /// VEIN A — the NON-exclusive glob candidates for a written call path (see `lang::glob_candidates`):
     /// pushed BESIDE the written path, never instead of it, because a local glob or a second external
     /// one may be the name's real origin.
@@ -2751,6 +2802,22 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Block(b) if b.label.is_none() && self.block_local_tail(&b.block).is_some() => {
                 self.block_local_tail(&b.block).and_then(|e| self.type_of(e))
             }
+            // SOUNDNESS R1155 — a block with `let`s whose value names none of them (`{ let v = D(2); D2(3) }`,
+            // `{ let _y = 3; mk() }`), a LABELLED block (`'b: { if f { break 'b D2(9); } D2(1) }`) and a `loop` with
+            // `break value`: every value it can produce is typed, and only when no value names a binding the
+            // block itself introduces (the resolvers key on bare names, so such a name would be read through as
+            // an OUTER binding — the reason `merge_value_exprs` refuses a block with a `let`). Strict as below:
+            // every value must type, and to one type.
+            syn::Expr::Block(b) if b.label.is_some() || b.block.stmts.iter().any(|st| matches!(st, syn::Stmt::Local(_))) => {
+                let label = b.label.as_ref().map(|l| l.name.ident.to_string());
+                let vals = crate::lang::block_values(&b.block, label.as_deref(), false)?;
+                self.type_of_all(&vals)
+            }
+            syn::Expr::Loop(l) => {
+                let label = l.label.as_ref().map(|l| l.name.ident.to_string());
+                let vals = crate::lang::block_values(&l.body, label.as_deref(), true)?;
+                self.type_of_all(&vals)
+            }
             // SOUNDNESS (v052 audit, `fxm` e1/e1d) — a VALUE macro (`let x = make!()`): the invocation expanded
             // (`mbe::expand_invocation`, under the same once-defined rule as the R1144 walk) and its value typed.
             syn::Expr::Macro(mm) => self.type_of_macro_value(&mm.mac),
@@ -2768,6 +2835,24 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// SOUNDNESS R1155 — the ONE type every value expression in `vals` has, or `None` when one does not type or two
+    /// disagree (the strict merge `type_of` applies to `if`/`match`).
+    fn type_of_all(&self, vals: &[&syn::Expr]) -> Option<String> {
+        let mut found: Option<String> = None;
+        for v in vals {
+            let t = self.type_of(v)?;
+            match &found {
+                None => found = Some(t),
+                Some(prev) if *prev == t => {}
+                Some(_) => return None,
+            }
+        }
+        if found.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            eprintln!("R1155LET\t{}", found.as_deref().unwrap_or("")); // §E1 REACH COUNTER
+        }
+        found
     }
 
     /// The value expression a block's tail binding stands for: the tail is a bare name, and the block's own LAST
@@ -2789,9 +2874,15 @@ impl<'a> CallCollector<'a> {
     /// The type of a value-position local macro invocation, from its macro-by-example expansion (see `type_of`).
     fn type_of_macro_value(&self, mac: &syn::Macro) -> Option<String> {
         let name = mac.path.get_ident()?.to_string();
+        // SOUNDNESS R1156 — a twice-defined name is typed from the definition in TEXTUAL scope here, when one is
+        // recorded (`model::SCOPE_MACRO_PREFIX`) and it is not R208's `#[cfg]` twin.
+        let redef = self.macro_twins.contains(&format!("{}{name}", crate::model::MACRO_REDEF_PREFIX));
+        let scoped = (redef && !self.macro_twins.contains(&name) && !self.body_macros.contains_key(&name))
+            .then(|| self.uses.get(&format!("{}{name}", crate::model::SCOPE_MACRO_PREFIX)))
+            .flatten();
         if self.macro_expanding.contains(&name)
             || self.macro_twins.contains(&name)
-            || self.macro_twins.contains(&format!("{}{name}", crate::model::MACRO_REDEF_PREFIX))
+            || (redef && scoped.is_none() && !self.body_macros.contains_key(&name))
         {
             return None;
         }
@@ -2799,7 +2890,7 @@ impl<'a> CallCollector<'a> {
         if DEPTH.with(|d| d.get()) >= 8 {
             return None; // a recursive template: no type rather than no end
         }
-        let body = self.body_macros.get(&name).or_else(|| self.local_macros.get(&name))?;
+        let body = self.body_macros.get(&name).or(scoped).or_else(|| self.local_macros.get(&name))?;
         let ts = crate::mbe::expand_invocation(body, &respan_call_site(mac.tokens.clone()))?;
         let e: syn::Expr = syn::parse2(ts).ok()?;
         DEPTH.with(|d| d.set(d.get() + 1));
@@ -5013,6 +5104,33 @@ impl<'a> CallCollector<'a> {
             }
             self.push_coercion_edge(&format!("&{ty_leaf}"), method);
         }
+        // SOUNDNESS R1157 — a primitive whose ONLY impl of this operator is MACRO-MADE (`model::MBE_PRIM_ATTR`). The orphan
+        // rule makes that impl's `Rhs` a crate-local type, so whether it runs depends on the right operand, and this
+        // typer cannot prove an operand's type by definition (R1128). So no edge is formed — an edge would charge
+        // every `u32 + u32` with the impl's effects, and the impl's own `ambiguous:` hedges cascaded onto 558 num-bigint
+        // rows in the first cut — and the site is recorded for a DISCLOSURE instead (`PRIM_OP_MARKER`, judged after
+        // the fixpoint: `Unknown` where a candidate impl carries a concrete effect). A LITERAL right operand
+        // (`RHS_LITERAL`, by syntax) can never be that `Rhs`: nothing is recorded, as before this existed.
+        // A HAND-WRITTEN impl of the same operator on the same primitive keeps its pre-existing edge below; the
+        // macro-made one is disclosed beside it.
+        if crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf)
+            && self.returns.contains_key(&crate::model::prim_op_key(trait_leaf, ty_leaf, true))
+        {
+            let hand = self.returns.contains_key(&crate::model::prim_op_key(trait_leaf, ty_leaf, false));
+            let lit = RHS_LITERAL.with(|c| c.get());
+            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                eprintln!("R1157PRIMOP\t{trait_leaf}\t{ty_leaf}\tliteral={lit}"); // §E1 REACH COUNTER
+            }
+            if !lit {
+                self.calls.push(Call { argc: 0, entropy_arg: false,
+                    path: format!("{PRIM_OP_MARKER}::{ty_leaf}::{method}"),
+                    leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                    typed: false, method: false, is_macro: false });
+            }
+            if !hand {
+                return;
+            }
+        }
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 // SOUNDNESS R1128 — WITHDRAWN to the pre-existing over-charge. A refusal of this edge when the
@@ -5945,6 +6063,31 @@ impl<'a> CallCollector<'a> {
                         path_lits_partial: false, path_lit2: None,
                         typed: true,
                         method: true,
+                        is_macro: false,
+                    });
+                }
+                // SOUNDNESS R1151 — …AND THE TRAIT'S OWN DEFAULT BODY. The implementor is unnamed here (a generic
+                // parameter, `dyn`, an untyped value), so it may be one this scan cannot see — a dependent's type —
+                // and every implementor that does not override `leaf` runs the trait's provided body. A visible
+                // implementor that inherits it already reaches it (scan.rs' inherited-default route); an unseen one
+                // reached NOTHING: rand_core's `impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> {
+                // fn from_rng(rng) -> Self { Self::new(R::from_rng(rng)) } }` edged only to the two local overrides
+                // and its row read `[]` over the provided `from_rng`'s draw (EXECUTED through a consumer's
+                // implementor, rustagent-v053/fx/r1151). The path names the trait's own unit, so a trait with no
+                // default for `leaf` resolves to nothing and adds nothing.
+                // Only a `pub` trait (`model::pub_trait_key`): a crate-private one's implementors are all visible, and
+                // the inherited-default route already reaches the body for each that does not override.
+                if self.returns.contains_key(&crate::model::pub_trait_key(tr)) {
+                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1151DEFAULT\t{tr}::{leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { argc: 0, entropy_arg: false,
+                        path: format!("{tr}::{leaf}"),
+                        leaf: leaf.to_string(),
+                        str_arg: str_arg.clone(),
+                        path_lits_partial: false, path_lit2: None,
+                        typed: false,
+                        method: false,
                         is_macro: false,
                     });
                 }
@@ -8152,6 +8295,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
+            let (ty, glob_extra) = self.glob_retype(ty, &leaf, node.args.len());
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
             // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…
@@ -8243,6 +8387,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
                                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                // SOUNDNESS R1153 — the glob candidates `glob_retype` could not prove exclusive, BESIDE the written
+                // type's call (see `GLOB_CAND_MARKER`).
+                for g in &glob_extra {
+                    let (root, rest) = g.split_once("::").unwrap_or((g.as_str(), ""));
+                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1153CAND\t{g}\t.{leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { argc: 0, entropy_arg: false,
+                        path: format!("{root}::{GLOB_CAND_MARKER}::{rest}::{leaf}"),
+                        leaf: leaf.clone(), str_arg: None, typed: false, method: false,
+                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                }
                 // ⟨0.40⟩ SOUNDNESS R861 — A GUESSED OWNER. When the receiver is a method CHAIN, the type
                 // above is the chain's BASE type: the builder-chain walk ASSUMED every step returns its
                 // receiver's type. For a dependency's type that is a guess (`n.get_parent().visit()` with
@@ -10698,10 +10854,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // was, so a name this body declares still does NOT reach a crate-level template of that name —
         // that reading is unchanged by this cut and is not measured by it.
         let mname = mleaf.strip_prefix(crate::decls::ITEM_SENTINEL).unwrap_or(&mleaf).to_string();
+        // SOUNDNESS R1156 — a name the crate defines twice (sibling modules, a textual redefinition) is read from
+        // the definition in TEXTUAL scope at this item (`model::SCOPE_MACRO_PREFIX`), when one is recorded and the
+        // name is not R208's `#[cfg]` twin. `local_macros` holds the crate's LAST definition only, so `b::fb`'s
+        // `pick!` and `k2`'s second `k!` were left unexpanded (ABSENT over an executed write), and expanding the
+        // last definition everywhere fabricated onto the pure twin (7dc5fef, `a::fa`, `k1`).
+        let redef_any = self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
+        let scoped_def: Option<String> = (!mpath.contains("::")
+            && redef_any
+            && !self.macro_twins.contains(&mleaf)
+            && !self.body_macros.contains_key(&mname)
+            && !self.macro_expanding.contains(&mleaf))
+            .then(|| self.uses.get(&format!("{}{mleaf}", crate::model::SCOPE_MACRO_PREFIX)).cloned())
+            .flatten();
+        if scoped_def.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            eprintln!("R1156SCOPED\t{mleaf}"); // §E1 REACH COUNTER
+        }
         let mbody = if mpath.contains("::") {
             None
         } else if !self.macro_expanding.contains(&mname) && self.body_macros.contains_key(&mname) {
             self.body_macros.get(&mname).cloned()
+        } else if scoped_def.is_some() {
+            scoped_def.clone()
         } else if !self.macro_expanding.contains(&mleaf) {
             self.local_macros.get(&mleaf).cloned()
         } else {
@@ -10727,7 +10901,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // order this index does not hold, and the invocation is left to the stripped walk (v052 audit, fxm2).
                 let redefined = self.macro_twins.contains(&mleaf)
                     || self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
-                if !redefined || self.body_macros.contains_key(&mname) {
+                if !redefined || self.body_macros.contains_key(&mname) || scoped_def.is_some() {
                     if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
                         let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
                             proc_macro2::Group::new(proc_macro2::Delimiter::Brace, ts),
@@ -10901,6 +11075,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
+            // R1157 — whether the RIGHT operand is a literal, for `charge_coercion_ty_at`; reset below.
+            RHS_LITERAL.with(|c| c.set(syntactic_literal(&node.right)));
             let lconst = self.local_const_type(&node.left);
             // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
             // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
@@ -10992,6 +11168,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
+            RHS_LITERAL.with(|c| c.set(false));
         }
         syn::visit::visit_expr_binary(self, node);
     }
@@ -11207,6 +11384,25 @@ pub(crate) fn pushed_values<'s>(stmt: &'s syn::Stmt, name: &str) -> Vec<&'s syn:
     let mut p = P { name, out: Vec::new() };
     syn::visit::Visit::visit_stmt(&mut p, stmt);
     p.out
+}
+
+thread_local! {
+    /// SOUNDNESS R1157 — set by `visit_expr_binary` for the duration of its operator charges: the right operand is a
+    /// literal (`syntactic_literal`).
+    static RHS_LITERAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// SOUNDNESS R1157 — a literal by SYNTAX (through parentheses, groups, references and a unary minus): a number, bool,
+/// char, byte or string literal. No typer answer is consulted.
+fn syntactic_literal(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Paren(p) => syntactic_literal(&p.expr),
+        syn::Expr::Group(g) => syntactic_literal(&g.expr),
+        syn::Expr::Reference(r) => syntactic_literal(&r.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => syntactic_literal(&u.expr),
+        syn::Expr::Lit(l) => !matches!(l.lit, syn::Lit::Verbatim(_)),
+        _ => false,
+    }
 }
 
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {

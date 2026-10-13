@@ -11,6 +11,59 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-classify: `getrandom::Error`'s own methods are not `Rand` (SOUNDNESS R1150).** The whole `getrandom`
+  crate was charged `Rand`, so an error value's `raw_os_error`, `Debug`/`Display` and comparison (rand_core 0.9.x's
+  derived `OsError::eq`, its `fmt`/`raw_os_error`; rand_core 0.5/0.6 `Error::from`/`fmt`) read as entropy draws
+  (executed: no draw happens). Every drawing entry point keeps `Rand`. Lands after R1151, whose silence the wrong
+  `Rand` was covering.
+- ⚠ **candor-scan: a dispatch on a local `pub` trait through an unnamed implementor also reaches the trait's own
+  default body (SOUNDNESS R1151).** `impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> { fn
+  from_rng(rng) -> Self { Self::new(R::from_rng(rng)) } }` (rand_core) edged only to the crate's own overrides, so
+  `BlockRng::from_rng` read `[]` while a dependent's implementor runs the provided `from_rng` and draws. A generic,
+  `dyn` or untyped implementor of a `pub` trait may be one the scan cannot see, so the provided body is a dispatch
+  target too; a crate-private trait is unchanged.
+- ⚠ **candor-scan: an operator on a primitive whose crate impl is macro-made is disclosed (SOUNDNESS R1157).** A
+  `macro_rules!`-made `impl Add<D> for u32` (serde_json's `impl PartialEq<Value> for u64` shape) was never analysed,
+  so `x + d` read ABSENT over its executed write. The impl is now analysed and published under its own name
+  (`u32::<mbe>::add`); no edge reaches it, because which impl runs depends on a right operand the scanner cannot
+  prove, and an operator site discloses `Unknown` (`ambiguous:operator on a primitive with a macro-made impl`) where
+  a candidate impl carries a concrete effect. A literal right operand (`x != 0`) can never be such an impl's `Rhs`
+  and records nothing. Gate: `deny Fs Unknown` fires; `deny Fs` does not.
+- ⚠ **candor-scan: a `macro_rules!` name defined twice expands from the definition in textual scope (SOUNDNESS
+  R1156).** Sibling modules each defining `pick!`, a textual redefinition of `k!`, value-position twins, a parent's
+  redefinition seen by a later child module, and a `#[macro_use] mod` beside a sibling definition: the effectful twin
+  was left unexpanded (ABSENT, no hedge) because the crate kept one definition per name. The walk now records each
+  ungated definition in textual order per module scope, and an invocation expands the one it really sees; the pure
+  twin stays pure. `#[cfg]` twins keep R208's `ambiguous:` disclosure. The same textual scope now applies at ITEM
+  position, so an impl made by one of two same-named macros (a dependency's `a::mk!`/`b::mk!`) is analysed and
+  published, and a chained consumer joins it (was `Unknown` only).
+- ⚠ **candor-scan: a `let` initialised from a labelled block, a `loop { break value }`, or a block with its own `let`s
+  is typed (SOUNDNESS R1155).** `let x = 'b: { if f { break 'b D2(9); } D2(1) };`, `let x = loop { break D2(1); };`,
+  `let x = { let v = D(2); D2(3) };` and `let x = { let _y = 3; mk() };` left `x` untyped, so `x + 1` formed no
+  operator edge (ABSENT over an executed write). Every value the block can produce is typed, and only when none
+  names a binding the block itself introduces; values must agree.
+- ⚠ **candor-scan: a method receiver typed by a bare name only a glob can supply, and a `#[cfg]`-duplicated alias over
+  dependency types, now reach the dependency (SOUNDNESS R1153).** An external glob beside a crate-local one (g1), a
+  `#[cfg(windows)]` local twin of the name (g2), a glob's `String` shadowing the prelude for a method std lacks (g4),
+  and `let t = Tool;` (g6) were ABSENT chained and unchained; a `#[cfg(unix)] use dep::A as T; #[cfg(windows)] use
+  dep::B as T;` alias was ABSENT chained. An exclusive glob retypes the receiver; a non-exclusive candidate is
+  joined against a chained dependency's own entry where it exists (a miss adds nothing) and recorded in `invisible`
+  unchained; each dependency arm of a duplicated alias is joined. Cost: `invisible` gains where a glob candidate is
+  not the real origin of the name.
+- ⚠ **candor-scan: a bin, example or test reaching its own package's library by the library's name, and a crate-root
+  free fn imported into a module, now form their edges (SOUNDNESS R1154).** `mylib::f()` / `use mylib::f` from
+  `src/main.rs` was read as another crate's path: no edge, no `invisible`, nothing in `coverage.uncovered`, so the
+  caller was ABSENT over `f`'s effect. Within one package (library root `src/lib.rs`, no dependency of the same
+  name) a path headed by the library's name is also resolved as a crate path; the written path still reaches the
+  classifier, so a calibrated crate's own bin keeps its rule's answer. The shape that reduces to —
+  `use crate::f; f()` in any module, including inside the library — named nothing either and is now resolved to the
+  root's own `f` by its exact qual. Residual: `use super::f` from an INLINE child module of the root.
+- ⚠ **candor-scan: a dependency method whose `Type::method` tail a crate-local same-named type also claims is joined
+  against the dependency's report (SOUNDNESS R1152).** `use cdep3::Tool; fn f(t: &Tool) { t.run() }` beside an
+  unrelated `mod local { struct Tool; impl Tool { fn run(&self) {} } }` linked only the local method, and that local
+  resolution closed the chained join, so `f` was ABSENT chained and `deny Fs f` exited 0 over an executed write. The
+  local edge is kept; the dependency's answer is added beside it (the R223 union). Unchained output is unchanged.
+
 ## [0.40.8] — 2026-10-13
 
 candor-scan only; the deep engine and candor-query are unchanged apart from the version. Almost every entry

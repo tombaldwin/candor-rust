@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v053 (R1153-R1157) bumped it to rev104.
         // R986 bumped it to rev66 (path-redirected modules are recorded).
         // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
         // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
@@ -17337,7 +17338,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17348,7 +17349,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev103/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev104/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -30494,9 +30495,9 @@ pub fn e1e() -> u64 { blk3!().0 }
     for f in ["e1", "e1c", "e1d", "e1e", "n1"] {
         assert!(veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{m:#}");
     }
-    // stated residuals: a twice-defined name is left to the `$`-stripped walk (as 0282a87)
+    // R1156 (v053): a twice-defined name expands from the definition in TEXTUAL scope (was this test's residual)
     for f in ["b::fb", "k2"] {
-        assert!(veina_row_effs(&m, f).is_empty(), "macro-redefinition residual `{f}` moved — decide it:\n{m:#}");
+        assert!(veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "R1156 `{f}` writes (executed):\n{m:#}");
     }
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -30541,4 +30542,380 @@ pub mod two { use cdep3::*; use std::collections::*; pub fn g_two(t: &Tool) { t.
     for f in ["local::z_local", "z_generic"] {
         assert!(!inv(f), "control `{f}` never calls cdep3 (executed):\n{g:#}");
     }
+}
+
+/// v053 — scan a dependency `dname` from `dsrc`, chain its report, and scan a consumer from `csrc` (which
+/// depends on it), returning (dependency report, CHAINED consumer report, UNCHAINED consumer report).
+fn v053_chain(dname: &str, dsrc: &str, csrc: &str) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v053chain-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dep = root.join("cdep");
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), toml(dname)).unwrap();
+    std::fs::write(dep.join("src/lib.rs"), dsrc).unwrap();
+    let dv = scan(&dep, &DepIndex::default());
+    let reports = root.join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join(format!("report.{dname}.scan.json")), dv.to_string()).unwrap();
+    let idx = crate::deps::load_dep_reports(Some(reports.to_str().unwrap()));
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), format!("{}[dependencies]\n{dname} = {{ path = \"../cdep\" }}\n", toml("ccons"))).unwrap();
+    std::fs::write(cons.join("src/lib.rs"), csrc).unwrap();
+    let cv = scan(&cons, &idx);
+    let uv = scan(&cons, &DepIndex::default());
+    let _ = std::fs::remove_dir_all(&root);
+    (dv, cv, uv)
+}
+
+/// SOUNDNESS R1152 (v053; fixture rustagent-v053/fx/r1152, every cell EXECUTED). A dependency type's method whose
+/// `Type::method` tail a crate-local same-named type also claims was linked to the local method alone, and that
+/// resolution closed the chained join: `dep_tool` / `sub::dep_gizmo` were ABSENT chained (`deny Fs` exit 0). The
+/// local edge is kept; the join now answers beside it. Controls name the local type and stay pure.
+#[test]
+fn v053_r1152_dependency_method_shadowed_by_local_tail() {
+    let (dv, cv, _) = v053_chain("cdep3", r##"pub struct Tool;
+impl Tool { pub fn run(&self) { let _ = std::fs::write("/tmp/rustagent53_1152", b"x"); } }
+pub struct Gizmo;
+impl Gizmo { pub fn run(&self) { let _ = std::fs::write("/tmp/rustagent53_1152", b"x"); } }
+"##, r##"use cdep3::Tool;
+pub mod local { pub struct Tool; impl Tool { pub fn run(&self) {} } }
+pub fn dep_tool(t: &Tool) { t.run() }
+pub struct Gizmo; impl Gizmo { pub fn run(&self) {} }
+pub mod sub { use cdep3::Gizmo; pub fn dep_gizmo(g: &Gizmo) { g.run() } }
+pub fn ctl_local(t: &local::Tool) { t.run() }
+pub mod cmod { use crate::local::Tool as LT; pub fn ctl_alias(t: &LT) { t.run() } }
+pub fn ctl_root(g: &Gizmo) { g.run() }
+"##);
+    for f in ["dep_tool", "sub::dep_gizmo"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1152 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+    }
+    for f in ["ctl_local", "cmod::ctl_alias", "ctl_root"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1152 control `{f}` is pure (executed):\n{cv:#}");
+    }
+}
+
+/// SOUNDNESS R1154 (v053; fixture rustagent-v053/fx/r1154, every cell EXECUTED). A bin target reaching its own
+/// library by the library's NAME (`v053selflib::write_it()`, `use v053selflib::write_it`, a group, a rename, a
+/// macro argument, a `::`-rooted path) was ABSENT with no `invisible`; and the shape the `use` spelling reduces to —
+/// importing a crate-ROOT free fn into a module (`use crate::write_it; write_it()`) — was ABSENT inside the
+/// library too. Controls: the pure lib fn through the same spellings, and a bin that declares its own module of
+/// the library's name (whole file refused, the local module answers).
+#[test]
+fn v053_r1154_bin_calls_own_lib_by_crate_name_and_crate_root_imports() {
+    let lib = r##"pub fn write_it() { let _ = std::fs::write("/tmp/rustagent53_1154", b"x"); }
+pub fn pure_it() -> u8 { 7 }
+pub mod a { pub fn g() { let _ = std::fs::write("/tmp/rustagent53_1154", b"x"); } }
+pub mod lm { use crate::write_it; pub fn lib_use_root() { write_it() } }
+pub mod lp { use crate::pure_it; pub fn lib_use_pure() -> u8 { pure_it() } }
+mod other;
+"##;
+    let v = scan_src_to_json_multi("v053selflib", &[("src/lib.rs", lib),
+        ("src/other.rs", "use crate::write_it; pub fn lib_file_root() { write_it() }\n"),
+        ("src/main.rs", r##"pub fn bin_path() { v053selflib::write_it() }
+pub fn bin_colon() { ::v053selflib::write_it() }
+mod bm { use v053selflib::write_it; pub fn bin_use() { write_it() } }
+mod bn { use v053selflib::{a::g, pure_it}; pub fn bin_group() { g() } pub fn bin_pure() -> u8 { pure_it() } }
+mod bo { use v053selflib::write_it as w; pub fn bin_rename() { w() } }
+pub fn bin_macro() { println!("{:?}", v053selflib::write_it()) }
+pub fn bin_pure_path() -> u8 { v053selflib::pure_it() }
+fn main() {}
+"##)]);
+    for f in ["bin_path", "bin_colon", "bm::bin_use", "bn::bin_group", "bo::bin_rename", "bin_macro",
+              "lm::lib_use_root", "other::lib_file_root"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1154 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["bn::bin_pure", "bin_pure_path", "lp::lib_use_pure"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1154 control `{f}` is pure (executed):\n{v:#}");
+    }
+    // a bin that binds the library's name itself: the local module is what the path names
+    let w = scan_src_to_json_multi("v053selflibb", &[("src/lib.rs", lib),
+        ("src/main.rs", r##"mod v053selflibb { pub fn write_it() {} }
+pub fn bin_local() { v053selflibb::write_it() }
+fn main() {}
+"##)]);
+    assert!(veina_row_effs(&w, "bin_local").is_empty(), "R1154 control: a local module of the lib's name answers:\n{w:#}");
+    // a calibrated crate's OWN bin keeps its classifier answer (the first cut REWROTE `clap::` to `crate::` and lost
+    // clap's `stdio-fixture` `Env` and duct's `child_grandchild` `Exec` on the corpus A/B)
+    let c = scan_src_to_json_multi("clap", &[("src/lib.rs", "pub use std::fmt;\n"),
+        ("src/bin/fx.rs", "use clap::Command;\nfn main() { let _m = Command::new(\"x\").get_matches(); }\n")]);
+    assert!(veina_row_effs(&c, "bin::fx::main").iter().any(|e| e == "Env"), "R1154: clap's own bin keeps get_matches' Env:\n{c:#}");
+    // a root name that is ALSO an extern decl (wasm-bindgen's `externs!` cfg pair) keeps its `native:` disclosure: the
+    // crate-root resolution first measured `JsValue::is_none` ABSENT by resolving to the non-wasm panicking stub
+    let x = scan_src_to_json_multi("v053ext", &[("src/lib.rs", r##"#[cfg(target_arch = "wasm32")] extern "C" { fn ext_x() -> u32; }
+#[cfg(not(target_arch = "wasm32"))] unsafe extern "C" fn ext_x() -> u32 { panic!("not on this target") }
+pub mod m { use crate::ext_x; pub fn caller() -> u32 { unsafe { ext_x() } } }
+"##)]);
+    assert!(veina_row_effs(&x, "m::caller").iter().any(|e| e == "Unknown"), "R1154: extern cfg pair keeps native:extern fn:\n{x:#}");
+}
+
+/// SOUNDNESS R1153 (v053; fixture rustagent-v053/fx/r1153, every cell EXECUTED). A method receiver typed by a bare
+/// name only a glob can supply: an external plus a local glob (g1), a `#[cfg(windows)]` local twin (g2), a glob's
+/// `String` shadowing the prelude (g4), `let t = Tool;` (g6) — and a `#[cfg]`-duplicated alias whose arms are both
+/// dependency types (`al`). All ABSENT chained on 0.40.7 and 0ef4c2d; each now joins the dependency's own entry.
+/// Controls: the local glob's own type, a std method on the prelude `String`, a local unit-struct `let`.
+#[test]
+fn v053_r1153_glob_candidates_and_alias_arms_join_chained() {
+    let (dv, cv, uv) = v053_chain("cdep4", r##"pub fn mark() { let _ = std::fs::write("/tmp/auditv052gA", b"x"); }
+pub struct Tool; impl Tool { pub fn run(&self) { mark(); } }
+pub mod inner { pub struct Deep; impl Deep { pub fn run(&self) { crate::mark(); } } }
+pub use inner::*;
+#[allow(non_camel_case_types)] pub struct String; impl String { pub fn run(&self) { mark(); } }
+pub struct Made;
+macro_rules! mk { () => { impl Made { pub fn run(&self) { crate::mark(); } } }; }
+mk!();
+"##, r##"#![allow(unused_imports)]
+pub mod loc { pub struct Gadget; impl Gadget { pub fn run(&self) {} } }
+// g1: an external glob plus a LOCAL glob (the local one supplies other names)
+pub mod g1 { use cdep4::*; use crate::loc::*; pub fn f(t: &Tool) { t.run() } }
+// g2: a cfg twin of a same-named local type that is NOT compiled on this target
+pub mod g2 { use cdep4::*; #[cfg(windows)] pub struct Tool; pub fn f(t: &Tool) { t.run() } }
+// g4: the glob shadows a std prelude name
+pub mod g4 { use cdep4::*; pub fn f(s: &String) { s.run() } }
+// g6: the type reached through a let, not a param
+pub mod g6 { use cdep4::*; pub fn f() { let t = Tool; t.run() } }
+// a cfg-duplicated alias whose arms are both dependency types
+pub mod al { #[cfg(unix)] use cdep4::Tool as T; #[cfg(windows)] use cdep4::inner::Deep as T; pub fn f(t: &T) { t.run() } }
+// controls (executed pure): the local glob's own type; a std method on the prelude String; the local cfg twin path
+pub mod c1 { use cdep4::*; use crate::loc::*; pub fn ctl_local(g: &Gadget) { g.run() } }
+pub mod c2 { use cdep4::inner::*; pub fn ctl_len(s: &String) -> usize { s.len() } }
+pub mod c3 { use cdep4::*; pub fn ctl_let() { let g = crate::loc::Gadget; g.run() } }
+"##);
+    for f in ["g1::f", "g2::f", "g4::f", "g6::f", "al::f"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1153 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+    }
+    let inv = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "cdep4")));
+    for f in ["g1::f", "g2::f", "g4::f", "g6::f", "al::f"] {
+        assert!(inv(&uv, f), "R1153 unchained `{f}` must disclose cdep4:\n{uv:#}");
+    }
+    for f in ["c1::ctl_local", "c2::ctl_len", "c3::ctl_let"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1153 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    // a bare receiver type that came from a recorded RETURN type (backtrace's `f.frame().backtrace_frame(..)` under
+    // `use std::prelude::v1::*`) is the crate's own type, never a glob's: the first cut lost this edge on the A/B
+    let b = scan_src_to_json_multi("v053btfmt", &[("src/lib.rs", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_bt", b"x"); }
+pub mod p { pub struct Fmt; impl Fmt { pub fn frame(&mut self) -> Frame { Frame } } pub struct Frame; impl Frame { pub fn go(&self) { crate::mark() } } }
+pub mod c { use std::prelude::v1::*; use crate::p::Fmt; pub fn f(x: &mut Fmt) { x.frame().go() } }
+"##)]);
+    assert!(veina_row_effs(&b, "c::f").iter().any(|e| e == "Fs"), "R1153: a returned local type keeps its edge:\n{b:#}");
+}
+
+/// SOUNDNESS R1155 (v053; fixture rustagent-v053/fx/r1155, every cell EXECUTED). A `let` initialised from a labelled
+/// block ending `break 'b value` (l5), a block whose inner `let` shadows an outer name (l6), a block whose tail is a
+/// fn call after a `let` (l7), `loop { break value }` (l8, l16) and a labelled break out of a nested loop (l15) were
+/// untyped, so `(x + 1)` formed no operator edge: ABSENT over an executed write. Controls: a break value naming a
+/// block-local binding (l11), an inner loop's own break (l13), a pure tail beside a shadowed effectful name (l14), l9.
+#[test]
+fn v053_r1155_let_from_labelled_blocks_loops_and_blocks_with_lets() {
+    let v = scan_src_to_json_multi("v053let", &[("src/lib.rs", r##"#![allow(dead_code, unused_variables, unreachable_code, clippy::needless_return)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052l", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);   // pure
+#[derive(Clone, Copy)] pub struct D2(pub u64);  // effectful
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// L1: block's tail is a DIFFERENT binding from the first `let`
+pub fn l1() -> u64 { let x = { let a = D(1); let b = D2(2); let _ = a; b }; (x + 1).0 }
+// L2: early return inside the block (the block's own value is D2)
+pub fn l2(f: bool) -> u64 { let x = { if f { return 0; } D2(1) }; (x + 1).0 }
+// L3: `if` block expression
+pub fn l3(f: bool) -> u64 { let x = if f { D2(1) } else { D2(2) }; (x + 1).0 }
+// L4: `match` expression
+pub fn l4(n: u8) -> u64 { let x = match n { 0 => D2(1), _ => D2(2) }; (x + 1).0 }
+// L5: labeled block with break-value of the effectful type while the tail is the pure type? (types must agree) -> use same type, break early
+pub fn l5(f: bool) -> u64 { let x = 'b: { if f { break 'b D2(9); } D2(1) }; (x + 1).0 }
+// L6: shadowing: the block's tail names an OUTER binding of another type
+pub fn l6() -> u64 { let v = D2(1); let x = { let v = D(2); let _ = v; D2(3) }; let _ = v; (x + 1).0 }
+// L7: block tail is a call to a fn returning the effectful type
+pub fn mk() -> D2 { D2(1) }
+pub fn l7() -> u64 { let x = { let _y = 3; mk() }; (x + 1).0 }
+// L8: loop with break value
+pub fn l8() -> u64 { let x = loop { break D2(1); }; (x + 1).0 }
+// L9: a pure tail whose inner binding is effectful (must stay pure: no fabrication)
+pub fn l9() -> u64 { let x = { let a = D2(1); let _ = a.0; D(5) }; (x + 1).0 }
+// L10: value macro defined once whose expansion is an `if`
+macro_rules! pickv { ($f:expr) => { if $f { D2(1) } else { D2(2) } }; }
+pub fn l10(f: bool) -> u64 { let x = pickv!(f); (x + 1).0 }
+// R1155 controls (executed pure): a break value naming a block-local binding; an inner loop's break; a pure shadowed tail
+pub fn l11(f: bool) -> u64 { let x = 'b: { let a = D2(1); if f { break 'b D(a.0); } D(2) }; (x + 1).0 }
+pub fn l13() -> u64 { let x = loop { let _i = loop { break D2(1); }; break D(2); }; (x + 1).0 }
+pub fn l14() -> u64 { let v = D2(1); let x = { let v = D(2); let _ = v; D(3) }; let _ = v.0; (x + 1).0 }
+// R1155 more hits: a labelled break from inside a nested loop; a loop whose break value is a call
+pub fn l15() -> u64 { let x = 'o: loop { loop { break 'o D2(4); } }; (x + 1).0 }
+pub fn l16() -> u64 { let x = loop { break mk(); }; (x + 1).0 }
+"##)]);
+    for f in ["l5", "l6", "l7", "l8", "l15", "l16", "l1", "l10"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1155 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["l9", "l11", "l13", "l14"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1155 control `{f}` is pure (executed):\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1156 (v053; fixture rustagent-v053/fx/r1156, every cell EXECUTED). A `macro_rules!` name defined twice
+/// (sibling modules `b::fb`, a textual redefinition `k2`, value-position twins `v::vb::vb`, a parent redefinition seen
+/// by a later child `qb::qb`, a `#[macro_use] mod` beside a sibling definition `zu`) was left unexpanded: ABSENT over a
+/// write. The definition in TEXTUAL scope at the item is expanded (`model::SCOPE_MACRO_PREFIX`). Controls: each pure
+/// twin (`a::fa`, `k1`, `v::va::va`, `qa::qa`, `mz::zp`) stays pure; `#[cfg]` twins stay R208's disclosure (`cw`).
+#[test]
+fn v053_r1156_twice_defined_macros_expand_from_textual_scope() {
+    let v = scan_src_to_json_multi("v053mac", &[("src/lib.rs", r##"#![allow(dead_code, unused_macros)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052m2", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+#[derive(Clone, Copy)] pub struct D2(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// same macro name in two modules, different expansions
+pub mod a { use super::*; macro_rules! pick { ($x:expr) => { D($x) + 0u64 }; } pub fn fa() -> u64 { pick!(1).0 } }
+pub mod b { use super::*; macro_rules! pick { ($x:expr) => { D2($x) + 0u64 }; } pub fn fb() -> u64 { pick!(1).0 } }
+// textual redefinition in one module
+macro_rules! k { ($x:expr) => { D($x) + 0u64 }; }
+pub fn k1() -> u64 { k!(1).0 }
+macro_rules! k { ($x:expr) => { D2($x) + 0u64 }; }
+pub fn k2() -> u64 { k!(1).0 }
+// repetition
+macro_rules! sum { ($($x:expr),*) => { 0u64 $( + ($x + 0u64).0 )* }; }
+pub fn r1() -> u64 { sum!(D(1), D2(2)) }
+// macro exported and used through a path from another module
+#[macro_export] macro_rules! exported_eff { ($x:expr) => { $crate::D2($x) + 0u64 }; }
+pub mod c { pub fn fc() -> u64 { crate::exported_eff!(1).0 } }
+// macro-made value bound via `let` INSIDE an expression macro block, escaping via the block's value
+macro_rules! blk { () => {{ let v = D2(1); v }}; }
+pub fn e1() -> u64 { let x = blk!(); (x + 1).0 }
+// nested macro call as an argument
+macro_rules! wrap { ($e:expr) => { $e }; }
+pub fn n1() -> u64 { wrap!(D2(1) + 1).0 }
+pub fn e1c() -> u64 { let x = { let v = D2(1); v }; (x + 1).0 }
+macro_rules! blk2 { () => { D2(1) }; }
+pub fn e1d() -> u64 { let x = blk2!(); (x + 1).0 }
+macro_rules! blk3 { () => {{ let v = D2(1); v + 1 }}; }
+pub fn e1e() -> u64 { blk3!().0 }
+// R1156 more: value-position twins; a child module inheriting the parent's CURRENT definition; #[macro_use] mod
+pub mod v { use super::*;
+    pub mod va { use super::*; macro_rules! mkv { () => { D(1) }; } pub fn va() -> u64 { let x = mkv!(); (x + 1).0 } }
+    pub mod vb { use super::*; macro_rules! mkv { () => { D2(1) }; } pub fn vb() -> u64 { let x = mkv!(); (x + 1).0 } }
+}
+macro_rules! q { ($x:expr) => { D($x) + 0u64 }; }
+pub mod qa { use super::*; pub fn qa() -> u64 { q!(1).0 } }
+macro_rules! q { ($x:expr) => { D2($x) + 0u64 }; }
+pub mod qb { use super::*; pub fn qb() -> u64 { q!(1).0 } }
+#[macro_use] pub mod mu { macro_rules! z { ($x:expr) => { $crate::D2($x) + 0u64 }; } }
+pub fn zu() -> u64 { z!(1).0 }
+pub mod mz { macro_rules! z { ($x:expr) => { crate::D($x) + 0u64 }; } pub fn zp() -> u64 { z!(1).0 } }
+// cfg twins (R208): no textual order picks one; disclosed, never picked
+#[cfg(unix)] macro_rules! w { ($x:expr) => { D2($x) + 0u64 }; }
+#[cfg(not(unix))] macro_rules! w { ($x:expr) => { D($x) + 0u64 }; }
+pub fn cw() -> u64 { w!(1).0 }
+// item-position twins: sibling modules' `mk!` make different impls
+pub struct W; pub struct W2;
+pub mod ia { macro_rules! mk { ($t:ty) => { impl $t { pub fn run(&self) { crate::mark() } } }; } mk!(crate::W); }
+pub mod ib { macro_rules! mk { ($t:ty) => { impl $t { pub fn run(&self) {} } }; } mk!(crate::W2); }
+pub fn iw(w: &W) { w.run() }
+pub fn iw2(w: &W2) { w.run() }
+"##)]);
+    for f in ["b::fb", "k2", "v::vb::vb", "qb::qb", "zu", "e1", "c::fc", "iw"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1156 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["a::fa", "k1", "v::va::va", "qa::qa", "mz::zp", "iw2"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1156 control `{f}` is pure (executed):\n{v:#}");
+    }
+    assert_eq!(veina_row_effs(&v, "cw"), vec!["Unknown".to_string()], "R1156: a #[cfg] twin stays disclosed:\n{v:#}");
+}
+
+/// SOUNDNESS R1157 (v053; fixture rustagent-v053/fx/r1157, every cell EXECUTED). A macro-made operator impl whose self
+/// type is a primitive (`impl Add<D> for $t` with `$t = u32`; serde_json's `impl PartialEq<Value> for u64` shape) was
+/// never spliced, so `x + d` was ABSENT over its write. It is now spliced as a PUBLISHED-ONLY unit under its own qual
+/// (`u32::<mbe>::add`) and no edge reaches it — which impl runs depends on a right operand this typer cannot prove
+/// (R1128) — and an operator site discloses `Unknown` (`ambiguous:`) where a candidate impl carries a concrete effect.
+/// A LITERAL right operand (by syntax) can never be the impl's `Rhs` and records nothing.
+#[test]
+fn v053_r1157_macro_made_primitive_operator_impls_disclose() {
+    let v = scan_src_to_json_multi("v053prim", &[("src/lib.rs", r##"#![allow(clippy::all)]
+use std::ops::{Add, Rem};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_1157", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+#[derive(Clone, Copy, PartialEq)] pub struct V(pub u64);
+macro_rules! prim_impl { ($t:ty) => { impl Add<D> for $t { type Output = u64; fn add(self, r: D) -> u64 { mark(); self as u64 + r.0 } } }; }
+prim_impl!(u32);
+// serde_json's shape: a macro-made PartialEq<Value> for a primitive
+macro_rules! prim_eq { ($($t:ty)*) => { $( impl PartialEq<V> for $t { fn eq(&self, o: &V) -> bool { mark(); *self as u64 == o.0 } } )* }; }
+prim_eq!(u64 i32);
+macro_rules! prim_rem { ($t:ty) => { impl<'a> Rem<&'a D> for &'a $t { type Output = u64; fn rem(self, r: &'a D) -> u64 { mark(); *self as u64 % r.0.max(1) } } }; }
+prim_rem!(u16);
+pub fn hit_add(x: u32, d: D) -> u64 { x + d }
+pub fn hit_eq(x: u64, v: V) -> bool { x == v }
+pub fn hit_ne_i(x: i32, v: &V) -> bool { x != *v }
+pub fn hit_rem(x: &u16, d: &D) -> u64 { x % d }
+pub fn hit_param_rhs(x: u64, v: V) -> bool { let w = v; x != w }
+// controls (executed pure): literal right operands, and a primitive right operand
+pub fn ctl_lit(x: u64) -> bool { x != 0 }
+pub fn ctl_neg(x: i32) -> bool { x == -1 }
+pub fn ctl_add_lit(x: u32) -> u32 { x + 1 }
+pub fn ctl_lt(x: u64) -> bool { x < 10 }
+// a hand-written impl of the same operator on the same primitive beside the macro-made one
+#[derive(Clone, Copy)] pub struct E(pub u64);
+impl std::ops::Sub<E> for u32 { type Output = u64; fn sub(self, r: E) -> u64 { self as u64 - r.0 } }
+macro_rules! prim_sub { ($t:ty) => { impl std::ops::Sub<D> for $t { type Output = u64; fn sub(self, r: D) -> u64 { mark(); self as u64 - r.0 } } }; }
+prim_sub!(u32);
+pub fn hit_mixed(x: u32, d: D) -> u64 { x - d }
+pub fn ctl_mixed_lit(x: u32) -> u32 { x - 1 }
+"##)]);
+    let why = |f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|x| x.as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>();
+    for f in ["hit_add", "hit_eq", "hit_ne_i", "hit_rem", "hit_param_rhs", "hit_mixed"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Unknown"), "R1157 `{f}` runs an effectful impl (executed) and must disclose:\n{v:#}");
+        assert!(why(f).iter().any(|w| w.starts_with("ambiguous:operator on a primitive")), "R1157 `{f}` reason:\n{v:#}");
+    }
+    for f in ["ctl_lit", "ctl_neg", "ctl_add_lit", "ctl_lt", "ctl_mixed_lit"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1157 control `{f}` is pure (executed):\n{v:#}");
+    }
+    // the macro-made impl's own unit is published, apart from the hand-written impl of the same operator
+    for f in ["u32::<mbe>::add", "u32::<mbe>::sub", "u64::<mbe>::eq"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1157 unit `{f}` writes:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1151 (v053; fixture rustagent-v053/fx/r1151, EXECUTED through a consumer's implementor). A dispatch on a
+/// LOCAL `pub` trait through an unnamed implementor (`R::from_rng(rng)` under `R: SeedableRng`, rand_core's `BlockRng`)
+/// edged only to the visible overrides, so `BlockRng::from_rng` read `[]` over the provided `from_rng`'s write that a
+/// dependent's implementor runs. The trait's own default body is now a dispatch target for a `pub` trait. Control: a
+/// crate-private trait whose every implementor overrides stays pure.
+#[test]
+fn v053_r1151_unnamed_implementor_dispatch_reaches_the_pub_trait_default() {
+    let v = scan_src_to_json_multi("v053rng", &[("src/lib.rs", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_1151", b"x"); }
+pub trait RngCore { fn next_u32(&mut self) -> u32; }
+pub trait SeedableRng: Sized {
+    fn from_seed(s: u8) -> Self;
+    fn from_rng(rng: &mut impl RngCore) -> Self { let s = rng.next_u32() as u8; Self::from_seed(s) }
+}
+pub trait BlockRngCore {}
+pub struct BlockRng<R>(pub R);
+impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> {
+    fn from_seed(s: u8) -> Self { BlockRng(R::from_seed(s)) }
+    fn from_rng(rng: &mut impl RngCore) -> Self { BlockRng(R::from_rng(rng)) }
+}
+pub struct OsRng; impl RngCore for OsRng { fn next_u32(&mut self) -> u32 { mark(); 4 } }
+// control: a crate-private trait whose every implementor overrides the effectful default
+trait Priv { fn go(&self) { mark() } }
+struct PA; impl Priv for PA { fn go(&self) {} }
+fn priv_call(x: &dyn Priv) { x.go() }
+pub fn ctl_priv() { priv_call(&PA) }
+"##)]);
+    assert!(veina_row_effs(&v, "BlockRng::from_rng").iter().any(|e| e == "Fs"), "R1151 (executed):\n{v:#}");
+    assert!(veina_row_effs(&v, "ctl_priv").is_empty(), "R1151 control is pure (executed):\n{v:#}");
 }

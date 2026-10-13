@@ -1331,6 +1331,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .collect::<Vec<_>>(),
     );
     let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
+    // SOUNDNESS R1154 — the package's own library name, as its bins/examples/tests spell it (`mylib::f()`). Not
+    // when a manifest dependency carries the same name: then the head is ambiguous and today's reading stands.
+    let self_lib: Option<String> = crate::deps::self_lib_name(root)
+        .filter(|l| !crate::deps::cargo_deps(dir).0.contains(l));
+
     // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
     // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
@@ -2287,6 +2292,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1157 — macro-made primitive operator impl units by tail2 (`FnInfo::mbe_prim_op`).
+    let mut by_primop: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1154 — the crate ROOT's own free fns, by their exact (one-segment) qual.
+    let mut by_root: HashMap<String, Vec<String>> = HashMap::new();
     // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
     // receiver-typed method call resolves to a local method ONLY if its type is in here, so an external
     // `reqwest::Client::send` can't mis-link to a same-named local `Client::send` (an inverse fabrication).
@@ -2299,6 +2308,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
         // SOUNDNESS R894 — a published foreign declaration's unit is for the REPORT; in-crate calls keep
         // answering through `extern_fns`, so it joins neither local resolution index.
+        // SOUNDNESS R1157 — a macro-made primitive operator impl's unit: published only, indexed for the disclosure.
+        if f.mbe_prim_op {
+            if let Some(t2) = tail2(&f.qual.replace(&format!("::{}", crate::model::MBE_PRIM_SEG), "")) {
+                let v = by_primop.entry(t2).or_default();
+                if !v.contains(&f.qual) {
+                    v.push(f.qual.clone());
+                }
+            }
+            continue;
+        }
         if f.extern_decl || f.reexport_alias || f.derive_synth {
             continue;
         }
@@ -2360,6 +2379,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let vl = by_leaf.entry(f.leaf.clone()).or_default();
             if !vl.contains(&f.qual) {
                 vl.push(f.qual.clone());
+            }
+            if !f.qual.contains("::") && f.qual == f.leaf {
+                by_root.entry(f.qual.clone()).or_insert_with(|| vec![f.qual.clone()]);
             }
         }
         if let Some(t2) = tail2(&f.qual) {
@@ -2631,6 +2653,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // VEIN A — contested non-method path calls the written path could not anchor: (caller, claimants).
     // Judged after the fixpoint (see `veina_contested` below the first `propagate`).
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1157 — (caller, `prim::method`, macro-made candidate impl units), judged after the fixpoint.
+    let mut primop_contested: Vec<(String, String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
@@ -3009,6 +3033,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // spelling and an unrelated local one costs a missing edge, not a fabricated one — the
                 // honest under-report this file takes everywhere else. The synthetic LAZY marker is not
                 // a call site and is skipped by name.
+                // SOUNDNESS (v053, the R1153 vein) — …AND THE CHAINED JOIN, once per arm. The ledger above records a
+                // dependency arm's crate, and the coverage filter drops it when that crate is CHAINED — so a
+                // `#[cfg]`-duplicated alias whose arms are dependency types (`#[cfg(unix)] use cdep4::Tool as T;
+                // #[cfg(windows)] use cdep4::inner::Deep as T;` then `t.run()`) answered NOTHING chained: ABSENT,
+                // `deny Fs` exit 0 over an executed write, on 0.40.7 and 0ef4c2d alike, while the single-arm
+                // spelling joined. Each unclassified dependency arm now asks the chained report exactly as the
+                // single-arm path does (its `cr#tail2` key, then the ⟨0.40⟩ walk's rows); every answer is ADDED, as
+                // the arms are a union. A miss adds nothing, as on the single-arm path.
+                for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
+                    let acr = alt.split("::").next().unwrap_or("");
+                    let acr_real: &str = dep_renames.get(acr).map(String::as_str).unwrap_or(acr);
+                    if !alt.contains("::") || !deps_idx.crates.contains(acr_real)
+                        || candor_classify::classify(acr_real, alt).is_some()
+                    {
+                        continue;
+                    }
+                    let rel = alt.strip_prefix(&format!("{acr}::")).unwrap_or(alt);
+                    let key = if rel.contains("::") {
+                        tail2(rel).map(|t2| format!("{acr_real}#{t2}"))
+                    } else {
+                        Some(format!("{acr_real}#{rel}"))
+                    };
+                    let mut rows: Vec<&crate::deps::DepFn> = Vec::new();
+                    if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
+                        rows.push(de);
+                    } else if c.method && c.typed {
+                        if let Some((tpath, member)) = rel.rsplit_once("::") {
+                            let start = deps_idx.surface.type_key(acr_real, tpath)
+                                .unwrap_or_else(|| format!("{acr_real}#{tpath}"));
+                            rows = crate::typesurf::join_through(deps_idx, &start, member, false).0;
+                        }
+                    }
+                    if !rows.is_empty() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1153ARMJOIN\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
+                    }
+                    for de in rows {
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
+                }
                 let mut r438_gained_edge = false;
                 for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
                     // Every synthetic marker, not just the lazy one: these are not call sites, they
@@ -3020,6 +3088,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || alt.contains(UNTYPED_RECV_MARKER)
                         || alt.contains(CHAIN_GUESS_MARKER)
                         || alt.contains(EXT_METHOD_MARKER)
+                        || alt.contains(GLOB_CAND_MARKER)
                     {
                         continue;
                     }
@@ -3134,6 +3203,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // recorded in the κ ledger exactly as a floored qualified call into `cr` is, so the coverage filter
             // downstream decides whether it surfaces as `invisible` (a chained or calibrated crate is dropped
             // there). Nothing else: no effect, no `Unknown`.
+            // SOUNDNESS R1157 — a primitive operator only a macro-made impl answers (`PRIM_OP_MARKER`): its candidates are
+            // judged after the fixpoint (`primop_contested`), never linked.
+            if let Some(t2) = c.path.strip_prefix(&format!("{PRIM_OP_MARKER}::")) {
+                if let Some(v) = by_primop.get(t2) {
+                    let cl: Vec<String> = v.iter().filter(|q| *q != &f.qual).cloned().collect();
+                    if !cl.is_empty() {
+                        primop_contested.push((f.qual.clone(), t2.to_string(), cl));
+                    }
+                }
+                continue;
+            }
+            // SOUNDNESS R1153 — a GLOB CANDIDATE for a bare receiver type (`GLOB_CAND_MARKER`): chained, the
+            // dependency's own `Type::leaf` entry is joined where it exists and a miss adds nothing (the glob may not
+            // be the origin); unchained, the crate is recorded in the κ ledger like any floored call into it.
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{GLOB_CAND_MARKER}::")) {
+                if deps_idx.crates.contains(cr_real) {
+                    let key = tail2(rest).map(|t2| format!("{cr_real}#{t2}"));
+                    if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
+                        if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                            eprintln!("R1153JOIN\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
+                } else if deps.contains(cr) {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                continue;
+            }
             if c.path.starts_with(&format!("{cr}::{EXT_METHOD_MARKER}::")) {
                 if deps.contains(cr) {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
@@ -3740,7 +3843,48 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut dep_default_path: Option<String> = None;
             if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
-                    .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport));
+                    .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport))
+                    // SOUNDNESS R1154 (and the crate-root import it reduces to) — `use crate::write_it;`
+                    // then `write_it()` keeps the `use`-map value `crate::write_it`, whose one-segment
+                    // remainder has no tail2 key and is not a bare leaf, so the call named NOTHING: every
+                    // caller importing a crate-ROOT free fn into a module (`use crate::f`, `use super::f`
+                    // from a direct child, a bin's `use mylib::f`) was ABSENT over the fn's effect
+                    // (executed). A surviving `crate::` head is crate-root ABSOLUTE (it only comes from a
+                    // `use` value, see `macro_hidden_owner`), so `crate::f` names the root's own `f` and
+                    // nothing else: the lookup is the EXACT qual, never a leaf guess.
+                    .or_else(|| {
+                        let r = c.path.strip_prefix("crate::").filter(|r| !r.contains("::") && !c.method)?;
+                        // A root name ALSO declared in an `extern` block is a cfg pair (wasm-bindgen's `externs!`: the
+                        // extern on wasm32, a panicking stub elsewhere): resolving to the stub would withdraw the §4
+                        // `native:extern fn` disclosure below (measured: `JsValue::is_none` went ABSENT). Left to it.
+                        if merged.extern_fns.contains(r) {
+                            return None;
+                        }
+                        let hit = by_root.get(r);
+                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                            eprintln!("R1154ROOT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        hit
+                    })
+                    // SOUNDNESS R1154 — a path headed by this package's OWN library name (`mylib::f()` from a bin, or
+                    // the `use mylib::f` value): the head names this crate's root, so the rest is resolved as a
+                    // crate path. The written path is untouched, so the classifier still reads it (a calibrated
+                    // crate's own bin — clap's `stdio-fixture`, duct's `child_grandchild` — keeps its rule's answer).
+                    .or_else(|| {
+                        let lib = self_lib.as_deref()?;
+                        let rest = c.path.strip_prefix(lib)?.strip_prefix("::")?;
+                        let hit = if rest.contains("::") {
+                            resolve_target(rest, &c.leaf, c.method, &by_tail2, &by_leaf)
+                        } else if !c.method && !merged.extern_fns.contains(rest) {
+                            by_root.get(rest)
+                        } else {
+                            None
+                        };
+                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                            eprintln!("R1154SELFLIB\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        hit
+                    });
                 if let Some(targets) = targets {
                     resolved_local = true;
                     for t in targets {
@@ -4033,7 +4177,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 None => (c.path.as_str(), cr, cr_real),
             };
-            if classified.is_none() && (!resolved_local || dep_default_path.is_some()) && !suppress_bare_leaf
+            // SOUNDNESS R1152 — A LOCAL RESOLUTION THAT IS ONLY A TAIL2 COLLISION DOES NOT SPEAK FOR THE
+            // DEPENDENCY. `use cdep3::Tool; fn dep_tool(t: &Tool) { t.run() }` beside an unrelated
+            // `mod local { struct Tool; impl Tool { fn run(&self) {} } }` forms `cdep3::Tool::run`, whose
+            // tail `Tool::run` the local method alone claims, so `resolve_target` linked it and
+            // `resolved_local` closed the join: chained, `dep_tool` was ABSENT over the dependency's real
+            // `Fs` and `deny Fs` exited 0 (executed). R223 already withdrew that local edge's AUTHORITY
+            // over the classifier (`extern_dep_qualified`); the join is the other half of the same
+            // authority and was left gated on the bare `resolved_local`. The local edge is KEPT — this
+            // only ADDS the dependency's answer beside it (a union, the R223 direction), so a call whose
+            // head merely looks like a dependency costs at most an over-report, never a silence.
+            let r1152_union = resolved_local && extern_dep_qualified && dep_default_path.is_none();
+            if r1152_union && std::env::var_os("CANDOR_R1152_INSTR").is_some() && deps_idx.crates.contains(cr_real) {
+                eprintln!("R1152UNION\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+            }
+            if classified.is_none() && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
                 && jpath.contains("::") && deps_idx.crates.contains(cr_real)
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
@@ -5507,6 +5665,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 hedged = true;
                 if std::env::var_os("CANDOR_R1095_INSTR").is_some() && fresh {
                     eprintln!("R1095HEDGE\t{caller}\t{leaf}"); // §E1 REACH PROBE — a caller newly Unknown
+                }
+            }
+        }
+        // SOUNDNESS R1157 — a primitive operator whose only crate impl is macro-made: which body runs depends on the
+        // right operand's type, which this engine cannot prove, so where a candidate carries a CONCRETE effect the
+        // caller does not already have, the caller discloses `Unknown` (`ambiguous:`, two definitions — std's and the
+        // crate's — with no way to say which runs). An `Unknown`-only candidate is not hedged on (the R1095 rule).
+        for (caller, label, cands) in &primop_contested {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            let impure = cands.iter().any(|u| {
+                inferred.get(u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+            });
+            if !impure {
+                continue;
+            }
+            let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+            let fresh_why = unknown_why
+                .entry(caller.clone())
+                .or_default()
+                .insert(format!("ambiguous:operator on a primitive with a macro-made impl ({})", label.replace('.', "_")));
+            if fresh || fresh_why {
+                hedged = true;
+                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    eprintln!("R1157HEDGE\t{caller}\t{label}"); // §E1 REACH COUNTER
                 }
             }
         }

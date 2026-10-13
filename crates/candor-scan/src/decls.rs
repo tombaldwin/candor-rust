@@ -101,6 +101,18 @@ pub(crate) fn scan_items(
         // Held for the whole arm, so a `mod`'s own `use` items, an impl's methods and a trait's defaults
         // are all read under it. See `lang::CfgOffScope`.
         let _cfg_off = crate::lang::CfgOffScope::enter_if(crate::lang::item_attrs(it));
+        // SOUNDNESS R1156 — record the ungated `macro_rules!` definition in TEXTUAL scope (see `SCOPE_MACRO_PREFIX`).
+        // A `#[cfg]`-gated one is R208's twin, disclosed there, and never recorded: no textual order picks it.
+        if let syn::Item::Macro(m) = it {
+            if m.mac.path.is_ident("macro_rules")
+                && (include_tests || !is_cfg_test(&m.attrs))
+                && !crate::lang::has_cfg(&m.attrs)
+            {
+                if let Some(name) = &m.ident {
+                    uses.insert(format!("{}{name}", crate::model::SCOPE_MACRO_PREFIX), m.mac.tokens.to_string());
+                }
+            }
+        }
         match it {
             syn::Item::Fn(f) => {
                 // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
@@ -179,13 +191,24 @@ pub(crate) fn scan_items(
                         }
                         let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated method
                         let n = m.sig.ident.to_string();
-                        let q = match &tyname {
-                            Some(t) => qual(&format!("{t}::{n}")),
-                            None => qual(&n),
+                        // SOUNDNESS R1157 — a macro-made primitive operator impl's unit gets its OWN qual
+                        // (`<prim>::<mbe>::<method>`): sharing a hand-written impl's qual would merge its body into
+                        // that row (SPEC §4's union over one qual) and every edge into the hand impl would inherit it.
+                        let mbe_prim = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_PRIM_ATTR))
+                            .then(|| match crate::lang::peel_ty_refs(&im.self_ty) {
+                                syn::Type::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                                _ => None,
+                            })
+                            .flatten();
+                        let q = match (&mbe_prim, &tyname) {
+                            (Some(p), _) => qual(&format!("{p}::{}::{n}", crate::model::MBE_PRIM_SEG)),
+                            (None, Some(t)) => qual(&format!("{t}::{n}")),
+                            (None, None) => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
                         let mut info = fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
+                        info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         out.push(info);
                     }
                 }
@@ -252,6 +275,15 @@ pub(crate) fn scan_items(
                     // R167 -- an inline `mod` is in the SAME FILE, so it inherits this file's answer,
                     // which is exactly what `fn_locs`' own recursion does with its unchanged `file`.
                     scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, skip_test_fns, &mut subuses, out);
+                    // SOUNDNESS R1156 — `#[macro_use] mod m { macro_rules! .. }`: the module's macros stay in
+                    // textual scope after it.
+                    if m.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                        for (k, v) in subuses.iter() {
+                            if k.starts_with(crate::model::SCOPE_MACRO_PREFIX) {
+                                uses.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -370,6 +402,7 @@ pub(crate) fn submodule_uses(
     subuses.remove(crate::lang::MODPATH_KEY);
     subuses.remove(crate::lang::MODDECL_KEY);
     subuses.remove(crate::lang::MODDECL_ALL_KEY);
+    subuses.remove(crate::lang::MODDECL_CFGONLY_KEY);
     subuses.remove(crate::lang::MODMACRO_KEY);
     subuses.remove(crate::lang::MODEXTERN_KEY);
     // A parent's glob imports do not reach an inline child in rustc (only `use super::*` brings them,
@@ -3177,6 +3210,7 @@ pub(crate) fn fninfo(
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         extern_decl: false,
         derive_synth: false,
+        mbe_prim_op: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
         untyped_methods: c.untyped_methods.into_iter().collect(),
@@ -4696,6 +4730,11 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Trait(t) => {
+                // SOUNDNESS R1151 — a `pub` trait can be implemented by a type this scan never sees
+                // (`model::pub_trait_key`).
+                if matches!(t.vis, syn::Visibility::Public(_)) {
+                    rets.insert(crate::model::pub_trait_key(&t.ident.to_string()), Some("1".to_string()));
+                }
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
                 for ti in &t.items {
@@ -4881,6 +4920,11 @@ pub(crate) fn collect_decls(
                             // Filed in `rets` (a string fact), NOT `trait_impls`, whose every key is read as a trait
                             // name by the CHA and local-type passes. One file unions its own impls; a second file's
                             // different set withdraws the key at the merge, which reads as today's edge.
+                            // SOUNDNESS R1157 — a primitive self type: macro-made (`MBE_PRIM_ATTR`) or hand-written.
+                            if crate::model::PRIMITIVE_LEAVES.contains(&tyl.as_str()) {
+                                let mbe = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_PRIM_ATTR));
+                                rets.insert(crate::model::prim_op_key(&key, &tyl, mbe), Some("1".to_string()));
+                            }
                             let k = crate::model::impl_rhs_key(&key, &tyl);
                             let mut set: Vec<String> = match rets.get(&k) {
                                 Some(Some(v)) => v.split(',').map(str::to_string).collect(),

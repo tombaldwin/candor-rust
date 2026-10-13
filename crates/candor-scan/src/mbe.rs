@@ -602,10 +602,34 @@ struct Ctx<'x> {
     /// R1004 — the crate-wide table, consulted only for a name THIS file does not define.
     xdefs: &'x CrateMacros,
     budget: usize,
+    /// SOUNDNESS R1156 (item position) — the `macro_rules!` definitions in TEXTUAL scope at the item being spliced:
+    /// `Some(tokens)` for an ungated one, `None` once a `#[cfg]`-gated definition of the name is in scope (no
+    /// textual order picks between cfg twins). Consulted only for a name this file defines more than once.
+    scope: HashMap<String, Option<String>>,
 }
 
 impl Ctx<'_> {
+    /// R1156 — the definition in textual scope for a name this FILE defines more than once.
+    fn scoped_def(&self, name: &str) -> Option<String> {
+        if !matches!(self.defs.get(name), Some(None)) {
+            return None;
+        }
+        self.scope.get(name).cloned().flatten()
+    }
+
     fn arms_of(&mut self, name: &str) -> Option<std::rc::Rc<Vec<Arm>>> {
+        if let Some(t) = self.scoped_def(name) {
+            let key = format!("{name}\u{1}{t}");
+            if let Some(a) = self.arms.get(&key) {
+                return a.clone();
+            }
+            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                eprintln!("R1156ITEM\t{name}"); // §E1 REACH COUNTER
+            }
+            let a = t.parse::<TokenStream>().ok().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
+            self.arms.insert(key, a.clone());
+            return a;
+        }
         if let Some(a) = self.arms.get(name) {
             return a.clone();
         }
@@ -631,7 +655,7 @@ impl Ctx<'_> {
             return None;
         }
         match self.defs.get(&id) {
-            Some(d) => d.is_some().then_some(id),
+            Some(d) => (d.is_some() || self.scoped_def(&id).is_some()).then_some(id),
             None => self.xdefs.get(&id).is_some_and(|d| d.is_some()).then_some(id),
         }
     }
@@ -681,6 +705,12 @@ impl Ctx<'_> {
     fn splice(&mut self, items: &mut Vec<syn::Item>, depth: usize) {
         let mut out: Vec<syn::Item> = Vec::with_capacity(items.len());
         for mut it in std::mem::take(items) {
+            if let syn::Item::Macro(m) = &it {
+                if let (Some(name), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
+                    let gated = crate::lang::has_cfg(&m.attrs);
+                    self.scope.insert(name.to_string(), (!gated).then(|| m.mac.tokens.to_string()));
+                }
+            }
             match &mut it {
                 syn::Item::Macro(m) if m.ident.is_none() => {
                     if let Some(gen) = self.expand_items(&m.mac, depth) {
@@ -702,7 +732,7 @@ impl Ctx<'_> {
                                 // reached BY PATH (`W::touch(&w)`) and by a typed receiver, exactly as a
                                 // free fn is, and no dispatch universe holds them, so splicing it cannot
                                 // move a CHA fan-out. A TRAIT impl stays unexpanded (see above).
-                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i),
+                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i) || prim_operator_impl(i),
                                 _ => false,
                             })
                             .collect();
@@ -720,6 +750,15 @@ impl Ctx<'_> {
                             // written impl has; peel it so the impl's units are keyed under the type
                             // (`W::touch`) exactly as the hand-written impl's are.
                             if let syn::Item::Impl(i) = g {
+                                // R1157 — a primitive-self operator impl is marked, so Pass A files it apart from a
+                                // hand-written one and the operator site can refuse it a LITERAL right operand.
+                                if prim_operator_impl(i) {
+                                    let id = syn::Ident::new(crate::model::MBE_PRIM_ATTR, proc_macro2::Span::call_site());
+                                    i.attrs.push(syn::parse_quote!(#[#id]));
+                                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                                        eprintln!("R1157SPLICE"); // §E1 REACH COUNTER
+                                    }
+                                }
                                 if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
                                     eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
                                 }
@@ -752,7 +791,13 @@ impl Ctx<'_> {
                 }
                 syn::Item::Mod(md) => {
                     if let Some((_, inner)) = &mut md.content {
+                        // R1156 — a child sees the parent's textual scope; its own definitions leave with it
+                        // unless the module is `#[macro_use]`.
+                        let saved = self.scope.clone();
                         self.splice(inner, depth);
+                        if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                            self.scope = saved;
+                        }
                     }
                 }
                 _ => {}
@@ -802,6 +847,30 @@ fn peel_groups(t: &mut syn::Type) {
 /// `impl PartialEq<Value> for u64` (serde_json) would put the primitive in the operator index, and every `x != 0` over a
 /// `u64` would then edge to it although the orphan rule means only a `Value` right operand can run it — those stay
 /// unspliced, exactly as before.
+/// SOUNDNESS R1157 — a macro-made std OPERATOR impl whose self type (through references and invisible groups) is a
+/// PRIMITIVE (`impl Add<D> for $t` with `$t = u32`). Spliced like `operator_trait_impl`'s nominal case, and marked
+/// (`model::MBE_PRIM_ATTR`): the orphan rule means its `Rhs` names a crate-local type, so a LITERAL right operand can
+/// never run it, and the operator site refuses exactly that syntactic case — `x != 0` over a `u64` beside serde_json's
+/// macro-made `impl PartialEq<Value> for u64` forms no edge, while any other right operand does (no name-typing claim
+/// withholds the edge). Unspliced, the impl had no unit and `x + d` read ABSENT over its executed write.
+fn prim_operator_impl(i: &syn::ItemImpl) -> bool {
+    let op = matches!(&i.trait_, Some((None, p, _))
+        if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
+    let mut t: &syn::Type = &i.self_ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            _ => break,
+        }
+    }
+    op && matches!(t, syn::Type::Path(p) if p.qself.is_none() && p.path.get_ident().is_some_and(|id| {
+        let s = id.to_string();
+        crate::model::PRIMITIVE_LEAVES.contains(&s.as_str())
+    }))
+}
+
 fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
     let op = matches!(&i.trait_, Some((None, p, _))
         if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
@@ -927,10 +996,11 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
 pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
     let mut defs = HashMap::new();
     collect_defs(items, &mut defs);
-    if defs.values().all(|d| d.is_none()) && xdefs.values().all(|d| d.is_none()) {
+    // R1156 — a name defined more than once (`None`) may still be expanded from its textual scope.
+    if defs.is_empty() && xdefs.values().all(|d| d.is_none()) {
         return;
     }
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new() };
     cx.splice(items, 0);
 }
 

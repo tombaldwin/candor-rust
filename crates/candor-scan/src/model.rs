@@ -188,6 +188,12 @@ pub(crate) struct FnInfo {
     /// Arch` lost its edge to the synthetic `col::Arch::eq` and `deny Fs` went 1 -> 0).
     #[serde(rename = "dv", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) derive_synth: bool,
+    /// SOUNDNESS R1157 — a method of a MACRO-MADE operator impl whose self type is a primitive (`MBE_PRIM_ATTR`). Published
+    /// (its own row, a chained consumer's key) but kept out of the local resolution indexes like `derive_synth`: no
+    /// edge may reach it, because which impl an operator on a primitive runs depends on a right operand this typer
+    /// cannot prove (R1128). Operator sites are judged against it after the fixpoint instead (`PRIM_OP_MARKER`).
+    #[serde(rename = "mp", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mbe_prim_op: bool,
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
@@ -560,6 +566,12 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
 /// SOUNDNESS R1144 (v052 audit) — prefix of a `macro_twins` entry naming a `macro_rules!` name defined more than once
 /// with different templates anywhere (ungated too). `\u{2}` cannot begin a Rust identifier.
 pub(crate) const MACRO_REDEF_PREFIX: &str = "\u{2}redef:";
+/// SOUNDNESS R1156 — the `uses` key under which `decls::scan_items` records, in TEXTUAL order, the `macro_rules!`
+/// definition of a name in scope at the current item (`\u{2}scopemac:<name>` -> the definition's tokens). It is
+/// the module scope and order `local_macros` (one entry per name per crate) does not hold, so a name defined twice
+/// (sibling modules, a textual redefinition) expands from the definition the invocation really sees. A child
+/// module inherits the map by clone, which is `macro_rules!` textual scope; no path segment can spell the key.
+pub(crate) const SCOPE_MACRO_PREFIX: &str = "\u{2}scopemac:";
 
 /// SOUNDNESS R1146 (v052 audit) — the attribute `mbe::splice_derived_comparisons` puts on a synthetic derived-comparison
 /// impl. No real crate can carry it (it is not a registered attribute and would not compile).
@@ -585,6 +597,24 @@ pub(crate) fn impl_gen_op_key(type_leaf: &str, fn_leaf: &str) -> String {
 
 /// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
+/// SOUNDNESS R1157 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
+/// a PRIMITIVE, so Pass A can tell it from a hand-written one (`prim_op_key`).
+pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
+/// SOUNDNESS R1157 — the qual segment that keeps such an impl's unit apart from a hand-written impl's (`decls::scan_items`).
+pub(crate) const MBE_PRIM_SEG: &str = "<mbe>";
+
+/// SOUNDNESS R1157 — a `ReturnIndex` key: the crate has an operator impl of `trait` on the primitive `ty`, `mbe` true
+/// for a macro-made one (`MBE_PRIM_ATTR`) and false for a hand-written one. Value `1`.
+pub(crate) fn prim_op_key(trait_leaf: &str, ty_leaf: &str, mbe: bool) -> String {
+    format!("<primop{}>{trait_leaf}\u{1f}{ty_leaf}", if mbe { "m" } else { "h" })
+}
+
+/// SOUNDNESS R1151 — a `ReturnIndex` key: a local trait of this leaf is declared `pub`, so an implementor this scan
+/// cannot see may exist and run the trait's provided body. Value `1`.
+pub(crate) fn pub_trait_key(trait_leaf: &str) -> String {
+    format!("<pubtrait>{trait_leaf}")
+}
+
 pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {
     format!("<rhs>{trait_leaf}\u{1f}{ty_leaf}")
 }

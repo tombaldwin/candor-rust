@@ -39,6 +39,19 @@ pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
 /// resolves to nothing, and the angle-bracket segment keeps it out of every key lookup.
 pub(crate) const EXT_METHOD_MARKER: &str = "<extmethod>";
 
+/// SOUNDNESS R1153 — `cr::<globcand>::<Type path>::leaf`: a method call on a receiver whose bare type name an
+/// EXTERNAL glob in scope may supply but is not proven to (a second glob, a crate-local glob, a `#[cfg]`-only
+/// local declaration, or a prelude type a glob can shadow). Consumed only by the call loop: chained, it joins the
+/// dependency's own `Type::leaf` entry where one exists and adds nothing on a miss (the glob may not be the
+/// origin, so a miss is not the dependency's purity claim and not a reason to hedge); unchained, it is a κ ledger
+/// entry for `cr`. The angle-bracket segment keeps it out of every local key lookup.
+pub(crate) const GLOB_CAND_MARKER: &str = "<globcand>";
+
+/// SOUNDNESS R1157 — `<primop>::<prim>::<method>`: an operator on a primitive whose only impl of that operator in the crate
+/// is macro-made (`collector::charge_coercion_ty_at`). Consumed only by the call loop, which records the site for the
+/// post-fixpoint disclosure; it forms no edge.
+pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
+
 /// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
 /// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
 /// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a
