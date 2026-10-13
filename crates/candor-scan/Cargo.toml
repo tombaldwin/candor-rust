@@ -23,7 +23,7 @@ candor-classify = { path = "../candor-classify", version = "0.40.7" }
 # parsed files un-sendable across rayon's worker threads. candor-scan is a standalone BINARY, never a
 # proc macro, so that feature is dead weight; everything else syn's default enabled is re-listed verbatim
 # (derive/parsing/printing/clone-impls) so parsing behaviour is byte-for-byte unchanged.
-syn = { version = "2", default-features = false, features = ["full", "visit", "visit-mut", "extra-traits", "derive", "parsing", "printing", "clone-impls"] }
+syn = { version = "2", default-features = false, features = ["full", "visit", "extra-traits", "derive", "parsing", "printing", "clone-impls"] }
 # `span-locations` adds 1-based line / 0-based column tracking to the FALLBACK `Span` (byte offsets stored
 # inline + a thread-local source map populated at parse time) — it does NOT pull syn's `proc-macro` feature
 # and does NOT make `Span`/`syn::File` any less `Send` than before (the `Rc` in `TokenStream` was already the

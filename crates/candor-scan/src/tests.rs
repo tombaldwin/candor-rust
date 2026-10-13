@@ -30647,6 +30647,11 @@ pub fn bin_local() { v053selflibb::write_it() }
 fn main() {}
 "##)]);
     assert!(veina_row_effs(&w, "bin_local").is_empty(), "R1154 control: a local module of the lib's name answers:\n{w:#}");
+    // a calibrated crate's OWN bin keeps its classifier answer (the first cut REWROTE `clap::` to `crate::` and lost
+    // clap's `stdio-fixture` `Env` and duct's `child_grandchild` `Exec` on the corpus A/B)
+    let c = scan_src_to_json_multi("clap", &[("src/lib.rs", "pub use std::fmt;\n"),
+        ("src/bin/fx.rs", "use clap::Command;\nfn main() { let _m = Command::new(\"x\").get_matches(); }\n")]);
+    assert!(veina_row_effs(&c, "bin::fx::main").iter().any(|e| e == "Env"), "R1154: clap's own bin keeps get_matches' Env:\n{c:#}");
 }
 
 /// SOUNDNESS R1153 (v053; fixture rustagent-v053/fx/r1153, every cell EXECUTED). A method receiver typed by a bare

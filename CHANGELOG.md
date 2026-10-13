@@ -49,7 +49,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   free fn imported into a module, now form their edges (SOUNDNESS R1154).** `mylib::f()` / `use mylib::f` from
   `src/main.rs` was read as another crate's path: no edge, no `invisible`, nothing in `coverage.uncovered`, so the
   caller was ABSENT over `f`'s effect. Within one package (library root `src/lib.rs`, no dependency of the same
-  name, no local item binding that name in the file) the name is rewritten to `crate::`. The shape that reduces to —
+  name) a path headed by the library's name is also resolved as a crate path; the written path still reaches the
+  classifier, so a calibrated crate's own bin keeps its rule's answer. The shape that reduces to —
   `use crate::f; f()` in any module, including inside the library — named nothing either and is now resolved to the
   root's own `f` by its exact qual. Residual: `use super::f` from an INLINE child module of the root.
 - ⚠ **candor-scan: a dependency method whose `Type::method` tail a crate-local same-named type also claims is joined

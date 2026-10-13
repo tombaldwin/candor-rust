@@ -1335,13 +1335,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // when a manifest dependency carries the same name: then the head is ambiguous and today's reading stands.
     let self_lib: Option<String> = crate::deps::self_lib_name(root)
         .filter(|l| !crate::deps::cargo_deps(dir).0.contains(l));
-    let self_lib_rewrite = |file: &mut syn::File, text: &str| {
-        if let Some(l) = &self_lib {
-            if text.contains(l.as_str()) {
-                crate::lang::rewrite_self_lib_paths(file, l);
-            }
-        }
-    };
+
     // A file whose last parse READ other files (`include!` targets) is keyed on their bytes too — see
     // `include_closure_hash`; with no targets the key is the plain content hash, exactly as before.
     let hashes: Vec<(String, String)> = paths
@@ -1358,8 +1352,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
             let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
             let key = match &xmacros_key { Some(x) => format!("{key}+xmac{x}"), None => key };
-            // R1154 — the rewrite depends on the manifest's library name, not on this file's bytes alone.
-            let key = match &self_lib { Some(l) => format!("{key}+selflib{l}"), None => key };
             (rel.clone(), key)
         })
         .collect();
@@ -1408,7 +1400,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
             crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
-            self_lib_rewrite(&mut file, &text); // R1154
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -2040,7 +2031,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
-                    self_lib_rewrite(&mut f, &t); // R1154 — the round-2 twin
                     Some(f)
                 })
                 .map(|file| {
@@ -3867,6 +3857,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let hit = by_root.get(r);
                         if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
                             eprintln!("R1154ROOT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        hit
+                    })
+                    // SOUNDNESS R1154 — a path headed by this package's OWN library name (`mylib::f()` from a bin, or
+                    // the `use mylib::f` value): the head names this crate's root, so the rest is resolved as a
+                    // crate path. The written path is untouched, so the classifier still reads it (a calibrated
+                    // crate's own bin — clap's `stdio-fixture`, duct's `child_grandchild` — keeps its rule's answer).
+                    .or_else(|| {
+                        let lib = self_lib.as_deref()?;
+                        let rest = c.path.strip_prefix(lib)?.strip_prefix("::")?;
+                        let hit = if rest.contains("::") {
+                            resolve_target(rest, &c.leaf, c.method, &by_tail2, &by_leaf)
+                        } else if !c.method {
+                            by_root.get(rest)
+                        } else {
+                            None
+                        };
+                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                            eprintln!("R1154SELFLIB\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                         }
                         hit
                     });
