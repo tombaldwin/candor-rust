@@ -11,14 +11,73 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.8] — 2026-10-13
+
+candor-scan only; the deep engine and candor-query are unchanged apart from the version. Almost every entry
+closes a **silent under-report**: an operator, a comparison, a method on a parameter, or a call inside a local
+`macro_rules!` that really runs in a function was missing from that function's row. Every closed shape was run
+with an impl that writes a file, and the effect was missing from the published 0.40.7 report.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.7 crate binary over the
+  3,633-crate registry corpus (`bin/corpus-ab.py`; each crate version counts separately). Each gate is scoped
+  to the function named. These now **fail where 0.40.7 passed**:
+  - `deny Log` over mio's `register`/`reregister`/`deregister` family (`Source`, `IoSource`, `TcpListener`,
+    `TcpStream`, …), memchr's `memchr_raw`/`memrchr_raw`/`count_raw` family, h2's `Recv::open`/
+    `poll_response`/`recv_trailers` and the client/server `poll`s, hyper's chunked decoder
+    (`ChunkedState::read_*`) and `Http::serve_connection`, redis's `ConnectionManager::*_packed_command(s)` and
+    async iterators, and jni 0.22's `Env::new_string`/`find_class`/`define_class`, `JString::new`/`from_str`
+    and `JavaVM::get_env`/`destroy`. Most of these call a crate-local `macro_rules!` (`syscall!`,
+    `log!`/`trace!`, `proto_err!`) whose expansion is now walked; the rest call a function that does. 721 rows.
+  - `deny Net` over mio's `sys::unix::tcp::{bind,connect,listen,accept}`, `udp::bind`, `new_socket` and the
+    `uds` datagram/listener functions (the `syscall!` wrapper), over redis's `ConnectionManager` sends, and
+    over git2's `Repository::update_submodules`. 152 rows. `deny Ipc` over mio's `uds::pair` family and
+    polling's `Poller::new` (26 rows).
+  - `deny Fs` over cc's `Build::which`/`search_programs`/`autodetect_wasi_compiler`, grep-cli's
+    `decompress::resolve_binary` and `DecompressionMatcher` builders, figment's `Format::file`/`Data::file`,
+    ignore's `is_hidden_path` (nested-fn parameters), and bindgen's `Item::parse`/`from_ty`/`Function::parse`
+    family. 88 rows.
+  - `deny Env` over wasm-bindgen-macro-support's parser/codegen/encode functions, criterion's `analysis`,
+    `plot` and `connection` functions, ureq's `agent`/`request`/`AgentBuilder::build`/`Proxy::try_from_system`,
+    etcetera's `AppStrategy::in_*_dir`, pear's debugger hooks and clap 3's `from_yaml`. 139 rows. `deny Clock`
+    over hyper's chunked decoder and redis's `ConnectionManager` sends (30 rows).
+  - `deny Rand` over rand_core 0.5.1's `OsRng::next_u32`/`next_u64`, `impls::next_*_via_fill` and the
+    `RngCore`/`Box` forwarding methods (10 rows; `OsRng` really draws, and these read pure or only `Unknown`
+    before). Also over rand_core 0.9's derived `OsError::eq` (4 rows): that one is an **over-charge**, because
+    candor classifies every `getrandom::Error` method as `Rand` and the derived comparison is now a published
+    unit. It is tracked as SOUNDNESS R1150.
+  - `deny Unknown` over 6,304 rows, 4,563 of them units the report did not carry before. Most are operator
+    units on reference and macro-made impls (R1131, R1146) and the derived `Type::eq`/`Type::partial_cmp`
+    units now published for chained consumers (R1146), mostly in rend, x11rb-protocol, wasm-bindgen, rustix, portable-atomic and js-sys. The
+    other 1,741 are existing rows whose newly visible operator or macro bodies reach an existing hedge (syn,
+    time, bigdecimal, hyper, num-bigint, jiff, …). `deny Unknown[ambiguous]` also newly fails on rows that
+    were already `Unknown` for another reason (see the reasons union below).
+
+  These now **pass where 0.40.7 failed**. No concrete effect is lost: `deny <E>` for a concrete effect does
+  not newly pass anywhere in the corpus. What changes is `deny Unknown`, over 39 rows whose hedge was resolved
+  and whose body was checked for a sink (rustc MIR, or by reading where the crate does not build):
+  clap/clap_builder `_propagate_subcommand`, glob `glob`/`glob_with` (0.3.1–0.3.4), http's and tonic's
+  `HeaderValue`/`MetadataValue` `partial_cmp`, mongodb 3.9.1 `Cursor::has_next` (async and sync),
+  ordered-float 4.6 `NotNan::cmp`, nine ascii 1.0.0 comparison and iterator functions, and six moxcms 0.8.1
+  `Jzazbz`/`Jzczhz` conversions (these keep `num_traits` in `invisible`).
+
+  **Renamed units.** 155 bare operator units (`mul`, `not`, `rem`, … in wasm-bindgen, rust_decimal,
+  num-bigint, bigdecimal, arrow-buffer, curve25519-dalek, group and rkyv) are now named for their reference
+  self type (`&JsValue::mul`) and keep their `Unknown`. A gate scoped to the old bare name no longer matches
+  them. Re-point it to the new name.
+
+  Counts: corpus A/B against published 0.40.7 gives ADDED 20,909, REMOVED 339, CHANGED 37,265 rows. 1,111 rows
+  gain a concrete effect, 6,051 gain only `Unknown`, and 0 lose a concrete effect. Over 14 real chained
+  consumers it gives ADDED 432, REMOVED 38 (re-keys), 22 rows gaining a concrete effect (the h2 and hyper rows
+  above) and 0 losing one.
+
 - ⚠ **candor-scan: renamed operator traits, body-local type aliases, macro expansion at expression position,
-  generic callers, and macro-made / derived operator impls (SOUNDNESS R1142, R1143, R1144, R1145, R1146).** Each
-  cell EXECUTED and read ABSENT on 0.40.7; `deny Fs` now exits 1 on every one. An `&T` operator impl written with a
+  generic callers, and macro-made / derived operator impls (SOUNDNESS R1142, R1143, R1144, R1145, R1146,
+  R1149).** Each cell EXECUTED and read ABSENT on 0.40.7; `deny Fs` now exits 1 on every one. An `&T` operator impl written with a
   RENAMED trait (`use std::ops::Add as Plus; impl Plus<&T> for &T`) is keyed `&T` like the plainly-spelled one, and a
   renamed UFCS path (`use std::ops::Rem as Mo; Mo::rem(a, b)`) is an operator call. A `type` alias declared in a fn
   body binds its target for that block (nested `fn` items included); a nested parameter typed by a body-declared
-  ITEM keeps the `dispatch:` disclosure 0.40.7 gave it (0282a87 had withdrawn it). A local `macro_rules!` invocation
-  in a body is ALSO expanded macro-by-example and the expansion walked (beside the existing `$`-stripped walk, whose
+  ITEM keeps the `dispatch:` disclosure it carried in 0.40.7 (an intermediate build had dropped it). A local
+  `macro_rules!` invocation in a body is ALSO expanded macro-by-example and the expansion walked (beside the existing `$`-stripped walk, whose
   hedges stay), so an operator or call on a metavariable reaches its impl. A caller that instantiates a generic whose
   body applies an operator to a generic parameter (`fn g<E: Add<u64>>(d: E) { d + 3 }`, `w.g9e(d, 3u64)`) is charged
   on its concrete argument's impl (the generic body stays SPEC §4's documented miss). A `macro_rules!`-made impl of
@@ -34,7 +93,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   visible operator bodies reach existing hedges or collide by name (`ambiguous:same-name local defs`).
 
 - ⚠ **candor-scan: operator, comparison and extension-method reaches (SOUNDNESS R1130, R1131, R1136, R1137,
-  R1139, R1140).** Each cell EXECUTED and read ABSENT on 0.40.6; `deny Fs` now exits 1 on every one.
+  R1139, R1140, R1141).** Each cell EXECUTED and read ABSENT on 0.40.7 (and on 0.40.6); `deny Fs` now exits 1 on
+  every one.
   An operator impl on a REFERENCE (`impl Rem<&B> for &B`, num-bigint's arithmetic) has its own unit
   (`&B::rem`, no longer a bare module-level `rem` that merged every such impl in the module) and is reached
   from `a % b`, `a.rem(b)`, `Rem::rem(a, b)` and `<&B as Rem<&B>>::rem(a, b)`; the by-value impl is reached
@@ -49,10 +109,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `num_conv::prelude::*`, `it.sorted()` under `itertools::Itertools`) now discloses the module's imported
   dependencies in `invisible`, as the qualified spelling already did (a generated table of std's stable
   methods decides what std answers). A chained consumer's operator on a dependency value also asks for the
-  dependency's `&Type::op` key (it was ABSENT chained). A by-value operand (a by-value parameter, an owned
-  field) never reaches a `&Type` impl. A NESTED fn's plainly nominal parameters are typed (`fn which(..) {
-  fn check_exe(exe: PathBuf) { exe.exists() } .. }`, cc / grep-cli / figment / git2: real `Fs`/`Net` that
-  read ABSENT). A crate type named like a primitive (`struct u8`) no longer reads as the primitive.
+  dependency's `&Type::op` key (it was ABSENT chained). A NESTED fn's plainly nominal parameters are typed
+  (`fn which(..) { fn check_exe(exe: PathBuf) { exe.exists() } .. }`, cc / grep-cli / figment / git2: real
+  `Fs`/`Net` that read ABSENT). A crate type named like a primitive (`struct u8`) no longer reads as the
+  primitive. When a call is contested by several same-named definitions and one of them is also `Unknown` for
+  another reason, the `ambiguous:` reason is now kept beside it instead of being dropped (the reasons union):
+  `deny Unknown[ambiguous]` newly fails on such rows; a bare `deny Unknown` does not move.
 
 ## [0.40.7] — 2026-10-12
 
