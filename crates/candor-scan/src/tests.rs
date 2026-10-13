@@ -30704,6 +30704,13 @@ pub mod c3 { use cdep4::*; pub fn ctl_let() { let g = crate::loc::Gadget; g.run(
     for f in ["c1::ctl_local", "c2::ctl_len", "c3::ctl_let"] {
         assert!(veina_row_effs(&cv, f).is_empty(), "R1153 control `{f}` is pure (executed):\n{cv:#}");
     }
+    // a bare receiver type that came from a recorded RETURN type (backtrace's `f.frame().backtrace_frame(..)` under
+    // `use std::prelude::v1::*`) is the crate's own type, never a glob's: the first cut lost this edge on the A/B
+    let b = scan_src_to_json_multi("v053btfmt", &[("src/lib.rs", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_bt", b"x"); }
+pub mod p { pub struct Fmt; impl Fmt { pub fn frame(&mut self) -> Frame { Frame } } pub struct Frame; impl Frame { pub fn go(&self) { crate::mark() } } }
+pub mod c { use std::prelude::v1::*; use crate::p::Fmt; pub fn f(x: &mut Fmt) { x.frame().go() } }
+"##)]);
+    assert!(veina_row_effs(&b, "c::f").iter().any(|e| e == "Fs"), "R1153: a returned local type keeps its edge:\n{b:#}");
 }
 
 /// SOUNDNESS R1155 (v053; fixture rustagent-v053/fx/r1155, every cell EXECUTED). A `let` initialised from a labelled

@@ -2692,7 +2692,23 @@ impl<'a> CallCollector<'a> {
         if prelude && crate::std_methods::is_std_method(leaf, argc) {
             return (ty, Vec::new());
         }
-        match crate::lang::glob_candidates_ext(&[ty.as_str()], &self.uses, &is_generic, prelude) {
+        // A receiver type is not always a name WRITTEN in this module: a recorded return type (`f.frame()` ->
+        // `BacktraceFrameFmt`, declared in another module) arrives bare too. Where the crate itself defines this
+        // method on a type of this name, the name is that local type (measured: backtrace's `Backtrace::fmt` lost
+        // its `BacktraceFrameFmt::backtrace_frame` edge to `use std::prelude::v1::*` on the first cut).
+        if self.local_fn_on(&ty, leaf)
+            || self.fields.contains_key(ty.as_str())
+            || self.trait_impls.values().any(|v| v.iter().any(|t| *t == ty))
+        {
+            return (ty, Vec::new());
+        }
+        // A std/core/alloc glob (`use std::prelude::v1::*`) never retypes: a std type reached by a glob is the
+        // classifier's by its full path elsewhere, and a bare name the glob does not export would be renamed into
+        // a std path no rule or unit answers.
+        let not_std = |c: &String| !matches!(c.split("::").next(), Some("std" | "core" | "alloc"));
+        match crate::lang::glob_candidates_ext(&[ty.as_str()], &self.uses, &is_generic, prelude)
+            .map(|(c, e)| (c.into_iter().filter(not_std).collect::<Vec<_>>(), e))
+        {
             Some((mut c, true)) if c.len() == 1 => {
                 if std::env::var_os("CANDOR_V053_INSTR").is_some() {
                     eprintln!("R1153EXCL\t{ty}\t{}", c[0]); // §E1 REACH COUNTER
