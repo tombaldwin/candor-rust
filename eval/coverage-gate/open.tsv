@@ -546,6 +546,7 @@ sqlx_core	sqlx_core::handshake	Fs	src/net/tls/tls_native_tls.rs	sqlx_core::net::
 sqlx_core	sqlx_core::handshake	Fs,Log,Net	src/net/tls/tls_rustls.rs	sqlx_core::net::tls::tls_rustls::handshake
 sqlx_core	sqlx_core::resolve_blocking	Fs	src/migrate/source.rs	sqlx_core::migrate::source::resolve_blocking
 sqlx_core	sqlx_core::resolve_blocking_with_config	Fs	src/migrate/source.rs	sqlx_core::migrate::source::resolve_blocking_with_config
+tempfile	tempfile::NamedTempFile::into_file	Fs	src/file/mod.rs	tempfile::file::NamedTempFile::into_file
 tempfile	tempfile::SpooledTempFile::into_file	Env,Fs,Unknown	src/spooled.rs	tempfile::spooled::SpooledTempFile::into_file
 tempfile	tempfile::SpooledTempFile::roll	Env,Fs,Unknown	src/spooled.rs	tempfile::spooled::SpooledTempFile::roll
 tempfile	tempfile::TempDir::into_path	Fs	src/dir/mod.rs	tempfile::dir::TempDir::into_path
