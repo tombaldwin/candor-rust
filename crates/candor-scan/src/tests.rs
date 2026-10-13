@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.
         // rustagent-v054 (R1160-R1162) bumped it to rev105.
         // rustagent-v053 (R1153-R1157) bumped it to rev104.
@@ -17351,7 +17352,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev106/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev107/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31120,4 +31121,112 @@ pub fn cf_fieldeq(d: D, a: u16) -> bool { d.0 == a }
     for f in ["cb_std", "cc_lit", "ce_field", "cf_fieldeq"] {
         assert!(!inv(&uv, f), "R1164 control `{f}` names no dependency type and discloses nothing:\n{uv:#}");
     }
+}
+
+/// SOUNDNESS R1165 (fixtures fable-r974/rs and rustagent-r1165/fx, every cell EXECUTED). A dependency's generic body runs
+/// the std-trait impl of the value a consumer hands it — `gena::same_eq(Noisy(1), Noisy(1))` runs `Noisy::eq` — and the
+/// dependency's report cannot say so (its body is pure, SPEC §4 / R1126; ⟨0.39⟩ `dispatchesOn` has no std-owned
+/// spelling). Chained, the caller read ABSENT (`deny Fs Unknown` exit 0) while unchained it carried `invisible`: chaining
+/// deleted the disclosure. The caller now discloses `Unknown` with the dotted `dispatch:<Trait>.<member>` reason, narrowed
+/// by the dependency's source signature where the consumer can read it. Controls (executed pure): a pure hand-written
+/// impl, a derived impl, a std type, an integer, an unbounded generic, a bound the body never touches, a constructor.
+#[test]
+fn r1165_local_std_trait_impl_handed_to_a_chained_dependency_is_disclosed() {
+    let dep = r##"use std::hash::{Hash, Hasher};
+pub fn same_eq<T: PartialEq>(a: T, b: T) -> bool { a == b }
+pub fn less_cmp<T>(a: T, b: T) -> bool where T: PartialOrd { a < b }
+pub fn hash_of<T: Hash>(a: T) -> u64 { let mut h = std::collections::hash_map::DefaultHasher::new(); a.hash(&mut h); h.finish() }
+pub fn via_fwd<T: PartialEq>(a: T, b: T) -> bool { same_eq(a, b) }
+pub fn describe_it<T: std::fmt::Display>(t: T) -> String { format!("{t}") }
+pub fn count_all<I: IntoIterator>(i: I) -> usize { i.into_iter().count() }
+pub fn eat<T>(_t: T) {}
+pub fn vec_same<T: PartialEq>(a: &[T], b: &[T]) -> bool { a == b }
+pub fn unused_bound<T: PartialEq>(_a: T) -> usize { 7 }
+pub struct Wrap<T>(pub T);
+pub fn emit(mut w: impl std::io::Write) { let _ = w.write_all(b"x"); }
+pub fn show_dyn(d: &dyn std::fmt::Display) -> String { d.to_string() }
+pub struct Bag(pub u64);
+impl<K: Hash> std::iter::FromIterator<K> for Bag { fn from_iter<I: IntoIterator<Item = K>>(_i: I) -> Bag { Bag(0) } }
+impl Bag { pub fn new() -> Bag { Bag(0) } pub fn put<T: Hash>(&mut self, t: T) { let mut h = std::collections::hash_map::DefaultHasher::new(); t.hash(&mut h); self.0 ^= h.finish(); } }
+"##;
+    let cons = r##"use std::hash::{Hash, Hasher};
+pub struct Noisy(pub i32);
+impl PartialEq for Noisy { fn eq(&self, o: &Noisy) -> bool { let _ = std::fs::write("/tmp/r1165_eq", "x"); self.0 == o.0 } }
+impl PartialOrd for Noisy { fn partial_cmp(&self, o: &Noisy) -> Option<std::cmp::Ordering> { let _ = std::fs::write("/tmp/r1165_lt", "x"); self.0.partial_cmp(&o.0) } }
+impl Hash for Noisy { fn hash<H: Hasher>(&self, h: &mut H) { let _ = std::fs::write("/tmp/r1165_h", "x"); self.0.hash(h) } }
+impl std::fmt::Display for Noisy { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { let _ = std::fs::write("/tmp/r1165_d", "x"); write!(f, "{}", self.0) } }
+pub struct Loud(pub i32);
+impl Iterator for Loud { type Item = i32; fn next(&mut self) -> Option<i32> { let _ = std::fs::write("/tmp/r1165_i", "x"); None } }
+pub struct Sink;
+impl std::io::Write for Sink { fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { let _ = std::fs::write("/tmp/r1165_w", b); Ok(b.len()) } fn flush(&mut self) -> std::io::Result<()> { Ok(()) } }
+pub struct Quiet(pub i32);
+impl PartialEq for Quiet { fn eq(&self, o: &Quiet) -> bool { self.0 == o.0 } }
+#[derive(PartialEq)] pub struct Calm(pub i32);
+pub fn call_eq_x() -> bool { cdep65::same_eq(Noisy(1), Noisy(1)) }
+pub fn call_lt_x() -> bool { cdep65::less_cmp(Noisy(1), Noisy(2)) }
+pub fn call_hash_x() -> u64 { cdep65::hash_of(Noisy(1)) }
+pub fn call_fwd_x() -> bool { cdep65::via_fwd(Noisy(1), Noisy(1)) }
+pub fn call_disp_x() -> String { cdep65::describe_it(Noisy(1)) }
+pub fn call_iter_x() -> usize { cdep65::count_all(Loud(0)) }
+pub fn call_vec_x() -> bool { cdep65::vec_same(&[Noisy(1)], &[Noisy(1)]) }
+pub fn call_ref_x() -> bool { let a = Noisy(1); let b = Noisy(1); cdep65::same_eq(&a, &b) }
+pub fn call_emit_x() { cdep65::emit(Sink) }
+pub fn call_dyn_x() -> String { cdep65::show_dyn(&Noisy(1)) }
+pub fn call_bag_x() { let mut b = cdep65::Bag::new(); b.put(Noisy(1)) }
+pub fn ctrl_quiet_x() -> bool { cdep65::same_eq(Quiet(1), Quiet(1)) }
+pub fn ctrl_calm_x() -> bool { cdep65::same_eq(Calm(1), Calm(1)) }
+pub fn ctrl_std_x() -> bool { cdep65::same_eq(String::from("a"), String::new()) }
+pub fn ctrl_int_x() -> bool { cdep65::same_eq(1, 1) }
+pub fn ctrl_eat_x() { cdep65::eat(Noisy(1)) }
+pub fn ctrl_unused_x() -> usize { cdep65::unused_bound(Noisy(1)) }
+pub fn ctrl_wrap_x() -> i32 { let w = cdep65::Wrap(Noisy(1)); (w.0).0 }
+"##;
+    let (dv, cv, uv) = v053_chain("cdep65", dep, cons);
+    let why = |v: &serde_json::Value, f: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+            .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default())
+            .filter_map(|x| x.as_str().map(String::from)).collect()
+    };
+    let hits = [("call_eq_x", "PartialEq.eq"), ("call_lt_x", "PartialOrd.partial_cmp"), ("call_hash_x", "Hash.hash"),
+        ("call_fwd_x", "PartialEq.eq"), ("call_disp_x", "Display.fmt"), ("call_iter_x", "Iterator.next"),
+        ("call_vec_x", "PartialEq.eq"), ("call_ref_x", "PartialEq.eq"), ("call_emit_x", "Write.write"),
+        ("call_dyn_x", "Display.fmt"), ("call_bag_x", "Hash.hash")];
+    for (f, r) in hits {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1165 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+        assert!(why(&cv, f).iter().any(|w| w == &format!("dispatch:{r}")), "R1165 `{f}` must name `dispatch:{r}`:\n{cv:#}");
+        // NARROWED to the bound: `hash_of` is bounded by `Hash` only, so `Noisy`'s effectful `eq` is not named there.
+        if f == "call_hash_x" {
+            assert!(!why(&cv, f).iter().any(|w| w == "dispatch:PartialEq.eq"), "R1165 `{f}` is bounded by Hash only:\n{cv:#}");
+        }
+    }
+    for f in ["ctrl_quiet_x", "ctrl_calm_x", "ctrl_std_x", "ctrl_int_x", "ctrl_eat_x", "ctrl_unused_x", "ctrl_wrap_x"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1165 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    // Unchained is unchanged: the whole call is already disclosed `invisible`, and no `Unknown` is added there.
+    for (f, _) in hits {
+        assert!(veina_row_effs(&uv, f).is_empty(), "R1165 adds nothing unchained (`invisible` is the channel):\n{uv:#}");
+    }
+}
+
+/// SOUNDNESS R1165 — the source-signature NARROWING is a denylist of proven-inert shapes, so every shape it cannot read
+/// keeps the disclosure: a dependency that re-exports a glob from another crate (the fn that runs may not be in this
+/// source), one whose `macro_rules!` makes fns, and an unbounded same-leaf twin beside a bounded one (the union).
+#[test]
+fn r1165_narrowing_refuses_what_the_dependency_source_cannot_prove() {
+    let cons = |d: &str| format!(r##"pub struct Noisy(pub i32);
+impl PartialEq for Noisy {{ fn eq(&self, o: &Noisy) -> bool {{ let _ = std::fs::write("/tmp/r1165_n", "x"); self.0 == o.0 }} }}
+pub fn call_a_x() -> bool {{ {d}::check(Noisy(1)) }}
+"##);
+    // A glob re-export from another crate: `check` may be that crate's.
+    let (_, cv, _) = v053_chain("cdep66", "pub use other_crate::*;\npub fn check<T>(_t: T) -> bool { true }\n", &cons("cdep66"));
+    assert!(veina_row_effs(&cv, "call_a_x").iter().any(|e| e == "Unknown"), "R1165 glob re-export keeps the disclosure:\n{cv:#}");
+    // A macro that makes fns: the `check` that runs may be macro-made.
+    let (_, cv, _) = v053_chain("cdep67", "macro_rules! mk { ($n:ident) => { pub fn $n<T: PartialEq>(a: T) -> bool { a == a } } }\nmk!(check);\nmod inner { pub fn check<T>(_t: T) -> bool { true } }\n", &cons("cdep67"));
+    assert!(veina_row_effs(&cv, "call_a_x").iter().any(|e| e == "Unknown"), "R1165 macro-made fns keep the disclosure:\n{cv:#}");
+    // Two same-leaf fns, one unbounded and one bounded: the union keeps it.
+    let (_, cv, _) = v053_chain("cdep68", "pub mod a { pub fn check<T>(_t: T) -> bool { true } }\npub mod b { pub fn check<T: PartialEq>(t: T) -> bool { t == t } }\npub use b::check;\n", &cons("cdep68"));
+    assert!(veina_row_effs(&cv, "call_a_x").iter().any(|e| e == "Unknown"), "R1165 a bounded same-leaf twin keeps it:\n{cv:#}");
+    // ...and the unbounded fn alone withholds it (the narrowing is not inert).
+    let (_, cv, _) = v053_chain("cdep69", "pub fn check<T>(_t: T) -> bool { true }\n", &cons("cdep69"));
+    assert!(veina_row_effs(&cv, "call_a_x").is_empty(), "R1165 an unbounded generic runs no impl:\n{cv:#}");
 }

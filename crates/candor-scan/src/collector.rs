@@ -1560,6 +1560,97 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1165 — a call into a DEPENDENCY that hands it a value of a CRATE-LOCAL type with a hand-written impl
+    /// of a std trait (`model::STD_WITNESS_TRAITS`). `gena::same_eq(Noisy(1), Noisy(1))` runs `Noisy::eq` inside
+    /// `gena`'s generic body (EXECUTED: fable-r974/rs, rustagent-r1165/fx); chained, `gena`'s report answered the call
+    /// (its body is pure, SPEC §4 / R1126) and the caller read ABSENT, while unchained it carried `invisible: [gena]` —
+    /// chaining deleted the only disclosure. In-crate, R1145 charges the operator half of this from the callee's
+    /// summary; a dependency's report has no such summary (⟨0.39⟩ `dispatchesOn` has no std-owned spelling), so this is
+    /// a DISCLOSURE, decided in `scan.rs` after the fixpoint: one `WITNESS_MARKER` call per (argument position, local
+    /// type), never an edge. `callee` is the expanded dependency path (`gena::same_eq`, `gena::Thing::push`); `base`
+    /// is the position of the first entry of `args` (1 for a method call's arguments, the receiver being 0).
+    fn note_chain_witness(&mut self, callee: &str, args: &[&syn::Expr], base: usize) {
+        if callee.contains(crate::decls::ALIAS_ALT_SEP) || callee.contains('<') || !self.is_dependency_type(callee) {
+            return;
+        }
+        let Some((cr, rest)) = callee.split_once("::") else { return };
+        if matches!(cr, "std" | "core" | "alloc") {
+            return;
+        }
+        for (i, a) in args.iter().enumerate() {
+            let mut leaves: Vec<String> = Vec::new();
+            for t in self.witness_arg_types(a) {
+                for l in self.local_witness_leaves(&t) {
+                    if !leaves.contains(&l) {
+                        leaves.push(l);
+                    }
+                }
+            }
+            for l in leaves {
+                if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+                    eprintln!("R1165WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER, ADDED branch only
+                }
+                self.calls.push(Call { argc: 0, entropy_arg: false,
+                    path: format!("{cr}::{WITNESS_MARKER}::{l}::{}::{rest}", base + i),
+                    leaf: l.clone(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                    typed: false, method: false, is_macro: false,
+                });
+            }
+        }
+    }
+
+    /// SOUNDNESS R1165 — the types an argument's VALUE carries, as the STRICT typer (`type_of`) proves them: the value
+    /// itself (`Noisy(1)`, `&a`, `*p`), or the element of an array / repeat literal (`&[Noisy(1)]`). An argument it
+    /// cannot type adds nothing (the residual: an untyped hand-off reads as before).
+    fn witness_arg_types(&self, a: &syn::Expr) -> Vec<String> {
+        let e = peel_value(a);
+        match e {
+            syn::Expr::Array(arr) => arr.elems.iter().flat_map(|x| self.witness_arg_types(x)).collect(),
+            syn::Expr::Repeat(r) => self.witness_arg_types(&r.expr),
+            syn::Expr::Reference(r) => self.witness_arg_types(&r.expr),
+            // The STRICT typer only: `resolve_recv_type`'s builder-chain answer ("a method returns its receiver's type")
+            // typed `libc::connect(self.as_raw_fd(), ..)`'s argument as the socket (mio, measured) and named a `Read`
+            // impl the call never reaches.
+            _ => self.type_of(e).into_iter().collect(),
+        }
+    }
+
+    /// SOUNDNESS R1165 — every crate-local nominal type named in a typed argument (`Noisy`, `Vec<Noisy>`, `&[Noisy]`)
+    /// that carries a hand-written impl of a `STD_WITNESS_TRAITS` trait. A path rooted anywhere but this crate is not
+    /// local; a bare or `crate::`-rooted name is asked of `trait_impls`, which holds this crate's impls only.
+    fn local_witness_leaves(&self, t: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if t.contains(crate::decls::ITEM_SENTINEL) || t.contains(crate::decls::ALIAS_ALT_SEP) {
+            return out;
+        }
+        for path in t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
+            let path = path.trim_matches(':');
+            if path.is_empty() {
+                continue;
+            }
+            if let Some((root, _)) = path.split_once("::") {
+                if !matches!(root, "crate" | "self" | "super") {
+                    continue;
+                }
+            }
+            let leaf = path.rsplit("::").next().unwrap_or(path);
+            if !leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                || crate::model::PRIMITIVE_LEAVES.contains(&leaf)
+                || self.generic_bounds.contains_key(leaf)
+                || self.impl_generic_bounds.contains_key(leaf)
+            {
+                continue;
+            }
+            let has = crate::model::STD_WITNESS_TRAITS
+                .iter()
+                .any(|(tr, _)| self.trait_impls.get(*tr).is_some_and(|v| v.iter().any(|x| x == leaf)));
+            if has && !out.iter().any(|o: &String| o == leaf) {
+                out.push(leaf.to_string());
+            }
+        }
+        out
+    }
+
     /// SOUNDNESS R1136 — a DEPENDENCY EXTENSION-TRAIT method on a std-typed receiver. `d.extend()` over a `u8`
     /// with `use num_conv::prelude::*` in scope runs `num_conv`'s body, and nothing said so: the qualified
     /// spelling (`num_conv::Extend::extend(d)`) carried `invisible: ["num_conv"]`, the method spelling carried
@@ -7854,6 +7945,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         if let syn::Expr::Path(p) = func {
             self.edge_generic_operator_call(p, &node.args);
+            // SOUNDNESS R1165 — a dependency call handed a local value with a std-trait impl (`gena::same_eq(n, n)`).
+            if p.qself.is_none() && !node.args.is_empty() {
+                let callee = self.expand_scoped(&crate::lang::path_to_string_lc(&p.path));
+                let args: Vec<&syn::Expr> = node.args.iter().collect();
+                self.note_chain_witness(&callee, &args, 0);
+            }
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.edge_std_type_dep_trait_member(p, &node.args);
             self.edge_ufcs_operator(p, &node.args);
@@ -8226,6 +8323,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
             let args: Vec<&syn::Expr> = node.args.iter().collect();
             self.charge_generic_operators(&crate::model::impl_gen_op_key(&tl, &leaf), &args, true);
+            // SOUNDNESS R1165 — a method on a DEPENDENCY's value handed a local value with a std-trait impl
+            // (`set.insert(Noisy(1))` with `set: dep::Set<Noisy>`).
+            if !args.is_empty() && self.is_dependency_type(&t) {
+                let head = t.split('<').next().unwrap_or(&t);
+                self.note_chain_witness(&format!("{head}::{leaf}"), &args, 1);
+            }
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { argc: 0, entropy_arg: false, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });

@@ -2655,6 +2655,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1157 — (caller, `prim::method`, macro-made candidate impl units), judged after the fixpoint.
     let mut primop_contested: Vec<(String, String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1165 — (caller, dependency as spelled, its real name, local type leaf, argument position, callee rest): a
+    // local value with a std-trait impl handed to a CHAINED dependency (`WITNESS_MARKER`). Judged after the fixpoint.
+    let mut witness_sites: Vec<(String, String, String, String, usize, String)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
@@ -2875,6 +2878,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string());
+                continue;
+            }
+            // SOUNDNESS R1165 — a local value with a std-trait impl handed to a dependency (`WITNESS_MARKER`). Recorded
+            // only where the dependency is CHAINED: there its report answers the call (a hit, or a miss that §2 rule 3
+            // reads as purity) and cannot say the body runs the caller's impl. Unchained, the κ ledger's `invisible`
+            // already discloses the whole call and this adds nothing. Never an edge, never a ledger entry.
+            if let Some((wcr, rest)) = c.path.split_once(&format!("::{WITNESS_MARKER}::")) {
+                let wcr_real: &str = dep_renames.get(wcr).map(String::as_str).unwrap_or(wcr);
+                // `CANDOR_R1165_OFF` is the falsification switch (the fixtures' 0.40.9 behaviour), never a user setting.
+                if deps_idx.crates.contains(wcr_real) && std::env::var_os("CANDOR_R1165_OFF").is_none() {
+                    let mut it = rest.splitn(3, "::");
+                    if let (Some(l), Some(pos), Some(callee)) = (it.next(), it.next().and_then(|p| p.parse().ok()), it.next()) {
+                        witness_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), l.to_string(), pos, callee.to_string()));
+                    }
+                }
                 continue;
             }
             // ── R105 — A `#[cfg]`-DUPLICATED ALIAS, ADJUDICATED WHERE THE LEAF IS KNOWN ────────────────
@@ -5616,6 +5634,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // the dependencies it reaches without a report (`invisible`): those bodies were not read, so it is not
     // genuinely pure and the hedge stays. Edges never change in this loop, so one walk of `blind_direct`
     // answers for every round.
+    // SOUNDNESS R1165 — what each witness site's callee can run, from the dependency's source signature (`None` = any).
+    let witness_allowed: Vec<Option<BTreeSet<String>>> = {
+        let mut sigs = crate::depsig::DepSigs::default();
+        let off = std::env::var_os("CANDOR_R1165_NO_NARROW").is_some();
+        witness_sites
+            .iter()
+            .map(|(_, alias, real, _, pos, callee)| if off { None } else { sigs.allowed(dir, alias, real, callee, *pos) })
+            .collect()
+    };
+    if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+        for ((caller, alias, _, l, pos, callee), a) in witness_sites.iter().zip(&witness_allowed) {
+            eprintln!("R1165SITE\t{caller}\t{alias}::{callee}\t{pos}\t{l}\t{a:?}"); // §E1 REACH COUNTER
+        }
+    }
     let nonpath_blind = if nonpath_contested.is_empty() {
         HashMap::new()
     } else {
@@ -5698,6 +5730,49 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // right operand's type, which this engine cannot prove, so where a candidate carries a CONCRETE effect the
         // caller does not already have, the caller discloses `Unknown` (`ambiguous:`, two definitions — std's and the
         // crate's — with no way to say which runs). An `Unknown`-only candidate is not hedged on (the R1095 rule).
+        // SOUNDNESS R1165 — a local value with a std-trait impl handed to a CHAINED dependency. The dependency's generic
+        // body may run the impl (`a == b` over `T: PartialEq`), and its report cannot say so: the body's row is pure
+        // (SPEC §4, R1126) and ⟨0.39⟩ `dispatchesOn` has no spelling for a std-owned member. Chained, the caller read
+        // ABSENT over an executed write while the unchained scan carried `invisible: [dep]` — chaining deleted the only
+        // disclosure (SPEC :4385). So where one of the type's impl members for a `STD_WITNESS_TRAITS` trait carries a
+        // CONCRETE effect the caller does not already have, the caller discloses `Unknown` with the dotted
+        // `dispatch:<Trait>.<member>` reason (std's trait declares that member). A DISCLOSURE, never a charge: nothing
+        // here knows the dependency's body runs the member, and charging it would fabricate wherever it does not.
+        // An `Unknown`-only member is not hedged on (the R1095 rule, measured there); that is the stated residual.
+        //
+        // NARROWED by the dependency's own source signature where the consumer can read it (`depsig`): only the std
+        // traits the callee's parameter at that position is bounded by can run, and a concrete parameter, a bound the
+        // body never touches, or a constructor runs none. Every doubt there is "any trait", so the narrowing can only
+        // withhold a disclosure the signature PROVES inert.
+        for ((caller, _alias, _real, l, _pos, _callee), allowed) in witness_sites.iter().zip(&witness_allowed) {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            for (tr, members) in crate::model::STD_WITNESS_TRAITS {
+                if !trait_impls.get(*tr).is_some_and(|v| v.iter().any(|x| x == l)) {
+                    continue;
+                }
+                if allowed.as_ref().is_some_and(|a| !a.contains(*tr)) {
+                    continue;
+                }
+                for m in *members {
+                    let Some(units) = by_tail2.get(&format!("{l}::{m}")) else { continue };
+                    let hot = units.iter().any(|u| {
+                        u != caller && inferred.get(u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+                    });
+                    if !hot {
+                        continue;
+                    }
+                    let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+                    let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(format!("dispatch:{tr}.{m}"));
+                    if fresh || fresh_why {
+                        hedged = true;
+                        if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+                            eprintln!("R1165HEDGE\t{caller}\t{tr}.{m}\t{l}"); // §E1 REACH COUNTER
+                        }
+                    }
+                }
+            }
+        }
         for (caller, label, cands) in &primop_contested {
             let empty = BTreeSet::new();
             let have = inferred.get(caller).unwrap_or(&empty);
