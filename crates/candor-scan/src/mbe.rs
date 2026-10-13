@@ -908,6 +908,11 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
             im.generics = generics.clone();
             // The type's own `#[cfg]`s govern the impl, as the derive's expansion would.
             im.attrs = attrs.iter().filter(|a| a.path().is_ident("cfg")).cloned().collect();
+            // The marker `crate::model::is_derive_synth` reads: Pass A records nothing for this impl, and its unit is
+            // kept out of in-crate resolution (published only; see `FnInfo::derive_synth`).
+            if let Ok(marker) = syn::parse_str::<syn::ItemImpl>(&format!("#[{}] impl X {{}}", crate::model::DERIVE_SYNTH_ATTR)) {
+                im.attrs.extend(marker.attrs);
+            }
             if std::env::var_os("CANDOR_R1146_INSTR").is_some() {
                 eprintln!("R1146DERIVE\t{ident}\t{m}"); // §E1 REACH COUNTER
             }

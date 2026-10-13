@@ -180,6 +180,14 @@ pub(crate) struct FnInfo {
     /// after Pass B, never cached.
     #[serde(rename = "ra", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reexport_alias: bool,
+    /// SOUNDNESS R1146 (v052 audit) — a SYNTHETIC unit for a `#[derive(PartialEq/PartialOrd)]` (`mbe::
+    /// splice_derived_comparisons`), so the report publishes `Type::eq` / `Type::partial_cmp` for a chained consumer.
+    /// Kept out of the local resolution indexes like `extern_decl` (in-crate comparisons keep the derive route, and an
+    /// in-crate call must never be redirected from a hand-written impl to it), and dropped outright where any
+    /// hand-written unit shares its `Type::method` tail (auditagent-v052/fxd: a cross-module `impl PartialEq<Other> for
+    /// Arch` lost its edge to the synthetic `col::Arch::eq` and `deny Fs` went 1 -> 0).
+    #[serde(rename = "dv", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) derive_synth: bool,
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
@@ -547,6 +555,18 @@ pub(crate) const PARAM_OPAQUE: &str = "<paramopaque>";
 
 pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
     format!("{PARAM_OPAQUE}{fn_leaf}")
+}
+
+/// SOUNDNESS R1144 (v052 audit) — prefix of a `macro_twins` entry naming a `macro_rules!` name defined more than once
+/// with different templates anywhere (ungated too). `\u{2}` cannot begin a Rust identifier.
+pub(crate) const MACRO_REDEF_PREFIX: &str = "\u{2}redef:";
+
+/// SOUNDNESS R1146 (v052 audit) — the attribute `mbe::splice_derived_comparisons` puts on a synthetic derived-comparison
+/// impl. No real crate can carry it (it is not a registered attribute and would not compile).
+pub(crate) const DERIVE_SYNTH_ATTR: &str = "candor_derive_synth";
+
+pub(crate) fn is_derive_synth(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(DERIVE_SYNTH_ATTR))
 }
 
 /// SOUNDNESS R1145 — a `ReturnIndex` key: the OPERATORS a fn applies to a value of one of its GENERIC type

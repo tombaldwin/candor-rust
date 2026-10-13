@@ -24,7 +24,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   on its concrete argument's impl (the generic body stays SPEC §4's documented miss). A `macro_rules!`-made impl of
   a std operator trait on a nominal type is now analysed (it was silent in its own crate too), and a derived
   `PartialEq`/`PartialOrd` gets a published `Type::eq` / `Type::partial_cmp` unit, so a CHAINED consumer's comparison
-  or arithmetic on a dependency value joins them instead of reading ABSENT. Verdict effects: new concrete charges
+  or arithmetic on a dependency value joins them instead of reading ABSENT (the synthetic unit is published only: no
+  in-crate call resolves to it, and it is dropped where a hand-written impl shares its `Type::method`). A macro name
+  defined more than once is not expanded. A parameter typed by a name only the module's one external glob import
+  can supply (`use dep::*; fn f(t: &Tool)`) is that dependency's type, so `t.run()` and `a % b` disclose or join the
+  dependency (they were ABSENT with no `invisible`). A `let` initialised from a block whose value is its own binding,
+  or from a value macro, is typed. Verdict effects: new concrete charges
   from macro expansion (mio/memchr/h2/hyper/jni/bindgen `log!`/`syscall!` wrappers), and new `Unknown` where the newly
   visible operator bodies reach existing hedges or collide by name (`ambiguous:same-name local defs`).
 

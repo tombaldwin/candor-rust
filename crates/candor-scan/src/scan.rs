@@ -2269,6 +2269,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R1146 (v052 audit) — a synthetic derived-comparison unit is dropped where any hand-written unit shares
+    // its `Type::method` tail (see `FnInfo::derive_synth`); the survivors are published only.
+    {
+        let tail2 = |q: &str| -> String {
+            let mut it = q.rsplit("::");
+            let m = it.next().unwrap_or("");
+            let t = it.next().unwrap_or("");
+            format!("{t}::{m}")
+        };
+        let real: std::collections::HashSet<String> =
+            fns.iter().filter(|f| !f.derive_synth).map(|f| tail2(&f.qual)).collect();
+        fns.retain(|f| !f.derive_synth || !real.contains(&tail2(&f.qual)));
+    }
     // The surviving declaration units, for the report's `declaration` key (R894).
     let decl_quals: std::collections::HashSet<String> =
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
@@ -2286,7 +2299,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
         // SOUNDNESS R894 — a published foreign declaration's unit is for the REPORT; in-crate calls keep
         // answering through `extern_fns`, so it joins neither local resolution index.
-        if f.extern_decl || f.reexport_alias {
+        if f.extern_decl || f.reexport_alias || f.derive_synth {
             continue;
         }
         let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);

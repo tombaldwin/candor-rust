@@ -17337,7 +17337,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17348,7 +17348,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev102/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev103/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -30420,5 +30420,125 @@ pub mod g { use cdep::*; pub fn m_byval_glob(a: M, b: M) -> u8 { a % b } }
         for f in resid {
             assert!(veina_row_effs(&cv, f).is_empty(), "R1146 chained residual `{f}` moved — decide it:\n{cv:#}");
         }
+    }
+}
+
+/// SOUNDNESS R1144 / R1146 (v052 AUDIT, auditagent-v052; every cell EXECUTED).
+///   * `fxd` — a DERIVED `PartialEq`/`PartialOrd` beside a hand-written `impl PartialEq<Other> for Arch` in ANOTHER module:
+///     the synthetic derived unit captured the edge (`d_method`/`d_op`/`d_cmp` went `deny Fs` 1 -> 0). The synthetic unit
+///     is now published only (never an in-crate resolution target) and dropped where a hand unit shares its tail.
+///   * `fxm2` — a macro NAME defined twice (sibling modules, textual redefinition) is not expanded: `a::fa` / `k1` were
+///     FABRICATED Fs from the other definition. Value-position macros and block-local tails type a `let` (`e1`..`e1e`).
+///   * `fxglob2` — a parameter typed through the crate's ONE external glob (`use cdep3::*`) is the dependency's type:
+///     `g_method` / `g_op` were ABSENT with no disclosure; a local same-named type and a generic parameter are controls.
+#[test]
+fn v052_audit_derived_capture_macro_scope_globs_and_block_values() {
+    let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
+    let d = scan_src_to_json_multi("v052fxd", &[("Cargo.toml", toml("v052fxd").as_str()), ("src/lib.rs", r##"#![allow(dead_code)]
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052d", b"x"); }
+pub mod col { #[derive(PartialEq, PartialOrd)] pub struct Arch(pub u8); }
+pub struct Other(pub u8);
+// the rkyv shape: the hand impl lives in a DIFFERENT module from the derive
+pub mod imps {
+    use crate::col::Arch; use crate::Other;
+    impl PartialEq<Other> for Arch { fn eq(&self, o: &Other) -> bool { crate::mark(); self.0 == o.0 } }
+    impl PartialEq<Arch> for Other { fn eq(&self, o: &Arch) -> bool { o.eq(self) } }        // rkyv: `other.eq(self)`
+    impl PartialOrd<Other> for Arch { fn partial_cmp(&self, o: &Other) -> Option<std::cmp::Ordering> { crate::mark(); self.0.partial_cmp(&o.0) } }
+}
+use col::Arch;
+pub fn d_method(a: &Arch, o: &Other) -> bool { a.eq(o) }
+pub fn d_op(a: &Arch, o: &Other) -> bool { a == o }
+pub fn d_rev(o: &Other, a: &Arch) -> bool { o == a }
+pub fn d_cmp(a: &Arch, o: &Other) -> bool { a < o }
+pub fn d_self(a: &Arch, b: &Arch) -> bool { a == b }        // derived, pure
+"##)]);
+    for f in ["d_method", "d_op", "d_cmp", "imps::Other::eq"] {
+        assert!(veina_row_effs(&d, f).iter().any(|e| e == "Fs"), "`{f}` runs the hand impl (executed):\n{d:#}");
+    }
+    let m = scan_src_to_json_multi("v052fxm2", &[("Cargo.toml", toml("v052fxm2").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_macros)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052m2", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+#[derive(Clone, Copy)] pub struct D2(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// same macro name in two modules, different expansions
+pub mod a { use super::*; macro_rules! pick { ($x:expr) => { D($x) + 0u64 }; } pub fn fa() -> u64 { pick!(1).0 } }
+pub mod b { use super::*; macro_rules! pick { ($x:expr) => { D2($x) + 0u64 }; } pub fn fb() -> u64 { pick!(1).0 } }
+// textual redefinition in one module
+macro_rules! k { ($x:expr) => { D($x) + 0u64 }; }
+pub fn k1() -> u64 { k!(1).0 }
+macro_rules! k { ($x:expr) => { D2($x) + 0u64 }; }
+pub fn k2() -> u64 { k!(1).0 }
+// repetition
+macro_rules! sum { ($($x:expr),*) => { 0u64 $( + ($x + 0u64).0 )* }; }
+pub fn r1() -> u64 { sum!(D(1), D2(2)) }
+// macro exported and used through a path from another module
+#[macro_export] macro_rules! exported_eff { ($x:expr) => { $crate::D2($x) + 0u64 }; }
+pub mod c { pub fn fc() -> u64 { crate::exported_eff!(1).0 } }
+// macro-made value bound via `let` INSIDE an expression macro block, escaping via the block's value
+macro_rules! blk { () => {{ let v = D2(1); v }}; }
+pub fn e1() -> u64 { let x = blk!(); (x + 1).0 }
+// nested macro call as an argument
+macro_rules! wrap { ($e:expr) => { $e }; }
+pub fn n1() -> u64 { wrap!(D2(1) + 1).0 }
+pub fn e1c() -> u64 { let x = { let v = D2(1); v }; (x + 1).0 }
+macro_rules! blk2 { () => { D2(1) }; }
+pub fn e1d() -> u64 { let x = blk2!(); (x + 1).0 }
+macro_rules! blk3 { () => {{ let v = D2(1); v + 1 }}; }
+pub fn e1e() -> u64 { blk3!().0 }
+"##)]);
+    for f in ["a::fa", "k1"] {
+        assert!(!veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "`{f}` expands its OWN pure definition (executed):\n{m:#}");
+    }
+    for f in ["e1", "e1c", "e1d", "e1e", "n1"] {
+        assert!(veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{m:#}");
+    }
+    // stated residuals: a twice-defined name is left to the `$`-stripped walk (as 0282a87)
+    for f in ["b::fb", "k2"] {
+        assert!(veina_row_effs(&m, f).is_empty(), "macro-redefinition residual `{f}` moved — decide it:\n{m:#}");
+    }
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v052glob-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dep = root.join("cdep");
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), toml("cdep3")).unwrap();
+    std::fs::write(dep.join("src/lib.rs"), r##"pub fn write_it() { let _ = std::fs::write("/tmp/auditv052g", b"x"); }
+pub struct Tool;
+impl Tool { pub fn run(&self) { let _ = std::fs::write("/tmp/auditv052g", b"x"); } }
+#[derive(Clone, Copy)] pub struct C(pub u8);
+impl std::ops::Rem for C { type Output = u8; fn rem(self, o: C) -> u8 { let _ = std::fs::write("/tmp/auditv052g", b"x"); self.0 % o.0.max(1) } }
+"##).unwrap();
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), format!("{}[dependencies]\ncdep3 = {{ path = \"../cdep\" }}\n", toml("ccons"))).unwrap();
+    std::fs::write(cons.join("src/lib.rs"), r##"use cdep3::*;
+pub fn g_fn() { write_it() }
+pub fn g_method(t: &Tool) { t.run() }
+pub fn g_op(a: C, b: C) -> u8 { a % b }
+// controls: a local type of the same name shadows the glob; a generic parameter is never a glob name
+pub mod local { use cdep3::*; pub struct Tool; impl Tool { pub fn run(&self) {} } pub fn z_local(t: &Tool) { t.run() } }
+pub fn z_generic<Tool: Clone>(t: &Tool) -> Tool { t.clone() }
+// two globs: not exclusive, left as before
+pub mod two { use cdep3::*; use std::collections::*; pub fn g_two(t: &Tool) { t.run() } }
+"##).unwrap();
+    let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (rc, body) = scan_one(&cons.to_string_lossy(), ScanOpts {
+        prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+        quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
+    }, &crate::gate::begin_run());
+    drop(_serial);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(rc, 0);
+    let g: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+    let inv = |f: &str| g["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "cdep3")));
+    for f in ["g_fn", "g_method", "g_op"] {
+        assert!(inv(f), "`{f}` calls into cdep3 (executed) and must disclose it:\n{g:#}");
+    }
+    for f in ["local::z_local", "z_generic"] {
+        assert!(!inv(f), "control `{f}` never calls cdep3 (executed):\n{g:#}");
     }
 }

@@ -184,7 +184,9 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                        let mut info = fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                        info.derive_synth = crate::model::is_derive_synth(&im.attrs);
+                        out.push(info);
                     }
                 }
                 // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
@@ -2630,6 +2632,35 @@ pub(crate) fn fninfo(
     let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
+    // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;
+    // fn g(t: &Tool) { t.run() }`) was typed by the bare `Tool`, which names no local type, so `t.run()` and `a % b`
+    // formed no edge and no disclosure: ABSENT unchained (no `invisible`) and chained alike, while the explicit
+    // import charged. rustc's rule (`lang::glob_candidates`): with the module's declarations complete, no `use`
+    // binding the name and exactly ONE glob in scope that is external, the name IS that glob's. Only that
+    // EXCLUSIVE answer retypes the parameter; a written generic parameter of the fn or its impl is never a candidate.
+    {
+        let generic = |n: &str| {
+            sig.generics.type_params().any(|t| t.ident == n)
+                || impl_generics.is_some_and(|g| g.type_params().any(|t| t.ident == n))
+        };
+        for arg in &sig.inputs {
+            let syn::FnArg::Typed(pt) = arg else { continue };
+            let syn::Pat::Ident(id) = &*pt.pat else { continue };
+            let n = id.ident.to_string();
+            let Some(t) = vars.get(&n) else { continue };
+            if t.contains("::") || t.contains(ITEM_SENTINEL) || generic(t) {
+                continue;
+            }
+            if let Some((cands, true)) = crate::lang::glob_candidates(&[t.as_str()], sig_uses, &generic) {
+                if let [c] = cands.as_slice() {
+                    if std::env::var_os("CANDOR_V052GLOB_INSTR").is_some() {
+                        eprintln!("V052GLOBTYPE\t{t}\t{c}"); // §E1 REACH COUNTER
+                    }
+                    vars.insert(n, c.clone());
+                }
+            }
+        }
+    }
     // SOUNDNESS R369 — A `#[cfg]`-DUPLICATED `use` ON THE TYPE ROUTE IS THE UNION OF ITS ARMS. Two
     // `use … as A1` items under opposite `#[cfg]`s bind one name; `uses` is single-valued, so a parameter
     // `x: &A1` was typed by whichever arm was WRITTEN LAST and `x.go()` charged that arm alone —
@@ -3145,6 +3176,7 @@ pub(crate) fn fninfo(
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         extern_decl: false,
+        derive_synth: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
         untyped_methods: c.untyped_methods.into_iter().collect(),
@@ -4025,6 +4057,14 @@ pub(crate) fn collect_decls(
                     {
                         macro_twins.insert(name.clone());
                     }
+                    // SOUNDNESS R1144 (v052 audit) — ANY second, different definition of the name in this file (a
+                    // sibling module's same-named macro, a textual redefinition): which one an invocation expands
+                    // depends on module scope and textual order, which `local_macros` (one entry per name) does
+                    // not hold. Recorded under `model::MACRO_REDEF_PREFIX`, which R208's disclosure never reads,
+                    // so only the R1144 expansion consults it — and declines.
+                    if local_macros.get(name.as_str()).is_some_and(|prev| *prev != tokens) {
+                        macro_twins.insert(format!("{}{name}", crate::model::MACRO_REDEF_PREFIX));
+                    }
                     local_macros.insert(name, tokens);
                 }
             }
@@ -4717,6 +4757,7 @@ pub(crate) fn collect_decls(
                     extern_fns.insert(n);
                 }
             }
+            syn::Item::Impl(im) if crate::model::is_derive_synth(&im.attrs) => {} // R1146: published only, no Pass A fact
             syn::Item::Impl(im) => {
                 let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items, uses); // R1034
                 // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only

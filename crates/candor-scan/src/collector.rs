@@ -2745,6 +2745,15 @@ impl<'a> CallCollector<'a> {
             // branch the typer cannot answer (`None`, a diverging arm aside) makes the whole unknown —
             // measured, the lenient merge typed rdkafka's `let key = if .. { None } else { Some(..) }` as
             // the unit struct `None`.
+            // SOUNDNESS (v052 audit, `fxm` e1c) — a block whose value is a binding it declares itself (`{ let v =
+            // D2(1); v }`): the tail names a `let` of THAT block, which the walk has not bound yet when the
+            // enclosing `let` is typed, so the value is typed from that `let`'s own annotation or initializer.
+            syn::Expr::Block(b) if b.label.is_none() && self.block_local_tail(&b.block).is_some() => {
+                self.block_local_tail(&b.block).and_then(|e| self.type_of(e))
+            }
+            // SOUNDNESS (v052 audit, `fxm` e1/e1d) — a VALUE macro (`let x = make!()`): the invocation expanded
+            // (`mbe::expand_invocation`, under the same once-defined rule as the R1144 walk) and its value typed.
+            syn::Expr::Macro(mm) => self.type_of_macro_value(&mm.mac),
             syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
                 let mut found: Option<String> = None;
                 for b in crate::lang::merge_value_exprs(expr)? {
@@ -2759,6 +2768,44 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The value expression a block's tail binding stands for: the tail is a bare name, and the block's own LAST
+    /// `let` of that name (a plain ident pattern, not shadowed after it) supplies its initializer — or, with an
+    /// annotation, a typed placeholder is not available, so only an initializer counts.
+    fn block_local_tail<'b>(&self, block: &'b syn::Block) -> Option<&'b syn::Expr> {
+        let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() else { return None };
+        let syn::Expr::Path(p) = tail else { return None };
+        let name = p.path.get_ident()?;
+        block.stmts.iter().rev().find_map(|st| match st {
+            syn::Stmt::Local(l) => match &l.pat {
+                syn::Pat::Ident(pi) if pi.ident == *name => l.init.as_ref().map(|i| &*i.expr),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// The type of a value-position local macro invocation, from its macro-by-example expansion (see `type_of`).
+    fn type_of_macro_value(&self, mac: &syn::Macro) -> Option<String> {
+        let name = mac.path.get_ident()?.to_string();
+        if self.macro_expanding.contains(&name)
+            || self.macro_twins.contains(&name)
+            || self.macro_twins.contains(&format!("{}{name}", crate::model::MACRO_REDEF_PREFIX))
+        {
+            return None;
+        }
+        thread_local! { static DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+        if DEPTH.with(|d| d.get()) >= 8 {
+            return None; // a recursive template: no type rather than no end
+        }
+        let body = self.body_macros.get(&name).or_else(|| self.local_macros.get(&name))?;
+        let ts = crate::mbe::expand_invocation(body, &respan_call_site(mac.tokens.clone()))?;
+        let e: syn::Expr = syn::parse2(ts).ok()?;
+        DEPTH.with(|d| d.set(d.get() + 1));
+        let t = self.type_of(&e);
+        DEPTH.with(|d| d.set(d.get() - 1));
+        t
     }
 
     /// VEIN B — the dependency provenance of a METHOD-CALL value the strict typer cannot type:
@@ -10674,7 +10721,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // cut that walked it first leaked `let s: String` into the stripped walk and changed what that
                 // walk disclosed (winreg `deserialize_f32`, the corpus A/B). Not where the crate defines the name
                 // twice (R208): which template applies is then a pick.
-                if !self.macro_twins.contains(&mleaf) {
+                // A name the crate defines more than once (any two different templates: sibling modules, a textual
+                // redefinition, `#[cfg]` twins, two files) is expanded only from THIS body's own definition, which
+                // the walk records in textual order (R142); otherwise which template applies needs module scope and
+                // order this index does not hold, and the invocation is left to the stripped walk (v052 audit, fxm2).
+                let redefined = self.macro_twins.contains(&mleaf)
+                    || self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
+                if !redefined || self.body_macros.contains_key(&mname) {
                     if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
                         let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
                             proc_macro2::Group::new(proc_macro2::Delimiter::Brace, ts),
