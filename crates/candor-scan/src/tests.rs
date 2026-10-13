@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v054 (R1160-R1162) bumped it to rev105.
         // rustagent-v053 (R1153-R1157) bumped it to rev104.
         // R986 bumped it to rev66 (path-redirected modules are recorded).
         // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
@@ -17338,7 +17339,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17349,7 +17350,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev104/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev105/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -30918,4 +30919,34 @@ pub fn ctl_priv() { priv_call(&PA) }
 "##)]);
     assert!(veina_row_effs(&v, "BlockRng::from_rng").iter().any(|e| e == "Fs"), "R1151 (executed):\n{v:#}");
     assert!(veina_row_effs(&v, "ctl_priv").is_empty(), "R1151 control is pure (executed):\n{v:#}");
+}
+
+/// SOUNDNESS R1161 (v054; fixture rustagent-v054/fx/r1161, every cell EXECUTED). A CAST left operand (`(y as u32) + F(3)`)
+/// was untyped, so the crate's hand-written effectful `impl Add<F> for u32` formed no edge and the caller read ABSENT. The
+/// cast's target now types the operator site. Controls (executed pure): a literal or a cast-to-primitive right operand,
+/// which by syntax can never be the impl's crate-local `Rhs`. A macro-made impl is reached through R1157's disclosure.
+#[test]
+fn v054_r1161_cast_left_operand_types_the_operator_site() {
+    let v = scan_src_to_json_multi("v054cast", &[("src/lib.rs", r##"use std::ops::{Add, Mul, Sub};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v054_r1161", b"x"); }
+#[derive(Clone, Copy)] pub struct F(pub u32);
+#[derive(Clone, Copy)] pub struct D(pub u32);
+impl Add<F> for u32 { type Output = u32; fn add(self, r: F) -> u32 { mark(); self + r.0 } }
+impl Mul<F> for i64 { type Output = i64; fn mul(self, r: F) -> i64 { mark(); self * r.0 as i64 } }
+macro_rules! prim { ($t:ty) => { impl Sub<D> for $t { type Output = u16; fn sub(self, r: D) -> u16 { crate::mark(); self - r.0 as u16 } } }; }
+prim!(u16);
+pub fn qa_cast_hand(y: u64) -> u32 { (y as u32) + F(3) }
+pub fn qb_cast_nopar(y: u64) -> i64 { y as i64 * F(2) }
+pub fn qc_cast_mbe(y: u64) -> u16 { (y as u16) - D(1) }
+pub fn ra_cast_lit(y: u64) -> u32 { (y as u32) + 3 }
+pub fn rb_cast_cast(y: u64, z: u8) -> u32 { (y as u32) + (z as u32) }
+pub fn rd_cast_mbe_lit(y: u64) -> u16 { (y as u16) - 1 }
+"##)]);
+    for f in ["qa_cast_hand", "qb_cast_nopar"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1161 `{f}` writes (executed):\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "qc_cast_mbe").iter().any(|e| e == "Unknown"), "R1161 `qc_cast_mbe` discloses (R1157):\n{v:#}");
+    for f in ["ra_cast_lit", "rb_cast_cast", "rd_cast_mbe_lit"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1161 control `{f}` is pure (executed):\n{v:#}");
+    }
 }

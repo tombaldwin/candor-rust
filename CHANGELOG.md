@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a cast on the left of an operator types the operator site (SOUNDNESS R1161).** `(y as u32) + F(3)`
+  and `y as i64 * F(2)` were untyped, so the crate's own effectful `impl Add<F> for u32` formed no edge and the caller
+  read ABSENT over its executed write. The cast's target is the operand's type, by syntax. A literal or a cast to a
+  primitive on the right forms no edge (it can never be the impl's crate-local `Rhs`); a macro-made impl is reached
+  through R1157's disclosure. A right operand typed as a primitive by name still gets the edge, as a parameter-typed
+  left operand already does (over-charge direction).
 - ⚠ **candor-classify: `getrandom::Error`'s own methods are not `Rand` (SOUNDNESS R1150).** The whole `getrandom`
   crate was charged `Rand`, so an error value's `raw_os_error`, `Debug`/`Display` and comparison (rand_core 0.9.x's
   derived `OsError::eq`, its `fmt`/`raw_os_error`; rand_core 0.5/0.6 `Error::from`/`fmt`) read as entropy draws

@@ -11092,6 +11092,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 },
                 _ => None,
             } });
+            // SOUNDNESS R1161 — a CAST left operand (`(y as u32) + F(3)`, `y as i64 * F(2)`) is typed by its target: the
+            // cast's type IS the operand's type, by syntax, and `as` reaches only a primitive (or an alias of one, which
+            // R1139 below follows). The receiver typer answers nothing for a cast, so the crate's `impl Add<F> for u32`
+            // formed no edge and the caller read ABSENT over the impl's write (EXECUTED: rustagent-v054/fx/r1161
+            // `qa_cast_hand`, `qb_cast_nopar`). The right-operand guard is SYNTAX ONLY (a literal or another cast to a
+            // primitive, neither of which can be the crate-local `Rhs` the orphan rule requires); a right operand the
+            // typer merely NAMES a primitive still gets the edge, exactly as a parameter-typed left operand does.
+            let lconst = lconst.or_else(|| {
+                let syntactic_prim = |e: &syn::Expr| syntactic_literal(e) || cast_target_ident(e).is_some_and(|t| {
+                    crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()) && !self.uses.contains_key(t.as_str())
+                });
+                if syntactic_prim(&node.right) {
+                    return None;
+                }
+                let t = cast_target_ident(&node.left)?;
+                if std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                    eprintln!("R1161CAST\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                Some(t)
+            });
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
                 None => self.charge_coercion(&node.left, tr, method),
@@ -11402,6 +11422,22 @@ fn syntactic_literal(e: &syn::Expr) -> bool {
         syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => syntactic_literal(&u.expr),
         syn::Expr::Lit(l) => !matches!(l.lit, syn::Lit::Verbatim(_)),
         _ => false,
+    }
+}
+
+/// SOUNDNESS R1161 — the single-identifier target of a CAST operand (`(y as u32)`, through parentheses, groups,
+/// references and a unary minus), by syntax. `None` for anything else, including a multi-segment or generic target.
+fn cast_target_ident(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Paren(p) => cast_target_ident(&p.expr),
+        syn::Expr::Group(g) => cast_target_ident(&g.expr),
+        syn::Expr::Reference(r) => cast_target_ident(&r.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => cast_target_ident(&u.expr),
+        syn::Expr::Cast(c) => match &*c.ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
