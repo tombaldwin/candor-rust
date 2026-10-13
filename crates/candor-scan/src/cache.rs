@@ -44,8 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
-    // rev104 (rustagent-v053): SOUNDNESS R1153/R1154 — glob-candidate retyping of bare receiver types and
-    // `GLOB_CAND_MARKER` calls, `MODDECL_CFGONLY_KEY`, and the bin-target `<lib>::` -> `crate::` rewrite (cached `calls`).
+    // rev104 (rustagent-v053): SOUNDNESS R1153-R1157 — glob-candidate retyping of bare receiver types and
+    // `GLOB_CAND_MARKER` calls, `MODDECL_CFGONLY_KEY`, the bin-target `<lib>::` -> `crate::` rewrite, `let` typing from
+    // labelled blocks/loops, textual-scope macro expansion (`SCOPE_MACRO_PREFIX`, item position too), and macro-made
+    // primitive operator impls (`FnInfo::mbe_prim_op`, `PRIM_OP_MARKER`, `prim_op_key`) — cached `calls`, units, `rets`.
     // rev103 (rustagent-v052, audit): `FnInfo::derive_synth`; synthetic derived units record no Pass A fact; a macro
     // name redefined anywhere (`MACRO_REDEF_PREFIX`) is not expanded (cached `calls`, `macro_twins`, `rets`).
     // rev102 (rustagent-v052): SOUNDNESS R1142-R1146 — a renamed operator trait re-keys `&Type` impls; body-local

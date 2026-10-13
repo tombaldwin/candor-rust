@@ -188,6 +188,12 @@ pub(crate) struct FnInfo {
     /// Arch` lost its edge to the synthetic `col::Arch::eq` and `deny Fs` went 1 -> 0).
     #[serde(rename = "dv", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) derive_synth: bool,
+    /// SOUNDNESS R1157 — a method of a MACRO-MADE operator impl whose self type is a primitive (`MBE_PRIM_ATTR`). Published
+    /// (its own row, a chained consumer's key) but kept out of the local resolution indexes like `derive_synth`: no
+    /// edge may reach it, because which impl an operator on a primitive runs depends on a right operand this typer
+    /// cannot prove (R1128). Operator sites are judged against it after the fixpoint instead (`PRIM_OP_MARKER`).
+    #[serde(rename = "mp", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mbe_prim_op: bool,
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
@@ -591,6 +597,18 @@ pub(crate) fn impl_gen_op_key(type_leaf: &str, fn_leaf: &str) -> String {
 
 /// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
+/// SOUNDNESS R1157 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
+/// a PRIMITIVE, so Pass A can tell it from a hand-written one (`prim_op_key`).
+pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
+/// SOUNDNESS R1157 — the qual segment that keeps such an impl's unit apart from a hand-written impl's (`decls::scan_items`).
+pub(crate) const MBE_PRIM_SEG: &str = "<mbe>";
+
+/// SOUNDNESS R1157 — a `ReturnIndex` key: the crate has an operator impl of `trait` on the primitive `ty`, `mbe` true
+/// for a macro-made one (`MBE_PRIM_ATTR`) and false for a hand-written one. Value `1`.
+pub(crate) fn prim_op_key(trait_leaf: &str, ty_leaf: &str, mbe: bool) -> String {
+    format!("<primop{}>{trait_leaf}\u{1f}{ty_leaf}", if mbe { "m" } else { "h" })
+}
+
 pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {
     format!("<rhs>{trait_leaf}\u{1f}{ty_leaf}")
 }

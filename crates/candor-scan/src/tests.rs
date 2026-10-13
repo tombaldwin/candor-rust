@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v053 (R1153-R1157) bumped it to rev104.
         // R986 bumped it to rev66 (path-redirected modules are recorded).
         // The release-audit mechanisms (R960, R982, R985-R989) bumped it to rev65.
         // R984 bumped it to rev64 (a trait-path call on a local value edges to the local impl).
@@ -17337,7 +17338,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17348,7 +17349,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev103/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev104/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -30814,4 +30815,58 @@ pub fn iw2(w: &W2) { w.run() }
         assert!(veina_row_effs(&v, f).is_empty(), "R1156 control `{f}` is pure (executed):\n{v:#}");
     }
     assert_eq!(veina_row_effs(&v, "cw"), vec!["Unknown".to_string()], "R1156: a #[cfg] twin stays disclosed:\n{v:#}");
+}
+
+/// SOUNDNESS R1157 (v053; fixture rustagent-v053/fx/r1157, every cell EXECUTED). A macro-made operator impl whose self
+/// type is a primitive (`impl Add<D> for $t` with `$t = u32`; serde_json's `impl PartialEq<Value> for u64` shape) was
+/// never spliced, so `x + d` was ABSENT over its write. It is now spliced as a PUBLISHED-ONLY unit under its own qual
+/// (`u32::<mbe>::add`) and no edge reaches it — which impl runs depends on a right operand this typer cannot prove
+/// (R1128) — and an operator site discloses `Unknown` (`ambiguous:`) where a candidate impl carries a concrete effect.
+/// A LITERAL right operand (by syntax) can never be the impl's `Rhs` and records nothing.
+#[test]
+fn v053_r1157_macro_made_primitive_operator_impls_disclose() {
+    let v = scan_src_to_json_multi("v053prim", &[("src/lib.rs", r##"#![allow(clippy::all)]
+use std::ops::{Add, Rem};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_1157", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+#[derive(Clone, Copy, PartialEq)] pub struct V(pub u64);
+macro_rules! prim_impl { ($t:ty) => { impl Add<D> for $t { type Output = u64; fn add(self, r: D) -> u64 { mark(); self as u64 + r.0 } } }; }
+prim_impl!(u32);
+// serde_json's shape: a macro-made PartialEq<Value> for a primitive
+macro_rules! prim_eq { ($($t:ty)*) => { $( impl PartialEq<V> for $t { fn eq(&self, o: &V) -> bool { mark(); *self as u64 == o.0 } } )* }; }
+prim_eq!(u64 i32);
+macro_rules! prim_rem { ($t:ty) => { impl<'a> Rem<&'a D> for &'a $t { type Output = u64; fn rem(self, r: &'a D) -> u64 { mark(); *self as u64 % r.0.max(1) } } }; }
+prim_rem!(u16);
+pub fn hit_add(x: u32, d: D) -> u64 { x + d }
+pub fn hit_eq(x: u64, v: V) -> bool { x == v }
+pub fn hit_ne_i(x: i32, v: &V) -> bool { x != *v }
+pub fn hit_rem(x: &u16, d: &D) -> u64 { x % d }
+pub fn hit_param_rhs(x: u64, v: V) -> bool { let w = v; x != w }
+// controls (executed pure): literal right operands, and a primitive right operand
+pub fn ctl_lit(x: u64) -> bool { x != 0 }
+pub fn ctl_neg(x: i32) -> bool { x == -1 }
+pub fn ctl_add_lit(x: u32) -> u32 { x + 1 }
+pub fn ctl_lt(x: u64) -> bool { x < 10 }
+// a hand-written impl of the same operator on the same primitive beside the macro-made one
+#[derive(Clone, Copy)] pub struct E(pub u64);
+impl std::ops::Sub<E> for u32 { type Output = u64; fn sub(self, r: E) -> u64 { self as u64 - r.0 } }
+macro_rules! prim_sub { ($t:ty) => { impl std::ops::Sub<D> for $t { type Output = u64; fn sub(self, r: D) -> u64 { mark(); self as u64 - r.0 } } }; }
+prim_sub!(u32);
+pub fn hit_mixed(x: u32, d: D) -> u64 { x - d }
+pub fn ctl_mixed_lit(x: u32) -> u32 { x - 1 }
+"##)]);
+    let why = |f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|x| x.as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>();
+    for f in ["hit_add", "hit_eq", "hit_ne_i", "hit_rem", "hit_param_rhs", "hit_mixed"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Unknown"), "R1157 `{f}` runs an effectful impl (executed) and must disclose:\n{v:#}");
+        assert!(why(f).iter().any(|w| w.starts_with("ambiguous:operator on a primitive")), "R1157 `{f}` reason:\n{v:#}");
+    }
+    for f in ["ctl_lit", "ctl_neg", "ctl_add_lit", "ctl_lt", "ctl_mixed_lit"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1157 control `{f}` is pure (executed):\n{v:#}");
+    }
+    // the macro-made impl's own unit is published, apart from the hand-written impl of the same operator
+    for f in ["u32::<mbe>::add", "u32::<mbe>::sub", "u64::<mbe>::eq"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1157 unit `{f}` writes:\n{v:#}");
+    }
 }

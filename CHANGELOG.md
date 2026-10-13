@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an operator on a primitive whose crate impl is macro-made is disclosed (SOUNDNESS R1157).** A
+  `macro_rules!`-made `impl Add<D> for u32` (serde_json's `impl PartialEq<Value> for u64` shape) was never analysed,
+  so `x + d` read ABSENT over its executed write. The impl is now analysed and published under its own name
+  (`u32::<mbe>::add`); no edge reaches it, because which impl runs depends on a right operand the scanner cannot
+  prove, and an operator site discloses `Unknown` (`ambiguous:operator on a primitive with a macro-made impl`) where
+  a candidate impl carries a concrete effect. A literal right operand (`x != 0`) can never be such an impl's `Rhs`
+  and records nothing. Gate: `deny Fs Unknown` fires; `deny Fs` does not.
 - ⚠ **candor-scan: a `macro_rules!` name defined twice expands from the definition in textual scope (SOUNDNESS
   R1156).** Sibling modules each defining `pick!`, a textual redefinition of `k!`, value-position twins, a parent's
   redefinition seen by a later child module, and a `#[macro_use] mod` beside a sibling definition: the effectful twin

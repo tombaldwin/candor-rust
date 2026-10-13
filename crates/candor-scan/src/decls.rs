@@ -191,13 +191,24 @@ pub(crate) fn scan_items(
                         }
                         let _cfg_off_m = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — a gated method
                         let n = m.sig.ident.to_string();
-                        let q = match &tyname {
-                            Some(t) => qual(&format!("{t}::{n}")),
-                            None => qual(&n),
+                        // SOUNDNESS R1157 — a macro-made primitive operator impl's unit gets its OWN qual
+                        // (`<prim>::<mbe>::<method>`): sharing a hand-written impl's qual would merge its body into
+                        // that row (SPEC §4's union over one qual) and every edge into the hand impl would inherit it.
+                        let mbe_prim = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_PRIM_ATTR))
+                            .then(|| match crate::lang::peel_ty_refs(&im.self_ty) {
+                                syn::Type::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                                _ => None,
+                            })
+                            .flatten();
+                        let q = match (&mbe_prim, &tyname) {
+                            (Some(p), _) => qual(&format!("{p}::{}::{n}", crate::model::MBE_PRIM_SEG)),
+                            (None, Some(t)) => qual(&format!("{t}::{n}")),
+                            (None, None) => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
                         let mut info = fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
+                        info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         out.push(info);
                     }
                 }
@@ -3199,6 +3210,7 @@ pub(crate) fn fninfo(
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         extern_decl: false,
         derive_synth: false,
+        mbe_prim_op: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
         untyped_methods: c.untyped_methods.into_iter().collect(),
@@ -4903,6 +4915,11 @@ pub(crate) fn collect_decls(
                             // Filed in `rets` (a string fact), NOT `trait_impls`, whose every key is read as a trait
                             // name by the CHA and local-type passes. One file unions its own impls; a second file's
                             // different set withdraws the key at the merge, which reads as today's edge.
+                            // SOUNDNESS R1157 — a primitive self type: macro-made (`MBE_PRIM_ATTR`) or hand-written.
+                            if crate::model::PRIMITIVE_LEAVES.contains(&tyl.as_str()) {
+                                let mbe = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_PRIM_ATTR));
+                                rets.insert(crate::model::prim_op_key(&key, &tyl, mbe), Some("1".to_string()));
+                            }
                             let k = crate::model::impl_rhs_key(&key, &tyl);
                             let mut set: Vec<String> = match rets.get(&k) {
                                 Some(Some(v)) => v.split(',').map(str::to_string).collect(),

@@ -732,7 +732,7 @@ impl Ctx<'_> {
                                 // reached BY PATH (`W::touch(&w)`) and by a typed receiver, exactly as a
                                 // free fn is, and no dispatch universe holds them, so splicing it cannot
                                 // move a CHA fan-out. A TRAIT impl stays unexpanded (see above).
-                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i),
+                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i) || prim_operator_impl(i),
                                 _ => false,
                             })
                             .collect();
@@ -750,6 +750,15 @@ impl Ctx<'_> {
                             // written impl has; peel it so the impl's units are keyed under the type
                             // (`W::touch`) exactly as the hand-written impl's are.
                             if let syn::Item::Impl(i) = g {
+                                // R1157 — a primitive-self operator impl is marked, so Pass A files it apart from a
+                                // hand-written one and the operator site can refuse it a LITERAL right operand.
+                                if prim_operator_impl(i) {
+                                    let id = syn::Ident::new(crate::model::MBE_PRIM_ATTR, proc_macro2::Span::call_site());
+                                    i.attrs.push(syn::parse_quote!(#[#id]));
+                                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                                        eprintln!("R1157SPLICE"); // §E1 REACH COUNTER
+                                    }
+                                }
                                 if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
                                     eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
                                 }
@@ -838,6 +847,30 @@ fn peel_groups(t: &mut syn::Type) {
 /// `impl PartialEq<Value> for u64` (serde_json) would put the primitive in the operator index, and every `x != 0` over a
 /// `u64` would then edge to it although the orphan rule means only a `Value` right operand can run it — those stay
 /// unspliced, exactly as before.
+/// SOUNDNESS R1157 — a macro-made std OPERATOR impl whose self type (through references and invisible groups) is a
+/// PRIMITIVE (`impl Add<D> for $t` with `$t = u32`). Spliced like `operator_trait_impl`'s nominal case, and marked
+/// (`model::MBE_PRIM_ATTR`): the orphan rule means its `Rhs` names a crate-local type, so a LITERAL right operand can
+/// never run it, and the operator site refuses exactly that syntactic case — `x != 0` over a `u64` beside serde_json's
+/// macro-made `impl PartialEq<Value> for u64` forms no edge, while any other right operand does (no name-typing claim
+/// withholds the edge). Unspliced, the impl had no unit and `x + d` read ABSENT over its executed write.
+fn prim_operator_impl(i: &syn::ItemImpl) -> bool {
+    let op = matches!(&i.trait_, Some((None, p, _))
+        if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
+    let mut t: &syn::Type = &i.self_ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            _ => break,
+        }
+    }
+    op && matches!(t, syn::Type::Path(p) if p.qself.is_none() && p.path.get_ident().is_some_and(|id| {
+        let s = id.to_string();
+        crate::model::PRIMITIVE_LEAVES.contains(&s.as_str())
+    }))
+}
+
 fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
     let op = matches!(&i.trait_, Some((None, p, _))
         if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));

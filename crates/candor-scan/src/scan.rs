@@ -2302,6 +2302,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1157 — macro-made primitive operator impl units by tail2 (`FnInfo::mbe_prim_op`).
+    let mut by_primop: HashMap<String, Vec<String>> = HashMap::new();
     // SOUNDNESS R1154 — the crate ROOT's own free fns, by their exact (one-segment) qual.
     let mut by_root: HashMap<String, Vec<String>> = HashMap::new();
     // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
@@ -2316,6 +2318,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // always qualifies, so keeping them out of `by_leaf` loses nothing.
         // SOUNDNESS R894 — a published foreign declaration's unit is for the REPORT; in-crate calls keep
         // answering through `extern_fns`, so it joins neither local resolution index.
+        // SOUNDNESS R1157 — a macro-made primitive operator impl's unit: published only, indexed for the disclosure.
+        if f.mbe_prim_op {
+            if let Some(t2) = tail2(&f.qual.replace(&format!("::{}", crate::model::MBE_PRIM_SEG), "")) {
+                let v = by_primop.entry(t2).or_default();
+                if !v.contains(&f.qual) {
+                    v.push(f.qual.clone());
+                }
+            }
+            continue;
+        }
         if f.extern_decl || f.reexport_alias || f.derive_synth {
             continue;
         }
@@ -2651,6 +2663,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // VEIN A — contested non-method path calls the written path could not anchor: (caller, claimants).
     // Judged after the fixpoint (see `veina_contested` below the first `propagate`).
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1157 — (caller, `prim::method`, macro-made candidate impl units), judged after the fixpoint.
+    let mut primop_contested: Vec<(String, String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
@@ -3199,6 +3213,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // recorded in the κ ledger exactly as a floored qualified call into `cr` is, so the coverage filter
             // downstream decides whether it surfaces as `invisible` (a chained or calibrated crate is dropped
             // there). Nothing else: no effect, no `Unknown`.
+            // SOUNDNESS R1157 — a primitive operator only a macro-made impl answers (`PRIM_OP_MARKER`): its candidates are
+            // judged after the fixpoint (`primop_contested`), never linked.
+            if let Some(t2) = c.path.strip_prefix(&format!("{PRIM_OP_MARKER}::")) {
+                if let Some(v) = by_primop.get(t2) {
+                    let cl: Vec<String> = v.iter().filter(|q| *q != &f.qual).cloned().collect();
+                    if !cl.is_empty() {
+                        primop_contested.push((f.qual.clone(), t2.to_string(), cl));
+                    }
+                }
+                continue;
+            }
             // SOUNDNESS R1153 — a GLOB CANDIDATE for a bare receiver type (`GLOB_CAND_MARKER`): chained, the
             // dependency's own `Type::leaf` entry is joined where it exists and a miss adds nothing (the glob may not
             // be the origin); unchained, the crate is recorded in the κ ledger like any floored call into it.
@@ -5625,6 +5650,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 hedged = true;
                 if std::env::var_os("CANDOR_R1095_INSTR").is_some() && fresh {
                     eprintln!("R1095HEDGE\t{caller}\t{leaf}"); // §E1 REACH PROBE — a caller newly Unknown
+                }
+            }
+        }
+        // SOUNDNESS R1157 — a primitive operator whose only crate impl is macro-made: which body runs depends on the
+        // right operand's type, which this engine cannot prove, so where a candidate carries a CONCRETE effect the
+        // caller does not already have, the caller discloses `Unknown` (`ambiguous:`, two definitions — std's and the
+        // crate's — with no way to say which runs). An `Unknown`-only candidate is not hedged on (the R1095 rule).
+        for (caller, label, cands) in &primop_contested {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            let impure = cands.iter().any(|u| {
+                inferred.get(u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+            });
+            if !impure {
+                continue;
+            }
+            let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+            let fresh_why = unknown_why
+                .entry(caller.clone())
+                .or_default()
+                .insert(format!("ambiguous:operator on a primitive with a macro-made impl ({})", label.replace('.', "_")));
+            if fresh || fresh_why {
+                hedged = true;
+                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    eprintln!("R1157HEDGE\t{caller}\t{label}"); // §E1 REACH COUNTER
                 }
             }
         }

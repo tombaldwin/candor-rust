@@ -47,6 +47,11 @@ pub(crate) const EXT_METHOD_MARKER: &str = "<extmethod>";
 /// entry for `cr`. The angle-bracket segment keeps it out of every local key lookup.
 pub(crate) const GLOB_CAND_MARKER: &str = "<globcand>";
 
+/// SOUNDNESS R1157 — `<primop>::<prim>::<method>`: an operator on a primitive whose only impl of that operator in the crate
+/// is macro-made (`collector::charge_coercion_ty_at`). Consumed only by the call loop, which records the site for the
+/// post-fixpoint disclosure; it forms no edge.
+pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
+
 /// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
 /// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
 /// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a

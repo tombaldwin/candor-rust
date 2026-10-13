@@ -5088,6 +5088,33 @@ impl<'a> CallCollector<'a> {
             }
             self.push_coercion_edge(&format!("&{ty_leaf}"), method);
         }
+        // SOUNDNESS R1157 — a primitive whose ONLY impl of this operator is MACRO-MADE (`model::MBE_PRIM_ATTR`). The orphan
+        // rule makes that impl's `Rhs` a crate-local type, so whether it runs depends on the right operand, and this
+        // typer cannot prove an operand's type by definition (R1128). So no edge is formed — an edge would charge
+        // every `u32 + u32` with the impl's effects, and the impl's own `ambiguous:` hedges cascaded onto 558 num-bigint
+        // rows in the first cut — and the site is recorded for a DISCLOSURE instead (`PRIM_OP_MARKER`, judged after
+        // the fixpoint: `Unknown` where a candidate impl carries a concrete effect). A LITERAL right operand
+        // (`RHS_LITERAL`, by syntax) can never be that `Rhs`: nothing is recorded, as before this existed.
+        // A HAND-WRITTEN impl of the same operator on the same primitive keeps its pre-existing edge below; the
+        // macro-made one is disclosed beside it.
+        if crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf)
+            && self.returns.contains_key(&crate::model::prim_op_key(trait_leaf, ty_leaf, true))
+        {
+            let hand = self.returns.contains_key(&crate::model::prim_op_key(trait_leaf, ty_leaf, false));
+            let lit = RHS_LITERAL.with(|c| c.get());
+            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                eprintln!("R1157PRIMOP\t{trait_leaf}\t{ty_leaf}\tliteral={lit}"); // §E1 REACH COUNTER
+            }
+            if !lit {
+                self.calls.push(Call { argc: 0, entropy_arg: false,
+                    path: format!("{PRIM_OP_MARKER}::{ty_leaf}::{method}"),
+                    leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                    typed: false, method: false, is_macro: false });
+            }
+            if !hand {
+                return;
+            }
+        }
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 // SOUNDNESS R1128 — WITHDRAWN to the pre-existing over-charge. A refusal of this edge when the
@@ -11007,6 +11034,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
+            // R1157 — whether the RIGHT operand is a literal, for `charge_coercion_ty_at`; reset below.
+            RHS_LITERAL.with(|c| c.set(syntactic_literal(&node.right)));
             let lconst = self.local_const_type(&node.left);
             // SOUNDNESS R1134 (left half) — `ONE + a` over a block-local `const ONE: D`: the receiver typer has no
             // entry for a body item (it answers a sentinel), so the operand is typed from its declaration.
@@ -11098,6 +11127,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }
+            RHS_LITERAL.with(|c| c.set(false));
         }
         syn::visit::visit_expr_binary(self, node);
     }
@@ -11313,6 +11343,25 @@ pub(crate) fn pushed_values<'s>(stmt: &'s syn::Stmt, name: &str) -> Vec<&'s syn:
     let mut p = P { name, out: Vec::new() };
     syn::visit::Visit::visit_stmt(&mut p, stmt);
     p.out
+}
+
+thread_local! {
+    /// SOUNDNESS R1157 — set by `visit_expr_binary` for the duration of its operator charges: the right operand is a
+    /// literal (`syntactic_literal`).
+    static RHS_LITERAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// SOUNDNESS R1157 — a literal by SYNTAX (through parentheses, groups, references and a unary minus): a number, bool,
+/// char, byte or string literal. No typer answer is consulted.
+fn syntactic_literal(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Paren(p) => syntactic_literal(&p.expr),
+        syn::Expr::Group(g) => syntactic_literal(&g.expr),
+        syn::Expr::Reference(r) => syntactic_literal(&r.expr),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => syntactic_literal(&u.expr),
+        syn::Expr::Lit(l) => !matches!(l.lit, syn::Lit::Verbatim(_)),
+        _ => false,
+    }
 }
 
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {
