@@ -2358,6 +2358,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // entropy sources (`OsRng`, `thread_rng`/`rng`, `from_entropy`/`from_os_rng`) and the generation
     // verbs (`gen*`/`random*`/`fill*`/`sample*`/`next_u*`). A `Uniform::new` is now correctly pure.
     if crate_name == "getrandom" {
+        // SOUNDNESS R1150 — …except its ERROR VALUE. `getrandom::Error` is a wrapped error code; its own methods
+        // (`raw_os_error`, `code`, `new_custom`, the derived `eq`/`hash`, `Debug`/`Display`) read or format that
+        // code and draw nothing. Charged with the crate, rand_core 0.9.x's DERIVED `OsError::eq` read `Rand`
+        // (EXECUTED: no draw happens). Every drawing entry point (`fill`, `fill_uninit`, `u32`, `u64`,
+        // `getrandom`, `SysRng`'s methods) is not on `Error`, and keeps `Rand`.
+        // `&Error` is the by-reference operator key (`getrandom::&Error::eq`, R1131).
+        if path.split("::").skip(1).any(|s| s.trim_start_matches('&') == "Error") {
+            return None;
+        }
         return Some("Rand");
     }
     // fastrand: like `rand`, it mixes entropy-consuming generation (effectful) with PURE deterministic
@@ -4331,6 +4340,17 @@ pub fn tables_in_sql(sql: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn r1150_getrandom_error_values_draw_nothing_but_the_draws_do() {
+        for p in ["getrandom::Error::eq", "getrandom::&Error::eq", "getrandom::Error::raw_os_error", "getrandom::Error::fmt",
+                  "getrandom::error::Error::new_custom", "getrandom::Error::UNSUPPORTED"] {
+            assert_eq!(classify("getrandom", p), None, "{p}");
+        }
+        for p in ["getrandom::fill", "getrandom::fill_uninit", "getrandom::u32", "getrandom::u64", "getrandom::getrandom",
+                  "getrandom::SysRng::try_fill_bytes", "getrandom::getrandom_uninit"] {
+            assert_eq!(classify("getrandom", p), Some("Rand"), "{p}");
+        }
+    }
     #[test]
     fn model_host_recognizes_known_providers_and_special_forms() {
         use super::is_model_host as m;

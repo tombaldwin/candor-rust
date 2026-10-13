@@ -11,6 +11,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-classify: `getrandom::Error`'s own methods are not `Rand` (SOUNDNESS R1150).** The whole `getrandom`
+  crate was charged `Rand`, so an error value's `raw_os_error`, `Debug`/`Display` and comparison (rand_core 0.9.x's
+  derived `OsError::eq`, its `fmt`/`raw_os_error`; rand_core 0.5/0.6 `Error::from`/`fmt`) read as entropy draws
+  (executed: no draw happens). Every drawing entry point keeps `Rand`. Lands after R1151, whose silence the wrong
+  `Rand` was covering.
 - ⚠ **candor-scan: a dispatch on a local `pub` trait through an unnamed implementor also reaches the trait's own
   default body (SOUNDNESS R1151).** `impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> { fn
   from_rng(rng) -> Self { Self::new(R::from_rng(rng)) } }` (rand_core) edged only to the crate's own overrides, so
