@@ -23,6 +23,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   really calls (ureq-proto's `**name == key` now joins http's `HeaderName::eq`), REMOVED 0. Residual: compound
   assignment (`a += d`), which is R6 for local types too.
 
+- ⚠ **Deep engine: a drop that runs inside a GENERIC body the caller instantiates is now charged
+  (SOUNDNESS R1117).** `drop_edges` read only each local body's own `Drop` terminators, so a destructor
+  that runs in a callee written over a type parameter was silent: std's `Vec::<G>::clear` / `truncate` /
+  `retain` / `drain`, `HashMap`/`BTreeMap`/`VecDeque` clear and retain, `Option::ok_or(g)` / `insert` /
+  `filter`, `Result::<_, G>::ok`, the `try_process` behind `collect::<Result<Vec<G>, _>>`, the `fold`
+  closure behind `into_iter().skip(1).count()`, a local `fn eat<T>(_: T)` called with `G`, and a local
+  `impl<T> Drop for RawBox<T>`. The new `InstDropWalk` reads each callee's MIR instantiated with the
+  call's own generic args (std ships generic MIR in metadata), gated on args that reach a local `Drop`,
+  normal path only, and per enum VARIANT where drop elaboration switched on the discriminant (so
+  `Result::<G, E>::ok` stays uncharged). It also recognises std's `core::ptr::drop_glue` lang item, which
+  is what std's optimized MIR calls in place of `drop_in_place`. Executed: R1117's nine cells plus twelve
+  more flip `deny Fs <fn>` 0 → 1; seventeen store/move/return controls stay uncharged. A std body that
+  drops a container EMPTY at run time (sort's scratch `Vec`, `extend`/`collect`'s exhausted `IntoIter`)
+  is charged — the type-level model local code always had, now reached through std. Corpus A/B against
+  v0.40.9 over 514 Drop crates: ADDED 17, REMOVED 0, `inferred` CHANGED 1, no field lost a value in any
+  row. Third-party generics are NOT read (a `cargo check` dependency ships no optimized MIR) — that
+  boundary is unchanged.
+
 ## [0.40.9] — 2026-10-13
 
 candor-scan and candor-classify; candor-query is unchanged apart from the version, and the deep engine changes

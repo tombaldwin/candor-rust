@@ -14,7 +14,7 @@
 //! still cannot resolve (the same dynamic dispatch HIR can't), so the go/no-go is grounded in fact.
 
 use rustc_middle::mir::{Operand, TerminatorKind};
-use rustc_middle::ty::{Ty, TyCtxt, TyKind, TypingEnv};
+use rustc_middle::ty::{Ty, TyCtxt, TyKind, TypeVisitableExt, TypingEnv};
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
@@ -259,6 +259,412 @@ fn walk_drop_tys<'tcx>(
     }
 }
 
+/// SOUNDNESS R1117 — a drop that runs INSIDE a generic body the caller instantiates.
+///
+/// `drop_edges` reads each LOCAL body's own `Drop` terminators, so it sees exactly the drops written in
+/// this crate's MIR. But a caller that hands a concrete drop-relevant type to a GENERIC body — a std one
+/// (`Vec::<H>::clear`, `Option::<u32>::ok_or::<H>`, `Result::<u32, H>::ok`, the `try_process` behind
+/// `collect::<Result<Vec<H>, _>>`, the `fold` closure behind `count`) or a local one (`fn eat<T>(_: T)`
+/// called with `H`) — runs that type's destructor in the CALLEE's body, where the drop is written over a
+/// type PARAMETER. Read standalone, `T` has no destructor; read at the call site, it is `H`. Measured at
+/// v0.40.9 on R1117's nine executed cells plus twelve more of the same shape (drop observed at run
+/// time, row absent, `deny Fs <fn>` exit 0); `tests/integration.sh` 9c-vi pins a set of them.
+///
+/// This is not monomorphization of the whole crate. It is the one question `drop_edges` already asks —
+/// "which local `Drop` impls run here?" — asked of a callee's body INSTANTIATED with the call site's own
+/// generic args, which the MIR carries on every `Call` terminator. std's generic bodies ship their MIR
+/// in metadata precisely because every downstream crate must instantiate them, so the body is there to
+/// read; nothing about it is guessed or tabled.
+///
+/// Three bounds keep it the same question rather than a new analysis:
+///   * DESCENT IS GATED ON THE ARGS: a callee is entered only if its generic args mention a type that
+///     reaches a LOCAL `Drop` impl (`args_reach_local_drop`). A std body can only name a local destructor
+///     through its type parameters, so a callee whose args reach none cannot contribute and is not read.
+///     That prunes every call that does not carry the crate's own drop types.
+///   * NORMAL PATH ONLY inside callees: cleanup (unwind) blocks are skipped. Panic-path drops inside a
+///     callee were never charged before this; they stay so (a precision choice, not a new silence), and
+///     reading them would charge every `Vec::push(h)` for the `h` an allocation panic would drop.
+///   * Only drops whose type MENTIONS A PARAMETER of the callee are read. A drop over a concrete type in a
+///     LOCAL callee is already that callee's own edge, inherited through the call edge.
+///
+/// A drop of an ADT whose own destructor is GENERIC over a drop-relevant arg — std's `Drain<'_, H>`,
+/// whose `Drop::drop` drops the un-yielded elements, or a local `impl<T> Drop for RawBox<T>` — is
+/// followed into that destructor's instantiated body the same way, at the root and inside callees:
+/// reading what the destructor does, so `MutexGuard<H>` (which only unlocks) charges nothing. And a
+/// drop that elaboration guarded by a switch on the value's discriminant is read per VARIANT
+/// (`guarded_variant`), which is what keeps `Result::<H, E>::ok` uncharged.
+pub(crate) struct InstDropWalk<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    reach: std::collections::HashMap<Ty<'tcx>, bool>,
+    body: std::collections::HashMap<
+        (TypingEnv<'tcx>, rustc_middle::ty::Instance<'tcx>),
+        std::rc::Rc<InstFacts<'tcx>>,
+    >,
+    closure: std::collections::HashMap<
+        (TypingEnv<'tcx>, rustc_middle::ty::Instance<'tcx>),
+        std::rc::Rc<std::collections::HashSet<LocalDefId>>,
+    >,
+    /// Roots whose walk hit `INST_WALK_BUDGET` (reported under `CANDOR_DROP_DEBUG`).
+    pub(crate) truncated: usize,
+}
+
+/// One instance's own facts: the local drop impls its normal path runs, and the callees it hands
+/// drop-relevant types to.
+type InstFacts<'tcx> = (Vec<LocalDefId>, Vec<rustc_middle::ty::Instance<'tcx>>);
+
+/// Instances one root may visit. A backstop, not a tuning knob: the args gate keeps real walks to tens of
+/// instances; a root that exceeds it keeps what it found (never less than before this walk existed).
+const INST_WALK_BUDGET: usize = 4096;
+
+impl<'tcx> InstDropWalk<'tcx> {
+    pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
+        InstDropWalk {
+            tcx,
+            reach: Default::default(),
+            body: Default::default(),
+            closure: Default::default(),
+            truncated: 0,
+        }
+    }
+
+    /// Does dropping, or handing over, a value of `ty` reach a LOCAL `Drop` impl anywhere in the type —
+    /// including behind references (a `&mut Vec<H>` receiver still lets `clear` drop an `H`)?
+    fn ty_reaches(&mut self, ty: Ty<'tcx>) -> bool {
+        if let Some(&b) = self.reach.get(&ty) {
+            return b;
+        }
+        let mut b = false;
+        for t in ty.walk().filter_map(|g| g.as_type()) {
+            let mut out = std::collections::HashSet::new();
+            let mut seen = std::collections::HashSet::new();
+            local_drop_impls(self.tcx, t, &mut out, &mut seen);
+            if !out.is_empty() {
+                b = true;
+                break;
+            }
+        }
+        self.reach.insert(ty, b);
+        b
+    }
+
+    fn args_reach_local_drop(&mut self, args: rustc_middle::ty::GenericArgsRef<'tcx>) -> bool {
+        args.types().any(|t| self.ty_reaches(t))
+    }
+
+    /// The non-local destructors that run when a value of `ty` is dropped and whose type args reach a
+    /// local `Drop` — each as the `Drop::drop` instance to read. Fields are followed so a local wrapper
+    /// around a `Drain<'_, H>` is covered. A LOCAL destructor is `local_drop_impls`'s job, not this one's.
+    fn nonlocal_dtors(
+        &mut self,
+        ty: Ty<'tcx>,
+        out: &mut Vec<rustc_middle::ty::Instance<'tcx>>,
+        seen: &mut std::collections::HashSet<Ty<'tcx>>,
+        depth: u32,
+    ) {
+        if depth > DROP_WALK_MAX_DEPTH || !seen.insert(ty) {
+            return;
+        }
+        match ty.kind() {
+            TyKind::Adt(adt, args) => {
+                if let Some(dtor) = adt.destructor(self.tcx)
+                    && self.args_reach_local_drop(args)
+                {
+                    out.push(rustc_middle::ty::Instance::new_raw(dtor.did, args));
+                }
+                for field in adt.all_fields() {
+                    let fty = field.ty(self.tcx, args).skip_normalization();
+                    self.nonlocal_dtors(fty, out, seen, depth + 1);
+                }
+            }
+            TyKind::Tuple(tys) => {
+                for t in tys.iter() {
+                    self.nonlocal_dtors(t, out, seen, depth + 1);
+                }
+            }
+            TyKind::Array(t, _) | TyKind::Slice(t) => self.nonlocal_dtors(*t, out, seen, depth + 1),
+            TyKind::Closure(_, args) => {
+                for t in args.as_closure().upvar_tys() {
+                    self.nonlocal_dtors(t, out, seen, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The MIR of an instance we are willing to read: a fn-like ITEM with MIR available (std generics
+    /// and `#[inline]` items ship it; a non-generic, non-inline foreign fn does not and cannot name a
+    /// local type anyway). Shims, intrinsics and virtual calls are not read.
+    fn readable_body(&self, inst: rustc_middle::ty::Instance<'tcx>) -> Option<&'tcx rustc_middle::mir::Body<'tcx>> {
+        let rustc_middle::ty::InstanceKind::Item(did) = inst.def else { return None };
+        if !self.tcx.def_kind(did).is_fn_like() || !self.tcx.is_mir_available(did) {
+            return None;
+        }
+        Some(self.tcx.instance_mir(inst.def))
+    }
+
+    /// Resolve a `FnDef` callee to the instance that runs. `try_resolve` asserts a Fn/AssocFn def; any
+    /// failure (too generic, an error) is "not read" — the status quo before this walk.
+    fn resolve(
+        &self,
+        env: TypingEnv<'tcx>,
+        did: rustc_hir::def_id::DefId,
+        args: rustc_middle::ty::GenericArgsRef<'tcx>,
+    ) -> Option<rustc_middle::ty::Instance<'tcx>> {
+        if !matches!(self.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
+            return None;
+        }
+        rustc_middle::ty::Instance::try_resolve(self.tcx, env, did, args).ok().flatten()
+    }
+
+    /// One instance's own contribution: the local drop impls its NORMAL-path body runs over a
+    /// parameter-dependent type, and the callee instances (args gated) it hands those types to.
+    fn body_facts(
+        &mut self,
+        env: TypingEnv<'tcx>,
+        inst: rustc_middle::ty::Instance<'tcx>,
+    ) -> std::rc::Rc<InstFacts<'tcx>> {
+        if let Some(f) = self.body.get(&(env, inst)) {
+            return f.clone();
+        }
+        let tcx = self.tcx;
+        let mut drops = std::collections::HashSet::new();
+        let mut next = Vec::new();
+        if let Some(body) = self.readable_body(inst) {
+            let inst_ty = |t: Ty<'tcx>| {
+                inst.try_instantiate_mir_and_normalize_erasing_regions(
+                    tcx,
+                    env,
+                    rustc_middle::ty::EarlyBinder::bind(t),
+                )
+                .ok()
+            };
+            for (bb_idx, bb) in body.basic_blocks.iter_enumerated() {
+                if bb.is_cleanup {
+                    continue;
+                }
+                let Some(term) = &bb.terminator else { continue };
+                match &term.kind {
+                    TerminatorKind::Drop { place, .. } => {
+                        let raw = place.ty(&body.local_decls, tcx).ty;
+                        if !raw.has_param() {
+                            continue;
+                        }
+                        let Some(ty) = inst_ty(raw) else { continue };
+                        // The value's drop-relevant parts: the whole type, or — when drop elaboration
+                        // guarded this drop by a switch on the value's own discriminant — only the
+                        // variant that switch selected. See `guarded_variant`.
+                        let parts = match guarded_variant(tcx, body, bb_idx, place, ty) {
+                            Some(fields) => fields,
+                            None => vec![ty],
+                        };
+                        for part in parts {
+                            let mut seen = std::collections::HashSet::new();
+                            local_drop_impls(tcx, part, &mut drops, &mut seen);
+                            let mut seen = std::collections::HashSet::new();
+                            self.nonlocal_dtors(part, &mut next, &mut seen, 0);
+                        }
+                    }
+                    TerminatorKind::Call { func, .. } => {
+                        let raw = func.ty(&body.local_decls, tcx);
+                        if !raw.has_param() {
+                            continue;
+                        }
+                        let Some(fty) = inst_ty(raw) else { continue };
+                        let TyKind::FnDef(d, a) = *fty.kind() else { continue };
+                        if is_drop_glue_call(tcx, d) {
+                            if let Some(t) = a.types().next() {
+                                let mut seen = std::collections::HashSet::new();
+                                local_drop_impls(tcx, t, &mut drops, &mut seen);
+                                let mut seen = std::collections::HashSet::new();
+                                self.nonlocal_dtors(t, &mut next, &mut seen, 0);
+                            }
+                            continue;
+                        }
+                        if !self.args_reach_local_drop(a) {
+                            continue;
+                        }
+                        if let Some(callee) = self.resolve(env, d, a) {
+                            next.push(callee);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let f = std::rc::Rc::new((drops.into_iter().collect(), next));
+        self.body.insert((env, inst), f.clone());
+        f
+    }
+
+    /// Every local drop impl that runs on the normal path of `root`, transitively through the args-gated
+    /// callees. Exact for a completed walk, so it is memoised and reused when another root reaches it.
+    pub(crate) fn reach(
+        &mut self,
+        env: TypingEnv<'tcx>,
+        root: rustc_middle::ty::Instance<'tcx>,
+    ) -> std::rc::Rc<std::collections::HashSet<LocalDefId>> {
+        if let Some(c) = self.closure.get(&(env, root)) {
+            return c.clone();
+        }
+        let mut out = std::collections::HashSet::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        let mut truncated = false;
+        while let Some(i) = stack.pop() {
+            if !visited.insert(i) {
+                continue;
+            }
+            if visited.len() > INST_WALK_BUDGET {
+                truncated = true;
+                break;
+            }
+            if let Some(c) = self.closure.get(&(env, i)) {
+                out.extend(c.iter().copied());
+                continue;
+            }
+            let f = self.body_facts(env, i);
+            out.extend(f.0.iter().copied());
+            stack.extend(f.1.iter().copied());
+        }
+        let c = std::rc::Rc::new(out);
+        if truncated {
+            self.truncated += 1;
+        } else {
+            self.closure.insert((env, root), c.clone());
+        }
+        c
+    }
+
+    /// The roots one LOCAL body contributes: every (args-gated) callee it calls, and every non-local
+    /// destructor its own `Drop` terminators run. The environment is the body's own when its types still
+    /// mention its parameters, else the fully monomorphic one.
+    pub(crate) fn roots(
+        &mut self,
+        did: LocalDefId,
+        body: &rustc_middle::mir::Body<'tcx>,
+    ) -> Vec<(TypingEnv<'tcx>, rustc_middle::ty::Instance<'tcx>)> {
+        let tcx = self.tcx;
+        let mut out = Vec::new();
+        for bb in body.basic_blocks.iter() {
+            let Some(term) = &bb.terminator else { continue };
+            match &term.kind {
+                TerminatorKind::Call { func, .. } if !bb.is_cleanup => {
+                    let TyKind::FnDef(d, a) = *func.ty(&body.local_decls, tcx).kind() else { continue };
+                    if is_drop_glue_call(tcx, d) {
+                        if let Some(t) = a.types().next() {
+                            let env = env_for(tcx, did, t.has_param());
+                            let mut v = Vec::new();
+                            let mut seen = std::collections::HashSet::new();
+                            self.nonlocal_dtors(t, &mut v, &mut seen, 0);
+                            out.extend(v.into_iter().map(|i| (env, i)));
+                        }
+                        continue;
+                    }
+                    if !self.args_reach_local_drop(a) {
+                        continue;
+                    }
+                    let env = env_for(tcx, did, a.has_param());
+                    if let Some(i) = self.resolve(env, d, a) {
+                        out.push((env, i));
+                    }
+                }
+                TerminatorKind::Drop { place, .. } => {
+                    let t = place.ty(&body.local_decls, tcx).ty;
+                    let env = env_for(tcx, did, t.has_param());
+                    let mut v = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    self.nonlocal_dtors(t, &mut v, &mut seen, 0);
+                    out.extend(v.into_iter().map(|i| (env, i)));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Drop elaboration in a GENERIC body cannot drop "just the `Err` payload" by place when a sibling arm
+/// moved the `Ok` payload out, so it emits the OPEN-DROP shape — `_k = discriminant(_1); switchInt(_k)
+/// -> [0: skip, 1: drop(_1)]` — and drops the WHOLE value only on the arm where it is still whole.
+/// Read naively, `drop(_1)` over `Result<H, u32>` charges `H::drop` in `Result::ok`, where the only
+/// value it can ever drop is the `Err(u32)`: a fabrication the concrete-MIR path never makes, because
+/// rustc elaborates a concrete body's drop by place. Measured on the corpus (lapin's
+/// `try_recv().ok()`), and on the fixture `m_resokok`.
+///
+/// So when the drop's block has exactly ONE predecessor, that predecessor's terminator switches on
+/// `discriminant(<the dropped local>)` computed IN THAT SAME BLOCK, and this block is the target of
+/// exactly one discriminant value (never `otherwise`), the drop runs on that one variant: return its
+/// fields' instantiated types. Anything else — a projection, an enum with its OWN destructor (which
+/// runs on the whole value), a shared target, a reassignment between — returns `None` and the whole
+/// type is charged, as before. It narrows only charges `InstDropWalk` itself adds; no pre-existing
+/// edge is read through it.
+fn guarded_variant<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &rustc_middle::mir::Body<'tcx>,
+    bb: rustc_middle::mir::BasicBlock,
+    place: &rustc_middle::mir::Place<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<Vec<Ty<'tcx>>> {
+    use rustc_middle::mir::{Rvalue, StatementKind};
+    if !place.projection.is_empty() {
+        return None;
+    }
+    let TyKind::Adt(adt, args) = ty.kind() else { return None };
+    if !adt.is_enum() || adt.destructor(tcx).is_some() {
+        return None;
+    }
+    let preds = &body.basic_blocks.predecessors()[bb];
+    let [pred] = preds.as_slice() else { return None };
+    let pdata = &body.basic_blocks[*pred];
+    let TerminatorKind::SwitchInt { discr, targets } = &pdata.terminator.as_ref()?.kind else {
+        return None;
+    };
+    let switched = discr.place()?;
+    if !switched.projection.is_empty() {
+        return None;
+    }
+    // `_k = discriminant(<place>)` must be the LAST write to `_k` in the predecessor, and nothing
+    // after it may write the dropped local.
+    let mut reads_place = false;
+    for st in &pdata.statements {
+        if let StatementKind::Assign(b) = &st.kind {
+            let (lhs, rv) = &**b;
+            if lhs.local == switched.local {
+                reads_place = lhs.projection.is_empty()
+                    && matches!(rv, Rvalue::Discriminant(p) if p.local == place.local && p.projection.is_empty());
+            } else if lhs.local == place.local {
+                reads_place = false;
+            }
+        } else if let StatementKind::SetDiscriminant { place: p, .. } = &st.kind
+            && p.local == place.local
+        {
+            reads_place = false;
+        }
+    }
+    if !reads_place || targets.otherwise() == bb {
+        return None;
+    }
+    let mut hit = targets.iter().filter(|(_, t)| *t == bb).map(|(v, _)| v);
+    let value = hit.next()?;
+    if hit.next().is_some() {
+        return None;
+    }
+    let (vidx, _) = adt.discriminants(tcx).find(|(_, d)| d.val == value)?;
+    Some(adt.variant(vidx).fields.iter().map(|f| f.ty(tcx, args).skip_normalization()).collect())
+}
+
+/// `core::ptr::drop_in_place::<T>` or the compiler's `core::ptr::drop_glue::<T>` lang item that std's
+/// OPTIMIZED MIR calls in its place (the inliner replaces `drop_in_place` with `drop_glue` in every std
+/// body read by `InstDropWalk` — `Vec::clear` is `drop_glue::<[T]>(ptr)`). Either runs `T`'s drop glue.
+fn is_drop_glue_call(tcx: TyCtxt<'_>, d: rustc_hir::def_id::DefId) -> bool {
+    (tcx.item_name(d).as_str() == "drop_in_place" && tcx.crate_name(d.krate).as_str() == "core")
+        || tcx.lang_items().drop_glue_fn() == Some(d)
+}
+
+fn env_for<'tcx>(tcx: TyCtxt<'tcx>, did: LocalDefId, generic: bool) -> TypingEnv<'tcx> {
+    if generic { TypingEnv::post_analysis(tcx, did.to_def_id()) } else { TypingEnv::fully_monomorphized() }
+}
+
 /// Production use of MIR (narrow, by design): the `(caller, drop-impl)` edges implied by the `Drop`
 /// terminators in every local function's MIR. HIR has no node for an implicit, scope-exit drop, so the
 /// HIR engine was structurally blind to an effectful `Drop` (a guard that does I/O on the way out — a
@@ -266,6 +672,7 @@ fn walk_drop_tys<'tcx>(
 /// Returns edges; the caller inserts them into `calls`.
 pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
     let mut edges = Vec::new();
+    let mut walk = InstDropWalk::new(tcx);
     for did in tcx.hir_body_owners() {
         // `is_fn_like()` is RUSTC'S OWN predicate for the bodies `optimized_mir` is defined on —
         // `Fn | AssocFn | Closure | SyntheticCoroutineBody` — and it is load-bearing, not tidiness.
@@ -325,9 +732,7 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
                 TerminatorKind::Call { func, .. } => match func.ty(&body.local_decls, tcx).kind() {
                     // The sync `drop_in_place` lang item was removed upstream (async-drop landed);
                     // identify `core::ptr::drop_in_place` by name + defining crate instead.
-                    TyKind::FnDef(d, args)
-                        if tcx.item_name(*d).as_str() == "drop_in_place"
-                            && tcx.crate_name(d.krate).as_str() == "core" =>
+                    TyKind::FnDef(d, args) if is_drop_glue_call(tcx, *d) =>
                     {
                         args.types().next()
                     }
@@ -340,6 +745,22 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
                 local_drop_impls(tcx, ty, &mut impls, &mut seen);
             }
         }
+        // SOUNDNESS R1117 — the drops this body's CALLEES run over the concrete types it hands them, and
+        // the drops a non-local destructor runs over this body's dropped values. See `InstDropWalk`.
+        let mut inst_impls = std::collections::HashSet::new();
+        for (env, root) in walk.roots(did, body) {
+            for l in walk.reach(env, root).iter() {
+                if !impls.contains(l) && inst_impls.insert(*l) && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+                    eprintln!(
+                        "CANDOR_DROP_INST_EDGE {} <- {} (drop impl {})",
+                        tcx.def_path_str(owner.to_def_id()),
+                        tcx.def_path_str_with_args(root.def_id(), root.args),
+                        tcx.def_path_str(l.to_def_id()),
+                    );
+                }
+            }
+        }
+        impls.extend(inst_impls);
         for impl_did in impls {
             // Self-edge guard, against the ATTRIBUTION TARGET rather than the body owner: a `Drop::drop`
             // that lets a value of its own type fall out of scope (directly or inside a closure in its
@@ -362,6 +783,9 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
                 edges.push((owner, impl_did));
             }
         }
+    }
+    if walk.truncated > 0 && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+        eprintln!("CANDOR_DROP_INST_TRUNCATED {}", walk.truncated);
     }
     edges
 }
