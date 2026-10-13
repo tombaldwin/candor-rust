@@ -3854,6 +3854,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // nothing else: the lookup is the EXACT qual, never a leaf guess.
                     .or_else(|| {
                         let r = c.path.strip_prefix("crate::").filter(|r| !r.contains("::") && !c.method)?;
+                        // A root name ALSO declared in an `extern` block is a cfg pair (wasm-bindgen's `externs!`: the
+                        // extern on wasm32, a panicking stub elsewhere): resolving to the stub would withdraw the §4
+                        // `native:extern fn` disclosure below (measured: `JsValue::is_none` went ABSENT). Left to it.
+                        if merged.extern_fns.contains(r) {
+                            return None;
+                        }
                         let hit = by_root.get(r);
                         if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
                             eprintln!("R1154ROOT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
@@ -3869,7 +3875,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let rest = c.path.strip_prefix(lib)?.strip_prefix("::")?;
                         let hit = if rest.contains("::") {
                             resolve_target(rest, &c.leaf, c.method, &by_tail2, &by_leaf)
-                        } else if !c.method {
+                        } else if !c.method && !merged.extern_fns.contains(rest) {
                             by_root.get(rest)
                         } else {
                             None

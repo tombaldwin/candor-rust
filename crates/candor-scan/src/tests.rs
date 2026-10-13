@@ -30652,6 +30652,13 @@ fn main() {}
     let c = scan_src_to_json_multi("clap", &[("src/lib.rs", "pub use std::fmt;\n"),
         ("src/bin/fx.rs", "use clap::Command;\nfn main() { let _m = Command::new(\"x\").get_matches(); }\n")]);
     assert!(veina_row_effs(&c, "bin::fx::main").iter().any(|e| e == "Env"), "R1154: clap's own bin keeps get_matches' Env:\n{c:#}");
+    // a root name that is ALSO an extern decl (wasm-bindgen's `externs!` cfg pair) keeps its `native:` disclosure: the
+    // crate-root resolution first measured `JsValue::is_none` ABSENT by resolving to the non-wasm panicking stub
+    let x = scan_src_to_json_multi("v053ext", &[("src/lib.rs", r##"#[cfg(target_arch = "wasm32")] extern "C" { fn ext_x() -> u32; }
+#[cfg(not(target_arch = "wasm32"))] unsafe extern "C" fn ext_x() -> u32 { panic!("not on this target") }
+pub mod m { use crate::ext_x; pub fn caller() -> u32 { unsafe { ext_x() } } }
+"##)]);
+    assert!(veina_row_effs(&x, "m::caller").iter().any(|e| e == "Unknown"), "R1154: extern cfg pair keeps native:extern fn:\n{x:#}");
 }
 
 /// SOUNDNESS R1153 (v053; fixture rustagent-v053/fx/r1153, every cell EXECUTED). A method receiver typed by a bare
