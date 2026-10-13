@@ -626,6 +626,72 @@ pub(crate) fn impl_ref_self_key(trait_leaf: &str, ty_leaf: &str) -> String {
 }
 
 /// The built-in primitive type names a crate can implement its own operator traits on (`impl Add<D> for u64`).
+/// SOUNDNESS R1165 — the std traits a DEPENDENCY's generic body can run on a value the consumer hands it, keyed by the
+/// trait's leaf as `TraitImplIndex` files it, with the members such a body can reach on the consumer's impl. Required
+/// members and the provided ones an impl commonly overrides; a member the impl does not define has no unit and adds
+/// nothing. `Drop` is not here: a by-value hand-off's drop is the caller's (R1126) and has its own route.
+///
+/// Leaf-keyed, like every trait index in this engine: a crate-local trait that shares one of these leaves is read as
+/// the std trait, which can only ADD a disclosure (the over-disclosure direction), never withhold one.
+pub(crate) const STD_WITNESS_TRAITS: &[(&str, &[&str])] = &[
+    ("PartialEq", &["eq", "ne"]),
+    ("PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]),
+    ("Ord", &["cmp", "max", "min", "clamp"]),
+    ("Hash", &["hash", "hash_slice"]),
+    ("Hasher", &["write", "finish", "write_u8", "write_u16", "write_u32", "write_u64", "write_usize", "write_str"]),
+    ("Display", &["fmt"]),
+    ("Debug", &["fmt"]),
+    ("LowerHex", &["fmt"]),
+    ("UpperHex", &["fmt"]),
+    ("Octal", &["fmt"]),
+    ("Binary", &["fmt"]),
+    ("LowerExp", &["fmt"]),
+    ("UpperExp", &["fmt"]),
+    ("Pointer", &["fmt"]),
+    ("Clone", &["clone", "clone_from"]),
+    ("Default", &["default"]),
+    ("Iterator", &["next", "size_hint", "nth", "count", "last", "fold", "try_fold", "for_each", "advance_by"]),
+    ("DoubleEndedIterator", &["next_back", "nth_back", "rfold", "try_rfold"]),
+    ("ExactSizeIterator", &["len"]),
+    ("IntoIterator", &["into_iter"]),
+    ("Extend", &["extend"]),
+    ("FromIterator", &["from_iter"]),
+    ("Read", &["read", "read_to_end", "read_to_string", "read_exact", "read_vectored"]),
+    ("Write", &["write", "flush", "write_all", "write_vectored", "write_fmt", "write_str", "write_char"]),
+    ("BufRead", &["fill_buf", "consume", "read_line", "read_until"]),
+    ("Seek", &["seek", "stream_position", "rewind"]),
+    ("AsRef", &["as_ref"]),
+    ("AsMut", &["as_mut"]),
+    ("Borrow", &["borrow"]),
+    ("BorrowMut", &["borrow_mut"]),
+    ("Deref", &["deref"]),
+    ("DerefMut", &["deref_mut"]),
+    ("Into", &["into"]),
+    ("TryInto", &["try_into"]),
+    ("FromStr", &["from_str"]),
+    ("Future", &["poll"]),
+    ("Error", &["source", "description", "cause"]),
+    ("Index", &["index"]),
+    ("IndexMut", &["index_mut"]),
+    ("Add", &["add"]),
+    ("Sub", &["sub"]),
+    ("Mul", &["mul"]),
+    ("Div", &["div"]),
+    ("Rem", &["rem"]),
+    ("Neg", &["neg"]),
+    ("Not", &["not"]),
+    ("BitAnd", &["bitand"]),
+    ("BitOr", &["bitor"]),
+    ("BitXor", &["bitxor"]),
+    ("Shl", &["shl"]),
+    ("Shr", &["shr"]),
+    ("AddAssign", &["add_assign"]),
+    ("SubAssign", &["sub_assign"]),
+    ("MulAssign", &["mul_assign"]),
+    ("DivAssign", &["div_assign"]),
+    ("RemAssign", &["rem_assign"]),
+];
+
 pub(crate) const PRIMITIVE_LEAVES: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool", "char",
 ];

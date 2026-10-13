@@ -48,6 +48,7 @@ mod lazy;
 mod std_methods;
 mod mbe;
 mod deps;
+mod depsig;
 mod collector;
 mod decls;
 mod cache;

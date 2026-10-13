@@ -56,6 +56,13 @@ under-report, never a wrong label.
   `Drop` of a value of a generic type `T` (`fn eat<T>(_t: T) {}`) are SILENT in that generic body — the
   scan cannot name `T`'s impl (SPEC §4's external-abstraction dispatch, SOUNDNESS R1126). A caller that
   passes a concrete value by value to an otherwise-unnamed generic parameter is charged instead.
+  When that generic body is in a CHAINED dependency, its report cannot say it runs the caller's impl, so a caller
+  that hands a CHAINED dependency a value of a local type whose hand-written std-trait impl (`PartialEq`, `Hash`,
+  `Display`, `Iterator`, `io::Write`, …) carries a concrete effect discloses `Unknown` with
+  `dispatch:<Trait>.<member>` (SOUNDNESS R1165) — narrowed to the traits the callee's parameter is bounded by where
+  the dependency's source is readable (a `path` dependency or the registry checkout Cargo.lock names). Still silent
+  there: an argument no route types or a generic `T` forwarded by the caller, and an impl whose only effect is
+  `Unknown`.
   A dependency's EXTENSION-TRAIT method called on a std or primitive value (`n.extend()` with
   `num_conv::prelude::*`, `it.sorted()` with `itertools::Itertools`) discloses the importing module's
   dependencies in `invisible` (SOUNDNESS R1136), except where std itself has a stable method of the same

@@ -1195,7 +1195,7 @@ fn verified_workspace_root(dir: &Path, root: &Path) -> Option<std::path::PathBuf
 /// the build script's universe, not the crate's runtime one) are excluded BY CONSTRUCTION — they are
 /// different KEYS ("dev-dependencies" is not "dependencies"), so unlike the old line scanner there is no
 /// prefix/substring confusion to guard against here at all.
-fn manifest_dependency_tables(doc: &toml::Table) -> Vec<&toml::Table> {
+pub(crate) fn manifest_dependency_tables(doc: &toml::Table) -> Vec<&toml::Table> {
     let mut out = Vec::new();
     if let Some(t) = doc.get("dependencies").and_then(toml::Value::as_table) {
         out.push(t);

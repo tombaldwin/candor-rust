@@ -11,6 +11,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a local value with an effectful std-trait impl handed to a CHAINED dependency is disclosed (SOUNDNESS
+  R1165).** `gena::same_eq(Noisy(1), Noisy(1))` runs `Noisy::eq` inside the dependency's generic body (likewise
+  `PartialOrd`, `Hash`, `Display` through `format!`, `Iterator::next` through `IntoIterator`, `io::Write`, a method on a
+  dependency value, a `&dyn Display` parameter). Chained, the dependency's report answered the call — its body is pure
+  (SPEC §4, R1126) and ⟨0.39⟩ `dispatchesOn` has no std-owned spelling — so the caller read ABSENT while the unchained
+  scan carried `invisible`: chaining deleted the only disclosure. The caller now adds `Unknown` with
+  `dispatch:<Trait>.<member>` where that impl member carries a concrete effect the caller lacks; a disclosure, never a
+  charge. Narrowed by the dependency's own source signature where it is readable (a `path` dependency, the registry
+  checkout Cargo.lock names, else every semver-compatible checkout): only the traits the parameter is bounded by, and
+  nothing for a concrete parameter, a bound the body never touches, or a constructor; anything unreadable keeps the
+  disclosure. Executed fixture: 13 shapes `deny Fs Unknown <fn>` 0 → 1, 7 pure controls stay 0. Corpus, against the
+  previous HEAD: unchained 5,221 registry entries byte-identical (2,718,022 rows); chained 982 consumers (every
+  dependency chained), 0 rows newly `Unknown`, 14 already-`Unknown` rows gain a reason (10 their first `dispatch:`
+  one), REMOVED 0, nothing lost. Residuals: an argument the strict typer cannot type, a generic `T` forwarded by the
+  caller, a value stored in a dependency container and dispatched by a later call, an impl whose only effect is
+  `Unknown`, and an unchained dependency (its `invisible` is the disclosure).
+
 - ⚠ **candor-scan: a dependency's operator impl on a primitive (or other foreign) `Self` is reached (SOUNDNESS R1164).**
   `impl Add<D> for u32`, `impl Rem<&D> for &u16`, a macro-made `impl BitAnd<M> for u64`, `impl PartialEq<D> for
   str`/`String`, defined in a dependency and reached by `a + d` (or `a.add(d)`, `Add::add(a, d)`) with `d: dep::D`,

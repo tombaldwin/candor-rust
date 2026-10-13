@@ -62,6 +62,14 @@ pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
 /// segment keeps it out of every local key lookup.
 pub(crate) const OP_RHS_MARKER: &str = "<oprhs>";
 
+/// SOUNDNESS R1165 — `cr::<witness>::<Type leaf>::<arg position>::<callee rest>`: a call into the dependency `cr`
+/// (a path call, or a method on a value of `cr`'s type) that hands it a value of a CRATE-LOCAL type carrying a
+/// hand-written impl of a std trait (`model::STD_WITNESS_TRAITS`). A generic body in `cr` may run that impl
+/// (`fn same_eq<T: PartialEq>(a: T, b: T) { a == b }`), and `cr`'s report cannot say so: the body's own row is pure
+/// (SPEC §4, R1126) and ⟨0.39⟩ `dispatchesOn` has no spelling for a std-owned member. Consumed only by the call loop,
+/// which records the site for a post-fixpoint DISCLOSURE when `cr` is chained; it forms no edge.
+pub(crate) const WITNESS_MARKER: &str = "<witness>";
+
 /// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
 /// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
 /// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a
