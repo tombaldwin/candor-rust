@@ -2858,9 +2858,15 @@ impl<'a> CallCollector<'a> {
     /// The type of a value-position local macro invocation, from its macro-by-example expansion (see `type_of`).
     fn type_of_macro_value(&self, mac: &syn::Macro) -> Option<String> {
         let name = mac.path.get_ident()?.to_string();
+        // SOUNDNESS R1156 — a twice-defined name is typed from the definition in TEXTUAL scope here, when one is
+        // recorded (`model::SCOPE_MACRO_PREFIX`) and it is not R208's `#[cfg]` twin.
+        let redef = self.macro_twins.contains(&format!("{}{name}", crate::model::MACRO_REDEF_PREFIX));
+        let scoped = (redef && !self.macro_twins.contains(&name) && !self.body_macros.contains_key(&name))
+            .then(|| self.uses.get(&format!("{}{name}", crate::model::SCOPE_MACRO_PREFIX)))
+            .flatten();
         if self.macro_expanding.contains(&name)
             || self.macro_twins.contains(&name)
-            || self.macro_twins.contains(&format!("{}{name}", crate::model::MACRO_REDEF_PREFIX))
+            || (redef && scoped.is_none() && !self.body_macros.contains_key(&name))
         {
             return None;
         }
@@ -2868,7 +2874,7 @@ impl<'a> CallCollector<'a> {
         if DEPTH.with(|d| d.get()) >= 8 {
             return None; // a recursive template: no type rather than no end
         }
-        let body = self.body_macros.get(&name).or_else(|| self.local_macros.get(&name))?;
+        let body = self.body_macros.get(&name).or(scoped).or_else(|| self.local_macros.get(&name))?;
         let ts = crate::mbe::expand_invocation(body, &respan_call_site(mac.tokens.clone()))?;
         let e: syn::Expr = syn::parse2(ts).ok()?;
         DEPTH.with(|d| d.set(d.get() + 1));
@@ -10780,10 +10786,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // was, so a name this body declares still does NOT reach a crate-level template of that name —
         // that reading is unchanged by this cut and is not measured by it.
         let mname = mleaf.strip_prefix(crate::decls::ITEM_SENTINEL).unwrap_or(&mleaf).to_string();
+        // SOUNDNESS R1156 — a name the crate defines twice (sibling modules, a textual redefinition) is read from
+        // the definition in TEXTUAL scope at this item (`model::SCOPE_MACRO_PREFIX`), when one is recorded and the
+        // name is not R208's `#[cfg]` twin. `local_macros` holds the crate's LAST definition only, so `b::fb`'s
+        // `pick!` and `k2`'s second `k!` were left unexpanded (ABSENT over an executed write), and expanding the
+        // last definition everywhere fabricated onto the pure twin (7dc5fef, `a::fa`, `k1`).
+        let redef_any = self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
+        let scoped_def: Option<String> = (!mpath.contains("::")
+            && redef_any
+            && !self.macro_twins.contains(&mleaf)
+            && !self.body_macros.contains_key(&mname)
+            && !self.macro_expanding.contains(&mleaf))
+            .then(|| self.uses.get(&format!("{}{mleaf}", crate::model::SCOPE_MACRO_PREFIX)).cloned())
+            .flatten();
+        if scoped_def.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            eprintln!("R1156SCOPED\t{mleaf}"); // §E1 REACH COUNTER
+        }
         let mbody = if mpath.contains("::") {
             None
         } else if !self.macro_expanding.contains(&mname) && self.body_macros.contains_key(&mname) {
             self.body_macros.get(&mname).cloned()
+        } else if scoped_def.is_some() {
+            scoped_def.clone()
         } else if !self.macro_expanding.contains(&mleaf) {
             self.local_macros.get(&mleaf).cloned()
         } else {
@@ -10809,7 +10833,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // order this index does not hold, and the invocation is left to the stripped walk (v052 audit, fxm2).
                 let redefined = self.macro_twins.contains(&mleaf)
                     || self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
-                if !redefined || self.body_macros.contains_key(&mname) {
+                if !redefined || self.body_macros.contains_key(&mname) || scoped_def.is_some() {
                     if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
                         let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
                             proc_macro2::Group::new(proc_macro2::Delimiter::Brace, ts),

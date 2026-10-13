@@ -30494,9 +30494,9 @@ pub fn e1e() -> u64 { blk3!().0 }
     for f in ["e1", "e1c", "e1d", "e1e", "n1"] {
         assert!(veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "`{f}` writes (executed):\n{m:#}");
     }
-    // stated residuals: a twice-defined name is left to the `$`-stripped walk (as 0282a87)
+    // R1156 (v053): a twice-defined name expands from the definition in TEXTUAL scope (was this test's residual)
     for f in ["b::fb", "k2"] {
-        assert!(veina_row_effs(&m, f).is_empty(), "macro-redefinition residual `{f}` moved — decide it:\n{m:#}");
+        assert!(veina_row_effs(&m, f).iter().any(|e| e == "Fs"), "R1156 `{f}` writes (executed):\n{m:#}");
     }
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -30743,4 +30743,69 @@ pub fn l16() -> u64 { let x = loop { break mk(); }; (x + 1).0 }
     for f in ["l9", "l11", "l13", "l14"] {
         assert!(veina_row_effs(&v, f).is_empty(), "R1155 control `{f}` is pure (executed):\n{v:#}");
     }
+}
+
+/// SOUNDNESS R1156 (v053; fixture rustagent-v053/fx/r1156, every cell EXECUTED). A `macro_rules!` name defined twice
+/// (sibling modules `b::fb`, a textual redefinition `k2`, value-position twins `v::vb::vb`, a parent redefinition seen
+/// by a later child `qb::qb`, a `#[macro_use] mod` beside a sibling definition `zu`) was left unexpanded: ABSENT over a
+/// write. The definition in TEXTUAL scope at the item is expanded (`model::SCOPE_MACRO_PREFIX`). Controls: each pure
+/// twin (`a::fa`, `k1`, `v::va::va`, `qa::qa`, `mz::zp`) stays pure; `#[cfg]` twins stay R208's disclosure (`cw`).
+#[test]
+fn v053_r1156_twice_defined_macros_expand_from_textual_scope() {
+    let v = scan_src_to_json_multi("v053mac", &[("src/lib.rs", r##"#![allow(dead_code, unused_macros)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052m2", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);
+#[derive(Clone, Copy)] pub struct D2(pub u64);
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// same macro name in two modules, different expansions
+pub mod a { use super::*; macro_rules! pick { ($x:expr) => { D($x) + 0u64 }; } pub fn fa() -> u64 { pick!(1).0 } }
+pub mod b { use super::*; macro_rules! pick { ($x:expr) => { D2($x) + 0u64 }; } pub fn fb() -> u64 { pick!(1).0 } }
+// textual redefinition in one module
+macro_rules! k { ($x:expr) => { D($x) + 0u64 }; }
+pub fn k1() -> u64 { k!(1).0 }
+macro_rules! k { ($x:expr) => { D2($x) + 0u64 }; }
+pub fn k2() -> u64 { k!(1).0 }
+// repetition
+macro_rules! sum { ($($x:expr),*) => { 0u64 $( + ($x + 0u64).0 )* }; }
+pub fn r1() -> u64 { sum!(D(1), D2(2)) }
+// macro exported and used through a path from another module
+#[macro_export] macro_rules! exported_eff { ($x:expr) => { $crate::D2($x) + 0u64 }; }
+pub mod c { pub fn fc() -> u64 { crate::exported_eff!(1).0 } }
+// macro-made value bound via `let` INSIDE an expression macro block, escaping via the block's value
+macro_rules! blk { () => {{ let v = D2(1); v }}; }
+pub fn e1() -> u64 { let x = blk!(); (x + 1).0 }
+// nested macro call as an argument
+macro_rules! wrap { ($e:expr) => { $e }; }
+pub fn n1() -> u64 { wrap!(D2(1) + 1).0 }
+pub fn e1c() -> u64 { let x = { let v = D2(1); v }; (x + 1).0 }
+macro_rules! blk2 { () => { D2(1) }; }
+pub fn e1d() -> u64 { let x = blk2!(); (x + 1).0 }
+macro_rules! blk3 { () => {{ let v = D2(1); v + 1 }}; }
+pub fn e1e() -> u64 { blk3!().0 }
+// R1156 more: value-position twins; a child module inheriting the parent's CURRENT definition; #[macro_use] mod
+pub mod v { use super::*;
+    pub mod va { use super::*; macro_rules! mkv { () => { D(1) }; } pub fn va() -> u64 { let x = mkv!(); (x + 1).0 } }
+    pub mod vb { use super::*; macro_rules! mkv { () => { D2(1) }; } pub fn vb() -> u64 { let x = mkv!(); (x + 1).0 } }
+}
+macro_rules! q { ($x:expr) => { D($x) + 0u64 }; }
+pub mod qa { use super::*; pub fn qa() -> u64 { q!(1).0 } }
+macro_rules! q { ($x:expr) => { D2($x) + 0u64 }; }
+pub mod qb { use super::*; pub fn qb() -> u64 { q!(1).0 } }
+#[macro_use] pub mod mu { macro_rules! z { ($x:expr) => { $crate::D2($x) + 0u64 }; } }
+pub fn zu() -> u64 { z!(1).0 }
+pub mod mz { macro_rules! z { ($x:expr) => { crate::D($x) + 0u64 }; } pub fn zp() -> u64 { z!(1).0 } }
+// cfg twins (R208): no textual order picks one; disclosed, never picked
+#[cfg(unix)] macro_rules! w { ($x:expr) => { D2($x) + 0u64 }; }
+#[cfg(not(unix))] macro_rules! w { ($x:expr) => { D($x) + 0u64 }; }
+pub fn cw() -> u64 { w!(1).0 }
+"##)]);
+    for f in ["b::fb", "k2", "v::vb::vb", "qb::qb", "zu", "e1", "c::fc"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1156 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["a::fa", "k1", "v::va::va", "qa::qa", "mz::zp"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1156 control `{f}` is pure (executed):\n{v:#}");
+    }
+    assert_eq!(veina_row_effs(&v, "cw"), vec!["Unknown".to_string()], "R1156: a #[cfg] twin stays disclosed:\n{v:#}");
 }

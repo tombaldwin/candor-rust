@@ -101,6 +101,18 @@ pub(crate) fn scan_items(
         // Held for the whole arm, so a `mod`'s own `use` items, an impl's methods and a trait's defaults
         // are all read under it. See `lang::CfgOffScope`.
         let _cfg_off = crate::lang::CfgOffScope::enter_if(crate::lang::item_attrs(it));
+        // SOUNDNESS R1156 — record the ungated `macro_rules!` definition in TEXTUAL scope (see `SCOPE_MACRO_PREFIX`).
+        // A `#[cfg]`-gated one is R208's twin, disclosed there, and never recorded: no textual order picks it.
+        if let syn::Item::Macro(m) = it {
+            if m.mac.path.is_ident("macro_rules")
+                && (include_tests || !is_cfg_test(&m.attrs))
+                && !crate::lang::has_cfg(&m.attrs)
+            {
+                if let Some(name) = &m.ident {
+                    uses.insert(format!("{}{name}", crate::model::SCOPE_MACRO_PREFIX), m.mac.tokens.to_string());
+                }
+            }
+        }
         match it {
             syn::Item::Fn(f) => {
                 // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
@@ -252,6 +264,15 @@ pub(crate) fn scan_items(
                     // R167 -- an inline `mod` is in the SAME FILE, so it inherits this file's answer,
                     // which is exactly what `fn_locs`' own recursion does with its unchanged `file`.
                     scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, skip_test_fns, &mut subuses, out);
+                    // SOUNDNESS R1156 — `#[macro_use] mod m { macro_rules! .. }`: the module's macros stay in
+                    // textual scope after it.
+                    if m.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                        for (k, v) in subuses.iter() {
+                            if k.starts_with(crate::model::SCOPE_MACRO_PREFIX) {
+                                uses.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly

@@ -560,6 +560,12 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
 /// SOUNDNESS R1144 (v052 audit) — prefix of a `macro_twins` entry naming a `macro_rules!` name defined more than once
 /// with different templates anywhere (ungated too). `\u{2}` cannot begin a Rust identifier.
 pub(crate) const MACRO_REDEF_PREFIX: &str = "\u{2}redef:";
+/// SOUNDNESS R1156 — the `uses` key under which `decls::scan_items` records, in TEXTUAL order, the `macro_rules!`
+/// definition of a name in scope at the current item (`\u{2}scopemac:<name>` -> the definition's tokens). It is
+/// the module scope and order `local_macros` (one entry per name per crate) does not hold, so a name defined twice
+/// (sibling modules, a textual redefinition) expands from the definition the invocation really sees. A child
+/// module inherits the map by clone, which is `macro_rules!` textual scope; no path segment can spell the key.
+pub(crate) const SCOPE_MACRO_PREFIX: &str = "\u{2}scopemac:";
 
 /// SOUNDNESS R1146 (v052 audit) — the attribute `mbe::splice_derived_comparisons` puts on a synthetic derived-comparison
 /// impl. No real crate can carry it (it is not a registered attribute and would not compile).
