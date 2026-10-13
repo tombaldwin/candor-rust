@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a dispatch on a local `pub` trait through an unnamed implementor also reaches the trait's own
+  default body (SOUNDNESS R1151).** `impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> { fn
+  from_rng(rng) -> Self { Self::new(R::from_rng(rng)) } }` (rand_core) edged only to the crate's own overrides, so
+  `BlockRng::from_rng` read `[]` while a dependent's implementor runs the provided `from_rng` and draws. A generic,
+  `dyn` or untyped implementor of a `pub` trait may be one the scan cannot see, so the provided body is a dispatch
+  target too; a crate-private trait is unchanged.
 - ⚠ **candor-scan: an operator on a primitive whose crate impl is macro-made is disclosed (SOUNDNESS R1157).** A
   `macro_rules!`-made `impl Add<D> for u32` (serde_json's `impl PartialEq<Value> for u64` shape) was never analysed,
   so `x + d` read ABSENT over its executed write. The impl is now analysed and published under its own name

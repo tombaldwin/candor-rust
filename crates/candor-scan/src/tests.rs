@@ -30870,3 +30870,33 @@ pub fn ctl_mixed_lit(x: u32) -> u32 { x - 1 }
         assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1157 unit `{f}` writes:\n{v:#}");
     }
 }
+
+/// SOUNDNESS R1151 (v053; fixture rustagent-v053/fx/r1151, EXECUTED through a consumer's implementor). A dispatch on a
+/// LOCAL `pub` trait through an unnamed implementor (`R::from_rng(rng)` under `R: SeedableRng`, rand_core's `BlockRng`)
+/// edged only to the visible overrides, so `BlockRng::from_rng` read `[]` over the provided `from_rng`'s write that a
+/// dependent's implementor runs. The trait's own default body is now a dispatch target for a `pub` trait. Control: a
+/// crate-private trait whose every implementor overrides stays pure.
+#[test]
+fn v053_r1151_unnamed_implementor_dispatch_reaches_the_pub_trait_default() {
+    let v = scan_src_to_json_multi("v053rng", &[("src/lib.rs", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_1151", b"x"); }
+pub trait RngCore { fn next_u32(&mut self) -> u32; }
+pub trait SeedableRng: Sized {
+    fn from_seed(s: u8) -> Self;
+    fn from_rng(rng: &mut impl RngCore) -> Self { let s = rng.next_u32() as u8; Self::from_seed(s) }
+}
+pub trait BlockRngCore {}
+pub struct BlockRng<R>(pub R);
+impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> {
+    fn from_seed(s: u8) -> Self { BlockRng(R::from_seed(s)) }
+    fn from_rng(rng: &mut impl RngCore) -> Self { BlockRng(R::from_rng(rng)) }
+}
+pub struct OsRng; impl RngCore for OsRng { fn next_u32(&mut self) -> u32 { mark(); 4 } }
+// control: a crate-private trait whose every implementor overrides the effectful default
+trait Priv { fn go(&self) { mark() } }
+struct PA; impl Priv for PA { fn go(&self) {} }
+fn priv_call(x: &dyn Priv) { x.go() }
+pub fn ctl_priv() { priv_call(&PA) }
+"##)]);
+    assert!(veina_row_effs(&v, "BlockRng::from_rng").iter().any(|e| e == "Fs"), "R1151 (executed):\n{v:#}");
+    assert!(veina_row_effs(&v, "ctl_priv").is_empty(), "R1151 control is pure (executed):\n{v:#}");
+}

@@ -6050,6 +6050,31 @@ impl<'a> CallCollector<'a> {
                         is_macro: false,
                     });
                 }
+                // SOUNDNESS R1151 — …AND THE TRAIT'S OWN DEFAULT BODY. The implementor is unnamed here (a generic
+                // parameter, `dyn`, an untyped value), so it may be one this scan cannot see — a dependent's type —
+                // and every implementor that does not override `leaf` runs the trait's provided body. A visible
+                // implementor that inherits it already reaches it (scan.rs' inherited-default route); an unseen one
+                // reached NOTHING: rand_core's `impl<R: BlockRngCore + SeedableRng> SeedableRng for BlockRng<R> {
+                // fn from_rng(rng) -> Self { Self::new(R::from_rng(rng)) } }` edged only to the two local overrides
+                // and its row read `[]` over the provided `from_rng`'s draw (EXECUTED through a consumer's
+                // implementor, rustagent-v053/fx/r1151). The path names the trait's own unit, so a trait with no
+                // default for `leaf` resolves to nothing and adds nothing.
+                // Only a `pub` trait (`model::pub_trait_key`): a crate-private one's implementors are all visible, and
+                // the inherited-default route already reaches the body for each that does not override.
+                if self.returns.contains_key(&crate::model::pub_trait_key(tr)) {
+                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        eprintln!("R1151DEFAULT\t{tr}::{leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { argc: 0, entropy_arg: false,
+                        path: format!("{tr}::{leaf}"),
+                        leaf: leaf.to_string(),
+                        str_arg: str_arg.clone(),
+                        path_lits_partial: false, path_lit2: None,
+                        typed: false,
+                        method: false,
+                        is_macro: false,
+                    });
+                }
             }
             // R485 — THE ROW'S OWN INSTANCE. `dispatch:<owner>.<member>`, §4's normative dotted detail:
             // the static target is known (trait `tr`'s `leaf`) and only the concrete body is not, which is

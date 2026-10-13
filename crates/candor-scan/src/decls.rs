@@ -4730,6 +4730,11 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Trait(t) => {
+                // SOUNDNESS R1151 — a `pub` trait can be implemented by a type this scan never sees
+                // (`model::pub_trait_key`).
+                if matches!(t.vis, syn::Visibility::Public(_)) {
+                    rets.insert(crate::model::pub_trait_key(&t.ident.to_string()), Some("1".to_string()));
+                }
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
                 for ti in &t.items {

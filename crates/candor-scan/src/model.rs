@@ -609,6 +609,12 @@ pub(crate) fn prim_op_key(trait_leaf: &str, ty_leaf: &str, mbe: bool) -> String 
     format!("<primop{}>{trait_leaf}\u{1f}{ty_leaf}", if mbe { "m" } else { "h" })
 }
 
+/// SOUNDNESS R1151 — a `ReturnIndex` key: a local trait of this leaf is declared `pub`, so an implementor this scan
+/// cannot see may exist and run the trait's provided body. Value `1`.
+pub(crate) fn pub_trait_key(trait_leaf: &str) -> String {
+    format!("<pubtrait>{trait_leaf}")
+}
+
 pub(crate) fn impl_rhs_key(trait_leaf: &str, ty_leaf: &str) -> String {
     format!("<rhs>{trait_leaf}\u{1f}{ty_leaf}")
 }
