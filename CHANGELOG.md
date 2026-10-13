@@ -41,8 +41,8 @@ with an impl that writes a file, and the effect was missing from the published 0
     etcetera's `AppStrategy::in_*_dir`, pear's debugger hooks and clap 3's `from_yaml`. 139 rows. `deny Clock`
     over hyper's chunked decoder and redis's `ConnectionManager` sends (30 rows).
   - `deny Rand` over rand_core 0.5.1's `OsRng::next_u32`/`next_u64`, `impls::next_*_via_fill` and the
-    `RngCore`/`Box` forwarding methods (10 rows; `OsRng` really draws, and these read pure or only `Unknown`
-    before). Also over rand_core 0.9's derived `OsError::eq` (4 rows): that one is an **over-charge**, because
+    `RngCore`/`Box` forwarding methods (10 rows; `OsRng` really draws, and 0.40.7 charged these no `Rand`, at most
+    `Unknown`). Also over rand_core 0.9's derived `OsError::eq` (4 rows): that one is an **over-charge**, because
     candor classifies every `getrandom::Error` method as `Rand` and the derived comparison is now a published
     unit. It is tracked as SOUNDNESS R1150.
   - `deny Unknown` over 6,304 rows, 4,563 of them units the report did not carry before. Most are operator
