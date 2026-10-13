@@ -11,6 +11,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a `let` initialised from a labelled block, a `loop { break value }`, or a block with its own `let`s
+  is typed (SOUNDNESS R1155).** `let x = 'b: { if f { break 'b D2(9); } D2(1) };`, `let x = loop { break D2(1); };`,
+  `let x = { let v = D(2); D2(3) };` and `let x = { let _y = 3; mk() };` left `x` untyped, so `x + 1` formed no
+  operator edge (ABSENT over an executed write). Every value the block can produce is typed, and only when none
+  names a binding the block itself introduces; values must agree.
 - ⚠ **candor-scan: a method receiver typed by a bare name only a glob can supply, and a `#[cfg]`-duplicated alias over
   dependency types, now reach the dependency (SOUNDNESS R1153).** An external glob beside a crate-local one (g1), a
   `#[cfg(windows)]` local twin of the name (g2), a glob's `String` shadowing the prelude for a method std lacks (g4),

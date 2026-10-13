@@ -30692,3 +30692,55 @@ pub mod c3 { use cdep4::*; pub fn ctl_let() { let g = crate::loc::Gadget; g.run(
         assert!(veina_row_effs(&cv, f).is_empty(), "R1153 control `{f}` is pure (executed):\n{cv:#}");
     }
 }
+
+/// SOUNDNESS R1155 (v053; fixture rustagent-v053/fx/r1155, every cell EXECUTED). A `let` initialised from a labelled
+/// block ending `break 'b value` (l5), a block whose inner `let` shadows an outer name (l6), a block whose tail is a
+/// fn call after a `let` (l7), `loop { break value }` (l8, l16) and a labelled break out of a nested loop (l15) were
+/// untyped, so `(x + 1)` formed no operator edge: ABSENT over an executed write. Controls: a break value naming a
+/// block-local binding (l11), an inner loop's own break (l13), a pure tail beside a shadowed effectful name (l14), l9.
+#[test]
+fn v053_r1155_let_from_labelled_blocks_loops_and_blocks_with_lets() {
+    let v = scan_src_to_json_multi("v053let", &[("src/lib.rs", r##"#![allow(dead_code, unused_variables, unreachable_code, clippy::needless_return)]
+use std::ops::Add;
+pub fn mark() { let _ = std::fs::write("/tmp/auditv052l", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u64);   // pure
+#[derive(Clone, Copy)] pub struct D2(pub u64);  // effectful
+impl Add<u64> for D { type Output = D; fn add(self, r: u64) -> D { D(self.0 + r) } }
+impl Add<u64> for D2 { type Output = D2; fn add(self, r: u64) -> D2 { mark(); D2(self.0 + r) } }
+// L1: block's tail is a DIFFERENT binding from the first `let`
+pub fn l1() -> u64 { let x = { let a = D(1); let b = D2(2); let _ = a; b }; (x + 1).0 }
+// L2: early return inside the block (the block's own value is D2)
+pub fn l2(f: bool) -> u64 { let x = { if f { return 0; } D2(1) }; (x + 1).0 }
+// L3: `if` block expression
+pub fn l3(f: bool) -> u64 { let x = if f { D2(1) } else { D2(2) }; (x + 1).0 }
+// L4: `match` expression
+pub fn l4(n: u8) -> u64 { let x = match n { 0 => D2(1), _ => D2(2) }; (x + 1).0 }
+// L5: labeled block with break-value of the effectful type while the tail is the pure type? (types must agree) -> use same type, break early
+pub fn l5(f: bool) -> u64 { let x = 'b: { if f { break 'b D2(9); } D2(1) }; (x + 1).0 }
+// L6: shadowing: the block's tail names an OUTER binding of another type
+pub fn l6() -> u64 { let v = D2(1); let x = { let v = D(2); let _ = v; D2(3) }; let _ = v; (x + 1).0 }
+// L7: block tail is a call to a fn returning the effectful type
+pub fn mk() -> D2 { D2(1) }
+pub fn l7() -> u64 { let x = { let _y = 3; mk() }; (x + 1).0 }
+// L8: loop with break value
+pub fn l8() -> u64 { let x = loop { break D2(1); }; (x + 1).0 }
+// L9: a pure tail whose inner binding is effectful (must stay pure: no fabrication)
+pub fn l9() -> u64 { let x = { let a = D2(1); let _ = a.0; D(5) }; (x + 1).0 }
+// L10: value macro defined once whose expansion is an `if`
+macro_rules! pickv { ($f:expr) => { if $f { D2(1) } else { D2(2) } }; }
+pub fn l10(f: bool) -> u64 { let x = pickv!(f); (x + 1).0 }
+// R1155 controls (executed pure): a break value naming a block-local binding; an inner loop's break; a pure shadowed tail
+pub fn l11(f: bool) -> u64 { let x = 'b: { let a = D2(1); if f { break 'b D(a.0); } D(2) }; (x + 1).0 }
+pub fn l13() -> u64 { let x = loop { let _i = loop { break D2(1); }; break D(2); }; (x + 1).0 }
+pub fn l14() -> u64 { let v = D2(1); let x = { let v = D(2); let _ = v; D(3) }; let _ = v.0; (x + 1).0 }
+// R1155 more hits: a labelled break from inside a nested loop; a loop whose break value is a call
+pub fn l15() -> u64 { let x = 'o: loop { loop { break 'o D2(4); } }; (x + 1).0 }
+pub fn l16() -> u64 { let x = loop { break mk(); }; (x + 1).0 }
+"##)]);
+    for f in ["l5", "l6", "l7", "l8", "l15", "l16", "l1", "l10"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1155 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["l9", "l11", "l13", "l14"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1155 control `{f}` is pure (executed):\n{v:#}");
+    }
+}

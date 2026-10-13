@@ -3133,6 +3133,123 @@ pub(crate) fn merge_value_exprs(expr: &syn::Expr) -> Option<Vec<&syn::Expr>> {
     }
 }
 
+/// SOUNDNESS R1155 — every expression a block (or, with `is_loop`, a `loop` body) can evaluate to: its tail (not for a
+/// loop) and each `break` that targets it — a `break 'label v` with its label, or for a loop an unlabelled `break v`
+/// not nested in an inner loop. `None` when a value names an identifier any pattern INSIDE the block binds (the
+/// resolvers key on bare names, so it would be read as an outer binding), when a targeting `break` carries no value
+/// or sits inside a macro (which this walk cannot see into), or when there is no value at all.
+pub(crate) fn block_values<'b>(block: &'b syn::Block, label: Option<&str>, is_loop: bool) -> Option<Vec<&'b syn::Expr>> {
+    use syn::visit::Visit;
+    struct Bound(std::collections::HashSet<String>);
+    impl<'ast> Visit<'ast> for Bound {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            self.0.insert(p.ident.to_string());
+            syn::visit::visit_pat_ident(self, p);
+        }
+    }
+    struct Brk<'b, 'l> {
+        label: Option<&'l str>,
+        is_loop: bool,
+        depth: usize, // nested loops (an unlabelled break inside one targets it)
+        out: Vec<&'b syn::Expr>,
+        bad: bool,
+    }
+    impl<'b> Visit<'b> for Brk<'b, '_> {
+        fn visit_expr_break(&mut self, e: &'b syn::ExprBreak) {
+            let targets = match (&e.label, self.label) {
+                (Some(l), Some(want)) => l.ident == want,
+                (None, _) => self.is_loop && self.depth == 0,
+                _ => false,
+            };
+            if targets {
+                match &e.expr {
+                    Some(v) => self.out.push(v),
+                    None => self.bad = true,
+                }
+            }
+            syn::visit::visit_expr_break(self, e);
+        }
+        fn visit_expr_loop(&mut self, e: &'b syn::ExprLoop) {
+            self.depth += 1;
+            syn::visit::visit_expr_loop(self, e);
+            self.depth -= 1;
+        }
+        fn visit_expr_while(&mut self, e: &'b syn::ExprWhile) {
+            self.depth += 1;
+            syn::visit::visit_expr_while(self, e);
+            self.depth -= 1;
+        }
+        fn visit_expr_for_loop(&mut self, e: &'b syn::ExprForLoop) {
+            self.depth += 1;
+            syn::visit::visit_expr_for_loop(self, e);
+            self.depth -= 1;
+        }
+        fn visit_expr_closure(&mut self, _: &'b syn::ExprClosure) {}
+        fn visit_expr_async(&mut self, _: &'b syn::ExprAsync) {}
+        fn visit_item(&mut self, _: &'b syn::Item) {}
+        fn visit_macro(&mut self, m: &'b syn::Macro) {
+            // a `break` inside a macro's tokens is invisible to this walk
+            fn has_break(ts: proc_macro2::TokenStream) -> bool {
+                ts.into_iter().any(|t| match t {
+                    proc_macro2::TokenTree::Ident(i) => i == "break",
+                    proc_macro2::TokenTree::Group(g) => has_break(g.stream()),
+                    _ => false,
+                })
+            }
+            if has_break(m.tokens.clone()) {
+                self.bad = true;
+            }
+        }
+    }
+    struct Names(std::collections::HashSet<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if let Some(i) = p.path.get_ident() {
+                self.0.insert(i.to_string());
+            }
+            syn::visit::visit_expr_path(self, p);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            fn walk(ts: proc_macro2::TokenStream, out: &mut std::collections::HashSet<String>) {
+                for t in ts {
+                    match t {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            out.insert(i.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(g) => walk(g.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            walk(m.tokens.clone(), &mut self.0);
+        }
+    }
+    let mut bound = Bound(Default::default());
+    bound.visit_block(block);
+    let mut brk = Brk { label, is_loop, depth: 0, out: Vec::new(), bad: false };
+    brk.visit_block(block);
+    if brk.bad {
+        return None;
+    }
+    let mut vals = brk.out;
+    if !is_loop {
+        if let Some(syn::Stmt::Expr(e, None)) = block.stmts.last() {
+            vals.push(e);
+        }
+    }
+    if vals.is_empty() {
+        return None;
+    }
+    for v in &vals {
+        let mut n = Names(Default::default());
+        n.visit_expr(v);
+        if n.0.iter().any(|x| bound.0.contains(x)) {
+            return None;
+        }
+    }
+    Some(vals)
+}
+
 /// The expression a BLOCK evaluates to — its trailing expression with no semicolon — but only when no
 /// statement in it is a `let`. See `merge_value_exprs` for why the `let` is the disqualifier: the
 /// resolvers key on bare names, so a block-local binding would be read through as the outer one.

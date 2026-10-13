@@ -2786,6 +2786,22 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Block(b) if b.label.is_none() && self.block_local_tail(&b.block).is_some() => {
                 self.block_local_tail(&b.block).and_then(|e| self.type_of(e))
             }
+            // SOUNDNESS R1155 — a block with `let`s whose value names none of them (`{ let v = D(2); D2(3) }`,
+            // `{ let _y = 3; mk() }`), a LABELLED block (`'b: { if f { break 'b D2(9); } D2(1) }`) and a `loop` with
+            // `break value`: every value it can produce is typed, and only when no value names a binding the
+            // block itself introduces (the resolvers key on bare names, so such a name would be read through as
+            // an OUTER binding — the reason `merge_value_exprs` refuses a block with a `let`). Strict as below:
+            // every value must type, and to one type.
+            syn::Expr::Block(b) if b.label.is_some() || b.block.stmts.iter().any(|st| matches!(st, syn::Stmt::Local(_))) => {
+                let label = b.label.as_ref().map(|l| l.name.ident.to_string());
+                let vals = crate::lang::block_values(&b.block, label.as_deref(), false)?;
+                self.type_of_all(&vals)
+            }
+            syn::Expr::Loop(l) => {
+                let label = l.label.as_ref().map(|l| l.name.ident.to_string());
+                let vals = crate::lang::block_values(&l.body, label.as_deref(), true)?;
+                self.type_of_all(&vals)
+            }
             // SOUNDNESS (v052 audit, `fxm` e1/e1d) — a VALUE macro (`let x = make!()`): the invocation expanded
             // (`mbe::expand_invocation`, under the same once-defined rule as the R1144 walk) and its value typed.
             syn::Expr::Macro(mm) => self.type_of_macro_value(&mm.mac),
@@ -2803,6 +2819,24 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// SOUNDNESS R1155 — the ONE type every value expression in `vals` has, or `None` when one does not type or two
+    /// disagree (the strict merge `type_of` applies to `if`/`match`).
+    fn type_of_all(&self, vals: &[&syn::Expr]) -> Option<String> {
+        let mut found: Option<String> = None;
+        for v in vals {
+            let t = self.type_of(v)?;
+            match &found {
+                None => found = Some(t),
+                Some(prev) if *prev == t => {}
+                Some(_) => return None,
+            }
+        }
+        if found.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            eprintln!("R1155LET\t{}", found.as_deref().unwrap_or("")); // §E1 REACH COUNTER
+        }
+        found
     }
 
     /// The value expression a block's tail binding stands for: the tail is a bare name, and the block's own LAST
