@@ -11,6 +11,47 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.9] — 2026-10-13
+
+candor-scan and candor-classify; candor-query is unchanged apart from the version, and the deep engine changes
+only through the classifier rule R1150 shares with it. Most entries close a **silent under-report**: a function
+that really performs an effect through an operator, a cast, a `macro_rules!` defined twice, a glob-imported
+type, a bin calling its own library, or a `pub` trait's default body was missing that effect from its row. Each
+row was filed from a fixture that was executed and performed the effect while the report omitted it. R1157 is
+closed as a disclosure (`Unknown`), not a charge, and R1150 removes a wrong charge instead. SOUNDNESS
+R1150–R1157 and R1159–R1162 close here.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.8 `candor-scan` over the
+  3,670-entry registry corpus (`bin/corpus-ab.py`; each crate version counts separately). Each gate is scoped
+  to the function named. Sampled gates were re-run on both binaries and moved as stated. These now **fail where
+  0.40.8 passed**:
+  - `deny Fs` over tokio's `process::sys::ChildStdin`/`ChildStdout`/`ChildStderr::into_owned_fd` (now
+    published units, tokio 1.33–1.53; `deny Log` too from 1.49), dunce's `realpath`, bindgen's
+    `ir::module::Module::parse`, dylint_testing's `ui_test`/`ui_test_example(s)`/`Test::run` (and `deny Log`),
+    and the `dotenv`/`dotenvy` bins' `main`. 59 rows.
+  - `deny Log` over regex-automata 0.4's `dfa::search::init_fwd`/`init_rev`, and `deny Log` and `deny Clock`
+    over quinn-udp's Windows `UdpSocketState::send`. 51 `Log` rows, 3 `Clock` rows.
+  - `deny Env` over azure_identity 0.31's `ClientSecretCredential::new` and
+    `ClientAssertionCredential::new`/`new_exclusive` (3 rows).
+  - `deny Rand` over rand_core 0.9's `BlockRng`/`BlockRng64` `from_rng`/`try_from_rng` (16 rows), which now
+    reach `SeedableRng`'s provided body (R1151).
+  - `deny Unknown` over 2,762 rows, 1,183 of them units the report did not carry before. The largest groups are
+    serde_json (1,442: its `Formatter`/`Serializer` methods now reach its own `io::Write` trait's default
+    `write_all`, R1151), rend (400 new operator units), sval (200), jiff, num-bigint, ndarray, bigdecimal and
+    ubyte (macro-made primitive operator impls now published, R1157).
+
+  These now **pass where 0.40.8 failed**, all because of R1150 (`getrandom::Error` methods are no longer charged
+  `Rand`):
+  - `deny Rand` over rand_core 0.9's `OsError::eq`/`fmt`/`raw_os_error` and rand_core 0.5/0.6's
+    `Error::from`/`Error::fmt` (18 rows).
+  - `deny Rand read` over rand_core 0.5.1, 0.6.3 and 0.6.4 (3 rows). Its `Rand` came only from the
+    `Error::from` call. **`deny Rand Unknown read` still fails**, because `read`'s `try_fill_bytes` call on an
+    untyped receiver stays `Unknown`.
+
+  No concrete effect is lost anywhere else in the corpus, and `deny Unknown` newly passes nowhere. Counts: ADDED
+  5,779, REMOVED 27 (all the rand_core error methods above), CHANGED 19,471 rows. 103 rows gain a concrete
+  effect, 2,494 gain only `Unknown`, and the 21 that lose one are the rand_core rows above.
+
 - ⚠ **candor-scan: a dependency glob's type named like a std prelude type is asked for every method (SOUNDNESS R1160).**
   With `use dep::*;` in scope and `dep` exporting its own `String`/`Vec`/`Option`/`Result`/`Box`, the bare name is the
   dependency's (a glob outranks the prelude), but the scanner asked the dependency only for methods std lacks, so
