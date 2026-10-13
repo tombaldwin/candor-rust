@@ -1435,6 +1435,10 @@ impl<'a> CallCollector<'a> {
             }
             self.charge_coercion_ty(&t, tr, m);
         }
+        // SOUNDNESS R1164 — `Add::add(a, d)` over `d: dep::D`: the same dispatch as `a + d`.
+        if args.len() == 2 {
+            self.charge_dep_rhs_operator(first, None, &args[1], tr, m);
+        }
     }
 
     /// SOUNDNESS R1144 — walk one macro EXPANSION for its edges only. Every name-keyed binding table is restored
@@ -5279,6 +5283,129 @@ impl<'a> CallCollector<'a> {
             if crate::lang::OPERATOR_TRAITS.contains(&trait_leaf) {
                 self.calls.push(Call { argc: 0, entropy_arg: false,
                     path: format!("{}::&{}::{}", segs[0], ty_leaf, method),
+                    leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                    typed: false, method: false, is_macro: false,
+                });
+            }
+        }
+    }
+
+    /// SOUNDNESS R1164 — an operator whose RIGHT operand is a DEPENDENCY's value (`a + d`, `a.add(d)`, `Add::add(a, d)`
+    /// with `d: dep::D`) and whose LEFT operand is not that dependency's type. The impl that runs (`impl Add<D> for
+    /// u32`, `impl Rem<&D> for &u16`, a macro-made one) can only be in `dep`: the orphan rule needs a local type in the
+    /// impl header and `D` is the only candidate, so the right operand's type names the impl's home crate, which the
+    /// left operand's does not. Every route above dispatches on the LEFT operand, and a primitive left names no crate,
+    /// so the site formed no edge and the caller read ABSENT over the impl's executed write — unchained AND chained, with
+    /// no `invisible` (EXECUTED: rustagent-v054/fx/xprim, rustagent-v055/fx/x2).
+    ///
+    /// The dependency is asked for each `Self` the left operand can be (`OP_RHS_MARKER`, joined in `scan.rs`): its
+    /// typed name (and the primitive a local alias names), or — a literal or an operand no route typed — every
+    /// primitive of the literal's kind, or every primitive, `str`, `String` and `D` itself. Each is asked by value, as
+    /// `&Self` (R1131's key) and as a macro-made unit (R1157's `<mbe>`). ADDITIVE ONLY: a key the report lacks adds
+    /// nothing, and nothing any other route formed is touched. The right operand is typed by NAME, so a mistyping
+    /// over-asks (an over-charge) and an untyped right operand stays the residual; nothing is ever withheld on it.
+    fn charge_dep_rhs_operator(&mut self, left: &syn::Expr, lty: Option<String>, right: &syn::Expr, tr: &str, method: &str) {
+        if !crate::lang::OPERATOR_TRAITS.contains(&tr) {
+            return;
+        }
+        // A dependency's TUPLE-STRUCT constructor (`a + D(3)`, `a + dep::D(3)`) is a call no ctor route types (the
+        // struct's fields are the dependency's): an expanded dependency path whose last segment is a type-cased name
+        // under a module-cased one is the struct it builds. Additive, like the rest.
+        let dep_tuple_ctor = || -> Option<String> {
+            let syn::Expr::Call(c) = peel_value(right) else { return None };
+            let syn::Expr::Path(p) = &*c.func else { return None };
+            if p.qself.is_some() {
+                return None;
+            }
+            let full = self.expand_scoped(&crate::lang::path_to_string_lc(&p.path));
+            let segs: Vec<&str> = full.split("::").collect();
+            let up = |s: &str| s.chars().next().is_some_and(|ch| ch.is_ascii_uppercase());
+            (segs.len() >= 2 && up(segs[segs.len() - 1]) && !up(segs[segs.len() - 2]) && self.is_dependency_type(&full))
+                .then_some(full)
+        };
+        let Some(rt) = self.type_of(right).or_else(|| self.resolve_recv_type(right)).or_else(dep_tuple_ctor) else { return };
+        if !self.is_dependency_type(&rt)
+            || rt.contains(crate::decls::ALIAS_ALT_SEP)
+            || rt.contains(crate::decls::ITEM_SENTINEL)
+        {
+            return;
+        }
+        let cr = rt.split("::").next().unwrap_or("").to_string();
+        let rleaf = rt.split('<').next().unwrap_or(&rt).rsplit("::").next().unwrap_or(&rt).to_string();
+        // A primitive right operand (`core::u64`, which a crate declaring a `core` dependency spells as one) is never what
+        // makes the impl legal: with `Rhs` foreign, the impl's home is its `Self`'s crate, which the left-operand routes ask.
+        // `std`/`core`/`alloc` are never a dependency's own types.
+        if crate::model::PRIMITIVE_LEAVES.contains(&rleaf.as_str())
+            || rleaf == "str"
+            || matches!(cr.as_str(), "std" | "core" | "alloc")
+        {
+            return;
+        }
+        let lty = lty.or_else(|| self.type_of(left)).or_else(|| self.resolve_recv_type(left));
+        let mut selves: Vec<String> = Vec::new();
+        let mut route = "typed";
+        match lty {
+            Some(t) => {
+                // The dependency's own type on the left: `charge_coercion_ty_at` already asks `dep::T::m` / `dep::&T::m`.
+                if self.is_dependency_type(&t) && t.split("::").next() == Some(cr.as_str()) {
+                    return;
+                }
+                let head = t.split('<').next().unwrap_or(&t);
+                let leaf = head.rsplit("::").next().unwrap_or(head).to_string();
+                let prim = crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str()) || leaf == "str";
+                // A type this crate declares (or anchors with `crate::`): `impl Op<dep::D> for Local` cannot be in `dep`,
+                // and the crate's own impl is answered by the left-operand route. Declining to ADD here withholds no edge
+                // that existed; a primitive the crate shadows (`PRIM_SHADOW_KEY`) is still asked.
+                let local = !prim
+                    && (t.starts_with("crate::")
+                        || self.fields.contains_key(&leaf)
+                        || self.trait_impls.get(tr).is_some_and(|v| v.iter().any(|x| x == &leaf)));
+                if !local {
+                    selves.push(leaf.clone());
+                }
+                // R1139's alias (`type Word = u64`): the primitive it names is a `Self` too.
+                if !prim {
+                    for p in crate::model::PRIMITIVE_LEAVES {
+                        if self.returns.contains_key(&crate::model::prim_alias_key(&leaf, p)) {
+                            selves.push((*p).to_string());
+                        }
+                    }
+                }
+            }
+            None => {
+                let kinds: &[&str] = match peel_value(left) {
+                    syn::Expr::Lit(l) => match &l.lit {
+                        syn::Lit::Int(i) if i.suffix().is_empty() => &["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"],
+                        syn::Lit::Float(f) if f.suffix().is_empty() => &["f32", "f64"],
+                        _ => &[],
+                    },
+                    _ => &[],
+                };
+                if kinds.is_empty() {
+                    route = "untyped";
+                    selves.extend(crate::model::PRIMITIVE_LEAVES.iter().map(|p| (*p).to_string()));
+                    selves.extend(["str".to_string(), "String".to_string(), rleaf.clone()]);
+                } else {
+                    route = "literal";
+                    selves.extend(kinds.iter().map(|p| (*p).to_string()));
+                }
+            }
+        }
+        selves.dedup();
+        if selves.is_empty() {
+            return;
+        }
+        if std::env::var_os("CANDOR_V055_INSTR").is_some() {
+            eprintln!("R1164OPRHS\t{route}\t{tr}\t{cr}\t{rleaf}\t{}", selves.join(",")); // §E1 REACH COUNTER, ADDED branch only
+        }
+        for s in selves {
+            let mut keys = vec![format!("{s}::{method}"), format!("&{s}::{method}")];
+            if crate::model::PRIMITIVE_LEAVES.contains(&s.as_str()) {
+                keys.push(format!("{s}::{}::{method}", crate::model::MBE_PRIM_SEG));
+            }
+            for k in keys {
+                self.calls.push(Call { argc: 0, entropy_arg: false,
+                    path: format!("{cr}::{OP_RHS_MARKER}::{k}"),
                     leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                     typed: false, method: false, is_macro: false,
                 });
@@ -9140,6 +9267,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.push_coercion_edge(&format!("&{tl}"), m);
                 }
             }
+            // SOUNDNESS R1164 — `a.add(d)` over `d: dep::D`: the same dispatch as `a + d`.
+            if node.args.len() == 1 {
+                self.charge_dep_rhs_operator(&node.receiver, None, &node.args[0], tr, m);
+            }
         }
         self.visit_expr(&node.receiver);
         if let Some(name) = closure_param {
@@ -11263,6 +11394,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                 }
             }
+            // SOUNDNESS R1164 — a dependency-typed RIGHT operand names the crate a foreign-`Self` impl lives in.
+            self.charge_dep_rhs_operator(&node.left, lconst.clone(), &node.right, tr, method);
             if matches!(tr, "PartialEq" | "PartialOrd") {
                 self.charge_compare_payload(&node.left, &node.right, tr, method);
             }

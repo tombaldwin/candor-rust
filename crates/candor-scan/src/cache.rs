@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev106 (rustagent-v055): SOUNDNESS R1164 — an operator whose right operand is a dependency's type asks that dependency
+    // for the left operand's foreign `Self` (`OP_RHS_MARKER` calls, cached `calls`).
     // rev105 (rustagent-v054): SOUNDNESS R1161 — a cast left operand types the operator site; R1162 — a hand-written operator impl
     // on `&<primitive>` is keyed `&prim::m` and an unsuffixed literal left operand is typed; R1160 — a glob's
     // prelude-named type is asked for std-named methods too, except on a std-made `String` (cached `calls`, units, `rets`).
@@ -488,7 +490,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev105/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev106/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

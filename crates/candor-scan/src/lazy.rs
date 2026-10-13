@@ -52,6 +52,16 @@ pub(crate) const GLOB_CAND_MARKER: &str = "<globcand>";
 /// post-fixpoint disclosure; it forms no edge.
 pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
 
+/// SOUNDNESS R1164 — `cr::<oprhs>::<Self>::<method>` (also `&<Self>::<method>` and `<prim>::<mbe>::<method>`): an
+/// operator whose RIGHT operand is a value of the dependency `cr`'s type while the LEFT operand is not (a primitive,
+/// `str`, a std or third-crate type, or a value no route typed). Such an impl (`impl Add<cr::D> for u32`) can only
+/// live in `cr` — the orphan rule needs a local type, and `D` is the only one — so `cr`'s report is asked for each
+/// candidate `Self` key (`collector::charge_dep_rhs_operator`). Consumed only by the call loop: the dependency's own
+/// entry is joined where one exists (a miss in a covered report is its purity claim), and the site is a κ ledger
+/// entry for `cr` either way, so an unchained (or uncovered) `cr` is disclosed `invisible`. The angle-bracket
+/// segment keeps it out of every local key lookup.
+pub(crate) const OP_RHS_MARKER: &str = "<oprhs>";
+
 /// SOUNDNESS R856/R857 — the PROVENANCE segments a `<untyped>` marker's callee path may carry when the
 /// receiver did not come from a factory CALL but from a dependency VALUE: `cr::<value>::SHARED` (a
 /// `pub static`/`const` reached by path), `cr::<type>::Node` (a value whose type resolved to a

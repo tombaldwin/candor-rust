@@ -805,6 +805,16 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 push_key(format!("{krate}#{t2}"), &mut keys);
             }
             push_key(format!("{krate}#{qual}"), &mut keys);
+            // SOUNDNESS R1164 — a macro-made primitive operator unit (`m::u64::<mbe>::bitand`, R1157) is also keyed by its
+            // module-free `<prim>::<mbe>::<method>`, which a consumer's `OP_RHS_MARKER` asks: its tail2 (`<mbe>::bitand`) names
+            // every primitive at once, and its full qual carries a module the consumer cannot know. The `<mbe>` segment
+            // appears in no other unit's qual, so this key collides with nothing but its own primitive's units.
+            if let Some(i) = qual.find(&format!("::{}::", crate::model::MBE_PRIM_SEG)) {
+                let prim = qual[..i].rsplit("::").next().unwrap_or("");
+                if !prim.is_empty() {
+                    push_key(format!("{krate}#{prim}{}", &qual[i..]), &mut keys);
+                }
+            }
             let is_union = e.get("interfaceUnion").and_then(|x| x.as_bool()).unwrap_or(false);
             if let Some((owner, leaf)) = qual.rsplit_once("::") {
                 let v = idx.members.entry(leaf.to_string()).or_default();

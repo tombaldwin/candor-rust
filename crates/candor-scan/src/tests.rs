@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v055 (R1164) bumped it to rev106.
         // rustagent-v054 (R1160-R1162) bumped it to rev105.
         // rustagent-v053 (R1153-R1157) bumped it to rev104.
         // R986 bumped it to rev66 (path-redirected modules are recorded).
@@ -17339,7 +17340,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17350,7 +17351,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev105/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev106/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31031,5 +31032,92 @@ pub mod kk { use cdep54::*; pub fn len_concat(a: &str) -> usize { let s = a.to_s
     }
     for f in ["kc::len_explicit", "kd::len_format", "kj::len_tostr2", "kk::len_concat"] {
         assert!(!inv(&uv, f), "R1160 control `{f}` names std's String and discloses nothing:\n{uv:#}");
+    }
+}
+
+/// SOUNDNESS R1164 (v055; fixtures rustagent-v054/fx/xprim and rustagent-v055/fx/x2, every cell EXECUTED). A DEPENDENCY's
+/// operator impl whose self type is a primitive (or another foreign type: `str`, `String`) — `impl Add<D> for u32`,
+/// `impl Rem<&D> for &u16`, a macro-made `impl BitAnd<M> for u64`, one in a submodule on a re-exported type — reached by
+/// `a + d` with `d: dep::D` read ABSENT from the consumer, unchained AND chained, with no `invisible`: every operator route
+/// dispatches on the LEFT operand, and a primitive names no crate. The RIGHT operand's dependency type names the impl's
+/// home (the orphan rule), so that crate is asked for each candidate `Self`: chained, its entry is joined; unchained,
+/// the crate is disclosed. Controls (executed pure): a pure dependency impl (by-value and macro-made), `u32 + u32`, a
+/// literal right operand, a field of a dependency value. STATED RESIDUAL: `a += d` (compound assignment, R6).
+#[test]
+fn v055_r1164_dependency_operator_impl_on_primitive_self_is_joined_by_the_right_operand() {
+    let (dv, cv, uv) = v053_chain("cdep55", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v055_x2", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u16);
+#[derive(Clone, Copy)] pub struct P(pub u16);
+#[derive(Clone, Copy)] pub struct M(pub u8);
+#[derive(Clone, Copy)] pub struct N(pub u64);
+pub mod ops {
+    #[derive(Clone, Copy)] pub struct Q(pub u32);
+    impl std::ops::Shl<Q> for i64 { type Output = i64; fn shl(self, o: Q) -> i64 { crate::mark(); self << o.0 } }
+    impl std::ops::Div<Q> for u32 { type Output = u32; fn div(self, o: Q) -> u32 { crate::mark(); self / o.0.max(1) } }
+    macro_rules! ors { ($($t:ty),*) => { $( impl std::ops::BitOr<Q> for $t { type Output = $t; fn bitor(self, o: Q) -> $t { crate::mark(); self | (o.0 as $t) } } )* } }
+    ors!(u16);
+}
+pub use ops::Q;
+impl<'a> std::ops::Rem<&'a D> for &'a u16 { type Output = u16; fn rem(self, o: &'a D) -> u16 { mark(); *self % o.0.max(1) } }
+impl std::ops::Add<D> for u32 { type Output = u32; fn add(self, o: D) -> u32 { mark(); self + o.0 as u32 } }
+impl std::ops::Sub<D> for f64 { type Output = f64; fn sub(self, o: D) -> f64 { mark(); self - o.0 as f64 } }
+impl PartialEq<D> for u16 { fn eq(&self, o: &D) -> bool { mark(); *self == o.0 } }
+impl PartialOrd<D> for u16 { fn partial_cmp(&self, o: &D) -> Option<std::cmp::Ordering> { mark(); self.partial_cmp(&o.0) } }
+impl PartialEq<D> for str { fn eq(&self, _o: &D) -> bool { mark(); self.is_empty() } }
+impl PartialEq<D> for String { fn eq(&self, _o: &D) -> bool { mark(); self.is_empty() } }
+impl std::ops::Mul<P> for u32 { type Output = u32; fn mul(self, o: P) -> u32 { self * o.0 as u32 } }
+macro_rules! bits { ($($t:ty),*) => { $( impl std::ops::BitAnd<M> for $t { type Output = $t; fn bitand(self, o: M) -> $t { mark(); self & (o.0 as $t) } } )* } }
+bits!(u8, u64);
+macro_rules! xors { ($($t:ty),*) => { $( impl std::ops::BitXor<N> for $t { type Output = $t; fn bitxor(self, o: N) -> $t { self ^ (o.0 as $t) } } )* } }
+xors!(u64);
+"##, r##"#![allow(clippy::op_ref, clippy::cmp_owned)]
+use std::ops::{Add, Rem};
+use cdep55::{D, P, M, N, Q};
+pub struct Loc(pub u32);
+pub fn xa_refprim(a: &u16, d: &D) -> u16 { a % d }
+pub fn xb_valprim(a: u32, d: D) -> u32 { a + d }
+pub fn xc_litleft(d: D) -> u32 { 5 + d }
+pub fn xd_suffix(d: D) -> u32 { 5u32 + d }
+pub fn xe_cast(y: u8, d: D) -> u32 { (y as u32) + d }
+pub fn xg_float(a: f64, d: D) -> f64 { a - d }
+pub fn xh_eq(a: u16, d: D) -> bool { a == d }
+pub fn xi_ne(a: u16, d: D) -> bool { a != d }
+pub fn xj_lt(a: u16, d: D) -> bool { a < d }
+pub fn xk_streq(s: &str, d: D) -> bool { *s == d }
+pub fn xl_stringeq(s: String, d: D) -> bool { s == d }
+pub fn xm_mbe(a: u64, m: M) -> u64 { a & m }
+pub fn xn_submod(a: i64, q: Q) -> i64 { a << q }
+pub fn xo_submod2(a: u32, q: Q) -> u32 { a / q }
+pub fn xp_meth(a: u32, d: D) -> u32 { a.add(d) }
+pub fn xq_ufcs(a: &u16, d: &D) -> u16 { Rem::rem(a, d) }
+pub fn xr_field(l: &Loc, d: D) -> u32 { l.0 + d }
+pub fn xs_ctor(a: u32) -> u32 { a + D(3) }
+pub fn xt_dlit(a: u32) -> u32 { a + cdep55::D(3) }
+pub fn xv_mbesub(a: u16, q: Q) -> u16 { a | q }
+pub fn xu_untyped(v: &[u32], d: D) -> u32 { v.iter().copied().sum::<u32>() + d }
+pub fn ca_pure(a: u32, p: P) -> u32 { a * p }
+pub fn cb_std(a: u32, b: u32) -> u32 { a + b }
+pub fn cc_lit(a: u32) -> u32 { a + 1 }
+pub fn cd_mbepure(a: u64, n: N) -> u64 { a ^ n }
+pub fn ce_field(d: D) -> u16 { d.0 + 1 }
+pub fn cf_fieldeq(d: D, a: u16) -> bool { d.0 == a }
+"##);
+    let hits = ["xa_refprim", "xb_valprim", "xc_litleft", "xd_suffix", "xe_cast", "xg_float", "xh_eq", "xi_ne", "xj_lt",
+        "xk_streq", "xl_stringeq", "xm_mbe", "xn_submod", "xo_submod2", "xp_meth", "xq_ufcs", "xr_field", "xs_ctor", "xt_dlit",
+        "xu_untyped", "xv_mbesub"];
+    for f in hits {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1164 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
+    }
+    let inv = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "cdep55")));
+    for f in hits {
+        assert!(inv(&uv, f), "R1164 unchained `{f}` must disclose cdep55:\n{uv:#}");
+    }
+    for f in ["ca_pure", "cb_std", "cc_lit", "cd_mbepure", "ce_field", "cf_fieldeq"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1164 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    // A primitive-only operation names no dependency, unchained too.
+    for f in ["cb_std", "cc_lit", "ce_field", "cf_fieldeq"] {
+        assert!(!inv(&uv, f), "R1164 control `{f}` names no dependency type and discloses nothing:\n{uv:#}");
     }
 }

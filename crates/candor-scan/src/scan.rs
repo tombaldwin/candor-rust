@@ -3089,6 +3089,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || alt.contains(CHAIN_GUESS_MARKER)
                         || alt.contains(EXT_METHOD_MARKER)
                         || alt.contains(GLOB_CAND_MARKER)
+                        || alt.contains(OP_RHS_MARKER)
                     {
                         continue;
                     }
@@ -3234,6 +3235,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 } else if deps.contains(cr) {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                continue;
+            }
+            // SOUNDNESS R1164 — an operator whose right operand is `cr`'s type and whose left is not (`OP_RHS_MARKER`): the
+            // impl can only be in `cr`, so `cr`'s own entry for the candidate `Self` key is joined where one exists (a
+            // miss in a covered report is its purity claim), and the site is a κ ledger entry for `cr` exactly as a floored
+            // qualified call into it is — the coverage filter downstream drops it for a chained, covered `cr`, and keeps
+            // it as `invisible` for an unchained, stale, incomplete or judged-nothing one.
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{OP_RHS_MARKER}::")) {
+                if deps.contains(cr) {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                if deps_idx.crates.contains(cr_real) {
+                    if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{rest}")) {
+                        if std::env::var_os("CANDOR_V055_INSTR").is_some() {
+                            eprintln!("R1164JOIN\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    }
                 }
                 continue;
             }

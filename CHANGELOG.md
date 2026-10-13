@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a dependency's operator impl on a primitive (or other foreign) `Self` is reached (SOUNDNESS R1164).**
+  `impl Add<D> for u32`, `impl Rem<&D> for &u16`, a macro-made `impl BitAnd<M> for u64`, `impl PartialEq<D> for
+  str`/`String`, defined in a dependency and reached by `a + d` (or `a.add(d)`, `Add::add(a, d)`) with `d: dep::D`,
+  read ABSENT from the consumer, chained and unchained, with no `invisible`. Every operator route dispatched on the
+  left operand, and a primitive names no crate. The right operand's dependency type names the impl's home (the orphan
+  rule), so that crate is now asked for each candidate `Self`: chained, its entry is joined (`deny Fs` over the
+  executed fixtures goes 0 → 1); unchained, the crate is disclosed `invisible`. Measured against published 0.40.9:
+  unchained, 475 rows gain `invisible` only (169 added, 306 changed; 0.022% of 2,160,688), REMOVED 0, no value lost;
+  chained (133 consumer/dependency pairs), 5 rows gain `Unknown` from the dependency's own hedge on the impl the code
+  really calls (ureq-proto's `**name == key` now joins http's `HeaderName::eq`), REMOVED 0. Residual: compound
+  assignment (`a += d`), which is R6 for local types too.
+
 ## [0.40.9] — 2026-10-13
 
 candor-scan and candor-classify; candor-query is unchanged apart from the version, and the deep engine changes
