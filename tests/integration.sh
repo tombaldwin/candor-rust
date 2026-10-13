@@ -733,6 +733,59 @@ want   "CANDOR_DROP_DEBUG names the closure-body edge and its enclosing owner"  
 absent "the reach probe is SILENT without CANDOR_DROP_DEBUG"                     "$(dl "$DB")" 'CANDOR_DROP_BODY_EDGE'
 rm -rf "$(dirname "$DB")"
 
+# ── 9c-vi. SOUNDNESS R1117 — the drop that runs INSIDE a generic body the caller instantiates ──
+# `drop_edges` reads each local body's own Drop terminators, so a destructor that runs inside a CALLEE's
+# body written over a type parameter was invisible: std's `Vec::<Guard>::clear`, `Option::ok_or(guard)`,
+# the `try_process` behind `collect::<Result<Vec<Guard>,_>>`, `Drain<'_, Guard>`'s own destructor, and a
+# LOCAL `fn eat<T>(_: T)` or `impl<T> Drop for RawBox<T>`. Each of these was EXECUTED (drop observed, row
+# absent, `deny Fs <fn>` exit 0) at v0.40.9. `InstDropWalk` reads the callee instantiated with the call's
+# own generic args. The CONTROLS are the half that matters for a widening: storing, moving and returning
+# a Guard through the same std/generic machinery runs no destructor, and must stay uncharged.
+echo "== drop inside an instantiated generic / std body (R1117) =="
+GI=$(mktemp -d)/gi; mkdir -p "$GI/src"
+printf '[package]\nname="gi"\nversion="0.1.0"\nedition="2021"\n' > "$GI/Cargo.toml"
+{
+  printf 'pub struct Guard;\n'
+  printf 'impl Drop for Guard { fn drop(&mut self){ let _=std::fs::remove_file("/tmp/candor_r1117_probe"); } }\n'
+  printf 'fn eat<T>(_t: T) {}\n'
+  printf 'pub fn r_gen(){ eat(Guard) }\n'
+  printf 'pub fn r_okor(o: Option<u32>) -> Result<u32, Guard> { o.ok_or(Guard) }\n'
+  printf 'pub fn r_vclear(v: &mut Vec<Guard>){ v.clear() }\n'
+  printf 'pub fn r_collect(x: &[u32]) -> Result<Vec<Guard>, ()> { x.iter().map(|i| if *i == 9 { Err(()) } else { Ok(Guard) }).collect() }\n'
+  printf 'pub fn r_drain(v: &mut Vec<Guard>){ v.drain(..); }\n'
+  printf 'pub struct RawBox<T> { p: *mut T }\n'
+  printf 'impl<T> Drop for RawBox<T> { fn drop(&mut self){ unsafe { drop(Box::from_raw(self.p)) } } }\n'
+  printf 'pub fn r_rawbox(){ let _b = RawBox { p: Box::into_raw(Box::new(Guard)) }; }\n'
+  printf 'fn keep<T>(v: &mut Vec<T>, t: T){ v.push(t) }\n'
+  printf 'pub fn k_push(v: &mut Vec<Guard>){ v.push(Guard) }\n'
+  printf 'pub fn k_box() -> Box<Guard> { Box::new(Guard) }\n'
+  printf 'pub fn k_gstore(v: &mut Vec<Guard>){ keep(v, Guard) }\n'
+  printf 'pub fn k_replace(o: &mut Option<Guard>) -> Option<Guard> { std::mem::replace(o, Some(Guard)) }\n'
+  printf 'pub fn k_take(o: &mut Option<Guard>) -> Option<Guard> { o.take() }\n'
+  printf 'pub fn k_okret(o: Option<Guard>) -> Result<Guard, u32> { o.ok_or(3) }\n'
+  printf 'pub fn r_resok(r: Result<u32, Guard>) -> Option<u32> { r.ok() }\n'
+  printf 'pub fn k_resok(r: Result<Guard, u32>) -> Option<Guard> { r.ok() }\n'
+} > "$GI/src/lib.rs"
+GIVIO="$GI/violations"
+echo "deny Fs" > "$GI/policy"
+: > "$GIVIO"; dl "$GI" env CANDOR_POLICY="$GI/policy" CANDOR_VIOLATIONS="$GIVIO" >/dev/null
+giv="|$(sort "$GIVIO" | tr '\n' '|')"
+for f in r_gen r_okor r_vclear r_collect r_drain r_rawbox r_resok; do
+  want   "R1117 GATE: deny Fs fires on $f (the destructor runs in the instantiated callee)" "$giv" "|AS-EFF-006 $f|"
+done
+for f in k_push k_box k_gstore k_replace k_take k_okret k_resok; do
+  absent "R1117 control: $f stores/moves/returns the Guard and runs no destructor — NOT charged" "$giv" "|AS-EFF-006 $f|"
+done
+# k_resok is the one control a naive instantiation FAILS: std's generic `Result::ok` drops the whole
+# `Result<T, E>` behind a switch on its discriminant (the Err arm), so reading `drop(_1)` over
+# `Result<Guard, u32>` charges `Guard::drop`, which can never run there. r_resok is its twin with the
+# Guard in the Err payload, which really is dropped — the pair pins the variant guard in both directions.
+# REACH, both directions: the probe names the instantiated callee, and is silent without the env var.
+rout=$(dl "$GI" env CANDOR_DROP_DEBUG=1)
+want   "CANDOR_DROP_DEBUG names the instantiated callee edge"  "$rout" 'CANDOR_DROP_INST_EDGE r_gen <- eat::<Guard>'
+absent "the R1117 reach probe is SILENT without CANDOR_DROP_DEBUG" "$(dl "$GI")" 'CANDOR_DROP_INST_EDGE'
+rm -rf "$(dirname "$GI")"
+
 # ── 9c-v. SOUNDNESS R761: the deep engine's ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST ──
 # `write_report_files` called `to_packaged_report_json`, which has no `analyzed` parameter, so every
 # deep-engine report was a §2 ROW-3 document — one that makes no completeness claim at all. Two
