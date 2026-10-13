@@ -2663,6 +2663,18 @@ pub(crate) fn fninfo(
     let sig_stripped = crate::lang::strip_concrete_where(sig, impl_generics, impl_generics.is_none() && self_ty.is_some());
     let sig: &syn::Signature = sig_stripped.as_ref().unwrap_or(sig);
     let mut trait_vars = seed_trait_vars(sig);
+    // SOUNDNESS (v053, found auditing R1150) — `impl Read for dyn RngCore { fn read(&mut self, ..) {
+    // self.try_fill_bytes(buf)?; .. } }`: `self` IS the trait object, so its calls are the trait's dispatch,
+    // exactly as a `&dyn RngCore` parameter's are. Untyped, rand_core 0.5/0.6's `read` kept only a hedge (its
+    // `Rand` came from the wrong-reason `getrandom::Error` charge, R1150).
+    if let Some(t @ syn::Type::TraitObject(_)) = impl_self.map(crate::lang::peel_ty_refs) {
+        if matches!(sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+            let leaves = crate::lang::trait_leaves(t, &HashMap::new());
+            if !leaves.is_empty() {
+                trait_vars.insert("self".to_string(), leaves);
+            }
+        }
+    }
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
     // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;

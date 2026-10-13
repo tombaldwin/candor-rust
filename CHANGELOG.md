@@ -11,6 +11,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: `self` in an impl for a trait object (`impl Read for dyn RngCore`) dispatches on that trait.** Its
+  calls (`self.try_fill_bytes(buf)`) were untyped and only hedged; they now reach the trait's implementors, so
+  rand_core 0.5/0.6's `read` keeps `Rand` for the right reason after R1150.
 - ⚠ **candor-classify: `getrandom::Error`'s own methods are not `Rand` (SOUNDNESS R1150).** The whole `getrandom`
   crate was charged `Rand`, so an error value's `raw_os_error`, `Debug`/`Display` and comparison (rand_core 0.9.x's
   derived `OsError::eq`, its `fmt`/`raw_os_error`; rand_core 0.5/0.6 `Error::from`/`fmt`) read as entropy draws
