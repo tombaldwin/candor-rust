@@ -2698,7 +2698,7 @@ impl<'a> CallCollector<'a> {
         // its `BacktraceFrameFmt::backtrace_frame` edge to `use std::prelude::v1::*` on the first cut).
         if self.local_fn_on(&ty, leaf)
             || self.fields.contains_key(ty.as_str())
-            || self.trait_impls.values().any(|v| v.iter().any(|t| *t == ty))
+            || self.trait_impls.values().any(|v| v.contains(&ty))
         {
             return (ty, Vec::new());
         }
