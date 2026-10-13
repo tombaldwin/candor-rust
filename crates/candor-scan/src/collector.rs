@@ -420,6 +420,9 @@ pub(crate) struct CallCollector<'a> {
     /// (SPEC §6.2). Measured: without this, plotters' and regex-automata's `ambiguous:` hedges on a local
     /// passed by value went away — false hedges, but retracted rather than resolved.
     pub(crate) veinb_typed: HashMap<String, String>,
+    /// SOUNDNESS R1160 — `let` bindings whose `String` std constructed (`std_made_str`), typed `String` by R963. Such a
+    /// value is never a glob's same-named type (`glob_retype`). Cleared with `veinb_typed` when the name is re-bound.
+    pub(crate) std_made_vars: std::collections::HashSet<String>,
     /// VEIN B — see `ElemIndexes::ambiguous_type_leaves` (keys are `<leaf>\u{1f}<field>` or `<leaf>\u{1f}*`).
     pub(crate) ambiguous_type_leaves: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
@@ -1457,7 +1460,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses.clone(),
             self.bound_names.clone(),
         );
-        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone());
+        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone());
         self.macro_expanding.insert(mname.to_string());
         self.visit_block(block);
         self.macro_expanding.remove(mname);
@@ -1477,7 +1480,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses,
             self.bound_names,
         ) = snap;
-        (self.veinb_typed, self.local_use_seen, self.use_alts) = snap2;
+        (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars) = snap2;
     }
 
     /// SOUNDNESS R1145 — a CALLER instantiating a generic whose body runs an operator on it. `fn ga<E: Add<u64>>(d: E)
@@ -2689,9 +2692,7 @@ impl<'a> CallCollector<'a> {
                 || self.trait_self.as_deref() == Some(h)
         };
         let prelude = crate::lang::PRELUDE_SHADOWABLE_TYPES.contains(&ty.as_str());
-        if prelude && crate::std_methods::is_std_method(leaf, argc) {
-            return (ty, Vec::new());
-        }
+        let _ = argc;
         // A receiver type is not always a name WRITTEN in this module: a recorded return type (`f.frame()` ->
         // `BacktraceFrameFmt`, declared in another module) arrives bare too. Where the crate itself defines this
         // method on a type of this name, the name is that local type (measured: backtrace's `Backtrace::fmt` lost
@@ -2715,7 +2716,12 @@ impl<'a> CallCollector<'a> {
                 }
                 (c.pop().unwrap_or(ty), Vec::new())
             }
-            Some((c, false)) => (ty, c),
+            Some((c, false)) => {
+                if prelude && !c.is_empty() && std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                    eprintln!("R1160PRELUDE\t{ty}\t.{leaf}\t{}", c.join(",")); // §E1 REACH COUNTER
+                }
+                (ty, c)
+            }
             _ => (ty, Vec::new()),
         }
     }
@@ -3587,6 +3593,25 @@ impl<'a> CallCollector<'a> {
                 self.resolve_recv_type(e).as_deref(),
                 Some("str" | "String" | "std::string::String" | "alloc::string::String")
             ),
+            _ => false,
+        }
+    }
+
+    /// SOUNDNESS R1160 — `is_provably_str`'s cases whose `String` std CONSTRUCTED (`format!`, `.to_string()`, a `+` onto
+    /// one), as opposed to one named by the module's own `String` (`String::from(..)`, a typed binding or field).
+    fn std_made_str(&self, e: &syn::Expr) -> bool {
+        match e {
+            syn::Expr::Reference(r) => self.std_made_str(&r.expr),
+            syn::Expr::Paren(p) => self.std_made_str(&p.expr),
+            syn::Expr::Group(g) => self.std_made_str(&g.expr),
+            syn::Expr::Macro(m) => m.mac.path.segments.last().is_some_and(|s| s.ident == "format"),
+            syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::Add(_)) => self.std_made_str(&b.left),
+            syn::Expr::MethodCall(m) => match m.method.to_string().as_str() {
+                "to_string" => true,
+                "to_owned" | "clone" => self.std_made_str(&m.receiver),
+                _ => false,
+            },
+            syn::Expr::Tuple(t) => t.elems.first().is_some_and(|h| self.std_made_str(h)),
             _ => false,
         }
     }
@@ -8302,7 +8327,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
         if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf) {
-            let (ty, glob_extra) = self.glob_retype(ty, &leaf, node.args.len());
+            // SOUNDNESS R1160 — a receiver std CONSTRUCTED as a `String` is std's, whatever a glob in scope exports. Only
+            // where the typer answered `String`: any other answer (a builder-chain guess) keeps its glob handling as before.
+            let std_made = ty == "String" && (self.std_made_str(&node.receiver) || match peel_recv(&node.receiver) {
+                syn::Expr::Path(p) if p.qself.is_none() => p.path.get_ident().is_some_and(|i| self.std_made_vars.contains(&i.to_string())),
+                _ => false,
+            });
+            let (ty, glob_extra) = if std_made { (ty, Vec::new()) } else { self.glob_retype(ty, &leaf, node.args.len()) };
             let cr = ty.split("::").next().unwrap_or("");
             // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
             // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…
@@ -10005,6 +10036,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         for n in &bound_names {
             self.mono_recv_traits.remove(n);
             self.veinb_typed.remove(n);
+            self.std_made_vars.remove(n);
         }
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
@@ -10606,6 +10638,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // `.to_string()`/`.as_str()`, `String::from` — the R949 authority, not a guess.
                                 if std::env::var_os("CANDOR_R963_INSTR").is_some() {
                                     eprintln!("R963STRLET");
+                                }
+                                // SOUNDNESS R1160 — a value std MADE (`format!`, `.to_string()`, a `+` onto one) is std's `String`
+                                // whatever the name `String` denotes in this module: under a dependency glob that exports a
+                                // `String` of its own the bare name is the glob's (`glob_retype`), and the binding must not be
+                                // asked of it (EXECUTED fabrication, rustagent-v054/fx/r1160 `kd`/`kj`/`kk`/`kl`). Recorded in
+                                // `std_made_vars`; a WRITTEN `String::from(..)` is not.
+                                if self.std_made_str(&init.expr) {
+                                    self.std_made_vars.insert(id.ident.to_string());
                                 }
                                 self.vars.insert(id.ident.to_string(), "String".to_string());
                             }

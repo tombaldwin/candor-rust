@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a dependency glob's type named like a std prelude type is asked for every method (SOUNDNESS R1160).**
+  With `use dep::*;` in scope and `dep` exporting its own `String`/`Vec`/`Option`/`Result`/`Box`, the bare name is the
+  dependency's (a glob outranks the prelude), but the scanner asked the dependency only for methods std lacks, so
+  `s.len()`, `s.clear()` and `v.push(1)` on the dependency's effectful types read ABSENT unchained and chained. The
+  candidate is now formed for every method: chained it joins the dependency's own entry (a union, beside std's
+  reading), unchained the call discloses the crate in `invisible`. A `String` std itself constructed (`format!`,
+  `.to_string()`, a `+` onto one) is never re-read as the glob's. Unchained modules with such a glob disclose the
+  dependency on more rows.
 - ⚠ **candor-scan: a hand-written operator impl on a reference to a primitive is analysed under its own name (SOUNDNESS
   R1162).** `impl Rem<&D> for &u16` was filed under the bare module-level `rem`, which no operator site names, so
   `a % d` (`a: &u16`), `Rem::rem(a, d)` and `&5 % d` read ABSENT over its executed write. It is now `&u16::rem` (the
