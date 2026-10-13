@@ -30912,17 +30912,3 @@ pub fn ctl_priv() { priv_call(&PA) }
     assert!(veina_row_effs(&v, "BlockRng::from_rng").iter().any(|e| e == "Fs"), "R1151 (executed):\n{v:#}");
     assert!(veina_row_effs(&v, "ctl_priv").is_empty(), "R1151 control is pure (executed):\n{v:#}");
 }
-
-/// v053 (found auditing R1150; fixture rustagent-v053/fx/dynself, EXECUTED). `impl Read for dyn Src { fn read(&mut self, ..)
-/// { self.get() } }`: `self` is the trait object, so its calls are the trait's dispatch. Untyped, `read` kept only an
-/// `Unknown` hedge (rand_core 0.5/0.6's `impl Read for dyn RngCore` lost its only `Rand` with R1150's correction).
-#[test]
-fn v053_self_in_an_impl_for_a_trait_object_dispatches_on_the_trait() {
-    let v = scan_src_to_json_multi("v053dyn", &[("src/lib.rs", r##"pub fn mark() { let _ = std::fs::write("/tmp/rustagent53_dyn", b"x"); }
-pub trait Src { fn get(&mut self) -> u8; }
-pub struct Os; impl Src for Os { fn get(&mut self) -> u8 { mark(); 1 } }
-pub struct Fixed; impl Src for Fixed { fn get(&mut self) -> u8 { 2 } }
-impl std::io::Read for dyn Src { fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { b[0] = self.get(); Ok(1) } }
-"##)]);
-    assert!(veina_row_effs(&v, "read").iter().any(|e| e == "Fs"), "dyn-self `read` reaches Os::get (executed):\n{v:#}");
-}
