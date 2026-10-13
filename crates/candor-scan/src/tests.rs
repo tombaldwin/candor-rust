@@ -30950,3 +30950,45 @@ pub fn rd_cast_mbe_lit(y: u64) -> u16 { (y as u16) - 1 }
         assert!(veina_row_effs(&v, f).is_empty(), "R1161 control `{f}` is pure (executed):\n{v:#}");
     }
 }
+
+/// SOUNDNESS R1162 (v054; fixture rustagent-v054/fx/r1162, every cell EXECUTED). A HAND-WRITTEN operator impl on a
+/// reference to a PRIMITIVE (`impl Rem<&D> for &u16`) was keyed as the bare module-level `rem`, so `a % d`, `Rem::rem(a, d)`
+/// and an unsuffixed literal left operand (`&5 % d`) read ABSENT over its write. It is keyed `&u16::rem` (R1131's scheme)
+/// and reached from the operator site; an unsuffixed literal left operand charges each primitive of its kind the crate
+/// implements the operator on. Controls (executed pure): a literal right operand, by syntax, forms no edge. A by-value
+/// impl on the same primitive keeps its own unit (no merge), and a same-named free fn does not capture it.
+#[test]
+fn v054_r1162_reference_to_primitive_operator_impl_is_keyed_and_reached() {
+    let v = scan_src_to_json_multi("v054refprim", &[("src/lib.rs", r##"#![allow(clippy::op_ref)]
+use std::ops::{Rem, Mul, Add};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v054_r1162", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u16);
+#[derive(Clone, Copy)] pub struct G(pub f64);
+#[derive(Clone, Copy)] pub struct E(pub u16);
+impl<'a> Rem<&'a D> for &'a u16 { type Output = u16; fn rem(self, o: &'a D) -> u16 { mark(); *self % o.0.max(1) } }
+impl Mul<&G> for &f64 { type Output = f64; fn mul(self, o: &G) -> f64 { mark(); *self * o.0 } }
+impl Add<E> for u16 { type Output = u16; fn add(self, o: E) -> u16 { self + o.0 } }
+impl Add<&E> for &u16 { type Output = u16; fn add(self, o: &E) -> u16 { mark(); *self + o.0 } }
+pub fn add(a: u16, b: u16) -> u16 { a.wrapping_add(b) }
+pub fn hp_ref(a: &u16, d: &D) -> u16 { a % d }
+pub fn hq_meth(a: &u16, d: &D) -> u16 { a.rem(d) }
+pub fn hr_ufcs(a: &u16, d: &D) -> u16 { Rem::rem(a, d) }
+pub fn hs_litleft(d: &D) -> u16 { &5 % d }
+pub fn ht_float(a: &f64, g: &G) -> f64 { a * g }
+pub fn hx_refadd(a: &u16, e: &E) -> u16 { a + e }
+pub fn ca_lit(a: &u16) -> u16 { a % 3 }
+pub fn cb_reflit(a: &u16) -> u16 { a % &3 }
+pub fn ce_flit(a: &f64) -> f64 { a * 2.0 }
+pub fn cf_meth_lit(a: &u16) -> u16 { a.rem(7) }
+pub fn cg_litboth() -> u16 { 5 % 3 }
+"##)]);
+    for f in ["hp_ref", "hq_meth", "hr_ufcs", "hs_litleft", "ht_float", "hx_refadd", "&u16::rem", "&f64::mul", "&u16::add"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1162 `{f}` writes (executed):\n{v:#}");
+    }
+    for f in ["ca_lit", "cb_reflit", "ce_flit", "cf_meth_lit", "cg_litboth", "add"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "R1162 control `{f}` is pure (executed):\n{v:#}");
+    }
+    // The by-value impl keeps its own unit. Its body's `self + o.0` (two `u16`s) DOES edge to `&u16::add`: the typer
+    // collapses references and the right operand is not a literal, which is R1131's stated over-charge direction.
+    assert!(v["functions"].as_array().unwrap().iter().any(|r| r["fn"] == "u16::add"), "R1162: no merge:\n{v:#}");
+}

@@ -4011,7 +4011,12 @@ pub(crate) fn impl_key_avoiding_free_fns(
     }
     // SOUNDNESS R1131 — an OPERATOR impl on a reference to a nominal type is keyed `&Name` too, whether or not
     // its method collides with a free fn (see `operator_ref_self`).
-    if operator_ref_self(im, uses).is_some() {
+    if let Some((_, referent)) = operator_ref_self(im, uses) {
+        // SOUNDNESS R1162 — `impl_unit_type_name` answers a reference to a primitive with the bare primitive (`u16`),
+        // which would merge the `&u16` impl into a by-value `impl Rem<X> for u16`'s unit; the R1131 scheme is `&Name`.
+        if crate::model::PRIMITIVE_LEAVES.contains(&referent.as_str()) {
+            return Some(format!("&{referent}"));
+        }
         return impl_unit_type_name(&im.self_ty, &im.generics);
     }
     let methods: Vec<String> = im
@@ -4129,6 +4134,17 @@ pub(crate) fn operator_ref_self(im: &syn::ItemImpl, uses: &HashMap<String, Strin
     let leaf = p.path.segments.last()?.ident.to_string();
     if p.path.segments.len() == 1 && im.generics.type_params().any(|t| t.ident == leaf) {
         return None;
+    }
+    // SOUNDNESS R1162 — a HAND-WRITTEN impl on a reference to a PRIMITIVE (`impl Rem<&D> for &u16`) is the same shape:
+    // its unit was the bare module-level `rem`, which no operator site names, so `a % d` over `a: &u16` read ABSENT
+    // over its executed write. It is keyed `&u16::rem` like a nominal referent. A MACRO-MADE one (`MBE_PRIM_ATTR`) is
+    // not: R1157 gives it its own `<prim>::<mbe>::m` unit and discloses at the operator site instead.
+    if p.path.segments.len() == 1
+        && matches!(p.path.segments[0].arguments, syn::PathArguments::None)
+        && crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
+    {
+        let mbe = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_PRIM_ATTR));
+        return (!mbe).then_some((tr_leaf, leaf));
     }
     if is_non_nominal_type(&r.elem) {
         return None;

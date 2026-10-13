@@ -5098,7 +5098,14 @@ impl<'a> CallCollector<'a> {
         // decoy, v4 `G<u32>` vs `G<u64>`). coset4's true `macro:` reason is kept on the REASON side: with no
         // referent fallback the by-value call stays unclaimed and discloses `macro:`, and this edge, contested
         // between two `&EdwardsPoint::add` units, is judged `ambiguous:` beside it.
-        if self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
+        // SOUNDNESS R1162 — a PRIMITIVE referent (`impl Rem<&D> for &u16`): the orphan rule makes the impl's `Rhs` a
+        // crate-local type, so a LITERAL right operand (by syntax, `RHS_LITERAL`, as R1157) can never run it and forms no
+        // edge; every other right operand does (no name-typing claim withholds it).
+        let prim_lit = crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf) && RHS_LITERAL.with(|c| c.get());
+        if !prim_lit && self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
+            if std::env::var_os("CANDOR_V054_INSTR").is_some() && crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf) {
+                eprintln!("R1162REFPRIM\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
             if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
                 eprintln!("R1131REFSELF\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
@@ -9095,7 +9102,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let Some((tr, m)) = crate::lang::operator_method_trait(&leaf, node.args.len()) {
             if let Some(t) = self.resolve_recv_type(&node.receiver) {
                 let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
-                if self.returns.contains_key(&crate::model::impl_ref_self_key(tr, &tl)) {
+                // SOUNDNESS R1162 — on a primitive referent a LITERAL argument (by syntax) cannot be the impl's `Rhs`.
+                let prim_lit = crate::model::PRIMITIVE_LEAVES.contains(&tl.as_str())
+                    && node.args.first().is_some_and(syntactic_literal);
+                if !prim_lit && self.returns.contains_key(&crate::model::impl_ref_self_key(tr, &tl)) {
                     self.push_coercion_edge(&format!("&{tl}"), m);
                 }
             }
@@ -11115,6 +11125,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
                 None => self.charge_coercion(&node.left, tr, method),
+            }
+            // SOUNDNESS R1162 (literal half) — an UNSUFFIXED literal left operand (`&5 % d`) takes its type from impl
+            // selection, so it is any primitive of its kind the crate implements this operator on: each such primitive
+            // is charged (a union; rustc rejects the ambiguous case, so one of them is the one that runs). EXECUTED:
+            // rustagent-v054/fx/r1162 `hs_litleft` runs `impl Rem<&D> for &u16`'s write and read ABSENT. Not when the
+            // right operand is, by syntax, a primitive too (`1 + 2`, `1 + (x as u8)`): std's impl runs.
+            if lconst.is_none() && !syntactic_literal(&node.right)
+                && !cast_target_ident(&node.right).is_some_and(|t| crate::model::PRIMITIVE_LEAVES.contains(&t.as_str()))
+            {
+                let kinds: &[&str] = match peel_value(&node.left) {
+                    syn::Expr::Lit(l) => match &l.lit {
+                        syn::Lit::Int(i) if i.suffix().is_empty() => &["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"],
+                        syn::Lit::Float(f) if f.suffix().is_empty() => &["f32", "f64"],
+                        _ => &[],
+                    },
+                    _ => &[],
+                };
+                for p in kinds {
+                    let implemented = self.trait_impls.get(tr).is_some_and(|v| v.iter().any(|x| x == p))
+                        || self.returns.contains_key(&crate::model::prim_op_key(tr, p, true))
+                        || self.returns.contains_key(&crate::model::impl_ref_self_key(tr, p));
+                    if implemented {
+                        if std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                            eprintln!("R1162LITLEFT\t{tr}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        self.charge_coercion_ty(p, tr, method);
+                    }
+                }
             }
             // The two ADDITIVE left-operand typings below (R1137, R1139) can each name a PRIMITIVE, and a crate's
             // own `impl Op<X> for u64` is only ever run when the right operand is that crate's `X` (the orphan

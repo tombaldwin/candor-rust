@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a hand-written operator impl on a reference to a primitive is analysed under its own name (SOUNDNESS
+  R1162).** `impl Rem<&D> for &u16` was filed under the bare module-level `rem`, which no operator site names, so
+  `a % d` (`a: &u16`), `Rem::rem(a, d)` and `&5 % d` read ABSENT over its executed write. It is now `&u16::rem` (the
+  `&Type` scheme R1131 uses for nominal types) and the operator site reaches it; an unsuffixed literal left operand
+  is charged as each primitive of its kind the crate implements the operator on. A literal right operand forms no
+  edge. Like R1131, the edge is formed for a by-value primitive operand too (`x % y` over two `u16`s in such a crate
+  is over-charged), because the scanner does not track references. A macro-made impl keeps R1157's disclosure.
 - ⚠ **candor-scan: a cast on the left of an operator types the operator site (SOUNDNESS R1161).** `(y as u32) + F(3)`
   and `y as i64 * F(2)` were untyped, so the crate's own effectful `impl Add<F> for u32` formed no edge and the caller
   read ABSENT over its executed write. The cast's target is the operand's type, by syntax. A literal or a cast to a
