@@ -602,10 +602,34 @@ struct Ctx<'x> {
     /// R1004 — the crate-wide table, consulted only for a name THIS file does not define.
     xdefs: &'x CrateMacros,
     budget: usize,
+    /// SOUNDNESS R1156 (item position) — the `macro_rules!` definitions in TEXTUAL scope at the item being spliced:
+    /// `Some(tokens)` for an ungated one, `None` once a `#[cfg]`-gated definition of the name is in scope (no
+    /// textual order picks between cfg twins). Consulted only for a name this file defines more than once.
+    scope: HashMap<String, Option<String>>,
 }
 
 impl Ctx<'_> {
+    /// R1156 — the definition in textual scope for a name this FILE defines more than once.
+    fn scoped_def(&self, name: &str) -> Option<String> {
+        if !matches!(self.defs.get(name), Some(None)) {
+            return None;
+        }
+        self.scope.get(name).cloned().flatten()
+    }
+
     fn arms_of(&mut self, name: &str) -> Option<std::rc::Rc<Vec<Arm>>> {
+        if let Some(t) = self.scoped_def(name) {
+            let key = format!("{name}\u{1}{t}");
+            if let Some(a) = self.arms.get(&key) {
+                return a.clone();
+            }
+            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                eprintln!("R1156ITEM\t{name}"); // §E1 REACH COUNTER
+            }
+            let a = t.parse::<TokenStream>().ok().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
+            self.arms.insert(key, a.clone());
+            return a;
+        }
         if let Some(a) = self.arms.get(name) {
             return a.clone();
         }
@@ -631,7 +655,7 @@ impl Ctx<'_> {
             return None;
         }
         match self.defs.get(&id) {
-            Some(d) => d.is_some().then_some(id),
+            Some(d) => (d.is_some() || self.scoped_def(&id).is_some()).then_some(id),
             None => self.xdefs.get(&id).is_some_and(|d| d.is_some()).then_some(id),
         }
     }
@@ -681,6 +705,12 @@ impl Ctx<'_> {
     fn splice(&mut self, items: &mut Vec<syn::Item>, depth: usize) {
         let mut out: Vec<syn::Item> = Vec::with_capacity(items.len());
         for mut it in std::mem::take(items) {
+            if let syn::Item::Macro(m) = &it {
+                if let (Some(name), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
+                    let gated = crate::lang::has_cfg(&m.attrs);
+                    self.scope.insert(name.to_string(), (!gated).then(|| m.mac.tokens.to_string()));
+                }
+            }
             match &mut it {
                 syn::Item::Macro(m) if m.ident.is_none() => {
                     if let Some(gen) = self.expand_items(&m.mac, depth) {
@@ -752,7 +782,13 @@ impl Ctx<'_> {
                 }
                 syn::Item::Mod(md) => {
                     if let Some((_, inner)) = &mut md.content {
+                        // R1156 — a child sees the parent's textual scope; its own definitions leave with it
+                        // unless the module is `#[macro_use]`.
+                        let saved = self.scope.clone();
                         self.splice(inner, depth);
+                        if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                            self.scope = saved;
+                        }
                     }
                 }
                 _ => {}
@@ -927,10 +963,11 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
 pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
     let mut defs = HashMap::new();
     collect_defs(items, &mut defs);
-    if defs.values().all(|d| d.is_none()) && xdefs.values().all(|d| d.is_none()) {
+    // R1156 — a name defined more than once (`None`) may still be expanded from its textual scope.
+    if defs.is_empty() && xdefs.values().all(|d| d.is_none()) {
         return;
     }
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new() };
     cx.splice(items, 0);
 }
 

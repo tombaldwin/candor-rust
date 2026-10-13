@@ -16,7 +16,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   redefinition seen by a later child module, and a `#[macro_use] mod` beside a sibling definition: the effectful twin
   was left unexpanded (ABSENT, no hedge) because the crate kept one definition per name. The walk now records each
   ungated definition in textual order per module scope, and an invocation expands the one it really sees; the pure
-  twin stays pure. `#[cfg]` twins keep R208's `ambiguous:` disclosure.
+  twin stays pure. `#[cfg]` twins keep R208's `ambiguous:` disclosure. The same textual scope now applies at ITEM
+  position, so an impl made by one of two same-named macros (a dependency's `a::mk!`/`b::mk!`) is analysed and
+  published, and a chained consumer joins it (was `Unknown` only).
 - ⚠ **candor-scan: a `let` initialised from a labelled block, a `loop { break value }`, or a block with its own `let`s
   is typed (SOUNDNESS R1155).** `let x = 'b: { if f { break 'b D2(9); } D2(1) };`, `let x = loop { break D2(1); };`,
   `let x = { let v = D(2); D2(3) };` and `let x = { let _y = 3; mk() };` left `x` untyped, so `x + 1` formed no

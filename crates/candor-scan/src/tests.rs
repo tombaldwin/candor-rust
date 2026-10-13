@@ -30800,11 +30800,17 @@ pub mod mz { macro_rules! z { ($x:expr) => { crate::D($x) + 0u64 }; } pub fn zp(
 #[cfg(unix)] macro_rules! w { ($x:expr) => { D2($x) + 0u64 }; }
 #[cfg(not(unix))] macro_rules! w { ($x:expr) => { D($x) + 0u64 }; }
 pub fn cw() -> u64 { w!(1).0 }
+// item-position twins: sibling modules' `mk!` make different impls
+pub struct W; pub struct W2;
+pub mod ia { macro_rules! mk { ($t:ty) => { impl $t { pub fn run(&self) { crate::mark() } } }; } mk!(crate::W); }
+pub mod ib { macro_rules! mk { ($t:ty) => { impl $t { pub fn run(&self) {} } }; } mk!(crate::W2); }
+pub fn iw(w: &W) { w.run() }
+pub fn iw2(w: &W2) { w.run() }
 "##)]);
-    for f in ["b::fb", "k2", "v::vb::vb", "qb::qb", "zu", "e1", "c::fc"] {
+    for f in ["b::fb", "k2", "v::vb::vb", "qb::qb", "zu", "e1", "c::fc", "iw"] {
         assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1156 `{f}` writes (executed):\n{v:#}");
     }
-    for f in ["a::fa", "k1", "v::va::va", "qa::qa", "mz::zp"] {
+    for f in ["a::fa", "k1", "v::va::va", "qa::qa", "mz::zp", "iw2"] {
         assert!(veina_row_effs(&v, f).is_empty(), "R1156 control `{f}` is pure (executed):\n{v:#}");
     }
     assert_eq!(veina_row_effs(&v, "cw"), vec!["Unknown".to_string()], "R1156: a #[cfg] twin stays disclosed:\n{v:#}");
