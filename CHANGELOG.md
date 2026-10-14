@@ -11,6 +11,46 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.10] — 2026-10-14
+
+candor-scan and the deep engine (`cargo candor deep`); candor-classify, candor-report and candor-query are unchanged
+apart from the version. Most entries close a **silent under-report**: a function that really performs an effect
+through a dependency's operator impl on a primitive, an in-crate generic that runs its argument's std-trait impl,
+`.await` on a crate-local future, `impl Tr for dep::X` beside a local `X`, or a drop inside a std or generic body was
+missing that effect from its row. R1165 is closed as a disclosure (`Unknown`), not a charge. Each row was filed from
+a fixture that was executed and performed the effect while the report omitted it. SOUNDNESS R1117, R1164, R1165 and
+R1167–R1169 close here, and R1168 also closes R980's stated residual.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.9 `candor-scan` (the crates.io
+  build) over the 5,219-entry registry corpus, unchained, and over 982 consumers with every dependency chained
+  (`bin/corpus-ab.py`; each crate version counts separately). Each gate is scoped to the function named. Five sampled
+  unchained gates were re-run on the published binary and on this release's source and moved as stated. These now
+  **fail where 0.40.9 passed**:
+  - `deny Clock` over mysql_async 0.37's connection and query paths (`Conn::read_packet`, `Conn::continue_auth`,
+    `Queryable::query`/`exec`/`prep`/`ping`/`close`, the `Routine::call` impls; 111 rows), and `deny Net` over its
+    `io::Endpoint::check` (now a published unit). These `.await` a crate-local future, which now reaches its `poll`
+    (R1168).
+  - `deny Log` over tokio's `process::Command::status`, `process::Child::kill`/`wait` (1.48–1.53) and
+    `fs::file::Inner::lazy_init_read` (1.52–1.53); 37 rows.
+  - `deny Rand` over hickory-net 0.26's `udp::udp_client_stream::retry`, `UdpClientStream::send_message` and the
+    `UdpRequest`/`Request::send` methods (12 rows).
+  - With dependencies chained, also `deny Clock` over aws-smithy-runtime's `client::orchestrator::invoke`,
+    `invoke_with_stop_point`, `try_op`, `try_attempt` and `Operation::invoke` (20 rows).
+  - `deny Unknown` over 226 rows unchained (89 of them units the report did not carry before) and 218 chained. The
+    largest groups are tokio's `fs::asyncify` callers, hickory-net, mysql_async, h2's `PingPong::ping`, bit-set's
+    `difference`/`intersection`/`union`/`is_disjoint` (an in-crate generic that iterates its argument, R1167),
+    sqlx-core, async-native-tls's `accept`/`connect` and quinn's `RecvStream::read_chunk`; chained, also
+    darling_core, hyper, mongodb's `error::Error` methods and reqwest's `ResponseBuilderExt::url`.
+  - Deep engine (`cargo candor deep`), against v0.40.9 over 514 crates with a `Drop` impl: `deny Fs`, `deny Clock`,
+    `deny Env`, `deny Rand` and `deny Db` over mongodb 3.9's `ChangeStream::<T>::with_type`; `deny Log` over lapin's
+    `ReturnedMessages::clear_dropped_confirms` and jni 0.22's `JavaVM::singleton`; `deny Unknown` over sea-orm's
+    `QueryStream`/`TransactionStream` drops and zstd's `stream::write::_assert_traits` (R1117).
+
+  **Nothing passes where 0.40.9 failed**: no concrete effect and no `Unknown` is lost in either arm, and the deep A/B
+  removed nothing. Counts, unchained: ADDED 353, REMOVED 0, CHANGED 1,725 rows; 161 rows gain a concrete effect, 226
+  gain `Unknown`. Chained: ADDED 202, REMOVED 0, CHANGED 1,384; 181 gain a concrete effect, 218 gain `Unknown`. Deep:
+  ADDED 17, REMOVED 0, CHANGED 385.
+
 - ⚠ **candor-scan: `self` in `impl Tr for dep::X` is the dependency's `X` where a crate-local `X` exists (SOUNDNESS R1169).**
   `self` was typed by the impl's unit key, the leaf, which named the crate's own same-leaf struct: hyper-util's
   `impl GracefulConnection for hyper::server::conn::http1::Connection` read `self` as `server::conn::auto::Connection`,
