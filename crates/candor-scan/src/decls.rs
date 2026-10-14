@@ -3637,6 +3637,22 @@ pub(crate) fn record_return(
 /// VEIN B — file a declared-return FACT under a sentinel key with the index's one conflict rule: a first
 /// contributor records, an agreeing one is a no-op, a DISAGREEING one withdraws (`None`) and the
 /// withdrawal is permanent. `cache::merge_decls`' `merge_amb` applies the same rule across files.
+/// SOUNDNESS R1168 — an `async fn` whose (`Result`/`Option`-unwrapped) value is the nominal type `L`: the return index
+/// records that VALUE as the call's type, so a name bound from such a call and then awaited (`let f = mk(); f.await`) holds
+/// `L`'s Output convention, not an `L` future. `model::async_ret_key(leaf)`, value `1`; read by `type_of`'s `.await`.
+fn note_async_return(sig: &syn::Signature, uses_ty: &HashMap<String, String>, rets: &mut HashMap<String, Option<String>>) {
+    if sig.asyncness.is_none() {
+        return;
+    }
+    if let syn::ReturnType::Type(_, t) = &sig.output {
+        if let Some(p) = r372_type_path(crate::lang::unwrap_result_option(t), uses_ty) {
+            let head = p.split('<').next().unwrap_or(&p);
+            let leaf = head.rsplit("::").next().unwrap_or(head);
+            rets.insert(crate::model::async_ret_key(leaf), Some("1".to_string()));
+        }
+    }
+}
+
 fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: String) {
     match rets.get(&key) {
         None => {
@@ -4545,6 +4561,7 @@ pub(crate) fn collect_decls(
             }
             syn::Item::Fn(f) => {
                 record_return(&f.sig, uses_ty, rets, None, callable_aliases, None);
+                note_async_return(&f.sig, uses_ty, rets); // SOUNDNESS R1168
                 // SOUNDNESS R1145 — see `model::gen_op_key`. Filed for every free fn, so a same-leaf twin withdraws it.
                 let g = crate::lang::generic_operator_uses(&f.sig, &f.block, &Default::default(), None);
                 file_decl_fact(rets, crate::model::gen_op_key(&f.sig.ident.to_string()), g.join(","));
@@ -4961,6 +4978,20 @@ pub(crate) fn collect_decls(
                         // `T::method` retries on `U::method` (the user-Deref analog of the Box/Arc/Rc peel; a
                         // newtype `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find).
                         // `.clone()` stays guarded elsewhere, so the pointer-clone fabrication can't recur.
+                        // SOUNDNESS R1168 — a LOCAL `impl Future for T { type Output = O }`: what `t.await` evaluates to
+                        // (`Result`/`Option`-unwrapped, as the return index records an `async fn`'s value), so the strict
+                        // typer answers `x.await` with `O` and not with `x`'s own type (`model::future_output_key`).
+                        if leaf.ident == "Future" {
+                            for it in &im.items {
+                                if let syn::ImplItem::Type(at) = it {
+                                    if at.ident == "Output" {
+                                        let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
+                                        let o = r372_type_path(crate::lang::unwrap_result_option(&at.ty), uses_ty).unwrap_or_default();
+                                        file_decl_fact(rets, crate::model::future_output_key(&kl), o);
+                                    }
+                                }
+                            }
+                        }
                         if leaf.ident == "Deref" {
                             for it in &im.items {
                                 if let syn::ImplItem::Type(at) = it {
@@ -5007,6 +5038,7 @@ pub(crate) fn collect_decls(
                         }
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
+                        note_async_return(&m.sig, uses_ty, rets); // SOUNDNESS R1168
                         // SOUNDNESS R1145 — see `model::impl_gen_op_key`.
                         if let Some(ty) = &impl_key_ty {
                             let tl = ty.rsplit("::").next().unwrap_or(ty);

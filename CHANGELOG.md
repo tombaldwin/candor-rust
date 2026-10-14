@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: awaiting a crate-local future is its `Output`, and drives its `poll` (SOUNDNESS R1168).** The typers
+  answered `x.await` with `x`'s own type, so a value awaited out of a local future (`let v = f.await`,
+  `if let Some(s) = fut.await?`) was typed AS the future, and R1165's witness disclosed a false `dispatch:Future.poll`
+  (hickory-net `MdnsStream::new`). Pass A now files a local `impl Future`'s `Output`; `.await` on a provably-local future
+  (its leaf declared once, or every twin a future; no crate `async fn` returning it) is that `Output`, or untyped. And
+  R980's stated residual is closed: `.await` on a NAME or CALL operand of such a future edges to its `poll` (crate-anchored
+  where the type names its twin), which read every awaiting async fn ABSENT. R980's measured fabrication (a name bound
+  from an `async fn` returning the future type) is the exclusion, and its control stays pure. Executed fixture: 5 cells
+  `deny Fs <fn>` 0 → 1, 3 pure controls stay 0.
+
 - ⚠ **candor-scan: an in-crate caller of a generic that runs a std-trait method on its argument, iterates it, compares
   its elements or forwards it is charged (SOUNDNESS R1167).** R1145 charged the caller of a generic whose body applies an
   OPERATOR to a generic parameter; the in-crate siblings read ABSENT while the program ran the argument's effectful impl:

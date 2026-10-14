@@ -595,6 +595,17 @@ pub(crate) fn impl_gen_op_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("<genop>{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// SOUNDNESS R1168 — a `ReturnIndex` key: the `Output` of the crate's `impl Future for <leaf>` (type path, `""` when not
+/// nominal; a second, disagreeing impl of the leaf withdraws it).
+pub(crate) fn future_output_key(type_leaf: &str) -> String {
+    format!("<futout>{type_leaf}")
+}
+
+/// SOUNDNESS R1168 — a `ReturnIndex` key: some crate `async fn` returns a value of the nominal type `leaf`. Value `1`.
+pub(crate) fn async_ret_key(type_leaf: &str) -> String {
+    format!("<asyncret>{type_leaf}")
+}
+
 /// SOUNDNESS R1128 — a `ReturnIndex` key: the comma-joined written `Rhs` leaves of every local operator impl of `trait`
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
 /// SOUNDNESS R1157 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is

@@ -1927,6 +1927,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         let mut out: HashSet<String> = HashSet::new();
+        // SOUNDNESS R1168 — the twin leaves EVERY one of whose quals is the self type of a local `impl Future`
+        // (hickory-net's two `NextRandomUdpSocket`s): awaiting a value of that leaf yields an `Output`, whichever twin
+        // it is. Keyed `\u{1f}fut\u{1f}<leaf>`, a prefix no `<leaf>\u{1f}` consumer of this set can match.
+        // A self TyRef is `L:<qual>` or, written with no `use`, `R:<modpath>\u{1}<written>` (typesurf's encodings).
+        let future_selves: HashSet<String> = decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.ts.impls.iter())
+            .filter(|(_, tr)| !tr.starts_with("L:") && tr.rsplit("::").next() == Some("Future"))
+            .filter_map(|(sr, _)| {
+                if let Some(q) = sr.strip_prefix("L:") {
+                    return Some(q.to_string());
+                }
+                let (m, w) = sr.strip_prefix("R:")?.split_once('\u{1}')?;
+                Some(if m.is_empty() { w.to_string() } else { format!("{m}::{w}") })
+            })
+            .collect();
+        for (leaf, qs) in &quals {
+            if qs.len() >= 2 && qs.iter().all(|q| future_selves.contains(*q)) {
+                out.insert(format!("\u{1f}fut\u{1f}{leaf}"));
+            }
+        }
         for (leaf, qs) in &quals {
             if qs.len() < 2 {
                 continue;

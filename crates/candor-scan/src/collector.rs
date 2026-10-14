@@ -1487,6 +1487,47 @@ impl<'a> CallCollector<'a> {
         (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars) = snap2;
     }
 
+    /// SOUNDNESS R1168 — the leaf of `t` when a value typed `t` is itself a FUTURE of this crate, so awaiting it yields its
+    /// `Output`: `t` names a crate-local type (not a dependency's, not std's), declared ONCE here (`ambiguous_type_leaves`),
+    /// with a local `impl Future`, and NO crate `async fn` returns that type — the return index records an `async fn`
+    /// call by its value, so where one does, a `t` operand may be that value awaited by convention, and is left as typed.
+    /// SOUNDNESS R1168 — `Some(answer)` when `expr` (through `(..)`, `&`, `?`, `*`) AWAITS a value of a crate-local
+    /// future type (`local_future_leaf`): its indexed, `Result`/`Option`-unwrapped `Output`, or `None` when unindexed.
+    fn awaited_local_future(&self, expr: &syn::Expr) -> Option<Option<String>> {
+        let mut x = expr;
+        loop {
+            match x {
+                syn::Expr::Paren(p) => x = &p.expr,
+                syn::Expr::Group(g) => x = &g.expr,
+                syn::Expr::Reference(r) => x = &r.expr,
+                syn::Expr::Try(t) => x = &t.expr,
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => x = &u.expr,
+                syn::Expr::Await(a) => {
+                    let t = self.resolve_recv_type(&a.base)?;
+                    let l = self.local_future_leaf(&t)?;
+                    return Some(self.returns.get(&crate::model::future_output_key(&l)).cloned().filter(|o| !o.is_empty()));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn local_future_leaf(&self, t: &str) -> Option<String> {
+        if self.is_dependency_type(t) || matches!(t.split("::").next(), Some("std" | "core" | "alloc")) {
+            return None;
+        }
+        let head = t.split('<').next().unwrap_or(t);
+        let leaf = head.rsplit("::").next().unwrap_or(head).to_string();
+        // A leaf declared at two quals is any of them: provably a future only when EVERY twin implements `Future`
+        // (`scan.rs` files those as `\u{1f}fut\u{1f}<leaf>`); else it is left as typed.
+        let twin = self.assign_drop.twin_leaves.is_none_or(|t| t.contains(&leaf))
+            || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"));
+        (self.trait_impls.get("Future").is_some_and(|v| v.contains(&leaf))
+            && (!twin || self.ambiguous_type_leaves.contains(&format!("\u{1f}fut\u{1f}{leaf}")))
+            && !self.returns.contains_key(&crate::model::async_ret_key(&leaf)))
+        .then_some(leaf)
+    }
+
     /// SOUNDNESS R1145 — a CALLER instantiating a generic whose body runs an operator on it. `fn ga<E: Add<u64>>(d: E)
     /// { d + 3 }` cannot name `E`'s impl (SPEC §4's external-abstraction dispatch, R1126 — that body's row is the
     /// documented miss), but `ga(d)` with `d: D` runs `<D as Add<u64>>::add`, and the caller read ABSENT over it
@@ -1715,6 +1756,20 @@ impl<'a> CallCollector<'a> {
     /// itself (`Noisy(1)`, `&a`, `*p`), or the element of an array / repeat literal (`&[Noisy(1)]`). An argument it
     /// cannot type adds nothing (the residual: an untyped hand-off reads as before).
     fn witness_arg_types(&self, a: &syn::Expr) -> Vec<String> {
+        // SOUNDNESS R1168 — `peel_value` treats `.await` as value-transparent, which it is not: `f.await` is `f`'s
+        // `Output`. An awaited argument is answered by the strict typer, which knows that.
+        let mut x = a;
+        loop {
+            match x {
+                syn::Expr::Paren(p) => x = &p.expr,
+                syn::Expr::Group(g) => x = &g.expr,
+                syn::Expr::Reference(r) => x = &r.expr,
+                syn::Expr::Try(t) => x = &t.expr,
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => x = &u.expr,
+                syn::Expr::Await(_) => return self.type_of(x).into_iter().collect(),
+                _ => break,
+            }
+        }
         let e = peel_value(a);
         match e {
             syn::Expr::Array(arr) => arr.elems.iter().flat_map(|x| self.witness_arg_types(x)).collect(),
@@ -2980,7 +3035,16 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Paren(p) => self.type_of(&p.expr),
             syn::Expr::Group(g) => self.type_of(&g.expr),
             syn::Expr::Try(t) => self.type_of(&t.expr),
-            syn::Expr::Await(a) => self.type_of(&a.base),
+            syn::Expr::Await(a) => {
+                let t = self.type_of(&a.base)?;
+                match self.local_future_leaf(&t) {
+                    // SOUNDNESS R1168 — `x.await` is the future's `Output`, not `x`'s own type (hickory-net
+                    // `next_socket.await?` with `next_socket: NextRandomUdpSocket` typed the awaited socket as the
+                    // future and minted a false `dispatch:Future.poll`). Unindexed / non-nominal Output: no proof.
+                    Some(l) => self.returns.get(&crate::model::future_output_key(&l)).cloned().filter(|o| !o.is_empty()),
+                    None => Some(t),
+                }
+            }
             syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.type_of(&u.expr),
             syn::Expr::Path(_) => self.resolve_recv_type(expr),
             syn::Expr::Field(f) => {
@@ -3363,7 +3427,15 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Paren(p) => self.resolve_recv_type_for(&p.expr, outer),
             syn::Expr::Group(g) => self.resolve_recv_type_for(&g.expr, outer),
             syn::Expr::Try(t) => self.resolve_recv_type_for(&t.expr, outer),
-            syn::Expr::Await(a) => self.resolve_recv_type_for(&a.base, outer),
+            syn::Expr::Await(a) => {
+                // SOUNDNESS R1168 — awaiting a value of a crate-local FUTURE type yields its `Output` (`type_of`'s rule;
+                // `local_future_leaf` says when the operand is provably that future).
+                let t = self.resolve_recv_type_for(&a.base, outer)?;
+                match self.local_future_leaf(&t) {
+                    Some(l) => self.returns.get(&crate::model::future_output_key(&l)).cloned().filter(|o| !o.is_empty()),
+                    None => Some(t),
+                }
+            }
             syn::Expr::MethodCall(m) => {
                 // A method whose return is a DISPATCH trait object (`self.handler() -> &dyn Doer` /
                 // `-> Box<dyn Doer>`) has NO concrete type — return None so the dispatch path
@@ -3873,6 +3945,11 @@ impl<'a> CallCollector<'a> {
     ///     typed the payload as `Option`. A name cannot say whether its recorded type was unwrapped, so
     ///     it is not asked; that spelling stays as it was (see the test's residual note).
     fn resolve_payload_type(&self, pat: &syn::Pat, expr: &syn::Expr) -> Option<String> {
+        // SOUNDNESS R1168 — `if let Some(s) = fut.await?` binds the future's `Output` payload; both routes below peel
+        // `.await` as if it were value-transparent and answered with the future's own type.
+        if let Some(o) = self.awaited_local_future(expr) {
+            return o;
+        }
         // SOUNDNESS R1023 — a LAYERED answer is returned as is, for the binder to peel ONE layer of its own
         // kind (`payload_bound`): `if let Ok(v) = self.m.lock()` over a `Mutex<Vec<G>>` binds the guard of
         // the Vec, `if let Some(v) = &self.ov` over an `Option<Vec<G>>` binds the Vec. It also declines the
@@ -4071,7 +4148,11 @@ impl<'a> CallCollector<'a> {
                     crate::lang::Layered::Val(_) => None,
                 }
             }
-            syn::Expr::Await(a) => self.resolve_elem_type_raw(&a.base),
+            syn::Expr::Await(a) => match self.awaited_local_future(expr) {
+                // SOUNDNESS R1168 — the element of an awaited local future is its `Output`'s, which no index holds.
+                Some(_) => None,
+                None => self.resolve_elem_type_raw(&a.base),
+            },
             syn::Expr::Path(p) => {
                 if let Some(name) = p.path.get_ident().map(|i| i.to_string()) {
                     if let Some(e) = self.elem_of.get(&name) {
@@ -8337,6 +8418,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     self.push_coercion_edge(&ty_leaf, "poll");
                 }
+            }
+        } else if let Some((t, l)) = self.resolve_recv_type(b).and_then(|t| self.local_future_leaf(&t).map(|l| (t, l))) {
+            // SOUNDNESS R1168 — R980's stated residual, a NAME or CALL operand (`let f = mk(); f.await`, `mk().await`):
+            // `local_future_leaf` excludes exactly the leaf R980 measured (`ctl_await_asyncfn`) — one some crate `async fn`
+            // returns, whose name may hold that fn's awaited VALUE by the return index's convention.
+            if std::env::var_os("CANDOR_R1168_INSTR").is_some() {
+                eprintln!("R1168AWAIT\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            // A crate-anchored type names WHICH twin (`crate::udp::udp_stream::NextRandomUdpSocket`); a bare leaf asks by leaf.
+            let head = t.split('<').next().unwrap_or(&t);
+            match head.strip_prefix("crate::") {
+                Some(q) => self.push_coercion_edge(q, "poll"),
+                None => self.push_coercion_edge(&l, "poll"),
             }
         }
         syn::visit::visit_expr_await(self, node);

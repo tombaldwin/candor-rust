@@ -31406,3 +31406,60 @@ fn ctrl_strasref_y() -> usize { bytes_of("xy") }
         }
     }
 }
+
+/// SOUNDNESS R1168 (rustagent-v057) — `x.await` is the future's `Output`. The typers answered it with `x`'s own type, so
+/// a value awaited out of a crate-local future (`let v = f.await`, `if let Some(p) = f.await?`) was typed AS the future:
+/// R1165's witness then disclosed `dispatch:Future.poll` on a hand-off of the awaited value (hickory-net
+/// `MdnsStream::new`, a false reason). And R980's stated residual — `.await` on a NAME or CALL operand formed no edge to
+/// the local future's `poll` — read every async fn below ABSENT while it ran `Fut::poll` / `OFut::poll` (EXECUTED:
+/// rustagent-v057/fx/r1168, each `call` cell wrote its marker). R980's measured fabrication (`ctl_await_asyncfn`: a name
+/// bound from an `async fn` returning the future type holds its awaited VALUE by the return index's convention) is the
+/// control: `ctrl_asyncfn_*` executed pure and stay pure, and `fut_sock` hands the future on unawaited (pure).
+#[test]
+fn v057_r1168_awaiting_a_local_future_is_its_output_and_drives_its_poll() {
+    let (_dv, cv, _uv) = v053_chain("fdep", r##"pub fn take<T>(t: T) -> T { t }
+pub fn poll_it<F: std::future::Future + Unpin>(mut f: F) -> bool {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    std::pin::Pin::new(&mut f).poll(&mut cx).is_ready()
+}
+pub struct Sock;
+impl Sock { pub fn from_std<T>(_t: T) -> Sock { Sock } }
+"##, r##"use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+struct Plain(i32);
+struct Fut;
+impl Future for Fut { type Output = Plain; fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Plain> { std::fs::write("/tmp/rustagent-v057c-poll.txt", "p").unwrap(); Poll::Ready(Plain(1)) } }
+fn make() -> Fut { Fut }
+fn block_on<F: Future>(f: F) -> F::Output {
+    let mut f = std::pin::pin!(f);
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    loop { if let Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
+}
+async fn awaited_handoff() -> i32 { let f = make(); let v = f.await; fdep::take(v).0 }
+async fn awaited_inline() -> i32 { fdep::take(make().await).0 }
+fn call_aw_handoff() -> i32 { block_on(awaited_handoff()) }
+fn ctrl_future_handoff() -> bool { fdep::poll_it(make()) }
+struct OFut;
+impl Future for OFut { type Output = std::io::Result<Option<Plain>>; fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> { std::fs::write("/tmp/rustagent-v057c-opoll.txt", "o").unwrap(); Poll::Ready(Ok(Some(Plain(2)))) } }
+fn mko() -> OFut { OFut }
+async fn iflet_handoff() -> std::io::Result<i32> { let f = mko(); if let Some(p) = f.await? { return Ok(fdep::take(p).0); } Ok(0) }
+async fn let_handoff() -> std::io::Result<i32> { let f = mko(); let p = f.await?; Ok(p.map(|x| fdep::take(x).0).unwrap_or(0)) }
+async fn iflet_sock() -> std::io::Result<()> { let f = mko(); if let Some(p) = f.await? { let _s = fdep::Sock::from_std(p); } Ok(()) }
+async fn fut_sock() { let _s = fdep::Sock::from_std(mko()); }
+struct Req;
+impl Future for Req { type Output = i32; fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<i32> { std::fs::write("/tmp/rustagent-v057c-req.txt", "r").unwrap(); Poll::Ready(3) } }
+async fn mkreq() -> Req { Req }
+async fn ctrl_asyncfn_value() -> i32 { let f = mkreq(); let _r = f.await; 0 }
+async fn ctrl_asyncfn_inline() -> i32 { let _r = mkreq().await; 0 }
+"##);
+    for f in ["awaited_handoff", "awaited_inline", "iflet_handoff", "let_handoff", "iflet_sock"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1168 `{f}` awaits an effectful local future (executed):\n{cv:#}");
+    }
+    for f in ["ctrl_asyncfn_value", "ctrl_asyncfn_inline", "fut_sock"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1168 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    let why = |f: &str| cv["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|w| w.as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert!(why("ctrl_future_handoff").iter().any(|w| w == "dispatch:Future.poll"), "the future handed on unawaited keeps R1165's hedge:\n{cv:#}");
+}
