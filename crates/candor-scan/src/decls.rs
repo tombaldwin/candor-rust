@@ -4027,7 +4027,8 @@ pub(crate) fn collect_decls(
         }
         let mut ids = Vec::new();
         idents(im.mac.tokens.clone(), &mut ids);
-        const OPS: &[&str] = &["PartialEq", "PartialOrd", "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr"];
+        const OPS: &[&str] = &["PartialEq", "PartialOrd", "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr",
+            "AddAssign", "SubAssign", "MulAssign", "DivAssign", "RemAssign", "BitAndAssign", "BitOrAssign", "BitXorAssign", "ShlAssign", "ShrAssign"]; // R1177
         for tr in ids.iter().filter(|i| OPS.contains(&i.as_str())) {
             for ty in ids.iter().filter(|i| i.chars().next().is_some_and(|c| c.is_uppercase()) && !OPS.contains(&i.as_str())) {
                 let k = crate::model::impl_rhs_key(tr, ty);
@@ -4934,7 +4935,10 @@ pub(crate) fn collect_decls(
                             _ => None,
                         };
                         if let (Some(ty), true) = (peeled_self.as_ref(), matches!(key.as_str(), "PartialEq" | "PartialOrd" | "Add" | "Sub" | "Mul" | "Div" | "Rem"
-                            | "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr"))
+                            | "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr"
+                            // SOUNDNESS R1177 — the compound-assignment family: its `Rhs` and its primitive impls (R1157) too.
+                            | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" | "RemAssign" | "BitAndAssign" | "BitOrAssign"
+                            | "BitXorAssign" | "ShlAssign" | "ShrAssign"))
                         {
                             let tyl = ty.rsplit("::").next().unwrap_or(ty).to_string();
                             let rhs = match &leaf.arguments {

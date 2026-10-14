@@ -11,6 +11,26 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`) forms an operator
+  edge (SOUNDNESS R1177).** The family had none, so `a += L(2)` over an effectful `impl AddAssign for L` read ABSENT, and
+  `a += d` over a dependency's `impl AddAssign<D> for u32` read ABSENT chained too, with no `invisible` (executed:
+  rustagent-v058/fx/x177; `deny Fs <fn>` 0 → 1 on 29 cells chained and on the 21 local ones unchained, where the 8
+  dependency cells now disclose `invisible` instead). Each family
+  now dispatches on the left place exactly as the binary operators do: a local value, `*r`, a field, an index, a
+  dependency's type, R1164's primitive-left join, and the UFCS spelling `AddAssign::add_assign(&mut a, b)`. `+=` never
+  falls back to `Add` (rustc rejects it, E0368), and a literal right operand over a primitive with a crate-local impl
+  forms no new edge (it cannot select that impl). An impl on `&mut T` is keyed `&T::m`, as R1131 keys the binary
+  family, so its row moves from the bare `m` to `&T::m`. A MACRO-MADE compound-assignment impl is not spliced (a stated
+  residual): splicing it made a hand-written `T::sub_assign` key ambiguous and traded 47 existing edges for an
+  `ambiguous:` reason in the first cut.
+  Measured against the published 0.40.10 `candor-scan` over the 5,219-entry registry corpus and 982 chained consumers:
+  **no row gains a concrete effect** (no crate in the corpus reaches an effectful compound-assignment impl), so no
+  scoped `deny <E>` gate moves. Unchained ADDED 531, REMOVED 60, CHANGED 949 rows; 137 rows newly carry `Unknown`
+  (0.0049%) and 41 more gain it, through new edges into num-bigint, bigdecimal, bitvec, fixedbitset and similar
+  operator impls that were already `Unknown`; chained 182 newly carry `Unknown`. The 30 removed keys are rust_decimal's
+  `impl XAssign for &mut Decimal` rows renamed to `&Decimal::x_assign`, each with the same effects and the same edge
+  (checked against rustc's MIR). Nothing loses a concrete effect, an `Unknown` or an `invisible`.
+
 ## [0.40.10] — 2026-10-14
 
 candor-scan and the deep engine (`cargo candor deep`); candor-classify, candor-report and candor-query are unchanged

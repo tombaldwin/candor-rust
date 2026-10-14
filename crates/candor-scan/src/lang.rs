@@ -4098,7 +4098,15 @@ pub(crate) fn impl_unit_type_name(ty: &syn::Type, generics: &syn::Generics) -> O
 /// The operator traits whose method an operator expression runs (`binop_trait`, plus unary `-`/`!`).
 pub(crate) const OPERATOR_TRAITS: &[&str] = &[
     "PartialEq", "PartialOrd", "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Neg", "Not",
+    // SOUNDNESS R1177 — the compound-assignment family (`binop_trait`).
+    "AddAssign", "SubAssign", "MulAssign", "DivAssign", "RemAssign", "BitAndAssign", "BitOrAssign", "BitXorAssign",
+    "ShlAssign", "ShrAssign",
 ];
+
+/// SOUNDNESS R1177 — the compound-assignment operator traits (a subset of `OPERATOR_TRAITS`).
+pub(crate) fn is_assign_operator_trait(tr: &str) -> bool {
+    tr.ends_with("Assign") && OPERATOR_TRAITS.contains(&tr)
+}
 
 /// SOUNDNESS R1131 — `impl Rem<&B> for &B` (and `&'a B`, `&mut B`): an OPERATOR trait implemented for a
 /// REFERENCE to a nominal type the crate names. Returns `(trait leaf as written, the referent's leaf)`.
@@ -11219,8 +11227,8 @@ pub(crate) fn is_format_macro(leaf: &str) -> bool {
 /// The (trait leaf, method) a binary operator overloads to, for the operator-overload coercion (#4). The
 /// dispatch receiver is the LEFT operand (Rust resolves `a OP b` as `<A>::method(a, b)`). Comparison ops
 /// route through `PartialOrd::partial_cmp`/`PartialEq::eq` (the impl method, not the per-op `lt`/`gt`
-/// which forward to it). Lazy boolean `&&`/`||`, assignment, and the compound-assign ops (`+=` is
-/// `AddAssign`, a distinct family left as an honest residual) return None — no overload edge.
+/// which forward to it). Lazy boolean `&&`/`||` and plain assignment return None — no overload edge. The compound-assign
+/// ops are their own family (`+=` is `AddAssign::add_assign`, SOUNDNESS R1177), dispatched on the left place.
 /// SOUNDNESS R1131 — the operator trait (and the method its impl defines) an EXPLICIT method call spells:
 /// `a.rem(b)` is `Rem::rem`, `a.ne(&b)` runs `PartialEq::eq`'s provided `ne`, `a.lt(&b)` `PartialOrd::partial_cmp`.
 pub(crate) fn operator_method_trait(method: &str, argc: usize) -> Option<(&'static str, &'static str)> {
@@ -11237,6 +11245,17 @@ pub(crate) fn operator_method_trait(method: &str, argc: usize) -> Option<(&'stat
         ("shr", 1) => ("Shr", "shr"),
         ("eq" | "ne", 1) => ("PartialEq", "eq"),
         ("partial_cmp" | "lt" | "le" | "gt" | "ge", 1) => ("PartialOrd", "partial_cmp"),
+        // SOUNDNESS R1177 — the compound-assignment family, spelled as a method / UFCS call (`AddAssign::add_assign(&mut a, b)`).
+        ("add_assign", 1) => ("AddAssign", "add_assign"),
+        ("sub_assign", 1) => ("SubAssign", "sub_assign"),
+        ("mul_assign", 1) => ("MulAssign", "mul_assign"),
+        ("div_assign", 1) => ("DivAssign", "div_assign"),
+        ("rem_assign", 1) => ("RemAssign", "rem_assign"),
+        ("bitand_assign", 1) => ("BitAndAssign", "bitand_assign"),
+        ("bitor_assign", 1) => ("BitOrAssign", "bitor_assign"),
+        ("bitxor_assign", 1) => ("BitXorAssign", "bitxor_assign"),
+        ("shl_assign", 1) => ("ShlAssign", "shl_assign"),
+        ("shr_assign", 1) => ("ShrAssign", "shr_assign"),
         ("neg", 0) => ("Neg", "neg"),
         ("not", 0) => ("Not", "not"),
         _ => return None,
@@ -11258,6 +11277,21 @@ pub(crate) fn binop_trait(op: &syn::BinOp) -> Option<(&'static str, &'static str
         BinOp::Shr(_) => ("Shr", "shr"),
         BinOp::Eq(_) | BinOp::Ne(_) => ("PartialEq", "eq"),
         BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_) => ("PartialOrd", "partial_cmp"),
+        // SOUNDNESS R1177 — a COMPOUND ASSIGNMENT is its own operator family: `a += b` runs `<A as AddAssign<B>>::
+        // add_assign(&mut a, b)` and NEVER `Add` (rustc E0368 rejects `+=` on a type with only `Add`; EXECUTED,
+        // rustagent-v058/fx/x177 `addonly`). The receiver is the left PLACE, so every left-operand route the binary
+        // operators take applies unchanged. Before this the family returned `None` and formed no edge at all, local or
+        // across the scan boundary: `a += L(2)` over an effectful `impl AddAssign for L` read ABSENT (EXECUTED, x177).
+        BinOp::AddAssign(_) => ("AddAssign", "add_assign"),
+        BinOp::SubAssign(_) => ("SubAssign", "sub_assign"),
+        BinOp::MulAssign(_) => ("MulAssign", "mul_assign"),
+        BinOp::DivAssign(_) => ("DivAssign", "div_assign"),
+        BinOp::RemAssign(_) => ("RemAssign", "rem_assign"),
+        BinOp::BitAndAssign(_) => ("BitAndAssign", "bitand_assign"),
+        BinOp::BitOrAssign(_) => ("BitOrAssign", "bitor_assign"),
+        BinOp::BitXorAssign(_) => ("BitXorAssign", "bitxor_assign"),
+        BinOp::ShlAssign(_) => ("ShlAssign", "shl_assign"),
+        BinOp::ShrAssign(_) => ("ShrAssign", "shr_assign"),
         _ => return None,
     })
 }

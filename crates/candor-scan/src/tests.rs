@@ -17342,7 +17342,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17353,7 +17353,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev108/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev109/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31524,4 +31524,116 @@ fn ctrl_via_quiet() -> u8 { hdep::server::Connection(1).via_quiet() }
         assert!(effs(f).iter().any(|e| e == "Fs"), "R1169 `{f}` writes (executed):\n{cv:#}");
     }
     assert!(!effs("Connection::via_dflt").iter().any(|e| e == "Fs"), "R1169 residual (one qual for two impls) moved — decide it:\n{cv:#}");
+}
+
+/// SOUNDNESS R1177 (rustagent-v058; fixture rustagent-v058/fx/x177, every cell EXECUTED). A COMPOUND ASSIGNMENT formed no
+/// operator edge: `binop_trait` returned `None` for `+=`/`-=`/…/`>>=`, so `a += L(2)` over an effectful `impl AddAssign for
+/// L` read ABSENT, and `a += d` over a dependency's `impl AddAssign<D> for u32` read ABSENT chained too (no `invisible`).
+/// All ten families now dispatch on the left PLACE exactly as the binary operators do (a local value, `*r`, a field, an
+/// index, a dependency's type, R1164's primitive-left join, UFCS). Controls (executed pure) stay pure: std arithmetic,
+/// `String += &str`, a type whose `Add` is effectful but whose `AddAssign` is not, a dependency's pure impls, and a
+/// literal right operand over a primitive with a crate-local impl. `lw_explicit`: a MACRO-MADE impl of the family in
+/// another module must not make `L::sub_assign` ambiguous (splicing it dropped this edge for an `ambiguous:` reason in
+/// the first cut). Pinned residuals: a generic body's own row (`lq_generic`, charged at its caller `lr_callgen` as the
+/// binary family is) and the binary `x + 3` over-charge (R1128).
+#[test]
+fn v058_r1177_compound_assignment_forms_an_operator_edge() {
+    let (_dv, cv, uv) = v053_chain("v058adep", r##"//! rustagent-v058 R1177 fixture: a DEPENDENCY's compound-assignment impls.
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v058_x177", b"x"); }
+#[derive(Clone, Copy)] pub struct D(pub u32);
+#[derive(Clone, Copy)] pub struct E(pub u32);
+// dependency type on the left
+impl std::ops::AddAssign for D { fn add_assign(&mut self, o: D) { mark(); self.0 += o.0 } }
+impl std::ops::ShlAssign<u32> for D { fn shl_assign(&mut self, o: u32) { mark(); self.0 <<= o } }
+// primitive on the left, dependency type on the right (R1164's join)
+impl std::ops::AddAssign<D> for u32 { fn add_assign(&mut self, o: D) { mark(); *self += o.0 } }
+impl std::ops::BitOrAssign<D> for u64 { fn bitor_assign(&mut self, o: D) { mark(); *self |= o.0 as u64 } }
+// pure: the over-charge control
+impl std::ops::SubAssign for E { fn sub_assign(&mut self, o: E) { self.0 -= o.0 } }
+impl std::ops::MulAssign<E> for u32 { fn mul_assign(&mut self, o: E) { *self *= o.0 } }
+"##, r##"#![allow(clippy::all)]
+use std::ops::*;
+use v058adep::{D, E};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v058_x177", b"x"); }
+#[derive(Clone, Copy)] pub struct L(pub u32);
+impl AddAssign for L { fn add_assign(&mut self, o: L) { mark(); self.0 += o.0 } }
+impl SubAssign for L { fn sub_assign(&mut self, o: L) { mark(); self.0 -= o.0 } }
+impl MulAssign for L { fn mul_assign(&mut self, o: L) { mark(); self.0 *= o.0 } }
+impl DivAssign for L { fn div_assign(&mut self, o: L) { mark(); self.0 /= o.0.max(1) } }
+impl RemAssign for L { fn rem_assign(&mut self, o: L) { mark(); self.0 %= o.0.max(1) } }
+impl BitAndAssign for L { fn bitand_assign(&mut self, o: L) { mark(); self.0 &= o.0 } }
+impl BitOrAssign for L { fn bitor_assign(&mut self, o: L) { mark(); self.0 |= o.0 } }
+impl BitXorAssign for L { fn bitxor_assign(&mut self, o: L) { mark(); self.0 ^= o.0 } }
+impl ShlAssign<u32> for L { fn shl_assign(&mut self, o: u32) { mark(); self.0 <<= o } }
+impl ShrAssign<u32> for L { fn shr_assign(&mut self, o: u32) { mark(); self.0 >>= o } }
+impl<'a> AddAssign<&'a L> for L { fn add_assign(&mut self, o: &'a L) { mark(); self.0 += o.0 } }
+impl Add<L> for u16 { type Output = u16; fn add(self, o: L) -> u16 { mark(); self + o.0 as u16 } }
+impl AddAssign<L> for u16 { fn add_assign(&mut self, o: L) { mark(); *self += o.0 as u16 } }
+// both families: Add effectful, AddAssign pure — `+=` runs ONLY AddAssign
+#[derive(Clone, Copy)] pub struct Both(pub u32);
+impl Add for Both { type Output = Both; fn add(self, o: Both) -> Both { mark(); Both(self.0 + o.0) } }
+impl AddAssign for Both { fn add_assign(&mut self, o: Both) { self.0 += o.0 } }
+// Add only: `+=` does not compile on it (see addonly.rs, not built); `a = a + b` runs Add
+#[derive(Clone, Copy)] pub struct OnlyAdd(pub u32);
+impl Add for OnlyAdd { type Output = OnlyAdd; fn add(self, o: OnlyAdd) -> OnlyAdd { mark(); OnlyAdd(self.0 + o.0) } }
+// a MACRO-MADE impl of the same family for L in another module (pure): must not make `L::sub_assign` ambiguous
+pub mod mk { macro_rules! mk { () => { impl std::ops::SubAssign<u8> for super::L { fn sub_assign(&mut self, o: u8) { self.0 -= o as u32 } } } } mk!(); }
+pub struct S { pub f: L, pub d: D, pub v: Vec<L> }
+impl S { pub fn sm_selffield(&mut self) { self.f += L(1) } }
+pub fn la_add(mut a: L) -> u32 { a += L(2); a.0 }
+pub fn lb_sub(mut a: L) -> u32 { a -= L(2); a.0 }
+pub fn lc_mul(mut a: L) -> u32 { a *= L(2); a.0 }
+pub fn ld_div(mut a: L) -> u32 { a /= L(2); a.0 }
+pub fn le_rem(mut a: L) -> u32 { a %= L(2); a.0 }
+pub fn lf_bitand(mut a: L) -> u32 { a &= L(2); a.0 }
+pub fn lg_bitor(mut a: L) -> u32 { a |= L(2); a.0 }
+pub fn lh_bitxor(mut a: L) -> u32 { a ^= L(2); a.0 }
+pub fn li_shl(mut a: L) -> u32 { a <<= 2; a.0 }
+pub fn lj_shr(mut a: L) -> u32 { a >>= 2; a.0 }
+pub fn lk_mutref(a: &mut L) { *a += L(2) }
+pub fn ll_field(s: &mut S) { s.f += L(2) }
+pub fn lm_index(v: &mut Vec<L>) { v[0] += L(2) }
+pub fn ln_arr(mut v: [L; 2]) -> u32 { v[1] -= L(1); v[1].0 }
+pub fn lo_primrhs(mut x: u16) -> u16 { x += L(3); x }
+pub fn lp_refrhs(mut a: L, b: &L) -> u32 { a += b; a.0 }
+pub fn lq_generic<T: AddAssign<L>>(mut t: T) -> T { t += L(1); t }
+pub fn lr_callgen() -> u32 { lq_generic(L(1)).0 }
+pub fn ls_method(mut a: L) -> u32 { a.add_assign(L(2)); a.0 }
+pub fn lt_ufcs(mut a: L) -> u32 { AddAssign::add_assign(&mut a, L(2)); a.0 }
+pub fn lu_vecfield(s: &mut S) { s.v[0] *= L(3) }
+pub fn lv_paren(a: &mut L) { (*a) ^= L(3) }
+pub fn lw_explicit(mut a: L) -> u32 { a.sub_assign(L(2)); a.0 }
+pub fn da_dep(mut d: D) -> u32 { d += D(2); d.0 }
+pub fn db_prim(mut a: u32, d: D) -> u32 { a += d; a }
+pub fn dc_field(s: &mut S) { s.d += D(1) }
+pub fn dd_mutref(r: &mut D) { *r += D(1) }
+pub fn de_index(v: &mut Vec<D>) { v[0] += D(1) }
+pub fn df_shl(mut d: D) -> u32 { d <<= 1; d.0 }
+pub fn dg_bitorprim(mut x: u64) -> u64 { x |= D(4); x }
+pub fn dh_ctor(mut a: u32) -> u32 { a += v058adep::D(3); a }
+// over-charge controls (executed pure)
+pub fn ca_std(mut a: u32, b: u32) -> u32 { a += b; a -= 1; a <<= 1; a }
+pub fn cb_string(mut s: String) -> String { s += "x"; s }
+pub fn cc_both(mut a: Both) -> u32 { a += Both(1); a.0 }
+pub fn cd_deppure(mut e: E) -> u32 { e -= E(1); e.0 }
+pub fn ce_primpure(mut x: u32, e: E) -> u32 { x *= e; x }
+pub fn cf_onlyadd(mut a: OnlyAdd) -> u32 { a = a + OnlyAdd(1); a.0 }
+pub fn cg_lit(mut x: u16) -> u16 { x += 3; x }
+pub fn ch_binlit(x: u16) -> u16 { x + 3 }
+"##);
+    let row = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f || r["fn"].as_str().unwrap().ends_with(&format!("::{f}"))).cloned().collect::<Vec<_>>();
+    let fs = |v: &serde_json::Value, f: &str| row(v, f).iter().flat_map(effs).any(|e| e == "Fs");
+    for f in ["sm_selffield", "la_add", "lb_sub", "lc_mul", "ld_div", "le_rem", "lf_bitand", "lg_bitor", "lh_bitxor", "li_shl", "lj_shr", "lk_mutref", "ll_field", "lm_index", "ln_arr", "lo_primrhs", "lp_refrhs", "lr_callgen", "ls_method", "lt_ufcs", "lu_vecfield", "lv_paren", "lw_explicit", "da_dep", "db_prim", "dc_field", "dd_mutref", "de_index", "df_shl", "dg_bitorprim", "dh_ctor", "cf_onlyadd"] {
+        assert!(fs(&cv, f), "R1177 `{f}` writes (executed), chained:\n{cv:#}");
+        if f.starts_with('d') {
+            assert!(row(&uv, f).iter().any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "v058adep"))), "R1177 `{f}` unchained discloses the dependency:\n{uv:#}");
+        } else {
+            assert!(fs(&uv, f), "R1177 `{f}` writes (executed), unchained:\n{uv:#}");
+        }
+    }
+    for f in ["ca_std", "cb_string", "cc_both", "cd_deppure", "ce_primpure", "cg_lit"] {
+        assert!(!fs(&cv, f) && !fs(&uv, f), "R1177 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    assert!(!fs(&cv, "lq_generic"), "R1177 residual (a generic body's own row) moved — decide it:\n{cv:#}");
+    assert!(fs(&cv, "ch_binlit"), "R1128 residual (binary over-charge on a literal) moved — decide it:\n{cv:#}");
 }

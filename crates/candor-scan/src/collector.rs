@@ -5451,7 +5451,14 @@ impl<'a> CallCollector<'a> {
                 return;
             }
         }
-        if let Some(impls) = self.trait_impls.get(trait_leaf) {
+        // SOUNDNESS R1177 — a NEW edge (the compound-assignment family had none) is not formed where it can never run: a
+        // crate-local `impl AddAssign<L> for u16` has a crate-local `Rhs` (the orphan rule), so a LITERAL right operand (by
+        // syntax, `RHS_LITERAL`, as R1157/R1162) cannot select it — `x += 3` over a `u16` runs std's impl (EXECUTED,
+        // x177 `cg_lit`). The binary family keeps its pre-existing edge here (`x + 3` stays over-charged, R1128).
+        let assign_prim_lit = crate::lang::is_assign_operator_trait(trait_leaf)
+            && crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf)
+            && RHS_LITERAL.with(|c| c.get());
+        if let Some(impls) = self.trait_impls.get(trait_leaf).filter(|_| !assign_prim_lit) {
             if impls.iter().any(|t| t == ty_leaf) {
                 // SOUNDNESS R1128 — WITHDRAWN to the pre-existing over-charge. A refusal of this edge when the
                 // other operand is not the impl's `Rhs` was tried three ways (3684f51, f0b83fb, 379176a) and each
@@ -11565,6 +11572,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
+            if crate::lang::is_assign_operator_trait(tr) && std::env::var_os("CANDOR_R1177_INSTR").is_some() {
+                eprintln!("R1177ASSIGN\t{tr}"); // §E1 REACH COUNTER: a compound-assignment site, which formed no edge before
+            }
             // R1157 — whether the RIGHT operand is a literal, for `charge_coercion_ty_at`; reset below.
             RHS_LITERAL.with(|c| c.set(syntactic_literal(&node.right)));
             let lconst = self.local_const_type(&node.left);

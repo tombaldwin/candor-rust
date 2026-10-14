@@ -836,6 +836,17 @@ fn peel_groups(t: &mut syn::Type) {
     }
 }
 
+/// SOUNDNESS R1177 — the operator traits whose MACRO-MADE impls are spliced: `OPERATOR_TRAITS` without the
+/// compound-assignment family. Splicing a macro-made `impl AddAssign` mints a unit whose `Type::add_assign` / bare
+/// `add_assign` key a hand-written impl or free fn in another module already holds, and the resolver REFUSES an
+/// ambiguous key: the existing edge was traded for an `ambiguous:` reason (rustagent-v058 A/B: bigdecimal's
+/// `BigDecimal::sub` -> `impl_ops_sub::BigDecimal::sub_assign`, arrow-buffer's `div_rem_knuth` -> its free
+/// `add_assign`, 47 edges). Left unspliced, as before R1177: a macro-made compound-assignment impl has no unit (stated
+/// residual), and no edge that existed is lost.
+fn spliced_operator_trait(leaf: &str) -> bool {
+    crate::lang::OPERATOR_TRAITS.contains(&leaf) && !crate::lang::is_assign_operator_trait(leaf)
+}
+
 /// SOUNDNESS R1146 — a macro-generated impl of a std OPERATOR trait (`lang::OPERATOR_TRAITS`, by the trait path's
 /// written last segment: `impl Rem for $t`, `impl<'a> Rem<&'a $t> for &'a $t`). Spliced like an inherent impl: the
 /// trait is std's, so no LOCAL dispatch universe (the bounded CHA, SPEC §4) holds it and splicing moves no fan-out —
@@ -855,7 +866,7 @@ fn peel_groups(t: &mut syn::Type) {
 /// withholds the edge). Unspliced, the impl had no unit and `x + d` read ABSENT over its executed write.
 fn prim_operator_impl(i: &syn::ItemImpl) -> bool {
     let op = matches!(&i.trait_, Some((None, p, _))
-        if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
+        if p.segments.last().is_some_and(|s| spliced_operator_trait(&s.ident.to_string())));
     let mut t: &syn::Type = &i.self_ty;
     loop {
         match t {
@@ -873,7 +884,7 @@ fn prim_operator_impl(i: &syn::ItemImpl) -> bool {
 
 fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
     let op = matches!(&i.trait_, Some((None, p, _))
-        if p.segments.last().is_some_and(|s| crate::lang::OPERATOR_TRAITS.contains(&s.ident.to_string().as_str())));
+        if p.segments.last().is_some_and(|s| spliced_operator_trait(&s.ident.to_string())));
     let mut t: &syn::Type = &i.self_ty;
     loop {
         match t {
