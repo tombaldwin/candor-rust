@@ -2665,6 +2665,31 @@ pub(crate) fn fninfo(
     let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
+    // SOUNDNESS R1169 — in `impl Tr for dep::X`, `self` is the DEPENDENCY's `X`, as written. `self_ty` is the impl's
+    // unit KEY (the leaf `X`, which is how this crate's units of that impl are filed), and typing `self` by it named a
+    // crate-local `X` of the same leaf when there was one: hyper-util's `impl GracefulConnection for
+    // hyper::server::conn::http1::Connection` read `self` as its own `server::conn::auto::Connection`, so
+    // `hyper::…::Connection::graceful_shutdown(self)` and `self.graceful_shutdown()` edged to the LOCAL twin's body
+    // (EXECUTED: rustagent-v057/fx/r1169 — the dependency's `Fs` ran, the local `Env` was charged and the `Fs` was not).
+    // A written path rooted at a manifest dependency types `self` by that path; the units stay keyed as they were.
+    // ONLY where the leaf collides with a crate-local struct (`fields` holds every local named / tuple struct): without a
+    // twin the leaf names nothing local and the old typing stands. Retyping every `impl Tr for dep::X` moved `self.f.m()`
+    // on a dependency's generic field from the untyped-receiver hedge to `[]` + `invisible` (tungstenite
+    // `StreamOwned::set_nodelay`, measured on the first cut), which is the dependency-field route's own residual, not this row's.
+    let twin = self_ty.is_some_and(|k| fields.contains_key(k.rsplit("::").next().unwrap_or(k)));
+    if let Some(w) = impl_self.filter(|_| twin).and_then(|st| crate::lang::type_path(st, sig_uses)) {
+        let root = w.split("::").next().unwrap_or("");
+        if w.contains("::")
+            && !w.contains(crate::decls::ALIAS_ALT_SEP)
+            && sig_uses.get(crate::lang::DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root))
+            && vars.contains_key("self")
+        {
+            if std::env::var_os("CANDOR_R1169_INSTR").is_some() {
+                eprintln!("R1169SELF\t{}\t{w}", self_ty.unwrap_or("")); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            vars.insert("self".to_string(), w);
+        }
+    }
     // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;
     // fn g(t: &Tool) { t.run() }`) was typed by the bare `Tool`, which names no local type, so `t.run()` and `a % b`
     // formed no edge and no disclosure: ABSENT unchained (no `invisible`) and chained alike, while the explicit

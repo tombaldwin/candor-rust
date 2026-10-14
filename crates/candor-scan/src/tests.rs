@@ -31463,3 +31463,65 @@ async fn ctrl_asyncfn_inline() -> i32 { let _r = mkreq().await; 0 }
         .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|w| w.as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
     assert!(why("ctrl_future_handoff").iter().any(|w| w == "dispatch:Future.poll"), "the future handed on unawaited keeps R1165's hedge:\n{cv:#}");
 }
+
+/// SOUNDNESS R1169 (rustagent-v057) — `self` in `impl Tr for dep::X` is the dependency's `X`. It was typed by the impl's
+/// unit KEY, the leaf `X`, which named a crate-local `X` of the same leaf (hyper-util's `server::conn::auto::Connection`
+/// beside `impl GracefulConnection for hyper::server::conn::http1::Connection`): `self.graceful()` edged to the LOCAL
+/// twin and the dependency's body was never asked — `Connection::via_inherent` read `['Env']` (the local twin's) while
+/// the program ran `hdep`'s `Fs` (EXECUTED: rustagent-v057/fx/r1169). Typed by the written path, the dependency is joined
+/// (unchained: disclosed `invisible`); `self.local_only()` still reaches this impl's own unit (an ambiguous
+/// `Other::local_only` beside it). Applied only where a crate-local struct of the leaf exists (the collision).
+/// Residuals pinned (pre-existing, unchanged): the local twin's `Env` edge rides beside (the bare-leaf twin, an
+/// over-charge), and `via_dflt` reaches `auto::Connection`'s `dflt` override instead of the trait default both impls are
+/// keyed under one `Connection::` qual (SILENT for the default's `Fs`; reported, not closed here).
+#[test]
+fn v057_r1169_self_in_an_impl_for_a_dependency_type_is_that_type() {
+    let (_dv, cv, _uv) = v053_chain("hdep", r##"pub mod server {
+    pub struct Connection(pub u8);
+    impl Connection {
+        pub fn graceful(&self) { std::fs::write("/tmp/rustagent-v057d-dep.txt", "d").unwrap(); }
+        pub fn quiet(&self) -> u8 { self.0 }
+    }
+}
+"##, r##"struct Other;
+impl Other { fn local_only(&self) { let _ = std::env::var("RUSTAGENT_V057_OTHER"); } fn graceful(&self) {} }
+mod auto {
+    pub struct Connection(pub u8);
+    impl Connection {
+        pub fn graceful(&self) { std::env::var("RUSTAGENT_V057_LOCAL").ok(); }
+        pub fn quiet(&self) -> u8 { let _ = std::env::var("RUSTAGENT_V057_Q"); self.0 }
+    }
+}
+trait Shut {
+    fn shut(&self);
+    fn via_self(&self);
+    fn via_inherent(&self);
+    fn via_quiet(&self) -> u8;
+    fn local_only(&self);
+    fn dflt(&self) { std::fs::write("/tmp/rustagent-v057d-dflt.txt", "f").unwrap(); }
+    fn via_dflt(&self);
+}
+impl Shut for hdep::server::Connection {
+    fn shut(&self) { hdep::server::Connection::graceful(self); }
+    fn via_self(&self) { self.local_only() }
+    fn via_inherent(&self) { self.graceful() }
+    fn via_quiet(&self) -> u8 { self.quiet() }
+    fn local_only(&self) { std::fs::write("/tmp/rustagent-v057d-local.txt", "l").unwrap(); }
+    fn via_dflt(&self) { self.dflt() }
+}
+impl Shut for auto::Connection {
+    fn shut(&self) {} fn via_self(&self) {} fn via_inherent(&self) {} fn via_quiet(&self) -> u8 { 0 } fn local_only(&self) {} fn via_dflt(&self) {}
+    fn dflt(&self) { let _ = std::env::var("RUSTAGENT_V057_DF"); }
+}
+fn call_via_dflt() { hdep::server::Connection(1).via_dflt() }
+fn call_shut() { hdep::server::Connection(1).shut() }
+fn call_via_self() { hdep::server::Connection(1).via_self() }
+fn call_via_inherent() { hdep::server::Connection(1).via_inherent() }
+fn ctrl_via_quiet() -> u8 { hdep::server::Connection(1).via_quiet() }
+"##);
+    let effs = |f: &str| cv["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f).flat_map(effs).collect::<Vec<String>>();
+    for f in ["Connection::shut", "Connection::via_inherent", "Connection::via_self"] {
+        assert!(effs(f).iter().any(|e| e == "Fs"), "R1169 `{f}` writes (executed):\n{cv:#}");
+    }
+    assert!(!effs("Connection::via_dflt").iter().any(|e| e == "Fs"), "R1169 residual (one qual for two impls) moved — decide it:\n{cv:#}");
+}

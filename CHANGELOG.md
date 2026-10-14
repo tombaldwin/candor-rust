@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: `self` in `impl Tr for dep::X` is the dependency's `X` where a crate-local `X` exists (SOUNDNESS R1169).**
+  `self` was typed by the impl's unit key, the leaf, which named the crate's own same-leaf struct: hyper-util's
+  `impl GracefulConnection for hyper::server::conn::http1::Connection` read `self` as `server::conn::auto::Connection`,
+  disclosed a false `dispatch:Future.poll` through R1165, and `self.m()` reached the local twin's body instead of asking
+  the dependency (executed: the dependency's `Fs` ran and was not charged; chained `deny Fs` 0 → 1). Applied only where
+  that collision exists; the units stay keyed as before. Residuals: the local twin's bare-leaf edge rides beside (an
+  over-charge), and `impl Tr for dep::X` beside `impl Tr for local::X` still share one `X::` qual, so a trait default the
+  dependency impl inherits reaches the local override instead (SILENT; reported).
+
 - ⚠ **candor-scan: awaiting a crate-local future is its `Output`, and drives its `poll` (SOUNDNESS R1168).** The typers
   answered `x.await` with `x`'s own type, so a value awaited out of a local future (`let v = f.await`,
   `if let Some(s) = fut.await?`) was typed AS the future, and R1165's witness disclosed a false `dispatch:Future.poll`
