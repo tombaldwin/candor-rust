@@ -7793,10 +7793,29 @@ fn owned_value_leaves_into(ty: &syn::Type, uses: &HashMap<String, String>, out: 
 /// typed input 0; `1`: the fn takes a receiver). Operator expressions (`+`, `==`, `<`, unary `-`/`!`) and the
 /// explicit method spellings (`d.add(t)`) count. A parameter the body RE-BINDS anywhere (`let d = ..`) is left
 /// out, as are nested `fn`/`impl` items (their parameters are their own). Sorted, deduplicated.
+///
+/// SOUNDNESS R1167 — the in-crate siblings the operator summary did not reach, each EXECUTED silent (rustagent-v057/fx/incr):
+/// * a std-trait METHOD on the parameter, charged at the trait's REQUIRED member the std body runs
+///   (`generic_method_requirements`: `a.hash(&mut h)` → `Hash/hash`, `a.cmp(b)` / `a.max(b)` → `Ord/cmp`,
+///   `w.write_all(..)` → `Write/write`, …), and `a.await` → `Future/poll`;
+/// * ITERATION: `for x in i`, `i.into_iter()` (→ `IntoIterator/into_iter`) and any method chain rooted at the parameter
+///   that DRIVES it (`i.into_iter().count()`, `i.next()`, `i.sum()`; → `Iterator/next`), and the parameter handed to
+///   a std consumer (`v.extend(i)`). A lazy adapter alone (`i.map(f)` returned unconsumed) runs nothing here;
+/// * an ELEMENT parameter — `&[T]`, `[T; N]`, `Vec<T>`, `VecDeque<T>`, `Option<T>` with `T` generic — whose
+///   comparison / hash / clone / search std runs on each element (`a == b` → `0e/PartialEq/eq`): the caller charges
+///   its argument's ELEMENT type;
+/// * FORWARDING: the parameter handed on to a crate-local generic (`same_eq(a, b)`, `Self::f(a)`, `Ty::f(a)`,
+///   `self.f(a)`), recorded as `{pos}/@F:{leaf}/{arg}/{recv}` (free fn), `@I:{Ty}:{leaf}` (path call on a type) or
+///   `@M:{Ty}:{leaf}` (method call on `self`), which the caller expands through the callee's own summary
+///   (`CallCollector::charge_generic_operators`). An `impl Trait` parameter is a generic parameter here.
+///
+/// Every entry only names WHERE a dispatch happens; the caller forms an edge only for an argument type with a LOCAL
+/// impl of the trait (`charge_coercion_ty`), so a std / primitive / pure argument still adds nothing.
 pub(crate) fn generic_operator_uses(
     sig: &syn::Signature,
     block: &syn::Block,
     impl_generics: &std::collections::HashSet<String>,
+    self_leaf: Option<&str>,
 ) -> Vec<String> {
     let gens: std::collections::HashSet<String> = sig
         .generics
@@ -7804,11 +7823,16 @@ pub(crate) fn generic_operator_uses(
         .map(|t| t.ident.to_string())
         .chain(impl_generics.iter().cloned())
         .collect();
-    if gens.is_empty() {
-        return Vec::new();
-    }
+    let is_gen = |t: &syn::Type| -> bool {
+        match peel_ty_refs(t) {
+            syn::Type::Path(tp) => tp.qself.is_none() && tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string())),
+            syn::Type::ImplTrait(_) => true,
+            _ => false,
+        }
+    };
     let recv = sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Receiver(_)));
-    let mut params: HashMap<String, usize> = HashMap::new();
+    // name -> (typed-input position, element mode)
+    let mut params: HashMap<String, (usize, bool)> = HashMap::new();
     for (i, pt) in sig
         .inputs
         .iter()
@@ -7819,19 +7843,38 @@ pub(crate) fn generic_operator_uses(
         .enumerate()
     {
         let syn::Pat::Ident(id) = &*pt.pat else { continue };
-        if let syn::Type::Path(tp) = peel_ty_refs(&pt.ty) {
-            if tp.qself.is_none() && tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string())) {
-                params.insert(id.ident.to_string(), i);
+        if is_gen(&pt.ty) {
+            params.insert(id.ident.to_string(), (i, false));
+            continue;
+        }
+        // SOUNDNESS R1167 — an element parameter.
+        let elem = seq_elem_ty(&pt.ty).or_else(|| match peel_ty_refs(&pt.ty) {
+            syn::Type::Path(p) => {
+                let seg = p.path.segments.last()?;
+                if seg.ident != "Option" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return None };
+                a.args.iter().find_map(|g| match g {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
             }
+            _ => None,
+        });
+        if elem.is_some_and(is_gen) {
+            params.insert(id.ident.to_string(), (i, true));
         }
     }
     if params.is_empty() {
         return Vec::new();
     }
     struct V<'p> {
-        params: &'p HashMap<String, usize>,
+        params: &'p HashMap<String, (usize, bool)>,
+        self_leaf: Option<&'p str>,
         rebound: std::collections::HashSet<String>,
-        hits: Vec<(String, &'static str, &'static str)>,
+        // (param, Trait or @forward, method or arg index)
+        hits: Vec<(String, String, String)>,
     }
     fn operand(e: &syn::Expr) -> Option<String> {
         let mut e = e;
@@ -7846,11 +7889,50 @@ pub(crate) fn generic_operator_uses(
             }
         }
     }
+    /// The parameter a method chain is rooted at, with every method name on the way (`i.into_iter().count()` →
+    /// `i`, [`into_iter`, `count`]), outermost last.
+    fn chain_root(e: &syn::Expr, names: &mut Vec<String>) -> Option<String> {
+        match e {
+            syn::Expr::MethodCall(m) => {
+                let r = chain_root(&m.receiver, names);
+                names.push(m.method.to_string());
+                r
+            }
+            syn::Expr::Paren(x) => chain_root(&x.expr, names),
+            syn::Expr::Group(x) => chain_root(&x.expr, names),
+            syn::Expr::Reference(x) => chain_root(&x.expr, names),
+            _ => operand(e),
+        }
+    }
+    impl V<'_> {
+        fn hit(&mut self, n: &str, tr: &str, m: &str) {
+            if self.params.contains_key(n) {
+                self.hits.push((n.to_string(), tr.to_string(), m.to_string()));
+            }
+        }
+        fn plain(&self, n: &str) -> bool {
+            self.params.get(n).is_some_and(|(_, e)| !e)
+        }
+        fn iterate(&mut self, n: &str) {
+            if self.plain(n) {
+                self.hit(n, "IntoIterator", "into_iter");
+                self.hit(n, "Iterator", "next");
+            }
+        }
+        fn forward(&mut self, target: String, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+            for (i, a) in args.iter().enumerate() {
+                if let Some(n) = operand(a) {
+                    self.hit(&n, &target, &i.to_string());
+                }
+            }
+        }
+    }
     impl<'x> syn::visit::Visit<'x> for V<'_> {
         fn visit_expr_binary(&mut self, b: &'x syn::ExprBinary) {
             if let (Some((tr, m)), Some(n)) = (binop_trait(&b.op), operand(&b.left)) {
-                if self.params.contains_key(&n) {
-                    self.hits.push((n, tr, m));
+                // An element parameter compares element-wise; its arithmetic is std's own (none exists).
+                if self.plain(&n) || matches!(tr, "PartialEq" | "PartialOrd") {
+                    self.hit(&n, tr, m);
                 }
             }
             syn::visit::visit_expr_binary(self, b);
@@ -7862,21 +7944,96 @@ pub(crate) fn generic_operator_uses(
                 _ => None,
             };
             if let (Some((tr, m)), Some(n)) = (tm, operand(&u.expr)) {
-                if self.params.contains_key(&n) {
-                    self.hits.push((n, tr, m));
+                if self.plain(&n) {
+                    self.hit(&n, tr, m);
                 }
             }
             syn::visit::visit_expr_unary(self, u);
         }
         fn visit_expr_method_call(&mut self, c: &'x syn::ExprMethodCall) {
-            if let (Some((tr, m)), Some(n)) =
-                (operator_method_trait(&c.method.to_string(), c.args.len()), operand(&c.receiver))
-            {
-                if self.params.contains_key(&n) {
-                    self.hits.push((n, tr, m));
+            let meth = c.method.to_string();
+            if let Some(n) = operand(&c.receiver) {
+                if let Some((tr, m)) = operator_method_trait(&meth, c.args.len()) {
+                    if self.plain(&n) || matches!(tr, "PartialEq" | "PartialOrd") {
+                        self.hit(&n, tr, m);
+                    }
+                }
+                let elem = !self.plain(&n);
+                for (tr, m) in generic_method_requirements(&meth, c.args.len(), elem) {
+                    self.hit(&n, tr, m);
+                }
+                if meth == "into_iter" && c.args.is_empty() {
+                    self.hit(&n, "IntoIterator", "into_iter");
+                }
+            }
+            // A chain rooted at a plain parameter that DRIVES the iterator.
+            let mut names = Vec::new();
+            if let Some(n) = chain_root(&c.receiver, &mut names) {
+                names.push(meth.clone());
+                if self.plain(&n) && names.iter().any(|x| iterator_drives(x)) {
+                    self.hit(&n, "Iterator", "next");
+                    if names.iter().any(|x| matches!(x.as_str(), "rev" | "next_back" | "rfold" | "rfind" | "nth_back")) {
+                        self.hit(&n, "DoubleEndedIterator", "next_back");
+                    }
+                }
+            }
+            // A std consumer handed the parameter (`v.extend(i)`).
+            if matches!(meth.as_str(), "extend" | "zip" | "chain" | "eq" | "ne" | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge") {
+                for a in &c.args {
+                    let mut names = Vec::new();
+                    if let Some(n) = chain_root(a, &mut names) {
+                        if meth == "extend" || names.iter().any(|x| x == "into_iter" || x == "iter") {
+                            self.iterate(&n);
+                        }
+                    }
+                }
+            }
+            // Forwarding through `self.f(a)`.
+            if let (Some(sl), syn::Expr::Path(p)) = (self.self_leaf, &*c.receiver) {
+                if p.path.is_ident("self") {
+                    self.forward(format!("@M:{sl}:{meth}"), &c.args);
                 }
             }
             syn::visit::visit_expr_method_call(self, c);
+        }
+        fn visit_expr_call(&mut self, c: &'x syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*c.func {
+                if p.qself.is_none() {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let target = match segs.as_slice() {
+                        [f] => Some(format!("@F:{f}")),
+                        [s, f] if s == "Self" => self.self_leaf.map(|sl| format!("@I:{sl}:{f}")),
+                        [.., t, f] if t.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) => Some(format!("@I:{t}:{f}")),
+                        [first, .., f] if matches!(first.as_str(), "crate" | "self" | "super") => Some(format!("@F:{f}")),
+                        _ => None,
+                    };
+                    if let Some(t) = target {
+                        self.forward(t, &c.args);
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+        fn visit_expr_for_loop(&mut self, f: &'x syn::ExprForLoop) {
+            let mut names = Vec::new();
+            if let Some(n) = chain_root(&f.expr, &mut names) {
+                if names.is_empty() || names.iter().all(|x| x == "into_iter" || x == "by_ref" || iterator_lazy(x)) {
+                    self.iterate(&n);
+                    // `for x in i.rev()` drives `next_back`.
+                    if self.plain(&n) && names.iter().any(|x| x == "rev") {
+                        self.hit(&n, "DoubleEndedIterator", "next_back");
+                    }
+                }
+            }
+            syn::visit::visit_expr_for_loop(self, f);
+        }
+        fn visit_expr_await(&mut self, a: &'x syn::ExprAwait) {
+            if let Some(n) = operand(&a.base) {
+                if self.plain(&n) {
+                    self.hit(&n, "Future", "poll");
+                }
+            }
+            syn::visit::visit_expr_await(self, a);
         }
         fn visit_pat_ident(&mut self, p: &'x syn::PatIdent) {
             self.rebound.insert(p.ident.to_string());
@@ -7886,17 +8043,76 @@ pub(crate) fn generic_operator_uses(
         fn visit_item_impl(&mut self, _: &'x syn::ItemImpl) {}
         fn visit_item_mod(&mut self, _: &'x syn::ItemMod) {}
     }
-    let mut v = V { params: &params, rebound: Default::default(), hits: Vec::new() };
+    let mut v = V { params: &params, self_leaf, rebound: Default::default(), hits: Vec::new() };
     syn::visit::Visit::visit_block(&mut v, block);
     let mut out: Vec<String> = v
         .hits
         .into_iter()
         .filter(|(n, _, _)| !v.rebound.contains(n))
-        .map(|(n, tr, m)| format!("{}/{tr}/{m}/{}", params[&n], u8::from(recv)))
+        .map(|(n, tr, m)| {
+            let (pos, elem) = params[&n];
+            format!("{pos}{}/{tr}/{m}/{}", if elem { "e" } else { "" }, u8::from(recv))
+        })
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// SOUNDNESS R1167 — the std trait REQUIRED members a std method call on a generic value runs on that value's own impl
+/// (`a.hash(h)` runs `Hash::hash`; `a.max(b)` runs `Ord::cmp`; `w.write_all(..)` runs `Write::write`). `elem`: the
+/// receiver is a slice / array / `Vec` / `Option` of the generic, whose std methods run the ELEMENT's impl (only the
+/// comparison / hash / clone / search family does). Iteration is `iterator_drives`'.
+pub(crate) fn generic_method_requirements(method: &str, argc: usize, elem: bool) -> Vec<(&'static str, &'static str)> {
+    if elem {
+        return match (method, argc) {
+            ("hash", 1) => vec![("Hash", "hash")],
+            ("cmp", 1) | ("sort" | "sort_unstable", 0) | ("binary_search", 1) => vec![("Ord", "cmp")],
+            ("clone" | "to_vec" | "to_owned", 0) => vec![("Clone", "clone")],
+            ("contains" | "starts_with" | "ends_with", 1) | ("dedup", 0) => vec![("PartialEq", "eq")],
+            _ => Vec::new(),
+        };
+    }
+    match (method, argc) {
+        ("hash", 1) | ("hash_slice", 2) => vec![("Hash", "hash")],
+        ("cmp" | "max" | "min", 1) | ("clamp", 2) => vec![("Ord", "cmp")],
+        ("clone", 0) | ("clone_from", 1) => vec![("Clone", "clone")],
+        ("to_string", 0) => vec![("Display", "fmt")],
+        ("fmt", 1) => vec![("Display", "fmt"), ("Debug", "fmt")],
+        ("poll", 1) => vec![("Future", "poll")],
+        ("write", 1) => vec![("Write", "write")],
+        ("flush", 0) => vec![("Write", "flush")],
+        ("write_str", 1) => vec![("Write", "write_str")],
+        ("read", 1) => vec![("Read", "read")],
+        ("as_ref", 0) => vec![("AsRef", "as_ref")],
+        ("borrow", 0) => vec![("Borrow", "borrow")],
+        ("deref", 0) => vec![("Deref", "deref")],
+        _ if is_write_provided(method) => vec![("Write", "write"), ("Write", "write_str")],
+        _ if is_read_provided(method) => vec![("Read", "read")],
+        _ => Vec::new(),
+    }
+}
+
+/// SOUNDNESS R1167 — an `Iterator` method that RUNS `next` when called (a consumer), as opposed to a lazy adapter
+/// (`iterator_lazy`), which only wraps.
+pub(crate) fn iterator_drives(method: &str) -> bool {
+    matches!(
+        method,
+        "next" | "count" | "last" | "nth" | "for_each" | "try_for_each" | "collect" | "fold" | "try_fold" | "reduce"
+            | "all" | "any" | "find" | "find_map" | "position" | "rposition" | "max" | "min" | "max_by_key" | "max_by"
+            | "min_by_key" | "min_by" | "sum" | "product" | "partition" | "unzip" | "next_back" | "rfold" | "rfind"
+            | "is_sorted" | "advance_by" | "collect_vec" | "join"
+    )
+}
+
+/// The lazy `Iterator` adapters a `for` may iterate (`for x in i.map(f)` drives the parameter's `next`).
+pub(crate) fn iterator_lazy(method: &str) -> bool {
+    matches!(
+        method,
+        "map" | "filter" | "filter_map" | "enumerate" | "peekable" | "skip" | "take" | "skip_while" | "take_while"
+            | "map_while" | "step_by" | "chain" | "zip" | "flat_map" | "flatten" | "fuse" | "inspect" | "rev"
+            | "copied" | "cloned" | "scan" | "cycle"
+    )
 }
 
 /// SOUNDNESS R1129 — `model::param_opaque_key`'s positions for `sig` (see there).

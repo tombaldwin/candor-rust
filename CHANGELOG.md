@@ -11,6 +11,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an in-crate caller of a generic that runs a std-trait method on its argument, iterates it, compares
+  its elements or forwards it is charged (SOUNDNESS R1167).** R1145 charged the caller of a generic whose body applies an
+  OPERATOR to a generic parameter; the in-crate siblings read ABSENT while the program ran the argument's effectful impl:
+  `a.hash(&mut h)`, `a.max(b)` / `cmp`, `t.clone()`, `w.write_all(..)` / `flush`, `t.to_string()`; `for x in i` (and
+  `i.rev()`), `i.into_iter().count()`, `i.sum()`, `v.extend(i)`; an element parameter (`&[T]`, `[T; N]`, `Vec<T>`,
+  `Option<T>`) compared, hashed, sorted or searched; and the parameter forwarded to another local generic
+  (`same_eq(a, b)`, `self.inner(t)`, `Self::inner2(t)`). Pass A's generic summary now names these, and the call site
+  charges its argument's type exactly as an operator would — through a LOCAL impl only, the argument typed by the strict
+  typer, and never a std, dependency or primitive argument (a leaf-keyed impl lookup otherwise formed clap's `Error::fmt`
+  for a `std::fmt::Error` and winnow's `AsRef<Bytes> for str` for std's `AsRef<[u8]>`). A lazy adapter left unconsumed
+  runs nothing. Executed fixtures: 33 positive cells `deny Fs <fn>` 0 → 1 (incl. the R1165 lane's `hash_of` / `via_fwd`
+  / `count_all` / `vec_same` callers), 26 pure controls stay 0. Corpus, R1167–R1169 together against the previous HEAD: unchained 5,219 registry
+  entries
+  ADDED 166, REMOVED 0, CHANGED 1,384 (151 rows newly carry a concrete effect, 141 newly `Unknown`; 0.0054% / 0.0051%), no
+  effect, `Unknown`, edge or reason class lost; chained 982 consumers ADDED 143, REMOVED 0, CHANGED 1,184, the only reason
+  classes lost being the two false ones R1168/R1169 remove (every reason-scoped gate on them unchanged, executed).
+
 - ⚠ **candor-scan: a local value with an effectful std-trait impl handed to a CHAINED dependency is disclosed (SOUNDNESS
   R1165).** `gena::same_eq(Noisy(1), Noisy(1))` runs `Noisy::eq` inside the dependency's generic body (likewise
   `PartialOrd`, `Hash`, `Display` through `format!`, `Iterator::next` through `IntoIterator`, `io::Write`, a method on a

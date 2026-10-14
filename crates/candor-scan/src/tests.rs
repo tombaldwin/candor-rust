@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.
         // rustagent-v054 (R1160-R1162) bumped it to rev105.
@@ -17341,7 +17342,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17352,7 +17353,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev107/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev108/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31229,4 +31230,179 @@ pub fn call_a_x() -> bool {{ {d}::check(Noisy(1)) }}
     // ...and the unbounded fn alone withholds it (the narrowing is not inert).
     let (_, cv, _) = v053_chain("cdep69", "pub fn check<T>(_t: T) -> bool { true }\n", &cons("cdep69"));
     assert!(veina_row_effs(&cv, "call_a_x").is_empty(), "R1165 an unbounded generic runs no impl:\n{cv:#}");
+}
+
+/// SOUNDNESS R1167 (rustagent-v057) — the in-crate siblings of R1145: a caller instantiating a generic whose body runs a
+/// std-trait METHOD on its parameter (`a.hash(h)`, `a.max(b)`, `t.clone()`, `w.write_all(..)`, `f.await`), ITERATES it
+/// (`for x in i`, `for x in i.rev()`, `i.into_iter().count()`, `i.sum()`, `v.extend(i)`), compares an ELEMENT parameter
+/// (`&[T]`, `Vec<T>`, `Option<T>`: `a == b`, `v.contains(x)`, `v.sort()`) or FORWARDS it to another local generic
+/// (`same_eq(a, b)`, `self.inner(t)`, `Self::inner2(t)`) read ABSENT while the program ran the argument's effectful impl.
+/// Every `call_*` cell below was EXECUTED and wrote its marker (rustagent-v057/fx/incr, fx/incr2); every `ctrl_*` cell was
+/// executed and wrote nothing. `ctrl_*` rows that carry `Unknown` do so from the pre-existing untyped-receiver hedge,
+/// unchanged. `ctrl_stderr_y` hands `std::fmt::Error` to a `T: Hash` generic beside a crate-local `Error` with an effectful
+/// `Hash`: the impl is asked by leaf, so a std / dependency argument must form nothing (it did, before that guard).
+#[test]
+fn v057_r1167_generic_callers_of_std_trait_methods_iteration_elements_and_forwarding_are_charged() {
+    let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
+    let a = scan_src_to_json_multi("v057incr", &[("Cargo.toml", toml("v057incr").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+use std::hash::{Hash, Hasher};
+fn same_eq<T: PartialEq>(a: T, b: T) -> bool { a == b }
+fn less_cmp<T: PartialOrd>(a: T, b: T) -> bool { a < b }
+fn hash_of<T: Hash>(a: T) -> u64 { let mut h = std::collections::hash_map::DefaultHasher::new(); a.hash(&mut h); h.finish() }
+fn via_fwd<T: PartialEq>(a: T, b: T) -> bool { same_eq(a, b) }
+fn describe_it<T: std::fmt::Display>(t: T) -> String { format!("{}", t) }
+fn count_all<I: IntoIterator>(i: I) -> usize { i.into_iter().count() }
+fn first_of<I: Iterator>(mut i: I) -> Option<I::Item> { i.next() }
+fn eat<T>(_t: T) {}
+fn vec_same<T: PartialEq>(a: &[T], b: &[T]) -> bool { a == b }
+fn hash_fwd<T: Hash>(a: T) -> u64 { hash_of(a) }
+fn hash_where<T>(a: T) -> u64 where T: Hash { let mut h = std::collections::hash_map::DefaultHasher::new(); a.hash(&mut h); h.finish() }
+fn hash_impl(a: impl Hash) -> u64 { let mut h = std::collections::hash_map::DefaultHasher::new(); a.hash(&mut h); h.finish() }
+fn for_all<I: IntoIterator>(i: I) -> usize { let mut n = 0; for _x in i { n += 1; } n }
+struct Noisy(i32);
+impl PartialEq for Noisy { fn eq(&self, o: &Noisy) -> bool { std::fs::write("/tmp/rustagent-v057-eq.txt", "eq").unwrap(); self.0 == o.0 } }
+impl PartialOrd for Noisy { fn partial_cmp(&self, o: &Noisy) -> Option<std::cmp::Ordering> { std::fs::write("/tmp/rustagent-v057-lt.txt", "lt").unwrap(); self.0.partial_cmp(&o.0) } }
+impl Hash for Noisy { fn hash<H: Hasher>(&self, h: &mut H) { std::fs::write("/tmp/rustagent-v057-hash.txt", "h").unwrap(); self.0.hash(h) } }
+impl std::fmt::Display for Noisy { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { std::fs::write("/tmp/rustagent-v057-disp.txt", "d").unwrap(); write!(f, "n{}", self.0) } }
+struct Loud(i32);
+impl Iterator for Loud { type Item = i32; fn next(&mut self) -> Option<i32> { std::fs::write("/tmp/rustagent-v057-iter.txt", "i").unwrap(); self.0 += 1; if self.0 > 2 { None } else { Some(self.0) } } }
+struct Bin(i32);
+impl IntoIterator for Bin { type Item = i32; type IntoIter = std::vec::IntoIter<i32>; fn into_iter(self) -> Self::IntoIter { std::fs::write("/tmp/rustagent-v057-intoiter.txt", "ii").unwrap(); vec![self.0].into_iter() } }
+#[derive(PartialEq, Hash)] struct Calm(i32);
+struct Quiet(i32);
+impl Iterator for Quiet { type Item = i32; fn next(&mut self) -> Option<i32> { self.0 += 1; if self.0 > 2 { None } else { Some(self.0) } } }
+fn call_eq_x() -> bool { same_eq(Noisy(1), Noisy(1)) }
+fn call_lt_x() -> bool { less_cmp(Noisy(1), Noisy(2)) }
+fn call_hash_x() -> u64 { hash_of(Noisy(1)) }
+fn call_fwd_x() -> bool { via_fwd(Noisy(1), Noisy(1)) }
+fn call_disp_x() -> String { describe_it(Noisy(1)) }
+fn call_iter_x() -> usize { count_all(Loud(0)) }
+fn call_intoiter_x() -> usize { count_all(Bin(4)) }
+fn call_first_x() -> Option<i32> { first_of(Loud(0)) }
+fn call_forin_x() -> usize { for_all(Loud(0)) }
+fn call_vec_x() -> bool { vec_same(&[Noisy(1)], &[Noisy(1)]) }
+fn call_ref_x() -> bool { let a = Noisy(1); let b = Noisy(1); same_eq(&a, &b) }
+fn call_hashfwd_x() -> u64 { hash_fwd(Noisy(1)) }
+fn call_hashwhere_x() -> u64 { hash_where(Noisy(1)) }
+fn call_hashimpl_x() -> u64 { hash_impl(Noisy(1)) }
+fn call_hashref_x() -> u64 { let n = Noisy(1); hash_of(&n) }
+fn ctrl_eat_x() { eat(Noisy(1)) }
+fn ctrl_calm_x() -> bool { same_eq(Calm(1), Calm(1)) }
+fn ctrl_int_x() -> bool { same_eq(1, 1) }
+fn ctrl_hashint_x() -> u64 { hash_of(5u32) }
+fn ctrl_hashcalm_x() -> u64 { hash_of(Calm(1)) }
+fn ctrl_fwdcalm_x() -> bool { via_fwd(Calm(1), Calm(1)) }
+fn ctrl_iterstd_x() -> usize { count_all(vec![1, 2]) }
+fn ctrl_iterquiet_x() -> usize { count_all(Quiet(0)) }
+fn ctrl_firstquiet_x() -> Option<i32> { first_of(Quiet(0)) }
+fn ctrl_forquiet_x() -> usize { for_all(Quiet(0)) }
+fn ctrl_vecint_x() -> bool { vec_same(&[1], &[1]) }
+fn ctrl_veccalm_x() -> bool { vec_same(&[Calm(1)], &[Calm(1)]) }
+fn ctrl_hashfwdint_x() -> u64 { hash_fwd(3u8) }
+"##)]);
+    let b = scan_src_to_json_multi("v057incr2", &[("Cargo.toml", toml("v057incr2").as_str()), ("src/lib.rs", r##"#![allow(dead_code, unused_imports)]
+use std::future::Future;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+fn mark(tag: &str) { std::fs::write(format!("/tmp/rustagent-v057b-{tag}.txt"), tag).unwrap(); }
+fn slice_same<T: PartialEq>(a: &[T], b: &[T]) -> bool { a == b }
+fn outer_slice<T: PartialEq>(a: &[T], b: &[T]) -> bool { slice_same(a, b) }
+fn opt_eq<T: PartialEq>(a: Option<T>, b: Option<T>) -> bool { a == b }
+fn srt<T: Ord>(v: &mut Vec<T>) { v.sort() }
+fn has_it<T: PartialEq>(v: &[T], x: &T) -> bool { v.contains(x) }
+fn dup<T: Clone>(t: &T) -> T { t.clone() }
+fn bigger<T: Ord>(a: T, b: T) -> T { a.max(b) }
+fn total<I: Iterator<Item = i32>>(i: I) -> i32 { i.sum() }
+fn for_mapped<I: Iterator<Item = i32>>(i: I) -> i32 { let mut s = 0; for x in i.map(|v| v + 1) { s += x; } s }
+fn lazy<I: Iterator<Item = i32>>(i: I) -> impl Iterator<Item = i32> { i.map(|x| x) }
+fn take_it<I: IntoIterator>(i: I) -> I::IntoIter { i.into_iter() }
+fn extend_from<I: IntoIterator<Item = i32>>(i: I) -> usize { let mut v = Vec::new(); v.extend(i); v.len() }
+fn emit<W: Write>(mut w: W) { w.write_all(b"x").unwrap(); }
+fn stringy<T: std::fmt::Display>(t: T) -> String { t.to_string() }
+fn hash_of<T: Hash>(a: T) -> u64 { let mut h = std::collections::hash_map::DefaultHasher::new(); a.hash(&mut h); h.finish() }
+async fn run<F: Future>(f: F) -> F::Output { f.await }
+fn block_on<F: Future>(f: F) -> F::Output {
+    let mut f = std::pin::pin!(f);
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    loop { if let Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
+}
+struct Holder;
+impl Holder {
+    fn check<T: Hash>(&self, t: T) -> u64 { self.inner(t) }
+    fn inner<T: Hash>(&self, t: T) -> u64 { hash_of(t) }
+    fn assoc<T: Hash>(t: T) -> u64 { Self::inner2(t) }
+    fn inner2<T: Hash>(t: T) -> u64 { hash_of(t) }
+}
+struct Noisy(i32);
+impl PartialEq for Noisy { fn eq(&self, o: &Noisy) -> bool { mark("eq"); self.0 == o.0 } }
+impl Eq for Noisy {}
+impl PartialOrd for Noisy { fn partial_cmp(&self, o: &Noisy) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+impl Ord for Noisy { fn cmp(&self, o: &Noisy) -> std::cmp::Ordering { mark("cmp"); self.0.cmp(&o.0) } }
+impl Hash for Noisy { fn hash<H: Hasher>(&self, h: &mut H) { mark("hash"); self.0.hash(h) } }
+impl Clone for Noisy { fn clone(&self) -> Noisy { mark("clone"); Noisy(self.0) } }
+impl std::fmt::Display for Noisy { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { mark("disp"); write!(f, "n{}", self.0) } }
+struct Loud(i32);
+impl Iterator for Loud { type Item = i32; fn next(&mut self) -> Option<i32> { mark("iter"); self.0 += 1; if self.0 > 2 { None } else { Some(self.0) } } }
+struct Bin(i32);
+impl IntoIterator for Bin { type Item = i32; type IntoIter = std::vec::IntoIter<i32>; fn into_iter(self) -> Self::IntoIter { mark("intoiter"); vec![self.0].into_iter() } }
+struct Sink;
+impl Write for Sink { fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { mark("write"); Ok(b.len()) } fn flush(&mut self) -> std::io::Result<()> { Ok(()) } }
+struct Fut;
+impl Future for Fut { type Output = i32; fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<i32> { mark("poll"); Poll::Ready(1) } }
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone)] struct Calm(i32);
+struct Quiet(i32);
+impl Iterator for Quiet { type Item = i32; fn next(&mut self) -> Option<i32> { self.0 += 1; if self.0 > 2 { None } else { Some(self.0) } } }
+struct QFut;
+impl Future for QFut { type Output = i32; fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<i32> { Poll::Ready(2) } }
+fn call_outerslice_y() -> bool { outer_slice(&[Noisy(1)], &[Noisy(1)]) }
+fn call_vecvar_y() -> bool { let v = vec![Noisy(1)]; slice_same(&v, &v) }
+fn call_opt_y() -> bool { opt_eq(Some(Noisy(1)), Some(Noisy(1))) }
+fn call_sort_y() { let mut v = vec![Noisy(2), Noisy(1)]; srt(&mut v) }
+fn call_contains_y() -> bool { has_it(&[Noisy(1)], &Noisy(1)) }
+fn call_dup_y() -> i32 { dup(&Noisy(1)).0 }
+fn call_max_y() -> i32 { bigger(Noisy(1), Noisy(2)).0 }
+fn call_sum_y() -> i32 { total(Loud(0)) }
+fn call_formap_y() -> i32 { for_mapped(Loud(0)) }
+fn call_takebin_y() -> usize { take_it(Bin(3)).count() }
+fn call_extend_y() -> usize { extend_from(Loud(0)) }
+fn call_emit_y() { emit(Sink) }
+fn call_stringy_y() -> String { stringy(Noisy(1)) }
+fn call_await_y() -> i32 { block_on(run(Fut)) }
+fn call_selffwd_y() -> u64 { Holder.check(Noisy(1)) }
+fn call_assocfwd_y() -> u64 { Holder::assoc(Noisy(1)) }
+fn ctrl_lazy_y() { let _l = lazy(Loud(0)); }
+fn ctrl_takeloud_y() { let _t = take_it(Loud(0)); }
+fn ctrl_outerslice_y() -> bool { outer_slice(&[Calm(1)], &[Calm(1)]) }
+fn ctrl_sortcalm_y() { let mut v = vec![Calm(2), Calm(1)]; srt(&mut v) }
+fn ctrl_dupcalm_y() -> i32 { dup(&Calm(1)).0 }
+fn ctrl_sumquiet_y() -> i32 { total(Quiet(0)) }
+fn ctrl_extendvec_y() -> usize { extend_from(vec![1, 2]) }
+fn ctrl_emitvec_y() { emit(Vec::new()) }
+fn ctrl_await_y() -> i32 { block_on(run(QFut)) }
+fn ctrl_selffwd_y() -> u64 { Holder.check(Calm(1)) }
+fn ctrl_maxint_y() -> i32 { bigger(1, 2) }
+struct Error;
+impl Hash for Error { fn hash<H: Hasher>(&self, h: &mut H) { mark("err"); 0u8.hash(h) } }
+fn rev_sum<I: DoubleEndedIterator<Item = i32>>(i: I) -> i32 { let mut s = 0; for x in i.rev() { s += x; } s }
+struct Back(i32);
+impl Iterator for Back { type Item = i32; fn next(&mut self) -> Option<i32> { None } }
+impl DoubleEndedIterator for Back { fn next_back(&mut self) -> Option<i32> { mark("back"); self.0 -= 1; if self.0 < 0 { None } else { Some(self.0) } } }
+fn call_rev_y() -> i32 { rev_sum(Back(2)) }
+fn ctrl_stderr_y() -> u64 { hash_of(std::fmt::Error) }
+fn call_localerr_y() -> u64 { hash_of(Error) }
+struct Bx;
+impl AsRef<Bx> for str { fn as_ref(&self) -> &Bx { mark("strasref"); &Bx } }
+fn bytes_of<B: ?Sized + AsRef<[u8]>>(b: &B) -> usize { b.as_ref().len() }
+fn ctrl_strasref_y() -> usize { bytes_of("xy") }
+"##)]);
+    for (v, calls, ctrls) in [(&a, &["call_eq_x", "call_lt_x", "call_hash_x", "call_fwd_x", "call_disp_x", "call_iter_x", "call_intoiter_x", "call_first_x", "call_forin_x", "call_vec_x", "call_ref_x", "call_hashfwd_x", "call_hashwhere_x", "call_hashimpl_x", "call_hashref_x"][..], &["ctrl_eat_x", "ctrl_calm_x", "ctrl_int_x", "ctrl_hashint_x", "ctrl_hashcalm_x", "ctrl_fwdcalm_x", "ctrl_iterstd_x", "ctrl_iterquiet_x", "ctrl_firstquiet_x", "ctrl_forquiet_x", "ctrl_vecint_x", "ctrl_veccalm_x", "ctrl_hashfwdint_x"][..]), (&b, &["call_outerslice_y", "call_vecvar_y", "call_opt_y", "call_sort_y", "call_contains_y", "call_dup_y", "call_max_y", "call_sum_y", "call_formap_y", "call_takebin_y", "call_extend_y", "call_emit_y", "call_stringy_y", "call_await_y", "call_selffwd_y", "call_assocfwd_y", "call_rev_y", "call_localerr_y"][..], &["ctrl_lazy_y", "ctrl_takeloud_y", "ctrl_outerslice_y", "ctrl_sortcalm_y", "ctrl_dupcalm_y", "ctrl_sumquiet_y", "ctrl_extendvec_y", "ctrl_emitvec_y", "ctrl_await_y", "ctrl_selffwd_y", "ctrl_maxint_y", "ctrl_stderr_y", "ctrl_strasref_y"][..])] {
+        for f in calls {
+            assert!(veina_row_effs(v, f).iter().any(|e| e == "Fs"), "R1167 `{f}` writes (executed):\n{v:#}");
+        }
+        for f in ctrls {
+            assert!(!veina_row_effs(v, f).iter().any(|e| e == "Fs"), "R1167 control `{f}` writes nothing (executed):\n{v:#}");
+        }
+    }
 }

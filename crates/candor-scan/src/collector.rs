@@ -1495,33 +1495,145 @@ impl<'a> CallCollector<'a> {
     /// exactly as the operator itself would be (`charge_coercion_ty`). An argument the typer cannot answer forms
     /// nothing (the pre-existing state); a receiver the summary says the callee takes shifts a path call's arguments.
     fn charge_generic_operators(&mut self, key: &str, args: &[&syn::Expr], method_syntax: bool) {
+        // SOUNDNESS R1167 — the argument at a position, with its element mode; an `@` entry FORWARDS it into another
+        // crate-local generic's summary (`lang::generic_operator_uses`), expanded here, bounded and cycle-safe.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        self.charge_generic_operators_at(key, args, method_syntax, None, false, &mut seen, 0);
+    }
+
+    /// `only`: the call-site argument index the outer summary forwarded (`None`: every entry of `key` is this call's own).
+    /// `elem_in`: the outer parameter was an element parameter, so the argument's ELEMENT type is the one charged.
+    #[allow(clippy::too_many_arguments)]
+    fn charge_generic_operators_at(
+        &mut self,
+        key: &str,
+        args: &[&syn::Expr],
+        method_syntax: bool,
+        only: Option<(usize, usize)>,
+        elem_in: bool,
+        seen: &mut std::collections::HashSet<String>,
+        depth: u8,
+    ) {
+        if depth > 6 || !seen.insert(format!("{key}\u{1f}{only:?}\u{1f}{elem_in}")) {
+            return;
+        }
         let Some(v) = self.returns.get(key).cloned() else { return };
         if v.is_empty() {
             return;
         }
-        let entries: Vec<(usize, String, String, bool)> = v
+        let entries: Vec<(usize, bool, String, String, bool)> = v
             .split(',')
             .filter_map(|e| {
                 let mut it = e.split('/');
-                let pos = it.next()?.parse().ok()?;
+                let p = it.next()?;
+                let (p, elem) = match p.strip_suffix('e') {
+                    Some(q) => (q, true),
+                    None => (p, false),
+                };
+                let pos = p.parse().ok()?;
                 let tr = it.next()?.to_string();
                 let m = it.next()?.to_string();
                 let recv = it.next()? == "1";
-                Some((pos, tr, m, recv))
+                Some((pos, elem, tr, m, recv))
             })
             .collect();
-        for (pos, tr, m, recv) in entries {
+        for (pos, elem, tr, m, recv) in entries {
             if method_syntax && !recv {
                 continue; // an associated fn with no receiver is not what method syntax calls
             }
             let idx = if recv && !method_syntax { pos + 1 } else { pos };
-            let Some(arg) = args.get(idx) else { continue };
-            if let Some(t) = self.resolve_recv_type(arg) {
+            // Forwarded from an outer summary: only the entries for the forwarded argument index, which names the
+            // OUTER call's argument `arg`.
+            let arg_at = match only {
+                Some((want, outer)) => {
+                    if idx != want {
+                        continue;
+                    }
+                    outer
+                }
+                None => idx,
+            };
+            let Some(arg) = args.get(arg_at).copied() else { continue };
+            let elem = elem || elem_in;
+            if let Some(fwd) = tr.strip_prefix('@') {
+                let Ok(at) = m.parse::<usize>() else { continue };
+                let (inner_key, inner_method) = if let Some(f) = fwd.strip_prefix("F:") {
+                    (crate::model::gen_op_key(f), false)
+                } else if let Some(r) = fwd.strip_prefix("I:") {
+                    let Some((t, f)) = r.split_once(':') else { continue };
+                    (crate::model::impl_gen_op_key(t, f), false)
+                } else if let Some(r) = fwd.strip_prefix("M:") {
+                    let Some((t, f)) = r.split_once(':') else { continue };
+                    (crate::model::impl_gen_op_key(t, f), true)
+                } else {
+                    continue;
+                };
+                if std::env::var_os("CANDOR_R1167_INSTR").is_some() {
+                    eprintln!("R1167FWD\t{key}\t{inner_key}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                self.charge_generic_operators_at(&inner_key, args, inner_method, Some((at, arg_at)), elem, seen, depth + 1);
+                continue;
+            }
+            // R1145's own operator entries keep the receiver walk they shipped with; every R1167 entry (a std-trait method,
+            // an element, a forwarded one) asks the STRICT typer: the walk's builder-chain guess ("a method returns its
+            // receiver's type") typed time's `offset.whole_hours().unsigned_abs()` as `UtcOffset` and charged its `fmt`.
+            let r1145 = !elem && depth == 0 && crate::lang::OPERATOR_TRAITS.contains(&tr.as_str());
+            let tys: Vec<String> = if elem {
+                self.generic_elem_arg_types(arg)
+            } else if r1145 {
+                self.resolve_recv_type(arg).into_iter().collect()
+            } else {
+                self.type_of(arg).into_iter().collect()
+            };
+            for t in tys {
+                // A std trait's impl for a std or dependency type is never this crate's (the orphan rule), yet
+                // `charge_coercion_ty` asks by LEAF: clap's `Error::raw(kind, e)` with `e: std::fmt::Error` formed
+                // clap's own `Error::fmt`. R1167's entries are std traits only, so such an argument forms nothing.
+                // A PRIMITIVE likewise: a crate's std-trait impl on one carries a local trait argument
+                // (`impl AsRef<Bytes> for str`), which the leaf cannot see — winnow's `Bytes::new(self)` with `self: &str`
+                // runs std's `AsRef<[u8]>`, and was charged winnow's own `str::as_ref`.
+                let leaf = t.split('<').next().unwrap_or(&t).rsplit("::").next().unwrap_or(&t);
+                if !r1145
+                    && (self.is_dependency_type(&t)
+                        || matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
+                        || crate::model::PRIMITIVE_LEAVES.contains(&leaf)
+                        || leaf == "str")
+                {
+                    continue;
+                }
                 if std::env::var_os("CANDOR_R1145_INSTR").is_some() {
                     eprintln!("R1145GENOP\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
+                if (elem || depth > 0 || !crate::lang::OPERATOR_TRAITS.contains(&tr.as_str()))
+                    && std::env::var_os("CANDOR_R1167_INSTR").is_some()
+                {
+                    eprintln!("R1167GEN\t{tr}\t{m}\t{t}\telem={elem}\tdepth={depth}"); // §E1 REACH COUNTER
+                }
                 self.charge_coercion_ty(&t, &tr, &m);
             }
+        }
+    }
+
+    /// SOUNDNESS R1167 — the ELEMENT types of an argument handed to an element parameter (`&[T]`, `Vec<T>`, `Option<T>`):
+    /// an array / repeat literal's elements as the strict typer types them (`&[Noisy(1)]`), else the collection's element
+    /// as the binding records it. Nothing when neither answers (the pre-existing state).
+    fn generic_elem_arg_types(&self, a: &syn::Expr) -> Vec<String> {
+        match peel_value(a) {
+            syn::Expr::Array(arr) => {
+                let mut out: Vec<String> = Vec::new();
+                for t in arr.elems.iter().filter_map(|x| self.type_of(x)) {
+                    if !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+                out
+            }
+            syn::Expr::Repeat(r) => self.type_of(&r.expr).into_iter().collect(),
+            syn::Expr::Reference(r) => self.generic_elem_arg_types(&r.expr),
+            syn::Expr::Call(c) if matches!(&*c.func, syn::Expr::Path(p) if p.path.is_ident("Some")) && c.args.len() == 1 => {
+                self.type_of(&c.args[0]).into_iter().collect()
+            }
+            e => self.resolve_elem_type_held(e).into_iter().collect(),
         }
     }
 

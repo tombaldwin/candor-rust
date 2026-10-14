@@ -4546,7 +4546,7 @@ pub(crate) fn collect_decls(
             syn::Item::Fn(f) => {
                 record_return(&f.sig, uses_ty, rets, None, callable_aliases, None);
                 // SOUNDNESS R1145 — see `model::gen_op_key`. Filed for every free fn, so a same-leaf twin withdraws it.
-                let g = crate::lang::generic_operator_uses(&f.sig, &f.block, &Default::default());
+                let g = crate::lang::generic_operator_uses(&f.sig, &f.block, &Default::default(), None);
                 file_decl_fact(rets, crate::model::gen_op_key(&f.sig.ident.to_string()), g.join(","));
             }
             // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
@@ -5009,8 +5009,8 @@ pub(crate) fn collect_decls(
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
                         // SOUNDNESS R1145 — see `model::impl_gen_op_key`.
                         if let Some(ty) = &impl_key_ty {
-                            let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params);
                             let tl = ty.rsplit("::").next().unwrap_or(ty);
+                            let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params, Some(tl));
                             file_decl_fact(rets, crate::model::impl_gen_op_key(tl, &m.sig.ident.to_string()), g.join(","));
                         }
                         // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
