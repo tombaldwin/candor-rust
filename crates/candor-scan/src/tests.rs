@@ -17342,7 +17342,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17353,7 +17353,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev109/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev110/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31523,7 +31523,8 @@ fn ctrl_via_quiet() -> u8 { hdep::server::Connection(1).via_quiet() }
     for f in ["Connection::shut", "Connection::via_inherent", "Connection::via_self"] {
         assert!(effs(f).iter().any(|e| e == "Fs"), "R1169 `{f}` writes (executed):\n{cv:#}");
     }
-    assert!(!effs("Connection::via_dflt").iter().any(|e| e == "Fs"), "R1169 residual (one qual for two impls) moved — decide it:\n{cv:#}");
+    // SOUNDNESS R1171 (v058) closed the residual this asserted: `via_dflt` now reaches the trait default it inherits.
+    assert!(effs("Connection::via_dflt").iter().any(|e| e == "Fs"), "R1171 `Connection::via_dflt` runs `Shut::dflt` (executed):\n{cv:#}");
 }
 
 /// SOUNDNESS R1177 (rustagent-v058; fixture rustagent-v058/fx/x177, every cell EXECUTED). A COMPOUND ASSIGNMENT formed no
@@ -31636,4 +31637,99 @@ pub fn ch_binlit(x: u16) -> u16 { x + 3 }
     }
     assert!(!fs(&cv, "lq_generic"), "R1177 residual (a generic body's own row) moved — decide it:\n{cv:#}");
     assert!(fs(&cv, "ch_binlit"), "R1128 residual (binary over-charge on a literal) moved — decide it:\n{cv:#}");
+}
+
+/// SOUNDNESS R1171 (rustagent-v058; fixtures rustagent-v057/fx/r1169 `via_dflt` and rustagent-v058/fx/r1171b, every cell
+/// EXECUTED). Units are keyed by the self type's LEAF, so `impl Shut for hdep::server::Connection` (inherits `Shut::dflt`)
+/// and `impl Shut for auto::Connection` (overrides it) in one module share `Connection::`, and `<the dependency's
+/// Connection>.dflt()` edged to the override: `['Env']` read while `Shut::dflt`'s `Fs` ran — through `self`, UFCS
+/// `Self::dflt(self)`, a free fn's parameter, and between two LOCAL twins. The default is now edged where the blocks of
+/// that trait for that leaf disagree about the member (additive: the override's edge rides beside). Controls (executed):
+/// a qualified callee naming the overriding type, a type whose INHERENT `dflt` shadows the default with no twin, a lone
+/// override, and twins that both override all stay pure of `Fs`. Pinned over-charge: a bare `self` in the overriding block.
+#[test]
+fn v058_r1171_twin_impls_keep_the_inherited_trait_default() {
+    let (_dv, cv, uv) = v053_chain("hdep", r##"pub mod server {
+    pub struct Connection(pub u8);
+    impl Connection {
+        pub fn graceful(&self) { std::fs::write("/tmp/rustagent-v057d-dep.txt", "d").unwrap(); }
+        pub fn quiet(&self) -> u8 { self.0 }
+    }
+}
+"##, r##"// R1171 variants. Each arm executes ONE route; ground truth is the file it writes / env it reads.
+mod auto {
+    pub struct Connection(pub u8);
+}
+mod lc {
+    pub struct Connection(pub u8);
+}
+trait Shut {
+    fn dflt(&self) { std::fs::write("/tmp/rustagent-v058-dflt.txt", "f").unwrap(); }
+    fn via_dflt(&self);
+    fn via_ufcs(&self);
+}
+impl Shut for hdep::server::Connection {
+    fn via_dflt(&self) { self.dflt() }
+    fn via_ufcs(&self) { Self::dflt(self) }
+}
+impl Shut for auto::Connection {
+    fn via_dflt(&self) {}
+    fn via_ufcs(&self) {}
+    fn dflt(&self) { let _ = std::env::var("RUSTAGENT_V058_DF"); }
+}
+// local-local twin: lc::Connection inherits the default, auto::Connection overrides it
+trait Shut2 {
+    fn d2(&self) { std::fs::write("/tmp/rustagent-v058-d2.txt", "f").unwrap(); }
+    fn via_d2(&self);
+}
+impl Shut2 for lc::Connection { fn via_d2(&self) { self.d2() } }
+impl Shut2 for auto::Connection { fn via_d2(&self) {} fn d2(&self) { let _ = std::env::var("RUSTAGENT_V058_D2"); } }
+// ---- over-charge controls ----
+pub struct Solo;
+impl Solo { fn dflt(&self) {} }
+impl Shut for Solo { fn via_dflt(&self) {} fn via_ufcs(&self) {} }
+pub struct Over;
+impl Shut for Over { fn via_dflt(&self) {} fn via_ufcs(&self) {} fn dflt(&self) {} }
+mod ka { pub struct K; }
+mod kb { pub struct K; }
+trait Shut3 { fn d3(&self) { std::fs::write("/tmp/rustagent-v058-d3.txt", "f").unwrap(); } }
+impl Shut3 for ka::K { fn d3(&self) {} }
+impl Shut3 for kb::K { fn d3(&self) {} }
+trait Shut4 { fn d4(&self) { std::fs::write("/tmp/rustagent-v058-d4.txt", "f").unwrap(); } fn v4(&self); }
+impl Shut4 for lc::Connection { fn v4(&self) {} }
+impl Shut4 for auto::Connection { fn d4(&self) {} fn v4(&self) { self.d4() } }
+fn ctl_auto(c: &auto::Connection) { c.dflt() }
+fn ctl_solo(s: &Solo) { s.dflt() }
+fn ctl_over(o: &Over) { o.dflt() }
+fn ctl_both(a: &ka::K, b: &kb::K) { a.d3(); b.d3() }
+fn ox_twinself(c: &auto::Connection) { c.v4() }
+fn free_dep(c: &hdep::server::Connection) { c.dflt() }
+fn free_lc(c: &lc::Connection) { c.d2() }
+fn main() {
+    match std::env::args().nth(1).unwrap_or_default().as_str() {
+        "via_dflt" => hdep::server::Connection(1).via_dflt(),
+        "via_ufcs" => hdep::server::Connection(1).via_ufcs(),
+        "via_d2" => lc::Connection(1).via_d2(),
+        "free_dep" => free_dep(&hdep::server::Connection(1)),
+        "free_lc" => free_lc(&lc::Connection(1)),
+        "ctl_auto" => ctl_auto(&auto::Connection(0)),
+        "ctl_solo" => ctl_solo(&Solo),
+        "ctl_over" => ctl_over(&Over),
+        "ctl_both" => ctl_both(&ka::K, &kb::K),
+        "ox_twinself" => ox_twinself(&auto::Connection(0)),
+        "auto" => { auto::Connection(0).dflt(); auto::Connection(0).d2(); }
+        _ => {}
+    }
+}
+"##);
+    let fs = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f).flat_map(effs).any(|e| e == "Fs");
+    for v in [&cv, &uv] {
+        for f in ["Connection::via_dflt", "Connection::via_ufcs", "Connection::via_d2", "free_dep", "free_lc"] {
+            assert!(fs(v, f), "R1171 `{f}` runs the inherited default (executed):\n{v:#}");
+        }
+        for f in ["ctl_auto", "ctl_solo", "ctl_over", "ctl_both"] {
+            assert!(!fs(v, f), "R1171 control `{f}` is pure of Fs (executed):\n{v:#}");
+        }
+        assert!(fs(v, "ox_twinself"), "R1171 pinned over-charge (bare self in the overriding twin) moved — decide it:\n{v:#}");
+    }
 }

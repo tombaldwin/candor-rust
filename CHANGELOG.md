@@ -11,6 +11,20 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a trait default inherited by one of two same-leaf implementors is reached (SOUNDNESS R1171).** Units
+  are keyed by the self type's leaf, so `impl Shut for hdep::server::Connection` (which inherits `Shut::dflt`) and
+  `impl Shut for auto::Connection` (which overrides it), written in one module, share one `Connection::` qual, and a
+  call to `dflt` on the dependency's `Connection` edged to the override: `['Env']` read while the default's `Fs` ran
+  (executed: rustagent-v057/fx/r1169 `via_dflt` and rustagent-v058/fx/r1171b, through `self`, `Self::dflt(self)`, a
+  free function's parameter, and two local twins; `deny Fs <fn>` 0 → 1 on all six, chained and unchained). Pass A now
+  records each impl block's written self path and members, and where the blocks of a trait for one leaf disagree about
+  a member, a call to it also reaches the trait default. The change only adds that edge, so the override's edge stays
+  beside it. A qualified callee naming exactly the overriding type adds nothing; a bare `self` inside the overriding
+  block cannot be told apart and is over-charged with the default (pinned). Residuals: a trait declared in a
+  dependency, and a self type written as a bare name inside a nested module. Corpus, against this branch's R1177 commit
+  and against 0.40.10: the rule fires in 5 entries (aws-smithy-runtime-api's `HeaderName` twins, where the default
+  was already reached) and changes no row and no call-graph edge, unchained or chained.
+
 - ⚠ **candor-scan: a compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`) forms an operator
   edge (SOUNDNESS R1177).** The family had none, so `a += L(2)` over an effectful `impl AddAssign for L` read ABSENT, and
   `a += d` over a dependency's `impl AddAssign<D> for u32` read ABSENT chained too, with no `invisible` (executed:

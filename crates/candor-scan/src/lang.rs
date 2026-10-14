@@ -5883,10 +5883,22 @@ pub(crate) fn collect_local_impl_members(
                     tr.segments.iter().map(|sg| sg.ident.to_string()).collect::<Vec<_>>().join("::");
                 out.insert(crate::model::impl_local_trait_key(
                     &tr_leaf, &ty, &expand(&written, uses)));
+                // SOUNDNESS R1171 — the same evidence per WRITTEN self type (`model::impl_path_key`), so two blocks whose
+                // self types share a leaf stay apart. Only where the written path's leaf is the leaf this block is
+                // filed under (`Box<X>` peels to `X` and is left out).
+                let wpath = type_path(&im.self_ty, uses)
+                    .filter(|w| !w.contains(crate::decls::ALIAS_ALT_SEP) && w.rsplit("::").next() == Some(ty.as_str()))
+                    .map(|w| crate::model::norm_type_path(&w));
+                if let Some(w) = &wpath {
+                    out.insert(crate::model::impl_path_key(&tr_leaf, &ty, w, None));
+                }
                 for ii in &im.items {
                     match ii {
                         syn::ImplItem::Fn(m) => {
                             out.insert(crate::model::impl_member_key(&tr_leaf, &ty, &m.sig.ident.to_string()));
+                            if let Some(w) = &wpath {
+                                out.insert(crate::model::impl_path_key(&tr_leaf, &ty, w, Some(&m.sig.ident.to_string())));
+                            }
                         }
                         // An associated const or type cannot introduce a METHOD, so neither blinds the
                         // member list.
@@ -5897,6 +5909,9 @@ pub(crate) fn collect_local_impl_members(
                         // of ABSENCE. Charging on is the pre-existing (over-approximating) answer.
                         _ => {
                             out.insert(crate::model::impl_opaque_key(&tr_leaf, &ty));
+                            if let Some(w) = &wpath {
+                                out.insert(crate::model::impl_path_key(&tr_leaf, &ty, w, Some("*")));
+                            }
                         }
                     }
                 }

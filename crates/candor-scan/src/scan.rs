@@ -2609,6 +2609,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
+    // SOUNDNESS R1171 — `(trait leaf, self-type leaf)` -> each `impl` block's WRITTEN self path, its declared members and
+    // whether a macro item blinds them (`model::impl_path_key`). Read only by the twin-default rule in the call loop.
+    type WpathBlock = (String, HashSet<String>, bool); // (written self path, declared members, a macro item blinds them)
+    let wpath_blocks: HashMap<(String, String), Vec<WpathBlock>> = {
+        let mut m: HashMap<(String, String), Vec<WpathBlock>> = HashMap::new();
+        for k in &merged.impl_members {
+            let Some(rest) = k.strip_prefix("\u{1f}wpath\u{1f}") else { continue };
+            let p: Vec<&str> = rest.split('\u{1f}').collect();
+            let (tr, ty, w) = match p.as_slice() {
+                [tr, ty, w] | [tr, ty, w, _] => (*tr, *ty, *w),
+                _ => continue,
+            };
+            let v = m.entry((tr.to_string(), ty.to_string())).or_default();
+            let i = match v.iter().position(|b| b.0 == w) {
+                Some(i) => i,
+                None => {
+                    v.push((w.to_string(), HashSet::new(), false));
+                    v.len() - 1
+                }
+            };
+            match p.get(3) {
+                Some(&"*") => v[i].2 = true,
+                Some(mem) => {
+                    v[i].1.insert(mem.to_string());
+                }
+                None => {}
+            }
+        }
+        m
+    };
     let r533_fi_prefix_t2: HashSet<String> =
         foreign_impls_by_tail2.keys().filter_map(|k| r533_trait_prefix(k)).collect();
     let mut direct_dispatchers: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
@@ -3906,6 +3936,49 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // VEIN C — set when a typed call on a local type reaches a DEFAULT it inherits from a
             // DEPENDENCY's trait; the chained join below then answers that member instead of `c.path`.
             let mut dep_default_path: Option<String> = None;
+            // SOUNDNESS R1171 — A TRAIT DEFAULT INHERITED BY ONE OF TWO SAME-LEAF IMPLEMENTORS. Units are keyed by the self
+            // type's LEAF, so `impl Shut for hdep::server::Connection` (inherits `Shut::dflt`) and `impl Shut for
+            // auto::Connection` (overrides it) in one module share `Connection::`: `Connection::dflt` is the override's
+            // unit, every route above resolves `<either Connection>.dflt()` to it, and the default the inheriting type
+            // runs was never edged (EXECUTED, rustagent-v057/fx/r1169 `via_dflt` and rustagent-v058/fx/r1171b: `Fs`
+            // ran, `['Env']` read, chained and unchained; also two LOCAL twins and a free fn's parameter).
+            //
+            // ADDITIVE ONLY: whatever this call resolved to is kept, so the override's edge rides beside (the
+            // over-charge direction), and nothing is withheld on a typing claim. The default is added where the
+            // blocks of that trait for that leaf DISAGREE about the member (one declares it, one does not), which is
+            // the collision itself: with no twin, a resolved `L::m` is the type's own, and the existing fallback
+            // already reaches the default when nothing resolves. A QUALIFIED callee type that is exactly a declaring
+            // block's written path and no inheriting block's is that override, and adds nothing; a bare or
+            // differently spelled one cannot be told apart, and gets the default (over-charge, never a silence).
+            if !c.is_macro {
+                let segs: Vec<&str> = c.path.split("::").collect();
+                if segs.len() >= 2 {
+                    let (ty_leaf, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
+                    let written = crate::model::norm_type_path(&segs[..segs.len() - 1].join("::"));
+                    for tr in type_to_traits.get(ty_leaf).into_iter().flatten() {
+                        let Some(blocks) = wpath_blocks.get(&(tr.clone(), ty_leaf.to_string())) else { continue };
+                        let declares = |b: &WpathBlock| b.2 || b.1.contains(m);
+                        let inherits: Vec<&String> = blocks.iter().filter(|b| !declares(b)).map(|b| &b.0).collect();
+                        if inherits.is_empty() || !blocks.iter().any(declares) {
+                            continue;
+                        }
+                        let is_override = written.contains("::")
+                            && !inherits.iter().any(|w| **w == written)
+                            && blocks.iter().any(|b| declares(b) && b.0 == written);
+                        if is_override || !trait_decls.get(tr).is_some_and(|lt| lt.methods.contains(m) || lt.assoc.contains(m)) {
+                            continue;
+                        }
+                        if let Some([t]) = by_tail2.get(&format!("{tr}::{m}")).map(Vec::as_slice) {
+                            if t != &f.qual {
+                                if std::env::var_os("CANDOR_R1171_INSTR").is_some() {
+                                    eprintln!("R1171TWINDFLT\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only
+                                }
+                                calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                            }
+                        }
+                    }
+                }
+            }
             if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
                     .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport))

@@ -971,6 +971,30 @@ pub(crate) fn impl_opaque_key(trait_leaf: &str, ty: &str) -> String {
     format!("{trait_leaf}\u{1f}{ty}\u{1f}*")
 }
 
+/// SOUNDNESS R1171 — THE SIXTH KEY SHAPE: `\u{1f}wpath\u{1f}<tr>\u{1f}<ty>\u{1f}<written self path>` (an `impl <tr> for
+/// <path>` block was seen, its self type WRITTEN as `<path>` and expanded through its scope's `use` map) and
+/// `…\u{1f}<m>` (it declares member `m`; `*` = it holds an item this engine cannot read). The other shapes key a block
+/// by its self type's LEAF, which is also how its units are filed, so `impl Shut for hdep::server::Connection` and
+/// `impl Shut for auto::Connection` written in one module are ONE `Connection::` qual and ONE member set: whether a
+/// given `Connection` inherits `Shut::dflt` or overrides it was not recoverable. This shape keeps the blocks apart.
+/// Leading separator, as `derive_key`: no reader splitting `(trait, type, member)` can mistake it for an impl block.
+pub(crate) fn impl_path_key(trait_leaf: &str, ty: &str, written: &str, member: Option<&str>) -> String {
+    match member {
+        Some(m) => format!("\u{1f}wpath\u{1f}{trait_leaf}\u{1f}{ty}\u{1f}{written}\u{1f}{m}"),
+        None => format!("\u{1f}wpath\u{1f}{trait_leaf}\u{1f}{ty}\u{1f}{written}"),
+    }
+}
+
+/// SOUNDNESS R1171 — a type path with its crate-relative head (`crate::`/`self::`/`super::`) dropped, the one spelling
+/// `impl_path_key` stores and its reader compares (§G: writer and reader both go through this).
+pub(crate) fn norm_type_path(p: &str) -> String {
+    let mut segs: Vec<&str> = p.split("::").collect();
+    while segs.len() > 1 && matches!(segs.first().copied(), Some("crate" | "self" | "super")) {
+        segs.remove(0);
+    }
+    segs.join("::")
+}
+
 /// SOUNDNESS R1111 — THE FIFTH KEY SHAPE: `\u{1f}derive\u{1f}<tr>\u{1f}<ty>` — `#[derive(<tr>)]` on the local
 /// type `<ty>`, for the std comparison/hash traits (`PartialEq`, `PartialOrd`, `Ord`, `Hash`). A derived
 /// impl has no body in the source, and it delegates to each FIELD's impl of the same trait; this key is
