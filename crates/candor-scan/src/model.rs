@@ -658,7 +658,8 @@ pub(crate) const STD_WITNESS_TRAITS: &[(&str, &[&str])] = &[
     ("PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]),
     ("Ord", &["cmp", "max", "min", "clamp"]),
     ("Hash", &["hash", "hash_slice"]),
-    ("Hasher", &["write", "finish", "write_u8", "write_u16", "write_u32", "write_u64", "write_usize", "write_str"]),
+    ("Hasher", &["write", "finish", "write_u8", "write_u16", "write_u32", "write_u64", "write_u128", "write_usize", "write_i8",
+        "write_i16", "write_i32", "write_i64", "write_i128", "write_isize", "write_str", "write_length_prefix"]),
     ("Display", &["fmt"]),
     ("Debug", &["fmt"]),
     ("LowerHex", &["fmt"]),
@@ -710,6 +711,30 @@ pub(crate) const STD_WITNESS_TRAITS: &[(&str, &[&str])] = &[
     ("MulAssign", &["mul_assign"]),
     ("DivAssign", &["div_assign"]),
     ("RemAssign", &["rem_assign"]),
+    // SOUNDNESS R1181 — the rest of the compound-assignment family. R1165 listed `AddAssign`..`RemAssign` and stopped, so
+    // a local value whose effectful `BitOrAssign` impl a chained dependency's generic body applies (`a |= b` under
+    // `T: BitOrAssign`) read ABSENT chained while the unchained scan carried `invisible` (EXECUTED, rustagent-v061/fx/v061).
+    ("BitAndAssign", &["bitand_assign"]),
+    ("BitOrAssign", &["bitor_assign"]),
+    ("BitXorAssign", &["bitxor_assign"]),
+    ("ShlAssign", &["shl_assign"]),
+    ("ShrAssign", &["shr_assign"]),
+    // SOUNDNESS R1181 (the whole-list check) — std traits a generic body runs on a value it is handed that the list did not
+    // name, each with hand-written EFFECTFUL impls measured in the registry corpus (rustagent-v061/census: a local
+    // `ToSocketAddrs` resolving through hickory charges `Net`; `AsFd`/`AsHandle` on async-fs's `File` charge `Fs`;
+    // tokio's `Wake` impls `Log`; async-nats's `IntoFuture` impls `Log`/`Rand`). EXECUTED, rustagent-v061/fx/v061w.
+    ("ToSocketAddrs", &["to_socket_addrs"]),
+    ("AsFd", &["as_fd"]),
+    ("AsRawFd", &["as_raw_fd"]),
+    ("IntoRawFd", &["into_raw_fd"]),
+    ("AsHandle", &["as_handle"]),
+    ("AsRawHandle", &["as_raw_handle"]),
+    ("IntoRawHandle", &["into_raw_handle"]),
+    ("AsSocket", &["as_socket"]),
+    ("AsRawSocket", &["as_raw_socket"]),
+    ("IntoRawSocket", &["into_raw_socket"]),
+    ("Wake", &["wake", "wake_by_ref"]),
+    ("IntoFuture", &["into_future"]),
 ];
 
 pub(crate) const PRIMITIVE_LEAVES: &[&str] = &[

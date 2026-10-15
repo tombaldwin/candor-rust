@@ -62,7 +62,19 @@ fn implied(bound: &str) -> Option<&'static [&'static str]> {
         "Into" => &["Into"],
         "TryInto" => &["TryInto"],
         "FromStr" => &["FromStr"],
-        "Future" | "IntoFuture" => &["Future"],
+        "Future" => &["Future"],
+        "IntoFuture" => &["IntoFuture", "Future"], // R1181
+        "ToSocketAddrs" => &["ToSocketAddrs"],
+        "AsFd" => &["AsFd"],
+        "AsRawFd" => &["AsRawFd"],
+        "IntoRawFd" => &["IntoRawFd"],
+        "AsHandle" => &["AsHandle"],
+        "AsRawHandle" => &["AsRawHandle"],
+        "IntoRawHandle" => &["IntoRawHandle"],
+        "AsSocket" => &["AsSocket"],
+        "AsRawSocket" => &["AsRawSocket"],
+        "IntoRawSocket" => &["IntoRawSocket"],
+        "Wake" => &["Wake"],
         "Error" => &["Error", "Display", "Debug"],
         "Index" => &["Index"],
         "IndexMut" => &["IndexMut", "Index"],
@@ -83,6 +95,11 @@ fn implied(bound: &str) -> Option<&'static [&'static str]> {
         "MulAssign" => &["MulAssign"],
         "DivAssign" => &["DivAssign"],
         "RemAssign" => &["RemAssign"],
+        "BitAndAssign" => &["BitAndAssign"], // R1181
+        "BitOrAssign" => &["BitOrAssign"],
+        "BitXorAssign" => &["BitXorAssign"],
+        "ShlAssign" => &["ShlAssign"],
+        "ShrAssign" => &["ShrAssign"],
         _ => return None,
     })
 }

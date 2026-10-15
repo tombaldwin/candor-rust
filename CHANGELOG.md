@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: the bit and shift compound-assignment traits are std witnesses (SOUNDNESS R1181).** A local value
+  whose effectful `BitOrAssign` / `BitAndAssign` / `BitXorAssign` / `ShlAssign` / `ShrAssign` impl was handed to a
+  chained dependency's generic body that applies the operator read ABSENT, while the unchained scan carried `invisible`
+  (EXECUTED fixture). R1165's list now includes them, and — from a census of the registry corpus's hand-written
+  std-trait impls joined to their rows — the other std traits with measured effectful impls it lacked:
+  `ToSocketAddrs`, `AsFd`/`AsRawFd`/`IntoRawFd` and their handle/socket twins, `Wake`, `IntoFuture`, plus the rest of
+  `Hasher`'s members. Such a call discloses `Unknown` with `dispatch:<Trait>.<member>`: `deny Unknown` fails where
+  0.40.11 passed on 11 fixture cells, chained.
+
 - ⚠ **candor-scan: a macro-made compound-assignment impl has a unit (SOUNDNESS R1182).** A `macro_rules!`-made
   `impl BitOrAssign for M` (and every other `XAssign`) was never spliced, so `a |= M(1)` over its write read ABSENT
   in the defining crate, and the crate's report published no `M::bitor_assign` key, so a chained consumer read ABSENT

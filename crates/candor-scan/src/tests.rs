@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v061 (R1181) bumped it to rev113.
         // rustagent-v061 (R1182) bumped it to rev112.
         // rustagent-v061 (R1180) bumped it to rev111.
         // rustagent-v057 (R1167) bumped it to rev108.
@@ -17344,7 +17345,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17355,7 +17356,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev112/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev113/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31890,4 +31891,84 @@ pub fn ce_addin() -> u32 { v061dep::add_in(P(1), P(2)).0 }
         assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1182 control `{f}` is pure (executed):\n{cv:#}");
     }
     assert!(has(&cv, "hd_macropure", "Fs"), "R1128 residual (Rhs-blind over-charge) moved — decide it:\n{cv:#}");
+}
+
+/// SOUNDNESS R1181 (rustagent-v061; fixture rustagent-v061/fx/v061w, every cell EXECUTED). R1165's `STD_WITNESS_TRAITS`
+/// listed `AddAssign`..`RemAssign` and stopped, so a local value whose effectful `BitOrAssign` / `BitAndAssign` /
+/// `BitXorAssign` / `ShlAssign` / `ShrAssign` impl a CHAINED dependency's generic body applies (`a |= b` under `T:
+/// BitOrAssign`) read ABSENT, while the unchained scan carried `invisible` — chaining deleted the only disclosure. The
+/// five join the list (and `depsig`'s bound table, so a `T: BitOrAssign` parameter narrows to that trait alone): each now
+/// discloses `Unknown` with its own `dispatch:<Trait>.<member>` reason. The whole-list check against std (a census of
+/// hand-written std-trait impls over the registry corpus, joined to their rows) added the traits with measured effectful
+/// impls the list lacked — `ToSocketAddrs`, the `AsFd`/`AsRawFd`/`AsHandle`/`AsSocket` family, `Wake`, `IntoFuture` — and
+/// the rest of `Hasher`'s members (`xa_addrs`..`xe_intofut`). Controls (executed pure): a `T: Copy` parameter that runs
+/// nothing, and a pure impl.
+#[test]
+fn v061_r1181_the_bit_and_shift_assign_traits_are_std_witnesses() {
+    let (_dv, cv, uv) = v053_chain("v061wdep", r##"//! rustagent-v061 R1181 fixture: generic bodies applying a compound operator to the value a consumer hands them.
+pub fn or_in<T: std::ops::BitOrAssign + Copy>(mut a: T, b: T) -> T { a |= b; a }
+pub fn and_in<T: std::ops::BitAndAssign + Copy>(mut a: T, b: T) -> T { a &= b; a }
+pub fn xor_in<T: std::ops::BitXorAssign + Copy>(mut a: T, b: T) -> T { a ^= b; a }
+pub fn shl_in<T: std::ops::ShlAssign<u32> + Copy>(mut a: T) -> T { a <<= 1; a }
+pub fn shr_in<T: std::ops::ShrAssign<u32> + Copy>(mut a: T) -> T { a >>= 1; a }
+pub fn add_in<T: std::ops::AddAssign + Copy>(mut a: T, b: T) -> T { a += b; a }
+pub fn keep<T: Copy>(a: T) -> T { a }
+pub fn or_where<T>(mut a: T, b: T) -> T where T: std::ops::BitOrAssign { a |= b; a }
+pub fn addrs<A: std::net::ToSocketAddrs>(a: A) -> usize { a.to_socket_addrs().map(|i| i.count()).unwrap_or(0) }
+pub fn fd_of<F: std::os::fd::AsFd>(f: &F) -> i32 { use std::os::fd::AsRawFd; f.as_fd().as_raw_fd() }
+pub fn raw_of<F: std::os::fd::AsRawFd>(f: &F) -> i32 { f.as_raw_fd() }
+pub fn wake_it<W: std::task::Wake + Send + Sync + 'static>(w: std::sync::Arc<W>) { std::task::Waker::from(w).wake() }
+pub fn fut_of<F: std::future::IntoFuture>(f: F) -> F::IntoFuture { f.into_future() }
+"##, r##"#![allow(clippy::all)]
+use std::ops::*;
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v061_fxw", b"x"); }
+// a local value with HAND-written effectful compound-assignment impls, handed to a dependency's generic body
+#[derive(Clone, Copy)] pub struct W(pub u32);
+impl BitOrAssign for W { fn bitor_assign(&mut self, o: W) { mark(); self.0 |= o.0 } }
+impl BitAndAssign for W { fn bitand_assign(&mut self, o: W) { mark(); self.0 &= o.0 } }
+impl BitXorAssign for W { fn bitxor_assign(&mut self, o: W) { mark(); self.0 ^= o.0 } }
+impl ShlAssign<u32> for W { fn shl_assign(&mut self, o: u32) { mark(); self.0 <<= o } }
+impl ShrAssign<u32> for W { fn shr_assign(&mut self, o: u32) { mark(); self.0 >>= o } }
+// a type with an effectful AddAssign (R1165's own family): the mechanism R1181 extends
+#[derive(Clone, Copy)] pub struct V(pub u32);
+impl AddAssign for V { fn add_assign(&mut self, o: V) { mark(); self.0 += o.0 } }
+pub fn wa_orin() -> u32 { v061wdep::or_in(W(1), W(2)).0 }
+pub fn wb_andin() -> u32 { v061wdep::and_in(W(1), W(2)).0 }
+pub fn wc_xorin() -> u32 { v061wdep::xor_in(W(1), W(2)).0 }
+pub fn wd_shlin() -> u32 { v061wdep::shl_in(W(1)).0 }
+pub fn we_shrin() -> u32 { v061wdep::shr_in(W(1)).0 }
+pub fn wf_where() -> u32 { v061wdep::or_where(W(1), W(2)).0 }
+pub fn wg_addin() -> u32 { v061wdep::add_in(V(1), V(2)).0 }
+// the whole-list check: other std traits a generic body runs on a value it is handed
+pub struct Xs;
+impl std::net::ToSocketAddrs for Xs { type Iter = std::vec::IntoIter<std::net::SocketAddr>; fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> { mark(); Ok(Vec::new().into_iter()) } }
+pub struct Yf;
+impl std::os::fd::AsFd for Yf { fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> { mark(); unsafe { std::os::fd::BorrowedFd::borrow_raw(0) } } }
+pub struct Rf;
+impl std::os::fd::AsRawFd for Rf { fn as_raw_fd(&self) -> std::os::fd::RawFd { mark(); 0 } }
+pub struct Wk;
+impl std::task::Wake for Wk { fn wake(self: std::sync::Arc<Self>) { mark() } }
+pub struct If;
+impl std::future::IntoFuture for If { type Output = (); type IntoFuture = std::future::Ready<()>; fn into_future(self) -> Self::IntoFuture { mark(); std::future::ready(()) } }
+pub fn xa_addrs() -> usize { v061wdep::addrs(Xs) }
+pub fn xb_asfd() -> i32 { v061wdep::fd_of(&Yf) }
+pub fn xc_rawfd() -> i32 { v061wdep::raw_of(&Rf) }
+pub fn xd_wake() { let w = std::sync::Arc::new(Wk); v061wdep::wake_it(w) }
+pub fn xe_intofut() { let _ = v061wdep::fut_of(If); }
+// controls (executed pure): a bound that runs nothing, and a pure impl
+#[derive(Clone, Copy)] pub struct Z(pub u32);
+impl BitOrAssign for Z { fn bitor_assign(&mut self, o: Z) { self.0 |= o.0 } }
+pub fn ca_keep() -> u32 { v061wdep::keep(W(1)).0 }
+pub fn cb_pureor() -> u32 { v061wdep::or_in(Z(1), Z(2)).0 }
+"##);
+    let row = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f || r["fn"].as_str().unwrap().ends_with(&format!("::{f}"))).cloned().collect::<Vec<_>>();
+    let why = |v: &serde_json::Value, f: &str| row(v, f).iter().flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|x| x.as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    for (f, w) in [("wa_orin", "dispatch:BitOrAssign.bitor_assign"), ("wb_andin", "dispatch:BitAndAssign.bitand_assign"), ("wc_xorin", "dispatch:BitXorAssign.bitxor_assign"), ("wd_shlin", "dispatch:ShlAssign.shl_assign"), ("we_shrin", "dispatch:ShrAssign.shr_assign"), ("wf_where", "dispatch:BitOrAssign.bitor_assign"), ("wg_addin", "dispatch:AddAssign.add_assign"), ("xa_addrs", "dispatch:ToSocketAddrs.to_socket_addrs"), ("xb_asfd", "dispatch:AsFd.as_fd"), ("xc_rawfd", "dispatch:AsRawFd.as_raw_fd"), ("xd_wake", "dispatch:Wake.wake"), ("xe_intofut", "dispatch:IntoFuture.into_future")] {
+        assert!(row(&cv, f).iter().flat_map(effs).any(|e| e == "Unknown"), "R1181 `{f}` hands an effectful impl to a generic body that runs it (executed), chained:\n{cv:#}");
+        assert_eq!(why(&cv, f), vec![w.to_string()], "R1181 `{f}` reason, narrowed by the dependency's signature:\n{cv:#}");
+        assert!(row(&uv, f).iter().any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "v061wdep"))), "R1181 `{f}` unchained:\n{uv:#}");
+    }
+    for f in ["ca_keep", "cb_pureor"] {
+        assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1181 control `{f}` is pure (executed):\n{cv:#}");
+    }
 }
