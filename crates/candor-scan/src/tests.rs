@@ -17302,6 +17302,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v067 (R1197b) bumped it to rev116.
         // rustagent-v066 (R1196) bumped it to rev115.
         // rustagent-v063 (R1186) bumped it to rev114.
         // rustagent-v061 (R1181) bumped it to rev113.
@@ -17350,7 +17351,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17361,7 +17362,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev115/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev116/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -32356,4 +32357,33 @@ pub fn p7_conv() -> usize { DEP::p7_into(Ls(1)) }
     let (_, cv, _) = v067_chain("pmdep67", "[lib]\nproc-macro = true\n", "use proc_macro::TokenStream;\n#[proc_macro_derive(Error)]\npub fn derive_error(_i: TokenStream) -> TokenStream { TokenStream::new() }\n",
         &cons("pmdep67", "pub mod e5 {\n    use pmdep67::Error;\n    #[derive(Error)] pub struct Error(pub u8);\n    impl Error { pub fn with_ls(_l: super::Ls) -> u8 { 0 } }\n    pub fn o5_proc() -> u8 { Error::with_ls(super::Ls(1)) }\n}\n"));
     assert!(veina_row_effs(&cv, "o5_proc").is_empty(), "R1192 a proc-macro crate runs nothing (executed pure):\n{cv:#}");
+}
+
+/// SOUNDNESS R1197(b) (rustagent-v067; fixture rustagent-v067/fx/r1192, `b*` cells EXECUTED). A crate-local one-argument
+/// `Result` alias (`type Result<T> = std::result::Result<T, Le>`, or `type Res2<T, E = Le>`) carried no error type, so a
+/// call returning it handed to a dependency's `E: Into<String>` named no `From` source and the caller read ABSENT over the
+/// executed `From<Le> for String` write. Pass A now files the alias's error type and the reader resolves the alias.
+/// Control: an alias whose error converts only purely (`b3_pure`).
+#[test]
+fn v067_r1197b_a_crate_local_result_alias_carries_its_error_type() {
+    let (_, cv, _) = v053_chain("bdep67", "pub fn bq<T, E: Into<String>>(r: Result<T, E>) -> usize { match r { Err(e) => e.into().len(), Ok(_) => 0 } }\npub fn bqu<T, E: Into<u64>>(r: Result<T, E>) -> u64 { match r { Err(e) => e.into(), Ok(_) => 0 } }\n", r##"#![allow(dead_code)]
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v067_fx", b"x"); }
+#[derive(Debug)] pub struct Le(pub u8);
+impl From<Le> for String { fn from(l: Le) -> String { mark(); format!("{}", l.0) } }
+#[derive(Debug)] pub struct Pe(pub u8);
+impl From<Pe> for u64 { fn from(l: Pe) -> u64 { l.0 as u64 } }
+pub mod error { pub type Result<T> = std::result::Result<T, super::Le>; }
+pub type Res2<T, E = Le> = std::result::Result<T, E>;
+pub type Res3<T> = std::result::Result<T, Pe>;
+fn mkb1() -> error::Result<u8> { Err(Le(1)) }
+fn mkb2() -> Res2<u8> { Err(Le(2)) }
+fn mkb3() -> Res3<u8> { Err(Pe(3)) }
+pub fn b1_alias() -> usize { bdep67::bq(mkb1()) }
+pub fn b2_default() -> usize { bdep67::bq(mkb2()) }
+pub fn b3_pure() -> u64 { bdep67::bqu(mkb3()) }
+"##);
+    for f in ["b1_alias", "b2_default"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1197(b) `{f}` writes through the alias's error type (executed):\n{cv:#}");
+    }
+    assert!(veina_row_effs(&cv, "b3_pure").is_empty(), "R1197(b) control `b3_pure` is pure (executed):\n{cv:#}");
 }

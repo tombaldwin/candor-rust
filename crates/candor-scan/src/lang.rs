@@ -11520,6 +11520,11 @@ pub(crate) fn result_err_type(ty: &syn::Type, uses: &HashMap<String, String>, ge
     match (full.as_str(), args.len()) {
         ("std::io::Result" | "io::Result", 1) => Some("std::io::Error".to_string()),
         ("std::fmt::Result" | "fmt::Result" | "core::fmt::Result", 0) => Some("std::fmt::Error".to_string()),
+        // SOUNDNESS R1197(b) — a one-argument `Name<T>` that is not std's may be a crate-local `Result` alias: a MARKER the
+        // reader resolves through `model::result_alias_key` (and drops when the crate declares no such alias).
+        (f, 1) if !matches!(f.split("::").next(), Some("std" | "core" | "alloc")) && std::env::var_os("CANDOR_R1197B_OFF").is_none() => {
+            Some(format!("{}{name}", crate::model::RESULT_ALIAS_MARK))
+        }
         _ => None,
     }
 }

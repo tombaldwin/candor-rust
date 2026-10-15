@@ -3731,6 +3731,55 @@ fn note_err_return(
     }
 }
 
+/// SOUNDNESS R1197(b) — a crate-local `Result` alias (`type Result<T> = std::result::Result<T, Error>`, or with a defaulted
+/// error parameter, `type Result<T, E = Error> = ..`): file its ERROR type under `model::result_alias_key(alias)`, so a
+/// return or binding written `Result<T>` names it (`lang::result_err_type` leaves an alias marker that
+/// `CallCollector::arg_err_types` resolves through this). A UNION across same-name aliases, like `ret_err_key`.
+fn note_result_alias(it: &syn::ItemType, uses_ty: &HashMap<String, String>, rets: &mut HashMap<String, Option<String>>) {
+    let mut generics: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut defaults: HashMap<String, &syn::Type> = HashMap::new();
+    for g in &it.generics.params {
+        if let syn::GenericParam::Type(t) = g {
+            match &t.default {
+                Some(d) => {
+                    defaults.insert(t.ident.to_string(), d);
+                }
+                None => {
+                    generics.insert(t.ident.to_string());
+                }
+            }
+        }
+    }
+    // a defaulted parameter in the error position stands for its default
+    let ty = match &*it.ty {
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let mut p = p.clone();
+            if let Some(seg) = p.path.segments.last_mut() {
+                if let syn::PathArguments::AngleBracketed(a) = &mut seg.arguments {
+                    for ga in a.args.iter_mut() {
+                        if let syn::GenericArgument::Type(syn::Type::Path(tp)) = ga {
+                            if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                                if let Some(d) = defaults.get(&tp.path.segments[0].ident.to_string()) {
+                                    *ga = syn::GenericArgument::Type((*d).clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Path(p)
+        }
+        _ => return,
+    };
+    let Some(e) = crate::lang::result_err_type(&ty, uses_ty, &generics) else { return };
+    let k = crate::model::result_alias_key(&it.ident.to_string());
+    let v = match rets.get(&k) {
+        Some(Some(prev)) => crate::model::union_err_types(prev, &e),
+        _ => e,
+    };
+    rets.insert(k, Some(v));
+}
+
 fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: String) {
     match rets.get(&key) {
         None => {
@@ -4786,6 +4835,7 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Type(it) => {
+                note_result_alias(it, uses_ty, rets); // SOUNDNESS R1197(b)
                 // A type alias to a NON-NOMINAL type (`type Inner = [u8; N]`, a slice/tuple/ptr/ref/fn,
                 // or a bare primitive) names a type that has NO local impl block — so a call
                 // `Inner::assoc()` resolves through the std/core inherent impl, NOT a same-named local

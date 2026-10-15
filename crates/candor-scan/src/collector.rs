@@ -2002,11 +2002,12 @@ impl<'a> CallCollector<'a> {
                     if !crate::lang::is_type_ident(ty) || self.is_dependency_type(head) {
                         return None;
                     }
-                    self.returns.get(&crate::model::impl_err_key(ty, last)).cloned()
+                    // R1197(b) — resolved here, so an alias marker naming nothing does not shadow the leaf fallback
+                    self.returns.get(&crate::model::impl_err_key(ty, last)).map(|v| self.resolve_err_markers(v)).filter(|v| !v.is_empty())
                 });
                 match assoc {
                     Some(a) => Some(a),
-                    None if bare || local_path => self.returns.get(&crate::model::ret_err_key(leaf)).cloned(),
+                    None if bare || local_path => self.returns.get(&crate::model::ret_err_key(leaf)).map(|v| self.resolve_err_markers(v)),
                     None => None,
                 }
             }
@@ -2020,7 +2021,33 @@ impl<'a> CallCollector<'a> {
             }
             _ => None,
         };
+        // SOUNDNESS R1197(b) — resolve a `Result` alias marker to the alias's error type(s); an unknown name drops.
+        let found = found.map(|v| self.resolve_err_markers(&v));
         found.filter(|s| !s.is_empty())
+    }
+
+    /// SOUNDNESS R1197(b) — `lang::result_err_type`'s answer with every crate-local `Result` alias MARKER replaced by the
+    /// alias's error type(s) (`model::result_alias_key`, up to 4 hops); a marker naming no alias drops. Empty when nothing
+    /// is left, so a binding's annotation that names no alias does not shadow what its initializer carries.
+    pub(crate) fn resolve_err_markers(&self, v: &str) -> String {
+        let mut out: Vec<String> = Vec::new();
+        let mut work: Vec<(String, usize)> = v.split(crate::model::RET_ERR_SEP).map(|x| (x.to_string(), 0)).collect();
+        while let Some((t, d)) = work.pop() {
+            match t.strip_prefix(crate::model::RESULT_ALIAS_MARK) {
+                Some(name) if d < 4 => {
+                    if let Some(e) = self.returns.get(&crate::model::result_alias_key(name)) {
+                        work.extend(e.split(crate::model::RET_ERR_SEP).map(|x| (x.to_string(), d + 1)));
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    if !t.is_empty() && !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+        }
+        out.join(&crate::model::RET_ERR_SEP.to_string())
     }
 
     /// SOUNDNESS R1186 — the source leaves of this crate's hand-written `From`/`TryFrom` impls (`model::from_impl_key`)
@@ -10581,7 +10608,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 };
                 if let Some(name) = single_pat_ident(pat) {
                     let prev = self.err_of.remove(&name);
-                    if let Some(e) = ty.and_then(|t| crate::lang::result_err_type(t, &self.uses, &generics)) {
+                    if let Some(e) = ty
+                        .and_then(|t| crate::lang::result_err_type(t, &self.uses, &generics))
+                        .map(|e| self.resolve_err_markers(&e)) // R1197(b)
+                        .filter(|e| !e.is_empty())
+                    {
                         self.err_of.insert(name.clone(), e);
                     }
                     saved_err.push((name, prev));
@@ -10786,6 +10817,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let generics = self.scope_generic_names();
                 let e = ann
                     .and_then(|t| crate::lang::result_err_type(t, &self.uses, &generics))
+                    // R1197(b) — an annotation naming no alias must not shadow what the initializer carries
+                    .map(|e| self.resolve_err_markers(&e))
+                    .filter(|e| !e.is_empty())
                     .or_else(|| {
                         let init = node.init.as_ref()?;
                         self.with_pre_bindings(&pre_bindings, |s| s.arg_err_types(&init.expr))

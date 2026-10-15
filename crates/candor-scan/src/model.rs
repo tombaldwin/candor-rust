@@ -788,6 +788,14 @@ pub(crate) fn impl_err_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("{RET_ERR}{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// SOUNDNESS R1197(b) — a crate-local `Result` alias's error type(s), keyed by the alias's name (`RET_ERR`-prefixed, so it
+/// merges as the same UNION). `RESULT_ALIAS_MARK` + name is what `lang::result_err_type` returns for a one-argument
+/// `Name<T>` it cannot read, resolved through this key by `CallCollector::arg_err_types` (dropped when no alias exists).
+pub(crate) fn result_alias_key(alias: &str) -> String {
+    format!("{RET_ERR}<ralias>{alias}")
+}
+pub(crate) const RESULT_ALIAS_MARK: &str = "<ralias>";
+
 pub(crate) fn is_ret_err_key(key: &str) -> bool {
     key.starts_with(RET_ERR)
 }
