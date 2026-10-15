@@ -11,6 +11,40 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.11] — 2026-10-15
+
+candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the
+version. Both entries close a **silent under-report**: a function that really performs an effect through a compound
+assignment (`a += b`) on a type with an effectful `AddAssign`-family impl, or through a trait default that one of two
+same-named implementors inherits, was missing that effect from its row. Each was filed from a fixture that was
+executed and performed the effect while the report omitted it. SOUNDNESS R1171 and R1177 close here.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.10 `candor-scan` (the crates.io
+  build) over the 5,219-entry registry corpus, unchained, and over 982 consumers with every dependency chained
+  (`bin/corpus-ab.py`; each crate version counts separately). Each gate is scoped to the function named. No crate in
+  the corpus reaches an effectful compound-assignment impl or a twin-implementor trait default, so **no `deny <E>`
+  gate on a concrete effect moves in either direction**; the R1171/R1177 fixtures are where `deny Fs` goes from
+  pass to fail. What moves is `deny Unknown`, which now **fails where 0.40.10 passed** over functions that apply a
+  compound operator to an operand type whose operator impl was already `Unknown`:
+  - fixedbitset 0.5.7's `FixedBitSet::union_with`, `intersect_with`, `symmetric_difference_with`, `insert`,
+    `insert_range`, `set`, `set_range`, `toggle`, `remove` and the `bitand_assign`/`bitor_assign`/`bitxor_assign`
+    impls; bitvec 1.0/1.1's `BitArray`/`BitBox`/`BitVec` bit operators and their `*_assign` forms; num-bigint 0.4–0.5's
+    `BigInt`/`BigUint::mul_assign` and `scalar_mul`, and 0.4.5/0.4.6's `from_f64`; bigdecimal 0.4's `BigDecimal::add`
+    and `sub`; kasuari 0.4's `Expression` operators; chrono 0.4.11 and 0.4.26's
+    `Parsed::to_naive_datetime_with_offset`; lexical-parse-float 0.8's `Bigint::mul_assign`. 137 rows unchained, most
+    of them units the report did not publish before (plus num-bigint's two `FromPrimitive::from_f64` trait-union
+    rows); chained, 182 rows, adding hdrhistogram, quinn-proto, curve25519-dalek and pathfinder_geometry.
+  - rust_decimal's `impl XAssign for &mut Decimal` rows are now keyed `&Decimal::x_assign` (as the binary operators
+    already were), so a gate written against the old `&mut Decimal::x_assign` name no longer matches a row: 30 rows
+    renamed with the same effects and the same edge. Re-scope such a gate to the new name.
+
+  **Nothing passes where 0.40.10 failed** apart from that rename: no concrete effect, no `Unknown` and no `invisible`
+  is lost in either arm. Counts, unchained: ADDED 531, REMOVED 60 (the 30 renamed keys), CHANGED 949. Six sampled
+  gates were re-run on the published binary and on this release's source: `deny Unknown` over fixedbitset's
+  `FixedBitSet::union_with` and `insert_range`, num-bigint 0.4.6's `BigUint::from_f64`, bitvec 1.1.1's
+  `BitVec::bitor_assign` and chrono 0.4.26's `Parsed::to_naive_datetime_with_offset` each pass on 0.40.10 and fail
+  now, and `deny Fs Clock Net Env Exec FixedBitSet::union_with` passes on both.
+
 - ⚠ **candor-scan: a trait default inherited by one of two same-leaf implementors is reached (SOUNDNESS R1171).** Units
   are keyed by the self type's leaf, so `impl Shut for hdep::server::Connection` (which inherits `Shut::dflt`) and
   `impl Shut for auto::Connection` (which overrides it), written in one module, share one `Connection::` qual, and a
