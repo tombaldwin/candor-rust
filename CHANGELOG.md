@@ -11,6 +11,30 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an untyped argument to a chained dependency callee the scan cannot read is disclosed (SOUNDNESS
+  R1197(a)).** An argument the typer cannot name (a dependency's generic return, a closure's return) handed to a
+  dependency callee whose source signature the scan cannot read (a macro-made `fn $n<T: Into<String>>`) was
+  deliberately undisclosed, and the caller read ABSENT over an executed effectful `From` write. It now discloses
+  `Unknown` (`dispatch:From.from`) where an effectful local conversion could meet it. `deny Unknown` fails where it
+  passed: over the chained registry corpus, 573 rows of 1,461,057 analysed units (0.039%) in 78 consumers newly carry
+  `Unknown` (with R1192 below); a `deny Unknown[ambiguous]` can also move where a same-name contest now has an
+  `Unknown` claimant. Stated over-disclosure: an unreadable callee that converts nothing.
+
+- ⚠ **candor-scan: a crate-local `Result` alias carries its error type to a chained conversion (SOUNDNESS R1197(b)).**
+  `type Result<T> = std::result::Result<T, Le>` (or a defaulted `E = Le`) named no error type, so a value of it handed
+  to a dependency's `E: Into<_>` body read ABSENT over an executed `From<Le>` write. Cache rev116.
+
+- ⚠ **candor-scan: a dependency's source signature is read per item, not per crate (SOUNDNESS R1192).** One
+  `macro_rules!` holding the token `fn`, a public glob of a local module, or an item macro naming the callee made the
+  WHOLE dependency unreadable, so the R1165/R1186 std-trait and conversion disclosures stayed un-narrowed on most real
+  dependencies (262,587 of 270,655 conversion sites). Now only a definition of the callee itself that may be out of
+  sight keeps it unreadable; pass-through `cfg` macros and `cfg_if!` are read through; a `proc-macro` crate runs
+  nothing; and a method must have an inherent definition on its type (a same-name foreign blanket-trait method may run
+  otherwise). Withdraws disclosures: over the chained corpus 23 rows lose `Unknown` and 64 reasons go, each of the 189
+  narrowed sites behind them shown inert — 116 by an independent rustc-based checker (the callee needs no bound of the
+  value, or takes a concrete type), 73 by reading the callee's source (a constructor, an unbounded or non-conversion
+  bound); against 0.40.11 no row loses `Unknown`. Unchained reports are unchanged.
+
 - ⚠ **candor-scan: a `Result` error type carried by a return or a binding, and an untyped argument, reach a chained
   dependency's conversion (SOUNDNESS R1196).** R1186's conversion witness named a `From` source only for a typed
   argument, and the expression typer records `Result` unwrapped to its `Ok` type, so `dep::q(mk())` with `mk() ->
