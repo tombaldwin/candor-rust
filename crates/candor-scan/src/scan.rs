@@ -2750,6 +2750,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1165 — (caller, dependency as spelled, its real name, local type leaf, argument position, callee rest): a
     // local value with a std-trait impl handed to a CHAINED dependency (`WITNESS_MARKER`). Judged after the fixpoint.
     let mut witness_sites: Vec<(String, String, String, String, usize, String)> = Vec::new();
+    // SOUNDNESS R1186 — the same, for a local `From`/`TryFrom` impl whose SOURCE the argument names (`model::from_impl_key`):
+    // (caller, dependency as spelled, its real name, source leaf, argument position, callee rest).
+    let mut from_sites: Vec<(String, String, String, String, usize, String)> = Vec::new();
     // SOUNDNESS R1034 / R1056 merged-sibling hedge — (caller, merged unit quals), judged after the fixpoint.
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
@@ -2982,7 +2985,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if deps_idx.crates.contains(wcr_real) && std::env::var_os("CANDOR_R1165_OFF").is_none() {
                     let mut it = rest.splitn(3, "::");
                     if let (Some(l), Some(pos), Some(callee)) = (it.next(), it.next().and_then(|p| p.parse().ok()), it.next()) {
-                        witness_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), l.to_string(), pos, callee.to_string()));
+                        // SOUNDNESS R1186 — a local conversion taking the argument is judged on its own list.
+                        if let Some(src) = l.strip_prefix(crate::model::FROM_WITNESS_PREFIX) {
+                            if std::env::var_os("CANDOR_R1186_OFF").is_none() {
+                                from_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), src.to_string(), pos, callee.to_string()));
+                            }
+                        } else {
+                            witness_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), l.to_string(), pos, callee.to_string()));
+                        }
                     }
                 }
                 continue;
@@ -5818,6 +5828,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             eprintln!("R1165SITE\t{caller}\t{alias}::{callee}\t{pos}\t{l}\t{a:?}"); // §E1 REACH COUNTER
         }
     }
+    // SOUNDNESS R1186 — the crate's conversions by SOURCE leaf: (trait, target unit type, target may be this crate's own
+    // type), from Pass A's `<fromimpl>` facts; and, per conversion site, which targets the dependency's callee can convert
+    // the argument INTO (`depsig::DepSigs::conversion_targets`; `None` = any).
+    let from_impls: HashMap<String, Vec<(String, String, bool)>> = {
+        let mut m: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+        if !from_sites.is_empty() {
+            for k in returns.keys() {
+                let Some(rest) = k.strip_prefix(crate::model::FROM_IMPL_PREFIX) else { continue };
+                let parts: Vec<&str> = rest.split('\u{1f}').collect();
+                if let [src, tr, tgt, bare] = parts[..] {
+                    let local = bare == "l" && returns.contains_key(&crate::model::nominal_key(tgt));
+                    m.entry(src.to_string()).or_default().push((tr.to_string(), tgt.to_string(), local));
+                }
+            }
+            for v in m.values_mut() {
+                v.sort();
+                v.dedup();
+            }
+        }
+        m
+    };
+    let from_targets: Vec<crate::depsig::ConvTargets> = {
+        let mut sigs = crate::depsig::DepSigs::default();
+        let off = std::env::var_os("CANDOR_R1186_NO_NARROW").is_some();
+        from_sites
+            .iter()
+            .map(|(_, alias, real, _, pos, callee)| if off { None } else { sigs.conversion_targets(dir, alias, real, callee, *pos) })
+            .collect()
+    };
+    if std::env::var_os("CANDOR_R1186_INSTR").is_some() {
+        for ((caller, alias, _, l, pos, callee), a) in from_sites.iter().zip(&from_targets) {
+            eprintln!("R1186SITE\t{caller}\t{alias}::{callee}\t{pos}\t{l}\t{:?}\t{a:?}", from_impls.get(l)); // §E1 REACH COUNTER
+        }
+    }
     let nonpath_blind = if nonpath_contested.is_empty() {
         HashMap::new()
     } else {
@@ -5944,6 +5988,62 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
                             eprintln!("R1165HEDGE\t{caller}\t{tr}.{m}\t{l}"); // §E1 REACH COUNTER
                         }
+                    }
+                }
+            }
+        }
+        // SOUNDNESS R1186 — a local `impl From<S> for U` (or `TryFrom`) handed an `S` through a CHAINED dependency's generic
+        // body (`fn f<T: Into<String>>(t: T) { t.into() }`). R1165's check above asks what the argument's OWN type
+        // implements, and a conversion's member is keyed under its TARGET (`String::from`), so it never saw this one:
+        // chained, the caller read ABSENT over an executed write while unchained it carried `invisible: [dep]` (EXECUTED,
+        // rustagent-v063/fx/v063). Same rule, same reason shape: where the conversion's unit carries a CONCRETE effect
+        // the caller lacks, the caller discloses `Unknown` with `dispatch:From.from` / `dispatch:TryFrom.try_from`.
+        // A DISCLOSURE, never a charge — nothing here proves the body converts, and every same-target impl of the crate
+        // shares the one unit (`String::from` is the union of the crate's `From<_> for String` bodies), so even the
+        // effect set is not this impl's alone.
+        //
+        // NARROWED by what the callee can convert the value INTO (`depsig`): a `TryInto`/`TryFrom` bound runs a `From`
+        // impl too (std's `TryFrom` blanket goes through `Into`), an `Into`/`From` bound never runs a `TryFrom` one. A
+        // dependency cannot name a type THIS crate declares, so a conversion into one runs only where the callee's
+        // target is generic; and two DIFFERENT std targets (`Into<String>` vs `impl From<S> for u64`) cannot meet. Every
+        // other concrete target is kept, since a dependency's alias can rename the type the consumer wrote.
+        for ((caller, _alias, _real, src, _pos, _callee), targets) in from_sites.iter().zip(&from_targets) {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            let mut convs: Vec<&(String, String, bool)> = from_impls.get(src).into_iter().flatten().collect();
+            if src != "*" {
+                convs.extend(from_impls.get("*").into_iter().flatten());
+            }
+            for (tr, tgt, local) in convs {
+                let runs = match targets {
+                    None => true,
+                    Some(ts) => ts.iter().any(|(kind, t)| {
+                        (kind == tr || tr == "From" && kind == "TryFrom")
+                            && (t == "*"
+                                || t == tgt
+                                || !*local
+                                    && !(crate::model::STD_CONVERSION_TARGETS.contains(&t.as_str())
+                                        && crate::model::STD_CONVERSION_TARGETS.contains(&tgt.as_str())))
+                    }),
+                };
+                if !runs {
+                    continue;
+                }
+                let m = if tr == "TryFrom" { "try_from" } else { "from" };
+                let key = format!("{tgt}::{m}");
+                let units: Vec<&String> = by_tail2.get(&key).into_iter().flatten().chain(mbe_side.get(&key).into_iter().flatten()).collect();
+                let hot = units.iter().any(|u| {
+                    *u != caller && inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+                });
+                if !hot {
+                    continue;
+                }
+                let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+                let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(format!("dispatch:{tr}.{m}"));
+                if fresh || fresh_why {
+                    hedged = true;
+                    if std::env::var_os("CANDOR_R1186_INSTR").is_some() {
+                        eprintln!("R1186HEDGE\t{caller}\t{tr}.{m}\t{src}\t{tgt}\t{fresh}"); // §E1 REACH COUNTER
                     }
                 }
             }

@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v063 (R1186) bumped it to rev114.
         // rustagent-v061 (R1181) bumped it to rev113.
         // rustagent-v061 (R1182) bumped it to rev112.
         // rustagent-v061 (R1180) bumped it to rev111.
@@ -17345,7 +17346,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17356,7 +17357,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev113/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev114/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31970,5 +31971,140 @@ pub fn cb_pureor() -> u32 { v061wdep::or_in(Z(1), Z(2)).0 }
     }
     for f in ["ca_keep", "cb_pureor"] {
         assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1181 control `{f}` is pure (executed):\n{cv:#}");
+    }
+}
+
+/// SOUNDNESS R1186 (rustagent-v063; fixture rustagent-v063/fx/v063, every cell EXECUTED). A crate's hand-written
+/// `impl From<S> for U` (or `TryFrom`) runs inside a CHAINED dependency's generic body handed an `S` (`fn into_s<T:
+/// Into<String>>(t: T) { t.into() }`, `where String: From<T>`, `U: From<T>` with `U` the caller's, a `?` into the
+/// dependency's error type), but its member is keyed under the TARGET (`String::from`), so R1165's witness check never
+/// asked about it: chained, every such caller read ABSENT while unchained it carried `invisible`. Each now discloses
+/// `Unknown` with `dispatch:From.from` / `dispatch:TryFrom.try_from`, narrowed by what the callee's signature can
+/// convert INTO (`depsig::conversion_targets`). Controls (executed pure): a pure conversion, a `T: Copy` / unused / `Debug`
+/// parameter, an effectful conversion into a DIFFERENT std type or into a type this crate declares.
+#[test]
+fn v063_r1186_a_local_conversion_handed_to_a_dependency_is_a_witness() {
+    let (_dv, cv, uv) = v053_chain("fdep", r##"//! rustagent-v063 R1186 fixture: generic bodies that convert the value a consumer hands them.
+use std::error::Error;
+pub struct DErr(pub String);
+// Into / TryInto bounds, target a std type
+pub fn into_s<T: Into<String>>(t: T) -> usize { t.into().len() }
+pub fn tryinto_u<T: TryInto<u64>>(t: T) -> u64 { t.try_into().unwrap_or(0) }
+// From / TryFrom bounds written on the TARGET
+pub fn from_s<T>(t: T) -> usize where String: From<T> { String::from(t).len() }
+pub fn tryfrom_u<T>(t: T) -> u64 where u64: TryFrom<T> { u64::try_from(t).unwrap_or(0) }
+// L and U both chosen by the consumer
+pub fn conv<T: Into<U>, U>(t: T) -> U { t.into() }
+pub fn conv_from<T, U: From<T>>(t: T) -> U { U::from(t) }
+pub fn tconv<T: TryInto<U>, U>(t: T) -> Option<U> { t.try_into().ok() }
+pub fn tconv_from<T, U: TryFrom<T>>(t: T) -> Option<U> { U::try_from(t).ok() }
+// `?` conversions inside the dependency, into its own error type
+pub fn q<E>(r: Result<u8, E>) -> Result<u8, DErr> where DErr: From<E> { Ok(r?) }
+pub fn q_into<E: Into<DErr>>(r: Result<u8, E>) -> Result<u8, DErr> { Ok(r.map_err(|e| e.into())?) }
+pub fn q_box<E: Into<Box<dyn Error>>>(r: Result<u8, E>) -> Result<u8, Box<dyn Error>> { Ok(r.map_err(Into::into)?) }
+pub fn q_qbox<E>(r: Result<u8, E>) -> Result<u8, Box<dyn Error>> where Box<dyn Error>: From<E> { Ok(r?) }
+// a method on a dependency value
+pub struct Sink(pub usize);
+impl Sink { pub fn put<T: Into<String>>(&mut self, t: T) { self.0 += t.into().len() } }
+// controls: bounds that run no conversion
+pub fn keep<T: Copy>(t: T) -> T { t }
+pub fn ignore<T: Into<String>>(_t: T) -> usize { 0 }
+pub fn dbg<T: std::fmt::Debug>(t: T) -> usize { format!("{t:?}").len() }
+pub fn into_v<T: Into<Vec<u8>>>(t: T) -> usize { t.into().len() }
+pub fn into_derr<T: Into<DErr>>(t: T) -> usize { t.into().0.len() }
+"##, r##"#![allow(clippy::all)]
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v063_fx", b"x"); }
+// L local, U std: an effectful From<L> for String, TryFrom<L> for u64
+#[derive(Clone, Copy, Debug)] pub struct Ls(pub u8);
+impl From<Ls> for String { fn from(l: Ls) -> String { mark(); format!("{}", l.0) } }
+impl TryFrom<Ls> for u64 { type Error = (); fn try_from(l: Ls) -> Result<u64, ()> { mark(); Ok(l.0 as u64) } }
+// L and U both local
+pub struct Lb(pub u8);
+pub struct Ub(pub u8);
+impl From<Lb> for Ub { fn from(l: Lb) -> Ub { mark(); Ub(l.0) } }
+pub struct Lt(pub u8);
+pub struct Ut(pub u8);
+impl TryFrom<Lt> for Ut { type Error = (); fn try_from(l: Lt) -> Result<Ut, ()> { mark(); Ok(Ut(l.0)) } }
+// U a dependency type, and Box<dyn Error>
+#[derive(Debug)] pub struct Le(pub u8);
+impl From<Le> for fdep::DErr { fn from(e: Le) -> fdep::DErr { mark(); fdep::DErr(format!("{}", e.0)) } }
+#[derive(Debug)] pub struct Lx(pub u8);
+impl From<Lx> for Box<dyn std::error::Error> { fn from(e: Lx) -> Self { mark(); format!("{}", e.0).into() } }
+// by reference
+pub struct Lr(pub u8);
+impl From<&Lr> for String { fn from(l: &Lr) -> String { mark(); format!("{}", l.0) } }
+// a PURE conversion (control)
+pub struct Pc(pub u8);
+impl From<Pc> for String { fn from(l: Pc) -> String { format!("{}", l.0) } }
+
+pub fn fa_into() -> usize { fdep::into_s(Ls(1)) }
+pub fn fb_tryinto() -> u64 { fdep::tryinto_u(Ls(1)) }
+pub fn fc_from() -> usize { fdep::from_s(Ls(1)) }
+pub fn fd_tryfrom() -> u64 { fdep::tryfrom_u(Ls(1)) }
+pub fn fe_conv() -> u8 { let u: Ub = fdep::conv(Lb(1)); u.0 }
+pub fn ff_convfrom() -> u8 { let u: Ub = fdep::conv_from(Lb(1)); u.0 }
+pub fn fg_tconv() -> u8 { let u: Option<Ut> = fdep::tconv(Lt(1)); u.map(|x| x.0).unwrap_or(0) }
+pub fn fh_tconvfrom() -> u8 { let u: Option<Ut> = fdep::tconv_from(Lt(1)); u.map(|x| x.0).unwrap_or(0) }
+pub fn fi_q() -> u8 { let _ = fdep::q(Err(Le(1))); 0 }
+pub fn fj_qinto() -> u8 { let _ = fdep::q_into(Err(Le(1))); 0 }
+pub fn fk_qbox() -> u8 { let _ = fdep::q_box(Err(Lx(1))); 0 }
+pub fn fl_qqbox() -> u8 { let _ = fdep::q_qbox(Err(Lx(1))); 0 }
+pub fn fm_sink() -> usize { let mut s = fdep::Sink(0); fdep::Sink::put(&mut s, Ls(1)); 0 }
+pub fn fn_byref() -> usize { let l = Lr(1); fdep::into_s(&l) }
+// a typed Result value, a conversion from ANY type, a conversion from a std type into a local one
+pub fn mk_le() -> Result<u8, Le> { Err(Le(2)) }
+pub fn fo_qtyped() -> u8 { let _ = fdep::q(mk_le()); 0 }
+pub fn fs_qlet() -> u8 { let r: Result<u8, Le> = mk_le(); let _ = fdep::q(r); 0 }
+pub struct Ug(pub usize);
+impl<T: std::fmt::Display> From<T> for Ug { fn from(t: T) -> Ug { mark(); Ug(format!("{t}").len()) } }
+pub struct Gs(pub u8);
+impl std::fmt::Display for Gs { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) } }
+pub fn fp_genericsrc() -> usize { let u: Ug = fdep::conv(Gs(1)); u.0 }
+pub struct Un(pub usize);
+impl From<std::path::PathBuf> for Un { fn from(p: std::path::PathBuf) -> Un { mark(); Un(p.as_os_str().len()) } }
+pub fn fq_stdsrc() -> usize { let p = std::path::PathBuf::from("a"); let u: Un = fdep::conv(p); u.0 }
+// controls
+pub struct Pv(pub u8);
+impl From<Pv> for Vec<u8> { fn from(l: Pv) -> Vec<u8> { vec![l.0] } }
+pub fn ca_pure() -> usize { fdep::into_v(Pv(1)) }
+// the callee converts into Vec<u8> only: an effectful conversion into a DIFFERENT std type, or into a type this
+// crate declares, cannot run there
+pub struct Lm(pub u8);
+impl From<Lm> for u64 { fn from(l: Lm) -> u64 { mark(); l.0 as u64 } }
+impl From<Lm> for Vec<u8> { fn from(l: Lm) -> Vec<u8> { vec![l.0] } }
+pub fn ce_stdmismatch() -> usize { fdep::into_v(Lm(1)) }
+pub struct Ln(pub u8);
+impl From<Ln> for Ub { fn from(l: Ln) -> Ub { mark(); Ub(l.0) } }
+impl From<Ln> for Vec<u8> { fn from(l: Ln) -> Vec<u8> { vec![l.0] } }
+pub fn cf_localtarget() -> usize { fdep::into_v(Ln(1)) }
+pub fn fr_derr() -> usize { fdep::into_derr(Le(1)) }
+pub fn xa_merged() -> usize { fdep::into_s(Pc(1)) }
+pub fn cb_keep() -> u8 { fdep::keep(Ls(1)).0 }
+pub fn cc_ignore() -> usize { fdep::ignore(Ls(1)) }
+pub fn cd_dbg() -> usize { fdep::dbg(Ls(1)) }
+"##);
+    let row = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f || r["fn"].as_str().unwrap().ends_with(&format!("::{f}"))).cloned().collect::<Vec<_>>();
+    let why = |v: &serde_json::Value, f: &str| row(v, f).iter().flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|x| x.as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let (fr, tf) = ("dispatch:From.from", "dispatch:TryFrom.try_from");
+    for (f, w) in [("fa_into", fr), ("fb_tryinto", tf), ("fc_from", fr), ("fd_tryfrom", tf), ("fe_conv", fr), ("ff_convfrom", fr),
+        ("fg_tconv", tf), ("fh_tconvfrom", tf), ("fi_q", fr), ("fj_qinto", fr), ("fk_qbox", fr), ("fl_qqbox", fr), ("fm_sink", fr),
+        ("fn_byref", fr), ("fp_genericsrc", fr), ("fq_stdsrc", fr), ("fr_derr", fr)] {
+        assert!(row(&cv, f).iter().flat_map(effs).any(|e| e == "Unknown"), "R1186 `{f}` hands an effectful conversion to a generic body that runs it (executed), chained:\n{cv:#}");
+        assert!(why(&cv, f).contains(&w.to_string()), "R1186 `{f}` reason {w}:\n{cv:#}");
+        assert!(row(&uv, f).iter().any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "fdep"))), "R1186 `{f}` unchained:\n{uv:#}");
+    }
+    // the narrowing: `Into<String>` runs no `TryFrom<_> for u64` (`fa_into`), `TryInto<u64>` no `From<_> for String`
+    assert_eq!(why(&cv, "fa_into"), vec![fr.to_string()], "R1186 narrowing by kind and target:\n{cv:#}");
+    assert_eq!(why(&cv, "fb_tryinto"), vec![tf.to_string()], "R1186 narrowing by kind and target:\n{cv:#}");
+    for f in ["ca_pure", "cb_keep", "cc_ignore", "cd_dbg", "ce_stdmismatch", "cf_localtarget"] {
+        assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1186 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    // Stated residuals, pinned so a change to either is decided rather than drifted into. `xa_merged`: a PURE
+    // `From<Pc> for String` shares the one `String::from` unit with the crate's effectful `From<Ls> for String`, so it
+    // over-discloses. `fo_qtyped` / `fs_qlet`: a `Result` whose error type only its declared type carries — the typer
+    // records `Ok` types — reads as before (absent); only a written `Err(..)` constructor is typed (`fi_q`).
+    assert!(why(&cv, "xa_merged").contains(&fr.to_string()), "R1186 residual (merged same-target unit) moved — decide it:\n{cv:#}");
+    for f in ["fo_qtyped", "fs_qlet"] {
+        assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1186 residual (Result error type untyped) moved — decide it:\n{cv:#}");
     }
 }

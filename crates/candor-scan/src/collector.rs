@@ -1732,16 +1732,38 @@ impl<'a> CallCollector<'a> {
         }
         for (i, a) in args.iter().enumerate() {
             let mut leaves: Vec<String> = Vec::new();
+            // SOUNDNESS R1186 — a std wrapper's payload is part of the value (`dep::q(Err(LocalErr(1)))`, whose `?` runs
+            // `From<LocalErr>`); asked for the conversion witness only, so R1165's own sites are unchanged.
+            let mut from_types: Vec<String> = Vec::new();
+            self.wrapper_payload_types(a, &mut from_types, 0);
+            for t in from_types {
+                for l in self.conversion_witness_leaves(&t) {
+                    let l = format!("{}{l}", crate::model::FROM_WITNESS_PREFIX);
+                    if !leaves.contains(&l) {
+                        leaves.push(l);
+                    }
+                }
+            }
             for t in self.witness_arg_types(a) {
                 for l in self.local_witness_leaves(&t) {
                     if !leaves.contains(&l) {
                         leaves.push(l);
                     }
                 }
+                // SOUNDNESS R1186 — a local CONVERSION taking the argument (`impl From<S> for U`), keyed under the target.
+                for l in self.conversion_witness_leaves(&t) {
+                    let l = format!("{}{l}", crate::model::FROM_WITNESS_PREFIX);
+                    if !leaves.contains(&l) {
+                        leaves.push(l);
+                    }
+                }
             }
             for l in leaves {
-                if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+                if std::env::var_os("CANDOR_R1165_INSTR").is_some() && !l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
                     eprintln!("R1165WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER, ADDED branch only
+                }
+                if std::env::var_os("CANDOR_R1186_INSTR").is_some() && l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
+                    eprintln!("R1186WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER (chained or not)
                 }
                 self.calls.push(Call { argc: 0, entropy_arg: false,
                     path: format!("{cr}::{WITNESS_MARKER}::{l}::{}::{rest}", base + i),
@@ -1814,6 +1836,61 @@ impl<'a> CallCollector<'a> {
             if has && !out.iter().any(|o: &String| o == leaf) {
                 out.push(leaf.to_string());
             }
+        }
+        out
+    }
+
+    /// SOUNDNESS R1186 — the types of the payloads of std wrapper constructors in an argument (`Some(x)`, `Ok(x)`,
+    /// `Err(x)`, `Box::new(x)`, `Rc::new(x)`, `Arc::new(x)`, `vec![x]` is a macro and not read), as the strict typer
+    /// proves them, recursively. The wrapper itself is the value's type and adds no conversion of its own.
+    fn wrapper_payload_types(&self, a: &syn::Expr, out: &mut Vec<String>, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        let syn::Expr::Call(c) = peel_value(a) else { return };
+        let syn::Expr::Path(p) = &*c.func else { return };
+        if p.qself.is_some() || c.args.len() != 1 {
+            return;
+        }
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let tail: Vec<&str> = segs.iter().rev().take(2).rev().map(String::as_str).collect();
+        let wrapper = matches!(tail.as_slice(), ["Some"] | ["Ok"] | ["Err"] | [_, "Some"] | [_, "Ok"] | [_, "Err"]
+            | ["Box", "new"] | ["Rc", "new"] | ["Arc", "new"]);
+        if !wrapper {
+            return;
+        }
+        let x = &c.args[0];
+        out.extend(self.witness_arg_types(x));
+        self.wrapper_payload_types(x, out, depth + 1);
+    }
+
+    /// SOUNDNESS R1186 — the source leaves of this crate's hand-written `From`/`TryFrom` impls (`model::from_impl_key`)
+    /// that a typed argument names: every leaf in the type (`Vec<Noisy>` names `Vec` and `Noisy`), WHEREVER it is
+    /// declared — `impl From<String> for Local` runs on a std value as much as `impl From<Local> for String` runs on a
+    /// local one — and `*` when the crate has a conversion from ANY type (`impl<T: Display> From<T> for E`). A leaf
+    /// that is a generic parameter in scope names no type and adds nothing (the forwarded-generic residual of R1165).
+    fn conversion_witness_leaves(&self, t: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if t.contains(crate::decls::ITEM_SENTINEL) || t.contains(crate::decls::ALIAS_ALT_SEP) {
+            return out;
+        }
+        let mut typed = false;
+        for path in t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
+            let path = path.trim_matches(':');
+            if path.is_empty() {
+                continue;
+            }
+            let leaf = path.rsplit("::").next().unwrap_or(path);
+            if leaf.is_empty() || self.generic_bounds.contains_key(leaf) || self.impl_generic_bounds.contains_key(leaf) {
+                continue;
+            }
+            typed = true;
+            if self.returns.contains_key(&crate::model::from_src_key(leaf)) && !out.iter().any(|o: &String| o == leaf) {
+                out.push(leaf.to_string());
+            }
+        }
+        if typed && self.returns.contains_key(&crate::model::from_src_key("*")) {
+            out.push("*".to_string());
         }
         out
     }

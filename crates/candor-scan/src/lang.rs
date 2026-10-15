@@ -11468,6 +11468,72 @@ pub(crate) fn impl_trait_leaf(tr: &syn::Path, uses: &HashMap<String, String>) ->
     Some(if is_ident { last.to_string() } else { written })
 }
 
+/// SOUNDNESS R1186 — the Pass A facts of one hand-written `impl From<S> for U` / `impl TryFrom<S> for U` (`seg` is the
+/// trait path's last segment, `target` the impl's unit type key): `(source leaf, target, target written bare)` per
+/// source leaf. The source leaf is the OUTER nominal leaf of `S` (`Vec<u8>` → `Vec`), each element's of a slice, array
+/// or tuple, and `*` when `S` is (or only names) one of the impl's own generic parameters — that impl converts any
+/// type. "Bare" means the self type is a one-segment path this file does not import, so it MAY be the crate's own type
+/// (`scan.rs` confirms with `model::nominal_key`); a bare name is never taken as proof of anything by itself.
+pub(crate) fn from_impl_facts(
+    im: &syn::ItemImpl,
+    seg: &syn::PathSegment,
+    target: &str,
+    uses: &HashMap<String, String>,
+) -> Vec<(String, String, bool)> {
+    let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return Vec::new() };
+    let Some(src) = a.args.iter().find_map(|g| match g {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let generics: HashSet<String> = im
+        .generics
+        .params
+        .iter()
+        .filter_map(|g| match g {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    fn leaves(t: &syn::Type, generics: &HashSet<String>, out: &mut Vec<String>) {
+        match peel_ty_refs(t) {
+            syn::Type::Path(p) if p.qself.is_none() => {
+                if let Some(s) = p.path.segments.last() {
+                    let n = s.ident.to_string();
+                    let l = if p.path.segments.len() == 1 && generics.contains(&n) { "*".to_string() } else { n };
+                    if l != "Self" && !out.contains(&l) {
+                        out.push(l);
+                    }
+                }
+            }
+            syn::Type::Slice(s) => leaves(&s.elem, generics, out),
+            syn::Type::Array(s) => leaves(&s.elem, generics, out),
+            syn::Type::Ptr(s) => leaves(&s.elem, generics, out),
+            syn::Type::Tuple(tu) => tu.elems.iter().for_each(|e| leaves(e, generics, out)),
+            // a qualified path, `impl Trait`, a fn pointer, a macro type: any source
+            _ => {
+                if !out.iter().any(|o| o == "*") {
+                    out.push("*".to_string());
+                }
+            }
+        }
+    }
+    let mut srcs = Vec::new();
+    leaves(src, &generics, &mut srcs);
+    if srcs.is_empty() {
+        srcs.push("*".to_string());
+    }
+    let bare = match &*im.self_ty {
+        syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() && p.path.segments.len() == 1 => {
+            let n = p.path.segments[0].ident.to_string();
+            expand(&n, uses) == n
+        }
+        _ => false,
+    };
+    srcs.into_iter().map(|s| (s, target.to_string(), bare)).collect()
+}
+
 /// SOUNDNESS R828 — IMPLEMENTORS THE ITEM-LEVEL INDEX CANNOT NAME. A non-nominal implementor of a LOCAL
 /// trait is RESOLVED (its method is a unit; recorded in `nonnominal`); every other one is recorded as the
 /// R529 hedge records a block-nested one: into the SAME `nested_local` / `nested_foreign` sets, so every

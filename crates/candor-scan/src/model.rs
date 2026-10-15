@@ -737,6 +737,45 @@ pub(crate) const STD_WITNESS_TRAITS: &[(&str, &[&str])] = &[
     ("IntoFuture", &["into_future"]),
 ];
 
+/// SOUNDNESS R1186 — a crate's hand-written `impl From<S> for U` (or `TryFrom`) is a std-trait impl a DEPENDENCY's
+/// generic body can run on a value the consumer hands it (`fn f<T: Into<String>>(t: T) { t.into() }` given an `S`),
+/// but its member is keyed under the TARGET (`U::from`), so R1165's witness check — which asks what the argument's
+/// OWN type implements — never sees it. Pass A files one presence key per (source leaf, trait, target leaf):
+/// `<fromimpl>{S}\u{1f}{From|TryFrom}\u{1f}{U}\u{1f}{l|f}` (`l` = the target was written as a bare, un-imported name,
+/// i.e. possibly a type of this crate; `f` = a path the crate imports or roots elsewhere), and `<fromsrc>{S}` so the
+/// collector can ask "does any local conversion take an `S`" in one lookup. A source written as one of the impl's own
+/// generic parameters (`impl<T: Display> From<T> for E`) is filed under the source leaf `*`. Values `1`.
+pub(crate) fn from_impl_key(src: &str, tr: &str, target: &str, written_bare: bool) -> String {
+    format!("<fromimpl>{src}\u{1f}{tr}\u{1f}{target}\u{1f}{}", if written_bare { "l" } else { "f" })
+}
+
+pub(crate) fn from_src_key(src: &str) -> String {
+    format!("<fromsrc>{src}")
+}
+
+pub(crate) const FROM_IMPL_PREFIX: &str = "<fromimpl>";
+
+/// SOUNDNESS R1186 — the leaf a `WITNESS_MARKER` call carries when the witness is a local CONVERSION taking the
+/// argument (`cr::<witness>::<from>S::pos::rest`) rather than a std-trait impl ON the argument. The angle bracket keeps
+/// it out of R1165's own `trait_impls` lookups, which therefore read it as a type with no impls.
+pub(crate) const FROM_WITNESS_PREFIX: &str = "<from>";
+
+/// SOUNDNESS R1186 — a nominal type (`struct` / `enum` / `union`) DECLARED by this crate. Value `1`. A dependency cannot
+/// name such a type, so a conversion INTO it can only run where the dependency's conversion target is generic.
+pub(crate) fn nominal_key(name: &str) -> String {
+    format!("<nominal>{name}")
+}
+
+/// SOUNDNESS R1186 — std type leaves two of which, when DIFFERENT, cannot denote the same type (no alias in either the
+/// consumer or the dependency renames one std type to another std type's leaf). Used only to withhold a conversion
+/// disclosure whose dependency-side target is one of these and whose impl target is a DIFFERENT one of these.
+pub(crate) const STD_CONVERSION_TARGETS: &[&str] = &[
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool", "char",
+    "str", "String", "Vec", "Box", "Arc", "Rc", "Cow", "Option", "PathBuf", "Path", "OsString", "OsStr", "CString",
+    "CStr", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "VecDeque", "Duration", "SystemTime", "IpAddr", "Ipv4Addr",
+    "Ipv6Addr", "SocketAddr",
+];
+
 pub(crate) const PRIMITIVE_LEAVES: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool", "char",
 ];

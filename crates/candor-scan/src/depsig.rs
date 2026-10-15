@@ -380,11 +380,16 @@ fn cand_allows(c: &Cand<'_>, pos: usize) -> Result<Option<BTreeSet<String>>, ()>
     Ok(Some(out))
 }
 
+/// SOUNDNESS R1186 — `(kind, target leaf)` pairs a callee can convert a value into; `None` = any.
+pub(crate) type ConvTargets = Option<BTreeSet<(String, String)>>;
+
 /// Per-scan cache of parsed dependency sources, keyed by the source directory.
 #[derive(Default)]
 pub(crate) struct DepSigs {
     files: HashMap<std::path::PathBuf, Option<Vec<syn::File>>>,
     dirs: HashMap<String, Vec<std::path::PathBuf>>,
+    /// SOUNDNESS R1186 — `conversion_targets` answers, per (alias, callee, position).
+    conv: HashMap<(String, String, usize), ConvTargets>,
 }
 
 impl DepSigs {
@@ -549,4 +554,242 @@ impl DepSigs {
         }
         Some(out)
     }
+
+    /// SOUNDNESS R1186 — what the dependency's callee can CONVERT the value at `pos` into, as `(kind, target leaf)`:
+    /// kind `From` for an `Into<X>` bound on the parameter's generic or an `X: From<..>` bound naming it, `TryFrom` for
+    /// `TryInto`/`TryFrom`; target `*` when `X` is (or names) a generic parameter or has no nominal leaf. `Some(empty)`
+    /// is a PROOF that no conversion runs (a concrete parameter, bounds that are all known non-conversion std traits, a
+    /// parameter the body never mentions, a constructor); every doubt — an unknown bound, which may carry a conversion
+    /// as a supertrait or an associated type, a receiver, `Self`, an unreadable source — is `None`. The same DENYLIST
+    /// discipline as `allowed`, over the same candidates.
+    pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
+        let key = (alias.to_string(), callee.to_string(), pos);
+        if let Some(v) = self.conv.get(&key) {
+            return v.clone();
+        }
+        let v = self.conversion_targets_uncached(dir, alias, real, callee, pos);
+        self.conv.insert(key, v.clone());
+        v
+    }
+
+    fn conversion_targets_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
+        let leaf = callee.rsplit("::").next().unwrap_or(callee).to_string();
+        let srcs = self.source_dirs(dir, alias, real);
+        if srcs.is_empty() {
+            return None;
+        }
+        let mut out = BTreeSet::new();
+        for s in srcs {
+            let files = self.parsed(&s)?;
+            let mut c = Collect { leaf: leaf.clone(), ..Default::default() };
+            for f in files {
+                c.visit_file(f);
+            }
+            if c.opaque {
+                return None;
+            }
+            let mut fitted = 0usize;
+            for cand in &c.fns {
+                match cand_converts(cand, pos) {
+                    Ok(Some(set)) => {
+                        fitted += 1;
+                        out.extend(set);
+                    }
+                    Ok(None) => return None,
+                    Err(()) => {}
+                }
+            }
+            if fitted == 0 && !(c.fns.is_empty() && c.ctor) {
+                return None;
+            }
+        }
+        Some(out)
+    }
+}
+
+/// SOUNDNESS R1186 — the conversion target a bound's type argument names: its outer nominal leaf, or `*` when it is
+/// (or names) one of the candidate's generic parameters, `Self`, or no plain path at all.
+fn conv_target(t: &syn::Type, generic_names: &HashSet<String>) -> String {
+    let mut n = TyNames::default();
+    n.visit_type(t);
+    if n.0.iter().any(|x| generic_names.contains(x) || x == "Self") {
+        return "*".to_string();
+    }
+    let mut t = t;
+    while let syn::Type::Reference(r) = t {
+        t = &r.elem;
+    }
+    match t {
+        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_else(|| "*".to_string()),
+        _ => "*".to_string(),
+    }
+}
+
+/// SOUNDNESS R1186 — the first type argument of a bound's last path segment (`Into<String>` → `String`).
+fn bound_type_arg(b: &syn::TraitBound) -> Option<&syn::Type> {
+    match &b.path.segments.last()?.arguments {
+        syn::PathArguments::AngleBracketed(a) => a.args.iter().find_map(|g| match g {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1186 — `cand_allows`'s twin for conversions: `Some(targets)` (possibly empty), `None` (any), `Err(())`
+/// when the candidate has no input at `pos`.
+fn cand_converts(c: &Cand<'_>, pos: usize) -> Result<Option<BTreeSet<(String, String)>>, ()> {
+    let arg = c.inputs.get(pos).ok_or(())?;
+    let syn::FnArg::Typed(pt) = arg else { return Ok(None) };
+    let generic_names: HashSet<String> = c
+        .scope
+        .iter()
+        .flat_map(|g| g.params.iter())
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut tn = TyNames::default();
+    tn.visit_type(&pt.ty);
+    if tn.0.contains("Self") {
+        return Ok(None);
+    }
+    let mut out: BTreeSet<(String, String)> = BTreeSet::new();
+    // One bound on a type the value flows through: a conversion it runs, a known std trait that runs none, or doubt.
+    let judge = |b: &syn::TraitBound, out: &mut BTreeSet<(String, String)>| -> bool {
+        let Some(l) = b.path.segments.last().map(|s| s.ident.to_string()) else { return true };
+        match l.as_str() {
+            "Into" | "TryInto" => {
+                let t = bound_type_arg(b).map(|t| conv_target(t, &generic_names)).unwrap_or_else(|| "*".to_string());
+                out.insert((if l == "Into" { "From" } else { "TryFrom" }.to_string(), t));
+                true
+            }
+            _ => implied(&l).is_some(),
+        }
+    };
+    let mut work: Vec<String> = tn.0.iter().filter(|n| generic_names.contains(*n)).cloned().collect();
+    // `impl Trait` / `dyn Trait` in the parameter's own type.
+    let mut inline: Vec<&syn::TraitBound> = Vec::new();
+    struct Inline<'b, 'ast>(&'b mut Vec<&'ast syn::TraitBound>);
+    impl<'ast> Visit<'ast> for Inline<'_, 'ast> {
+        fn visit_type_impl_trait(&mut self, t: &'ast syn::TypeImplTrait) {
+            for b in &t.bounds {
+                if let syn::TypeParamBound::Trait(tb) = b {
+                    self.0.push(tb);
+                }
+            }
+            syn::visit::visit_type_impl_trait(self, t);
+        }
+        fn visit_type_trait_object(&mut self, t: &'ast syn::TypeTraitObject) {
+            for b in &t.bounds {
+                if let syn::TypeParamBound::Trait(tb) = b {
+                    self.0.push(tb);
+                }
+            }
+            syn::visit::visit_type_trait_object(self, t);
+        }
+    }
+    Inline(&mut inline).visit_type(&pt.ty);
+    if work.is_empty() && inline.is_empty() {
+        return Ok(Some(BTreeSet::new())); // a concrete type: the consumer's value cannot be passed here
+    }
+    for b in &inline {
+        if matches!(b.modifier, syn::TraitBoundModifier::None) && !judge(b, &mut out) {
+            return Ok(None);
+        }
+        let mut n = TyNames::default();
+        n.visit_trait_bound(b);
+        work.extend(n.0.into_iter().filter(|x| generic_names.contains(x)));
+    }
+    let mentioned_generics: Vec<String> = work.clone();
+    // The generics the value flows through: the parameter's own, closed over the generics their bounds name.
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(g) = work.pop() {
+        if !seen.insert(g.clone()) {
+            continue;
+        }
+        for gens in &c.scope {
+            let mut preds: Vec<(Vec<String>, Vec<&syn::TraitBound>)> = Vec::new();
+            for p in &gens.params {
+                if let syn::GenericParam::Type(t) = p {
+                    let bs = t.bounds.iter().filter_map(|b| match b {
+                        syn::TypeParamBound::Trait(tb) => Some(tb),
+                        _ => None,
+                    });
+                    preds.push((vec![t.ident.to_string()], bs.collect()));
+                }
+            }
+            if let Some(w) = &gens.where_clause {
+                for pred in &w.predicates {
+                    if let syn::WherePredicate::Type(pt2) = pred {
+                        let mut bn = TyNames::default();
+                        bn.visit_type(&pt2.bounded_ty);
+                        let bs = pt2.bounds.iter().filter_map(|b| match b {
+                            syn::TypeParamBound::Trait(tb) => Some(tb),
+                            _ => None,
+                        });
+                        preds.push((bn.0.into_iter().collect(), bs.collect()));
+                    }
+                }
+            }
+            for (bounded, bs) in preds {
+                for b in bs {
+                    if !matches!(b.modifier, syn::TraitBoundModifier::None) {
+                        continue;
+                    }
+                    let mut an = TyNames::default();
+                    an.visit_trait_bound(b);
+                    let on_g = bounded.contains(&g);
+                    // a bound whose ARGUMENTS name `g` (`U: From<T>`, `DErr: From<E>`, `S: Sink<T>`)
+                    let names_g = an.0.contains(&g) && !on_g;
+                    if on_g {
+                        if !judge(b, &mut out) {
+                            return Ok(None);
+                        }
+                        work.extend(an.0.iter().filter(|x| generic_names.contains(*x) && !seen.contains(*x)).cloned());
+                        if bounded.len() > 1 {
+                            work.extend(bounded.iter().filter(|x| generic_names.contains(*x) && !seen.contains(*x)).cloned());
+                        }
+                    } else if names_g {
+                        let l = b.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                        match l.as_str() {
+                            "From" | "TryFrom" => {
+                                let t = if bounded.iter().any(|x| generic_names.contains(x) || x == "Self") {
+                                    "*".to_string()
+                                } else {
+                                    // the bounded type's own outer leaf, as the predicate wrote it
+                                    gens.where_clause
+                                        .as_ref()
+                                        .and_then(|w| w.predicates.iter().find_map(|p| match p {
+                                            syn::WherePredicate::Type(pt2) if pt2.bounds.iter().any(|x| matches!(x, syn::TypeParamBound::Trait(tb) if std::ptr::eq(tb, b))) => Some(conv_target(&pt2.bounded_ty, &generic_names)),
+                                            _ => None,
+                                        }))
+                                        .unwrap_or_else(|| "*".to_string())
+                                };
+                                out.insert((l.clone(), t));
+                            }
+                            // a std trait taking `g` as an argument runs no conversion of it (`F: Fn(T)`, `PartialEq<T>`)
+                            _ if implied(&l).is_some() => {}
+                            _ => return Ok(None),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A parameter neither whose binding nor whose generic names the body mentions cannot be converted.
+    if !out.is_empty() {
+        if let Some(b) = c.body {
+            let mut w = Words::default();
+            w.visit_block(b);
+            let mut binds = TyNames::default();
+            binds.visit_pat(&pt.pat);
+            let used = binds.0.iter().any(|n| w.0.contains(n)) || mentioned_generics.iter().any(|g| w.0.contains(g));
+            if !used {
+                return Ok(Some(BTreeSet::new()));
+            }
+        }
+    }
+    Ok(Some(out))
 }

@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev114 (rustagent-v063): SOUNDNESS R1186 — Pass A files a hand-written `From`/`TryFrom` impl under its SOURCE type
+    // (`<fromimpl>`/`<fromsrc>`) and every declared nominal type (`<nominal>`); a dependency call handed such a source
+    // records a `WITNESS_MARKER` call with a `<from>` leaf (cached `rets`, `calls`).
     // rev113 (rustagent-v061): SOUNDNESS R1181 — five more `STD_WITNESS_TRAITS` (cached `WITNESS_MARKER` calls).
     // rev112 (rustagent-v061): SOUNDNESS R1182 — macro-made compound-assignment impls are spliced (cached units, `rets`).
     // rev111 (rustagent-v061): SOUNDNESS R1180 — `FnInfo::mbe_op` (a macro-made nominal operator impl's unit, `MBE_OP_ATTR`).
@@ -502,7 +505,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev113/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev114/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

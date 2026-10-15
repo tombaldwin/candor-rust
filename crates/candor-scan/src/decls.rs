@@ -4163,6 +4163,10 @@ pub(crate) fn collect_decls(
         }) {
             rets.insert(crate::model::PRIM_SHADOW_KEY.to_string(), Some("1".to_string()));
         }
+        // SOUNDNESS R1186 — a nominal type this crate DECLARES (not a `type` alias, which may name a dependency's type).
+        if let Some(i) = shadow_ident.filter(|_| !matches!(it, syn::Item::Type(_))) {
+            rets.insert(crate::model::nominal_key(&i.to_string()), Some("1".to_string()));
+        }
         // SOUNDNESS R1130 — the COMPARISON PAYLOAD of what the field indexes cannot hold: a struct field of TUPLE
         // type (`p: (Guard, i32)`, which `type_path` names nothing for) and every payload of an ENUM's variants
         // (`enum E { A(Guard), B { g: Guard } }`, which no per-enum field index records). A derived or
@@ -4995,6 +4999,13 @@ pub(crate) fn collect_decls(
                         // (`use super::T10 as Renamed; impl Renamed for M10`) is filed under `T10`.
                         let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
                         trait_impls.entry(key.clone()).or_default().push(ty.clone());
+                        // SOUNDNESS R1186 — a hand-written conversion: filed under its SOURCE type (`model::from_impl_key`).
+                        if matches!(key.as_str(), "From" | "TryFrom") {
+                            for (src, tgt, bare) in crate::lang::from_impl_facts(im, leaf, ty, uses) {
+                                rets.insert(crate::model::from_impl_key(&src, &key, &tgt, bare), Some("1".to_string()));
+                                rets.insert(crate::model::from_src_key(&src), Some("1".to_string()));
+                            }
+                        }
 
                         // A LOCAL `impl Drop for Type` — its `drop` body runs at scope exit, an implicit
                         // edge the syntactic call graph doesn't otherwise model. Record the type leaf so a
