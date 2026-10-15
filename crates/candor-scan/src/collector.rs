@@ -423,6 +423,13 @@ pub(crate) struct CallCollector<'a> {
     /// SOUNDNESS R1160 — `let` bindings whose `String` std constructed (`std_made_str`), typed `String` by R963. Such a
     /// value is never a glob's same-named type (`glob_retype`). Cleared with `veinb_typed` when the name is re-bound.
     pub(crate) std_made_vars: std::collections::HashSet<String>,
+    /// SOUNDNESS R1196 — a binding's `Result` ERROR type (`lang::result_err_type`'s string; `model::RET_ERR_SEP`-joined
+    /// when a call's declared return names several): `let r: Result<u8, Le> = ..`, `let r = mk()` over `mk() -> Result<_,
+    /// Le>`, `let r = Err(Le(1))`, a `Result` parameter. The expression typer records `Result` unwrapped to the `Ok`
+    /// type, so without this a value whose error type only the binding carried named no `From` source for R1186's
+    /// conversion witness. Read by that witness alone (`arg_err_types`). A RESOLUTION table in `scoped_binding`'s split
+    /// (a shadow is not the outer `Result`), registered in `BoundNameState`, cleared by every `let` that binds the name.
+    pub(crate) err_of: HashMap<String, String>,
     /// VEIN B — see `ElemIndexes::ambiguous_type_leaves` (keys are `<leaf>\u{1f}<field>` or `<leaf>\u{1f}*`).
     pub(crate) ambiguous_type_leaves: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
@@ -790,6 +797,7 @@ pub(crate) struct BoundNameState {
     tuple_trait_of: Option<Vec<Vec<String>>>,
     fn_alias: Option<Vec<String>>,
     str_locals: Option<String>,
+    err_of: Option<String>, // SOUNDNESS R1196
     closure_vars: bool,
     fn_typed_vars: bool,
 }
@@ -1736,6 +1744,19 @@ impl<'a> CallCollector<'a> {
             // `From<LocalErr>`); asked for the conversion witness only, so R1165's own sites are unchanged.
             let mut from_types: Vec<String> = Vec::new();
             self.wrapper_payload_types(a, &mut from_types, 0);
+            // SOUNDNESS R1196 — and the `Result` error type a call's declared return or a binding carries
+            // (`dep::q(mk())`, `let r: Result<u8, Le> = ..; dep::q(r)`), which the expression typer does not record.
+            if std::env::var_os("CANDOR_R1196_OFF").is_none() {
+                if let Some(errs) = self.arg_err_types(a) {
+                    for t in errs.split(crate::model::RET_ERR_SEP) {
+                        if std::env::var_os("CANDOR_R1196_INSTR").is_some() {
+                            eprintln!("R1196ERR\t{callee}\t{}\t{t}", base + i); // §E1 REACH COUNTER, ADDED branch only
+                        }
+                        from_types.push(t.to_string());
+                    }
+                }
+            }
+            let payload_typed = !from_types.is_empty();
             for t in from_types {
                 for l in self.conversion_witness_leaves(&t) {
                     let l = format!("{}{l}", crate::model::FROM_WITNESS_PREFIX);
@@ -1744,7 +1765,33 @@ impl<'a> CallCollector<'a> {
                     }
                 }
             }
-            for t in self.witness_arg_types(a) {
+            let arg_types = self.witness_arg_types(a);
+            // SOUNDNESS R1196 — an argument whose type NOTHING above names (`dep::into_s(dep::keep(Ls(1)))`, `dep::into_s(mk())`
+            // over a closure `mk`) may be the source of ANY of the crate's conversions; `scan.rs` discloses only where the
+            // dependency's callee was read and names a conversion at this position. Not a literal (std's type, which no
+            // local impl converts into a dependency-nameable target) or a closure, and only in a crate that writes a
+            // conversion at all. A value typed only by a GENERIC PARAMETER of this scope (`fn f<T: Into<String>>(t: T) {
+            // dep::into_s(t) }`) is untyped here: its type is the caller's choice, and the caller may choose a local source.
+            let generics = self.scope_generic_names();
+            let named_concrete = arg_types.iter().any(|t| {
+                let head = t.split('<').next().unwrap_or(t);
+                !generics.contains(head.rsplit("::").next().unwrap_or(head))
+            });
+            if !named_concrete
+                && !payload_typed
+                && std::env::var_os("CANDOR_R1196_UNTYPED_OFF").is_none()
+                && self.returns.contains_key(crate::model::FROM_ANY_KEY)
+                && self.untyped_conversion_candidate(a)
+            {
+                let l = format!("{}{}", crate::model::FROM_WITNESS_PREFIX, crate::model::FROM_UNTYPED_SRC);
+                if std::env::var_os("CANDOR_R1196_INSTR").is_some() {
+                    eprintln!("R1196UNTYPED\t{callee}\t{}", base + i); // §E1 REACH COUNTER, ADDED branch only
+                }
+                if !leaves.contains(&l) {
+                    leaves.push(l);
+                }
+            }
+            for t in arg_types {
                 for l in self.local_witness_leaves(&t) {
                     if !leaves.contains(&l) {
                         leaves.push(l);
@@ -1862,6 +1909,118 @@ impl<'a> CallCollector<'a> {
         let x = &c.args[0];
         out.extend(self.witness_arg_types(x));
         self.wrapper_payload_types(x, out, depth + 1);
+    }
+
+    /// SOUNDNESS R1196 — run `f` with `err_of` cleared for every name `pat` binds, then put those entries back: a default
+    /// walk that binds a pattern's names in no table must not let them answer with an enclosing binding's error type.
+    pub(crate) fn with_err_shadowed<R>(&mut self, pat: &syn::Pat, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved: Vec<(String, String)> = crate::decls::pat_bound_idents(pat)
+            .into_iter()
+            .filter_map(|n| self.err_of.remove(&n).map(|e| (n, e)))
+            .collect();
+        let r = f(self);
+        for (n, e) in saved {
+            self.err_of.insert(n, e);
+        }
+        r
+    }
+
+    /// SOUNDNESS R1196 — whether an argument the typer could not name is a candidate source for a local conversion: not
+    /// a literal, a closure, a range, an empty tuple or a std value-making macro, after peeling `&`/`()`.
+    fn untyped_conversion_candidate(&self, a: &syn::Expr) -> bool {
+        let mut e = a;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                _ => break,
+            }
+        }
+        match e {
+            syn::Expr::Lit(_) | syn::Expr::Closure(_) | syn::Expr::Range(_) => false,
+            syn::Expr::Tuple(t) => !t.elems.is_empty(),
+            syn::Expr::Macro(m) => !matches!(
+                m.mac.path.segments.last().map(|s| s.ident.to_string()).as_deref(),
+                Some("vec" | "concat" | "stringify" | "include_str" | "include_bytes" | "env" | "option_env" | "file"
+                    | "line" | "column" | "module_path")
+            ),
+            _ => true,
+        }
+    }
+
+    /// SOUNDNESS R1196 — the generic type parameters in scope (the signature's and the enclosing impl's): a `Result`
+    /// whose error type is one of them carries the caller's choice, not a type.
+    pub(crate) fn scope_generic_names(&self) -> std::collections::HashSet<String> {
+        self.generic_bounds.keys().chain(self.impl_generic_bounds.keys()).cloned().collect()
+    }
+
+    /// SOUNDNESS R1196 — the `Result` ERROR type(s) an argument's value carries, `model::RET_ERR_SEP`-joined, where the
+    /// expression typer cannot see them (it records `Result` unwrapped to the `Ok` type): a binding with an `err_of`
+    /// entry; a call of this crate's fn or method whose DECLARED return is a `Result` (`model::ret_err_key` /
+    /// `impl_err_key`, resolved as `released_result` resolves a callee: `Type::f(..)` on a non-dependency type, a bare
+    /// non-imported, non-shadowed name or a `crate::`/`self::`/`super::` path, a method on a receiver this collector
+    /// typed); and std's `Err(x)` constructor, whose error type is `x`'s. `None` otherwise — a std or dependency
+    /// callee, an adapter (`r.map_err(..)` changes the error type and is not followed), a closure call.
+    pub(crate) fn arg_err_types(&self, a: &syn::Expr) -> Option<String> {
+        let mut e = a;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                _ => break,
+            }
+        }
+        let found = match e {
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 && p.path.leading_colon.is_none() => {
+                self.err_of.get(&p.path.segments[0].ident.to_string()).cloned()
+            }
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return None };
+                if p.qself.is_some() {
+                    return None;
+                }
+                let written = path_to_string(&p.path);
+                let full = crate::lang::expand(&written, &self.uses);
+                let segs: Vec<&str> = full.split("::").collect();
+                // std's `Err(x)` / `Result::Err(x)`: the error type is the payload's.
+                let std_err = matches!(segs.as_slice(), ["Err"] | ["Result", "Err"] | [.., "result", "Result", "Err"])
+                    && !self.bound_names.contains("Err");
+                if std_err {
+                    return (c.args.len() == 1).then(|| self.type_of(&c.args[0])).flatten();
+                }
+                if matches!(segs.first(), Some(&("std" | "core" | "alloc"))) {
+                    return None;
+                }
+                let leaf = segs.last().copied().unwrap_or("");
+                let bare = !written.contains("::") && !self.uses.contains_key(&written) && !self.bound_names.contains(&written);
+                let local_path = full.starts_with("crate::")
+                    || ["crate::", "self::", "super::"].iter().any(|h| written.starts_with(h));
+                let assoc = full.rsplit_once("::").and_then(|(head, last)| {
+                    let ty = head.rsplit("::").next().unwrap_or(head);
+                    if !crate::lang::is_type_ident(ty) || self.is_dependency_type(head) {
+                        return None;
+                    }
+                    self.returns.get(&crate::model::impl_err_key(ty, last)).cloned()
+                });
+                match assoc {
+                    Some(a) => Some(a),
+                    None if bare || local_path => self.returns.get(&crate::model::ret_err_key(leaf)).cloned(),
+                    None => None,
+                }
+            }
+            syn::Expr::MethodCall(m) => {
+                let t = self.resolve_recv_type(&m.receiver)?;
+                if matches!(t.split("::").next(), Some("std" | "core" | "alloc")) || self.is_dependency_type(&t) {
+                    return None;
+                }
+                let tl = t.rsplit("::").next().unwrap_or(&t);
+                self.returns.get(&crate::model::impl_err_key(tl, &m.method.to_string())).cloned()
+            }
+            _ => None,
+        };
+        found.filter(|s| !s.is_empty())
     }
 
     /// SOUNDNESS R1186 — the source leaves of this crate's hand-written `From`/`TryFrom` impls (`model::from_impl_key`)
@@ -7632,6 +7791,8 @@ impl<'a> CallCollector<'a> {
         // A resolved host literal: a shadow inheriting it attributes the outer binding's endpoint to
         // this one's call, which lands in the gate's `hosts` surface.
         let p_str = self.str_locals.remove(name);
+        // SOUNDNESS R1196 — a binding's `Result` error type: a shadow is not the outer `Result`.
+        let p_err = self.err_of.remove(name);
 
         match bound {
             Bound::Concrete(t) => {
@@ -7663,6 +7824,7 @@ impl<'a> CallCollector<'a> {
         restore(&mut self.dep_bound_vars, name, p_prov);
         restore(&mut self.fn_alias, name, p_alias);
         restore(&mut self.str_locals, name, p_str);
+        restore(&mut self.err_of, name, p_err);
         restore(&mut self.elem_of, name, p_elem);
         match p_traits {
             Some(v) => { self.trait_vars.insert(name.to_string(), v); }
@@ -7704,6 +7866,7 @@ impl<'a> CallCollector<'a> {
                 tuple_trait_of: self.tuple_trait_of.get(n).cloned(),
                 fn_alias: self.fn_alias.get(n).cloned(),
                 str_locals: self.str_locals.get(n).cloned(),
+                err_of: self.err_of.get(n).cloned(),
                 closure_vars: self.closure_vars.contains(n),
                 fn_typed_vars: self.fn_typed_vars.contains(n),
             })
@@ -7735,6 +7898,7 @@ impl<'a> CallCollector<'a> {
             put(&mut self.tuple_trait_of, n, &b.tuple_trait_of);
             put(&mut self.fn_alias, n, &b.fn_alias);
             put(&mut self.str_locals, n, &b.str_locals);
+            put(&mut self.err_of, n, &b.err_of);
             put_set(&mut self.closure_vars, n, b.closure_vars);
             put_set(&mut self.fn_typed_vars, n, b.fn_typed_vars);
         }
@@ -9808,6 +9972,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     return;
                 }
             }
+            // SOUNDNESS R1196 — the default walk binds nothing, so a payload that rebinds an enclosing `Result`'s name
+            // (`if let Some(r) = .. { dep::q_box(r) }`) would read the OUTER `r`'s error type: shadow `err_of` for the
+            // then-branch only (the scrutinee and the `else` are the outer scope).
+            if crate::decls::pat_bound_idents(&el.pat).iter().any(|n| self.err_of.contains_key(n)) {
+                self.visit_expr(&node.cond);
+                self.with_err_shadowed(&el.pat, |s| s.visit_block(&node.then_branch));
+                if let Some((_, else_b)) = &node.else_branch {
+                    self.visit_expr(else_b);
+                }
+                return;
+            }
         }
         syn::visit::visit_expr_if(self, node);
     }
@@ -9863,6 +10038,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     );
                     return;
                 }
+            }
+            // SOUNDNESS R1196 — the while-let twin of `visit_expr_if`'s `err_of` shadow.
+            if crate::decls::pat_bound_idents(&el.pat).iter().any(|n| self.err_of.contains_key(n)) {
+                self.visit_expr(&node.cond);
+                self.with_err_shadowed(&el.pat, |s| s.visit_block(&node.body));
+                return;
             }
         }
         syn::visit::visit_expr_while(self, node);
@@ -10051,7 +10232,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }),
             );
         } else {
-            syn::visit::visit_arm(self, node);
+            // SOUNDNESS R1196 — an arm's pattern shadows an enclosing `Result`'s `err_of` for its guard and body.
+            self.with_err_shadowed(&node.pat, |s| syn::visit::visit_arm(s, node));
         }
     }
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
@@ -10387,6 +10569,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 saved_mono.push((name, prev));
             }
         }
+        // SOUNDNESS R1196 — a closure parameter shadows an enclosing binding's `Result` error type (`err_of`) for the
+        // body; an annotated `|r: Result<u8, Le>|` gives its own. Saved and restored like the tables above.
+        let mut saved_err: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let generics = self.scope_generic_names();
+            for input in &node.inputs {
+                let (pat, ty) = match input {
+                    syn::Pat::Type(pt) => (&*pt.pat, Some(&*pt.ty)),
+                    other => (other, None),
+                };
+                if let Some(name) = single_pat_ident(pat) {
+                    let prev = self.err_of.remove(&name);
+                    if let Some(e) = ty.and_then(|t| crate::lang::result_err_type(t, &self.uses, &generics)) {
+                        self.err_of.insert(name.clone(), e);
+                    }
+                    saved_err.push((name, prev));
+                }
+            }
+        }
         for input in &node.inputs {
             if let syn::Pat::Type(pt) = input {
                 if let Some(name) = single_pat_ident(&pt.pat) {
@@ -10452,6 +10653,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         syn::visit::visit_expr_closure(self, node);
+        for (name, prev) in saved_err {
+            match prev {
+                Some(v) => { self.err_of.insert(name, v); }
+                None => { self.err_of.remove(&name); }
+            }
+        }
         for (name, prev) in saved_mono {
             match prev {
                 Some(v) => { self.mono_recv_traits.insert(name, v); }
@@ -10561,6 +10768,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.mono_recv_traits.remove(n);
             self.veinb_typed.remove(n);
             self.std_made_vars.remove(n);
+            self.err_of.remove(n); // SOUNDNESS R1196
+        }
+        // SOUNDNESS R1196 — the `Result` ERROR type this `let` gives a single name: from the annotation
+        // (`let r: Result<u8, Le> = ..`), else from the initializer read under the PRE-statement bindings (`let r = mk()`,
+        // `let r = Err(Le(1))`, `let s = r`). See `err_of`.
+        {
+            let named = match &node.pat {
+                syn::Pat::Ident(pi) if pi.subpat.is_none() => Some((pi.ident.to_string(), None)),
+                syn::Pat::Type(pt) => match &*pt.pat {
+                    syn::Pat::Ident(pi) if pi.subpat.is_none() => Some((pi.ident.to_string(), Some(&*pt.ty))),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((n, ann)) = named {
+                let generics = self.scope_generic_names();
+                let e = ann
+                    .and_then(|t| crate::lang::result_err_type(t, &self.uses, &generics))
+                    .or_else(|| {
+                        let init = node.init.as_ref()?;
+                        self.with_pre_bindings(&pre_bindings, |s| s.arg_err_types(&init.expr))
+                    });
+                if let Some(e) = e {
+                    self.err_of.insert(n, e);
+                }
+            }
         }
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into

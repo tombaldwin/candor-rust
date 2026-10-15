@@ -3090,7 +3090,7 @@ pub(crate) fn fninfo(
         macro_twins: elems.macro_twins,
         ambiguous_type_leaves: elems.ambiguous_type_leaves,
         veinb_off: std::cell::Cell::new(false),
-        veinb_typed: HashMap::new(), std_made_vars: Default::default(),
+        veinb_typed: HashMap::new(), std_made_vars: Default::default(), err_of: HashMap::new(),
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -3133,6 +3133,20 @@ pub(crate) fn fninfo(
         in_pattern: false, untyped_methods: Default::default(),
         block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
+    // SOUNDNESS R1196 — a `Result` PARAMETER's error type (`CallCollector::err_of`), named by the signature; a generic
+    // error type (the fn's or the enclosing impl's parameter) is the caller's choice and names nothing.
+    {
+        let generics = c.scope_generic_names();
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                if let Some(n) = crate::lang::single_pat_ident(&pt.pat) {
+                    if let Some(e) = crate::lang::result_err_type(&pt.ty, uses, &generics) {
+                        c.err_of.insert(n, e);
+                    }
+                }
+            }
+        }
+    }
     // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
     // in THIS scope, and no construction expression in this body says so. Same marker, same consumer —
     // the marker's meaning is "a value of this type is RELEASED here", of which construction is the
@@ -3677,6 +3691,43 @@ fn note_async_return(sig: &syn::Signature, uses_ty: &HashMap<String, String>, re
             let leaf = head.rsplit("::").next().unwrap_or(head);
             rets.insert(crate::model::async_ret_key(leaf), Some("1".to_string()));
         }
+    }
+}
+
+/// SOUNDNESS R1196 — file the ERROR type of `sig`'s declared `Result` return (`lang::result_err_type`) under the fn
+/// leaf and, for a method of a known impl type, under (type leaf, method) — `model::ret_err_key` / `impl_err_key`. A
+/// UNION, never withdrawn (see `model::RET_ERR`); a generic error type (the fn's or the impl's own parameter) is not
+/// filed.
+fn note_err_return(
+    sig: &syn::Signature,
+    uses_ty: &HashMap<String, String>,
+    rets: &mut HashMap<String, Option<String>>,
+    impl_ty: Option<&str>,
+    impl_generics: &std::collections::HashSet<String>,
+) {
+    let syn::ReturnType::Type(_, t) = &sig.output else { return };
+    let mut generics: std::collections::HashSet<String> = sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|g| match g {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    generics.extend(impl_generics.iter().cloned());
+    let Some(e) = crate::lang::result_err_type(t, uses_ty, &generics) else { return };
+    let leaf = sig.ident.to_string();
+    let mut keys = vec![crate::model::ret_err_key(&leaf)];
+    if let Some(ty) = impl_ty {
+        keys.push(crate::model::impl_err_key(ty.rsplit("::").next().unwrap_or(ty), &leaf));
+    }
+    for k in keys {
+        let v = match rets.get(&k) {
+            Some(Some(prev)) => crate::model::union_err_types(prev, &e),
+            _ => e.clone(),
+        };
+        rets.insert(k, Some(v));
     }
 }
 
@@ -4594,6 +4645,7 @@ pub(crate) fn collect_decls(
             syn::Item::Fn(f) => {
                 record_return(&f.sig, uses_ty, rets, None, callable_aliases, None);
                 note_async_return(&f.sig, uses_ty, rets); // SOUNDNESS R1168
+                note_err_return(&f.sig, uses_ty, rets, None, &Default::default()); // SOUNDNESS R1196
                 // SOUNDNESS R1145 — see `model::gen_op_key`. Filed for every free fn, so a same-leaf twin withdraws it.
                 let g = crate::lang::generic_operator_uses(&f.sig, &f.block, &Default::default(), None);
                 file_decl_fact(rets, crate::model::gen_op_key(&f.sig.ident.to_string()), g.join(","));
@@ -5004,6 +5056,7 @@ pub(crate) fn collect_decls(
                             for (src, tgt, bare) in crate::lang::from_impl_facts(im, leaf, ty, uses) {
                                 rets.insert(crate::model::from_impl_key(&src, &key, &tgt, bare), Some("1".to_string()));
                                 rets.insert(crate::model::from_src_key(&src), Some("1".to_string()));
+                                rets.insert(crate::model::FROM_ANY_KEY.to_string(), Some("1".to_string())); // R1196
                             }
                         }
 
@@ -5081,6 +5134,8 @@ pub(crate) fn collect_decls(
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
                             impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
                         note_async_return(&m.sig, uses_ty, rets); // SOUNDNESS R1168
+                        // SOUNDNESS R1196 — with the impl's own generics, which name no type either.
+                        note_err_return(&m.sig, uses_ty, rets, impl_key_ty.as_deref(), &impl_generic_params);
                         // SOUNDNESS R1145 — see `model::impl_gen_op_key`.
                         if let Some(ty) = &impl_key_ty {
                             let tl = ty.rsplit("::").next().unwrap_or(ty);

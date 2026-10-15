@@ -1632,7 +1632,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let mut withdraw: Vec<(String, BTreeSet<String>)> = Vec::new();
         for (fn_leaf, v) in &merged.rets {
             let Some(v) = v else { continue };
-            if !v.starts_with("crate::") || crate::model::split_amb_ret_key(fn_leaf).is_some() {
+            // SOUNDNESS R1196 — a declared error-type fact is a union (`model::RET_ERR`), never withdrawn.
+            if !v.starts_with("crate::") || crate::model::split_amb_ret_key(fn_leaf).is_some() || crate::model::is_ret_err_key(fn_leaf) {
                 continue;
             }
             let ty_leaf = v.rsplit("::").next().unwrap_or(v);
@@ -6010,8 +6011,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         for ((caller, _alias, _real, src, _pos, _callee), targets) in from_sites.iter().zip(&from_targets) {
             let empty = BTreeSet::new();
             let have = inferred.get(caller).unwrap_or(&empty);
-            let mut convs: Vec<&(String, String, bool)> = from_impls.get(src).into_iter().flatten().collect();
-            if src != "*" {
+            // SOUNDNESS R1196 — an UNTYPED argument (`model::FROM_UNTYPED_SRC`) may be the source of any of the crate's
+            // conversions, and is judged only against a callee `depsig` READ: an unread callee ("any") with an untyped
+            // argument is every dependency call in the crate, which is the over-disclosure R1186 measured.
+            let untyped = src == crate::model::FROM_UNTYPED_SRC;
+            if untyped && !targets.as_ref().is_some_and(|t| !t.is_empty()) {
+                continue;
+            }
+            let mut convs: Vec<&(String, String, bool)> = if untyped {
+                let mut v: Vec<&(String, String, bool)> = from_impls.values().flatten().collect();
+                v.sort();
+                v.dedup();
+                v
+            } else {
+                from_impls.get(src).into_iter().flatten().collect()
+            };
+            if src != "*" && !untyped {
                 convs.extend(from_impls.get("*").into_iter().flatten());
             }
             for (tr, tgt, local) in convs {

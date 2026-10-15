@@ -753,12 +753,52 @@ pub(crate) fn from_src_key(src: &str) -> String {
     format!("<fromsrc>{src}")
 }
 
+/// SOUNDNESS R1196 — present (value `1`) when this crate has ANY hand-written `From`/`TryFrom` impl, so the collector can
+/// ask in one lookup whether an UNTYPED argument handed to a dependency could be the source of one.
+pub(crate) const FROM_ANY_KEY: &str = "<fromany>";
+
+/// SOUNDNESS R1196 — the `<from>` witness leaf for an argument whose type the scan's typer cannot name: it may be the
+/// source of ANY of the crate's conversions, so `scan.rs` asks every one — but only where the dependency's callee was
+/// READ and names a conversion at that position (`depsig::conversion_targets` is `Some`), never on an unread callee.
+pub(crate) const FROM_UNTYPED_SRC: &str = "?";
+
 pub(crate) const FROM_IMPL_PREFIX: &str = "<fromimpl>";
 
 /// SOUNDNESS R1186 — the leaf a `WITNESS_MARKER` call carries when the witness is a local CONVERSION taking the
 /// argument (`cr::<witness>::<from>S::pos::rest`) rather than a std-trait impl ON the argument. The angle bracket keeps
 /// it out of R1165's own `trait_impls` lookups, which therefore read it as a type with no impls.
 pub(crate) const FROM_WITNESS_PREFIX: &str = "<from>";
+
+/// SOUNDNESS R1196 — the ERROR type of a fn's declared `Result<_, E>` return (`io::Result<_>` / `fmt::Result` name std's
+/// own error), which the expression typer never records: every one of its facts is filed with `Result` unwrapped to the
+/// `Ok` type, so a value whose error type is carried only by a call's return named no `From` source for R1186's witness
+/// (`dep::q(mk())`, `mk() -> Result<u8, Le>`, read ABSENT chained over an executed `From<Le>` write). Keyed by fn leaf
+/// (`ret_err_key`) and by (impl type leaf, method) (`impl_err_key`); the value is every concrete error type a
+/// contributor declares, `RET_ERR_SEP`-joined — a UNION across same-leaf fns (`cache::merge_decls`), never withdrawn,
+/// because the one reader is a disclosure and a withdrawn fact is the silence this closes. A generic error type
+/// (`fn f<E>() -> Result<u8, E>`) names nothing and is not filed.
+pub(crate) const RET_ERR: &str = "<reterr>";
+pub(crate) const RET_ERR_SEP: char = '\u{2}';
+
+pub(crate) fn ret_err_key(fn_leaf: &str) -> String {
+    format!("{RET_ERR}{fn_leaf}")
+}
+
+pub(crate) fn impl_err_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("{RET_ERR}{type_leaf}\u{1f}{fn_leaf}")
+}
+
+pub(crate) fn is_ret_err_key(key: &str) -> bool {
+    key.starts_with(RET_ERR)
+}
+
+/// SOUNDNESS R1196 — `a ∪ b` over two `RET_ERR_SEP`-joined error-type sets, sorted and deduplicated.
+pub(crate) fn union_err_types(a: &str, b: &str) -> String {
+    let mut v: Vec<&str> = a.split(RET_ERR_SEP).chain(b.split(RET_ERR_SEP)).filter(|s| !s.is_empty()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v.join(&RET_ERR_SEP.to_string())
+}
 
 /// SOUNDNESS R1186 — a nominal type (`struct` / `enum` / `union`) DECLARED by this crate. Value `1`. A dependency cannot
 /// name such a type, so a conversion INTO it can only run where the dependency's conversion target is generic.

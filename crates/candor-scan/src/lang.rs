@@ -11468,6 +11468,62 @@ pub(crate) fn impl_trait_leaf(tr: &syn::Path, uses: &HashMap<String, String>) ->
     Some(if is_ident { last.to_string() } else { written })
 }
 
+/// SOUNDNESS R1196 — the ERROR type a `Result` TYPE carries, as the expanded path of its outer nominal (`Le`,
+/// `crate::err::Le`, `Box`, `std::io::Error`): the second argument of a two-argument `Result<_, E>` (std's, or a
+/// two-parameter alias of it — the second parameter is the error in every alias of `Result` that has one),
+/// `std::io::Error` for `io::Result<_>`, `std::fmt::Error` for `fmt::Result`. `None` for anything else, for an `E`
+/// that is (or is a reference to) one of `generics` — the caller's choice, not a type — and for an `_` or a
+/// non-path `E`. This is the fact the expression typer drops (it records `Result` unwrapped to the `Ok` type), and it
+/// feeds exactly one reader: R1186's conversion witness, which names the `From` source a dependency's `?` can run.
+pub(crate) fn result_err_type(ty: &syn::Type, uses: &HashMap<String, String>, generics: &HashSet<String>) -> Option<String> {
+    let mut t = ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => t = &r.elem,
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            _ => break,
+        }
+    }
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    let seg = p.path.segments.last()?;
+    let args: Vec<&syn::Type> = match &seg.arguments {
+        syn::PathArguments::AngleBracketed(a) => a
+            .args
+            .iter()
+            .filter_map(|g| match g {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let full = expand(&path_to_string_lc(&p.path), uses);
+    let name = seg.ident.to_string();
+    if name == "Result" && args.len() == 2 {
+        let mut e = args[1];
+        while let syn::Type::Reference(r) = e {
+            e = &r.elem;
+        }
+        let syn::Type::Path(ep) = e else { return None };
+        if ep.qself.is_some() {
+            return None;
+        }
+        if ep.path.segments.len() == 1 && generics.contains(&ep.path.segments[0].ident.to_string()) {
+            return None;
+        }
+        return Some(expand(&path_to_string_lc(&ep.path), uses));
+    }
+    match (full.as_str(), args.len()) {
+        ("std::io::Result" | "io::Result", 1) => Some("std::io::Error".to_string()),
+        ("std::fmt::Result" | "fmt::Result" | "core::fmt::Result", 0) => Some("std::fmt::Error".to_string()),
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R1186 — the Pass A facts of one hand-written `impl From<S> for U` / `impl TryFrom<S> for U` (`seg` is the
 /// trait path's last segment, `target` the impl's unit type key): `(source leaf, target, target written bare)` per
 /// source leaf. The source leaf is the OUTER nominal leaf of `S` (`Vec<u8>` → `Vec`), each element's of a slice, array
