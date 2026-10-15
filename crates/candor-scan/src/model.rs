@@ -758,8 +758,9 @@ pub(crate) fn from_src_key(src: &str) -> String {
 pub(crate) const FROM_ANY_KEY: &str = "<fromany>";
 
 /// SOUNDNESS R1196 — the `<from>` witness leaf for an argument whose type the scan's typer cannot name: it may be the
-/// source of ANY of the crate's conversions, so `scan.rs` asks every one — but only where the dependency's callee was
-/// READ and names a conversion at that position (`depsig::conversion_targets` is `Some`), never on an unread callee.
+/// source of ANY of the crate's conversions, so `scan.rs` asks every one — except where the dependency's callee was READ
+/// and names NO conversion at that position (`depsig::conversion_targets` is `Some(empty)`). An unread callee is asked
+/// too since R1197(a).
 pub(crate) const FROM_UNTYPED_SRC: &str = "?";
 
 pub(crate) const FROM_IMPL_PREFIX: &str = "<fromimpl>";

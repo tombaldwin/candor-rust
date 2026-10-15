@@ -32387,3 +32387,27 @@ pub fn b3_pure() -> u64 { bdep67::bqu(mkb3()) }
     }
     assert!(veina_row_effs(&cv, "b3_pure").is_empty(), "R1197(b) control `b3_pure` is pure (executed):\n{cv:#}");
 }
+
+/// SOUNDNESS R1197(a) (rustagent-v067; fixture rustagent-v067/fx/r1197a, every cell EXECUTED). An argument the consumer's
+/// typer cannot name, handed to a chained dependency callee `depsig` cannot read (a metavariable-named macro fn
+/// `fn $n<T: Into<String>>`), was deliberately undisclosed (R1196), and the caller read ABSENT over the executed
+/// `From<Ls> for String` write — the old build hedged `ua_unread` only through an inner `keep(Ls(1))` site, a wrong reason
+/// R1192 correctly withdraws. Now disclosed. Stated over-disclosure: `ka_drop` (an unreadable callee that converts
+/// nothing). Control: a typed `&str` argument.
+#[test]
+fn v067_r1197a_an_untyped_argument_to_an_unreadable_callee_is_disclosed() {
+    let (_, cv, _) = v053_chain("adep67", "macro_rules! mk_into { ($n:ident) => { pub fn $n<T: Into<String>>(t: T) -> usize { t.into().len() } } }\nmk_into!(a_into);\nmacro_rules! mk_keep { ($n:ident) => { pub fn $n<T>(_t: T) -> usize { 0 } } }\nmk_keep!(a_drop);\npub fn keep<T>(t: T) -> T { t }\n", r##"#![allow(dead_code)]
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v067a_fx", b"x"); }
+#[derive(Clone, Copy, Debug, Default)] pub struct Ls(pub u8);
+impl From<Ls> for String { fn from(l: Ls) -> String { mark(); format!("{}", l.0) } }
+pub fn ua_unread() -> usize { adep67::a_into(adep67::keep(Ls(1))) }
+pub fn ub_closure() -> usize { let mk = || Ls(2); adep67::a_into(mk()) }
+pub fn ka_drop() -> usize { adep67::a_drop(adep67::keep(Ls(3))) }
+pub fn kb_str() -> usize { adep67::a_into("abc") }
+"##);
+    for f in ["ua_unread", "ub_closure"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1197(a) `{f}` writes (executed) through an unreadable callee:\n{cv:#}");
+    }
+    assert!(veina_row_effs(&cv, "kb_str").is_empty(), "R1197(a) control `kb_str` (a typed std argument) is pure (executed):\n{cv:#}");
+    assert!(veina_row_effs(&cv, "ka_drop").iter().any(|e| e == "Unknown"), "R1197(a) stated over-disclosure moved — decide it:\n{cv:#}");
+}

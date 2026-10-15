@@ -6012,10 +6012,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let empty = BTreeSet::new();
             let have = inferred.get(caller).unwrap_or(&empty);
             // SOUNDNESS R1196 — an UNTYPED argument (`model::FROM_UNTYPED_SRC`) may be the source of any of the crate's
-            // conversions, and is judged only against a callee `depsig` READ: an unread callee ("any") with an untyped
-            // argument is every dependency call in the crate, which is the over-disclosure R1186 measured.
+            // conversions. SOUNDNESS R1197(a) — judged against a callee `depsig` could NOT read too ("any"): R1196 withheld
+            // that case as 97.6% of untyped sites, priced before R1192 made `depsig` read per item; measured after it, the
+            // disclosure costs 558 rows newly `Unknown` of 1,461,057 analysed chained units (0.038%), so an untyped
+            // argument to an unreadable callee discloses where an effectful local conversion could meet it. Only a callee
+            // `depsig` READ and found no conversion at that position (`Some(empty)`) is skipped.
             let untyped = src == crate::model::FROM_UNTYPED_SRC;
-            if untyped && !targets.as_ref().is_some_and(|t| !t.is_empty()) {
+            if untyped
+                && (targets.as_ref().is_some_and(|t| t.is_empty())
+                    || targets.is_none() && std::env::var_os("CANDOR_R1197A_OFF").is_some())
+            {
                 continue;
             }
             let mut convs: Vec<&(String, String, bool)> = if untyped {
