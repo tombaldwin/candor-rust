@@ -11,6 +11,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a local `From`/`TryFrom` impl handed to a chained dependency is a witness (SOUNDNESS R1186).** A
+  crate's hand-written `impl From<S> for U` (or `TryFrom`) runs inside a chained dependency's generic body handed an
+  `S` — `T: Into<U>`, `T: TryInto<U>`, `U: From<T>`, a `?` into the dependency's error type — but its member is keyed
+  under the target (`U::from`), so R1165's witness check never asked about it: chained, the caller read ABSENT while
+  the unchained scan carried `invisible` (EXECUTED fixture). Such a call now discloses `Unknown` with
+  `dispatch:From.from` / `dispatch:TryFrom.try_from` where the conversion's unit carries an effect the caller lacks,
+  narrowed by what the callee's signature can convert into. `deny Unknown` fails where 0.40.11 passed on 17 fixture
+  cells, chained; unchained reports are unchanged. Residuals: a `Result` whose error type only a binding or a return
+  type carries, an argument the typer cannot type, and a pure conversion that shares its target's unit with an
+  effectful one (over-discloses).
+
 - ⚠ **candor-scan: the bit and shift compound-assignment traits are std witnesses (SOUNDNESS R1181).** A local value
   whose effectful `BitOrAssign` / `BitAndAssign` / `BitXorAssign` / `ShlAssign` / `ShrAssign` impl was handed to a
   chained dependency's generic body that applies the operator read ABSENT, while the unchained scan carried `invisible`
