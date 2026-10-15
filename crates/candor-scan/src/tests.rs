@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v061 (R1182) bumped it to rev112.
         // rustagent-v061 (R1180) bumped it to rev111.
         // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
@@ -17343,7 +17344,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17354,7 +17355,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev111/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev112/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31779,4 +31780,114 @@ pub fn rb_handpure(r: R) -> u32 { (r - R(1)).0 }
     }
     assert!(veina_row_effs(&v, "rm::R::sub").iter().any(|e| e == "Fs"), "R1180 the macro-made unit is still published:\n{v:#}");
     assert!(veina_row_effs(&v, "nc_macropure").iter().any(|e| e == "Fs"), "R1128 residual (Rhs-blind over-charge) moved — decide it:\n{v:#}");
+}
+
+/// SOUNDNESS R1182 (rustagent-v061; fixture rustagent-v061/fx/v061, every cell EXECUTED). A MACRO-MADE compound-assignment
+/// impl was never spliced (R1177 left it out: splicing it traded 47 hand-written edges for `ambiguous:`), so `a |= M(1)`
+/// over a macro-made effectful `impl BitOrAssign for M` read ABSENT, in the crate and — the dependency publishing no
+/// `Dm::bitor_assign` — chained too, where coverage deleted the unchained `invisible`. With R1180's `mbe_side` a macro-made
+/// unit can no longer contest a hand-written claimant, so the family is spliced like the binary operators: every route
+/// (operator, UFCS, method, field, `*r`, `&T` right operand, shifts) charges the write; a hand-written impl in another
+/// module keeps its edge (`ha_hand`, `hb_explicit`, `hc_ufcs` — the R1177 trade's own shape); a macro-made EFFECTFUL impl
+/// beside a hand-written pure one discloses (`ka_macro`); a primitive self type takes R1157's disclosure (`pa_prim`).
+/// Controls (executed pure): a pure macro-made impl, std compound assignment, a dependency's pure macro-made impl, and a
+/// literal over a primitive with a macro-made impl. Pinned: `hd_macropure` is R1128's Rhs-blind over-charge (present on
+/// 0.40.11), `kb_handpure` over-discloses.
+#[test]
+fn v061_r1182_a_macro_made_compound_assignment_impl_has_a_unit() {
+    let (_dv, cv, uv) = v053_chain("v061dep", r##"//! rustagent-v061 fixture: a DEPENDENCY with macro-made compound-assignment impls (R1182, chained) and a generic body
+//! that applies `|=` / `&=` / `^=` / `<<=` / `>>=` to a value the consumer hands it (R1181).
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v061_fx", b"x"); }
+#[derive(Clone, Copy)] pub struct Dm(pub u32);
+macro_rules! dm_ops { ($($tr:ident $m:ident),*) => { $( impl std::ops::$tr for Dm { fn $m(&mut self, o: Dm) { mark(); self.0 ^= o.0 } } )* } }
+dm_ops!(BitOrAssign bitor_assign, AddAssign add_assign);
+#[derive(Clone, Copy)] pub struct Dp(pub u32);
+macro_rules! dp_ops { ($($tr:ident $m:ident),*) => { $( impl std::ops::$tr for Dp { fn $m(&mut self, o: Dp) { self.0 ^= o.0 } } )* } }
+dp_ops!(BitOrAssign bitor_assign);
+pub fn or_in<T: std::ops::BitOrAssign + Copy>(mut a: T, b: T) -> T { a |= b; a }
+pub fn and_in<T: std::ops::BitAndAssign + Copy>(mut a: T, b: T) -> T { a &= b; a }
+pub fn xor_in<T: std::ops::BitXorAssign + Copy>(mut a: T, b: T) -> T { a ^= b; a }
+pub fn shl_in<T: std::ops::ShlAssign<u32> + Copy>(mut a: T) -> T { a <<= 1; a }
+pub fn shr_in<T: std::ops::ShrAssign<u32> + Copy>(mut a: T) -> T { a >>= 1; a }
+pub fn add_in<T: std::ops::AddAssign + Copy>(mut a: T, b: T) -> T { a += b; a }
+pub fn keep<T: Copy>(a: T) -> T { a }
+"##, r##"#![allow(clippy::all)]
+use std::ops::*;
+use v061dep::{Dm, Dp};
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v061_fx", b"x"); }
+
+// R1182 — macro-made compound-assignment impls on a nominal type, EFFECTFUL, no hand-written twin.
+#[derive(Clone, Copy)] pub struct M(pub u32);
+macro_rules! m_ops { ($($tr:ident $m:ident),*) => { $( impl $tr for M { fn $m(&mut self, o: M) { mark(); self.0 ^= o.0 } } )* } }
+m_ops!(AddAssign add_assign, SubAssign sub_assign, MulAssign mul_assign, DivAssign div_assign, RemAssign rem_assign,
+       BitAndAssign bitand_assign, BitOrAssign bitor_assign, BitXorAssign bitxor_assign);
+macro_rules! m_sh { ($($tr:ident $m:ident),*) => { $( impl $tr<u32> for M { fn $m(&mut self, o: u32) { mark(); self.0 = self.0.wrapping_add(o) } } )* } }
+m_sh!(ShlAssign shl_assign, ShrAssign shr_assign);
+macro_rules! m_ref { ($t:ty) => { impl<'a> AddAssign<&'a $t> for $t { fn add_assign(&mut self, o: &'a $t) { mark(); self.0 ^= o.0 } } } }
+m_ref!(M);
+pub struct Sm { pub m: M }
+pub fn ma_or(mut a: M) -> u32 { a |= M(1); a.0 }
+pub fn mb_add(mut a: M) -> u32 { a += M(1); a.0 }
+pub fn mc_shl(mut a: M) -> u32 { a <<= 2; a.0 }
+pub fn md_ufcs(mut a: M) -> u32 { BitOrAssign::bitor_assign(&mut a, M(1)); a.0 }
+pub fn me_method(mut a: M) -> u32 { a.bitxor_assign(M(1)); a.0 }
+pub fn mf_field(s: &mut Sm) { s.m |= M(1) }
+pub fn mg_deref(r: &mut M) { *r -= M(1) }
+pub fn mh_refrhs(mut a: M, b: &M) -> u32 { a += b; a.0 }
+pub fn mi_shr(mut a: M) -> u32 { a >>= 1; a.0 }
+pub fn mj_rem(mut a: M) -> u32 { a %= M(1); a.0 }
+
+// R1182 — a macro-made compound-assignment impl on a PRIMITIVE (R1157's `<mbe>` route).
+macro_rules! prim_assign { ($t:ty) => { impl AddAssign<M> for $t { fn add_assign(&mut self, o: M) { mark(); *self ^= o.0 as $t } } } }
+prim_assign!(u64);
+pub fn pa_prim(mut x: u64) -> u64 { x += M(1); x }
+pub fn pb_primlit(mut x: u64) -> u64 { x += 3; x }
+
+// R1182/R1177 — a HAND-written effectful assign impl in one module, a MACRO-made PURE one (other Rhs) in another.
+#[derive(Clone, Copy)] pub struct H(pub u32);
+pub mod hh { impl std::ops::SubAssign for super::H { fn sub_assign(&mut self, o: super::H) { super::mark(); self.0 ^= o.0 } } }
+pub mod hm { macro_rules! hm { () => { impl std::ops::SubAssign<u8> for super::H { fn sub_assign(&mut self, o: u8) { self.0 ^= o as u32 } } } } hm!(); }
+pub fn ha_hand(mut h: H) -> u32 { h -= H(1); h.0 }
+pub fn hb_explicit(mut h: H) -> u32 { h.sub_assign(H(1)); h.0 }
+pub fn hc_ufcs(mut h: H) -> u32 { SubAssign::sub_assign(&mut h, H(1)); h.0 }
+pub fn hd_macropure(mut h: H) -> u32 { h -= 3u8; h.0 }
+
+// R1182 — a HAND-written PURE assign impl, a MACRO-made EFFECTFUL one (other Rhs) in another module.
+#[derive(Clone, Copy)] pub struct K(pub u32);
+pub mod kh { impl std::ops::SubAssign for super::K { fn sub_assign(&mut self, o: super::K) { self.0 ^= o.0 } } }
+pub mod km { macro_rules! km { () => { impl std::ops::SubAssign<u8> for super::K { fn sub_assign(&mut self, o: u8) { super::mark(); self.0 ^= o as u32 } } } } km!(); }
+pub fn ka_macro(mut k: K) -> u32 { k -= 3u8; k.0 }
+pub fn kb_handpure(mut k: K) -> u32 { k -= K(1); k.0 }
+
+// R1182 chained — the dependency's macro-made impls.
+pub fn da_depor(mut d: Dm) -> u32 { d |= Dm(1); d.0 }
+pub fn db_depadd(mut d: Dm) -> u32 { d += Dm(1); d.0 }
+
+// over-charge controls (executed pure)
+#[derive(Clone, Copy)] pub struct P(pub u32);
+macro_rules! p_ops { ($($tr:ident $m:ident),*) => { $( impl $tr for P { fn $m(&mut self, o: P) { self.0 ^= o.0 } } )* } }
+p_ops!(BitOrAssign bitor_assign, AddAssign add_assign);
+pub fn ca_pureor(mut p: P) -> u32 { p |= P(1); p.0 }
+pub fn cb_std(mut x: u32) -> u32 { x |= 4; x ^= 1; x <<= 1; x }
+pub fn cc_deppure(mut d: Dp) -> u32 { d |= Dp(1); d.0 }
+pub fn cd_keep() -> u32 { v061dep::keep(W(1)).0 }
+pub fn ce_addin() -> u32 { v061dep::add_in(P(1), P(2)).0 }
+"##);
+    let row = |v: &serde_json::Value, f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f || r["fn"].as_str().unwrap().ends_with(&format!("::{f}"))).cloned().collect::<Vec<_>>();
+    let has = |v: &serde_json::Value, f: &str, e: &str| row(v, f).iter().flat_map(effs).any(|x| x == e);
+    for f in ["ma_or", "mb_add", "mc_shl", "md_ufcs", "me_method", "mf_field", "mg_deref", "mh_refrhs", "mi_shr", "mj_rem", "ha_hand", "hb_explicit", "hc_ufcs", "da_depor", "db_depadd"] {
+        assert!(has(&cv, f, "Fs"), "R1182 `{f}` writes (executed), chained:\n{cv:#}");
+        if f.starts_with('d') {
+            assert!(row(&uv, f).iter().any(|r| r["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "v061dep"))), "R1182 `{f}` unchained discloses the dependency:\n{uv:#}");
+        } else {
+            assert!(has(&uv, f, "Fs"), "R1182 `{f}` writes (executed), unchained:\n{uv:#}");
+        }
+    }
+    for f in ["ka_macro", "pa_prim"] {
+        assert!(has(&cv, f, "Unknown") && has(&uv, f, "Unknown"), "R1182 `{f}` may run a macro-made write and must disclose:\n{cv:#}");
+    }
+    for f in ["ca_pureor", "cb_std", "cc_deppure", "pb_primlit"] {
+        assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1182 control `{f}` is pure (executed):\n{cv:#}");
+    }
+    assert!(has(&cv, "hd_macropure", "Fs"), "R1128 residual (Rhs-blind over-charge) moved — decide it:\n{cv:#}");
 }

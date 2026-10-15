@@ -842,15 +842,14 @@ fn peel_groups(t: &mut syn::Type) {
     }
 }
 
-/// SOUNDNESS R1177 — the operator traits whose MACRO-MADE impls are spliced: `OPERATOR_TRAITS` without the
-/// compound-assignment family. Splicing a macro-made `impl AddAssign` mints a unit whose `Type::add_assign` / bare
-/// `add_assign` key a hand-written impl or free fn in another module already holds, and the resolver REFUSES an
-/// ambiguous key: the existing edge was traded for an `ambiguous:` reason (rustagent-v058 A/B: bigdecimal's
-/// `BigDecimal::sub` -> `impl_ops_sub::BigDecimal::sub_assign`, arrow-buffer's `div_rem_knuth` -> its free
-/// `add_assign`, 47 edges). Left unspliced, as before R1177: a macro-made compound-assignment impl has no unit (stated
-/// residual), and no edge that existed is lost.
+/// SOUNDNESS R1177 / R1182 — the operator traits whose MACRO-MADE impls are spliced: all of `OPERATOR_TRAITS`, the
+/// compound-assignment family included. R1177's first cut spliced that family and the new unit made a hand-written
+/// `Type::sub_assign` key ambiguous, trading 47 edges (bigdecimal, arrow-buffer) for an `ambiguous:` reason, so it was
+/// left unspliced and a macro-made `impl BitOrAssign for M` had no unit: `a |= M(1)` read ABSENT over its write, and a
+/// chained consumer's join found no published key (R1182, EXECUTED, rustagent-v061/fx/v061). R1180's `mbe_side` removes
+/// the trade at its root for every operator family: a macro-made unit never contests a hand-written claimant's tail.
 fn spliced_operator_trait(leaf: &str) -> bool {
-    crate::lang::OPERATOR_TRAITS.contains(&leaf) && !crate::lang::is_assign_operator_trait(leaf)
+    crate::lang::OPERATOR_TRAITS.contains(&leaf)
 }
 
 /// SOUNDNESS R1146 — a macro-generated impl of a std OPERATOR trait (`lang::OPERATOR_TRAITS`, by the trait path's

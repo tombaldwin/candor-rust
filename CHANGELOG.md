@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a macro-made compound-assignment impl has a unit (SOUNDNESS R1182).** A `macro_rules!`-made
+  `impl BitOrAssign for M` (and every other `XAssign`) was never spliced, so `a |= M(1)` over its write read ABSENT
+  in the defining crate, and the crate's report published no `M::bitor_assign` key, so a chained consumer read ABSENT
+  too where the unchained scan carried `invisible` (EXECUTED fixture: `deny Fs` now fails where 0.40.11 passed on 10 cells unchained and 12 chained, and `deny Unknown`
+  on 2 more).
+  It is spliced as the binary operators are; beside a hand-written impl of the same family in another module it is
+  disclosed rather than contested (R1180), and on a primitive self type it takes R1157's disclosure.
+
 - ⚠ **candor-scan: a macro-made operator impl no longer takes the edge from a hand-written one (SOUNDNESS R1180).**
   Since 0.40.8 (R1146) a macro-made `impl Sub<u8> for N` in one module made `N::sub` ambiguous against a hand-written
   `impl Sub for N` in another (bigdecimal's `impl_ops` / `impl_ops_sub` shape), and every call reaching the
