@@ -17299,6 +17299,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v061 (R1180) bumped it to rev111.
         // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.
@@ -17342,7 +17343,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17353,7 +17354,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev110/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev111/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -31732,4 +31733,50 @@ fn main() {
         }
         assert!(fs(v, "ox_twinself"), "R1171 pinned over-charge (bare self in the overriding twin) moved — decide it:\n{v:#}");
     }
+}
+
+/// SOUNDNESS R1180 (rustagent-v061; fixture rustagent-v061/fx/v061, every cell EXECUTED). R1146 spliced macro-made
+/// operator impls on nominal types into `by_tail2` BESIDE a hand-written impl of the same operator on the same type in
+/// another module (bigdecimal's `impl_ops` / `impl_ops_sub`), so the `Type::method` tail became contested,
+/// `resolve_target` refused it, and the edge to the hand-written impl was TRADED for an `ambiguous:` reason: `n - N(1)`
+/// over an effectful hand `impl Sub for N` read `deny Fs` 1 on the pre-R1146 binary and 0 on 0.40.11 — through the
+/// operator, an explicit `n.sub(..)`, and the hand impl's own body recursing through the operator. The macro-made units
+/// now ride BESIDE the hand-written claimant (`scan.rs` `mbe_side`): its edge is the pre-R1146 one, and the macro-made
+/// candidates are judged at each such site (VEIN A's rule), so an effectful one still discloses (`ra_macro`). Pinned:
+/// `nc_macropure` is R1128's Rhs-blind over-charge (as on the pre-R1146 binary); `rb_handpure` over-discloses.
+#[test]
+fn v061_r1180_a_macro_made_operator_impl_does_not_contest_a_hand_written_one() {
+    let v = scan_src_to_json_multi("v061r1180", &[("src/lib.rs", r##"#![allow(clippy::all)]
+use std::ops::*;
+pub fn mark() { let _ = std::fs::write("/tmp/rustagent_v061_fx", b"x"); }
+#[derive(Clone, Copy)] pub struct N(pub u32);
+pub mod nh { impl std::ops::Sub for super::N { type Output = super::N; fn sub(self, o: super::N) -> super::N { super::mark(); super::N(self.0 ^ o.0) } } }
+pub mod nm { macro_rules! nm { () => { impl std::ops::Sub<u8> for super::N { type Output = super::N; fn sub(self, o: u8) -> super::N { super::N(self.0 ^ o as u32) } } } } nm!(); }
+pub fn na_hand(n: N) -> u32 { (n - N(1)).0 }
+pub fn nb_explicit(n: N) -> u32 { n.sub(N(1)).0 }
+pub fn nc_macropure(n: N) -> u32 { (n - 3u8).0 }
+#[derive(Clone, Copy)] pub struct Q(pub u32);
+pub mod qh { impl std::ops::Sub for super::Q { type Output = super::Q; fn sub(self, o: super::Q) -> super::Q { if o.0 == 0 { super::mark(); self } else { self - super::Q(0) } } } }
+pub mod qm { macro_rules! qm { () => { impl std::ops::Sub<u8> for super::Q { type Output = super::Q; fn sub(self, o: u8) -> super::Q { super::Q(self.0 ^ o as u32) } } } } qm!(); }
+pub fn qa_selfrec(q: Q) -> u32 { (q - Q(1)).0 }
+#[derive(Clone, Copy)] pub struct R(pub u32);
+pub mod rh { impl std::ops::Sub for super::R { type Output = super::R; fn sub(self, o: super::R) -> super::R { super::R(self.0 ^ o.0) } } }
+pub mod rm { macro_rules! rm { () => { impl std::ops::Sub<u8> for super::R { type Output = super::R; fn sub(self, o: u8) -> super::R { super::mark(); super::R(self.0 ^ o as u32) } } } } rm!(); }
+pub fn ra_macro(r: R) -> u32 { (r - 3u8).0 }
+pub fn rb_handpure(r: R) -> u32 { (r - R(1)).0 }
+"##)]);
+    let why = |f: &str| v["functions"].as_array().unwrap().iter().filter(|r| r["fn"] == f)
+        .flat_map(|r| r["unknownWhy"].as_array().cloned().unwrap_or_default()).map(|x| x.as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>();
+    for f in ["na_hand", "nb_explicit", "qa_selfrec"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Fs"), "R1180 `{f}` runs the hand-written impl's write (executed):\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "qh::Q::sub").iter().any(|e| e == "Fs"), "R1180 the hand impl's own row:\n{v:#}");
+    assert!(!veina_row_effs(&v, "qh::Q::sub").iter().any(|e| e == "Unknown"), "R1180 a pure macro-made rival discloses nothing:\n{v:#}");
+    for f in ["ra_macro", "rb_handpure"] {
+        assert!(veina_row_effs(&v, f).iter().any(|e| e == "Unknown"), "R1180 `{f}` may run the macro-made write and must disclose:\n{v:#}");
+        assert!(why(f).iter().any(|w| w == "ambiguous:same-name local defs"), "R1180 `{f}` reason:\n{v:#}");
+    }
+    assert!(veina_row_effs(&v, "rm::R::sub").iter().any(|e| e == "Fs"), "R1180 the macro-made unit is still published:\n{v:#}");
+    assert!(veina_row_effs(&v, "nc_macropure").iter().any(|e| e == "Fs"), "R1128 residual (Rhs-blind over-charge) moved — decide it:\n{v:#}");
 }

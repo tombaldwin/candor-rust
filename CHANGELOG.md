@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a macro-made operator impl no longer takes the edge from a hand-written one (SOUNDNESS R1180).**
+  Since 0.40.8 (R1146) a macro-made `impl Sub<u8> for N` in one module made `N::sub` ambiguous against a hand-written
+  `impl Sub for N` in another (bigdecimal's `impl_ops` / `impl_ops_sub` shape), and every call reaching the
+  hand-written impl — through `n - m`, `n.sub(m)`, or the impl's own body recursing through the operator — lost its
+  edge for an `ambiguous:` reason: over an effectful hand-written impl `deny Fs` went from fail (0.40.7) to pass
+  (EXECUTED fixture). The hand-written impl keeps its edge again; the macro-made one is judged beside it and still
+  discloses `Unknown` (`ambiguous:same-name local defs`) where it carries an effect the caller lacks.
+
 ## [0.40.11] — 2026-10-15
 
 candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the

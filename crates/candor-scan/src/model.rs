@@ -194,6 +194,12 @@ pub(crate) struct FnInfo {
     /// cannot prove (R1128). Operator sites are judged against it after the fixpoint instead (`PRIM_OP_MARKER`).
     #[serde(rename = "mp", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) mbe_prim_op: bool,
+    /// SOUNDNESS R1180 — a method of a MACRO-MADE operator impl whose self type is NOMINAL (`MBE_OP_ATTR`, spliced since
+    /// R1146). Published and resolvable exactly as before WHERE IT IS THE ONLY CLAIMANT of its `Type::method` tail; where a
+    /// HAND-WRITTEN unit claims the same tail it is kept out of the resolution indexes (`scan.rs` `mbe_side`) and judged at
+    /// every site that reaches the tail instead, so it can never turn the hand-written claimant's edge into a contest.
+    #[serde(rename = "mo", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mbe_op: bool,
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
@@ -611,6 +617,9 @@ pub(crate) fn async_ret_key(type_leaf: &str) -> String {
 /// SOUNDNESS R1157 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
 /// a PRIMITIVE, so Pass A can tell it from a hand-written one (`prim_op_key`).
 pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
+/// SOUNDNESS R1180 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
+/// NOMINAL (R1146), so `scan.rs` can keep its units from contesting a hand-written impl's `Type::method` tail.
+pub(crate) const MBE_OP_ATTR: &str = "candor_mbe_op";
 /// SOUNDNESS R1157 — the qual segment that keeps such an impl's unit apart from a hand-written impl's (`decls::scan_items`).
 pub(crate) const MBE_PRIM_SEG: &str = "<mbe>";
 

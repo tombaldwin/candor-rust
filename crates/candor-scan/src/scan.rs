@@ -2315,6 +2315,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     // SOUNDNESS R1157 — macro-made primitive operator impl units by tail2 (`FnInfo::mbe_prim_op`).
     let mut by_primop: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1180 — a MACRO-MADE nominal operator impl's units (`FnInfo::mbe_op`, R1146) whose `Type::method` tail a
+    // HAND-WRITTEN unit also claims, by that tail. R1146 put them in `by_tail2` beside the hand-written claimant, which made
+    // the tail contested: `resolve_target` refused it and the edge to the hand-written impl was TRADED for an `ambiguous:`
+    // reason (EXECUTED, rustagent-v061/fx/v061 `na_hand`: `n - N(1)` over an effectful hand `impl Sub for N`, `deny Fs` 1
+    // on the pre-R1146 binary, 0 on 0.40.11, because a pure macro-made `impl Sub<u8> for N` sat in another module). Rust
+    // picks between them by the right operand's type, which this typer cannot prove (R1128), so neither may displace the
+    // other: the hand-written claimant keeps every route it had before R1146, and these units are judged at each site that
+    // reaches the tail — `Unknown` with the same `ambiguous:` reason VEIN A uses, where one carries something the caller
+    // lacks (`veina_contested`). Never an edge (a union over distinct definitions is a fabrication — only one runs). A
+    // macro-made unit with NO hand-written rival is untouched: it stays in `by_tail2` and resolves as R1146 made it.
+    let mut mbe_side: HashMap<String, Vec<String>> = HashMap::new();
+    let (hand_t2, hand_leaf): (HashSet<String>, HashSet<String>) = {
+        let mut t: HashSet<String> = HashSet::new();
+        let mut l: HashSet<String> = HashSet::new();
+        for f in fns.iter().filter(|f| !f.mbe_op && !f.mbe_prim_op && !f.extern_decl && !f.reexport_alias && !f.derive_synth) {
+            if let Some(t2) = tail2(&f.qual) {
+                t.insert(t2);
+            }
+            // `by_leaf` holds no lazy-init unit (see below), so one cannot contest a leaf there either.
+            if !f.qual.starts_with(LAZY_UNIT_PREFIX) {
+                l.insert(f.leaf.clone());
+            }
+        }
+        (t, l)
+    };
     // SOUNDNESS R1154 — the crate ROOT's own free fns, by their exact (one-segment) qual.
     let mut by_root: HashMap<String, Vec<String>> = HashMap::new();
     // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
@@ -2342,8 +2367,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if f.extern_decl || f.reexport_alias || f.derive_synth {
             continue;
         }
+        // SOUNDNESS R1180 — a macro-made operator unit a hand-written unit's tail already claims: kept out of both
+        // resolution indexes (see `mbe_side`). Its type still counts as local.
+        if f.mbe_op {
+            if let Some(t2) = tail2(&f.qual).filter(|t2| hand_t2.contains(t2)) {
+                if let Some(ty) = t2.split("::").next() {
+                    if ty.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        local_types.insert(ty.to_string());
+                    }
+                }
+                let v = mbe_side.entry(t2).or_default();
+                if !v.contains(&f.qual) {
+                    v.push(f.qual.clone());
+                }
+                continue;
+            }
+        }
         let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);
-        if !is_lazy_unit {
+        if !is_lazy_unit && !(f.mbe_op && hand_leaf.contains(&f.leaf)) {
             // SOUNDNESS R222/R129 — these buckets are the input to a UNIQUENESS test, so they must hold
             // DISTINCT DEFINITIONS, not `FnInfo` entries. `fns` carries one entry per analysed UNIT and
             // several units routinely share one qual: two `#[cfg]` arms of a fn or of its module, ≥2
@@ -5702,6 +5743,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // silently drops a report entry, which `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`
     // (candor-scan/tests/cli.rs) pins as a REQUIRED shape — "the report itself still lists both units,
     // so this is a GATE de-duplication, not a lost entry").
+    // SOUNDNESS R1180 — every site that reaches a tail a macro-made operator unit shares with a hand-written one (`mbe_side`):
+    // a call whose written tail is that tail (the hand-written claimant's own body recursing through the operator
+    // included, whose self-edge is never formed), and every edge any route formed to a unit under it (a trait-dispatch or
+    // alias route spells the call differently). Judged with VEIN A's rule after the fixpoint.
+    if !mbe_side.is_empty() {
+        let instr = std::env::var_os("CANDOR_R1180_INSTR").is_some();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut push = |caller: &str, t2: &str, why: &str, out: &mut Vec<(String, Vec<String>)>| {
+            if let Some(side) = mbe_side.get(t2) {
+                if seen.insert((caller.to_string(), t2.to_string())) {
+                    let cl: Vec<String> = side.iter().filter(|q| q.as_str() != caller).cloned().collect();
+                    if !cl.is_empty() {
+                        if instr {
+                            eprintln!("R1180SITE\t{why}\t{caller}\t{t2}"); // §E1 REACH COUNTER
+                        }
+                        out.push((caller.to_string(), cl));
+                    }
+                }
+            }
+        };
+        for f in &fns {
+            for c in f.calls.iter().filter(|c| !c.is_macro && c.path.contains("::")) {
+                if let Some(t2) = tail2(&c.path) {
+                    push(&f.qual, &t2, "call", &mut veina_contested);
+                }
+            }
+        }
+        for (caller, ts) in &calls {
+            for t in ts {
+                if let Some(t2) = tail2(t) {
+                    push(caller, &t2, "edge", &mut veina_contested);
+                }
+            }
+        }
+    }
     let all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
     let mut inferred = propagate(&direct, &calls, &all);
     // ── §4 HONESTY — VEIN A: THE CONTEST NO WRITTEN PATH SETTLES, DISCLOSED WHERE IT COULD MATTER ──────
@@ -5849,9 +5925,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     continue;
                 }
                 for m in *members {
-                    let Some(units) = by_tail2.get(&format!("{l}::{m}")) else { continue };
+                    // R1180 — a macro-made impl's units a hand-written rival keeps out of `by_tail2` count here too.
+                    let key = format!("{l}::{m}");
+                    let units: Vec<&String> = by_tail2.get(&key).into_iter().flatten().chain(mbe_side.get(&key).into_iter().flatten()).collect();
+                    if units.is_empty() {
+                        continue;
+                    }
                     let hot = units.iter().any(|u| {
-                        u != caller && inferred.get(u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+                        *u != caller && inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
                     });
                     if !hot {
                         continue;

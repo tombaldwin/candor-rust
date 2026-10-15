@@ -759,6 +759,12 @@ impl Ctx<'_> {
                                         eprintln!("R1157SPLICE"); // §E1 REACH COUNTER
                                     }
                                 }
+                                // R1180 — a nominal-self operator impl is marked too: where a hand-written impl claims
+                                // the same `Type::method` tail, its units must not contest that claimant (`scan.rs`).
+                                if !prim_operator_impl(i) && operator_trait_impl(i) {
+                                    let id = syn::Ident::new(crate::model::MBE_OP_ATTR, proc_macro2::Span::call_site());
+                                    i.attrs.push(syn::parse_quote!(#[#id]));
+                                }
                                 if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
                                     eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
                                 }

@@ -209,6 +209,7 @@ pub(crate) fn scan_items(
                         let mut info = fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, self_name.as_deref(), Some(&im.generics), Some(&*im.self_ty), include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
                         info.mbe_prim_op = mbe_prim.is_some(); // R1157
+                        info.mbe_op = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_OP_ATTR)); // R1180
                         out.push(info);
                     }
                 }
@@ -3236,6 +3237,7 @@ pub(crate) fn fninfo(
         extern_decl: false,
         derive_synth: false,
         mbe_prim_op: false,
+        mbe_op: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
         untyped_methods: c.untyped_methods.into_iter().collect(),
