@@ -11,6 +11,20 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a `Result` error type carried by a return or a binding, and an untyped argument, reach a chained
+  dependency's conversion (SOUNDNESS R1196).** R1186's conversion witness named a `From` source only for a typed
+  argument, and the expression typer records `Result` unwrapped to its `Ok` type, so `dep::q(mk())` with `mk() ->
+  Result<u8, Le>`, and the same value through an annotated or plain `let`, a bound `Err(..)`, an associated fn, a method
+  or a parameter, read ABSENT chained over an executed `From<Le>` write. A fn's declared `Result` error type
+  (`io::Result`/`fmt::Result` included) is now recorded for its callers and its bindings. Separately, an argument the
+  typer cannot name (a dependency's generic return, a closure's return, a caller-scope generic) handed to a callee whose
+  signature the scan reads and finds a conversion bound on is disclosed against the crate's own effectful conversions
+  into a target that can meet it. `deny Unknown` and `deny Fs Unknown` fail where the previous build passed on 20
+  executed fixture cells, chained; unchained reports are unchanged, and over the registry corpus (981 chained
+  consumers, 5,215 crates unchained) no row changed — no true positive was found there either. Over-disclosures by design: an `Ok`-only value of a `Result<_, E>` type, and an
+  untyped value that is in fact a std type (`&str` into `Into<String>`) in a crate with an effectful conversion into
+  the same target. Cache rev115.
+
 - ⚠ **candor-scan: a local `From`/`TryFrom` impl handed to a chained dependency is a witness (SOUNDNESS R1186).** A
   crate's hand-written `impl From<S> for U` (or `TryFrom`) runs inside a chained dependency's generic body handed an
   `S` — `T: Into<U>`, `T: TryInto<U>`, `U: From<T>`, a `?` into the dependency's error type — but its member is keyed
