@@ -30563,6 +30563,11 @@ pub mod two { use cdep3::*; use std::collections::*; pub fn g_two(t: &Tool) { t.
 /// v053 — scan a dependency `dname` from `dsrc`, chain its report, and scan a consumer from `csrc` (which
 /// depends on it), returning (dependency report, CHAINED consumer report, UNCHAINED consumer report).
 fn v053_chain(dname: &str, dsrc: &str, csrc: &str) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    v067_chain(dname, "", dsrc, csrc)
+}
+
+/// `v053_chain` with extra manifest text for the dependency (`[lib]\nproc-macro = true\n`).
+fn v067_chain(dname: &str, dextra: &str, dsrc: &str, csrc: &str) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let toml = |n: &str| format!("[package]\nname = \"{n}\"\nedition = \"2021\"\n");
     let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
@@ -30579,7 +30584,7 @@ fn v053_chain(dname: &str, dsrc: &str, csrc: &str) -> (serde_json::Value, serde_
     let _ = std::fs::remove_dir_all(&root);
     let dep = root.join("cdep");
     std::fs::create_dir_all(dep.join("src")).unwrap();
-    std::fs::write(dep.join("Cargo.toml"), toml(dname)).unwrap();
+    std::fs::write(dep.join("Cargo.toml"), format!("{}{dextra}", toml(dname))).unwrap();
     std::fs::write(dep.join("src/lib.rs"), dsrc).unwrap();
     let dv = scan(&dep, &DepIndex::default());
     let reports = root.join("reports");
@@ -32272,4 +32277,83 @@ pub fn ke_keep() -> u8 { udep::keep(udep::keep(Ls(1))).0 }
         assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1196 control `{f}` is pure (executed):\n{cv:#}");
     }
     assert!(why(&cv, "kd_str").contains(&"dispatch:From.from".to_string()), "R1196 stated over-disclosure moved — decide it:\n{cv:#}");
+}
+
+/// SOUNDNESS R1192 (rustagent-v067; fixture rustagent-v067/fx/r1192, every cell EXECUTED). `depsig` judged opacity per
+/// CRATE: any `macro_rules!` whose tokens held `fn` (percent-encoding's `static_assert!`), a glob of a LOCAL module
+/// (`pub use inner::*`, a relative root read as another crate's), or an item macro naming the leaf (tokio's `cfg_rt!`)
+/// made every callee of the dependency unreadable, so R1165 / R1186 disclosed over callees whose source proves they run
+/// nothing on the value. Now judged per ITEM: only a definition of the CALLEE that may be out of sight hides it. Controls
+/// (executed pure) lose the hedge; every executed write keeps it — a metavariable-named macro fn, a fixed-name macro
+/// method, a foreign macro naming the type, a paste-computed name, a method only a local trait impl shows (a foreign
+/// blanket trait's runs).
+#[test]
+fn v067_r1192_depsig_opacity_is_judged_per_item() {
+    let cons = |d: &str, calls: &str| format!(r##"#![allow(dead_code)]
+pub fn mark() {{ let _ = std::fs::write("/tmp/rustagent_v067_fx", b"x"); }}
+pub struct Noisy(pub i32);
+impl PartialEq for Noisy {{ fn eq(&self, o: &Noisy) -> bool {{ mark(); self.0 == o.0 }} }}
+#[derive(Clone, Copy, Debug, Default)] pub struct Ls(pub u8);
+impl From<Ls> for String {{ fn from(l: Ls) -> String {{ mark(); format!("{{}}", l.0) }} }}
+{}
+"##, calls.replace("DEP", d));
+    let (_, cv, _) = v053_chain("rdep67", r##"
+macro_rules! static_assert { ($e:expr) => { const _: fn() = || { let _ = [(); 0 - (!($e) as usize)]; }; } }
+static_assert!(true);
+pub fn o1_check<T>(_t: T) -> bool { true }
+mod inner { pub fn o2_check<T>(_t: T) -> bool { true } }
+pub use inner::*;
+macro_rules! cfg_on { ($($item:item)*) => { $( #[cfg(all())] $item )* } }
+cfg_on! { pub fn o3_check<T>(_t: T) -> bool { true } }
+cfg_if::cfg_if! { if #[cfg(unix)] { pub fn o4_check<T>(_t: T) -> bool { true } } else { pub fn o4_check<T>(_t: T) -> bool { true } } }
+pub fn o7_keep<T>(_t: T) -> usize { 0 }
+pub fn p7_into<T: Into<String>>(t: T) -> usize { t.into().len() }
+macro_rules! mk { ($n:ident) => { pub fn $n<T: PartialEq>(a: T) -> bool { a == a } } }
+mk!(p1_check);
+pub mod p1m { pub fn p1_check<T>(_t: T) -> bool { true } }
+pub struct Thing2;
+macro_rules! imp2 { ($t:ident) => { impl $t { pub fn p2_check<T: PartialEq>(a: T) -> bool { a == a } } } }
+imp2!(Thing2);
+pub fn p2_check<T>(_t: T) -> bool { true }
+pub struct Thing3;
+mdep::make_p3!(Thing3);
+pub fn p3_check<T>(_t: T) -> bool { true }
+pub struct Hasher5;
+pub trait LocalU { fn p5_update(&self, d: &[u8]) -> bool; }
+impl LocalU for Hasher5 { fn p5_update(&self, d: &[u8]) -> bool { d.is_empty() } }
+pub struct Thing8;
+impl Thing8 { pub fn o8_check<T>(_t: T) -> bool { true } }
+"##, &cons("rdep67", r##"
+pub fn o1_mac() -> bool { DEP::o1_check(Noisy(1)) }
+pub fn o2_glob() -> bool { DEP::o2_check(Noisy(1)) }
+pub fn o3_pass() -> bool { DEP::o3_check(Noisy(1)) }
+pub fn o4_cfgif() -> bool { DEP::o4_check(Noisy(1)) }
+pub fn o7_noconv() -> usize { DEP::o7_keep(Ls(1)) }
+pub fn o8_inherent() -> bool { DEP::Thing8::o8_check(Noisy(1)) }
+pub fn p1_metamac() -> bool { DEP::p1_check(Noisy(1)) }
+pub fn p2_fixedmac() -> bool { DEP::Thing2::p2_check(Noisy(1)) }
+pub fn p3_foreignmac() -> bool { DEP::Thing3::p3_check(Noisy(1)) }
+pub fn p5_blanket(h: &DEP::Hasher5) -> bool { h.p5_update(Noisy(1)) }
+pub fn p7_conv() -> usize { DEP::p7_into(Ls(1)) }
+"##));
+    for f in ["o1_mac", "o2_glob", "o3_pass", "o4_cfgif", "o7_noconv", "o8_inherent"] {
+        assert!(veina_row_effs(&cv, f).is_empty(), "R1192 control `{f}` is pure (executed), and its callee is read:\n{cv:#}");
+    }
+    for f in ["p1_metamac", "p2_fixedmac", "p3_foreignmac", "p5_blanket", "p7_conv"] {
+        assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1192 `{f}` writes (executed) and keeps its disclosure:\n{cv:#}");
+    }
+    // An EXTERNAL glob beside a type the crate declares: the type's inherent method is read; a free fn is not.
+    let (_, cv, _) = v067_chain("gdep67", "[dependencies]\nodep = \"1\"\n", "pub use odep::*;\npub struct Thing6;\nimpl Thing6 { pub fn o6_check<T>(_t: T) -> bool { true } }\npub fn p6_free<T>(_t: T) -> bool { true }\n",
+        &cons("gdep67", "pub fn o6_extglob() -> bool { DEP::Thing6::o6_check(Noisy(1)) }\npub fn q6_free() -> bool { DEP::p6_free(Noisy(1)) }\n"));
+    assert!(veina_row_effs(&cv, "o6_extglob").is_empty(), "R1192 a local type's inherent method beside an external glob is read:\n{cv:#}");
+    assert!(veina_row_effs(&cv, "q6_free").iter().any(|e| e == "Unknown"), "R1192 a free fn beside an external glob keeps the disclosure:\n{cv:#}");
+    // A paste-computed fn name can be any name: the dependency stays unreadable.
+    let (_, cv, _) = v053_chain("qdep67", "macro_rules! pmk { ($n:ident) => { paste::paste! { pub fn [<p4_ $n>]<T: PartialEq>(a: T) -> bool { a == a } } } }\npmk!(check);\npub mod p4m { pub fn p4_check<T>(_t: T) -> bool { true } }\n",
+        &cons("qdep67", "pub fn p4_paste() -> bool { DEP::p4_check(Noisy(1)) }\n"));
+    assert!(veina_row_effs(&cv, "p4_paste").iter().any(|e| e == "Unknown"), "R1192 a computed fn name keeps the disclosure:\n{cv:#}");
+    // A proc-macro crate exports no runtime item: a consumer path misread into it (`use pm::Error` beside a local `Error`)
+    // lands nowhere in it.
+    let (_, cv, _) = v067_chain("pmdep67", "[lib]\nproc-macro = true\n", "use proc_macro::TokenStream;\n#[proc_macro_derive(Error)]\npub fn derive_error(_i: TokenStream) -> TokenStream { TokenStream::new() }\n",
+        &cons("pmdep67", "pub mod e5 {\n    use pmdep67::Error;\n    #[derive(Error)] pub struct Error(pub u8);\n    impl Error { pub fn with_ls(_l: super::Ls) -> u8 { 0 } }\n    pub fn o5_proc() -> u8 { Error::with_ls(super::Ls(1)) }\n}\n"));
+    assert!(veina_row_effs(&cv, "o5_proc").is_empty(), "R1192 a proc-macro crate runs nothing (executed pure):\n{cv:#}");
 }
