@@ -1813,7 +1813,9 @@ impl<'a> CallCollector<'a> {
                     eprintln!("R1186WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER (chained or not)
                 }
                 self.calls.push(Call { argc: 0, entropy_arg: false,
-                    path: format!("{cr}::{WITNESS_MARKER}::{l}::{}::{rest}", base + i),
+                    // SOUNDNESS R1200 — a METHOD-CALL site (`base` 1) carries an `m` after its position: method resolution there
+                    // may pick a same-name trait method out of the dependency's sight over an inherent one (`depsig`).
+                    path: format!("{cr}::{WITNESS_MARKER}::{l}::{}{}::{rest}", base + i, if base == 1 { "m" } else { "" }),
                     leaf: l.clone(), str_arg: None, path_lits_partial: false, path_lit2: None,
                     typed: false, method: false, is_macro: false,
                 });

@@ -11,6 +11,20 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a chained dependency's signature is read only where the consumer's path is known to reach it
+  (SOUNDNESS R1200).** The R1165/R1186 disclosure for a local value handed to a chained dependency is withheld when
+  the dependency's source proves the callee cannot run the value's impl. That source was searched by the callee's
+  LEAF across the whole crate, so four shapes read a definition the program does not run, and an executed write read
+  ABSENT under `deny Unknown`. The shapes were: a foreign item macro defining the fn the path reaches beside a visible
+  same-name twin; a method-call site where a third crate's blanket trait's by-value method beats the inherent one
+  (method probing takes the first autoref step that matches); an external glob supplying the type the path names while
+  the crate's own same-name type sits in another module; and a module brought in from outside (`pub use
+  other::inner`, `pub extern crate other as inner`). Each is now unreadable, so the disclosure stays. Measured against
+  the published 0.40.12 over 981 chained consumers: **59 rows newly carry `Unknown`** (0.0068% of 869,900 rows) and no
+  row loses an effect or an `Unknown`. `deny Unknown` moves from pass to fail on those 59 functions, and no
+  `deny <E>` on a concrete effect moves. Nearly all are an untyped argument to a method of a dependency type (R1197(a)),
+  which is over-disclosure. The unchained corpus is unchanged.
+
 ## [0.40.12] — 2026-10-16
 
 candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the

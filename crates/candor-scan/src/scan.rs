@@ -2985,14 +2985,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `CANDOR_R1165_OFF` is the falsification switch (the fixtures' 0.40.9 behaviour), never a user setting.
                 if deps_idx.crates.contains(wcr_real) && std::env::var_os("CANDOR_R1165_OFF").is_none() {
                     let mut it = rest.splitn(3, "::");
-                    if let (Some(l), Some(pos), Some(callee)) = (it.next(), it.next().and_then(|p| p.parse().ok()), it.next()) {
+                    // SOUNDNESS R1200 — a position written `<n>m` is a METHOD-CALL site; `depsig` is told so by a `.` before the
+                    // callee (`.Foo::m`), since method resolution may run a trait method out of the dependency's sight there.
+                    let (l, pos_s, callee) = (it.next(), it.next(), it.next());
+                    let meth = pos_s.is_some_and(|p| p.ends_with('m'));
+                    let pos: Option<usize> = pos_s.and_then(|p| p.trim_end_matches('m').parse().ok());
+                    let callee = callee.map(|c| if meth { format!(".{c}") } else { c.to_string() });
+                    if let (Some(l), Some(pos), Some(callee)) = (l, pos, callee) {
                         // SOUNDNESS R1186 — a local conversion taking the argument is judged on its own list.
                         if let Some(src) = l.strip_prefix(crate::model::FROM_WITNESS_PREFIX) {
                             if std::env::var_os("CANDOR_R1186_OFF").is_none() {
-                                from_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), src.to_string(), pos, callee.to_string()));
+                                from_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), src.to_string(), pos, callee));
                             }
                         } else {
-                            witness_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), l.to_string(), pos, callee.to_string()));
+                            witness_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), l.to_string(), pos, callee));
                         }
                     }
                 }

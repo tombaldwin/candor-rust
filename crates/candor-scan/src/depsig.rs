@@ -25,6 +25,13 @@
 //!     not declare) from outside the crate (a root that is a dependency, std, or nothing the crate declares), a
 //!     `macro_rules!` that can name it, a macro invocation naming it or its type, a file that does not parse and names
 //!     it. A pass-through `macro_rules!` (`cfg_rt!`) and `cfg_if!` are read as the items they re-emit.
+//!   * SOUNDNESS R1200 — the candidates are found by LEAF across the whole crate, not by the PATH the consumer wrote, so the
+//!     union is sound only if every definition the path can reach is in sight. Four ways it was not, each now unreadable:
+//!     a module-level FOREIGN item macro (any name; `macro_is_known`), an external glob whose OWN module does not declare
+//!     the type (a declaration shadows a glob only there), a MODULE segment of the path brought in from outside (`pub use
+//!     other::inner`, `pub extern crate other as inner`), and a METHOD-CALL site, where method probing may run a trait
+//!     method out of sight over the inherent anchor. Chosen over resolving the path through the module tree because the
+//!     coarse rules cost 59 newly-`Unknown` rows over the 981 chained consumers (rustagent-v070).
 use crate::*;
 
 /// The std-witness traits (`model::STD_WITNESS_TRAITS` leaves) a body bounded by `bound` can reach on the value.
@@ -200,6 +207,44 @@ struct FnNames {
     fixed: HashSet<String>,
     metavar: bool,
     computed: bool,
+    /// SOUNDNESS R1200 — the macros this body invokes, as `(root, name)` (`root` `None` for a bare `name!`, `Some("$crate")`
+    /// for `$crate::name!`): a FOREIGN one among them can define fns this reading never sees
+    invokes: Vec<(Option<String>, String)>,
+}
+
+/// SOUNDNESS R1200 — std macros that define no fn a path outside them can reach: expression macros, and the item macros
+/// whose items their own tokens name (`thread_local!`). A DENYLIST of proven-inert names; every other macro this crate does
+/// not define is FOREIGN. `include!` is deliberately absent: it pastes a file (often `OUT_DIR`'s) of any items.
+const INERT_STD_MACROS: &[&str] = &[
+    "macro_rules", "thread_local", "compile_error", "global_asm", "asm", "naked_asm", "format", "format_args", "write",
+    "writeln", "print", "println", "eprint", "eprintln", "panic", "unreachable", "todo", "unimplemented", "assert",
+    "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "matches", "vec", "dbg", "concat",
+    "stringify", "env", "option_env", "include_str", "include_bytes", "line", "column", "file", "module_path", "cfg",
+    "ready", "addr_of", "addr_of_mut", "try", "const_format_args", "unreachable_unchecked", "debug_assert_matches",
+    "assert_matches", "trace_macros", "log_syntax", "concat_idents", "pin", "offset_of",
+];
+
+/// `(root, name)` of a `name!` / `a::b::name!` / `$crate::name!` invocation starting at `toks[i]` (an ident followed by
+/// `!`), walking back over `::`-joined path segments.
+fn invoked_at(toks: &[proc_macro2::TokenTree], i: usize) -> (Option<String>, String) {
+    use proc_macro2::TokenTree as T;
+    let name = toks[i].to_string();
+    let mut j = i;
+    let mut root: Option<String> = None;
+    // `seg :: name` — the `::` is two `:` puncts
+    while j >= 3 {
+        match (&toks[j - 1], &toks[j - 2], &toks[j - 3]) {
+            (T::Punct(c1), T::Punct(c2), T::Ident(seg)) if c1.as_char() == ':' && c2.as_char() == ':' => {
+                root = Some(seg.to_string());
+                j -= 3;
+            }
+            _ => break,
+        }
+    }
+    if root.as_deref() == Some("crate") && j >= 1 && matches!(&toks[j - 1], T::Punct(d) if d.as_char() == '$') {
+        root = Some("$crate".to_string());
+    }
+    (root, name)
 }
 
 fn fn_names(ts: &proc_macro2::TokenStream, out: &mut FnNames) {
@@ -216,6 +261,14 @@ fn fn_names(ts: &proc_macro2::TokenStream, out: &mut FnNames) {
                 // `fn [<..>]`, `fn #name` (a quote! template) — a name this reading cannot bound
                 _ => out.computed = true,
             },
+            proc_macro2::TokenTree::Ident(id)
+                if matches!(toks.get(i + 1), Some(proc_macro2::TokenTree::Punct(b)) if b.as_char() == '!')
+                    && matches!(toks.get(i + 2), Some(proc_macro2::TokenTree::Group(_))) =>
+            {
+                // `$m!(..)` takes its macro from an invocation: `invoked_at` names the metavariable, which no definition has
+                let _ = id;
+                out.invokes.push(invoked_at(&toks, i));
+            }
             proc_macro2::TokenTree::Group(g) => fn_names(&g.stream(), out),
             _ => {}
         }
@@ -369,6 +422,21 @@ struct SrcIndex {
     types: HashSet<String>,
     /// type-alias edges, both directions (`type A = B<..>`, `use ..::B as A`)
     aliases: HashMap<String, HashSet<String>>,
+    /// SOUNDNESS R1200 — local `macro_rules!` names whose body invokes a FOREIGN macro (directly, or through another
+    /// such local macro): an invocation of one may define any fn
+    tainted: HashSet<String>,
+}
+
+/// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
+/// definition) that invokes no foreign macro, or an inert std macro. Everything else is FOREIGN: its items are not here.
+fn macro_is_known(root: Option<&str>, name: &str, local: &HashMap<String, FnNames>, tainted: &HashSet<String>) -> bool {
+    match root {
+        None if local.contains_key(name) => !tainted.contains(name),
+        None => INERT_STD_MACROS.contains(&name),
+        Some("crate" | "self" | "super" | "$crate") => local.contains_key(name) && !tainted.contains(name),
+        Some("std" | "core" | "alloc") => INERT_STD_MACROS.contains(&name),
+        Some(_) => false,
+    }
 }
 
 impl SrcIndex {
@@ -431,6 +499,7 @@ impl SrcIndex {
                     e.fixed.extend(f.fixed);
                     e.metavar |= f.metavar;
                     e.computed |= f.computed;
+                    e.invokes.extend(f.invokes);
                     if is_passthrough(&m.mac.tokens) {
                         self.1.insert(n);
                     } else {
@@ -443,6 +512,19 @@ impl SrcIndex {
         let mut defs = Defs::default();
         for f in &files {
             defs.visit_file(f);
+        }
+        // SOUNDNESS R1200 — a local macro invoking a foreign one (or a tainted local one) is tainted, to a fixpoint
+        let mut tainted: HashSet<String> = HashSet::new();
+        loop {
+            let before = tainted.len();
+            for (n, f) in &defs.0 {
+                if !tainted.contains(n) && f.invokes.iter().any(|(r, m)| !macro_is_known(r.as_deref(), m, &defs.0, &tainted)) {
+                    tainted.insert(n.clone());
+                }
+            }
+            if tainted.len() == before {
+                break;
+            }
         }
         // a name with any NON-pass-through definition is not expanded
         let pass: HashSet<String> = defs.1.difference(&defs.2).cloned().collect();
@@ -562,6 +644,7 @@ impl SrcIndex {
             macro_words: facts.words,
             types: facts.types,
             aliases,
+            tainted,
         })
     }
 
@@ -592,6 +675,37 @@ struct Want {
     leaf: String,
     /// the callee's type, under every alias the source gives it; empty for a free fn
     tys: HashSet<String>,
+    /// SOUNDNESS R1200 — the MODULE segments the path walks before the type / leaf (`inner::f` → `inner`): one brought in
+    /// from outside the crate (`pub use other::inner`, `pub extern crate other as inner`) holds definitions not here
+    mods: Vec<String>,
+}
+
+/// SOUNDNESS R1200 — does this item list (a file, or an inline module's body) itself bind one of `names` in the namespace
+/// a glob would fill, with no `#[cfg]` that may remove it? Such a binding shadows every glob of the list, so an external glob
+/// there cannot supply the name. `types`: a struct / enum / union / trait / type alias / module; else a fn. An explicit
+/// `use` binding of the name counts too (an explicit import shadows a glob; where IT leaves the crate is judged on its own).
+fn list_binds(items: &[syn::Item], names: &HashSet<String>, types: bool) -> bool {
+    let cfgd = |a: &[syn::Attribute]| a.iter().any(|x| x.path().is_ident("cfg"));
+    fn use_binds(t: &syn::UseTree, names: &HashSet<String>) -> bool {
+        match t {
+            syn::UseTree::Path(p) => use_binds(&p.tree, names),
+            syn::UseTree::Name(n) => names.contains(&n.ident.to_string()),
+            syn::UseTree::Rename(r) => names.contains(&r.rename.to_string()),
+            syn::UseTree::Glob(_) => false,
+            syn::UseTree::Group(g) => g.items.iter().any(|i| use_binds(i, names)),
+        }
+    }
+    items.iter().any(|it| match it {
+        syn::Item::Struct(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Enum(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Union(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Trait(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Type(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Mod(i) if types => !cfgd(&i.attrs) && names.contains(&i.ident.to_string()),
+        syn::Item::Fn(i) if !types => !cfgd(&i.attrs) && names.contains(&i.sig.ident.to_string()),
+        syn::Item::Use(u) => !cfgd(&u.attrs) && use_binds(&u.tree, names),
+        _ => false,
+    })
 }
 
 struct Collect<'a, 'i> {
@@ -604,6 +718,13 @@ struct Collect<'a, 'i> {
     ctor: bool,
     /// a definition of the callee may be somewhere this reading cannot see; the reason, for the reach counter
     opaque: Option<String>,
+    /// SOUNDNESS R1200 — the item list being walked (a file, or an inline module's body), innermost last
+    lists: Vec<&'a [syn::Item]>,
+    /// SOUNDNESS R1200 — inside a fn / const / static body, where an item is reachable by no path from outside
+    body: usize,
+    /// SOUNDNESS R1200 — the first module-level invocation of a FOREIGN macro (`macro_is_known`): it may define a free fn
+    /// of any name, its own tokens naming none of them (`mmac::make_free!()`)
+    foreign: Option<String>,
 }
 
 impl<'a, 'i> Collect<'a, 'i> {
@@ -644,9 +765,36 @@ impl<'a, 'i> Collect<'a, 'i> {
 }
 
 impl<'a> Visit<'a> for Collect<'a, '_> {
+    fn visit_file(&mut self, f: &'a syn::File) {
+        self.lists.push(&f.items);
+        syn::visit::visit_file(self, f);
+        self.lists.pop();
+    }
+    fn visit_item_mod(&mut self, m: &'a syn::ItemMod) {
+        match &m.content {
+            Some((_, items)) => {
+                self.lists.push(items);
+                syn::visit::visit_item_mod(self, m);
+                self.lists.pop();
+            }
+            None => syn::visit::visit_item_mod(self, m),
+        }
+    }
     fn visit_item_fn(&mut self, f: &'a syn::ItemFn) {
         self.sig(&f.sig, Some(&f.block), Site::Free);
+        self.body += 1;
         syn::visit::visit_item_fn(self, f);
+        self.body -= 1;
+    }
+    fn visit_item_const(&mut self, c: &'a syn::ItemConst) {
+        self.body += 1;
+        syn::visit::visit_item_const(self, c);
+        self.body -= 1;
+    }
+    fn visit_item_static(&mut self, c: &'a syn::ItemStatic) {
+        self.body += 1;
+        syn::visit::visit_item_static(self, c);
+        self.body -= 1;
     }
     fn visit_item_impl(&mut self, i: &'a syn::ItemImpl) {
         self.stack.push(&i.generics);
@@ -674,7 +822,9 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
     }
     fn visit_impl_item_fn(&mut self, f: &'a syn::ImplItemFn) {
         // the signature was taken by `visit_item_impl` with the impl's generics in scope; walk the body for nested items
+        self.body += 1;
         syn::visit::visit_block(self, &f.block);
+        self.body -= 1;
     }
     fn visit_impl_item_macro(&mut self, _m: &'a syn::ImplItemMacro) {
         // judged by `visit_item_impl`, which knows the self type
@@ -689,6 +839,7 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
                 _ => {}
             }
         }
+        self.body += 1;
         for it in &t.items {
             if let syn::TraitItem::Fn(f) = it {
                 if let Some(b) = &f.default {
@@ -696,6 +847,7 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
                 }
             }
         }
+        self.body -= 1;
         self.stack.pop();
     }
     fn visit_item_struct(&mut self, s: &'a syn::ItemStruct) {
@@ -715,11 +867,39 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
             // An external glob cannot supply a method of a type this crate DECLARES (a local item shadows a glob, and the
             // other crate cannot implement for it what the anchor below does not see); a free fn, or a type the crate
             // does not declare, may come through it.
-            let globs = !self.want.tys.iter().any(|t| idx.types.contains(t));
+            // SOUNDNESS R1200 — but a declaration shadows a glob only in ITS OWN module: `pub use other::*` at the root beside
+            // a `Foo` declared in a private module supplies the root's `Foo`, which is the other crate's. So the exemption
+            // holds only where THIS glob's own item list binds the type, uncfg'd (`CANDOR_R1200_GLOB_OFF` restores R1192's
+            // crate-wide reading, for falsification only).
+            let list: &[syn::Item] = self.lists.last().copied().unwrap_or(&[]);
+            let declared = self.want.tys.iter().any(|t| idx.types.contains(t));
+            let globs = if std::env::var_os("CANDOR_R1200_GLOB_OFF").is_some() {
+                !declared
+            } else {
+                !(declared && list_binds(list, &self.want.tys, true))
+            };
             if use_may_import(&u.tree, &self.want.leaf, None, &ext, globs) {
                 self.dark(|| "use:leaf".to_string());
             } else if self.want.tys.iter().any(|t| use_may_import(&u.tree, t, None, &ext, globs)) {
                 self.dark(|| "use:type".to_string());
+            } else if std::env::var_os("CANDOR_R1200_MOD_OFF").is_none()
+                && self.want.mods.iter().any(|m| {
+                    let one: HashSet<String> = std::iter::once(m.clone()).collect();
+                    use_may_import(&u.tree, m, None, &ext, !list_binds(list, &one, true))
+                })
+            {
+                // SOUNDNESS R1200 — a module the path walks through comes from outside (`pub use other::inner`, or a glob
+                // of a list that does not itself declare it)
+                self.dark(|| "use:mod".to_string());
+            }
+        }
+    }
+    fn visit_item_extern_crate(&mut self, e: &'a syn::ItemExternCrate) {
+        // SOUNDNESS R1200 — `pub extern crate other as name;` makes `name::..` the other crate's
+        if !matches!(e.vis, syn::Visibility::Inherited) && std::env::var_os("CANDOR_R1200_MOD_OFF").is_none() {
+            let n = e.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| e.ident.to_string());
+            if n == self.want.leaf || self.want.tys.contains(&n) || self.want.mods.contains(&n) {
+                self.dark(|| "extern:crate".to_string());
             }
         }
     }
@@ -734,7 +914,17 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
                     }
                 }
             }
-            None => self.invocation(&m.mac, None),
+            None => {
+                self.invocation(&m.mac, None);
+                if self.body == 0 && self.foreign.is_none() {
+                    let segs: Vec<String> = m.mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let name = segs.last().cloned().unwrap_or_default();
+                    let root = (segs.len() > 1).then(|| segs[0].clone());
+                    if !macro_is_known(root.as_deref(), &name, &self.idx.macros, &self.idx.tainted) {
+                        self.foreign = Some(segs.join("::"));
+                    }
+                }
+            }
         }
     }
 }
@@ -1011,6 +1201,11 @@ impl DepSigs {
         pos: usize,
         judge: impl Fn(&Cand<'_>, usize) -> Result<Option<BTreeSet<T>>, ()>,
     ) -> (Option<BTreeSet<T>>, String) {
+        // SOUNDNESS R1200 — a `.` before the callee marks a METHOD-CALL site (`scan.rs`)
+        let (method_site, callee) = match callee.strip_prefix('.') {
+            Some(c) => (true, c),
+            None => (false, callee),
+        };
         let segs: Vec<&str> = callee.split("::").collect();
         let leaf = segs.last().copied().unwrap_or(callee).to_string();
         let srcs = self.source_dirs(dir, alias, real);
@@ -1026,18 +1221,33 @@ impl DepSigs {
             let ty_seg = (segs.len() >= 2).then(|| segs[segs.len() - 2]).filter(|t| {
                 idx.types.contains(*t) || t.chars().next().is_some_and(char::is_uppercase) || !idx.local_names.contains(*t)
             });
-            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default() };
+            let mods: Vec<String> = segs[..segs.len() - 1 - usize::from(ty_seg.is_some())].iter().map(|s| s.to_string()).collect();
+            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default(), mods };
             for (text, w) in &idx.unparsed {
                 if w.contains(&want.leaf) || want.tys.iter().any(|t| w.contains(t)) || w.contains("macro_rules") || text.contains("::*") {
                     return (None, "parse".into());
                 }
             }
-            let mut c = Collect { idx, want: &want, stack: Vec::new(), imp: Vec::new(), fns: Vec::new(), ctor: false, opaque: None };
+            let mut c = Collect {
+                idx, want: &want, stack: Vec::new(), imp: Vec::new(), fns: Vec::new(), ctor: false, opaque: None,
+                lists: Vec::new(), body: 0, foreign: None,
+            };
             for f in &idx.files {
                 c.visit_file(f);
             }
             if let Some(why) = c.opaque {
                 return (None, why);
+            }
+            // SOUNDNESS R1200 — a FREE fn's candidates are the free fns of its name, and a foreign item macro may have made one
+            // this reading never sees, in any module (`mmac::make_free!()` at the root beside a visible `twin::f`); its tokens
+            // name nothing, so `invocation` cannot see it. Methods too: a foreign macro can write `impl crate::Foo<B> { fn m }`
+            // beside a visible `impl Foo<A> { fn m }` (distinct instantiations are not duplicates). Measured: applying it to
+            // methods as well costs 1 more newly-`Unknown` row over the chained corpus, so the duplicate-definition argument
+            // is not leaned on.
+            if std::env::var_os("CANDOR_R1200_FMAC_OFF").is_none() {
+                if let Some(m) = &c.foreign {
+                    return (None, format!("fmac:{m}"));
+                }
             }
             if c.fns.is_empty() && c.ctor {
                 continue;
@@ -1071,6 +1281,15 @@ impl DepSigs {
             };
             if !anchored {
                 return (None, format!("noanchor:{}", c.fns.len()));
+            }
+            // SOUNDNESS R1200 — at a METHOD-CALL site the anchor does not settle which `m` runs. Method resolution probes the
+            // receiver by value, then `&`, then `&mut`, and takes the FIRST step any method matches; an inherent method wins only
+            // against a trait method found at the SAME step. So a by-value `fn m(self, ..)` of any trait in scope at the consumer
+            // (a blanket `impl<T> Ext for T` in a third crate, never in this source) beats an inherent `fn m(&self, ..)` on a
+            // value receiver — and which step the inherent sits at depends on the receiver's reference-ness, which the site does
+            // not carry. A path call (`Type::m(..)`) has no such probe: the inherent is the callee.
+            if method_site && std::env::var_os("CANDOR_R1200_METH_OFF").is_none() {
+                return (None, "meth:probe".into());
             }
             let mut fitted = 0usize;
             for cand in cands {

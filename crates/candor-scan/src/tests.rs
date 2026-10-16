@@ -17302,6 +17302,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v070 (R1200) bumped it to rev117.
         // rustagent-v067 (R1197b) bumped it to rev116.
         // rustagent-v066 (R1196) bumped it to rev115.
         // rustagent-v063 (R1186) bumped it to rev114.
@@ -17351,7 +17352,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17362,7 +17363,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev116/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev117/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -32316,9 +32317,6 @@ pub struct Thing2;
 macro_rules! imp2 { ($t:ident) => { impl $t { pub fn p2_check<T: PartialEq>(a: T) -> bool { a == a } } } }
 imp2!(Thing2);
 pub fn p2_check<T>(_t: T) -> bool { true }
-pub struct Thing3;
-mdep::make_p3!(Thing3);
-pub fn p3_check<T>(_t: T) -> bool { true }
 pub struct Hasher5;
 pub trait LocalU { fn p5_update(&self, d: &[u8]) -> bool; }
 impl LocalU for Hasher5 { fn p5_update(&self, d: &[u8]) -> bool { d.is_empty() } }
@@ -32333,16 +32331,20 @@ pub fn o7_noconv() -> usize { DEP::o7_keep(Ls(1)) }
 pub fn o8_inherent() -> bool { DEP::Thing8::o8_check(Noisy(1)) }
 pub fn p1_metamac() -> bool { DEP::p1_check(Noisy(1)) }
 pub fn p2_fixedmac() -> bool { DEP::Thing2::p2_check(Noisy(1)) }
-pub fn p3_foreignmac() -> bool { DEP::Thing3::p3_check(Noisy(1)) }
 pub fn p5_blanket(h: &DEP::Hasher5) -> bool { h.p5_update(Noisy(1)) }
 pub fn p7_conv() -> usize { DEP::p7_into(Ls(1)) }
 "##));
     for f in ["o1_mac", "o2_glob", "o3_pass", "o4_cfgif", "o7_noconv", "o8_inherent"] {
         assert!(veina_row_effs(&cv, f).is_empty(), "R1192 control `{f}` is pure (executed), and its callee is read:\n{cv:#}");
     }
-    for f in ["p1_metamac", "p2_fixedmac", "p3_foreignmac", "p5_blanket", "p7_conv"] {
+    for f in ["p1_metamac", "p2_fixedmac", "p5_blanket", "p7_conv"] {
         assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1192 `{f}` writes (executed) and keeps its disclosure:\n{cv:#}");
     }
+    // A FOREIGN macro naming the type makes its method. Its own dependency: since R1200 a foreign item macro also makes
+    // every FREE fn of the crate unreadable, which would hedge the free-fn controls above.
+    let (_, cv, _) = v053_chain("tdep67", "pub struct Thing3;\nmdep::make_p3!(Thing3);\npub fn p3_check<T>(_t: T) -> bool { true }\n",
+        &cons("tdep67", "pub fn p3_foreignmac() -> bool { DEP::Thing3::p3_check(Noisy(1)) }\n"));
+    assert!(veina_row_effs(&cv, "p3_foreignmac").iter().any(|e| e == "Unknown"), "R1192 `p3_foreignmac` writes (executed) and keeps its disclosure:\n{cv:#}");
     // An EXTERNAL glob beside a type the crate declares: the type's inherent method is read; a free fn is not.
     let (_, cv, _) = v067_chain("gdep67", "[dependencies]\nodep = \"1\"\n", "pub use odep::*;\npub struct Thing6;\nimpl Thing6 { pub fn o6_check<T>(_t: T) -> bool { true } }\npub fn p6_free<T>(_t: T) -> bool { true }\n",
         &cons("gdep67", "pub fn o6_extglob() -> bool { DEP::Thing6::o6_check(Noisy(1)) }\npub fn q6_free() -> bool { DEP::p6_free(Noisy(1)) }\n"));
@@ -32386,6 +32388,57 @@ pub fn b3_pure() -> u64 { bdep67::bqu(mkb3()) }
         assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1197(b) `{f}` writes through the alias's error type (executed):\n{cv:#}");
     }
     assert!(veina_row_effs(&cv, "b3_pure").is_empty(), "R1197(b) control `b3_pure` is pure (executed):\n{cv:#}");
+}
+
+/// SOUNDNESS R1200 (rustagent-v070; fixture rustagent-v070/fx/r1200, every cell EXECUTED). `depsig` finds a callee's
+/// candidates by LEAF across the whole dependency, so it read a definition the consumer's path does not reach and withheld
+/// the R1165 / R1186 disclosure over an executed write: (1) a FOREIGN item macro at the root defines `f1_conv` beside a
+/// visible unbounded `twin1::f1_conv`; (2) at a METHOD-CALL site a third crate's blanket trait's by-value `f2_put(self, ..)`
+/// beats the read inherent `f2_put(&self, ..)` (method probing takes the first autoref step that matches); (3) an external
+/// glob at the root supplies `Foo3` while the crate's own `Foo3` lives in a private module; (4) an external MODULE
+/// re-exported by name (`pub use odep4::inner`) beside a visible unbounded twin. Each read ABSENT under `deny Unknown`;
+/// each now discloses. Controls (executed pure) where the read definition IS the callee keep the narrowing.
+#[test]
+fn v070_r1200_depsig_reads_only_what_the_path_reaches() {
+    let cons = |d: &str, calls: &str| format!(r##"#![allow(dead_code)]
+pub fn mark() {{ let _ = std::fs::write("/tmp/rustagent_v070_fx", b"x"); }}
+pub struct Noisy(pub i32);
+impl PartialEq for Noisy {{ fn eq(&self, o: &Noisy) -> bool {{ mark(); self.0 == o.0 }} }}
+#[derive(Clone, Copy, Debug, Default)] pub struct Ls(pub u8);
+impl From<Ls> for String {{ fn from(l: Ls) -> String {{ mark(); format!("{{}}", l.0) }} }}
+{}
+"##, calls.replace("DEP", d));
+    let unk = |cv: &serde_json::Value, f: &str| veina_row_effs(cv, f).iter().any(|e| e == "Unknown");
+    // (1) a foreign item macro defines the free fn the root path reaches
+    let (_, cv, _) = v067_chain("xdep1", "[dependencies]\nmmac = \"1\"\n",
+        "mmac::make_free!();\npub mod twin1 {\n    pub fn f1_conv<T>(_t: T) -> usize { 0 }\n    pub fn f1_eq<T>(_t: T) -> bool { true }\n}\n",
+        &cons("xdep1", "pub fn p1_conv() -> usize { DEP::f1_conv(Ls(1)) }\npub fn p1_eq() -> bool { DEP::f1_eq(Noisy(1)) }\n"));
+    for f in ["p1_conv", "p1_eq"] {
+        assert!(unk(&cv, f), "R1200(1) `{f}` writes through a foreign-macro fn (executed) and discloses:\n{cv:#}");
+    }
+    // (2) a method-call site: a blanket trait's by-value method out of the dependency's sight wins the probe
+    let (_, cv, _) = v053_chain("xdep2",
+        "pub struct Foo2;\nimpl Foo2 {\n    pub fn f2_put(&self, _x: u32) -> usize { 0 }\n    pub fn f2_eq<D>(&self, _d: D) -> bool { true }\n}\n",
+        &cons("xdep2", "pub fn p2_put() -> usize { use tdep::Put; let f = DEP::Foo2; f.f2_put(Ls(1)) }\npub fn p2_eq() -> bool { use tdep::Put; let f = DEP::Foo2; f.f2_eq(Noisy(1)) }\n"));
+    for f in ["p2_put", "p2_eq"] {
+        assert!(unk(&cv, f), "R1200(2) `{f}` runs the blanket trait's method (executed) and discloses:\n{cv:#}");
+    }
+    // (3) an external glob supplies the type the root path names; the crate's own same-named type is in a private module
+    let (_, cv, _) = v067_chain("xdep3", "[dependencies]\ngdep3 = \"1\"\n",
+        "mod hidden3 {\n    pub struct Foo3;\n    impl Foo3 {\n        pub fn f3_conv<T>(_t: T) -> usize { 0 }\n        pub fn f3_eq<T>(_t: T) -> bool { true }\n    }\n}\npub fn mk3() -> hidden3::Foo3 { hidden3::Foo3 }\npub use gdep3::*;\npub struct Foo3c;\nimpl Foo3c { pub fn f3c_conv<T>(_t: T) -> usize { 0 } }\n",
+        &cons("xdep3", "pub fn p3_conv() -> usize { DEP::Foo3::f3_conv(Ls(1)) }\npub fn p3_eq() -> bool { DEP::Foo3::f3_eq(Noisy(1)) }\npub fn k3_conv() -> usize { DEP::Foo3c::f3c_conv(Ls(1)) }\n"));
+    for f in ["p3_conv", "p3_eq"] {
+        assert!(unk(&cv, f), "R1200(3) `{f}` runs the glob's `Foo3` (executed) and discloses:\n{cv:#}");
+    }
+    assert!(veina_row_effs(&cv, "k3_conv").is_empty(), "R1200(3) control: a type declared beside the glob is read (executed pure):\n{cv:#}");
+    // (4) an external module re-exported by name, and `pub extern crate .. as ..`
+    let (_, cv, _) = v067_chain("xdep4", "[dependencies]\nodep4 = \"1\"\n",
+        "pub use odep4::inner;\npub use odep4 as ext4;\npub mod twin4 {\n    pub fn f4_conv<T>(_t: T) -> usize { 0 }\n    pub fn f4_eq<T>(_t: T) -> bool { true }\n    pub fn f4b_conv<T>(_t: T) -> usize { 0 }\n}\n",
+        &cons("xdep4", "pub fn p4_conv() -> usize { DEP::inner::f4_conv(Ls(1)) }\npub fn p4_eq() -> bool { DEP::inner::f4_eq(Noisy(1)) }\npub fn p4b_conv() -> usize { DEP::ext4::f4b_conv(Ls(1)) }\npub fn k4_twin() -> usize { DEP::twin4::f4_conv(Ls(1)) }\n"));
+    for f in ["p4_conv", "p4_eq", "p4b_conv"] {
+        assert!(unk(&cv, f), "R1200(4) `{f}` runs the other crate's fn (executed) and discloses:\n{cv:#}");
+    }
+    assert!(veina_row_effs(&cv, "k4_twin").is_empty(), "R1200(4) control: the local module's fn is read (executed pure):\n{cv:#}");
 }
 
 /// SOUNDNESS R1197(a) (rustagent-v067; fixture rustagent-v067/fx/r1197a, every cell EXECUTED). An argument the consumer's
