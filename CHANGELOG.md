@@ -11,6 +11,56 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.12] — 2026-10-16
+
+candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the
+version. Every entry closes a **silent under-report** filed from a fixture that was executed and performed the
+effect while the report omitted it. The one users of bigdecimal and similar crates will see is R1180: since 0.40.8 a
+macro-made operator impl beside a hand-written one (bigdecimal's `impl_ops` shape) made the hand-written impl's
+call edge ambiguous, so a call reaching it lost the edge for an `ambiguous:` reason, and over an effectful
+hand-written impl `deny Fs` passed. **bigdecimal and the crates built the same way get their real edges back.** The
+rest add a unit for a macro-made compound-assignment impl (R1182), and disclose a value handed to a chained
+dependency's bit-operator or conversion body (R1181, R1186, R1196, R1197); a dependency's signature is now read per
+item (R1192). SOUNDNESS R1180, R1181, R1182, R1186, R1192, R1196 and R1197 close here.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.11 `candor-scan` (the
+  `cargo install` build) over the 5,221-entry registry corpus, unchained (5,215 compared), and over 982 consumers
+  with every dependency chained (981 compared; `bin/corpus-ab.py`; each crate version counts separately). Each gate
+  is scoped to the function named. **No `deny <E>` gate on a concrete effect moves in either direction**: no row
+  gains or loses a concrete effect in either arm. The R1180/R1182 fixtures are where `deny Fs` goes from pass to
+  fail.
+  - `deny Unknown` now **fails where 0.40.11 passed**, unchained, over 1,606 rows, every one a unit the report did
+    not publish before: macro-made compound-assignment impls (R1182) in rend (1,144 rows), x11rb-protocol (258),
+    bitflags 2.x's generated flag types (`Flags::bitor_assign` and the rest, 72), ppv-lite86, fraction's
+    `DynaInt::add_assign` and siblings, num-bigint and num-bigint-dig's `<mbe>` `rem_assign`/`div_assign`
+    family, ndarray 0.15's `ArrayBase::add_assign` family, rgb and arrow-buffer's `i256` assign operators.
+  - Chained, `deny Unknown` now **fails where 0.40.11 passed** over 647 rows (459 of them carrying `Unknown` and
+    nothing else), mostly code that hands a value to a dependency's `Into`/`From`/`TryFrom` body while the crate has
+    an effectful conversion it could meet (`dispatch:From.from` 222, `dispatch:TryFrom.try_from` 158): tokio (178
+    rows), quinn-proto (80), reqwest (66, e.g. `H3Connector::remote_connect`), hyper (45), sea-orm (44), mongodb
+    (38), rocket's `NamedFile::open`, mysql_async's `CheckTcpStream::poll`, plus num-rational/num-bigint/fraction
+    rows whose generic arithmetic dispatches on num-traits.
+  - `deny Unknown` now **passes where 0.40.11 failed** (R1180) over 376 rows unchained — bigdecimal 0.4 (312: its
+    `BigDecimal` arithmetic, `square`, `sqrt`, `inverse`, `with_scale`, the `arithmetic::addition` helpers),
+    wasm-bindgen 0.2's `Option`/`Result::expect_throw` and `unwrap_throw`, num-bigint 0.4/0.5's `scalar_mul` and
+    `from_f64` (both reported as newly failing in 0.40.11's notes; they pass again), bstr's `BStr::cmp`, uncased's
+    `partial_cmp`, ordered-float — and over 19 chained rows (termwiz's `eq` impls, num-bigint's `scalar_mul`,
+    metrics-util's `DebugValue::eq`). Each lost `Unknown` was an `ambiguous:same-name local defs` (or `methods`)
+    hedge that R1180 replaces with the edge to the hand-written impl; the R1180 lane classified every lost hedge as
+    either a new edge to that impl or the unit's own former contest, with a seeded removal carrying `invisible`
+    shown to be caught, and no lost `invisible`. 45 of those rows (36 keys) leave the report because the hedge was
+    all they carried.
+
+  Counts: unchained ADDED 5,827, REMOVED 45, CHANGED 5,403; chained ADDED 649, REMOVED 4, CHANGED 9,954. Eleven
+  sampled gates were re-run on the published binary and on this release's source, in a clean environment.
+  Unchained, `deny Unknown` over bitflags 2.11.0's `example_generated::Flags::bitxor_assign` and fraction 0.17.0's
+  `DynaInt::add_assign` pass on 0.40.11 and fail now; over bigdecimal 0.4.11's `BigDecimal::square` and
+  `arithmetic::addition::add_bigdecimal_refs`, wasm-bindgen 0.2.92's `Option::expect_throw` and num-bigint 0.4.6's
+  `biguint::multiplication::scalar_mul` they fail on 0.40.11 and pass now; `deny Fs Net Exec Env Clock Log
+  BigDecimal::square` passes on both. Chained, `deny Unknown` over rocket 0.5.1's `NamedFile::open`, reqwest
+  0.12.28's `H3Connector::remote_connect` and mysql_async 0.37.1's `CheckTcpStream::poll` passes on 0.40.11 and
+  fails now; over termwiz 0.23.3's `CellAttributes::eq` it fails on 0.40.11 and passes now.
+
 - ⚠ **candor-scan: an untyped argument to a chained dependency callee the scan cannot read is disclosed (SOUNDNESS
   R1197(a)).** An argument the typer cannot name (a dependency's generic return, a closure's return) handed to a
   dependency callee whose source signature the scan cannot read (a macro-made `fn $n<T: Into<String>>`) was
@@ -31,9 +81,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   sight keeps it unreadable; pass-through `cfg` macros and `cfg_if!` are read through; a `proc-macro` crate runs
   nothing; and a method must have an inherent definition on its type (a same-name foreign blanket-trait method may run
   otherwise). Withdraws disclosures: over the chained corpus 23 rows lose `Unknown` and 64 reasons go, each of the 189
-  narrowed sites behind them shown inert — 116 by an independent rustc-based checker (the callee needs no bound of the
-  value, or takes a concrete type), 73 by reading the callee's source (a constructor, an unbounded or non-conversion
-  bound); against 0.40.11 no row loses `Unknown`. Unchained reports are unchanged.
+  narrowed sites behind them checked to run no conversion of the value — 116 by an independent rustc-based checker (the
+  callee needs no bound of the value, or takes a concrete type), 73 by reading the callee's source (a constructor, an
+  unbounded or non-conversion bound). Against 0.40.11 this change takes `Unknown` from no row (the 19 chained rows
+  that lose it are R1180's, below). Unchained reports are unchanged.
 
 - ⚠ **candor-scan: a `Result` error type carried by a return or a binding, and an untyped argument, reach a chained
   dependency's conversion (SOUNDNESS R1196).** R1186's conversion witness named a `From` source only for a typed
