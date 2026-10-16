@@ -7,4 +7,4 @@ publish = false
 name = "fs_zip"
 path = "src/main.rs"
 [dependencies]
-zip = { version = "2", default-features = false }
+zip = { version = "9", default-features = false }
