@@ -20,10 +20,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   (method probing takes the first autoref step that matches); an external glob supplying the type the path names while
   the crate's own same-name type sits in another module; and a module brought in from outside (`pub use
   other::inner`, `pub extern crate other as inner`). Each is now unreadable, so the disclosure stays. Measured against
-  the published 0.40.12 over 981 chained consumers: **59 rows newly carry `Unknown`** (0.0068% of 869,900 rows) and no
-  row loses an effect or an `Unknown`. `deny Unknown` moves from pass to fail on those 59 functions, and no
-  `deny <E>` on a concrete effect moves. Nearly all are an untyped argument to a method of a dependency type (R1197(a)),
-  which is over-disclosure. The unchained corpus is unchanged.
+  the published 0.40.12 over 1,173 chained consumers: **9 rows newly carry `Unknown`** (0.0023% of 387,989 rows; 8
+  were absent or pure, 1 already carried concrete effects) and no row loses an effect or an `Unknown`. `deny Unknown`
+  moves from pass to fail on those 9 functions, and no `deny <E>` on a concrete effect moves. They are in redis and
+  hyper; redis's `is_hostname_error` is a stated over-disclosure, and the other 8 were not classified one by one.
+  The unchained corpus is unchanged.
 
 - ⚠ **candor-scan: a trait in scope can beat the inherent method a typed method call resolved to (SOUNDNESS R1202).**
   Rust's method probe tries the receiver by value, then `&`, then `&mut`, and takes the first step where any method
