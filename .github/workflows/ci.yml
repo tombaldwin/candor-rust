@@ -328,6 +328,14 @@ jobs:
             echo "::error::candor's effect surface grew vs .candor/baseline; refresh it if intended"
             exit 1
           fi
+          # A baseline FILE the engine could not load means that unit was compared against NOTHING — this
+          # step has no CANDOR_VIOLATIONS sink, so the engine's GUARD-UNAVAILABLE reaches it only as this
+          # stderr line. Measured: renaming the build-script key (issue #10) left the old file unloadable
+          # and this step green.
+          if echo "$out" | grep -q "could not be loaded"; then
+            echo "::error::a .candor/baseline file could not be loaded — that unit was not guarded; re-snapshot it"
+            exit 1
+          fi
           if [ "$rc" -ne 0 ]; then
             echo "::error::cargo dylint exited $rc without emitting AS-EFF-005 — see output above (not a surface regression)"
             exit 1

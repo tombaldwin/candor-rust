@@ -713,6 +713,29 @@ fn layer_reach_path(prefix: &str, krate: &str, kinds: &str) -> String {
     format!("{prefix}.{krate}.{kinds}.layerreach.json")
 }
 
+/// The `<crate>` segment of THIS unit's report-file names (`<prefix>.<crate>.<kinds>.json` and every
+/// sidecar beside it). Normally the crate name. A BUILD SCRIPT is the exception: cargo compiles every
+/// package's `build.rs` as a crate named `build_script_build`, so in a workspace with two build scripts
+/// both wrote ONE file — the last writer won, and the guard compared each build script against
+/// whichever one that was. Measured (issue #10 follow-up): `a/build.rs` (Env) beside `b/build.rs`
+/// (Env, Fs) with b written last, then `a/build.rs` gains Fs → `cargo candor guard` exit 0; with the
+/// other build order a clean tree failed instead. So a build script's key carries its package —
+/// `build_script_build-<package>` (cargo sets CARGO_PKG_NAME for every rustc it runs; a package name
+/// never contains `.`, so the key stays one dot-segment). If the package cannot be read the plain name
+/// is kept, which is the old behaviour rather than a guess.
+fn unit_file_key(crate_name: &str) -> String {
+    unit_file_key_from(crate_name, std::env::var("CARGO_PKG_NAME").ok().as_deref())
+}
+
+fn unit_file_key_from(crate_name: &str, pkg: Option<&str>) -> String {
+    match pkg {
+        Some(p) if crate_name == "build_script_build" && !p.is_empty() && !p.contains('.') => {
+            format!("build_script_build-{p}")
+        }
+        _ => crate_name.to_string(),
+    }
+}
+
 /// Write this crate's `layerreach` sidecar: for each local function (by hex `DefPathHash`), the set of
 /// `forbid`-target scopes it transitively reaches. Dependent crates load it (later in the same enforce
 /// pass) so a dependency *laundered through* this crate is still caught (AS-EFF-009).
@@ -3691,7 +3714,7 @@ impl Candor {
             candor_report::Analyzed { count: quals.len(), digest: candor_report::fnv1a_hex(&quals) }
         };
         match candor_report::to_packaged_report_json_full(
-            &meta, krate, json_entries, None, &[], Some(&analyzed), &[], None, None, None,
+            &meta, cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str(), json_entries, None, &[], Some(&analyzed), &[], None, None, None,
         ) {
             Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
                 Ok(()) => eprintln!(
@@ -3906,7 +3929,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             },
         };
         if let Some(prefix) = prefix {
-            let me = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).to_string();
+            let me = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
             let me_kind = cx
                 .tcx
                 .crate_types()
@@ -4338,7 +4361,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // Per-crate file naming, shared by JSON output, baseline input. A package emits
         // several crates SHARING a name (rlib + bin), so disambiguate by crate type too.
         let entry_fn = cx.tcx.entry_fn(()).map(|(did, _)| did);
-        let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+        // The FILE key (see unit_file_key — a build script's carries its package), not the bare name.
+        let krate = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
         let kinds: String = cx
             .tcx
             .crate_types()
@@ -4900,6 +4924,44 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // ── the §3.3 gate verdict (CANDOR_GATE_JSON) — see write_gate_verdict ─────────────────
         let guard_unavailable = baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
         self.write_gate_verdict(guard_unavailable);
+
+        // LAST, on the normal path only: this unit's report, violations and gate parts are on disk. A
+        // panic anywhere above skips this line, so its absence is the "did not finish" signal.
+        record_unit_completed(cx);
+    }
+}
+
+/// CANDOR_COMPLETED: a per-unit COMPLETION record, kept in its own sink because several readers treat
+/// ANY line in `CANDOR_VIOLATIONS` as a violation. One line per lint unit whose `check_crate_post`
+/// returned normally — `<canonical crate-root path>\t<crate>.<kinds>` — appended (O_APPEND, one write
+/// per line) so every unit of a workspace run lands in the one file. `cargo-candor` compares it with
+/// the units cargo builds to tell "the analysis finished, then rustc failed at shutdown" (a rustc
+/// `span_delayed_bug` promoted to an ICE AFTER this pass — tolerable) from "a unit was never analysed"
+/// (never tolerable). The key is the crate ROOT FILE because that is what cargo's own
+/// `compiler-artifact.target.src_path` names, so the wrapper needs no crate-type spelling map. A write
+/// failure is reported and leaves the record ABSENT, which the wrapper reads as "not completed" — the
+/// fail-closed direction. A no-op when the variable is unset or empty.
+fn record_unit_completed(cx: &LateContext<'_>) {
+    use std::io::Write;
+    let Some(path) = std::env::var("CANDOR_COMPLETED").ok().filter(|s| !s.is_empty()) else { return };
+    let krate = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
+    let kinds: String = cx.tcx.crate_types().iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join("-");
+    let root = cx
+        .tcx
+        .sess
+        .local_crate_source_file()
+        .and_then(|f| f.local_path().map(std::path::Path::to_path_buf))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let line = format!("{root}\t{krate}.{kinds}\n");
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                eprintln!("candor: could not append to CANDOR_COMPLETED={path:?} ({e})");
+            }
+        }
+        Err(e) => eprintln!("candor: could not open CANDOR_COMPLETED={path:?} ({e})"),
     }
 }
 
@@ -4938,6 +5000,18 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
 /// output (`CANDOR_BASELINE`, `CANDOR_JSON`) turns nearly every row red with "actual stderr differed"
 /// — a shell-state failure that looks exactly like a lint regression. Check `env | grep CANDOR` before
 /// concluding the engine changed.
+#[test]
+fn unit_file_key_separates_build_scripts_by_package() {
+    assert_eq!(unit_file_key_from("build_script_build", Some("a")), "build_script_build-a");
+    assert_eq!(unit_file_key_from("build_script_build", Some("my-pkg")), "build_script_build-my-pkg");
+    assert_ne!(unit_file_key_from("build_script_build", Some("a")), unit_file_key_from("build_script_build", Some("b")));
+    // Every other crate keeps its name — a package's lib/bin keys are unchanged.
+    assert_eq!(unit_file_key_from("app", Some("app")), "app");
+    // No readable package → the old key, never a guess.
+    assert_eq!(unit_file_key_from("build_script_build", None), "build_script_build");
+    assert_eq!(unit_file_key_from("build_script_build", Some("")), "build_script_build");
+}
+
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
