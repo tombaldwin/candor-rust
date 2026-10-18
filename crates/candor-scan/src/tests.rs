@@ -3303,7 +3303,9 @@ pub fn c2_closed_pure(o: &tdep::Other) { o.pure_one() }
         let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert_eq!(e("f2_exact"), s(&["Fs"]), "EXACT receiver: the default runs, never a sibling's override:\n{v:#}");
         assert_eq!(e("f3_inherit"), s(&["Env"]), "the inherited default must be joined:\n{v:#}");
-        assert_eq!(e("f4_kindonly"), s(&["Unknown"]), "a KIND-ONLY node with the trait in scope discloses:\n{v:#}");
+        // SOUNDNESS R1202 (rustagent-v072): the in-scope `Tr2`'s DEFAULT body is also joined — on a KIND-ONLY `K` that
+        // publishes no `K::m2`, it is the body that runs unless an override the wire does not show exists — beside the hedge.
+        assert_eq!(e("f4_kindonly"), s(&["Env", "Unknown"]), "a KIND-ONLY node with the trait in scope discloses:\n{v:#}");
         assert_eq!(e("f5_adds"), s(&["Env"]), "the ADDING package's override runs:\n{v:#}");
         assert_eq!(e("f1_chain"), s(&["Fs", "Unknown"]), "the guess is kept AND hedged:\n{v:#}");
         assert_eq!(e("c1_own"), s(&["Env"]), "an own key answers directly:\n{v:#}");
@@ -17302,6 +17304,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v072 (R1202) bumped it to rev118.
         // rustagent-v070 (R1200) bumped it to rev117.
         // rustagent-v067 (R1197b) bumped it to rev116.
         // rustagent-v066 (R1196) bumped it to rev115.
@@ -17352,7 +17355,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17363,7 +17366,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev117/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev118/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -32439,6 +32442,99 @@ impl From<Ls> for String {{ fn from(l: Ls) -> String {{ mark(); format!("{{}}", 
         assert!(unk(&cv, f), "R1200(4) `{f}` runs the other crate's fn (executed) and discloses:\n{cv:#}");
     }
     assert!(veina_row_effs(&cv, "k4_twin").is_empty(), "R1200(4) control: the local module's fn is read (executed pure):\n{cv:#}");
+}
+
+/// Scan each `(name, manifest deps, src)` dependency in order, each chained on the reports before it, then a consumer whose
+/// `files` are `(relative path, source)`, chained on every dependency except those in `unchained`. Returns the consumer report.
+#[cfg(test)]
+fn v072_chain_many(deps: &[(&str, &str, &str)], unchained: &[&str], files: &[(&str, &str)]) -> serde_json::Value {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let scan = |dir: &std::path::Path, idx: &DepIndex| -> serde_json::Value {
+        let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false,
+            quiet: true, deps_idx: idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    };
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("candor-v072many-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (all, chained) = (root.join("all"), root.join("chained"));
+    std::fs::create_dir_all(&all).unwrap();
+    std::fs::create_dir_all(&chained).unwrap();
+    let mut cdeps = String::new();
+    for (name, extra, src) in deps {
+        let d = root.join(name);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\nedition = \"2021\"\n[dependencies]\n{extra}")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let v = scan(&d, &crate::deps::load_dep_reports(Some(all.to_str().unwrap())));
+        std::fs::write(all.join(format!("report.{name}.scan.json")), v.to_string()).unwrap();
+        if !unchained.contains(name) {
+            std::fs::write(chained.join(format!("report.{name}.scan.json")), v.to_string()).unwrap();
+        }
+        cdeps.push_str(&format!("{name} = {{ path = \"../{name}\" }}\n"));
+    }
+    let cons = root.join("ccons");
+    std::fs::create_dir_all(cons.join("src")).unwrap();
+    std::fs::write(cons.join("Cargo.toml"), format!("[package]\nname = \"ccons\"\nedition = \"2021\"\n[dependencies]\n{cdeps}")).unwrap();
+    for (p, s) in files {
+        std::fs::write(cons.join("src").join(p), s).unwrap();
+    }
+    let cv = scan(&cons, &crate::deps::load_dep_reports(Some(chained.to_str().unwrap())));
+    let _ = std::fs::remove_dir_all(&root);
+    cv
+}
+
+/// SOUNDNESS R1202 (rustagent-v072; fixture rustagent-v072/fx/r1202, every cell EXECUTED, callees confirmed by rustc MIR).
+/// A typed method call resolved to the receiver type's INHERENT method, while a trait in scope carries a method of the same
+/// name that Rust's method probe reaches first: a blanket `impl<T> Go for T`'s `go(self)` beats `Bar::go(&self)` on a value
+/// receiver (by-value step before the `&` step), and an `MGo::mgo(&self)` beats an inherent `mgo(&mut self)`. The trait ran
+/// `Fs` and the report read the inherent's `['Env']` (or nothing, for a pure inherent): `deny Fs` and `deny Unknown` both 0,
+/// on 0.40.12 too. Now: a chained trait publishing the member is JOINED, a trait this crate declares is EDGED, and a
+/// dependency receiver beside an import of an unchained package DISCLOSES. The inherent's charge is kept (a union).
+#[test]
+fn v072_r1202_a_trait_in_scope_may_beat_the_inherent_method() {
+    let ydep = ("ydep", "", "pub struct Bar;\nimpl Bar {\n    pub fn go(&self, n: u32) -> usize { std::env::var(\"X\").map(|s| s.len()).unwrap_or(0) + n as usize }\n    pub fn mgo(&mut self, n: u32) -> usize { std::env::var(\"X\").map(|s| s.len()).unwrap_or(0) + n as usize }\n}\n");
+    let ypure = ("ypure", "", "pub struct Baz;\nimpl Baz { pub fn go(&self, n: u32) -> usize { n as usize } }\n");
+    let tgo = ("tgo", "", "pub trait Go { fn go(self, n: u32) -> usize where Self: Sized { let _ = std::fs::write(\"/tmp/v072\", b\"x\"); n as usize } }\nimpl<T> Go for T {}\npub trait MGo { fn mgo(&self, n: u32) -> usize { let _ = std::fs::write(\"/tmp/v072\", b\"x\"); n as usize } }\nimpl<T> MGo for T {}\n");
+    let tgo2 = ("tgo2", "ydep = { path = \"../ydep\" }\n", "pub trait Go2 { fn go(self, n: u32) -> usize; }\nimpl Go2 for ydep::Bar { fn go(self, n: u32) -> usize { let _ = std::fs::write(\"/tmp/v072\", b\"x\"); n as usize } }\n");
+    let lib = "pub mod m01; pub mod m02; pub mod m03; pub mod m04; pub mod m05; pub mod m06; pub mod m09; pub mod m10; pub mod m12;\n\
+pub mod loc { pub trait LGo { fn go(self, n: u32) -> usize where Self: Sized { let _ = std::fs::write(\"/tmp/v072\", b\"x\"); n as usize } } impl<T> LGo for T {} }\n\
+pub struct LTy;\nimpl LTy { pub fn go(&self, n: u32) -> usize { std::env::var(\"X\").map(|s| s.len()).unwrap_or(0) + n as usize } }\n";
+    let files: &[(&str, &str)] = &[
+        ("lib.rs", lib),
+        ("m01.rs", "pub fn q2g_go() -> usize { use tgo::Go; let b = ydep::Bar; b.go(1) }\n"),
+        ("m02.rs", "pub fn q2_go() -> usize { use tgo::Go; let b = ypure::Baz; b.go(1) }\n"),
+        ("m03.rs", "pub fn q3_named() -> usize { use tgo2::Go2; let b = ydep::Bar; b.go(1) }\n"),
+        ("m04.rs", "pub fn q4_mut() -> usize { use tgo::MGo; let mut b = ydep::Bar; b.mgo(1) }\n"),
+        ("m05.rs", "pub fn q5_glob() -> usize { use tgo::*; let b = ydep::Bar; b.go(1) }\n"),
+        ("m06.rs", "pub fn q6_local() -> usize { use crate::loc::LGo; let b = ypure::Baz; b.go(1) }\n"),
+        ("m09.rs", "pub fn k_path() -> usize { use tgo::Go; ydep::Bar::go(&ydep::Bar, 1) }\n"),
+        ("m10.rs", "pub fn k_noimp() -> usize { let b = ydep::Bar; b.go(1) }\n"),
+        ("m12.rs", "pub fn k_pnoimp() -> usize { let b = ypure::Baz; b.go(1) }\n"),
+    ];
+    let has = |cv: &serde_json::Value, f: &str, e: &str| veina_row_effs(cv, f).iter().any(|x| x == e);
+    // every package chained: the trait's body is joined (a resolution) — `deny Fs` sees the executed write
+    let cv = v072_chain_many(&[ydep, ypure, tgo, tgo2], &[], files);
+    for f in ["m01::q2g_go", "m02::q2_go", "m03::q3_named", "m04::q4_mut", "m05::q5_glob", "m06::q6_local"] {
+        assert!(has(&cv, f, "Fs"), "R1202 `{f}` runs the trait's method (executed: Fs) and is charged it:\n{cv:#}");
+    }
+    // the trait's package unchained: a dependency receiver discloses; this crate's own trait is still edged
+    let cu = v072_chain_many(&[ydep, ypure, tgo, tgo2], &["tgo", "tgo2"], files);
+    for f in ["m01::q2g_go", "m02::q2_go", "m03::q3_named", "m04::q4_mut", "m05::q5_glob"] {
+        assert!(has(&cu, f, "Unknown"), "R1202 `{f}` runs an unchained trait's method (executed) and discloses:\n{cu:#}");
+    }
+    assert!(has(&cu, "m06::q6_local", "Fs"), "R1202 `m06::q6_local` runs this crate's trait (executed: Fs):\n{cu:#}");
+    // controls: no trait in scope, or a path call — the inherent is the callee (MIR), nothing is added
+    for cv in [&cv, &cu] {
+        for f in ["m09::k_path", "m10::k_noimp"] {
+            assert_eq!(veina_row_effs(cv, f), vec!["Env".to_string()], "R1202 control `{f}` runs the inherent alone (MIR):\n{cv:#}");
+        }
+        assert!(veina_row_effs(cv, "m12::k_pnoimp").is_empty(), "R1202 control `k_pnoimp` is pure (executed):\n{cv:#}");
+    }
 }
 
 /// SOUNDNESS R1197(a) (rustagent-v067; fixture rustagent-v067/fx/r1197a, every cell EXECUTED). An argument the consumer's

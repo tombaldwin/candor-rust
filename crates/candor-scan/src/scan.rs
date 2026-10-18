@@ -2244,6 +2244,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // ⟨0.40⟩ this crate's own trait declarations, by module-qualified path — row 1 must not read an import of
     // one of them as a chained trait in scope (see `typesurf::in_scope_publishes`).
     let local_trait_quals: Vec<&str> = merged.trait_quals.values().flatten().map(String::as_str).collect();
+    // SOUNDNESS R1202 — per file, the leaves of the traits this crate DECLARES in it (in scope there without a `use`).
+    let file_local_traits: HashMap<&str, HashSet<&str>> = decls_per_file
+        .iter()
+        .map(|(rel, _, fd)| (rel.as_str(), fd.trait_quals.keys().map(String::as_str).collect()))
+        .collect();
+    let r1202_off = std::env::var_os("CANDOR_R1202_OFF").is_some();
+    // SOUNDNESS R1202 — each unit's receiver rank (`FnInfo::recv_rank`), for the local-trait-vs-local-inherent contest.
+    let r1202_rank: HashMap<String, u8> = fns.iter().filter(|f| f.recv_rank > 0).map(|f| (f.qual.clone(), f.recv_rank)).collect();
+    let r1202_probe = std::env::var_os("CANDOR_R1202_PROBE").is_some();
     // ⟨0.40⟩ SOUNDNESS R888 — this crate's own `Deref` impls whose target is a DEPENDENCY's type.
     let foreign_derefs = {
         let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
@@ -4584,6 +4593,175 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             let leaf = tpath.rsplit("::").next().unwrap_or(tpath);
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
+                        }
+                    }
+                }
+            }
+            // SOUNDNESS R1202 — A TRAIT IN SCOPE MAY BEAT THE INHERENT METHOD A TYPED CALL RESOLVED TO. Rust's method probe
+            // walks the receiver by value, then `&`, then `&mut`, and takes the FIRST step at which ANY candidate matches;
+            // an inherent method wins only against a trait method found at the SAME step. So `use tgo::Go; let b =
+            // ydep::Bar; b.go(1)` runs a blanket `impl<T> Go for T`'s `go(self)` over `Bar::go(&self)` (EXECUTED,
+            // rustagent-v072/fx/r1202: `Fs` ran, `['Env']` read, `deny Fs` and `deny Unknown` both 0, on 0.40.12 too), and a
+            // trait's `&self` method beats an inherent `&mut self` one. The site does not carry the receiver's
+            // reference-ness, so every trait in scope that may carry the member is a candidate callee, UNIONED with the
+            // resolution already made (which is kept: the inherent does run when the receiver is a reference):
+            //   * a CHAINED trait publishing the member: its DEFAULT body, or an impl for the receiver's type in the trait's
+            //     crate, is JOINED (a resolution); with neither on the wire a MISS discloses and a HIT keeps its answer;
+            //   * a trait THIS CRATE declares with a BLANKET impl, in scope and declaring the member, is EDGED (its default,
+            //     its blanket body) unless both receiver ranks are known and the inherent's step comes first; where
+            //     neither unit exists the call discloses;
+            //   * a dependency receiver beside a `use` of a package with NO report (a glob, or an UpperCamelCase leaf)
+            //     DISCLOSES: that package's members cannot be read. Asked for a DEPENDENCY's receiver only, where this
+            //     scan already chains; a local receiver beside an unchained import is the residual, stated (every
+            //     UpperCamelCase import of every unchained crate would hedge every typed call in its file).
+            // A trait the receiver's own type already implements is not a competitor: the call's key IS that impl. Only a
+            // method-call EXPRESSION (`Call::dot`) is asked — a path call runs no probe.
+            // `CANDOR_R1202_OFF` is the falsification switch.
+            if !r1202_off && c.dot && c.method && c.typed && !c.is_macro && dep_default_path.is_none() && !suppress_bare_leaf {
+                let segs: Vec<&str> = c.path.split("::").collect();
+                let dep_recv = classified.is_none()
+                    && (!resolved_local || r1152_union)
+                    && jpath.contains("::")
+                    && deps_idx.crates.contains(cr_real);
+                let local_recv = resolved_local && !dep_recv && segs.len() >= 2;
+                if dep_recv || local_recv {
+                    let member = c.leaf.as_str();
+                    let file = f.loc.split(':').next().unwrap_or("");
+                    let fu = file_uses.get(file).copied().unwrap_or(&[]);
+                    let st = crate::typesurf::in_scope_traits(deps_idx, fu, &dep_renames, &local_trait_quals, &deps, member);
+                    // the receiver type: its chained key (dependency) or its leaf (local)
+                    let (recv_key, ty_leaf) = if dep_recv {
+                        let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
+                        let tpath = rel.rsplit_once("::").map_or("", |(t, _)| t);
+                        let k = deps_idx.surface.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
+                        (Some(k), tpath.rsplit("::").next().unwrap_or(tpath).to_string())
+                    } else {
+                        (None, segs[segs.len() - 2].to_string())
+                    };
+                    // a dependency type's supertraits (closure): a trait among them is the type's own impl, already the key
+                    // (the receiver key itself too: a receiver typed as a TRAIT dispatches on that trait already)
+                    let mut supers: HashSet<String> = recv_key.iter().cloned().collect();
+                    if let Some(k) = &recv_key {
+                        let mut todo = vec![k.clone()];
+                        while let Some(t) = todo.pop() {
+                            for s in deps_idx.surface.types.get(&t).and_then(|i| i.supers.as_ref()).into_iter().flatten() {
+                                if supers.insert(s.clone()) {
+                                    todo.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                    let own_traits = type_to_traits.get(&ty_leaf);
+                    // a receiver typed as a trait (`S: Serializer`, `&dyn Array`) is a dispatch on that trait, not an
+                    // inherent resolution; nothing here is a competitor of it
+                    let recv_is_trait = recv_key.as_ref().is_some_and(|k| deps_idx.surface.kind(k) == Some(crate::typesurf::KIND_PROTOCOL))
+                        || (!dep_recv && trait_decls.contains_key(&ty_leaf));
+                    for key in st.chained.iter().filter(|_| !recv_is_trait) {
+                        let tr_leaf = key.split_once('#').map_or(key.as_str(), |(_, q)| q).rsplit("::").next().unwrap_or("");
+                        if supers.contains(key) || own_traits.is_some_and(|v| v.iter().any(|t| t == tr_leaf)) {
+                            continue;
+                        }
+                        // NOT the trait's ⟨0.39⟩ union: that unions EVERY implementor, and where the receiver's type
+                        // implements the trait itself (its impl is the key that already answered) it charged the other
+                        // implementors' effects — measured, `StdRng::fill_bytes` read `Rand` through `RngCore`'s union.
+                        // What can run INSTEAD of the resolved method is the trait's DEFAULT body (a blanket impl that does
+                        // not override it) or an impl for the receiver's own type written in the trait's crate (`impl Go2
+                        // for ydep::Bar` in `tgo2`). Where neither body is on the wire: a MISS discloses; a HIT (the
+                        // receiver's own key answered, or a local unit resolved) keeps its resolution — the residual is a
+                        // blanket impl that OVERRIDES the member, whose body is keyed by a type parameter, stated.
+                        let tpkg = key.split_once('#').map_or("", |(p, _)| p);
+                        // an impl for the receiver's own type in the trait's crate (an `adds` override among them) is the
+                        // body that runs for it; only where there is none can the DEFAULT run
+                        let mut bodies: Vec<String> = Vec::new();
+                        if dep_recv && Some(tpkg) != recv_key.as_ref().and_then(|k| k.split_once('#')).map(|(p, _)| p) {
+                            if let Some(k) = crate::typesurf::present(deps_idx, &format!("{tpkg}#{ty_leaf}::{member}"), true) {
+                                bodies.push(k);
+                            }
+                        }
+                        if bodies.is_empty() {
+                            if let Some(k) = crate::typesurf::present(deps_idx, &format!("{key}::{member}"), true) {
+                                bodies.push(k);
+                            }
+                        }
+                        let hit = !dep_recv || dep_join_hit;
+                        if r1202_probe {
+                            eprintln!("R1202\t{}\t{}\tchained\t{key}\tbodies={}{}\t{}", f.qual, c.path, bodies.len(),
+                                if hit { "/hit" } else { "/miss" }, if dep_recv { "dep" } else { "local" });
+                        }
+                        if bodies.is_empty() && !hit {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr_leaf}.{member}"));
+                        }
+                        for k in &bodies {
+                            if let Some(de) = crate::typesurf::row(deps_idx, k, true) {
+                                apply_dep_fn(de, &f.qual, DepSink {
+                                    direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                                    tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                                    blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                                    unknown_via_dep: &mut unknown_via_dep,
+                                });
+                            }
+                        }
+                    }
+                    if dep_recv && !st.unread.is_empty() {
+                        if r1202_probe {
+                            eprintln!("R1202\t{}\t{}\tunread\t{}\t-\tdep", f.qual, c.path, st.unread.join(","));
+                        }
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{ty_leaf}.{member}"));
+                    }
+                    // this crate's own traits declaring the member, in scope in this file
+                    let leaves: HashSet<&str> = fu.iter().filter_map(|u| u.rsplit("::").next()).collect();
+                    let local_glob = fu.iter().any(|u| {
+                        let head = u.split("::").next().unwrap_or("");
+                        u.ends_with('*') && !deps.contains(head) && !deps_idx.crates.contains(head)
+                            && !matches!(head, "std" | "core" | "alloc")
+                    });
+                    let declared_here = file_local_traits.get(file);
+                    for (tl, lt) in trait_decls.iter().filter(|_| !recv_is_trait) {
+                        if !lt.methods.contains(member) || own_traits.is_some_and(|v| v.iter().any(|t| t == tl)) {
+                            continue;
+                        }
+                        // the trait can apply to the receiver only through a BLANKET impl (its own impls for the
+                        // receiver's type are `own_traits`): an `impl<T> Tr for T`, recorded by Pass A.
+                        let blanket_impl = merged.blanket_methods.contains_key(&crate::model::blanket_trait_key(tl));
+                        if !blanket_impl {
+                            continue;
+                        }
+                        if !(local_glob || leaves.contains(tl.as_str()) || declared_here.is_some_and(|d| d.contains(tl.as_str()))) {
+                            continue;
+                        }
+                        let blanket = merged.blanket_methods.get(member).filter(|b| !b.is_empty()).map(|b| format!("{b}::{member}"));
+                        // BOTH bodies local, so both RANKS are known: on a value receiver the trait wins only at an
+                        // EARLIER step than the inherent (`self` before `&self` before `&mut self`); at the same or a
+                        // later step the inherent wins (Rust prefers it within a step). A REFERENCE receiver can let a
+                        // blanket impl for `&T`/`&mut T` win at a later rank; the site does not carry the receiver's
+                        // reference-ness, so that half is the residual, stated.
+                        if local_recv {
+                            let rank_of = |k: &str| by_tail2.get(k).into_iter().flatten().filter_map(|q| r1202_rank.get(q).copied()).min();
+                            let inh = rank_of(&format!("{ty_leaf}::{member}"));
+                            let tr = rank_of(&format!("{tl}::{member}")).or_else(|| blanket.as_deref().and_then(rank_of));
+                            if let (Some(i), Some(t)) = (inh, tr) {
+                                if t >= i {
+                                    continue;
+                                }
+                            }
+                        }
+                        let mut edged = false;
+                        for k in std::iter::once(format!("{tl}::{member}")).chain(blanket) {
+                            for t in by_tail2.get(&k).into_iter().flatten() {
+                                if t != &f.qual {
+                                    calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                                    edged = true;
+                                }
+                            }
+                        }
+                        if r1202_probe {
+                            eprintln!("R1202\t{}\t{}\tlocal\t{tl}\tedged={edged}\t{}", f.qual, c.path, if dep_recv { "dep" } else { "local" });
+                        }
+                        if !edged {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tl}.{member}"));
                         }
                     }
                 }

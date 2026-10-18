@@ -83,6 +83,29 @@ pub(crate) struct Call {
     /// deterministic and `from_rng(&mut SysRng)` is an OS draw, and only the argument tells them apart.
     #[serde(rename = "er", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) entropy_arg: bool,
+    /// SOUNDNESS R1202 — written as a METHOD-CALL EXPRESSION (`x.m(..)`), where Rust's autoref probe runs and a trait in
+    /// scope may beat the inherent method. `method` alone does not say so: generic-parameter and default-body expansions
+    /// (`T::m(..)` dispatched to every implementor) are method edges too, and no probe runs for a path call. A cache
+    /// entry from before this field reads `false` (no R1202 competitor), which is why rev118 exists.
+    #[serde(rename = "d", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) dot: bool,
+}
+
+/// SOUNDNESS R1202 — `FnInfo::recv_rank` of a signature (and of a trait method's, by the same rule).
+pub(crate) fn recv_rank(sig: &syn::Signature) -> u8 {
+    match sig.receiver() {
+        Some(r) if r.colon_token.is_none() => match (&r.reference, &r.mutability) {
+            (None, _) => 1,
+            (Some(_), None) => 2,
+            (Some(_), Some(_)) => 3,
+        },
+        _ => 0,
+    }
+}
+
+/// SOUNDNESS R1202 — the reserved `blanket_methods` key recording that trait `leaf` has a BLANKET impl (`impl<T> Tr for T`).
+pub(crate) fn blanket_trait_key(leaf: &str) -> String {
+    format!("\u{1f}blanket\u{1f}{leaf}")
 }
 
 pub(crate) fn is_zero_u8(n: &u8) -> bool {
@@ -203,6 +226,11 @@ pub(crate) struct FnInfo {
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
+    /// SOUNDNESS R1202 — the receiver's autoref RANK, the step of Rust's method probe at which a value receiver reaches
+    /// this method: 1 `self`, 2 `&self`, 3 `&mut self`; 0 = not recorded or a typed receiver (`self: Box<Self>`), which
+    /// no rule may read as a rank.
+    #[serde(rename = "rr", default, skip_serializing_if = "crate::model::is_zero_u8")]
+    pub(crate) recv_rank: u8,
     /// SOUNDNESS R1095 — method leaves called on a receiver no route typed (`CallCollector::untyped_methods`).
     #[serde(rename = "um", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) untyped_methods: Vec<String>,

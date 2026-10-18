@@ -1387,6 +1387,69 @@ pub(crate) fn in_scope_publishes(
     })
 }
 
+/// SOUNDNESS R1202 — the traits IN SCOPE in this file that may supply `member` to a method call, as opposed to
+/// `in_scope_publishes`'s first one. Rust's method probe takes the FIRST autoref step (by value, `&`, `&mut`) at which
+/// any candidate matches, and prefers an inherent method only against a trait method found at the SAME step, so a
+/// trait in scope whose method takes `self` beats an inherent `&self` one, and a `&self` trait method beats an inherent
+/// `&mut self` one. The receiver's reference-ness is not on the call site, so any trait in scope that carries the
+/// member is a candidate callee.
+///   * `chained`: every chained TRAIT (kind known) publishing `member`, matched the way `in_scope_publishes` matches —
+///     by the `use` leaf, or by a glob of a chained package; the caller joins its default or type impl body.
+///   * `unread`: every `use` that may name a trait of a package this scan has NO report for — a glob of a manifest
+///     dependency that is not chained, or an UpperCamelCase leaf imported from one. Its members cannot be read, so the
+///     caller DISCLOSES.
+pub(crate) struct ScopeTraits {
+    pub(crate) chained: Vec<String>,
+    pub(crate) unread: Vec<String>,
+}
+
+pub(crate) fn in_scope_traits(
+    idx: &crate::deps::DepIndex,
+    file_uses: &[String],
+    renames: &HashMap<String, String>,
+    local_traits: &[&str],
+    manifest: &HashSet<String>,
+    member: &str,
+) -> ScopeTraits {
+    let norm = |s: &str| s.replace('-', "_");
+    let real_head = |u: &str| -> String {
+        let head = u.split("::").next().unwrap_or("");
+        norm(renames.get(head).map_or(head, String::as_str))
+    };
+    let names_local_trait = |u: &str| -> bool { u.strip_prefix("crate::").is_some_and(|tail| local_traits.contains(&tail)) };
+    let uses: Vec<&String> = file_uses.iter().filter(|u| u.ends_with('*') || !names_local_trait(u)).collect();
+    let glob = uses.iter().any(|u| u.ends_with('*') && idx.crates.contains(&real_head(u)));
+    let leaves: HashSet<&str> = uses.iter().filter_map(|u| u.rsplit("::").next()).collect();
+    let chained = idx
+        .members
+        .get(member)
+        .map(|owners| {
+            owners
+                .iter()
+                .filter_map(|(pkg, o)| {
+                    let leaf = o.rsplit("::").next().unwrap_or(o);
+                    let key = format!("{pkg}#{o}");
+                    ((glob || leaves.contains(leaf)) && idx.surface.kind(&key) == Some(KIND_PROTOCOL)).then_some(key)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let manifest: HashSet<String> = manifest.iter().map(|m| norm(m)).collect();
+    let unread = uses
+        .iter()
+        .filter(|u| {
+            let head = real_head(u);
+            if !u.contains("::") || !manifest.contains(&head) || idx.crates.contains(&head) {
+                return false;
+            }
+            let leaf = u.rsplit("::").next().unwrap_or("");
+            leaf == "*" || leaf.chars().next().is_some_and(char::is_uppercase)
+        })
+        .map(|u| (*u).clone())
+        .collect();
+    ScopeTraits { chained, unread }
+}
+
 #[cfg(test)]
 mod unit {
     use super::*;

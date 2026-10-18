@@ -25,6 +25,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `deny <E>` on a concrete effect moves. Nearly all are an untyped argument to a method of a dependency type (R1197(a)),
   which is over-disclosure. The unchained corpus is unchanged.
 
+- ⚠ **candor-scan: a trait in scope can beat the inherent method a typed method call resolved to (SOUNDNESS R1202).**
+  Rust's method probe tries the receiver by value, then `&`, then `&mut`, and takes the first step where any method
+  matches. An inherent method wins only against a trait method found at the same step. So `use tgo::Go; let b =
+  ydep::Bar; b.go(1)` runs a blanket trait's `go(self)` instead of `Bar::go(&self)`. The scan joined only the inherent
+  method, and an executed write read as `['Env']` (or as nothing, for a pure inherent method), so `deny Fs` and
+  `deny Unknown` both passed. Now, at every method-call expression (`x.m(..)`), the scan looks at each trait in scope
+  that carries `m`. For a chained trait it joins the trait's default body, or an impl for the receiver's own type in
+  the trait's crate. It edges to a trait this crate declares that has a blanket impl, unless both receiver ranks show
+  that the inherent method wins. For a dependency's type, it discloses `Unknown` when a package with no report is
+  imported in the file. The inherent method's charge is kept: it does run when the receiver is a reference.
+  Measured over 1,173 chained consumers against the R1200 build: 15 rows gain concrete effects, and 115 rows newly
+  carry `Unknown` (0.030% of 388,068). Against the published 0.40.12, with R1200 included, the figure is 124. The 15
+  are redis's sync cluster connection, reached through `ConnectionLike`'s default `req_command`, which is the real
+  callee. Unchained, over 5,372 registry crates: 28 rows gain concrete effects (the same redis shape, in two versions)
+  and 164 newly carry `Unknown` (0.0069% of 2,381,733). No row loses an effect or an `Unknown`. The cache schema
+  moves to rev118 (`Call::dot`, `FnInfo::recv_rank`, and a blanket-trait record).
+
 ## [0.40.12] — 2026-10-16
 
 candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the

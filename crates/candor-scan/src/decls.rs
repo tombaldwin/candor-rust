@@ -3254,6 +3254,7 @@ pub(crate) fn fninfo(
         mbe_op: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
+        recv_rank: crate::model::recv_rank(sig),
         untyped_methods: c.untyped_methods.into_iter().collect(),
     }
 }
@@ -5007,6 +5008,13 @@ pub(crate) fn collect_decls(
                             && p.path.get_ident().is_some_and(|id| im.generics.params.iter().any(|g|
                                 matches!(g, syn::GenericParam::Type(t) if &t.ident == id))));
                     if is_blanket {
+                        // SOUNDNESS R1202 — and WHICH TRAIT has a blanket impl, under a reserved key no method leaf
+                        // can equal: a method of it is a candidate at every method-call site with the trait in scope.
+                        if let Some((_, tp, _)) = &im.trait_ {
+                            if let Some(seg) = tp.segments.last() {
+                                blanket_methods.insert(crate::model::blanket_trait_key(&seg.ident.to_string()), sty.clone());
+                            }
+                        }
                         for ii in &im.items {
                             if let syn::ImplItem::Fn(m) = ii {
                                 let leaf = m.sig.ident.to_string();
