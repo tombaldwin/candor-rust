@@ -4900,6 +4900,44 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // ── the §3.3 gate verdict (CANDOR_GATE_JSON) — see write_gate_verdict ─────────────────
         let guard_unavailable = baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
         self.write_gate_verdict(guard_unavailable);
+
+        // LAST, on the normal path only: this unit's report, violations and gate parts are on disk. A
+        // panic anywhere above skips this line, so its absence is the "did not finish" signal.
+        record_unit_completed(cx);
+    }
+}
+
+/// CANDOR_COMPLETED: a per-unit COMPLETION record, kept in its own sink because several readers treat
+/// ANY line in `CANDOR_VIOLATIONS` as a violation. One line per lint unit whose `check_crate_post`
+/// returned normally — `<canonical crate-root path>\t<crate>.<kinds>` — appended (O_APPEND, one write
+/// per line) so every unit of a workspace run lands in the one file. `cargo-candor` compares it with
+/// the units cargo builds to tell "the analysis finished, then rustc failed at shutdown" (a rustc
+/// `span_delayed_bug` promoted to an ICE AFTER this pass — tolerable) from "a unit was never analysed"
+/// (never tolerable). The key is the crate ROOT FILE because that is what cargo's own
+/// `compiler-artifact.target.src_path` names, so the wrapper needs no crate-type spelling map. A write
+/// failure is reported and leaves the record ABSENT, which the wrapper reads as "not completed" — the
+/// fail-closed direction. A no-op when the variable is unset or empty.
+fn record_unit_completed(cx: &LateContext<'_>) {
+    use std::io::Write;
+    let Some(path) = std::env::var("CANDOR_COMPLETED").ok().filter(|s| !s.is_empty()) else { return };
+    let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+    let kinds: String = cx.tcx.crate_types().iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join("-");
+    let root = cx
+        .tcx
+        .sess
+        .local_crate_source_file()
+        .and_then(|f| f.local_path().map(std::path::Path::to_path_buf))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let line = format!("{root}\t{krate}.{kinds}\n");
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                eprintln!("candor: could not append to CANDOR_COMPLETED={path:?} ({e})");
+            }
+        }
+        Err(e) => eprintln!("candor: could not open CANDOR_COMPLETED={path:?} ({e})"),
     }
 }
 

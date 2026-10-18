@@ -81,6 +81,40 @@
       ]
     },
     {
+      "fn": "record_unit_completed",
+      "loc": "src/lib.rs:4920:1: 4920:47",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "unresolved": true,
+      "hash": "abe6a14fe9fda668c2618895c8dbfcb3",
+      "fs": [
+        "read"
+      ],
+      "unknownWhy": [
+        "dispatch:Write.write_all"
+      ],
+      "invisible": [
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_expr",
       "loc": "src/lib.rs:3742:5: 3742:77",
       "inferred": [

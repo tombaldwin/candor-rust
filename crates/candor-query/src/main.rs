@@ -95,6 +95,7 @@ fn main() {
         "locate" => cmd_locate(rest),
         "gate-verdict" => cmd_gate_verdict(rest),
         "engine-version" => cmd_engine_version(rest),
+        "units" => cmd_units(rest),
         "merge-hook" => cmd_merge_hook(rest),
         "parsepolicy" => cmd_parsepolicy(rest),
         // The agent contract for THE INSTALLED VERSION, embedded at build time — doc and binary
@@ -107,7 +108,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|units|merge-hook|--agents)"
             );
             2
         }
@@ -180,6 +181,7 @@ fn print_help() {
         ("locate   <lib|scan> <dir>…", "print the newest matching report file under the dirs"),
         ("gate-verdict <parts-file> <out|-> [--report <loc>] [--policy <f>]", "assemble the gate verdict from NDJSON violation records"),
         ("engine-version <lib-path>", "print the candor-build-version tag embedded in a binary"),
+        ("units    <metadata.json> <check.jsonl> <completed>", "did candor's analysis finish for every unit cargo builds? (exit 1 names each missing one)"),
         ("merge-hook <settings.json> <hook-command>", "idempotently merge candor's Stop hook into a settings file"),
         ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),
         ("--agents", "print the agent contract embedded in this installed build"),

@@ -11,6 +11,26 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **`cargo candor snapshot` and `guard` give one answer when `cargo dylint` exits nonzero** (issue #10).
+  Before, `snapshot` accepted any nonzero exit that left *some* report file under the prefix and called the
+  baseline valid, while `guard` treated every nonzero exit as a build failure (exit 2), so a crate could be
+  snapshotted and never guarded. Measured on a lib+bin fixture against 797f5b5: a bin with a **compile error**
+  was "snapshotted" from the previous run's stale bin report and re-stamped with the current engine; a lib
+  whose rustc failed after its analysis left the bin unbuilt and the baseline without `<crate>.Executable`,
+  called valid; a `#![deny(dead_code)]` failure was called valid too. Using that stale report, `guard` then
+  passed a function that regained `Net`, although the claimed baseline did not allow it. Both commands now ask
+  one question. **Does the crate build without candor?** That is a plain `cargo check` on the lint's own
+  toolchain. **Did every unit cargo builds finish candor's analysis?** The engine appends
+  `<crate-root>\t<crate>.<kinds>` to the new `CANDOR_COMPLETED` sink as the last act of each unit's pass, and
+  the new `candor-query units` compares those lines with cargo's own `compiler-artifact` records. The
+  completion record is not enough by itself: a `deny(dead_code)` error arrives after candor's pass has
+  recorded every unit, so the build check is what keeps a real build failure from passing. If both hold, the
+  failure came after the analysis (the rustc shutdown delayed-bug), so `snapshot` writes the baseline and
+  `guard` gates normally (exit 0 or 1, where it used to give exit 2). Otherwise `snapshot` exits 1 and `guard`
+  exits 2, and each names the units that were never analysed. `snapshot` now writes into a staging prefix
+  and replaces the baseline only after this check passes, so a refused snapshot leaves the previous baseline
+  byte-identical, where before it left a half-rewritten set.
+
 ## [0.40.12] — 2026-10-16
 
 candor-scan only; candor-classify, candor-report, candor-query and the deep engine are unchanged apart from the

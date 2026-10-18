@@ -463,6 +463,45 @@ ensure_report() {
   return 0
 }
 
+# After `cargo dylint` exited NONZERO: did candor's analysis nonetheless FINISH for every unit cargo builds?
+# `snapshot` and `guard` both ask THIS one function, so a tree one of them accepts the other accepts too
+# (they used to disagree — snapshot tolerated any nonzero exit that left SOME report file, guard
+# tolerated none — so a crate could be snapshotted but never guarded, and a crate that did not build at
+# all could be "snapshotted" from a previous run's files). Two questions, both answered by cargo itself:
+#   1. Does the crate build WITHOUT candor? A plain `cargo check` on the SAME toolchain the lint ran on
+#      (read from the dylib's name, exactly as dylint sets RUSTUP_TOOLCHAIN). A real build failure — a
+#      compile error, a `deny` lint, a nightly-only error — fails here too. Return 1.
+#   2. Was every unit that check built analysed to the end? The engine appends a completion record to
+#      CANDOR_COMPLETED ($1) as the LAST act of each unit's pass; `candor-query units` compares those
+#      with the workspace members' `compiler-artifact` records. Any unit without one (cargo stopped
+#      before building it, or the pass died mid-analysis) — or anything that cannot be read — is
+#      return 2, and the caller names the units.
+# Return 0 only when both hold: the failure came AFTER every unit's analysis (the rustc shutdown
+# delayed-bug ICE is the known case), so the reports and violation records are complete.
+analysis_finished_despite_exit() {
+  local completed="$1" tc work
+  tc="$(basename -- "$LIB")"; tc="${tc#libcandor@}"; tc="${tc%.dylib}"; tc="${tc%.so}"
+  work="$(mktemp -d)"
+  if ! env -u CARGO -u RUSTC RUSTUP_TOOLCHAIN="$tc" cargo metadata --no-deps --format-version 1 \
+         > "$work/meta.json" 2> "$work/meta.err"; then
+    echo "candor: 'cargo metadata' failed — cannot tell which units cargo builds:" >&2
+    sed 's/^/candor:   /' "$work/meta.err" >&2
+    rm -rf "$work"; return 2
+  fi
+  if ! env -u CARGO -u RUSTC RUSTUP_TOOLCHAIN="$tc" cargo check --message-format=json \
+         --target-dir target/dylint/candor-plain-check > "$work/check.jsonl" 2> "$work/check.err"; then
+    echo "candor: the crate does not build even WITHOUT candor ('cargo +$tc check' failed) — a real build failure:" >&2
+    tail -n 20 "$work/check.err" | sed 's/^/candor:   /' >&2
+    rm -rf "$work"; return 1
+  fi
+  if query units "$work/meta.json" "$work/check.jsonl" "$completed" > "$work/units.out" 2> "$work/units.err"; then
+    rm -rf "$work"; return 0
+  fi
+  sed -n 's/^MISSING /candor:   NOT analysed: /p' "$work/units.out" >&2
+  sed 's/^/candor:   /' "$work/units.err" >&2
+  rm -rf "$work"; return 2
+}
+
 # Run the lint with the given env, INCREMENTALLY: a forced re-lint only recompiles the changed
 # crate. dylint emits only when the lint runs, so if cargo had nothing to recompile (a pure cache
 # hit — no "Checking"/"Compiling" line) the diagnostics would be missing; in that case, and only
@@ -524,20 +563,43 @@ case "$cmd" in
     # snapshot still stamped a version and reported success — an EMPTY baseline silently disables the
     # guard. Force the recompile, then verify the files actually appeared.
     rm -rf target/dylint 2>/dev/null || true
-    # candor writes its report in `check_crate_post` — BEFORE rustc flushes any `span_delayed_bug`s at
-    # shutdown. So a NONZERO dylint exit alongside a COMPLETE report means a benign rustc shutdown
-    # delayed-bug (e.g. a speculative `Instance::try_resolve` on a derive'd impl — which candor already
-    # records as unresolved), NOT an analysis failure. Capture the exit (don't let `set -e` abort) and
-    # let the report-existence check below be the real success gate.
+    # STAGE, then publish. The engine writes into a fresh prefix beside the baseline, and only a run
+    # that is verified complete is moved over `$pre`. Writing straight into `$pre` let a FAILED run
+    # pass the old `report_exists` check on the PREVIOUS snapshot's files (measured: a bin with a
+    # compile error was "snapshotted", its stale report re-stamped with the current engine) and left a
+    # refused run's half-rewritten set on disk under the old stamp.
+    stage="$(mktemp -d "$(dirname "$pre")/.candor-snapshot.XXXXXX")"; trap 'rm -rf "$stage"' EXIT
     snap_rc=0
-    CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" || snap_rc=$?
-    if ! report_exists "$pre"; then
-      echo "candor: snapshot produced NO report files — did the crate build? Baseline NOT written." >&2
+    CANDOR_JSON="$stage/b" CANDOR_COMPLETED="$stage/completed" cargo dylint --lib-path "$LIB" || snap_rc=$?
+    if ! report_exists "$stage/b"; then
+      echo "candor: snapshot produced NO report files — did the crate build? Baseline NOT written (any previous baseline at '$pre' is untouched)." >&2
       exit 1
     fi
+    # A NONZERO exit beside SOME reports is not evidence of a complete baseline: rustc may have failed
+    # at shutdown after a COMPLETE analysis, or cargo may have stopped before building a unit (a
+    # library's failure leaves its binary unbuilt — and that binary's report simply absent).
     if [ "$snap_rc" -ne 0 ]; then
-      echo "candor: note — rustc emitted a delayed-bug at shutdown (dylint exit $snap_rc), but the report is complete; the snapshot is valid. This is a benign rustc artifact of speculative resolution, not a candor analysis error." >&2
+      fin_rc=0; analysis_finished_despite_exit "$stage/completed" || fin_rc=$?
+      case "$fin_rc" in
+        0) echo "candor: note — dylint exited $snap_rc, but the crate builds cleanly without candor and every unit cargo builds was analysed to the end: rustc failed AFTER the analysis (e.g. a shutdown delayed-bug), so the baseline is complete." >&2 ;;
+        1) echo "candor: Baseline NOT written (any previous baseline at '$pre' is untouched)." >&2; exit 1 ;;
+        *) echo "candor: the baseline would be INCOMPLETE (dylint exit $snap_rc; the units above have no report) — NOT written; any previous baseline at '$pre' is untouched." >&2
+           exit 1 ;;
+      esac
     fi
+    # Every unit that recorded completion must have its report in the set (a failed report write is
+    # disclosed by the engine but is otherwise just an absent file). A dylib that predates completion
+    # records writes no file; the exit-0 path then rests on the build succeeding, as it always did.
+    if [ -f "$stage/completed" ]; then
+      while IFS=$'\t' read -r _src key; do
+        [ -n "$key" ] || continue
+        [ -f "$stage/b.$key.json" ] || { echo "candor: unit $key was analysed but its report is missing — Baseline NOT written." >&2; exit 1; }
+      done < "$stage/completed"
+    fi
+    for f in "$stage"/b.*; do
+      [ -e "$f" ] || continue
+      mv -f "$f" "$pre${f#"$stage/b"}"
+    done
     engine_ver > "$pre.candor-version"
     rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
     echo "candor: baseline written and stamped @$(cat "$pre.candor-version" 2>/dev/null)." >&2
@@ -628,16 +690,28 @@ case "$cmd" in
     # Verdict via a MACHINE signal (CANDOR_VIOLATIONS), not by grepping the prose: the engine appends a
     # line per AS-EFF-005 gain, so a reworded message or a changed output stream can't turn the guard
     # green. Fresh file per run (the engine appends). The human diagnostics are still printed.
-    vio="$(mktemp)"; trap 'rm -rf "$vio" ${gtmp:+"$gtmp"}' EXIT
-    if out="$(CANDOR_BASELINE="$pre" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)"; then
+    vio="$(mktemp)"; done_f="$(mktemp)"; trap 'rm -rf "$vio" "$done_f" ${gtmp:+"$gtmp"}' EXIT
+    if out="$(CANDOR_BASELINE="$pre" CANDOR_VIOLATIONS="$vio" CANDOR_COMPLETED="$done_f" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)"; then
       printf '%s\n' "$out" >&2
     else
-      # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
+      # dylint failed. The SAME test snapshot applies (analysis_finished_despite_exit): only when the
+      # crate builds without candor AND every unit was analysed to the end is the run's violation record
+      # complete — then the failure came after the analysis and the guard evaluates as normal. Anything
+      # else could NOT run the guard over every unit, so it does not pass: exit 2.
       printf '%s\n' "$out" >&2
-      [ -n "$gate_target" ] && [ "$gjson" != "-" ] \
-        && echo "candor: --gate-json $gate_target holds the fail-closed refusal document — the gate did not complete (exit 2)." >&2
-      echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
-      gate_exit2 "the crate failed to build under dylint — the guard could not run"
+      fin_rc=0; analysis_finished_despite_exit "$done_f" || fin_rc=$?
+      if [ "$fin_rc" -eq 0 ]; then
+        echo "candor: note — dylint exited nonzero, but the crate builds cleanly without candor and every unit cargo builds was analysed to the end: rustc failed AFTER the analysis (e.g. a shutdown delayed-bug). The guard evaluates." >&2
+      else
+        [ -n "$gate_target" ] && [ "$gjson" != "-" ] \
+          && echo "candor: --gate-json $gate_target holds the fail-closed refusal document — the gate did not complete (exit 2)." >&2
+        if [ "$fin_rc" -eq 1 ]; then
+          echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
+          gate_exit2 "the crate failed to build under dylint — the guard could not run"
+        fi
+        echo "candor: guard could NOT evaluate every unit (the units above were never analysed) — failing closed, not a pass." >&2
+        gate_exit2 "a unit cargo builds was never analysed — the guard could not evaluate it"
+      fi
     fi
     # A per-crate baseline gap (a NEW workspace member, a renamed crate — the prefix has files, but not
     # for this crate) is disclosed by the engine as a GUARD-UNAVAILABLE sentinel line: the guard could

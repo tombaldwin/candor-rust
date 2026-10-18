@@ -1,4 +1,4 @@
-//! Workspace/report state: `state`, `reports`, `locate`, `engine-version`,
+//! Workspace/report state: `state`, `reports`, `locate`, `engine-version`, `units`,
 //! `merge-hook`.
 
 use crate::*;
@@ -266,5 +266,171 @@ pub(crate) fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if ft.is_file() && path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
+    }
+}
+
+/// One unit cargo builds for a workspace member: its crate-root file (canonical) and a display label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedUnit {
+    pub(crate) src: String,
+    pub(crate) label: String,
+}
+
+fn canonical(p: &str) -> String {
+    std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| p.to_string())
+}
+
+/// The units cargo built for the WORKSPACE MEMBERS, read from cargo's own output rather than predicted:
+/// `metadata` is `cargo metadata --no-deps --format-version 1` (for `workspace_members`) and `check` is
+/// the `--message-format=json` stream of a plain `cargo check` in the same directory. Only the
+/// members' `compiler-artifact` records count — those are the units `RUSTC_WORKSPACE_WRAPPER` (dylint's
+/// driver) runs on, build scripts included; a dependency never carries a candor report. The stream must
+/// end in a successful `build-finished`: a failed or truncated check is a build we cannot vouch for, so
+/// it is an Err (the caller fails closed), never a shorter list.
+pub(crate) fn expected_units(metadata: &str, check: &str) -> Result<Vec<ExpectedUnit>, String> {
+    let meta: serde_json::Value = serde_json::from_str(metadata).map_err(|e| format!("cargo metadata is not JSON ({e})"))?;
+    let members: BTreeSet<String> = meta["workspace_members"]
+        .as_array()
+        .ok_or("cargo metadata has no workspace_members")?
+        .iter()
+        .filter_map(|m| m.as_str().map(str::to_string))
+        .collect();
+    let mut finished = None;
+    let mut units = Vec::new();
+    for line in check.lines() {
+        let Ok(m) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match m["reason"].as_str() {
+            Some("build-finished") => finished = m["success"].as_bool(),
+            Some("compiler-artifact") => {
+                let Some(pkg) = m["package_id"].as_str() else { continue };
+                if !members.contains(pkg) {
+                    continue;
+                }
+                let Some(src) = m["target"]["src_path"].as_str() else {
+                    return Err(format!("a member artifact of {pkg} names no src_path"));
+                };
+                let kind = m["target"]["kind"]
+                    .as_array()
+                    .map(|k| k.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                    .unwrap_or_default();
+                let name = m["target"]["name"].as_str().unwrap_or("?");
+                units.push(ExpectedUnit { src: canonical(src), label: format!("{name} ({kind})") });
+            }
+            _ => {}
+        }
+    }
+    match finished {
+        Some(true) => {}
+        Some(false) => return Err("the plain `cargo check` did not succeed".into()),
+        None => return Err("the plain `cargo check` stream has no build-finished record (truncated?)".into()),
+    }
+    if units.is_empty() {
+        return Err("cargo built no workspace-member unit — nothing to compare against".into());
+    }
+    Ok(units)
+}
+
+/// The expected units with NO completion record. `completed` is the engine's `CANDOR_COMPLETED` sink:
+/// one `<crate-root path>\t<crate>.<kinds>` line per unit whose analysis returned.
+pub(crate) fn missing_units(expected: &[ExpectedUnit], completed: &str) -> Vec<ExpectedUnit> {
+    let done: BTreeSet<String> = completed
+        .lines()
+        .filter_map(|l| l.split('\t').next())
+        .filter(|p| !p.is_empty())
+        .map(canonical)
+        .collect();
+    expected.iter().filter(|u| !done.contains(&u.src)).cloned().collect()
+}
+
+/// `candor-query units <cargo-metadata.json> <cargo-check.jsonl> <completed>` — did candor's analysis
+/// FINISH for every unit cargo builds? The wrapper asks this only after `cargo dylint` exited nonzero,
+/// to tell "every unit was analysed, then rustc failed at shutdown" (exit 0) from "a unit was never
+/// analysed" (exit 1, each one named) — and anything it cannot read or vouch for is exit 2, which the
+/// wrapper treats exactly like exit 1. There is no input under which a missing unit reads as complete.
+pub(crate) fn cmd_units(args: &[String]) -> i32 {
+    let [meta, check, completed] = args else {
+        eprintln!("usage: candor-query units <cargo-metadata.json> <cargo-check.jsonl> <completed>");
+        return 2;
+    };
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("cannot read {p} ({e})"));
+    let expected = match read(meta).and_then(|m| read(check).and_then(|c| expected_units(&m, &c))) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("candor-query units: {e}");
+            return 2;
+        }
+    };
+    // An ABSENT completion file is "no unit finished" — the engine creates it on the first record.
+    let completed = std::fs::read_to_string(completed).unwrap_or_default();
+    let missing = missing_units(&expected, &completed);
+    for u in &missing {
+        println!("MISSING {} {}", u.label, u.src);
+    }
+    if missing.is_empty() {
+        println!("complete {} unit(s)", expected.len());
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+mod units_tests {
+    use super::*;
+
+    const META: &str = r#"{"workspace_members":["path+file:///w/app#0.1.0"],"packages":[]}"#;
+
+    fn artifact(pkg: &str, name: &str, kind: &str, src: &str) -> String {
+        format!(
+            r#"{{"reason":"compiler-artifact","package_id":"{pkg}","target":{{"name":"{name}","kind":["{kind}"],"crate_types":["{kind}"],"src_path":"{src}"}},"fresh":false}}"#
+        )
+    }
+
+    fn stream(lines: &[String], finished: Option<bool>) -> String {
+        let mut s = lines.join("\n");
+        if let Some(ok) = finished {
+            s.push_str(&format!("\n{{\"reason\":\"build-finished\",\"success\":{ok}}}"));
+        }
+        s
+    }
+
+    fn app_units() -> Vec<String> {
+        vec![
+            artifact("registry+https://github.com/rust-lang/crates.io-index#dep@1.0.0", "dep", "lib", "/reg/dep/src/lib.rs"),
+            artifact("path+file:///w/app#0.1.0", "build-script-build", "custom-build", "/w/app/build.rs"),
+            artifact("path+file:///w/app#0.1.0", "app", "lib", "/w/app/src/lib.rs"),
+            artifact("path+file:///w/app#0.1.0", "app", "bin", "/w/app/src/main.rs"),
+        ]
+    }
+
+    #[test]
+    fn expected_units_are_the_members_artifacts_build_scripts_included_deps_excluded() {
+        let u = expected_units(META, &stream(&app_units(), Some(true))).unwrap();
+        let srcs: Vec<&str> = u.iter().map(|x| x.src.as_str()).collect();
+        assert_eq!(srcs, ["/w/app/build.rs", "/w/app/src/lib.rs", "/w/app/src/main.rs"]);
+        assert_eq!(u[2].label, "app (bin)");
+    }
+
+    #[test]
+    fn a_check_that_failed_or_was_truncated_is_never_a_shorter_list() {
+        assert!(expected_units(META, &stream(&app_units(), Some(false))).is_err(), "failed check");
+        assert!(expected_units(META, &stream(&app_units(), None)).is_err(), "no build-finished record");
+        assert!(expected_units(META, &stream(&[], Some(true))).is_err(), "no member unit at all");
+        assert!(expected_units("not json", &stream(&app_units(), Some(true))).is_err(), "unreadable metadata");
+    }
+
+    #[test]
+    fn the_issue_10_shape_lib_finished_bin_never_built_is_missing_the_bin() {
+        // The lib's analysis completed (then rustc failed at shutdown), so cargo never built the bin.
+        let u = expected_units(META, &stream(&app_units(), Some(true))).unwrap();
+        let done = "/w/app/build.rs\tbuild_script_build.Executable\n/w/app/src/lib.rs\tapp.Rlib\n";
+        let m = missing_units(&u, done);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].label, "app (bin)");
+        // Every unit recorded → nothing missing.
+        let all = format!("{done}/w/app/src/main.rs\tapp.Executable\n");
+        assert!(missing_units(&u, &all).is_empty());
+        // No completion file content at all → every unit missing (never "complete").
+        assert_eq!(missing_units(&u, "").len(), 3);
     }
 }

@@ -348,6 +348,79 @@ want "guard discloses the unloadable per-crate baseline" "$gap" "could not be lo
 if [ "$gap_rc" -eq 2 ]; then echo "  ok   guard with a per-crate baseline gap exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL guard with a per-crate baseline gap exited $gap_rc (want 2)"; fail=$((fail+1)); fi
 rm -rf "$(dirname "$FC")"
 
+# ── 9-unit. A NONZERO dylint exit: snapshot and guard give the SAME answer (issue #10) ──
+# They used to disagree: snapshot accepted any nonzero exit that left SOME report file (even a previous
+# run's — a bin with a compile error was "snapshotted" from its stale report and re-stamped), guard
+# accepted none. Now both ask one question: does the crate build WITHOUT candor, and did every unit cargo
+# builds record completion (CANDOR_COMPLETED)? rustc's real shutdown delayed-bug can't be produced on
+# demand, so a RUSTC_WRAPPER SIMULATES it: under the lint driver ONLY, for one unit, run the real rustc
+# to completion and THEN exit 101 ("after"), or exit 101 without running it ("before"). Plain rustc
+# passes through, so the simulated failure is candor-induced, as the real one was. What it does NOT
+# prove: that a real delayed-bug ICE fires after `check_crate_post` — that ordering is 392aeb9's finding.
+echo "== nonzero dylint exit: snapshot/guard agree; a real build failure never passes (issue #10) =="
+UN=$(mktemp -d)/un; mkdir -p "$UN/src"
+SHIM="$(dirname "$UN")/rustc-fail-shim.sh"
+cat > "$SHIM" <<'SHIMEOF'
+#!/usr/bin/env bash
+case "$1" in *dylint-driver*) ;; *) exec "$@" ;; esac
+args=("$@"); name=""; ctype=""
+for ((i=0; i<${#args[@]}; i++)); do
+  [ "${args[$i]}" = "--crate-name" ] && name="${args[$((i+1))]}"
+  [ "${args[$i]}" = "--crate-type" ] && ctype="${args[$((i+1))]}"
+done
+if [ "$name" = "$SHIM_CRATE" ] && [ "$ctype" = "$SHIM_KIND" ]; then
+  [ "$SHIM_MODE" = before ] && exit 101
+  "$@"; exit 101
+fi
+exec "$@"
+SHIMEOF
+chmod +x "$SHIM"
+printf '[package]\nname="un"\nversion="0.1.0"\nedition="2021"\n' > "$UN/Cargo.toml"
+printf 'pub fn net(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\npub fn pure(){}\n' > "$UN/src/lib.rs"
+printf 'fn main(){ un::pure(); }\n' > "$UN/src/main.rs"
+shimmed() { env RUSTC_WRAPPER="$SHIM" SHIM_CRATE=un SHIM_KIND="$1" SHIM_MODE="$2" "${@:3}"; }
+expect_rc() { if [ "$2" -eq "$3" ]; then echo "  ok   $1 (exit $2)"; pass=$((pass+1)); else echo "  FAIL $1 — exited $2 (want $3)"; fail=$((fail+1)); fi; }
+base_sum() { cat "$UN"/.candor/base.un.*.json "$UN/.candor/base.candor-version" 2>/dev/null | cksum; }
+( cd "$UN"; "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 )
+sum0=$(base_sum)
+# (a) the issue's shape: the lib is analysed, then its rustc fails — so cargo never builds the bin.
+rc=0; o=$( cd "$UN"; shimmed lib after "$ROOT/cargo-candor" snapshot .candor/base 2>&1 ) || rc=$?
+expect_rc "snapshot: lib analysed then rustc failed, bin never built → refused" "$rc" 1
+want   "snapshot names the unit that was never analysed" "$o" "NOT analysed: un (bin)"
+absent "snapshot no longer calls an incomplete baseline valid" "$o" "the snapshot is valid"
+if [ "$(base_sum)" = "$sum0" ]; then echo "  ok   a refused snapshot leaves the previous baseline byte-identical"; pass=$((pass+1)); else echo "  FAIL a refused snapshot rewrote the previous baseline"; fail=$((fail+1)); fi
+rc=0; o=$( cd "$UN"; shimmed lib after "$ROOT/cargo-candor" guard .candor/base 2>&1 ) || rc=$?
+expect_rc "guard: same tree → fails closed" "$rc" 2
+want   "guard names the unit it could not evaluate" "$o" "NOT analysed: un (bin)"
+# (b) the LAST unit fails after its analysis: every unit was analysed → both accept, and guard still gates.
+rc=0; o=$( cd "$UN"; shimmed bin after "$ROOT/cargo-candor" snapshot .candor/base 2>&1 ) || rc=$?
+expect_rc "snapshot: every unit analysed, then rustc failed → baseline written" "$rc" 0
+want   "snapshot says what it verified" "$o" "every unit cargo builds was analysed to the end"
+rc=0; ( cd "$UN"; shimmed bin after "$ROOT/cargo-candor" guard .candor/base >/dev/null 2>&1 ) || rc=$?
+expect_rc "guard: the same tree now evaluates (no gain → pass)" "$rc" 0
+printf 'fn main(){ un::net(); }\n' > "$UN/src/main.rs"
+rc=0; o=$( cd "$UN"; shimmed bin after "$ROOT/cargo-candor" guard .candor/base 2>&1 ) || rc=$?
+expect_rc "guard: … and a real gain on that tree is still blocked" "$rc" 1
+want   "the tolerated run still reports the AS-EFF-005 gain" "$o" "gained effect"
+printf 'fn main(){ un::pure(); }\n' > "$UN/src/main.rs"
+# (c) SEEDED REAL BUILD FAILURE that the engine itself survives: `deny(dead_code)` fires AFTER candor's
+# pass has recorded completion for every unit (measured), so completion alone cannot tell it from a
+# shutdown ICE — the build-without-candor check must, for both commands.
+( cd "$UN"; "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 ); sum0=$(base_sum)
+printf '#![deny(dead_code)]\nfn unused(){}\nfn main(){ un::pure(); }\n' > "$UN/src/main.rs"
+rc=0; o=$( cd "$UN"; "$ROOT/cargo-candor" snapshot .candor/base 2>&1 ) || rc=$?
+expect_rc "snapshot: a real build failure (deny(dead_code)) → refused" "$rc" 1
+want   "snapshot says the crate does not build" "$o" "does not build even WITHOUT candor"
+if [ "$(base_sum)" = "$sum0" ]; then echo "  ok   … and the previous baseline is untouched"; pass=$((pass+1)); else echo "  FAIL the build-failure snapshot rewrote the previous baseline"; fail=$((fail+1)); fi
+rc=0; ( cd "$UN"; "$ROOT/cargo-candor" guard .candor/base >/dev/null 2>&1 ) || rc=$?
+expect_rc "guard: a real build failure → fails closed, never a pass" "$rc" 2
+# (d) a compile error in the bin over a previous baseline: the stale bin report is never re-stamped.
+printf 'fn main(){ this does not compile }\n' > "$UN/src/main.rs"
+rc=0; o=$( cd "$UN"; "$ROOT/cargo-candor" snapshot .candor/base 2>&1 ) || rc=$?
+expect_rc "snapshot: a compile error over a previous baseline → refused" "$rc" 1
+absent "… never called valid from the previous run's files" "$o" "baseline written"
+rm -rf "$(dirname "$UN")"
+
 # ── 9-cfg. `.candor/config` (spec §3.4) drives the wrapper: policy/baseline keys, fail-closed, warnings ──
 echo "== .candor/config discovery (cargo candor) =="
 CG=$(mktemp -d)/cg; mkdir -p "$CG/src" "$CG/.candor"
