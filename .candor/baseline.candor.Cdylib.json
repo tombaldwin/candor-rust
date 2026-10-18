@@ -115,6 +115,20 @@
       ]
     },
     {
+      "fn": "unit_file_key",
+      "loc": "src/lib.rs:726:1: 726:45",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "undeclared": [
+        "Env"
+      ],
+      "hash": "abe6a14fe9fda6686ac545993175142e"
+    },
+    {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_expr",
       "loc": "src/lib.rs:3742:5: 3742:77",
       "inferred": [

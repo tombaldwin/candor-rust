@@ -30,6 +30,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   exits 2, and each names the units that were never analysed. `snapshot` now writes into a staging prefix
   and replaces the baseline only after this check passes, so a refused snapshot leaves the previous baseline
   byte-identical, where before it left a half-rewritten set.
+- ⚠ **Two packages' build scripts no longer share one baseline file.** cargo compiles every `build.rs` as a
+  crate named `build_script_build`, so in a workspace with two build scripts both wrote
+  `<prefix>.build_script_build.Executable.json`, the last writer won, and `guard` compared each build script
+  against whichever one that was. Measured with `CARGO_BUILD_JOBS=1`: `a/build.rs` (Env) beside `b/build.rs`
+  (Env, Fs), b written last; `a/build.rs` then gains `Fs` and **`guard` exits 0**. With the other build
+  order, a clean tree failed instead. A build script's file key now carries its package:
+  `build_script_build-<package>`. **Re-snapshot after upgrading.** An old baseline's build-script file is no
+  longer loaded, so `guard` fails closed on it (exit 2). candor's own `.candor/baseline` is renamed to
+  match. The CI `Self-guard` step now also fails on a baseline file the engine could not load. That step
+  has no violations sink, so before this change the stale name left it green while the build script went
+  unguarded.
+- ⚠ **`cargo candor update` refreshes the baseline through `snapshot`.** It used to be a separate writer.
+  It wrote straight into the prefix and required dylint exit 0, so a refused refresh still rewrote the
+  units that did build, all while printing "baseline NOT refreshed". Measured from a fake clone (a no-op
+  `git pull` and a stub `install.sh`, so no engine change): a lib's new `Net` was absorbed into the lib's
+  baseline file and the next `guard` exited 0. In the case `snapshot` accepts, it also refused where
+  `snapshot` wrote. Now the same staged and verified write applies: a refused refresh leaves the baseline
+  byte-identical. The prefix also resolves as `snapshot`'s does (`CANDOR_BASELINE`, then the config's
+  `baseline` key) instead of always `.candor/baseline`.
 
 ## [0.40.12] — 2026-10-16
 

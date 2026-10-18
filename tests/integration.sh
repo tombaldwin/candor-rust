@@ -419,7 +419,58 @@ printf 'fn main(){ this does not compile }\n' > "$UN/src/main.rs"
 rc=0; o=$( cd "$UN"; "$ROOT/cargo-candor" snapshot .candor/base 2>&1 ) || rc=$?
 expect_rc "snapshot: a compile error over a previous baseline → refused" "$rc" 1
 absent "… never called valid from the previous run's files" "$o" "baseline written"
+# (e) `update` refreshes the baseline through `snapshot` — ONE writer. It used to write straight into the
+# prefix and require exit 0, so a refusal left the set half-rewritten while saying "NOT refreshed":
+# measured, the lib's report absorbed a new `Net` and the next guard PASSED it (exit 0). It runs from a
+# FAKE CLONE (a git clone of a local repo, so `git pull --ff-only` is a no-op, and a stub install.sh);
+# NOT exercised here: a real pull, a real rebuild, or an engine-version change across the update.
+UC="$(dirname "$UN")/upd"; UO="$UC/origin"; UT="$UC/clone"; UP="$UC/proj"
+mkdir -p "$UC/cache/lib" "$UC/cache/bin" "$UP/src"
+cp "$LIB" "$UC/cache/lib/"; cp "$QBIN" "$UC/cache/bin/candor-query"
+git init -q "$UO"; printf '[package]\nname="fakeclone"\nversion="0.0.0"\n' > "$UO/Cargo.toml"
+git -C "$UO" add Cargo.toml; git -C "$UO" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m init
+git clone -q "$UO" "$UT"; cp "$ROOT/cargo-candor" "$UT/"; printf '#!/bin/sh\nexit 0\n' > "$UT/install.sh"; chmod +x "$UT/install.sh"
+printf '[package]\nname="un"\nversion="0.1.0"\nedition="2021"\n' > "$UP/Cargo.toml"
+printf 'pub fn net(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\npub fn lf(){}\n' > "$UP/src/lib.rs"
+printf 'fn main(){}\n' > "$UP/src/main.rs"
+upd_sum() { cat "$UP"/.candor/baseline.* 2>/dev/null | cksum; }
+( cd "$UP"; CANDOR_CACHE="$UC/cache" "$UT/cargo-candor" snapshot >/dev/null 2>&1 ); usum0=$(upd_sum)
+printf 'pub fn net(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\npub fn lf(){ net(); }\n' > "$UP/src/lib.rs"
+rc=0; o=$( cd "$UP"; CANDOR_CACHE="$UC/cache" shimmed lib after "$UT/cargo-candor" update 2>&1 ) || rc=$?
+want   "update: an incomplete refresh is refused, naming the unit" "$o" "NOT analysed: un (bin)"
+if [ "$(upd_sum)" = "$usum0" ]; then echo "  ok   update: a refused refresh leaves the baseline byte-identical"; pass=$((pass+1)); else echo "  FAIL update: a refused refresh rewrote the baseline"; fail=$((fail+1)); fi
+rc=0; ( cd "$UP"; CANDOR_CACHE="$UC/cache" "$UT/cargo-candor" guard >/dev/null 2>&1 ) || rc=$?
+expect_rc "guard after a refused update still blocks the lib's new Net" "$rc" 1
+rc=0; o=$( cd "$UP"; CANDOR_CACHE="$UC/cache" shimmed bin after "$UT/cargo-candor" update 2>&1 ) || rc=$?
+want   "update: every unit analysed then rustc failed → refreshed, as snapshot would" "$o" "baseline CHANGED"
+rc=0; ( cd "$UP"; CANDOR_CACHE="$UC/cache" "$UT/cargo-candor" guard >/dev/null 2>&1 ) || rc=$?
+expect_rc "guard after that refresh passes the absorbed change" "$rc" 0
 rm -rf "$(dirname "$UN")"
+
+# ── 9-bs. Two packages' build scripts get two baseline files (issue #10 follow-up) ──
+# cargo names every `build.rs` crate `build_script_build`, so two build scripts wrote ONE baseline file
+# and the guard compared each against whichever was written last. Measured with CARGO_BUILD_JOBS=1:
+# b (Env, Fs) written last, then a's build script GAINS Fs → guard exit 0, a silent pass (and the other
+# build order failed a clean tree). The key now carries the package: build_script_build-<pkg>. Even
+# CARGO_BUILD_JOBS=1 does not fix which build script is written last, so the clean-tree and the gain
+# assertions are a PAIR: on the old key, either order fails one of them (seeded and measured).
+echo "== build scripts of two packages are baselined separately =="
+BS=$(mktemp -d)/bs; mkdir -p "$BS/a/src" "$BS/b/src"
+printf '[workspace]\nmembers=["a","b"]\nresolver="2"\n' > "$BS/Cargo.toml"
+for p in a b; do printf '[package]\nname="%s"\nversion="0.1.0"\nedition="2021"\n' $p > "$BS/$p/Cargo.toml"; printf 'pub fn f(){}\n' > "$BS/$p/src/lib.rs"; done
+printf 'fn main(){ let _ = std::env::var("A_X"); }\n' > "$BS/a/build.rs"
+printf 'fn main(){ let _ = std::env::var("B_X"); let _ = std::fs::read("/nonexistent"); }\n' > "$BS/b/build.rs"
+( cd "$BS"; CARGO_BUILD_JOBS=1 "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 )
+for p in a b; do
+  if [ -f "$BS/.candor/base.build_script_build-$p.Executable.json" ]; then echo "  ok   build script of package $p has its own baseline file"; pass=$((pass+1)); else echo "  FAIL no baseline file for package $p's build script"; fail=$((fail+1)); fi
+done
+rc=0; ( cd "$BS"; CARGO_BUILD_JOBS=1 "$ROOT/cargo-candor" guard .candor/base >/dev/null 2>&1 ) || rc=$?
+expect_rc "build scripts: a clean tree passes" "$rc" 0
+printf 'fn main(){ let _ = std::env::var("A_X"); let _ = std::fs::read("/etc/hosts"); }\n' > "$BS/a/build.rs"
+rc=0; o=$( cd "$BS"; CARGO_BUILD_JOBS=1 "$ROOT/cargo-candor" guard .candor/base 2>&1 ) || rc=$?
+expect_rc "build scripts: a's build script gaining Fs is blocked (was a silent pass)" "$rc" 1
+want   "… named as an AS-EFF-005 gain" "$o" 'gained effect { Fs }'
+rm -rf "$(dirname "$BS")"
 
 # ── 9-cfg. `.candor/config` (spec §3.4) drives the wrapper: policy/baseline keys, fail-closed, warnings ──
 echo "== .candor/config discovery (cargo candor) =="

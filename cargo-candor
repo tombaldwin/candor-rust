@@ -1158,15 +1158,17 @@ case "$cmd" in
     # against the new-engine baseline → spurious reclassification deltas. Clearing it forces a rebuild
     # with the new engine on next use.
     rm -f .candor/report.*.*.json .candor/state 2>/dev/null || true
-    # Auto-refresh a baseline in THIS project so the guard never false-fires after an
-    # upgrade. Force a recompile (dylint emits only on recompile), regenerate, re-stamp.
-    if ls .candor/baseline.*.json >/dev/null 2>&1; then
-      pre=".candor/baseline"
+    # Auto-refresh a baseline in THIS project so the guard never false-fires after an upgrade —
+    # through `snapshot` itself, so there is ONE baseline writer: staged, verified complete
+    # (analysis_finished_despite_exit on a nonzero exit), and moved over the old set only on success.
+    # This used to be its own copy: it wrote straight into the baseline prefix and required dylint exit
+    # 0, so a refusal left the set half-rewritten by the NEW engine under the OLD stamp, and in the case
+    # snapshot accepts (rustc failing after a complete analysis) it refused where snapshot wrote. The
+    # prefix resolves exactly as snapshot's default does (CANDOR_BASELINE, then the config's `baseline`).
+    pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
+    if report_exists "$pre"; then
       old="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
-      find . -path ./target -prune -o -name '*.rs' -print0 2>/dev/null | xargs -0 touch 2>/dev/null || true
-      if CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 && ls "$pre".*.json >/dev/null 2>&1; then
-        echo "$ev" > "$pre.candor-version"
-        rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
+      if "$SELF" snapshot "$pre" >&2; then
         new="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
         if [ "$old" = "$new" ]; then
           echo "candor: baseline content UNCHANGED (this engine classifies it identically) — re-stamped @$ev, nothing to review." >&2
@@ -1175,9 +1177,9 @@ case "$cmd" in
           echo "candor: review 'git diff .candor/' and commit it (this is the upgrade's doing, not a code change)." >&2
         fi
       else
-        echo "candor: this project didn't compile — baseline NOT refreshed under the new engine, so" >&2
-        echo "candor: 'cargo candor guard' will FAIL CLOSED (exit 2, stale-baseline) until the crate" >&2
-        echo "candor: builds and you re-run this (or 'cargo candor snapshot')." >&2
+        echo "candor: the baseline was NOT refreshed under the new engine (see above) — it is left exactly as it" >&2
+        echo "candor: was, under its old stamp, so 'cargo candor guard' will FAIL CLOSED (exit 2, stale baseline)" >&2
+        echo "candor: until the crate builds and you re-run this (or 'cargo candor snapshot $pre')." >&2
       fi
     else
       echo "candor: (no guard baseline in $PWD — run from a project dir to refresh that project's baseline)" >&2
