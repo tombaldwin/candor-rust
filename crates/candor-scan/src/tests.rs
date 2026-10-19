@@ -17304,6 +17304,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-v075 (R1207/R1208) bumped it to rev119.
         // rustagent-v072 (R1202) bumped it to rev118.
         // rustagent-v070 (R1200) bumped it to rev117.
         // rustagent-v067 (R1197b) bumped it to rev116.
@@ -17366,7 +17367,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev118/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev119/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -32559,4 +32560,120 @@ pub fn kb_str() -> usize { adep67::a_into("abc") }
     }
     assert!(veina_row_effs(&cv, "kb_str").is_empty(), "R1197(a) control `kb_str` (a typed std argument) is pure (executed):\n{cv:#}");
     assert!(veina_row_effs(&cv, "ka_drop").iter().any(|e| e == "Unknown"), "R1197(a) stated over-disclosure moved — decide it:\n{cv:#}");
+}
+
+/// SOUNDNESS R1207 / R1208 / R1209 (rustagent-v075; fixture rustagent-v075/fx/r1207, every cell EXECUTED, callees confirmed
+/// by rustc MIR). Three residuals of R1202, each read `['Env']` (the inherent's) over a trait method that wrote a file:
+///   * R1207 — a LOCAL receiver beside a trait whose package is unchained (`use tgo::Go; crate::LTy.go(1)`): now discloses,
+///     except where the receiver's own form IS the inherent's receiver (`self.go()` in `fn(&self)`, a `&LTy` parameter),
+///     where the inherent matches at the probe's first step and nothing can beat it;
+///   * R1208 — a crate-local blanket trait on a REFERENCE receiver (`&mut x` against `&self`, `&x` of a Copy type against
+///     `self`) or implemented for `&T` / `&mut T`: R1202's `t >= i` rule assumed a value receiver of a plain blanket;
+///   * R1209 — a chained trait whose blanket impl OVERRIDES the member (no default body), on a HIT: now joins the
+///     trait's union, which holds the blanket body.
+#[test]
+fn v075_r1207_r1208_r1209_the_probe_on_local_receivers_reference_receivers_and_overriding_blankets() {
+    let w = "let _ = std::fs::write(\"/tmp/v075\", b\"x\");";
+    let e = "std::env::var(\"X\").map(|s| s.len()).unwrap_or(0)";
+    let tgo_src = format!("pub trait Go {{ fn go(self, n: u32) -> usize where Self: Sized {{ {w} n as usize }} }}\nimpl<T> Go for T {{}}\n\
+pub trait MGo {{ fn mgo(&self, n: u32) -> usize {{ {w} n as usize }} }}\nimpl<T> MGo for T {{}}\n\
+pub mod o {{ pub trait OGo {{ fn go(self, n: u32) -> usize; }}\nimpl<T> OGo for T {{ fn go(self, n: u32) -> usize {{ {w} n as usize }} }} }}\n\
+pub mod n {{ pub trait NPush {{ fn npush(&self, n: u32) -> usize; }}\npub struct Q;\nimpl NPush for Q {{ fn npush(&self, n: u32) -> usize {{ {w} n as usize }} }} }}\n");
+    let ydep_src = format!("pub struct Bar;\nimpl Bar {{ pub fn go(&self, n: u32) -> usize {{ {e} + n as usize }} }}\n");
+    let lib = format!("pub mod m01; pub mod m02; pub mod m03; pub mod m04; pub mod m07; pub mod m08; pub mod m10; pub mod m11; pub mod m12;\n\
+pub mod m13; pub mod m14; pub mod m21; pub mod m22; pub mod m51; pub mod m52; pub mod m41; pub mod m42; pub mod m43; pub mod m44; pub mod m46; pub mod m47;\n\
+pub struct LTy;\nimpl LTy {{\n    pub fn go(&self, n: u32) -> usize {{ {e} + n as usize }}\n    pub fn mgo(&mut self, n: u32) -> usize {{ {e} + n as usize }}\n\
+    pub fn ma(&self, n: u32) -> usize {{ {e} + n as usize }}\n    pub fn mc(&mut self, n: u32) -> usize {{ {e} + n as usize }}\n\
+    pub fn md(&self, n: u32) -> usize {{ {e} + n as usize }}\n    pub fn mf(&self, n: u32) -> usize {{ {e} + n as usize }}\n    pub fn mk(&self, n: u32) -> usize {{ {e} + n as usize }}\n}}\n\
+#[derive(Clone, Copy)]\npub struct LTyC;\nimpl LTyC {{ pub fn mb(self, n: u32) -> usize {{ {e} + n as usize }}\n    pub fn go(self, n: u32) -> usize {{ {e} + n as usize }} }}\npub struct Hold {{ pub l: LTy }}\n\
+#[macro_export]\nmacro_rules! byref {{ ($x:ident) => {{ let $x = &$x; }}; }}\n\
+pub mod loc {{\n    pub trait LMut {{ fn ma(&mut self, n: u32) -> usize {{ {w} n as usize }} }} impl<T> LMut for T {{}}\n\
+    pub trait LRef {{ fn mb(&self, n: u32) -> usize {{ {w} n as usize }} }} impl<T> LRef for T {{}}\n\
+    pub trait LRT {{ fn mc(self, n: u32) -> usize where Self: Sized {{ {w} n as usize }} }} impl<T> LRT for &T {{}}\n\
+    pub trait LMT {{ fn md(self, n: u32) -> usize where Self: Sized {{ {w} n as usize }} }} impl<T> LMT for &mut T {{}}\n\
+    pub trait LMut2 {{ fn mf(&mut self, n: u32) -> usize {{ {w} n as usize }} }} impl<T> LMut2 for T {{}}\n\
+    pub trait LRef2 {{ fn mk(&self, n: u32) -> usize {{ {w} n as usize }} }} impl<T> LRef2 for T {{}}\n}}\n");
+    let files: &[(&str, &str)] = &[
+        ("lib.rs", &lib),
+        ("m01.rs", "pub fn q9_lty() -> usize { use tgo::Go; let b = crate::LTy; b.go(1) }\n"),
+        ("m02.rs", "impl crate::LTy { pub fn k9_self(&self) -> usize { use tgo::Go; self.go(1) } }\n"),
+        ("m03.rs", "impl crate::LTy { pub fn q9_mself(&mut self) -> usize { use tgo::Go; self.go(1) } }\n"),
+        ("m04.rs", "impl crate::LTy { pub fn q9_vself(self) -> usize { use tgo::Go; self.go(1) } }\n"),
+        ("m07.rs", "pub fn q9_field(h: crate::Hold) -> usize { use tgo::Go; h.l.go(1) }\n"),
+        ("m08.rs", "pub fn q9_param(b: crate::LTy) -> usize { use tgo::Go; b.go(1) }\n"),
+        ("m10.rs", "pub fn q9_mgo() -> usize { use tgo::MGo; let mut b = crate::LTy; b.mgo(1) }\n"),
+        ("m11.rs", "pub fn k9_noimp() -> usize { let b = crate::LTy; b.go(1) }\n"),
+        ("m12.rs", "pub fn k9_pref(b: &crate::LTy) -> usize { use tgo::Go; b.go(1) }\n"),
+        ("m13.rs", "pub fn q9_macro() -> usize { use tgo::Go; let b = crate::LTyC; crate::byref!(b); b.go(1) }\n"),
+        ("m14.rs", "pub fn k9_unit() -> usize { use tgo::Go; let b = crate::LTyC; b.go(1) }\n"),
+        ("m21.rs", "pub fn q11_odep() -> usize { use tgo::o::OGo; let b = ydep::Bar; b.go(1) }\n"),
+        ("m22.rs", "pub fn q11_olty() -> usize { use tgo::o::OGo; let b = crate::LTy; b.go(1) }\n"),
+        ("m51.rs", "use ydep::*;\npub struct LP;\nimpl LP { pub fn npush(&self, n: u32) -> usize { std::env::var(\"X\").map(|s| s.len()).unwrap_or(0) + n as usize } }\npub fn k13_glob() -> usize { let _ = Bar; LP.npush(1) }\n"),
+        ("m52.rs", "pub struct LQ;\nimpl LQ {\n    pub fn npush(&self, n: u32) -> usize { std::env::var(\"X\").map(|s| s.len()).unwrap_or(0) + n as usize }\n    pub fn k13_self(&self) -> usize { use tgo::n::NPush; self.npush(1) }\n}\n"),
+        ("m41.rs", "pub fn q8a_mutref() -> usize { use crate::loc::LMut; let mut v = crate::LTy; let r = &mut v; r.ma(1) }\n"),
+        ("m42.rs", "pub fn q8b_refcopy() -> usize { use crate::loc::LRef; let r = &crate::LTyC; r.mb(1) }\n"),
+        ("m43.rs", "pub fn q8c_reft() -> usize { use crate::loc::LRT; let mut b = crate::LTy; b.mc(1) }\n"),
+        ("m44.rs", "pub fn q8d_mutt() -> usize { use crate::loc::LMT; let mut v = crate::LTy; let r = &mut v; r.md(1) }\n"),
+        ("m46.rs", "impl crate::LTy { pub fn q8f_mself(&mut self) -> usize { use crate::loc::LMut2; self.mf(1) } }\n"),
+        ("m47.rs", "pub fn k8_pref(b: crate::LTy) -> usize { use crate::loc::LRef2; b.mk(1) }\n"),
+    ];
+    let deps = [("tgo", "", tgo_src.as_str()), ("ydep", "", ydep_src.as_str())];
+    let has = |cv: &serde_json::Value, f: &str, e: &str| veina_row_effs(cv, f).iter().any(|x| x == e);
+    let cv = v072_chain_many(&deps, &[], files);
+    let cu = v072_chain_many(&deps, &["tgo"], files);
+    // R1209: every crate chained, the overriding blanket's body is joined through the trait's union
+    for f in ["m21::q11_odep", "m22::q11_olty"] {
+        assert!(has(&cv, f, "Fs"), "R1209 `{f}` runs the overriding blanket body (executed: Fs):\n{cv:#}");
+    }
+    // control (executed noFs): a glob of a DIFFERENT chained package admits tgo's `NPush` as "in scope"; it has no default
+    // and no blanket, so the inherent runs. R1209's union join is for a trait the file names from ITS package only.
+    assert_eq!(veina_row_effs(&cv, "m51::k13_glob"), vec!["Env".to_string()], "R1209 control `k13_glob`:\n{cv:#}");
+    // control (executed noFs): the file NAMES `NPush`, but `self` in a `&self` fn IS the inherent `npush(&self)`'s
+    // receiver, so the inherent matches at the probe's first step; the union is not joined (R1207's exemption, exact)
+    assert_eq!(veina_row_effs(&cv, "m52::LQ::k13_self"), vec!["Env".to_string()], "R1209 control `k13_self`:\n{cv:#}");
+    // R1208: in both arms, this crate's own reference-receiver / reference-impl blankets are edged
+    for cx in [&cv, &cu] {
+        for f in ["m41::q8a_mutref", "m42::q8b_refcopy", "m43::q8c_reft", "m44::q8d_mutt", "m46::LTy::q8f_mself"] {
+            assert!(has(cx, f, "Fs"), "R1208 `{f}` runs this crate's blanket method (executed: Fs):\n{cx:#}");
+        }
+        // control: a VALUE parameter against `&self` vs `&self` — the same step, the inherent wins (MIR)
+        assert_eq!(veina_row_effs(cx, "m47::k8_pref"), vec!["Env".to_string()], "R1208 control `k8_pref`:\n{cx:#}");
+    }
+    // R1207: the trait's package unchained, a local receiver discloses
+    // q9_macro: `let b = LTyC;` reads as a value, but a macro re-binds `b` to `&b` and the blanket wins (executed)
+    for f in ["m01::q9_lty", "m03::LTy::q9_mself", "m04::LTy::q9_vself", "m07::q9_field", "m08::q9_param", "m10::q9_mgo", "m13::q9_macro", "m22::q11_olty"] {
+        assert!(has(&cu, f, "Unknown"), "R1207 `{f}` runs an unchained trait's method (executed) and discloses:\n{cu:#}");
+    }
+    // controls (MIR: the inherent runs): the receiver's own form IS the inherent's, or no trait is in scope
+    for f in ["m02::LTy::k9_self", "m11::k9_noimp", "m12::k9_pref", "m14::k9_unit"] {
+        assert_eq!(veina_row_effs(&cu, f), vec!["Env".to_string()], "R1207 control `{f}` runs the inherent alone (MIR):\n{cu:#}");
+    }
+    // R1207, a STANDALONE scan (nothing chained): adds NOTHING, as 0.40.12 — the stated residual. A ledger-only
+    // `invisible` row here was measured to turn a consumer's MISS into a HIT and delete its 0.40.12 `Unknown` (see the
+    // POSTURE comment in `scan_one`); this pins that the standalone report publishes no new row for these units.
+    let cn = v072_chain_many(&deps, &["tgo", "ydep"], files);
+    let row = |f: &str| cn["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).cloned();
+    for f in ["m01::q9_lty", "m03::LTy::q9_mself", "m08::q9_param"] {
+        let r = row(f).unwrap_or_default();
+        assert!(r.get("invisible").is_none() && !has(&cn, f, "Unknown"),
+            "R1207 `{f}` standalone: no ledger-only row, no Unknown (the residual):\n{cn:#}");
+    }
+}
+
+/// SOUNDNESS R1207/R1208 — `model::trait_may_win`, the method probe's step order, against the executed cells.
+#[test]
+fn v075_trait_may_win_is_the_probe_order() {
+    use crate::model::trait_may_win as w;
+    // (inherent rank, trait rank, impl self form, receiver form) -> the trait wins
+    assert!(w(2, 1, 0, 1), "q9_lty: value receiver, go(self) blanket over go(&self)");
+    assert!(!w(2, 2, 0, 1), "k8: value receiver, &self vs &self — the same step");
+    assert!(!w(2, 1, 0, 2), "k9_self: a `&` receiver matches go(&self) at the first step");
+    assert!(w(2, 1, 0, 3), "q9_mself: a `&mut` receiver, the blanket for `&mut LTy` by value");
+    assert!(w(2, 3, 0, 3), "q8a/q8f: `&mut` receiver, &mut self trait over &self inherent");
+    assert!(w(1, 2, 0, 2), "q8b: `&` receiver of a Copy type, &self trait over self inherent");
+    assert!(w(3, 1, 1, 1), "q8c: value receiver, an impl for &T by value over &mut self");
+    assert!(w(2, 1, 2, 3), "q8d: `&mut` receiver, an impl for &mut T by value over &self");
+    assert!(!w(3, 2, 0, 3), "q8g: `&mut` receiver, &mut self inherent at the first step");
+    assert!(!w(1, 1, 0, 1), "a value receiver of a by-value inherent: the first step, the inherent wins");
+    assert!(w(2, 2, 0, 0), "form unknown: a `&mut` receiver would let the trait's &self method win");
 }

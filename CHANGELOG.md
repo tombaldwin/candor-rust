@@ -43,6 +43,30 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   and 164 newly carry `Unknown` (0.0069% of 2,381,733). No row loses an effect or an `Unknown`. The cache schema
   moves to rev118 (`Call::dot`, `FnInfo::recv_rank`, and a blanket-trait record).
 
+- ⚠ **candor-scan: three residuals of R1202's method probe (SOUNDNESS R1207, R1208, R1209).** Each read the
+  inherent method's `['Env']` over a trait method that, executed, wrote a file. (R1208) A crate-local blanket trait
+  on a REFERENCE receiver: on `&mut x` a trait `&mut self` method beats an inherent `&self` one, on `&x` of a `Copy`
+  type a trait `&self` method beats an inherent `self` one, and an impl for `&T` / `&mut T` matches one autoref step
+  later than its rank says. The scan now runs the probe's step order over the receiver's own form where the
+  expression says it (`self`, a parameter, `&x`, a struct literal, a `let` bound once) and over every form where it
+  does not, and reads a member's declared receiver when it has no default body. (R1209) A chained trait whose
+  blanket impl OVERRIDES the member, with no default body: the trait's union is joined on a key hit, for a trait the
+  file names from its own package, except where the receiver's form is the inherent method's own. (R1207) A local
+  receiver beside a trait from a package with no report: a chained scan discloses `Unknown` unless the receiver's form
+  is the inherent method's own; a standalone scan adds nothing, as 0.40.12 did (stated residual). Executed: five
+  R1208 cells move `deny Fs` 0 to 1 in all three chain arms, two R1209 cells move `deny Fs` 0 to 1 chained, eight
+  R1207 cells move `deny Unknown` 0 to 1 with the trait's package unchained, and every control that runs the
+  inherent method stays as it was. Measured against the published 0.40.12 over 1,160 chained census consumers
+  (604,997 analysed units): no row is removed and no row loses an effect or an `Unknown`; 322 rows newly carry
+  `Unknown` and 36 gain a concrete effect (15 of them are R1202's redis rows). Against the R1202 build: 226 rows newly
+  carry `Unknown` (0.037%), 21 gain `Log` or `Net`, and 20 mongodb rows lose an R1202 `Unknown` that the probe order
+  shows was over-disclosed (`db.read_concern()` on a `Database` value: the inherent `&self` method and the trait's
+  `&self` method match at the same step, and the inherent wins). Of the 21: 9 are joins of a union for a generic or
+  `dyn` receiver (hyper-tls, tonic); 12 are a stated over-charge in sqlx-core, where `Pin::new(self).poll_shutdown()`
+  on tokio's `TcpStream` is typed as the local call and tokio's `AsyncWrite` union charges `Log`. Unchained, over
+  5,367 registry crates (3,316,366 units): 469 rows newly carry `Unknown` (0.014%) and none gains a concrete effect.
+  The cache schema moves to rev119 (`Call::recv_form`, and a blanket-for-reference record).
+
 - ⚠ **`cargo candor snapshot` and `guard` give one answer when `cargo dylint` exits nonzero** (issue #10).
   Before, `snapshot` accepted any nonzero exit that left *some* report file under the prefix and called the
   baseline valid, while `guard` treated every nonzero exit as a build failure (exit 2), so a crate could be

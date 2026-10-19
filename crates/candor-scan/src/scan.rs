@@ -2253,6 +2253,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1202 — each unit's receiver rank (`FnInfo::recv_rank`), for the local-trait-vs-local-inherent contest.
     let r1202_rank: HashMap<String, u8> = fns.iter().filter(|f| f.recv_rank > 0).map(|f| (f.qual.clone(), f.recv_rank)).collect();
     let r1202_probe = std::env::var_os("CANDOR_R1202_PROBE").is_some();
+    // SOUNDNESS R1207 / R1208 / R1209 — falsification switches for the three halves below, and R1207's measurement
+    // switch (`CANDOR_R1207_NOFORM`: hedge without the receiver-form exemption, to price it).
+    let r1207_off = std::env::var_os("CANDOR_R1207_OFF").is_some();
+    let r1207_noform = std::env::var_os("CANDOR_R1207_NOFORM").is_some();
+    // SOUNDNESS R1207 — the POSTURE. A scan that chains reports has declared its dependency universe, and a package it
+    // imports and could not read is a hole in it: `Unknown`, as R1202 already answers a dependency receiver (whose rule
+    // can only fire in a chained scan). A STANDALONE scan (nothing chained) adds NOTHING, as 0.40.12 did. Priced
+    // (rustagent-v075, 5,372 standalone registry crates): the `Unknown` posture there newly hedged ~102k rows, 4.3%,
+    // above the ~2.6% band. And a κ ledger entry (`invisible`) there is NOT free: it turns a pure unit, which a
+    // standalone report omits, into a published `[]` + `invisible` ROW, so a consumer chaining that report HITS where it
+    // missed, and the hit skips the consumer's own trait-in-scope miss rule (⟨0.40⟩ permission row 1): MEASURED
+    // (rustagent-v075 A/B against 0.40.12, 1,160 chained census consumers) 160 consumer rows lost a 0.40.12 `Unknown`
+    // with the standalone ledger on and 0 with it off, the only difference between the two builds (regex
+    // `Regex::static_captures_len`: `deny Unknown` 1 to 0; the row is pure with the ledger build's dependency reports
+    // and `Unknown` with the main-line build's, whichever of the two engines scans the consumer). That is SPEC's
+    // "a mechanism that makes reports better must not make silence cheaper" (R764's shape), so the standalone ledger
+    // is OFF; the standalone half of R1207 is the stated residual. `CANDOR_R1207_HEDGE=1` forces `Unknown` (and its ledger
+    // entry) in a standalone scan too, to price it.
+    let r1207_hedge = !deps_idx.crates.is_empty() || std::env::var_os("CANDOR_R1207_HEDGE").is_some();
+    let r1208_off = std::env::var_os("CANDOR_R1208_OFF").is_some();
+    let r1209_off = std::env::var_os("CANDOR_R1209_OFF").is_some();
     // ⟨0.40⟩ SOUNDNESS R888 — this crate's own `Deref` impls whose target is a DEPENDENCY's type.
     let foreign_derefs = {
         let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
@@ -4684,6 +4705,48 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                         }
                         let hit = !dep_recv || dep_join_hit;
+                        // SOUNDNESS R1209/R1210 — NEITHER BODY, ON A HIT: what can still run is a BLANKET impl that
+                        // OVERRIDES the member (`impl<T> OGo for T { fn go(self) .. }`). Its body is on the wire only
+                        // under the impl's type PARAMETER (`o::T::go`), which no receiver key names, and in the
+                        // trait's `interfaceUnion` row, which unions it. A hit never covers it: a dependency
+                        // receiver's key is that TYPE's own unit (an impl in the type's crate shares it, a blanket
+                        // in the trait's crate does not), and a local receiver's "hit" is only that this crate
+                        // resolved the inherent. EXECUTED (rustagent-v075/fx/r1207): q11_odep and q11_olty write a
+                        // file and read `['Env']` with every crate chained, `deny Fs` and `deny Unknown` both 0. The
+                        // union is joined: it is the trait's every implementor in its crate, so it may charge an
+                        // implementor that is not the receiver's (the over-charge direction), but it holds every
+                        // body that CAN run here. A miss keeps its disclosure below, unchanged.
+                        //
+                        // ONLY FOR A TRAIT THIS FILE NAMES FROM ITS OWN PACKAGE (a `use` whose head is the trait's
+                        // package, by its leaf or by a glob of that package). `in_scope_traits` matches a `use` LEAF or
+                        // ANY chained glob against EVERY chained package, so `use std::task::Context` admits rustls's
+                        // `crypto::hash::Context` and `use proto::ReadError::*` admits tokio's private
+                        // `multi_thread::overflow::Overflow`. Where such a false candidate had no body, R1202 did
+                        // nothing; joining its UNION there charged every implementor: MEASURED (rustagent-v075 A/B,
+                        // 1,160 chained census consumers) quinn `ReadToEnd::poll` gained `Log` through `self.buffer.push`
+                        // on a local struct, sqlx `TcpStream::poll_shutdown` through `Pin::new(self)`. A false
+                        // candidate kept out here is exactly R1202's answer, so this can only narrow the new join.
+                        let named_here = fu.iter().any(|u| {
+                            let head = u.split("::").next().unwrap_or("");
+                            let head = dep_renames.get(head).map_or(head, String::as_str).replace('-', "_");
+                            head == tpkg.replace('-', "_") && (u.ends_with('*') || u.rsplit("::").next() == Some(tr_leaf))
+                        });
+                        // and NOT where the receiver's own form is known and IS the inherent method's receiver: the
+                        // inherent matches at the probe's first step and nothing comes before it (R1207's exemption,
+                        // exact). MEASURED: async-nats `Connection::easy_write_and_flush` (`self.poll_write(cx)` in a
+                        // `&mut self` fn, over an inherent `poll_write(&mut self, ..)`) gained `Log` from tokio's union.
+                        let inh_first = c.recv_form != 0 && {
+                            let inh: Vec<u8> = by_tail2.get(&format!("{ty_leaf}::{member}")).into_iter().flatten()
+                                .filter_map(|q| r1202_rank.get(q).copied()).collect();
+                            !inh.is_empty() && inh.iter().all(|&i| i == c.recv_form)
+                        };
+                        let mut union_body = false;
+                        if bodies.is_empty() && hit && !r1209_off && named_here && !inh_first {
+                            if let Some(k) = crate::typesurf::present(deps_idx, &format!("{key}::{member}"), false) {
+                                bodies.push(k);
+                                union_body = true;
+                            }
+                        }
                         if r1202_probe {
                             eprintln!("R1202\t{}\t{}\tchained\t{key}\tbodies={}{}\t{}", f.qual, c.path, bodies.len(),
                                 if hit { "/hit" } else { "/miss" }, if dep_recv { "dep" } else { "local" });
@@ -4693,7 +4756,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr_leaf}.{member}"));
                         }
                         for k in &bodies {
-                            if let Some(de) = crate::typesurf::row(deps_idx, k, true) {
+                            if let Some(de) = crate::typesurf::row(deps_idx, k, !union_body) {
                                 apply_dep_fn(de, &f.qual, DepSink {
                                     direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                                     tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
@@ -4710,6 +4773,49 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         direct.entry(f.qual.clone()).or_default().insert("Unknown");
                         unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{ty_leaf}.{member}"));
                     }
+                    // each receiver rank this crate records for `<leaf>::<member>` (a leaf two types share yields both)
+                    let ranks_of = |k: &str| -> Vec<u8> {
+                        by_tail2.get(k).into_iter().flatten().filter_map(|q| r1202_rank.get(q).copied()).collect()
+                    };
+                    // SOUNDNESS R1207 — A LOCAL RECEIVER BESIDE A TRAIT THIS SCAN CANNOT READ. `use tgo::Go; let b =
+                    // crate::LTy; b.go(1)` with `tgo` unchained runs tgo's blanket `go(self)` over `LTy::go(&self)`
+                    // (EXECUTED, rustagent-v075/fx/r1207: seven receiver spellings write a file and read `['Env']`,
+                    // `deny Fs` and `deny Unknown` both 0). A foreign trait reaches a LOCAL type only through a blanket
+                    // impl in its crate (an impl here is `own_traits`, already the key), and that crate's members are
+                    // not on the wire, so the call DISCLOSES, as the dependency receiver above does. One exemption,
+                    // exact: where the receiver's own form is known (`Call::recv_form`: `self`, a parameter, `&x`) and
+                    // the inherent method's receiver IS that form, the inherent matches at the probe's first step and
+                    // no trait method can come before it (`self.go()` inside `fn f(&self)` over `go(&self)`). An
+                    // unread leaf this type already implements is the key, not a competitor; a glob is never one.
+                    if local_recv && !dep_recv && !recv_is_trait && !r1207_off {
+                        let unread: Vec<&String> = st.unread.iter().filter(|u| {
+                            let leaf = u.rsplit("::").next().unwrap_or("");
+                            leaf == "*" || !own_traits.is_some_and(|v| v.iter().any(|t| t == leaf))
+                        }).collect();
+                        if !unread.is_empty() {
+                            let inh = ranks_of(&format!("{ty_leaf}::{member}"));
+                            let first_step = !r1207_noform && c.recv_form != 0
+                                && !inh.is_empty() && inh.iter().all(|&i| i == c.recv_form);
+                            if r1202_probe {
+                                eprintln!("R1207\t{}\t{}\tunread\t{}\tform={}/inh={:?}/{}\tlocal", f.qual, c.path,
+                                    unread.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(","), c.recv_form, inh,
+                                    if first_step { "exempt" } else { "hedge" });
+                            }
+                            if !first_step && r1207_hedge {
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{ty_leaf}.{member}"));
+                                // and the κ ledger entry beside it: the call may land in each unread package (never
+                                // alone — see the POSTURE above for why a ledger-only row is not free)
+                                for u in &unread {
+                                    let head = u.split("::").next().unwrap_or("");
+                                    if deps.contains(head) {
+                                        *dep_seen.entry(head.to_string()).or_insert(0) += 1;
+                                        blind_direct.entry(f.qual.clone()).or_default().insert(head.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // this crate's own traits declaring the member, in scope in this file
                     let leaves: HashSet<&str> = fu.iter().filter_map(|u| u.rsplit("::").next()).collect();
                     let local_glob = fu.iter().any(|u| {
@@ -4725,7 +4831,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // the trait can apply to the receiver only through a BLANKET impl (its own impls for the
                         // receiver's type are `own_traits`): an `impl<T> Tr for T`, recorded by Pass A.
                         let blanket_impl = merged.blanket_methods.contains_key(&crate::model::blanket_trait_key(tl));
-                        if !blanket_impl {
+                        // SOUNDNESS R1208 — or for every REFERENCE (`impl<T> Tr for &T` / `&mut T`): "1" / "2", "" both
+                        let ref_blanket = if r1208_off { None } else {
+                            merged.blanket_methods.get(&crate::model::blanket_ref_trait_key(tl)).map(|v| match v.as_str() {
+                                "1" => 1u8,
+                                "2" => 2,
+                                _ => 3,
+                            })
+                        };
+                        if !blanket_impl && ref_blanket.is_none() {
                             continue;
                         }
                         if !(local_glob || leaves.contains(tl.as_str()) || declared_here.is_some_and(|d| d.contains(tl.as_str()))) {
@@ -4738,11 +4852,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // blanket impl for `&T`/`&mut T` win at a later rank; the site does not carry the receiver's
                         // reference-ness, so that half is the residual, stated.
                         if local_recv {
-                            let rank_of = |k: &str| by_tail2.get(k).into_iter().flatten().filter_map(|q| r1202_rank.get(q).copied()).min();
-                            let inh = rank_of(&format!("{ty_leaf}::{member}"));
-                            let tr = rank_of(&format!("{tl}::{member}")).or_else(|| blanket.as_deref().and_then(rank_of));
-                            if let (Some(i), Some(t)) = (inh, tr) {
-                                if t >= i {
+                            let inh = ranks_of(&format!("{ty_leaf}::{member}"));
+                            let mut tr = ranks_of(&format!("{tl}::{member}"));
+                            if tr.is_empty() {
+                                tr = blanket.as_deref().map(ranks_of).unwrap_or_default();
+                            }
+                            if tr.is_empty() && !r1208_off {
+                                // a member with no default body: its declared rank (Pass A, `model::trait_rank_key`)
+                                if let Some(r) = merged.blanket_methods.get(&crate::model::trait_rank_key(tl, member))
+                                    .and_then(|v| v.parse::<u8>().ok()).filter(|r| *r > 0)
+                                {
+                                    tr.push(r);
+                                }
+                            }
+                            if r1208_off {
+                                // the R1202 rule: a VALUE receiver of a plain blanket, by the lowest rank on each side
+                                if let (Some(i), Some(t)) = (inh.iter().min(), tr.iter().min()) {
+                                    if t >= i {
+                                        continue;
+                                    }
+                                }
+                            } else if !inh.is_empty() && !tr.is_empty() {
+                                // SOUNDNESS R1208 — the R1202 rule (`t >= i` → the inherent wins) holds only for a VALUE
+                                // receiver of a PLAIN blanket. On `&mut x` a trait `&mut self` method beats an inherent
+                                // `&self` one; on `&x` of a `Copy` type a trait `&self` method beats an inherent `self`
+                                // one; an impl for `&T` / `&mut T` is matched one autoref step later than its rank says.
+                                // EXECUTED (rustagent-v075/fx/r1207: q8a/q8b/q8c/q8d/q8f each write a file and read
+                                // `['Env']`, `deny Fs` 0). So the probe is run (`model::trait_may_win`) over the receiver's
+                                // own form where the site knows it, and over every form where it does not; and over
+                                // every pair of ranks the two names carry.
+                                let sf: Vec<u8> = match (blanket_impl, ref_blanket) {
+                                    (true, None) => vec![0],
+                                    (false, Some(r)) => vec![r],
+                                    (_, Some(r)) => vec![0, r],
+                                    (false, None) => vec![],
+                                };
+                                let wins = inh.iter().any(|&i| tr.iter().any(|&t| sf.iter().any(|&f|
+                                    crate::model::trait_may_win(i, t, f, c.recv_form))));
+                                if !wins {
                                     continue;
                                 }
                             }

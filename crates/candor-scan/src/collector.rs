@@ -158,6 +158,16 @@ pub(crate) struct AssignDrop<'a> {
     pub(crate) field_borrows: Option<&'a HashMap<String, HashMap<String, crate::model::FieldBorrow>>>,
     /// The enclosing impl's type leaf, for `Self` in a parameter type.
     pub(crate) self_leaf: Option<String>,
+    /// SOUNDNESS R1207/R1208 — a name the body binds EXACTLY ONCE, by a plain `let` (`let x = e;`, `let mut x: T = e;`),
+    /// and which is not a parameter: its initializer and written type, so `Call::recv_form` can read the form a
+    /// receiver `x` holds. Any second binding of the name anywhere in the body (a shadowing `let`, a closure or match
+    /// pattern, a nested fn's parameter) leaves the name out, so no scope question has to be answered.
+    pub(crate) let_inits: HashMap<String, (Option<syn::Type>, Option<syn::Expr>)>,
+    /// SOUNDNESS R1207/R1208 — the body declares a nested fn with a receiver, whose `self` is not this fn's.
+    pub(crate) nested_self: bool,
+    /// SOUNDNESS R1207/R1208 — every identifier a macro invocation in the body carries: a macro may re-bind it
+    /// (`tokio::pin!(x)`), so neither its parameter type nor its `let` says what form it holds.
+    pub(crate) macro_idents: std::collections::HashSet<String>,
     /// Type leaves declared at two or more quals (`ElemIndexes::twin_type_leaves`).
     pub(crate) twin_leaves: Option<&'a std::collections::HashSet<String>>,
 }
@@ -1149,7 +1159,7 @@ impl<'a> CallCollector<'a> {
                 if std::env::var_os("CANDOR_R1056_INSTR").is_some() {
                     eprintln!("{route}\t{t2}"); // §E1 REACH PROBE (`[_]`/`[_;_]` in t2 = the generic arm)
                 }
-                self.calls.push(Call { dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
+                self.calls.push(Call { recv_form: 0, dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
                     leaf: leaf.to_string(), str_arg: None, typed: true, method: true, is_macro: false,
                     path_lits_partial: false, path_lit2: None });
             }
@@ -1812,7 +1822,7 @@ impl<'a> CallCollector<'a> {
                 if std::env::var_os("CANDOR_R1186_INSTR").is_some() && l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
                     eprintln!("R1186WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER (chained or not)
                 }
-                self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                     // SOUNDNESS R1200 — a METHOD-CALL site (`base` 1) carries an `m` after its position: method resolution there
                     // may pick a same-name trait method out of the dependency's sight over an inherent one (`depsig`).
                     path: format!("{cr}::{WITNESS_MARKER}::{l}::{}{}::{rest}", base + i, if base == 1 { "m" } else { "" }),
@@ -2158,7 +2168,7 @@ impl<'a> CallCollector<'a> {
             if std::env::var_os("CANDOR_R1136_INSTR").is_some() {
                 eprintln!("R1136EXT\t{cr}\t{t}\t.{leaf}/{}", node.args.len()); // §E1 REACH COUNTER, on the ADDED branch only
             }
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 path: format!("{cr}::{EXT_METHOD_MARKER}::{leaf}"),
                 leaf: leaf.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
@@ -2666,7 +2676,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
             eprintln!("CTOR-RELEASE-CROSS {cr}::{leaf} in {}", self.modpath);
         }
-        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{cr}::{DROP_MARKER}::{leaf}"),
             leaf: "drop".to_string(),
             str_arg: None,
@@ -2930,7 +2940,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
             eprintln!("CTOR-MARK {} in {}", leaf, self.modpath);
         }
-        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{leaf}::{CONSTRUCT_MARKER}"),
             leaf: CONSTRUCT_MARKER.to_string(),
             str_arg: None,
@@ -2983,7 +2993,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
             eprintln!("CTOR-MARK-CROSS {cr}::{leaf} in {}", self.modpath);
         }
-        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{cr}::{DROP_MARKER}::{leaf}"),
             leaf: "drop".to_string(),
             str_arg: None,
@@ -4927,7 +4937,7 @@ impl<'a> CallCollector<'a> {
     fn charge_iter_next(&mut self, expr: &syn::Expr) {
         if let Some(ty_leaf) = self.iter_next_target(expr) {
             let path = format!("{ty_leaf}::next");
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 path,
                 leaf: "next".to_string(),
                 str_arg: None,
@@ -5068,7 +5078,7 @@ impl<'a> CallCollector<'a> {
             if std::env::var_os("CANDOR_R1038_INSTR").is_some() {
                 eprintln!("R1038DEPTRAIT\t{full} -> {t}"); // §E1 REACH COUNTER, on the CHANGED branch only
             }
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 leaf: method.clone(), path: t,
                 str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false });
@@ -5620,7 +5630,7 @@ impl<'a> CallCollector<'a> {
     }
 
     fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
-        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{ty_leaf}::{method}"),
             leaf: method.to_string(),
             str_arg: None,
@@ -5707,7 +5717,7 @@ impl<'a> CallCollector<'a> {
                 eprintln!("R1157PRIMOP\t{trait_leaf}\t{ty_leaf}\tliteral={lit}"); // §E1 REACH COUNTER
             }
             if !lit {
-                self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                     path: format!("{PRIM_OP_MARKER}::{ty_leaf}::{method}"),
                     leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                     typed: false, method: false, is_macro: false });
@@ -5818,7 +5828,7 @@ impl<'a> CallCollector<'a> {
         // here as `layout::Rect`) gets the same edge, by its full path: local resolution settles it.
         // Without this, ratatui's `{:?}` of `self.area` lost its `Rect::fmt` edge.
         if segs.len() >= 3 && segs[0] == "crate" && !ty.contains(crate::decls::ALIAS_ALT_SEP) {
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 path: format!("{ty}::{method}"),
                 leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
@@ -5826,7 +5836,7 @@ impl<'a> CallCollector<'a> {
             return;
         }
         if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 path: format!("{}::{}::{}", segs[0], ty_leaf, method),
                 leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
@@ -5837,7 +5847,7 @@ impl<'a> CallCollector<'a> {
             // `a: &dep::B` joined nothing, and chaining's coverage then deleted the `invisible: [dep]` the
             // unchained arm carried: ABSENT over a write (auditagent-v051/fxchain, every arm).
             if crate::lang::OPERATOR_TRAITS.contains(&trait_leaf) {
-                self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                     path: format!("{}::&{}::{}", segs[0], ty_leaf, method),
                     leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                     typed: false, method: false, is_macro: false,
@@ -5960,7 +5970,7 @@ impl<'a> CallCollector<'a> {
                 keys.push(format!("{s}::{}::{method}", crate::model::MBE_PRIM_SEG));
             }
             for k in keys {
-                self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                     path: format!("{cr}::{OP_RHS_MARKER}::{k}"),
                     leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                     typed: false, method: false, is_macro: false,
@@ -6771,7 +6781,7 @@ impl<'a> CallCollector<'a> {
         match self.trait_impls.get(tr) {
             Some(impls) if impls.len() <= 12 => {
                 for ty in impls {
-                    self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                    self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                         path: format!("{ty}::{leaf}"),
                         leaf: leaf.to_string(),
                         str_arg: str_arg.clone(),
@@ -6796,7 +6806,7 @@ impl<'a> CallCollector<'a> {
                     if std::env::var_os("CANDOR_V053_INSTR").is_some() {
                         eprintln!("R1151DEFAULT\t{tr}::{leaf}"); // §E1 REACH COUNTER
                     }
-                    self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                    self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                         path: format!("{tr}::{leaf}"),
                         leaf: leaf.to_string(),
                         str_arg: str_arg.clone(),
@@ -6937,7 +6947,7 @@ impl<'a> CallCollector<'a> {
             if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                 eprintln!("VEINB_HANDLEARG\t{path}\t{ty}::{verb}");
             }
-            self.calls.push(Call { dot: false, argc: 1, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 1, entropy_arg: false,
                 path: format!("{ty}::{verb}"), leaf: verb.to_string(), str_arg: None,
                 typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
         }
@@ -7079,7 +7089,7 @@ impl<'a> CallCollector<'a> {
                     if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
                         eprintln!("VEINC_TYPEPATH\t{path}");
                     }
-                    self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
+                    self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
                         leaf: leaf.to_string(), str_arg: str_arg.clone(), typed: true, method: true,
                         is_macro: false, path_lits_partial: false, path_lit2: None });
                 }
@@ -7103,7 +7113,7 @@ impl<'a> CallCollector<'a> {
                     self.impl_members, &tr, ty.rsplit("::").next().unwrap_or(&ty), leaf) => {}
                 Some(ty) => {
                     let p2 = crate::lang::alias_join(&ty, &[leaf]);
-                    self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: p2, leaf: leaf.to_string(),
+                    self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: p2, leaf: leaf.to_string(),
                         str_arg: str_arg.clone(), typed: true, method: true, is_macro: false,
                         path_lits_partial: false, path_lit2: None });
                 }
@@ -7353,6 +7363,72 @@ impl<'a> CallCollector<'a> {
                 Some(format!("{base}::{FIELD_HOP_SEG}::{member}"))
             }
             _ => None,
+        }
+    }
+    /// SOUNDNESS R1207/R1208 — `Call::recv_form` of a method-call receiver whose type resolved to a type whose last
+    /// segment is `ty_leaf`: 1 a value of it, 2 `&` of it, 3 `&mut` of it, 0 not known. Only what the expression says
+    /// by itself: `self` (its declared receiver), a parameter not rebound in the body (`AssignDrop::params`) declared as
+    /// the type or a reference to it, `&e` / `&mut e` of a known value, and a struct literal. A path to a unit struct is
+    /// NOT read as a value (a `static`/`const` of a reference type is spelled the same), nor is a field, a call or a
+    /// `let` binding: those read 0, and every rule must treat 0 as "any form".
+    fn recv_form_of(&self, e: &syn::Expr, ty_leaf: &str) -> u8 {
+        self.recv_form_at(e, ty_leaf, 0)
+    }
+
+    fn recv_form_at(&self, e: &syn::Expr, ty_leaf: &str, depth: u8) -> u8 {
+        // the declared type's form, if it is `ty_leaf` / `Self`, or one reference to it
+        let of_ty = |t: &syn::Type| -> u8 {
+            let names = |t: &syn::Type| matches!(t, syn::Type::Path(p) if p.qself.is_none()
+                && p.path.segments.last().is_some_and(|s| s.arguments.is_none() && {
+                    let id = s.ident.to_string();
+                    id == ty_leaf || (id == "Self" && self.assign_drop.self_leaf.as_deref() == Some(ty_leaf))
+                }));
+            match t {
+                syn::Type::Reference(r) if names(&r.elem) => if r.mutability.is_some() { 3 } else { 2 },
+                syn::Type::Paren(p) => if names(&p.elem) { 1 } else { 0 },
+                t if names(t) => 1,
+                _ => 0,
+            }
+        };
+        match e {
+            syn::Expr::Paren(p) => self.recv_form_at(&p.expr, ty_leaf, depth),
+            syn::Expr::Group(g) => self.recv_form_at(&g.expr, ty_leaf, depth),
+            syn::Expr::Reference(r) => match self.recv_form_at(&r.expr, ty_leaf, depth) {
+                1 => if r.mutability.is_some() { 3 } else { 2 },
+                _ => 0,
+            },
+            syn::Expr::Struct(s) if s.qself.is_none()
+                && s.path.segments.last().is_some_and(|l| l.ident == ty_leaf) => 1,
+            syn::Expr::Path(p) if p.qself.is_none() => {
+                if let Some(id) = p.path.get_ident() {
+                    let n = id.to_string();
+                    if (n == "self" && self.assign_drop.nested_self) || (n != "self" && self.assign_drop.macro_idents.contains(&n)) {
+                        return 0;
+                    }
+                    if let Some(t) = self.assign_drop.params.get(&n) {
+                        return of_ty(t);
+                    }
+                    if let Some((t, init)) = self.assign_drop.let_inits.get(&n) {
+                        if let Some(t) = t {
+                            return of_ty(t);
+                        }
+                        if let Some(e) = init {
+                            if depth < 4 {
+                                return self.recv_form_at(e, ty_leaf, depth + 1);
+                            }
+                        }
+                        return 0;
+                    }
+                }
+                // a path naming the TYPE itself is its unit-struct constructor, a value (a `const`/`static` cannot
+                // share the type's name in one namespace scope)
+                match p.path.segments.last() {
+                    Some(l) if l.arguments.is_none() && l.ident == ty_leaf
+                        && l.ident.to_string().starts_with(|c: char| c.is_ascii_uppercase()) => 1,
+                    _ => 0,
+                }
+            }
+            _ => 0,
         }
     }
     fn locally_bound(&self, name: &str) -> bool {
@@ -8472,7 +8548,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if let Some(ts) = &aliased {
                             for extra in ts.iter().skip(1) {
                                 let leaf2 = extra.rsplit("::").next().unwrap_or(extra).to_string();
-                                self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                                self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra.clone(), leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                             }
                         }
                         // SOUNDNESS R140/R287 — A `use` ALIAS BOUND TWICE PUSHES EVERY ARM, exactly as a
@@ -8507,7 +8583,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         let full = crate::lang::alias_join(&t, &rest_refs);
                                         if full == written { continue; }
                                         let leaf2 = full.rsplit("::").next().unwrap_or(&full).to_string();
-                                        self.calls.push(Call { dot: false,
+                                        self.calls.push(Call { recv_form: 0, dot: false,
                                             argc: 0, entropy_arg: false, path: full, leaf: leaf2,
                                             str_arg: None, typed: false, method: false,
                                             is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -8532,7 +8608,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     }
                                     for extra in extras {
                                         let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
-                                        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: extra,
+                                        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra,
                                             leaf: leaf2, str_arg: None, typed: false, method: false,
                                             is_macro: false, path_lits_partial: false, path_lit2: None });
                                     }
@@ -8658,7 +8734,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             }
                             _ => path,
                         };
-                        self.calls.push(Call { dot: false, argc: node.args.len().min(255) as u8,
+                        self.calls.push(Call { recv_form: 0, dot: false, argc: node.args.len().min(255) as u8,
                                                entropy_arg: args_name_entropy_source(&node.args),
                                                path, leaf, str_arg, typed: false, method,
                                                is_macro: false, path_lits_partial, path_lit2 });
@@ -8814,7 +8890,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { dot: true, argc: 0, entropy_arg: false, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
+        self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false, path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
         // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver is a local bound from
         // a cross-crate call whose return type we never learned — `let c = deplib::build(); c.fetch()`.
         // No key is formed, so no question is asked of the chained report, so its silence licenses
@@ -8871,7 +8947,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // a callee path is not, so splitting from the FRONT (as the reverted attempt did)
                 // truncates every non-root factory to its first module segment.
                 let (root, rest) = callee_path.split_once("::").unwrap_or((callee_path.as_str(), ""));
-                self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                     path: format!("{root}::<untyped>::{rest}::{leaf}"),
                     leaf: leaf.clone(),
                     str_arg: None,
@@ -8915,7 +8991,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 {
                     if let Some(prov) = bound_caps.cloned().or_else(|| self.dep_value_provenance(&node.receiver)) {
                         let (root, rest) = prov.split_once("::").unwrap_or((prov.as_str(), ""));
-                        self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                        self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{root}::{UNTYPED_RECV_MARKER}::{rest}::{leaf}"),
                             leaf: leaf.clone(), str_arg: None,
                             path_lits_partial: false, path_lit2: None,
@@ -8963,7 +9039,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                         eprintln!("VEINB_LEGACY\t{lt}::{leaf}");
                     }
-                    self.calls.push(Call { dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false,
+                    self.calls.push(Call { recv_form: 0, dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false,
                         path: crate::lang::alias_join(&lt, &[leaf.as_str()]), leaf: leaf.clone(), str_arg: None,
                         typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
                     self.veinb_off.set(true);
@@ -8971,7 +9047,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.veinb_off.set(false);
                     if let Some((steps, base)) = guess.filter(|(_, b)| *b == lt) {
                         let rest = base.split_once("::").map_or("", |(_, r)| r);
-                        self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                        self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{root}::{CHAIN_GUESS_MARKER}::{}::{rest}::{leaf}", steps.join(".")),
                             leaf: leaf.clone(), str_arg: None, typed: false, method: false,
                             is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -9032,7 +9108,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
                 eprintln!("R950RECV {} lit={lit:?}", recv_why.unwrap_or(""));
             }
-            self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+            self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                                    path: "std::net::ToSocketAddrs::to_socket_addrs".to_string(),
                                    leaf: leaf.clone(), str_arg: lit, typed: true, method: true,
                                    is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -9134,7 +9210,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     (None, _, "Command") => self.resolve_cmd_recv(&node.receiver),
                     _ => str_arg,
                 };
-                self.calls.push(Call { dot: true, argc: node.args.len().min(255) as u8,
+                let recv_form = self.recv_form_of(&node.receiver, recv_seg);
+                self.calls.push(Call { recv_form, dot: true, argc: node.args.len().min(255) as u8,
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
                                        is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -9145,7 +9222,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if std::env::var_os("CANDOR_V053_INSTR").is_some() {
                         eprintln!("R1153CAND\t{g}\t.{leaf}"); // §E1 REACH COUNTER
                     }
-                    self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                    self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                         path: format!("{root}::{GLOB_CAND_MARKER}::{rest}::{leaf}"),
                         leaf: leaf.clone(), str_arg: None, typed: false, method: false,
                         is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -9175,7 +9252,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
                     {
                         let rest = base.split_once("::").map_or("", |(_, r)| r);
-                        self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                        self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{root}::{CHAIN_GUESS_MARKER}::{}::{rest}::{leaf}", steps.join(".")),
                             leaf: leaf.clone(), str_arg: None, typed: false, method: false,
                             is_macro: false, path_lits_partial: false, path_lit2: None });
@@ -9404,7 +9481,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                     }
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
-                        self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                        self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: str_arg.clone(),
@@ -9529,7 +9606,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             }
                             if impls.len() <= 12 {
                                 for ty in impls {
-                                    self.calls.push(Call { dot: true, argc: 0, entropy_arg: false,
+                                    self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                                         path: format!("{ty}::{leaf}"),
                                         leaf: leaf.clone(),
                                         str_arg: str_arg.clone(),
@@ -9564,7 +9641,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
                             eprintln!("VEINC_STD\t{full}::{leaf}");
                         }
-                        self.calls.push(Call { dot: true, argc: node.args.len().min(255) as u8,
+                        self.calls.push(Call { recv_form: 0, dot: true, argc: node.args.len().min(255) as u8,
                             entropy_arg: args_name_entropy_source(&node.args),
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
@@ -9811,7 +9888,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             let paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
                             for path in paths {
                                 let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                                self.calls.push(Call { dot: true, argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                                self.calls.push(Call { recv_form: 0, dot: true, argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                             }
                             if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                 eprintln!("R271ADAPT");
@@ -10400,7 +10477,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !locally_bound && !self.lazy_statics.contains(&name)
                         && self.forced_lazies.insert(format!("{cr}\u{0}{key}"))
                     {
-                        self.calls.push(Call { dot: false, argc: 0, entropy_arg: false,
+                        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                             path: format!("{cr}::{LAZY_UNIT_PREFIX}::{key}"),
                             leaf: name.clone(), str_arg: None,
                             typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
@@ -10443,7 +10520,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let qual = lazy_qual(&mp, &name);
                         // Not a macro/typed/method.
                         if self.forced_lazies.insert(qual.clone()) {
-                            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                         }
                     }
                 }
@@ -11840,7 +11917,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         if mpath.contains("::") {
-            self.calls.push(Call { dot: false, argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
                             path_lits_partial: false, path_lit2: None,
                         });
         }

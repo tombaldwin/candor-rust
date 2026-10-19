@@ -44,6 +44,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev119 (rustagent-v075): SOUNDNESS R1207/R1208 — `Call` gains `recv_form`; Pass A files `blanket_ref_trait_key`.
     // rev118 (rustagent-v072): SOUNDNESS R1202 — `Call` gains `dot` (a method-call EXPRESSION, where the autoref probe runs).
     // rev117 (rustagent-v070): SOUNDNESS R1200 — a METHOD-CALL `WITNESS_MARKER` call writes its position `<n>m` (cached `calls`).
     // rev116 (rustagent-v067): SOUNDNESS R1197(b) — Pass A files a crate-local `Result` alias's error type
@@ -512,7 +513,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev118/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev119/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

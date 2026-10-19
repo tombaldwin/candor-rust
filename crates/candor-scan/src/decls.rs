@@ -2933,15 +2933,68 @@ pub(crate) fn fninfo(
     // SOUNDNESS R297/R195 — the assignment-drop rule's inputs. Parameters keep their DECLARED type only
     // while the body never re-binds the name (a shadowing `let`/pattern makes the name something else).
     let assign_drop = {
-        struct Bound(std::collections::HashSet<String>);
+        // every name a pattern binds (with how often), the plain `let`s (SOUNDNESS R1207/R1208), and whether a nested fn
+        // declares its own receiver
+        #[derive(Default)]
+        struct Bound {
+            names: std::collections::HashSet<String>,
+            count: HashMap<String, usize>,
+            lets: HashMap<String, (Option<syn::Type>, Option<syn::Expr>)>,
+            recv: bool,
+            macro_idents: std::collections::HashSet<String>,
+        }
         impl<'ast> syn::visit::Visit<'ast> for Bound {
             fn visit_pat_ident(&mut self, n: &'ast syn::PatIdent) {
-                self.0.insert(n.ident.to_string());
+                self.names.insert(n.ident.to_string());
+                *self.count.entry(n.ident.to_string()).or_default() += 1;
                 syn::visit::visit_pat_ident(self, n);
             }
+            // a macro may re-bind a name its tokens carry (`tokio::pin!(x)` shadows `x` as `Pin<&mut _>`): such a
+            // name is not "bound once" as far as this visitor can see
+            fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                fn idents(ts: proc_macro2::TokenStream, out: &mut std::collections::HashSet<String>) {
+                    for t in ts {
+                        match t {
+                            proc_macro2::TokenTree::Ident(i) => { out.insert(i.to_string()); }
+                            proc_macro2::TokenTree::Group(g) => idents(g.stream(), out),
+                            _ => {}
+                        }
+                    }
+                }
+                idents(m.tokens.clone(), &mut self.macro_idents);
+                syn::visit::visit_macro(self, m);
+            }
+            fn visit_receiver(&mut self, r: &'ast syn::Receiver) {
+                self.recv = true;
+                syn::visit::visit_receiver(self, r);
+            }
+            fn visit_local(&mut self, l: &'ast syn::Local) {
+                let (pi, ty) = match &l.pat {
+                    syn::Pat::Ident(pi) => (Some(pi), None),
+                    syn::Pat::Type(pt) => match &*pt.pat {
+                        syn::Pat::Ident(pi) => (Some(pi), Some((*pt.ty).clone())),
+                        _ => (None, None),
+                    },
+                    _ => (None, None),
+                };
+                if let Some(pi) = pi.filter(|pi| pi.by_ref.is_none() && pi.subpat.is_none()) {
+                    self.lets.insert(pi.ident.to_string(), (ty, l.init.as_ref().map(|i| (*i.expr).clone())));
+                }
+                syn::visit::visit_local(self, l);
+            }
         }
-        let mut b = Bound(Default::default());
+        let mut b = Bound::default();
         syn::visit::Visit::visit_block(&mut b, block);
+        let sig_names: std::collections::HashSet<String> = sig.inputs.iter().filter_map(|i| match i {
+            syn::FnArg::Typed(pt) => crate::lang::single_pat_ident(&pt.pat),
+            _ => None,
+        }).collect();
+        let let_inits: HashMap<String, (Option<syn::Type>, Option<syn::Expr>)> = std::mem::take(&mut b.lets)
+            .into_iter()
+            .filter(|(n, _)| b.count.get(n) == Some(&1) && !sig_names.contains(n) && !b.macro_idents.contains(n))
+            .collect();
+        let macro_idents = std::mem::take(&mut b.macro_idents);
+        let nested_self = b.recv;
         let mut params: HashMap<String, syn::Type> = HashMap::new();
         for input in &sig.inputs {
             match input {
@@ -2950,7 +3003,7 @@ pub(crate) fn fninfo(
                 }
                 syn::FnArg::Typed(pt) => {
                     if let Some(n) = crate::lang::single_pat_ident(&pt.pat) {
-                        if !b.0.contains(&n) {
+                        if !b.names.contains(&n) {
                             params.insert(n, (*pt.ty).clone());
                         }
                     }
@@ -2969,6 +3022,9 @@ pub(crate) fn fninfo(
             field_borrows: elems.field_borrows,
             self_leaf: self_ty.map(|t| t.rsplit("::").next().unwrap_or(t).to_string()),
             twin_leaves: elems.twin_type_leaves,
+            let_inits,
+            nested_self,
+            macro_idents,
         }
     };
     // SOUNDNESS R200 (caller half) — every name a parameter pattern binds: a call through one is a call
@@ -4907,6 +4963,15 @@ pub(crate) fn collect_decls(
                         // never mis-reads `Trait::assoc(&x)` as a receiver call on `x`.
                         if matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
                             e.methods.insert(m.sig.ident.to_string());
+                            // SOUNDNESS R1208 — the DECLARED receiver rank, for a member with no default body (its
+                            // only units are impls, which no `<Trait>::<member>` key names); a conflict reads "".
+                            let k = crate::model::trait_rank_key(&t.ident.to_string(), &m.sig.ident.to_string());
+                            let r = crate::model::recv_rank(&m.sig).to_string();
+                            match blanket_methods.get(&k) {
+                                Some(prev) if *prev != r => { blanket_methods.insert(k, String::new()); }
+                                Some(_) => {}
+                                None => { blanket_methods.insert(k, r); }
+                            }
                         } else {
                             // R776 — recorded in its OWN set; see `LocalTrait::assoc` for why the two
                             // must not mix.
@@ -5024,6 +5089,24 @@ pub(crate) fn collect_decls(
                                     None => { blanket_methods.insert(leaf, sty.clone()); }
                                 }
                             }
+                        }
+                    }
+                }
+                // SOUNDNESS R1208 — a blanket impl for every REFERENCE (`impl<T> Tr for &T`, `for &mut T`) is a blanket
+                // too: it supplies `Tr`'s methods to `&x` / `&mut x` of every type, one autoref step later than the plain
+                // form, so a method-call site must see it. Recorded under its own reserved key with the reference form.
+                if let (Some((None, tp, _)), syn::Type::Reference(rf)) = (&im.trait_, &*im.self_ty) {
+                    let over_param = matches!(&*rf.elem, syn::Type::Path(p)
+                        if p.qself.is_none()
+                            && p.path.get_ident().is_some_and(|id| im.generics.params.iter().any(|g|
+                                matches!(g, syn::GenericParam::Type(t) if &t.ident == id))));
+                    if let (true, Some(seg)) = (over_param, tp.segments.last()) {
+                        let form = if rf.mutability.is_some() { "2" } else { "1" };
+                        let k = crate::model::blanket_ref_trait_key(&seg.ident.to_string());
+                        match blanket_methods.get(&k) {
+                            Some(prev) if prev != form => { blanket_methods.insert(k, String::new()); }
+                            Some(_) => {}
+                            None => { blanket_methods.insert(k, form.to_string()); }
                         }
                     }
                 }

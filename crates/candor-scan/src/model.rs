@@ -89,6 +89,63 @@ pub(crate) struct Call {
     /// entry from before this field reads `false` (no R1202 competitor), which is why rev118 exists.
     #[serde(rename = "d", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) dot: bool,
+    /// SOUNDNESS R1207/R1208 — the RECEIVER EXPRESSION's own form at a method-call expression, on the rank scale of
+    /// `FnInfo::recv_rank`: 1 a value of the receiver's type, 2 `&` of it, 3 `&mut` of it; 0 NOT KNOWN, which no rule
+    /// may read as any form. Known only where the expression says so by itself: `self` (its declared receiver),
+    /// a parameter written as the type, `&x` / `&mut x`, and a struct literal. Rust's method probe starts at this
+    /// type, so it decides which autoref step an inherent and a trait method each match at.
+    #[serde(rename = "rf", default, skip_serializing_if = "crate::model::is_zero_u8")]
+    pub(crate) recv_form: u8,
+}
+
+/// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,
+/// 2 `&`, 3 `&mut` of the receiver's type), in order, each as its outer reference layers (2 `&`, 3 `&mut`) over the
+/// type itself. A reference receiver is tried as itself, autoref'd, and then dereferenced once.
+fn probe_steps(form: u8) -> &'static [&'static [u8]] {
+    match form {
+        1 => &[&[], &[2], &[3]],
+        2 => &[&[2], &[2, 2], &[3, 2], &[], &[2], &[3]],
+        _ => &[&[3], &[2, 3], &[3, 3], &[], &[2], &[3]],
+    }
+}
+
+/// SOUNDNESS R1207/R1208 — can a BLANKET trait method beat an inherent method at a method-call expression? The probe
+/// takes the FIRST step at which any candidate matches and prefers the inherent method only within a step. The
+/// inherent method of rank `inh` (1 `self`, 2 `&self`, 3 `&mut self`) matches exactly one receiver type; the trait's
+/// method of rank `tr`, implemented for every `T` (`self_form` 0), every `&T` (1) or every `&mut T` (2), matches any
+/// step whose outer layers are its own receiver layer and then its impl's layer. `form` 0 (the receiver's form is not
+/// known) asks all three forms: the trait may win if it wins in any of them. `self_form` 3 means "not known": both
+/// reference impls and the plain one are asked.
+pub(crate) fn trait_may_win(inh: u8, tr: u8, self_form: u8, form: u8) -> bool {
+    let layer = |r: u8| -> Option<u8> {
+        match r {
+            2 => Some(2),
+            3 => Some(3),
+            _ => None,
+        }
+    };
+    let inh_layers: Vec<u8> = layer(inh).into_iter().collect();
+    let forms: &[u8] = if (1..=3).contains(&form) { std::slice::from_ref(&form) } else { &[1, 2, 3] };
+    let self_forms: &[u8] = if self_form <= 2 { std::slice::from_ref(&self_form) } else { &[0, 1, 2] };
+    forms.iter().any(|&f| {
+        let steps = probe_steps(f);
+        let i_at = steps.iter().position(|s| *s == inh_layers.as_slice()).unwrap_or(usize::MAX);
+        self_forms.iter().any(|&sf| {
+            let pat: Vec<u8> = layer(tr).into_iter().chain(match sf { 1 => Some(2), 2 => Some(3), _ => None }).collect();
+            steps.iter().position(|s| s.starts_with(&pat)).is_some_and(|t_at| t_at < i_at)
+        })
+    })
+}
+
+/// SOUNDNESS R1208 — the reserved `blanket_methods` key recording a local trait member's DECLARED receiver rank.
+pub(crate) fn trait_rank_key(tr: &str, member: &str) -> String {
+    format!("\u{1f}rank\u{1f}{tr}::{member}")
+}
+
+/// SOUNDNESS R1208 — the reserved `blanket_methods` key recording that trait `leaf` has a blanket impl for every
+/// REFERENCE (`impl<T> Tr for &T` → "1", `for &mut T` → "2"; both, or a conflict on merge → "").
+pub(crate) fn blanket_ref_trait_key(leaf: &str) -> String {
+    format!("\u{1f}blanketref\u{1f}{leaf}")
 }
 
 /// SOUNDNESS R1202 — `FnInfo::recv_rank` of a signature (and of a trait method's, by the same rule).
