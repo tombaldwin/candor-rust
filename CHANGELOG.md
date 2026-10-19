@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.13] — 2026-10-19
+
 - ⚠ **candor-scan: a chained dependency's signature is read only where the consumer's path is known to reach it
   (SOUNDNESS R1200).** The R1165/R1186 disclosure for a local value handed to a chained dependency is withheld when
   the dependency's source proves the callee cannot run the value's impl. That source was searched by the callee's
