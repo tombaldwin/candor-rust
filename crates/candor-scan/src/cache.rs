@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev123 (rustagent-b): SOUNDNESS R1279/R1281/R1280 — `rets` gains `<tparams>`/`<ftargs>`/`<projof>` facts; Pass B reads
+    // `*impltargs` and a foreign-ABI flag (cached `calls`/`unresolved_why` move).
     // rev122 (rustagent-b): SOUNDNESS R1267 — a receiver typed by a bounded generic NAME dispatches (cached `calls`/`dispatch`).
     // rev121 (rustagent-b): SOUNDNESS R1265 — FnInfo gains `assoc` (an impl member / trait default; bare calls skip it).
     // rev120 (rustagent-a): SOUNDNESS R1245 — Pass A splices the `fn`s an IMPL-ITEM-position local macro expands to (new units).
@@ -516,7 +518,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev122/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev123/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

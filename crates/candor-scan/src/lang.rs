@@ -832,6 +832,33 @@ pub(crate) fn strip_concrete_where(
 /// Generic `T -> [trait bounds]` for any `syn::Generics` — a fn signature's OR a TYPE's own generics
 /// (`struct Pipe<T: Saver>`), covering both the inline `<T: P>` bound and the `where T: P` clause. Reused so
 /// a struct field typed `T` resolves to its bound (else `self.item.save()` on such a field read silent-pure).
+/// SOUNDNESS R1279 — the `where` predicates whose bounded type is an associated-type PROJECTION of a type parameter
+/// (`T::Archived: Deserialize<T, D>`), keyed by the projection's path (`T::Archived`). `generic_bounds_of_generics`
+/// files bare-identifier predicates only, and is left exactly as it is.
+pub(crate) fn projection_bounds_of_generics(generics: &syn::Generics) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    let params: Vec<String> = generics.type_params().map(|t| t.ident.to_string()).collect();
+    if let Some(w) = &generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                if let syn::Type::Path(p) = &pt.bounded_ty {
+                    if p.qself.is_none() && p.path.segments.len() == 2
+                        && p.path.segments.iter().all(|s| s.arguments.is_none())
+                        && params.iter().any(|g| p.path.segments[0].ident == g.as_str())
+                    {
+                        let key = format!("{}::{}", p.path.segments[0].ident, p.path.segments[1].ident);
+                        let leaves = bound_leaves(&pt.bounds);
+                        if !leaves.is_empty() {
+                            m.entry(key).or_default().extend(leaves);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    m
+}
+
 pub(crate) fn generic_bounds_of_generics(generics: &syn::Generics) -> HashMap<String, Vec<String>> {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
     for gp in &generics.params {

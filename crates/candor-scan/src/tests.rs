@@ -7903,14 +7903,76 @@ pub fn c_iflet<B: Src>(_b: B, inner: &mut Inner<Zero>) -> usize { if let Inner::
         let v = scan_fixture("r1267gen", src);
         // CALIBRATION — the parameter route, which always dispatched.
         assert_eq!(fixture_effects(&v, "p_direct"), vec!["Fs".to_string()], "CALIBRATION:\n{v:#}");
-        for f in ["p_field", "p_tuple", "p_iflet", "p_struct", "Holder::s_field", "Holder::s_tuple", "Holder::s_opaque"] {
+        for f in ["p_field", "p_tuple", "p_iflet", "p_struct", "Holder::s_field", "Holder::s_tuple"] {
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
                        "R1267: `{f}` dispatches its generic-typed receiver over `Src`:\n{v:#}");
         }
+        // R1281 — an UNTYPABLE scrutinee (`identity(&mut self.sinner)`) shows no instantiation: a true hedge, not a guess.
+        assert_eq!(fixture_effects(&v, "Holder::s_opaque"), vec!["Unknown".to_string()], "R1281 hedge:\n{v:#}");
+        assert_eq!(fn_entry(&v, "Holder::s_opaque")["unknownWhy"], serde_json::json!(["dispatch:generic payload receiver of `pull`"]));
         for f in ["c_field", "c_tuple", "c_iflet"] {
             assert!(fixture_effects(&v, f).is_empty(),
                     "R1267 control: the written `Wrap<Zero>`/`Inner<Zero>` refutes the scope's `B: Src` for `{f}`:\n{v:#}");
         }
+    }
+
+    /// SOUNDNESS R1281 — the four false `Fs` charges R1267's NAME rule made (EXECUTED `rustab-b/fx/oc`, prints 0): the
+    /// instantiation is now read by POSITION wherever it is written (a field of `self` through the struct's own field
+    /// type, a parameter's written type), and where nothing writes it the call is HEDGED, never charged. The
+    /// must-still-charge side is `r1267_a_generic_payload_or_field_dispatches_like_a_generic_parameter`.
+    #[test]
+    fn r1281_a_payload_name_is_mapped_by_position_and_never_guessed() {
+        let src = "\
+pub trait Src { fn pull(&mut self) -> usize; }\n\
+pub struct Zero;\n\
+impl Src for Zero { fn pull(&mut self) -> usize { 0 } }\n\
+pub struct FileSrc;\n\
+impl Src for FileSrc { fn pull(&mut self) -> usize { std::fs::read(\"/etc/hosts\").map(|v| v.len()).unwrap_or(0) } }\n\
+pub struct Wrap<B> { pub body: B }\n\
+pub enum Inner<B> { Z(Zero), Body(B) }\n\
+pub struct Holder<B> { pub w: Wrap<Zero>, pub other: B }\n\
+impl<B: Src> Holder<B> { pub fn nb_field(&mut self) -> usize { self.w.body.pull() } }\n\
+pub struct Pair<A, B> { pub a: A, pub b: B }\n\
+pub fn pos_swap<B: Src>(p: &mut Pair<B, Zero>) -> usize { p.b.pull() }\n\
+pub fn pos_right<B: Src>(p: &mut Pair<Zero, B>) -> usize { p.b.pull() }\n\
+pub struct Maker;\n\
+impl Maker { pub fn make(&self) -> Wrap<Zero> { Wrap { body: Zero } } }\n\
+pub fn ret_base<B: Src>(_b: B, m: &Maker) -> usize { let mut w = m.make(); w.body.pull() }\n\
+pub struct HI<B> { pub i: Inner<Zero>, pub o: B }\n\
+impl<B: Src> HI<B> { pub fn nb_enum(&mut self) -> usize { match &mut self.i { Inner::Z(z) => z.pull(), Inner::Body(b) => b.pull() } } }\n";
+        let v = scan_fixture("r1281pos", src);
+        for f in ["Holder::nb_field", "pos_swap", "HI::nb_enum"] {
+            assert!(fixture_effects(&v, f).is_empty(), "R1281: `{f}`'s payload is `Zero` by position:\n{v:#}");
+        }
+        assert_eq!(fixture_effects(&v, "pos_right"), vec!["Fs".to_string()],
+                   "R1281 second fixture: the POSITION that does hold `B` still dispatches:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "ret_base"), vec!["Unknown".to_string()],
+                   "R1281: an untyped `let` shows no instantiation — hedged, not charged:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1279 — rkyv's `ArchivedResult::deserialize`: the impl's self type is `AR<T::Archived, E::Archived>`, so
+    /// the enum's `T` is the PROJECTION `T::Archived`, which the `where` clause bounds by `De<T>`. Read by name as the
+    /// impl's `T: Archive` (which declares no `de`) the call was dropped and v0.40.13's `Unknown` went with it.
+    /// EXECUTED (`rustagent-b/fx/r1279`, calls `getpid` through FFI): `deny Unknown AR::de` v0.40.13 1, 7e2a712 0, 1.
+    #[test]
+    fn r1279_a_payload_instantiated_by_a_bounded_projection_dispatches_over_its_bound() {
+        let src = "\
+extern \"C\" { fn getpid() -> i32; }\n\
+pub trait Archive { type Archived; }\n\
+pub trait De<T> { fn de(&self) -> usize; }\n\
+pub enum AR<T, E> { Ok(T), Err(E) }\n\
+pub struct Native;\n\
+impl De<K> for Native { fn de(&self) -> usize { unsafe { getpid() as usize } } }\n\
+pub struct K;\n\
+impl Archive for K { type Archived = Native; }\n\
+impl<T, E> De<(T, E)> for AR<T::Archived, E::Archived>\n\
+where T: Archive, E: Archive, T::Archived: De<T>, E::Archived: De<E> {\n\
+    fn de(&self) -> usize { match self { AR::Ok(value) => value.de(), AR::Err(err) => err.de() } }\n\
+}\n";
+        let v = scan_fixture("r1279proj", src);
+        assert_eq!(fixture_effects(&v, "AR::de"), vec!["Unknown".to_string()], "R1279:\n{v:#}");
+        assert!(fn_entry(&v, "AR::de")["dispatchesOn"].as_array().is_some_and(|a| a.iter().any(|k| k.as_str().is_some_and(|k| k.ends_with("#De::de")))),
+                "R1279: the payload dispatches over its `where` bound `De`:\n{v:#}");
     }
 
     /// SOUNDNESS R1266 — tower-http's `limit::body::ResponseBody::poll_frame` shape: a pin-project projection whose one arm
@@ -17653,7 +17715,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17664,7 +17726,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev122/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev123/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

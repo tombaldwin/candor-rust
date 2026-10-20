@@ -683,6 +683,25 @@ pub(crate) fn is_derive_synth(attrs: &[syn::Attribute]) -> bool {
 /// instantiates the parameter with a concrete argument can, so the call site charges that argument's type.
 /// `gen_op_key` is a FREE fn's (filed for every free fn of the leaf under the conflict rule), `impl_gen_op_key`
 /// a method's or associated fn's, keyed by its impl's type leaf.
+/// SOUNDNESS R1279/R1281 — a struct's or enum's TYPE parameters in declaration order (`<tparams>Wrap` -> `B`), filed
+/// under the conflict rule so two same-leaf containers that disagree withdraw the fact. Read by the collector to map
+/// a payload typed by a parameter NAME to the argument at its POSITION in the scrutinee's written type.
+pub(crate) fn type_params_key(type_leaf: &str) -> String {
+    format!("<tparams>{type_leaf}")
+}
+
+/// SOUNDNESS R1281 — a struct field's WRITTEN type, `<leaf>|<type args>` (`<ftargs>Holder\u{1f}w` -> `Wrap|Zero`), the
+/// arguments as written in the struct (its own parameters by name), filed under the conflict rule.
+pub(crate) fn field_targs_key(struct_leaf: &str, field: &str) -> String {
+    format!("<ftargs>{struct_leaf}\u{1f}{field}")
+}
+
+/// SOUNDNESS R1279/R1281 — a pin-project PROJECTION type's source (`#[project = BodyProj] enum Inner<B>` files
+/// `<projof>BodyProj` -> `Inner`): the projection has the source's type parameters and the source's variants.
+pub(crate) fn projection_of_key(proj_leaf: &str) -> String {
+    format!("<projof>{proj_leaf}")
+}
+
 pub(crate) fn gen_op_key(fn_leaf: &str) -> String {
     format!("<genop>{fn_leaf}")
 }

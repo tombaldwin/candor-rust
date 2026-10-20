@@ -584,10 +584,9 @@ pub(crate) struct CallCollector<'a> {
     /// `match` over three arms, was charged the agent `Handle`'s `Drop`. A pattern MATCHES a value,
     /// it never builds one.
     pub(crate) in_pattern: bool,
-    /// SOUNDNESS R1267 — the written generic ARGUMENTS of the enclosing `match` scrutinee's declared type, when it is a
-    /// parameter or annotated `let` (`inner: &mut Inner<Zero>` -> `["Zero"]`); `None` when not visible. A variant payload
-    /// typed by a bare generic NAME is read as the scope's same-named bounded parameter only when this does not refute it.
-    pub(crate) scrut_args: Option<Vec<String>>,
+    /// SOUNDNESS R1267/R1279/R1281 — the enclosing `match` scrutinee's INSTANTIATION evidence (`scrut_evidence`): its
+    /// type's leaf and type arguments, as this scope writes them. `None` when nothing shows them.
+    pub(crate) scrut_args: Option<(String, Vec<String>)>,
     /// SOUNDNESS R1095 — the method LEAVES this body calls on a receiver no route typed: no concrete type, no
     /// element/slice/dispatch call formed, no disclosure made at the site. Judged after the
     /// fixpoint (`scan.rs`): where a crate-local method of that name (a unit with a `self` receiver) carries a
@@ -6488,22 +6487,6 @@ impl<'a> CallCollector<'a> {
         out
     }
 
-    /// SOUNDNESS R1267 — a receiver the PLAIN typer types as a bare generic parameter NAME that this scope bounds
-    /// (`B` under `fn f<B: Src>` or `impl<B: Body>`): its dispatch is the bound's. The plain typer reads such a name
-    /// off a container's DECLARATION — a generic struct field (`w.body` over `struct Wrap<B> { body: B }`), an enum
-    /// variant's payload (`Inner::Body(body)`), a struct-variant field (`BodyProj::Body { body }`, pin-project's
-    /// projection) — and formed the typed path `B::pull`, which names no local type: the call vanished while the
-    /// same call on a parameter `b: &mut B` dispatched. EXECUTED (`rustagent-b/fx/r1267_m`): ten shapes each read
-    /// `/etc/hosts`, two were charged; tower-http's `limit::body::ResponseBody::poll_frame` dropped its generic arm
-    /// (R1266), which v0.40.13 covered only by a `macro:` hedge with a false premise.
-    ///
-    /// THE NAME IS THE CONTAINER'S PARAMETER, READ AS THE SCOPE'S. Rust would map it by POSITION through the
-    /// scrutinee's written type arguments, which this typer does not carry (a pin-project projection has no
-    /// written type at all). The wrapper idiom names them alike (`struct ResponseBody<B> { inner: Inner<B> }`
-    /// under `impl<B: Body>`), and where it does not the error is a dispatch over a bound trait's implementors —
-    /// an over-report, and only for a method the dispatch routes accept for that trait — where the old answer was
-    /// a call to nothing. A name that is a local type (`fields`) is left to the plain route. FALLBACK ONLY: it runs
-    /// where every dispatch table answered nothing, so no receiver another route types moves.
     /// SOUNDNESS R1267 — `t` is a bare name this scope (fn or enclosing impl) declares as a generic parameter WITH
     /// trait bounds, and not a local struct's name.
     fn is_scoped_generic_name(&self, t: &str) -> bool {
@@ -6513,78 +6496,153 @@ impl<'a> CallCollector<'a> {
                 || self.impl_generic_bounds.get(t).is_some_and(|v| !v.is_empty()))
     }
 
-    fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
+    /// SOUNDNESS R1267 (as narrowed by R1279/R1281) — a FIELD receiver whose plain type is a container's generic
+    /// parameter NAME (`w.body` over `struct Wrap<B> { body: B }`). `Dispatch` answers the dispatch branch with the
+    /// instantiating argument's bounds; see `payload_decision`.
+    fn field_payload(&self, expr: &syn::Expr) -> PayloadTy {
         if self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty() {
-            return Vec::new();
+            return PayloadTy::Old;
         }
-        // A FIELD receiver only: a binding typed by such a name is decided where it is bound (`enum_variant_binding`),
-        // so a name that reaches here through `vars` is one that rule REFUSED and must stay refused.
-        let syn::Expr::Field(fe) = peel_recv(expr) else { return Vec::new() };
-        let Some(t) = self.resolve_recv_type(expr) else { return Vec::new() };
-        let args = self.written_type_args(&fe.base);
-        let out = self.generic_payload_bounds(&t, args.as_deref());
-        if !out.is_empty() && std::env::var_os("CANDOR_R1267_INSTR").is_some() {
-            eprintln!("R1267FIELD\t{t}\t{out:?}"); // §E1 REACH COUNTER
+        let syn::Expr::Field(fe) = peel_recv(expr) else { return PayloadTy::Old };
+        let Some(t) = self.resolve_recv_type(expr) else { return PayloadTy::Old };
+        let container = self.resolve_recv_type(&fe.base).map(|b| b.rsplit("::").next().unwrap_or(&b).to_string());
+        let ev = self.scrut_evidence(&fe.base);
+        let d = self.payload_decision(container.as_deref(), &t, ev.as_ref());
+        if std::env::var_os("CANDOR_R1267_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+            eprintln!("R1267FIELD\t{t}\t{d:?}"); // §E1 REACH COUNTER
         }
-        out
+        d
     }
 
-    /// SOUNDNESS R1267 — the bounds of `t` read as the scope's bounded generic of that name, unless the container's
-    /// visible written arguments REFUTE it: `w: &mut Wrap<Zero>` instantiates `Wrap`'s `B` with `Zero`, so the scope's
-    /// own `B: Src` is not its type (EXECUTED control `rustagent-b/fx/r1267_ctl`: prints 0, and the name rule alone
-    /// charged it `Fs`). Arguments that name `t` are taken as the name rule's corroboration; the POSITION is not
-    /// checked (`Pair<B, A>` against a declaration `Pair<A, B>` is the residual, an over-report).
-    fn generic_payload_bounds(&self, t: &str, args: Option<&[String]>) -> Vec<String> {
-        if !self.is_scoped_generic_name(t) || args.is_some_and(|a| !a.iter().any(|x| x == t)) {
-            return Vec::new();
+    fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
+        match self.field_payload(expr) {
+            PayloadTy::Dispatch(b) => b,
+            _ => Vec::new(),
         }
-        let mut out: Vec<String> = Vec::new();
-        for l in self.generic_bounds.get(t).into_iter().chain(self.impl_generic_bounds.get(t)).flatten() {
-            if !out.contains(l) {
-                out.push(l.clone());
-            }
-        }
-        out
     }
 
-    /// SOUNDNESS R1267 — the written generic arguments (last-segment names) of the DECLARED type of `e`, when `e` is a
-    /// parameter or a `let` with a written type; `None` when nothing declares it here (a field, a projection, `self`).
-    fn written_type_args(&self, e: &syn::Expr) -> Option<Vec<String>> {
-        let syn::Expr::Path(p) = peel_recv(e) else { return None };
-        let n = p.path.get_ident()?.to_string();
-        let ty = match self.assign_drop.params.get(&n) {
-            Some(t) => t,
-            None => self.assign_drop.let_inits.get(&n)?.0.as_ref()?,
-        };
-        let mut t = ty;
-        loop {
-            t = match t {
-                syn::Type::Reference(r) => &r.elem,
-                syn::Type::Paren(p) => &p.elem,
-                syn::Type::Group(g) => &g.elem,
-                _ => break,
-            };
+    /// SOUNDNESS R1267/R1279/R1281 — WHAT A PAYLOAD TYPED BY A CONTAINER'S GENERIC PARAMETER NAME `t` IS.
+    ///
+    /// The plain typer reads `t` off the container's DECLARATION (a generic struct field, an enum variant's payload, a
+    /// struct-variant field) and formed the typed path `t::m`, which names no type: the call vanished while the same
+    /// call on a parameter `b: &mut B` dispatched (R1267, EXECUTED `rustagent-b/fx/r1267_m`). Rust maps `t` by POSITION
+    /// through the scrutinee's type arguments, so that is what decides here:
+    ///
+    /// * `Dispatch` — the INSTANTIATION is visible (`scrut_evidence`: `self` through the impl's written self type, a
+    ///   parameter or annotated `let`, a field of either) and the argument at `t`'s position carries bounds in this
+    ///   scope: a parameter (`B: Src`) or an associated-type projection the `where` clause bounds (`T::Archived:
+    ///   Deserialize<T, D>`, rkyv's `ArchivedResult::deserialize` — R1279, where reading `T` by name dispatched over
+    ///   `Archive`, which declares no `deserialize`, and dropped the call).
+    /// * `Old` — the instantiation is visible and its argument is anything else (a concrete type, an unbounded
+    ///   parameter, an unwritten `_`), or `t` names no bounded parameter here: the pre-R1267 reading, unchanged. This is
+    ///   what removes R1281's false charges on `Pair<B, Zero>` against `Pair<A, B>`.
+    /// * `Hedge` — nothing shows the instantiation (a pin-project projection, a call result, an untyped `let`) and `t`
+    ///   names a bounded parameter of this scope. Reading it as that parameter is a guess — R1281's other three false
+    ///   charges are that guess — and reading it as nothing is the silence R1267 is; what is true is that this engine
+    ///   cannot say which type the payload has, so the call discloses `dispatch:generic payload receiver of `m``.
+    fn payload_decision(&self, container: Option<&str>, t: &str, ev: Option<&(String, Vec<String>)>) -> PayloadTy {
+        if t.contains("::") || self.fields.contains_key(t) {
+            return PayloadTy::Old;
         }
-        let syn::Type::Path(tp) = t else { return None };
-        if tp.qself.is_some() {
-            return None;
-        }
-        let last = tp.path.segments.last()?;
-        if last.ident == "Self" {
-            return None;
-        }
-        let mut out = Vec::new();
-        if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
-            for a in &ab.args {
-                if let syn::GenericArgument::Type(at) = a {
-                    out.push(match at {
-                        syn::Type::Path(ap) => ap.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
-                        _ => String::new(),
-                    });
+        if let (Some(c), Some((ev_leaf, args))) = (container, ev) {
+            // A pin-project projection (`BodyProj`) is read as its source (`Inner`): same parameters, same variants.
+            let c = self.returns.get(&crate::model::projection_of_key(c)).map(String::as_str).unwrap_or(c);
+            let params: Option<Vec<&str>> = self
+                .returns
+                .get(&crate::model::type_params_key(c))
+                .map(|v| v.split(',').filter(|x| !x.is_empty()).collect());
+            if let Some(params) = params.filter(|p| ev_leaf == c && p.len() == args.len()) {
+                let Some(pos) = params.iter().position(|p| *p == t) else { return PayloadTy::Old };
+                let arg = &args[pos];
+                let mut out: Vec<String> = Vec::new();
+                for l in self.generic_bounds.get(arg).into_iter().chain(self.impl_generic_bounds.get(arg)).flatten() {
+                    if !out.contains(l) {
+                        out.push(l.clone());
+                    }
                 }
+                return if out.is_empty() { PayloadTy::Old } else { PayloadTy::Dispatch(out) };
             }
         }
-        Some(out)
+        if self.is_scoped_generic_name(t) {
+            PayloadTy::Hedge
+        } else {
+            PayloadTy::Old
+        }
+    }
+
+    /// SOUNDNESS R1279/R1281 — the INSTANTIATION of `e`'s type as this scope writes it: `(type leaf, type arguments)`,
+    /// each argument a written path (`Zero`, `B`, `T::Archived`) or `_`. From `self` (the impl's written self type,
+    /// `decls::IMPL_TARGS_KEY`), a parameter or a `let` with a written type, and a FIELD of any of those (the field's
+    /// written type, its arguments in the struct's own parameters mapped through the base's by position). `None`
+    /// wherever nothing writes it — a projection, a call result, an untyped `let`.
+    fn scrut_evidence(&self, e: &syn::Expr) -> Option<(String, Vec<String>)> {
+        let self_ev = || -> Option<(String, Vec<String>)> {
+            let leaf = self.uses.get(crate::lang::SELF_KEY)?;
+            let leaf = leaf.rsplit("::").next().unwrap_or(leaf).to_string();
+            let args = self.uses.get(crate::decls::IMPL_TARGS_KEY)?;
+            Some((leaf, args.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()))
+        };
+        match peel_value(e) {
+            syn::Expr::Path(p) if p.qself.is_none() => {
+                let n = p.path.get_ident()?.to_string();
+                if n == "self" {
+                    return self_ev();
+                }
+                let ty = match self.assign_drop.params.get(&n) {
+                    Some(t) => t,
+                    None => self.assign_drop.let_inits.get(&n)?.0.as_ref()?,
+                };
+                let mut t = ty;
+                loop {
+                    t = match t {
+                        syn::Type::Reference(r) => &r.elem,
+                        syn::Type::Paren(p) => &p.elem,
+                        syn::Type::Group(g) => &g.elem,
+                        _ => break,
+                    };
+                }
+                let syn::Type::Path(tp) = t else { return None };
+                if tp.qself.is_some() {
+                    return None;
+                }
+                let last = tp.path.segments.last()?;
+                if last.ident == "Self" {
+                    return self_ev();
+                }
+                Some((last.ident.to_string(), written_targs(&last.arguments)))
+            }
+            // A pin-project PROJECTION (`self.project()`, `x.project_ref()`) keeps its receiver's type arguments, and its
+            // fields are the source's fields; `Pin::new(x)` / `x.as_mut()` / `x.get_mut()` re-wrap the same value.
+            syn::Expr::MethodCall(mc)
+                if mc.args.is_empty()
+                    && matches!(mc.method.to_string().as_str(), "project" | "project_ref" | "as_mut" | "get_mut" | "as_ref") =>
+            {
+                self.scrut_evidence(&mc.receiver)
+            }
+            syn::Expr::Field(fe) => {
+                let syn::Member::Named(f) = &fe.member else { return None };
+                let (bl, bargs) = self.scrut_evidence(&fe.base)?;
+                let fact = self.returns.get(&crate::model::field_targs_key(&bl, &f.to_string()))?;
+                let (fleaf, fargs) = fact.split_once('|')?;
+                let bparams: Vec<&str> = self
+                    .returns
+                    .get(&crate::model::type_params_key(&bl))
+                    .map(|v| v.split(',').filter(|x| !x.is_empty()).collect())?;
+                let mapped: Vec<String> = fargs
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(|a| match bparams.iter().position(|p| *p == a) {
+                        Some(i) if bparams.len() == bargs.len() => bargs[i].clone(),
+                        Some(_) => "_".to_string(),
+                        // A concrete argument written in the STRUCT's module: it is not this scope's to read as a
+                        // bounded parameter, whatever its spelling.
+                        None => "_".to_string(),
+                    })
+                    .collect();
+                Some((fleaf.to_string(), mapped))
+            }
+            _ => None,
+        }
     }
 
     fn resolve_recv_traits_walk(&self, expr: &syn::Expr) -> Vec<String> {
@@ -7559,7 +7617,7 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1267 — `enum_variant_binding` with THIS site's scrutinee (an `if let` / `while let` / let-else), so an
     /// enclosing `match`'s `scrut_args` cannot answer for it.
     fn enum_variant_binding_s(&mut self, pat: &syn::Pat, scrut: Option<&syn::Expr>) -> Option<(String, Vec<String>, Option<String>)> {
-        let args = scrut.and_then(|e| self.written_type_args(e));
+        let args = scrut.and_then(|e| self.scrut_evidence(e));
         let prev = std::mem::replace(&mut self.scrut_args, args);
         let r = self.enum_variant_binding(pat);
         self.scrut_args = prev;
@@ -7567,11 +7625,26 @@ impl<'a> CallCollector<'a> {
     }
     /// SOUNDNESS R1267 — the struct-variant twin of `enum_variant_binding_s`.
     fn enum_struct_variant_bindings_s(&mut self, pat: &syn::Pat, scrut: Option<&syn::Expr>) -> Vec<(String, Vec<String>, Option<String>)> {
-        let args = scrut.and_then(|e| self.written_type_args(e));
+        let args = scrut.and_then(|e| self.scrut_evidence(e));
         let prev = std::mem::replace(&mut self.scrut_args, args);
         let r = self.enum_struct_variant_bindings(pat);
         self.scrut_args = prev;
         r
+    }
+    /// SOUNDNESS R1267/R1279/R1281 — `payload_decision` applied to a binding: `Dispatch` binds the bounds, `Hedge`
+    /// binds the `GENERIC_PAYLOAD_MARK` spelling the method-call site discloses on, `Old` leaves the binding as it was.
+    fn apply_payload_decision(&self, container: Option<&str>, leaves: Vec<String>, ty: Option<String>) -> (Vec<String>, Option<String>) {
+        let Some(t) = ty.as_deref().filter(|_| leaves.is_empty()) else { return (leaves, ty) };
+        let ev = self.scrut_args.clone();
+        let d = self.payload_decision(container, t, ev.as_ref());
+        if std::env::var_os("CANDOR_R1267_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+            eprintln!("R1267BIND\t{t}\t{d:?}"); // §E1 REACH COUNTER
+        }
+        match d {
+            PayloadTy::Dispatch(b) => (b, ty),
+            PayloadTy::Hedge => (leaves, Some(format!("{GENERIC_PAYLOAD_MARK}{t}"))),
+            PayloadTy::Old => (leaves, ty),
+        }
     }
     fn enum_variant_binding(&mut self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
         let (name, leaf) = tuple_variant_binding(pat)?;
@@ -7587,17 +7660,15 @@ impl<'a> CallCollector<'a> {
             self.enum_variants.get(&format!("{en}\u{1e}{leaf}")).cloned()
         });
         let ty = qualified.or_else(|| self.enum_variants.get(&leaf).cloned());
-        // SOUNDNESS R1267 — a payload typed by a bare generic NAME binds as the scope's bounded parameter of that name.
-        let leaves = match (&ty, leaves.is_empty()) {
-            (Some(t), true) => {
-                let b = self.generic_payload_bounds(t, self.scrut_args.clone().as_deref());
-                if !b.is_empty() && std::env::var_os("CANDOR_R1267_INSTR").is_some() {
-                    eprintln!("R1267BIND\t{t}\t{b:?}"); // §E1 REACH COUNTER
-                }
-                if b.is_empty() { leaves } else { b }
+        // SOUNDNESS R1267/R1279/R1281 — a payload typed by a container's generic parameter NAME (`payload_decision`).
+        let container = crate::lang::tuple_variant_enum(pat).and_then(|en| {
+            if en == "Self" {
+                self.uses.get(crate::lang::SELF_KEY).map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+            } else {
+                Some(en)
             }
-            _ => leaves,
-        };
+        });
+        let (leaves, ty) = self.apply_payload_decision(container.as_deref(), leaves, ty);
         // R90 — SOUNDNESS: `leaf` colliding across two unrelated enums makes
         // `drop_cross_ambiguous_enum_leaves` remove it from BOTH indexes rather than guess which enum a
         // pattern meant — so `leaves`/`ty` land empty/`None` here NOT because this payload is genuinely
@@ -7626,17 +7697,15 @@ impl<'a> CallCollector<'a> {
             .map(|(name, key)| {
                 let leaves = self.enum_variant_traits.get(&key).cloned().unwrap_or_default();
                 let ty = self.enum_variants.get(&key).cloned();
-                // SOUNDNESS R1267 — the struct-variant-field twin of `enum_variant_binding`'s generic-name rule.
-                let leaves = match (&ty, leaves.is_empty()) {
-                    (Some(t), true) => {
-                        let b = self.generic_payload_bounds(t, self.scrut_args.clone().as_deref());
-                        if !b.is_empty() && std::env::var_os("CANDOR_R1267_INSTR").is_some() {
-                            eprintln!("R1267BIND\t{t}\t{b:?}"); // §E1 REACH COUNTER
-                        }
-                        if b.is_empty() { leaves } else { b }
+                // SOUNDNESS R1267/R1279/R1281 — the struct-variant-field twin of `enum_variant_binding`'s rule.
+                let container = struct_variant_enum(pat).and_then(|en| {
+                    if en == "Self" {
+                        self.uses.get(crate::lang::SELF_KEY).map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+                    } else {
+                        Some(en)
                     }
-                    _ => leaves,
-                };
+                });
+                let (leaves, ty) = self.apply_payload_decision(container.as_deref(), leaves, ty);
                 // R90 — the struct-variant-field counterpart of `enum_variant_binding`'s own R90 fix,
                 // same collision, same composite `"VariantLeaf::field"` key space (see the type's doc
                 // comment on why struct-variant fields share `enum_variants`/`enum_variant_traits`).
@@ -9260,9 +9329,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
-        // SOUNDNESS R1267 — a receiver typed only as a bounded generic parameter's NAME takes the dispatch branch below
-        // (`scoped_generic_recv`), not a typed path `B::m` that names no type.
-        if let Some(ty) = self.resolve_recv_type_for(&node.receiver, &leaf).filter(|_| self.scoped_generic_recv(&node.receiver).is_empty()) {
+        // SOUNDNESS R1267/R1279/R1281 — a receiver typed by a container's generic parameter NAME: `Dispatch` takes the
+        // dispatch branch below (`scoped_generic_recv`); `Hedge` (a binding carrying `GENERIC_PAYLOAD_MARK`, or a field
+        // whose instantiation nothing shows) discloses and forms no typed path. See `payload_decision`.
+        let recv_ty = self.resolve_recv_type_for(&node.receiver, &leaf);
+        let payload = if recv_ty.as_deref().is_some_and(|t| t.starts_with(GENERIC_PAYLOAD_MARK)) {
+            PayloadTy::Hedge
+        } else {
+            self.field_payload(&node.receiver)
+        };
+        if matches!(payload, PayloadTy::Hedge) {
+            self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));
+        }
+        if let Some(ty) = recv_ty.filter(|_| matches!(payload, PayloadTy::Old)) {
             // SOUNDNESS R1160 — a receiver std CONSTRUCTED as a `String` is std's, whatever a glob in scope exports. Only
             // where the typer answered `String`: any other answer (a builder-chain guess) keeps its glob handling as before.
             let std_made = ty == "String" && (self.std_made_str(&node.receiver) || match peel_recv(&node.receiver) {
@@ -10303,7 +10382,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         // SOUNDNESS R1267 — the scrutinee's written generic arguments, for the arms' payload bindings.
-        let sa = self.written_type_args(&node.expr);
+        let sa = self.scrut_evidence(&node.expr);
         let prev = std::mem::replace(&mut self.scrut_args, sa);
         // `match <opt> { Some(d) => d.go(), None => {} }` — when the scrutinee is an Option/Result OF A
         // TRAIT OBJECT, type each `Some(d)`/`Ok(d)` arm's payload into `trait_vars` for that arm's body
@@ -12337,6 +12416,47 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
 /// pointers to the pointee), so a provenance test that did not would see `C` typed and `(*C)` not — the
 /// spelling deciding the disclosure. Kept separate from `peel_recv`, which has seven other callers whose
 /// answers this change has no business moving.
+/// SOUNDNESS R1267/R1279/R1281 — see `CallCollector::payload_decision`.
+#[derive(Debug)]
+pub(crate) enum PayloadTy {
+    Dispatch(Vec<String>),
+    Hedge,
+    Old,
+}
+
+/// SOUNDNESS R1267/R1281 — the type a binding gets when its payload's instantiation is not visible (`PayloadTy::Hedge`):
+/// no identifier or path can spell it, so no index matches it, and the method-call site discloses on it.
+pub(crate) const GENERIC_PAYLOAD_MARK: &str = "\u{1f}genpayload\u{1f}";
+
+/// SOUNDNESS R1279/R1281 — the TYPE arguments of a written path segment, each a written path or `_`; lifetimes and
+/// const arguments are not positions of `model::type_params_key`.
+fn written_targs(args: &syn::PathArguments) -> Vec<String> {
+    let syn::PathArguments::AngleBracketed(ab) = args else { return Vec::new() };
+    ab.args
+        .iter()
+        .filter_map(|a| match a {
+            syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => {
+                Some(t.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+            }
+            syn::GenericArgument::Type(_) => Some("_".to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// SOUNDNESS R1279/R1281 — the ENUM segment a struct-variant pattern names (`Inner` in `Inner::Body { body }`).
+fn struct_variant_enum(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Reference(r) => struct_variant_enum(&r.pat),
+        syn::Pat::Paren(p) => struct_variant_enum(&p.pat),
+        syn::Pat::Struct(ps) => {
+            let n = ps.path.segments.len();
+            (n >= 2).then(|| ps.path.segments[n - 2].ident.to_string())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn peel_value(expr: &syn::Expr) -> &syn::Expr {
     let mut e = peel_recv(expr);
     while let syn::Expr::Unary(u) = e {

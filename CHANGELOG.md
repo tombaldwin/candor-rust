@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a payload typed by a container's generic parameter NAME is mapped by POSITION, and hedged where its
+  instantiation is not visible (SOUNDNESS R1279, R1281; narrows the R1267 entry below).** R1267 read the name as the
+  scope's same-named bound, which charged `Fs` on code that does no I/O (`Pair<B, Zero>` against `Pair<A, B>`, a field of
+  `self` instantiated with a pure type, an untyped `let`) and dropped rkyv's `ArchivedResult::deserialize`, whose payload
+  is the PROJECTION `T::Archived` (`deny Unknown` v0.40.13 1 → R1267 0). The argument is now read at the parameter's
+  position from what writes the instantiation — the impl's self type, a parameter or annotated `let`, a field of either,
+  a pin-project projection of either — and dispatches over that argument's bounds, a `where`-bounded projection
+  included; where nothing writes it the call discloses `dispatch:generic payload receiver of `m``. Executed: the four
+  false `Fs` are gone (`deny Fs run` 1 → **0**), `deny Unknown AR::de` 0 → **1** on an rkyv-shaped fixture, rkyv
+  0.7.46 `deny Unknown impls::core::result::ArchivedResult::deserialize` 0 → **1** (`dispatch:Deserialize.deserialize`).
 - ⚠ **candor-scan: an `interfaceUnion` entry carrying `Unknown` now carries its contributors' reasons (SOUNDNESS R1268,
   SPEC §3.1 ⟨0.40⟩ clarification of 2026-10-20).** Every union row was reasonless, so a chained consumer classed it
   `unresolved` and a narrowed `deny Unknown[native] <caller>` over a `&dyn dep::Sink` whose implementor calls FFI exited

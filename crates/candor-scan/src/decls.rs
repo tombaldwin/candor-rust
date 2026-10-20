@@ -177,6 +177,15 @@ pub(crate) fn scan_items(
                             _ => "_".into(),
                         }).collect();
                         uses.insert(IMPL_ARGS_KEY.to_string(), args.join(","));
+                        // SOUNDNESS R1279/R1281 — the TYPE arguments only (no lifetimes), each as its written path
+                        // (`T::Archived`, `Zero`), `_` where no path is written: `model::type_params_key` positions.
+                        let targs: Vec<String> = ab.args.iter().filter_map(|a| match a {
+                            syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => Some(
+                                t.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")),
+                            syn::GenericArgument::Type(_) => Some("_".into()),
+                            _ => None,
+                        }).collect();
+                        uses.insert(IMPL_TARGS_KEY.to_string(), targs.join(","));
                     }
                 }
                 for ii in &im.items {
@@ -218,6 +227,7 @@ pub(crate) fn scan_items(
                 // for &[u8]` — and then nothing was inserted and nothing is removed: an honest miss.)
                 uses.remove(SELF_KEY);
                 uses.remove(IMPL_ARGS_KEY);
+                uses.remove(IMPL_TARGS_KEY);
             }
             // SOUNDNESS R894 — A PUBLISHED FOREIGN DECLARATION IS A UNIT THE REPORT MUST ANSWER FOR. Its body
             // is in another language, so in-crate analysis already answers a call to it with `Unknown` +
@@ -432,6 +442,8 @@ pub(crate) fn reseed_child_scope(
 /// self-type generic arguments, comma-separated in order (`impl<B, A> W<'a, A, B>` -> `'a,A,B`; a
 /// non-identifier argument is `_`). `*` cannot appear in a path segment, so no import can bind it.
 pub(crate) const IMPL_ARGS_KEY: &str = "*implargs";
+/// SOUNDNESS R1279/R1281 — the impl self type's TYPE arguments as written paths (see the insertion site).
+pub(crate) const IMPL_TARGS_KEY: &str = "*impltargs";
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
 /// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
@@ -3088,7 +3100,23 @@ pub(crate) fn fninfo(
         // `dispatchesOn` key is the ⟨0.39⟩ join, and the stripped map dropped it (measured: 14 `cast` rows).
         generic_bounds: crate::lang::generic_bounds_of(sig_written),
         // R570/R776 — the impl block's generics, read only by the trait-member path router.
-        impl_generic_bounds: impl_generics.map(crate::lang::generic_bounds_of_generics).unwrap_or_default(),
+        // SOUNDNESS R1279 — plus the bounds a `where` clause puts on an associated-type PROJECTION of a parameter
+        // (`T::Archived: Deserialize<T, D>`), keyed by the projection's path (`T::Archived`), from the impl's and the
+        // signature's own clauses: the type a payload has when the impl's self type is `ArchivedResult<T::Archived, ..>`.
+        impl_generic_bounds: {
+            let mut m = impl_generics.map(crate::lang::generic_bounds_of_generics).unwrap_or_default();
+            for g in impl_generics.into_iter().chain(std::iter::once(&sig.generics)) {
+                for (k, v) in crate::lang::projection_bounds_of_generics(g) {
+                    let e = m.entry(k).or_default();
+                    for l in v {
+                        if !e.contains(&l) {
+                            e.push(l);
+                        }
+                    }
+                }
+            }
+            m
+        },
         // R576(a)/R629 — a trait DEFAULT body is the one `fninfo` call with a self type and no impl
         // block (see the three call sites in `scan_items`), so this is exactly that case.
         trait_self: if impl_generics.is_none() { self_ty.map(str::to_string) } else { None },
@@ -3838,6 +3866,42 @@ fn note_result_alias(it: &syn::ItemType, uses_ty: &HashMap<String, String>, rets
     rets.insert(k, Some(v));
 }
 
+/// SOUNDNESS R1279/R1281 — the projection type names a pin-project item declares for itself (`#[project = P]`,
+/// `#[project_ref = P]`, `#[project_replace = P]`).
+/// Both spellings: pin-project-lite's `#[project = P]` inside `pin_project!`, and pin-project's attribute macro
+/// `#[pin_project(project = P, project_ref = Q)]`.
+fn projection_names(attrs: &[syn::Attribute]) -> Vec<String> {
+    let named = |nv: &syn::MetaNameValue| -> Option<String> {
+        if !(nv.path.is_ident("project") || nv.path.is_ident("project_ref") || nv.path.is_ident("project_replace")) {
+            return None;
+        }
+        match &nv.value {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    for a in attrs {
+        match &a.meta {
+            syn::Meta::NameValue(nv) => out.extend(named(nv)),
+            syn::Meta::List(l) if l.path.segments.last().is_some_and(|s| s.ident == "pin_project") => {
+                use syn::parse::Parser;
+                if let Ok(items) =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated.parse2(l.tokens.clone())
+                {
+                    for m in items {
+                        if let syn::Meta::NameValue(nv) = m {
+                            out.extend(named(&nv));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: String) {
     match rets.get(&key) {
         None => {
@@ -4376,6 +4440,33 @@ pub(crate) fn collect_decls(
         }
         match it {
             syn::Item::Struct(s) => {
+                // SOUNDNESS R1279/R1281 — the struct's type parameters, by position (`model::type_params_key`).
+                file_decl_fact(rets, crate::model::type_params_key(&s.ident.to_string()),
+                    s.generics.type_params().map(|t| t.ident.to_string()).collect::<Vec<_>>().join(","));
+                for p in projection_names(&s.attrs) {
+                    file_decl_fact(rets, crate::model::projection_of_key(&p), s.ident.to_string());
+                }
+                // SOUNDNESS R1281 — each named field's written type leaf and type arguments (`model::field_targs_key`).
+                if let syn::Fields::Named(named) = &s.fields {
+                    for f in named.named.iter().filter(|f| !has_cfg(&f.attrs)) {
+                        let Some(fname) = &f.ident else { continue };
+                        let mut t = &f.ty;
+                        while let syn::Type::Reference(r) = t {
+                            t = &r.elem;
+                        }
+                        let syn::Type::Path(tp) = t else { continue };
+                        let Some(last) = tp.path.segments.last().filter(|_| tp.qself.is_none()) else { continue };
+                        let syn::PathArguments::AngleBracketed(ab) = &last.arguments else { continue };
+                        let args: Vec<String> = ab.args.iter().filter_map(|a| match a {
+                            syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => Some(
+                                t.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")),
+                            syn::GenericArgument::Type(_) => Some("_".into()),
+                            _ => None,
+                        }).collect();
+                        file_decl_fact(rets, crate::model::field_targs_key(&s.ident.to_string(), &fname.to_string()),
+                            format!("{}|{}", last.ident, args.join(",")));
+                    }
+                }
                 // VEIN A — A STRUCT'S GENERIC PARAMETER SHADOWS AN IMPORT OF THE SAME NAME. tower-http
                 // declares `struct Trace<S, M, MakeSpan = DefaultMakeSpan, ..> { make_span: MakeSpan }`
                 // beside `use super::MakeSpan;` (the TRAIT): the field's type is the PARAMETER, and
@@ -4765,6 +4856,12 @@ pub(crate) fn collect_decls(
             // composite `"VariantLeaf::field"` key in these SAME two maps — see the `Fields::Named` arm
             // below (R77 residual).
             syn::Item::Enum(en) => {
+                // SOUNDNESS R1279/R1281 — the enum's type parameters, by position (`model::type_params_key`).
+                file_decl_fact(rets, crate::model::type_params_key(&en.ident.to_string()),
+                    en.generics.type_params().map(|t| t.ident.to_string()).collect::<Vec<_>>().join(","));
+                for p in projection_names(&en.attrs) {
+                    file_decl_fact(rets, crate::model::projection_of_key(&p), en.ident.to_string());
+                }
                 // R77: the enum's OWN generic bounds (`enum Msg<T: Doer> { Cb(T) }`), mirroring the
                 // struct field route just above — a bounded-generic single-field payload dispatches too.
                 let enum_bounds = generic_bounds_of_generics(&en.generics);
