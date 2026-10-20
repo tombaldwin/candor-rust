@@ -271,6 +271,26 @@ pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
     out
 }
 
+/// SOUNDNESS R1286 — the written multi-segment trait bounds of a generics list (params and `where`), leaf-keyed under the
+/// tombstone rule (`quals_from_bounds`). For an IMPL block's generics, which `sig_trait_quals` never reads: `impl<T> Write
+/// for AllowStdIo<T> where T: io::Write` reaches `self.0.write(..)` with the bare leaf `Write`.
+pub(crate) fn generics_trait_quals(g: &syn::Generics) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for p in &g.params {
+        if let syn::GenericParam::Type(tp) = p {
+            quals_from_bounds(&tp.bounds, &mut out);
+        }
+    }
+    if let Some(w) = &g.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                quals_from_bounds(&pt.bounds, &mut out);
+            }
+        }
+    }
+    out
+}
+
 fn quals_from_bounds(
     bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
     out: &mut HashMap<String, String>,
@@ -12514,6 +12534,41 @@ pub(crate) fn opaque_include_scope(
             return scope;
         }
     }
+}
+
+/// SOUNDNESS R1286 — a member of a std I/O trait (`std::io::{Write, Read, BufRead, Seek}`) that RUNS the
+/// implementor's I/O: the required members and the provided methods defined by calling them, plus the
+/// iterator-producing `bytes`/`lines`/`split`, whose `next` is the implementor's read (the `Iterator` that then
+/// drives them is SPEC §4 territory and deliberately not hedged anywhere — R190(c)). NOT the plumbing that only
+/// wraps the receiver (`by_ref`, `take`, `chain`). `tr` is the trait LEAF; a member the trait does not declare is
+/// a false reason and answers `false` (`flush` on a `Read` bound is a builder-chain walk, never a dispatch).
+pub(crate) fn is_driving_io_member(tr: &str, leaf: &str) -> bool {
+    match tr {
+        "Write" => matches!(
+            leaf,
+            "write" | "write_all" | "write_vectored" | "write_all_vectored" | "write_fmt" | "flush"
+        ),
+        "Read" => matches!(
+            leaf,
+            "read" | "read_exact" | "read_to_end" | "read_to_string" | "read_vectored" | "read_buf"
+                | "read_buf_exact" | "bytes"
+        ),
+        "BufRead" => matches!(
+            leaf,
+            "fill_buf" | "consume" | "read_line" | "read_until" | "skip_until" | "lines" | "split"
+                | "has_data_left"
+        ),
+        "Seek" => matches!(leaf, "seek" | "rewind" | "stream_position" | "stream_len" | "seek_relative"),
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R1286 — COULD `full` (a receiver bound's expanded spelling, `tr` its leaf) be std's I/O trait? `std::io::…`
+/// (or `core::io::…`), or a bare leaf nothing rooted. A bare leaf is NOT evidence on its own — a `fmt::Write` bound on
+/// an impl generic reaches a field receiver bare (regex-syntax) — so the collector's `is_io_bound` decides that case.
+pub(crate) fn is_std_io_trait(full: &str, tr: &str) -> bool {
+    matches!(tr, "Write" | "Read" | "BufRead" | "Seek")
+        && (!full.contains("::") || full.starts_with("std::io::") || full.starts_with("core::io::"))
 }
 
 /// SOUNDNESS R981 — the members of the async abstractions (`futures_core::Stream`/`TryStream`,

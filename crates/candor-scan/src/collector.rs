@@ -591,6 +591,9 @@ pub(crate) struct CallCollector<'a> {
     /// only entry is a function pointer handed to foreign code (`SSLSetIOFuncs(.., write_func::<S>)`), so no analysed
     /// call site ever names its instantiation.
     pub(crate) foreign_abi_generic: bool,
+    /// SOUNDNESS R1286 — the ENCLOSING IMPL's written trait bounds, leaf-keyed (`lang::generics_trait_quals`): read only
+    /// by `is_io_bound`, to tell `impl<W: fmt::Write>` from `impl<T> .. where T: io::Write` when the receiver arrives bare.
+    pub(crate) impl_trait_quals: HashMap<String, String>,
     /// SOUNDNESS R1095 — the method LEAVES this body calls on a receiver no route typed: no concrete type, no
     /// element/slice/dispatch call formed, no disclosure made at the site. Judged after the
     /// fixpoint (`scan.rs`): where a crate-local method of that name (a unit with a `self` receiver) carries a
@@ -1551,6 +1554,48 @@ impl<'a> CallCollector<'a> {
             && (!twin || self.ambiguous_type_leaves.contains(&format!("\u{1f}fut\u{1f}{leaf}")))
             && !self.returns.contains_key(&crate::model::async_ret_key(&leaf)))
         .then_some(leaf)
+    }
+
+    /// SOUNDNESS R1286 — is the receiver bound `tr` (its expanded spelling `full`, `recv_trait_full`) std's I/O trait? A
+    /// rooted spelling answers itself (`lang::is_std_io_trait`). A BARE leaf nothing rooted — no `use`, and the crate's
+    /// written qualifications tombstoned or absent — is std's only where this scope globs `std::io` or its prelude
+    /// (security-framework's `use std::io::prelude::*`): regex-syntax's `impl<W: fmt::Write> Writer<W>` field reaches
+    /// here bare too, and reading THAT as I/O published a false `dispatch:Write.write_fmt` on its printer (measured on the
+    /// first cut of this rule). The undecided bare leaf keeps its pre-existing answer.
+    fn is_io_bound(&self, receiver: &syn::Expr, full: &str, tr: &str) -> bool {
+        if !matches!(tr, "Write" | "Read" | "BufRead" | "Seek") {
+            return false;
+        }
+        // The SIGNATURE's own spelling of the bound (`recv_trait_full`'s first two sources) decides when it exists…
+        let recv_param = match peel_value(receiver) {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            _ => None,
+        };
+        let from_sig = recv_param
+            .as_ref()
+            .and_then(|n| self.trait_quals_by_param.get(n))
+            .and_then(|m| m.get(tr))
+            .is_some_and(|q| !q.is_empty())
+            || self.trait_quals.get(tr).is_some_and(|q| !q.is_empty());
+        // …else the ENCLOSING IMPL's written bound does, ahead of the file's `use` map: regex-syntax's
+        // `impl<W: fmt::Write> Writer<W>` in a file that also imports `io::Write` expanded the bare leaf to the WRONG one.
+        if !from_sig {
+            if let Some(q) = self.impl_trait_quals.get(tr).filter(|q| !q.is_empty()) {
+                return crate::lang::is_std_io_trait(&crate::lang::expand(q, &self.uses), tr);
+            }
+        }
+        if !crate::lang::is_std_io_trait(full, tr) {
+            return false;
+        }
+        if full.contains("::") {
+            return true;
+        }
+        [crate::lang::GLOB_KEY, crate::lang::ALLGLOB_KEY].iter().filter_map(|k| self.uses.get(*k)).any(|v| {
+            v.split('\u{1}').any(|g| {
+                let g = crate::lang::expand(g, &self.uses);
+                matches!(g.as_str(), "std::io" | "std::io::prelude" | "core::io" | "core::io::prelude")
+            })
+        })
     }
 
     /// SOUNDNESS R1145 — a CALLER instantiating a generic whose body runs an operator on it. `fn ga<E: Add<u64>>(d: E)
@@ -6374,6 +6419,24 @@ impl<'a> CallCollector<'a> {
             let writer = exprs[fmt_pos - 1];
             self.charge_coercion(writer, "Write", "write_str");
             self.charge_coercion(writer, "Write", "write");
+            // SOUNDNESS R1286 — the macro spelling of `w.write_fmt(..)` on a DISPATCH-typed writer (`W: io::Write`,
+            // `&mut dyn Write`, a `Box<dyn Write>` field) is the same unnamed dispatch the method spelling is hedged
+            // for (`writeln!(s, ..)` with `s: &mut S` read ABSENT, vein-r1286 fx1 `w_macro`). `fmt::Write` writers
+            // (`String`, a `Formatter`) are concrete or rooted at `std::fmt` and never reach it.
+            if self.resolve_recv_type(writer).is_none() {
+                for tr in self.resolve_recv_traits(writer) {
+                    if self.local_traits.contains_key(&tr) {
+                        continue;
+                    }
+                    let full = self.recv_trait_full(writer, &tr, "write_fmt");
+                    if tr == "Write" && self.is_io_bound(writer, &full, &tr) {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1286HEDGE\tWrite\twrite_fmt\tmacro"); // §E1 REACH COUNTER
+                        }
+                        self.mark_unresolved("dispatch:Write.write_fmt".to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -6878,6 +6941,70 @@ impl<'a> CallCollector<'a> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The expanded spelling of the trait bound `tr` (a leaf from `resolve_recv_traits`) as THIS receiver binds it —
+    /// the receiver parameter's own declared bound, else the crate's leaf-keyed qualification, expanded through the
+    /// `use` map (R6/R577). Split out of the dispatch-typed method-call branch so the `write!`/`writeln!` WRITER
+    /// (SOUNDNESS R1286) asks the identical question; a bare leaf comes back when nothing roots it.
+    fn recv_trait_full(&self, receiver: &syn::Expr, tr: &str, leaf: &str) -> String {
+        let recv_param = match receiver {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            syn::Expr::Reference(r) => match &*r.expr {
+                syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let per_param = recv_param
+            .as_ref()
+            .and_then(|n| self.trait_quals_by_param.get(n))
+            .and_then(|m| m.get(tr))
+            .map(|q| q.as_str())
+            .filter(|q| !q.is_empty());   // a tombstone is "unknown", never a path
+        let written = per_param.or_else(|| {
+            self.trait_quals.get(tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
+        }).unwrap_or(tr);
+        let mut full = crate::lang::expand(written, &self.uses);
+        // SOUNDNESS R577 — …AND WHEN THAT PRODUCES A BARE LEAF, THE CRATE'S OWN WRITTEN
+        // SPELLING, because three of the four declaration sites cannot carry it themselves.
+        // `sig_trait_quals` and `visit_local` record the qualification; `trait_fields`, `rets`
+        // and the closure binder record only the leaf — so `full` stayed `"Q"`, every gate
+        // below is spelled `contains("::")`, and the site emitted NOTHING: no dep key, no
+        // `dispatchesOn`, no CHA. MEASURED with the `use` as the single variable, on a program
+        // that builds: `pub struct H { inner: Box<dyn dep::Q> }` + `h.inner.fetch()` in a file
+        // with no `use dep::Q` is ABSENT, while the signature and annotated-`let` controls on
+        // the same trait in the same file both read `['Net']`.
+        //
+        // FOUR PROPERTIES, and they are what make a crate-wide leaf-keyed map safe HERE where
+        // R562 correctly refused one for the ERASURE fact:
+        //  1. PURELY ADDITIVE. It is consulted only when `full` has no `::`, which is exactly
+        //     the state in which every branch below already does nothing. It can never change
+        //     an answer, only supply one where there was none.
+        //  2. IT CANNOT RE-ROUTE A CHA. The bounded fan-out reads `trait_impls[tr]` — keyed on
+        //     the LEAF, not on this path — so naming the wrong crate cannot fabricate an edge
+        //     to a different implementor set. What the path decides is the KEY a consumer
+        //     joins on, and a key that names nothing joins to nothing (PART 92 `c3_pure_only`).
+        //  3. IT REFUSES RATHER THAN GUESSES. Two spellings of one leaf anywhere in the crate
+        //     tombstone it (`merge_trait_qual`), the same rule one signature's own parameters
+        //     already obey.
+        //  4. NOT UNDER A GLOB. `use other::*;` can bind this leaf to a crate nothing in the
+        //     source spells, so there is no collision for the tombstone to see. A scope with a
+        //     glob keeps today's answer — the status quo, not a new loss.
+        if !full.contains("::") && !self.uses.contains_key(crate::lang::GLOB_KEY) {
+            if let Some(q) =
+                self.written_trait_quals.get(tr).filter(|q| !q.is_empty())
+            {
+                // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG`
+                // channel `R504HIT`/`R551HIT`/`R562HIT` already use. A byte-identical A/B is
+                // not evidence until reach is counted.
+                if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                    eprintln!("R577HIT {q}::{leaf}");
+                }
+                full = crate::lang::expand(q, &self.uses);
+            }
+        }
+        full
     }
 
     /// THE ONE WRITER of `unresolved` — set the flag AND say why, in SPEC §4's `kind:detail` vocabulary.
@@ -9557,62 +9684,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // The RECEIVER's own declared bound wins. Only when the receiver is not a plain
                     // parameter do we fall back to the leaf-keyed map, whose empty value is the tombstone
                     // for a leaf this signature bound to two different crates.
-                    let recv_param = match &*node.receiver {
-                        syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
-                        syn::Expr::Reference(r) => match &*r.expr {
-                            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    let per_param = recv_param
-                        .as_ref()
-                        .and_then(|n| self.trait_quals_by_param.get(n))
-                        .and_then(|m| m.get(&tr))
-                        .map(|q| q.as_str())
-                        .filter(|q| !q.is_empty());   // a tombstone is "unknown", never a path
-                    let written = per_param.or_else(|| {
-                        self.trait_quals.get(&tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
-                    }).unwrap_or(tr.as_str());
-                    let mut full = crate::lang::expand(written, &self.uses);
-                    // SOUNDNESS R577 — …AND WHEN THAT PRODUCES A BARE LEAF, THE CRATE'S OWN WRITTEN
-                    // SPELLING, because three of the four declaration sites cannot carry it themselves.
-                    // `sig_trait_quals` and `visit_local` record the qualification; `trait_fields`, `rets`
-                    // and the closure binder record only the leaf — so `full` stayed `"Q"`, every gate
-                    // below is spelled `contains("::")`, and the site emitted NOTHING: no dep key, no
-                    // `dispatchesOn`, no CHA. MEASURED with the `use` as the single variable, on a program
-                    // that builds: `pub struct H { inner: Box<dyn dep::Q> }` + `h.inner.fetch()` in a file
-                    // with no `use dep::Q` is ABSENT, while the signature and annotated-`let` controls on
-                    // the same trait in the same file both read `['Net']`.
-                    //
-                    // FOUR PROPERTIES, and they are what make a crate-wide leaf-keyed map safe HERE where
-                    // R562 correctly refused one for the ERASURE fact:
-                    //  1. PURELY ADDITIVE. It is consulted only when `full` has no `::`, which is exactly
-                    //     the state in which every branch below already does nothing. It can never change
-                    //     an answer, only supply one where there was none.
-                    //  2. IT CANNOT RE-ROUTE A CHA. The bounded fan-out reads `trait_impls[tr]` — keyed on
-                    //     the LEAF, not on this path — so naming the wrong crate cannot fabricate an edge
-                    //     to a different implementor set. What the path decides is the KEY a consumer
-                    //     joins on, and a key that names nothing joins to nothing (PART 92 `c3_pure_only`).
-                    //  3. IT REFUSES RATHER THAN GUESSES. Two spellings of one leaf anywhere in the crate
-                    //     tombstone it (`merge_trait_qual`), the same rule one signature's own parameters
-                    //     already obey.
-                    //  4. NOT UNDER A GLOB. `use other::*;` can bind this leaf to a crate nothing in the
-                    //     source spells, so there is no collision for the tombstone to see. A scope with a
-                    //     glob keeps today's answer — the status quo, not a new loss.
-                    if !full.contains("::") && !self.uses.contains_key(crate::lang::GLOB_KEY) {
-                        if let Some(q) =
-                            self.written_trait_quals.get(&tr).filter(|q| !q.is_empty())
-                        {
-                            // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG`
-                            // channel `R504HIT`/`R551HIT`/`R562HIT` already use. A byte-identical A/B is
-                            // not evidence until reach is counted.
-                            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
-                                eprintln!("R577HIT {q}::{leaf}");
-                            }
-                            full = crate::lang::expand(q, &self.uses);
-                        }
-                    }
+                    let full = self.recv_trait_full(&node.receiver, &tr, &leaf);
                     let root = full.split("::").next().unwrap_or("");
                     // SOUNDNESS R1280 — A STD-TRAIT DISPATCH IN A GENERIC FOREIGN-ABI CALLBACK. A method on a value whose
                     // type is a parameter bounded by a std trait (`conn.stream.flush()`, `S: std::io::Write`) forms no
@@ -9628,14 +9700,31 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // question of std-trait dispatch, not this row.
                     // `full` with no `::` is a trait leaf no spelling roots anywhere (security-framework imports
                     // `Write` through `use std::io::prelude::*`): no dependency key is formed for it below either.
-                    if self.foreign_abi_generic
-                        && (matches!(root, "std" | "core" | "alloc") || !full.contains("::"))
-                        && !std_conventionally_pure(&tr, &leaf)
+                    //
+                    // SOUNDNESS R1286 — …and the I/O half of that question is not open. A DRIVING member of std's I/O
+                    // traits (`lang::is_driving_io_member`: `write`/`write_all`/`flush`/`read`/`read_line`/`seek`, …) on
+                    // a generic, `impl`, `dyn`/`Box<dyn>` receiver or a generic/trait-object FIELD runs a body this crate
+                    // cannot name — the caller's `File`/`TcpStream` as readily as a `Vec<u8>` — and SPEC §4 (:5073) forbids
+                    // reading it as conventionally pure. EXECUTED (vein-r1286 fx1/fx2): `w_gen<S: Write>`, `w_dyn`, the
+                    // `Box<dyn Write>` field and the generic field all read ABSENT while the program wrote a file and a
+                    // socket through them. The true reason is the dispatch: `dispatch:<Trait>.<member>` — R1280's hedge
+                    // without its ABI gate, I/O traits only. NOT `Iterator` (R190(c)), NOT `fmt::Write` (`is_std_io_trait`
+                    // reads the bound's own spelling), NOT the wrapping plumbing (`by_ref`/`take`). The in-crate caller
+                    // that supplies a std handle is RESOLVED separately (`charge_generic_operators_at`).
+                    let tr_leaf = tr.rsplit("::").next().unwrap_or(&tr);
+                    let io_hedge = self.is_io_bound(&node.receiver, &full, tr_leaf) && crate::lang::is_driving_io_member(tr_leaf, &leaf);
+                    if io_hedge
+                        || (self.foreign_abi_generic
+                            && (matches!(root, "std" | "core" | "alloc") || !full.contains("::"))
+                            && !std_conventionally_pure(&tr, &leaf))
                     {
                         if std::env::var_os("CANDOR_R1280_INSTR").is_some() {
                             eprintln!("R1280HEDGE\t{tr}\t{leaf}"); // §E1 REACH COUNTER
                         }
-                        self.mark_unresolved(format!("dispatch:{}.{leaf}", tr.rsplit("::").next().unwrap_or(&tr)));
+                        if io_hedge && crate::lang::reach_debug() {
+                            eprintln!("R1286HEDGE\t{tr_leaf}\t{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
                     }
                     // SOUNDNESS R504 — SPEC §4 ⟨0.39⟩ obligation 1, for an abstraction THIS CRATE DOES
                     // NOT OWN. The emission below already forms the crate-qualified CALL, which answers

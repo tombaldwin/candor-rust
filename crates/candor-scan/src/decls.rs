@@ -3264,6 +3264,8 @@ pub(crate) fn fninfo(
         // SOUNDNESS R1280 — a generic fn with a non-Rust ABI (see the collector field).
         foreign_abi_generic: sig.abi.as_ref().is_some_and(|a| a.name.as_ref().is_none_or(|n| n.value() != "Rust"))
             && sig.generics.type_params().next().is_some(), untyped_methods: Default::default(),
+        // SOUNDNESS R1286 — see the collector field.
+        impl_trait_quals: impl_generics.map(crate::lang::generics_trait_quals).unwrap_or_default(),
         block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
     // SOUNDNESS R1196 — a `Result` PARAMETER's error type (`CallCollector::err_of`), named by the signature; a generic
