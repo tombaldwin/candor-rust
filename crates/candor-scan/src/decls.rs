@@ -166,6 +166,12 @@ pub(crate) fn scan_items(
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
                 }
+                // SOUNDNESS R1292 — the trait this impl implements (its leaf), for `self`'s typing in a blanket forwarder.
+                if let Some((_, tp, _)) = &im.trait_ {
+                    if let Some(l) = tp.segments.last() {
+                        uses.insert(IMPL_TRAIT_KEY.to_string(), l.ident.to_string());
+                    }
+                }
                 // SOUNDNESS R897 — the self type's generic arguments IN ORDER, lifetimes included,
                 // because the struct's parameter positions (`TF_GEN_FIELD`) count them too.
                 if let syn::Type::Path(tp) = &*im.self_ty {
@@ -228,6 +234,7 @@ pub(crate) fn scan_items(
                 uses.remove(SELF_KEY);
                 uses.remove(IMPL_ARGS_KEY);
                 uses.remove(IMPL_TARGS_KEY);
+                uses.remove(IMPL_TRAIT_KEY);
             }
             // SOUNDNESS R894 — A PUBLISHED FOREIGN DECLARATION IS A UNIT THE REPORT MUST ANSWER FOR. Its body
             // is in another language, so in-crate analysis already answers a call to it with `Unknown` +
@@ -444,6 +451,8 @@ pub(crate) fn reseed_child_scope(
 pub(crate) const IMPL_ARGS_KEY: &str = "*implargs";
 /// SOUNDNESS R1279/R1281 — the impl self type's TYPE arguments as written paths (see the insertion site).
 pub(crate) const IMPL_TARGS_KEY: &str = "*impltargs";
+/// SOUNDNESS R1292 — the leaf of the trait the enclosing `impl` implements.
+pub(crate) const IMPL_TRAIT_KEY: &str = "*impltrait";
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
 /// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
@@ -2849,6 +2858,43 @@ pub(crate) fn fninfo(
                             eprintln!("R1036SELFDEREF\t{qual}");
                         }
                     }
+                }
+            }
+        }
+    }
+    // SOUNDNESS R1292 — `self` IN A BLANKET IMPL OVER A PARAMETER (`impl<U: ComInterface> TryIntoParam for &U`, windows'
+    // `core/param.rs`) is a value of that parameter, so it dispatches over the parameter's bounds exactly as a parameter
+    // `u: &U` does (`seed_trait_vars`). It was untyped: `self.cast()` formed no edge, the impl's unit read pure and the
+    // published `TryIntoParam::try_into_param` union read `[]` over an FFI call. Only where `self` has no type of its
+    // own and the self type IS (a reference to) a bounded generic of the impl or the method.
+    if let Some(st) = impl_self {
+        if !vars.contains_key("self") && !trait_vars.contains_key("self") {
+            let mut gb = generic_bounds_of(sig);
+            if let Some(g) = impl_generics {
+                for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                    gb.entry(k).or_default().extend(v);
+                }
+            }
+            let mut t = st;
+            while let syn::Type::Reference(r) = t {
+                t = &r.elem;
+            }
+            let is_param = matches!(t, syn::Type::Path(p) if p.qself.is_none()
+                && p.path.get_ident().is_some_and(|i| gb.contains_key(&i.to_string())));
+            if is_param && sig.receiver().is_some() {
+                // The impl's OWN trait is left out: `impl<P: Policy> Policy for &mut P { fn m(&mut self) { (**self).m() } }`
+                // re-dispatches the member the union already holds, and reading it here would trade that call's
+                // existing disclosure for a closed-world CHA over a trait other crates implement.
+                let own = uses.get(IMPL_TRAIT_KEY).cloned();
+                let leaves: Vec<String> = crate::lang::trait_leaves(st, &gb)
+                    .into_iter()
+                    .filter(|l| own.as_deref() != Some(l.rsplit("::").next().unwrap_or(l)))
+                    .collect();
+                if !leaves.is_empty() {
+                    if std::env::var_os("CANDOR_R1292_INSTR").is_some() {
+                        eprintln!("R1292SELF\t{qual}\t{leaves:?}"); // §E1 REACH COUNTER
+                    }
+                    trait_vars.insert("self".to_string(), leaves);
                 }
             }
         }

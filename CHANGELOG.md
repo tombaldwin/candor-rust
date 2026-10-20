@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: four resolution gaps that a false `ambiguous:` hedge used to cover now resolve (SOUNDNESS R1287,
+  R1289, R1290, R1292).** (R1287) `use super::{f, ..}` naming a crate-ROOT fn anchors to `crate::f`, so the bare call
+  resolves: quinn-udp 0.4.1 `unix::UdpSocketState::send` `deny Clock` 0 → **1**. (R1289) `Type::assoc(..)` takes the
+  return `impl Type` declares for it before the leaf-keyed record (which a same-named fn on the caller's own type
+  withdraws): hickory-proto 0.25.2 `DS::from_key` `deny Log` 0 → **1**. (R1290) a bare call of this module's own free
+  fn reads its crate-anchored return: jsonschema 0.52.0 `async_bundle` and sval `serde::v1::serialize` `deny Unknown`
+  0 → **1**. (R1292) `self` in a blanket impl over a bounded parameter (`impl<U: ComInterface> TryIntoParam for &U`)
+  dispatches over the parameter's bounds (the impl's own trait excepted), and a LOCAL trait's forwarder impl is a
+  union contributor: the published `TryIntoParam::try_into_param` reads `Unknown` (`native:extern fn`), chained
+  `deny Unknown go` 0 → **1**. Cache schema rev124.
 - ⚠ **candor-classify: `tokio::time::Instant::now` and the clock crates' `now` read `Clock` (SOUNDNESS R1288).** tokio's
   `Instant::now()` read pure; tokio-util `DelayQueue::insert`/`reset` and tokio-stream `throttle` were covered only by
   a false `ambiguous:` hedge in v0.40.13. Also `quanta`, `minstant`, `web_time`, `instant`, `coarsetime` `…::now`.

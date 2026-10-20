@@ -8007,6 +8007,78 @@ pub fn plain<S: Write>(conn: &mut Connection<S>) -> i32 { if conn.stream.flush()
         assert!(fixture_effects(&v, "plain").is_empty(), "R1280 scope: an ordinary generic fn is not this row:\n{v:#}");
     }
 
+    /// SOUNDNESS R1287/R1289/R1290/R1292 — four silences R1265's correct removals exposed (each was covered in v0.40.13
+    /// only by a false `ambiguous:` hedge), one crate each so their indexes cannot help each other. EXECUTED fixtures in
+    /// `rustagent-b/fx/r1287`, `r1289`, `r1290`, `r1292_dep`; each has its must-still-charge control asserted first.
+    #[test]
+    fn r1287_r1289_r1290_r1292_exposed_silences_resolve() {
+        // R1287 — a crate-ROOT fn imported through `use super::{..}` and called bare (quinn-udp `log_sendmsg_error`).
+        let v = scan_fixture("r1287sup", "\
+pub mod unix {\n\
+    use super::{log_err, Transmit};\n\
+    pub struct UdpSocketState;\n\
+    impl UdpSocketState { pub fn send(&self, t: &Transmit) -> u64 { send(t) } }\n\
+    fn send(t: &Transmit) -> u64 { log_err(t) }\n\
+}\n\
+pub struct Transmit { pub n: u64 }\n\
+fn log_err(t: &Transmit) -> u64 { let _ = std::time::Instant::now(); t.n }\n\
+pub fn direct(t: &Transmit) -> u64 { log_err(t) }\n");
+        assert_eq!(fixture_effects(&v, "direct"), vec!["Clock".to_string()], "R1287 control:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "unix::UdpSocketState::send"), vec!["Clock".to_string()], "R1287:\n{v:#}");
+        // R1289 — `Type::assoc()`'s return when the leaf is withdrawn because the CALLER's type declares it too.
+        let v = scan_fixture("r1289ret", "\
+pub struct DNSKEY { k: u8 }\n\
+impl DNSKEY {\n\
+    pub fn from_key(k: u8) -> Self { Self { k } }\n\
+    pub fn to_digest(&self, n: &str) -> usize { std::env::var(n).map(|v| v.len()).unwrap_or(0) + self.k as usize }\n\
+}\n\
+pub struct DS { pub d: usize }\n\
+impl DS { pub fn from_key(k: u8, n: &str) -> Self { let dnskey = DNSKEY::from_key(k); Self { d: dnskey.to_digest(n) } } }\n\
+pub struct Solo;\n\
+impl Solo { pub fn make() -> Self { Solo } pub fn go(&self, n: &str) -> usize { std::env::var(n).map(|v| v.len()).unwrap_or(0) } }\n\
+pub fn solo(n: &str) -> usize { let s = Solo::make(); s.go(n) }\n");
+        assert_eq!(fixture_effects(&v, "solo"), vec!["Env".to_string()], "R1289 control:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "DS::from_key"), vec!["Env".to_string()], "R1289:\n{v:#}");
+        // R1290 — a BARE call of the crate root's own free fn, whose leaf another type declares with a differently
+        // spelled return (jsonschema `async_options().bundle(..)`).
+        let v = scan_fixture("r1290bare", "\
+pub mod opts {\n\
+    pub struct Options { pub key: String }\n\
+    impl Options { pub fn bundle(&self) -> usize { std::env::var(&self.key).map(|v| v.len()).unwrap_or(0) } }\n\
+}\n\
+pub use opts::Options;\n\
+pub mod validator {\n\
+    pub struct Validator;\n\
+    impl Validator { pub fn async_options() -> crate::opts::Options { crate::opts::Options { key: \"HOME\".into() } } }\n\
+}\n\
+pub fn async_options() -> Options { validator::Validator::async_options() }\n\
+pub fn async_bundle() -> usize { async_options().bundle() }\n\
+pub fn solo_options() -> Options { validator::Validator::async_options() }\n\
+pub fn solo_bundle() -> usize { solo_options().bundle() }\n");
+        assert_eq!(fixture_effects(&v, "solo_bundle"), vec!["Env".to_string()], "R1290 control:\n{v:#}");
+        assert_eq!(fixture_effects(&v, "async_bundle"), vec!["Env".to_string()], "R1290:\n{v:#}");
+        // R1292 — a blanket forwarder over a reference (`impl<U: ComInterface> TryIntoParam for &U`) whose body reaches
+        // ANOTHER trait; the published union must not read `[]`. Second fixture: a forwarder that only re-dispatches
+        // its OWN trait over pure implementors adds nothing.
+        let v = scan_fixture("r1292fwd", "\
+extern \"C\" { fn getpid() -> i32; }\n\
+pub trait ComInterface { fn cast(&self) -> usize { unsafe { getpid() as usize } } }\n\
+pub trait TryIntoParam { fn try_into_param(self) -> usize; }\n\
+impl<U: ComInterface> TryIntoParam for &U { fn try_into_param(self) -> usize { self.cast() } }\n\
+pub struct Plain;\n\
+impl TryIntoParam for Plain { fn try_into_param(self) -> usize { 0 } }\n\
+pub trait Pol { fn on(&mut self) -> usize; }\n\
+pub struct P0;\n\
+impl Pol for P0 { fn on(&mut self) -> usize { 0 } }\n\
+impl<P: Pol> Pol for &mut P { fn on(&mut self) -> usize { (**self).on() } }\n");
+        let union = |k: &str| v["functions"].as_array().unwrap().iter()
+            .find(|f| f["interfaceUnion"].as_bool() == Some(true) && f["fn"] == k).cloned();
+        assert!(union("TryIntoParam::try_into_param").is_some_and(|u| u["inferred"] == serde_json::json!(["Unknown"])),
+                "R1292: the union carries the forwarder's FFI:\n{v:#}");
+        assert!(union("Pol::on").is_none_or(|u| u["inferred"].as_array().is_some_and(|a| a.is_empty())),
+                "R1292 second fixture: a pure own-trait forwarder adds nothing:\n{v:#}");
+    }
+
     /// ⟨0.40⟩ SOUNDNESS R1293 — a union's implementor that the never-guess rule refuses (two units claim its tail, the
     /// tower-http `ResponseBody` shape) or that is published under another spelling of the same trait contributes the
     /// `unresolved` class (§3.1), so the union's reasons are never a strict subset. EXECUTED (`rustagent-b/fx/r1293_use`,
@@ -17777,7 +17849,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17788,7 +17860,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev123/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev124/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

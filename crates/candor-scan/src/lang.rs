@@ -1617,6 +1617,25 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             if let Some(t) = turbofish_return(p, leaf, uses, returns) {
                 return Some(t);
             }
+            // SOUNDNESS R1289 — `Type::assoc(..)` returns what `impl Type { fn assoc(..) -> R }` DECLARES, keyed on
+            // (type, fn) as R451 files it, BEFORE the leaf-keyed record: a leaf two types declare (`DS::from_key` and
+            // `DNSKEY::from_key`, both `-> Self`, hickory-proto) is withdrawn as ambiguous there, so `let dnskey =
+            // DNSKEY::from_key(k)` was untyped and `dnskey.to_digest(..)` lost its edge — the caller read `[]` over
+            // the callee's `[Log, Unknown]`. The declaration the written type carries is not a guess. Both facts on one
+            // (type, fn) (two same-leaf types disagree) refuse, as `impl_ret_key`'s method-chain reader does.
+            if let Some((ty, last)) = full.rsplit_once("::") {
+                let full_ty = expand(ty, uses);
+                let ty_leaf = full_ty.rsplit("::").next().unwrap_or(&full_ty);
+                if ty_leaf.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    let other = returns.get(&crate::model::impl_ret_key(ty_leaf, last));
+                    let same = returns.contains_key(&crate::model::impl_self_ret_key(ty_leaf, last));
+                    match (other, same) {
+                        (Some(r), false) => return Some(r.clone()),
+                        (None, true) => return Some(full_ty),
+                        _ => {}
+                    }
+                }
+            }
             recorded_return_type(leaf, returns).or_else(|| qual_recorded_return(&full, uses, returns))
         }
         // `let s = S {..};` — a struct literal names its type directly.
@@ -1680,7 +1699,17 @@ pub(crate) fn turbofish_return(
 /// withdrew it), and only for a path `expand` anchors in this crate: a dependency's `dep::mk()` has no
 /// entry here by construction, and a bare `mk()` stays the leaf route's question.
 pub(crate) fn qual_recorded_return(written: &str, uses: &HashMap<String, String>, returns: &ReturnIndex) -> Option<String> {
-    let full = expand(written, uses);
+    let mut full = expand(written, uses);
+    // SOUNDNESS R1290 — a BARE call nothing imported (`async_options()` written beside `pub fn async_options` at the
+    // crate root) names this module's own free fn: a glob import cannot shadow a module's own item. `expand` leaves it
+    // bare, so the crate-anchored qual Pass A filed (`free_qual`) was never asked — and where another type declares the
+    // same leaf with a differently spelled return (`Validator::async_options`, jsonschema 0.52.0), the leaf record is
+    // withdrawn too: `async_options().bundle(..)` lost its edge to `ValidationOptions::bundle`.
+    if !full.contains("::") {
+        if let Some(m) = uses.get(MODPATH_KEY) {
+            full = if m.is_empty() { format!("crate::{full}") } else { format!("crate::{m}::{full}") };
+        }
+    }
     if !full.starts_with("crate::") {
         return None;
     }
@@ -5471,11 +5500,42 @@ pub(crate) fn collect_use(
 /// root — the caller then keeps the literal, which is today's answer.
 fn anchored_value(full: &str, out: &HashMap<String, String>) -> Option<String> {
     let segs: Vec<&str> = full.split("::").collect();
+    if let Some(r) = root_one_segment(&segs, out) {
+        return Some(r);
+    }
     absolutise(&segs, out)?;
     // NOT alias-followed: the value names what the `use` names. Following a local type alias here
     // would bake the TARGET into the binding and leave no way back to an `impl` written on the alias
     // itself (see `expand_noalias`); a later `expand` of a path through this binding still follows it.
     Some(expand_noalias(full, out))
+}
+
+/// SOUNDNESS R1287 — a `self::`/`super::` `use` value that lands on a ONE-segment name at the CRATE ROOT (`use
+/// super::{log_sendmsg_error, ..}` in quinn-udp's `unix.rs`): `absolutise` declines it (a `crate::f` prefix would break a
+/// tail2 key), so the value stayed the literal `super::log_sendmsg_error`, which no resolution route reads — the
+/// module's `send` lost its edge to the root's `log_sendmsg_error` (`Instant::now` → Clock). `crate::f` is exactly the
+/// spelling R1154's crate-root route resolves (`use crate::f`), so the value takes it.
+fn root_one_segment(segs: &[&str], out: &HashMap<String, String>) -> Option<String> {
+    let modpath = out.get(MODPATH_KEY)?;
+    let depth = if modpath.is_empty() { 0 } else { modpath.split("::").count() };
+    let mut ups = 0usize;
+    let mut i = 0usize;
+    while let Some(h) = segs.get(i) {
+        match *h {
+            "self" => {}
+            "super" => ups += 1,
+            _ => break,
+        }
+        i += 1;
+    }
+    if i == 0 || ups != depth || segs.len() != i + 1 {
+        return None;
+    }
+    let name = segs[i];
+    if out.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == name)) {
+        return None;
+    }
+    Some(format!("crate::{name}"))
 }
 
 /// The CRATE-ROOT re-exports that a `use crate::name` in ANY file (even another one) resolves through —
@@ -11704,7 +11764,14 @@ pub(crate) fn collect_opaque_trait_impls(
                 // implementor of its own: its body reaches the trait through those parameters, whose
                 // implementors the CHA already holds. Not hedged. THE RESIDUAL: a forwarder whose body
                 // ALSO performs an effect of its own is not disclosed by this rule.
-                if self_type_is_params_only(&im.self_ty, &im.generics) {
+                // SOUNDNESS R1292 — …BUT FOR A LOCAL TRAIT THE RESIDUAL IS REAL AND THE RESOLUTION IS FREE. windows' `impl<U:
+                // ComInterface> TryIntoParam for &U` reaches a DIFFERENT trait (`self.cast()`, FFI), which no implementor
+                // of `TryIntoParam` the CHA holds performs, and `TryIntoParam::try_into_param`'s union read `[]`. A local
+                // forwarder's unit exists (`{modpath}::{method}`, minted below) and now types `self` by the parameter's
+                // bounds (decls, R1292), so it is resolved like any non-nominal implementor: an edge to its own body,
+                // never a hedge. A forwarder that only re-dispatches its own trait adds nothing the union does not
+                // already hold. A FOREIGN trait's forwarder keeps the skip (its key has no spelling for the unit).
+                if self_type_is_params_only(&im.self_ty, &im.generics) && foreign_trait_owner_qual(tr, uses).is_some() {
                     if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
                         eprintln!("VEINC_FORWARDER");
                     }
