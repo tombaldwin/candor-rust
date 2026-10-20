@@ -1602,14 +1602,18 @@ impl<'a> CallCollector<'a> {
         })
     }
 
-    /// SOUNDNESS (rustagent-d, sibling of R1320) — `self` in a LOCAL trait's impl FOR a std I/O handle (`impl Flush3 for
-    /// File { fn flush(&mut self) { self.write_all(b"3") } }`) is typed by the impl's LEAF (`File`), so the call formed
-    /// `File::write_all`, which names no unit and no classifier rule: the contributor read pure, and so did every generic
-    /// dispatch reaching it (EXECUTED rustagent-d `fx/ctl` `mc_local_real` writes; pub 0). The handle call the receiver
-    /// spelling `f.write_all(..)` makes on a `&mut File` parameter is made here, so the handle's own classifier rule
-    /// decides. Only when the leaf expands through this file's `use` map to a std handle (a crate-local `struct File`
-    /// expands to the crate's own path and is untouched), the member is a DRIVING I/O member, and the impl's own trait
-    /// does not declare the member itself.
+    /// SOUNDNESS R1318 — `self` IN A BLANKET IMPL OVER A std-I/O-BOUNDED PARAMETER. `impl<T: io::Write> Sink for T { fn
+    /// put(&mut self, b: &[u8]) { self.write_all(b) } }` runs the caller's `File`/`TcpStream` as readily as a `Vec<u8>`,
+    /// exactly as `fn w_gen<S: Write>(s: &mut S) { s.write_all(..) }` does — the shape R1286's hedge discloses. But Pass A
+    /// types `self` here as the impl's own generic NAME (`vars["self"] = "T"`), so the call went down the typed arm as
+    /// `T::write_all`, resolved to nothing, and the contributor read PURE: the `Sink::put` union published `[]` and a
+    /// caller passing a `&mut File` read ABSENT (EXECUTED rustab-c `fx/blanket`: `run_file` wrote 5 bytes; rmp's
+    /// `impl<T: io::Write> RmpWrite for T`, quick-xml's `impl<R: BufRead> XmlSource for R`). The true reason is the
+    /// dispatch, so this marks `dispatch:<Trait>.<member>` — e6129ca's hedge, for the one receiver its predicate could not
+    /// see. Only when the receiver is `self`, `self` is typed as a generic parameter of the impl bounded by a std I/O
+    /// trait (read through the impl's own written qualification, so a `fmt::Write` bound is out), the member is a
+    /// DRIVING member of that trait, and the impl's own trait does not itself declare the member (then `self.m()` is
+    /// the blanket's own sibling, which the typed arm already reaches).
     fn self_io_receiver(&mut self, receiver: &syn::Expr, leaf: &str) {
         let syn::Expr::Path(p) = peel_value(receiver) else { return };
         if !p.path.is_ident("self") {
@@ -1620,6 +1624,13 @@ impl<'a> CallCollector<'a> {
         if own.as_deref().is_some_and(|o| self.local_traits.get(o).is_some_and(|lt| lt.methods.contains(leaf))) {
             return;
         }
+        // SOUNDNESS (rustagent-d, sibling of R1320) — `self` in a LOCAL trait's impl FOR a std I/O handle (`impl Flush3 for
+        // File { fn flush(&mut self) { self.write_all(b"3") } }`) is typed by the impl's LEAF (`File`), so the call formed
+        // `File::write_all`, which names no unit and no classifier rule: the contributor read pure, and so did every
+        // generic dispatch reaching it (EXECUTED rustagent-d `fx/ctl` `mc_local_real` writes; pub 0). The handle call the
+        // receiver spelling `f.write_all(..)` makes on a `&mut File` parameter is made here, so the handle's own
+        // classifier rule decides. Only when the leaf expands through this file's `use` map to a std handle (a crate-local
+        // `struct File` expands to the crate's own path and is untouched) and the member is a DRIVING I/O member.
         if !self.impl_generic_bounds.contains_key(g.as_str()) {
             if let Some(h) = std_io_handle(&crate::lang::expand(&g, &self.uses)) {
                 if let Some(tr) =
@@ -1630,6 +1641,31 @@ impl<'a> CallCollector<'a> {
                     }
                     self.push_io_handle_call(&h, if tr == "BufRead" { "read" } else { leaf });
                 }
+            }
+            return;
+        }
+        let Some(bounds) = self.impl_generic_bounds.get(g.as_str()).cloned() else { return };
+        for b in bounds {
+            if !crate::lang::is_driving_io_member(&b, leaf) {
+                continue;
+            }
+            // The impl's own written qualification decides when it exists (a `W: fmt::Write` bound is out), else the
+            // file's `use` map, as `is_io_bound` reads it.
+            let written = self.impl_trait_quals.get(&b).filter(|q| !q.is_empty()).cloned().unwrap_or_else(|| b.clone());
+            let full = crate::lang::expand(&written, &self.uses);
+            let std_io = full.starts_with("std::io::") || full.starts_with("core::io::")
+                || (!full.contains("::")
+                    && [crate::lang::GLOB_KEY, crate::lang::ALLGLOB_KEY].iter().filter_map(|k| self.uses.get(*k)).any(|v| {
+                        v.split('\u{1}').any(|g| {
+                            matches!(crate::lang::expand(g, &self.uses).as_str(), "std::io" | "std::io::prelude")
+                        })
+                    }));
+            if std_io {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1318HEDGE\t{b}\t{leaf}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{b}.{leaf}"));
+                return;
             }
         }
     }
@@ -7430,6 +7466,42 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1318 (UFCS) — the UFCS spelling of a DRIVING std I/O member on a dispatch-typed first argument:
+    /// `std::io::Read::read_exact(self, buf)` in rmp's `impl<T: std::io::Read> RmpRead for T`, or `Write::write_all(w, b)`
+    /// with `w: &mut W, W: Write`. The receiver spelling of the same call is hedged (`dispatch:<Trait>.<member>`, R1286 /
+    /// R1318); the path spelling reached `route_handle_args`, which forms a call only for a CONCRETE std handle, and read
+    /// pure (rmp 0.8.15 `decode::read_int`: `deny Unknown` pub 1 -> 9489bca 0). The same predicates the method arm uses:
+    /// the trait path must be std's I/O trait (`std::io::`, or a bare leaf no local trait declares), the member a driving
+    /// one, and the argument either `self` in a blanket impl over an I/O bound or a value whose own bound is that trait.
+    fn hedge_io_ufcs(&mut self, path: &str, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        let segs: Vec<&str> = path.split("::").collect();
+        let n = segs.len();
+        if n < 2 {
+            return;
+        }
+        let (tr, m) = (segs[n - 2], segs[n - 1]);
+        if !crate::lang::is_driving_io_member(tr, m)
+            || !(path.starts_with("std::io::") || (n == 2 && !self.local_traits.contains_key(tr)))
+        {
+            return;
+        }
+        let Some(first) = args.first() else { return };
+        let before = self.unresolved_why.len();
+        self.self_io_receiver(first, m);
+        if self.unresolved_why.len() != before || self.resolve_recv_type(first).is_some() {
+            return;
+        }
+        if self.resolve_recv_traits(first).iter().any(|t| t == tr) {
+            let full = self.recv_trait_full(first, tr, m);
+            if self.is_io_bound(first, &full, tr) {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1318UFCS\t{tr}\t{m}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{tr}.{m}"));
+            }
+        }
+    }
+
     fn route_trait_member_path(
         &mut self,
         p: &syn::ExprPath,
@@ -9247,6 +9319,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // authority; the written path below is still pushed, so nothing is withdrawn.
                         self.route_trait_member_path(p, &path, &leaf, &node.args, str_arg.clone());
                         self.route_handle_args(&path, &node.args);
+                        self.hedge_io_ufcs(&path, &node.args);
                         // SOUNDNESS R330 — the arity travels with the call. See `Call::argc`: this is
                         // the ExprCall spelling, so `node.args` INCLUDES the receiver for a UFCS
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the

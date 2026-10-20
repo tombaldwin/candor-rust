@@ -8183,6 +8183,22 @@ pub(crate) fn generic_operator_uses(
                     if let Some(t) = target {
                         self.forward(t, &c.args);
                     }
+                    // SOUNDNESS R1318 (UFCS) — `std::io::Read::read_exact(r, buf)` on a parameter is the method spelling
+                    // `r.read_exact(buf)`, and runs the same required member of the argument's own impl.
+                    if let [.., t, m] = segs.as_slice() {
+                        let std_path = segs.len() == 2 || (segs.len() == 4 && segs[0] == "std" && segs[1] == "io");
+                        if std_path && matches!(t.as_str(), "Read" | "Write" | "BufRead" | "Seek") {
+                            if let Some(n) = c.args.first().and_then(operand) {
+                                if self.plain(&n) {
+                                    for (tr, rm) in generic_method_requirements(m, c.args.len().saturating_sub(1), false) {
+                                        if tr == t {
+                                            self.hit_named(&n, tr, rm, m);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             syn::visit::visit_expr_call(self, c);

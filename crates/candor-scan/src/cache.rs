@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev128 (rustagent-d): SOUNDNESS R1318 — `self` in a blanket impl over a std-I/O bound, and the UFCS spelling of a driving I/O member
+    // on a dispatch-typed argument, mark `dispatch:<Trait>.<member>`; the `<genop>` summary reads the UFCS spelling
+    // (cached `unresolved_why`, decls and `calls` move).
     // rev127 (rustagent-d): SOUNDNESS R1320 — `<genop>` entries read off a method NAME carry the parameter's written bounds; a `self`
     // method on a std I/O handle in a local trait's impl forms the handle call (cached decls and `calls` move).
     // rev126 (rustagent-c): SOUNDNESS R1286/R1294/R1295 — the `<genop>` summary covers `dyn`/`Box<dyn>` parameters, the
@@ -527,7 +530,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev127/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev128/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

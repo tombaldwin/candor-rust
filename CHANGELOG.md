@@ -131,6 +131,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   SUPERTRAIT is `Write` still resolves. And `self` in a local trait's impl FOR a std handle (`impl Rd3 for File { fn
   read(..) { self.write_all(..) } }`) now forms the handle call: `mc_local_real` `deny Fs` 0 → **1** vs v0.40.13.
   Cache schema rev127.
+- ⚠ **candor-scan: `self` in a blanket impl over a std I/O bound, and the UFCS spelling of an I/O member, disclose the
+  dispatch (SOUNDNESS R1318).** `impl<T: io::Write> RmpWrite for T { fn write_bytes(&mut self, b) { self.write_all(b) }
+  }` read pure (the union `[]`, a caller passing `&mut File` absent); it now carries `dispatch:Write.write_all`, as the
+  generic spelling `w_gen<S: Write>` already did. `std::io::Read::read_exact(self, buf)` (rmp's `RmpRead`) likewise,
+  and an in-crate caller supplying a `File` to a UFCS-spelled generic body is charged `Fs`. rmp 0.8.14/0.8.15
+  `encode::uint::write_uint`/`write_uint8` and 0.8.15 `decode::read_int` `deny Unknown` 0 → **1** (v0.40.13 had 1, by
+  a wrong-reason hedge). Cache schema rev128.
 
 ## [0.40.13] — 2026-10-19
 

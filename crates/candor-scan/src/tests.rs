@@ -8185,6 +8185,50 @@ pub fn mc_local_real(f: &mut File) -> usize { fl3(f) }\n";
         }
     }
 
+    /// SOUNDNESS R1318 (rustagent-d) — `self` in a BLANKET impl over a std-I/O-bounded parameter (`impl<T: io::Write> Sink2
+    /// for T { fn put(&mut self, b) { self.write_all(b) } }`, rmp's `RmpWrite`, quick-xml's `XmlSource`) dispatches on the
+    /// caller's writer exactly as `w_gen<S: Write>` does, and read PURE: the union `[]`, `run_file(f: &mut File) { emit(f) }`
+    /// ABSENT while the EXECUTED program (rustab-c `fx/blanket`) wrote 5 bytes. Now `dispatch:Write.write_all`, the same
+    /// true reason the generic spelling carries. MUST-NOT (rustagent-d `fx/ctlb`, executed): a `fmt::Write` blanket and a
+    /// sibling member the impl's own trait declares stay clean.
+    #[test]
+    fn r1318_self_in_a_blanket_impl_over_an_io_bound_discloses_the_dispatch() {
+        let src = "\
+use std::fs::File;\n\
+pub trait Sink2 { fn put(&mut self, b: &[u8]) -> std::io::Result<()>; }\n\
+impl<T: std::io::Write> Sink2 for T { fn put(&mut self, b: &[u8]) -> std::io::Result<()> { self.write_all(b) } }\n\
+pub fn emit<W: Sink2>(w: &mut W) -> bool { w.put(b\"e\").is_ok() }\n\
+pub fn run_file(f: &mut File) -> bool { emit(f) }\n\
+pub trait Src { fn pull(&mut self) -> usize; }\n\
+impl<R: std::io::Read> Src for R { fn pull(&mut self) -> usize { let mut b = [0u8; 4]; self.read(&mut b).unwrap_or(0) } }\n\
+pub fn mh_read(f: &mut File) -> usize { let mut s = f; s.pull() }\n\
+pub trait FmtSink { fn fput(&mut self, s: &str); }\n\
+impl<T: std::fmt::Write> FmtSink for T { fn fput(&mut self, s: &str) { let _ = self.write_str(s); } }\n\
+pub fn oc_fmt(s: &mut String) { s.fput(\"x\") }\n\
+pub trait Own { fn write_all(&mut self, b: &[u8]); fn go(&mut self) { self.write_all(b\"o\") } }\n\
+impl<T: Clone> Own for T { fn write_all(&mut self, _b: &[u8]) {} }\n\
+pub fn oc_own(v: &mut Vec<u8>) { Own::go(v) }\n\
+pub trait Src2 { fn p2(&mut self) -> usize; }\n\
+impl<R: std::io::Read> Src2 for R { fn p2(&mut self) -> usize { let mut b = [0u8; 1]; std::io::Read::read(self, &mut b).unwrap_or(0) } }\n\
+pub fn u_gen<R: std::io::Read>(r: &mut R) { let mut b = [0u8; 1]; let _ = std::io::Read::read_exact(r, &mut b); }\n\
+pub fn u_fmt<W: std::fmt::Write>(w: &mut W) { let _ = std::fmt::Write::write_str(w, \"x\"); }\n\
+pub fn c_u_gen(f: &mut File) { u_gen(f) }\n";
+        let v = scan_fixture("r1318blanket", src);
+        for f in ["Src2::p2", "u_gen"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "R1318 UFCS `{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "u_fmt").is_empty(), "R1318 UFCS MUST-NOT `u_fmt`:\n{v:#}");
+        // …and the in-crate caller supplying a `File` to the UFCS-spelled body is RESOLVED (rustagent-d `fx/ufcs`, executed).
+        assert!(fixture_effects(&v, "c_u_gen").contains(&"Fs".to_string()), "R1318 UFCS resolution `c_u_gen`:\n{v:#}");
+        for f in ["run_file", "emit", "Sink2::put"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()), "R1318 `{f}` (executed: writes):\n{v:#}");
+        }
+        assert!(fn_entry(&v, "Sink2::put")["unknownWhy"].to_string().contains("dispatch:Write.write_all"), "R1318 reason:\n{v:#}");
+        assert!(fixture_effects(&v, "Src::pull").contains(&"Unknown".to_string()), "R1318 Read blanket:\n{v:#}");
+        for c in ["oc_fmt", "oc_own", "FmtSink::fput"] {
+            assert!(fixture_effects(&v, c).is_empty(), "R1318 MUST-NOT `{c}`:\n{v:#}");
+        }
+    }
 
 
 
@@ -18030,7 +18074,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18041,7 +18085,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev127/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev128/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
