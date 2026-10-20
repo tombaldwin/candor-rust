@@ -258,7 +258,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -311,7 +311,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -636,7 +636,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(),
-            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
         let n = "x";
@@ -8069,6 +8069,85 @@ impl<T> Allow<T> where T: std::io::Write { pub fn put(&mut self, b: &[u8]) { let
         assert!(fixture_effects(&v, "caller").contains(&"Unknown".to_string()), "R1286 caller:\n{v:#}");
     }
 
+    /// SOUNDNESS R1286/R1294/R1295 (rustagent-c) — RESOLUTION. An in-crate caller that SUPPLIES a std I/O handle to a body
+    /// that dispatches on it (`inst_file_gen(f: &mut File) { w_gen(f) }`), a local implementor through `&mut dyn Write`
+    /// (R1294), and a concrete handle used through `writeln!`, a `BufReader<File>` parameter's `read_line`/`lines`, or a
+    /// `ReadDir` parameter iterated (R1295) each read ABSENT while the EXECUTED program (vein-r1286 fx1/fx2, rustagent-c
+    /// fx4) wrote or read the file / socket / directory. Each now carries the handle's own effect. The MUST-NOT controls
+    /// (rustagent-c fx3, executed: no file created) come first: a crate-local `File` with a pure `Write` impl, and the
+    /// pure std writers, never gain `Fs`/`Net`; an undriven `lines()` is not a read.
+    #[test]
+    fn r1286_a_caller_supplying_a_std_io_handle_is_charged_the_handle_effect() {
+        let src = "\
+use std::io::{BufRead, Read, Seek, Write};\n\
+use std::fs::File;\n\
+pub fn w_gen<S: Write>(s: &mut S) -> usize { s.write(b\"g\").unwrap_or(0) }\n\
+pub fn w_mid<S: Write>(s: &mut S) -> usize { w_gen(s) }\n\
+pub fn w_dyn(s: &mut dyn Write) -> usize { s.write(b\"d\").unwrap_or(0) }\n\
+pub fn w_impl(mut s: impl Write) -> usize { s.write(b\"i\").unwrap_or(0) }\n\
+pub fn w_box(mut s: Box<dyn Write>) { let _ = s.flush(); }\n\
+pub fn wl_dyn(w: &mut dyn Write) { let _ = writeln!(w, \"x\"); }\n\
+pub fn w_macro<S: Write>(s: &mut S) { let _ = writeln!(s, \"m\"); }\n\
+pub fn r_gen<R: Read>(r: &mut R) -> usize { let mut b = [0u8; 4]; r.read(&mut b).unwrap_or(0) }\n\
+pub fn rl_gen<R: BufRead>(r: &mut R) -> usize { let mut s = String::new(); r.read_line(&mut s).unwrap_or(0) }\n\
+pub fn seek_gen<S: Seek>(s: &mut S) { let _ = s.rewind(); }\n\
+pub fn it_gen<I: Iterator>(i: I) -> usize { i.count() }\n\
+pub mod local { pub struct File(pub Vec<u8>); pub struct ReadDir(pub u8); }\n\
+impl Write for local::File {\n\
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.extend_from_slice(b); Ok(b.len()) }\n\
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }\n\
+}\n\
+impl Iterator for local::ReadDir { type Item = u8; fn next(&mut self) -> Option<u8> { None } }\n\
+pub struct Mine(pub String);\n\
+impl Write for Mine {\n\
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { std::fs::OpenOptions::new().append(true).open(&self.0)?.write(b) }\n\
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }\n\
+}\n\
+pub fn c_local_gen(f: &mut local::File) -> usize { w_gen(f) }\n\
+pub fn c_local_dyn(f: &mut local::File) -> usize { w_dyn(f) }\n\
+pub fn c_local_direct(f: &mut local::File) -> usize { f.write(b\"x\").unwrap_or(0) }\n\
+pub fn c_local_writeln(f: &mut local::File) { let _ = writeln!(f, \"x\"); }\n\
+pub fn c_local_rd(r: local::ReadDir) -> usize { r.count() }\n\
+pub fn c_vec(v: &mut Vec<u8>) -> usize { w_gen(v) }\n\
+pub fn c_cursor(c: &mut std::io::Cursor<Vec<u8>>) -> usize { w_dyn(c) }\n\
+pub fn c_sink() -> usize { w_gen(&mut std::io::sink()) }\n\
+pub fn c_stdout() -> usize { let mut o = std::io::stdout(); w_gen(&mut o) }\n\
+pub fn c_writeln_vec(v: &mut Vec<u8>) { let _ = writeln!(v, \"x\"); }\n\
+pub fn c_lines_undriven(r: std::io::BufReader<File>) -> std::io::Lines<std::io::BufReader<File>> { r.lines() }\n\
+pub fn inst_file_gen(f: &mut File) -> usize { w_gen(f) }\n\
+pub fn inst_file_dyn(f: &mut File) -> usize { w_dyn(f) }\n\
+pub fn inst_file_impl(f: File) -> usize { w_impl(f) }\n\
+pub fn inst_tcp_gen(s: &mut std::net::TcpStream) -> usize { w_gen(s) }\n\
+pub fn inst_box(f: File) { w_box(Box::new(f)) }\n\
+pub fn inst_wl_dyn(f: &mut File) { wl_dyn(f) }\n\
+pub fn inst_macro(f: &mut File) { w_macro(f) }\n\
+pub fn two_hop(f: &mut File) -> usize { w_mid(f) }\n\
+pub fn r_inst_file(f: &mut File) -> usize { r_gen(f) }\n\
+pub fn bufw_gen(w: &mut std::io::BufWriter<File>) -> usize { w_gen(w) }\n\
+pub fn inst_rl(r: &mut std::io::BufReader<File>) -> usize { rl_gen(r) }\n\
+pub fn inst_seek(f: &mut File) { seek_gen(f) }\n\
+pub fn it_inst_rd(rd: std::fs::ReadDir) -> usize { it_gen(rd) }\n\
+pub fn inst_local_dyn(m: &mut Mine) -> usize { w_dyn(m) }\n\
+pub fn c_writeln(f: &mut File) { let _ = writeln!(f, \"x\"); }\n\
+pub fn c_read_line(r: &mut std::io::BufReader<File>) -> String { let mut s = String::new(); let _ = r.read_line(&mut s); s }\n\
+pub fn c_lines(r: std::io::BufReader<File>) -> usize { r.lines().count() }\n\
+pub fn c_iter_rd(rd: std::fs::ReadDir) -> usize { rd.count() }\n\
+pub fn c_for_rd(rd: std::fs::ReadDir) -> usize { let mut n = 0; for _e in rd { n += 1 } n }\n\
+pub fn c_rd_map(rd: std::fs::ReadDir) -> Vec<String> { rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect() }\n";
+        let v = scan_fixture("r1286resolve", src);
+        let concrete = |f: &str| fixture_effects(&v, f).into_iter().filter(|e| e != "Unknown").collect::<Vec<_>>();
+        for c in ["c_local_gen", "c_local_dyn", "c_local_direct", "c_local_writeln", "c_local_rd", "c_vec", "c_cursor", "c_sink",
+                  "c_stdout", "c_writeln_vec", "c_lines_undriven"] {
+            assert!(concrete(c).is_empty(), "R1286 MUST-NOT control `{c}` gained a concrete effect:\n{v:#}");
+        }
+        for f in ["inst_file_gen", "inst_file_dyn", "inst_file_impl", "inst_box", "inst_wl_dyn", "inst_macro", "two_hop",
+                  "r_inst_file", "bufw_gen", "inst_rl", "inst_seek", "it_inst_rd", "inst_local_dyn", "c_writeln",
+                  "c_read_line", "c_lines", "c_iter_rd", "c_for_rd", "c_rd_map"] {
+            assert_eq!(concrete(f), vec!["Fs".to_string()], "R1286/R1294/R1295 `{f}` (executed: Fs):\n{v:#}");
+        }
+        assert_eq!(concrete("inst_tcp_gen"), vec!["Net".to_string()], "R1286 `inst_tcp_gen` (executed: Net):\n{v:#}");
+    }
+
     /// SOUNDNESS R1287/R1289/R1290/R1292 — four silences R1265's correct removals exposed (each was covered in v0.40.13
     /// only by a false `ambiguous:` hedge), one crate each so their indexes cannot help each other. EXECUTED fixtures in
     /// `rustagent-b/fx/r1287`, `r1289`, `r1290`, `r1292_dep`; each has its must-still-charge control asserted first.
@@ -9020,7 +9099,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -9062,7 +9141,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(), body_externs: Default::default(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -9088,7 +9167,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(), body_externs: Default::default(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), ctor_bound: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -9138,7 +9217,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -9177,7 +9256,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+                const_strings: empty_consts(), local_macros: empty_consts(), body_macros: Default::default(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -17911,7 +17990,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17922,7 +18001,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev125/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev126/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -22653,7 +22732,7 @@ pub fn go() {{ imp::doit(); }}
             const_strings: &consts, local_macros: &macros, body_macros: Default::default(), macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), mut_uses: Default::default(), dispatch_sites: Default::default(), foreign_dispatch_sites: Default::default(), unresolved_why: Default::default(),
-            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
+            ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), veinb_off: std::cell::Cell::new(false), veinb_typed: std::collections::HashMap::new(), std_made_vars: Default::default(), err_of: Default::default(), refusals: Default::default(), drop_relevant: &std::collections::HashSet::new(), assign_drop: Default::default(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false, scrut_args: None, foreign_abi_generic: false, io_wrapped: Default::default(), impl_trait_quals: Default::default(), untyped_methods: Default::default(), block_field_variants: Default::default(),
         };
         let n = "x";
         c.vars.insert(n.into(), "Outer".into());

@@ -591,6 +591,10 @@ pub(crate) struct CallCollector<'a> {
     /// only entry is a function pointer handed to foreign code (`SSLSetIOFuncs(.., write_func::<S>)`), so no analysed
     /// call site ever names its instantiation.
     pub(crate) foreign_abi_generic: bool,
+    /// SOUNDNESS R1295 — a PARAMETER whose written type is a std buffering wrapper over a std I/O handle
+    /// (`r: &mut BufReader<File>`, `w: BufWriter<TcpStream>`) -> that handle's path. The strict typer answers the wrapper
+    /// without its type arguments (`std::io::BufReader`), so this is the one place the handle inside is still visible.
+    pub(crate) io_wrapped: HashMap<String, String>,
     /// SOUNDNESS R1286 — the ENCLOSING IMPL's written trait bounds, leaf-keyed (`lang::generics_trait_quals`): read only
     /// by `is_io_bound`, to tell `impl<W: fmt::Write>` from `impl<T> .. where T: io::Write` when the receiver arrives bare.
     pub(crate) impl_trait_quals: HashMap<String, String>,
@@ -1598,6 +1602,69 @@ impl<'a> CallCollector<'a> {
         })
     }
 
+    /// SOUNDNESS R1295 — the handle inside a std buffering wrapper `e` holds, when `e` is a PARAMETER whose written type
+    /// says so (`io_wrapped`); `ty` is what the strict typer answered for `e` (the wrapper, without its arguments).
+    fn io_wrapped_of(&self, e: &syn::Expr, ty: &str) -> Option<String> {
+        if !matches!(ty, "std::io::BufReader" | "std::io::BufWriter" | "std::io::LineWriter") {
+            return None;
+        }
+        let syn::Expr::Path(p) = peel_value(e) else { return None };
+        self.io_wrapped.get(&p.path.get_ident()?.to_string()).cloned()
+    }
+
+    /// SOUNDNESS R1286/R1295 — the std I/O handle `e` reads or writes through (`std_io_handle`, or a wrapper parameter's).
+    fn io_handle_of(&self, e: &syn::Expr) -> Option<String> {
+        let t = self.type_of(e)?;
+        std_io_handle(&t).or_else(|| self.io_wrapped_of(e, &t))
+    }
+
+    /// SOUNDNESS R1286/R1295 — the typed call the receiver spelling `h.m(..)` makes on std I/O handle `h`, so the handle's
+    /// own classifier rule decides the effect (`route_handle_args`' move).
+    fn push_io_handle_call(&mut self, h: &str, m: &str) {
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 1, entropy_arg: false,
+            path: format!("{h}::{m}"), leaf: m.to_string(), str_arg: None,
+            typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
+    }
+
+    /// SOUNDNESS R1295 — an ITERATOR whose `next` reads a std I/O source, driven here: the chain under `e` (lazy adapters,
+    /// `by_ref`, `into_iter` peeled) bottoms out at `ReadDir` (`rd.count()`, `for e in rd`) or at `lines()`/`bytes()`/
+    /// `split(..)` on a std handle or a buffering wrapper parameter (`r.lines().count()` with `r: BufReader<File>`). Only a
+    /// DRIVEN chain is charged — `r.lines()` returned unconsumed reads nothing here. EXECUTED (vein-r1286 fx2 `c_lines`,
+    /// `c_iter_rd`, `c_for_rd`; rustagent-c fx4 `readdir_map`): each read the directory or the file and read ABSENT.
+    fn charge_io_iter_source(&mut self, e: &syn::Expr) {
+        let mut x = peel_recv(e);
+        loop {
+            match x {
+                syn::Expr::MethodCall(mc) => {
+                    let m = mc.method.to_string();
+                    if matches!(m.as_str(), "lines" | "bytes" | "split") {
+                        if let Some(h) = self.io_handle_of(&mc.receiver) {
+                            if crate::lang::reach_debug() {
+                                eprintln!("R1295ITER\t{h}::{m}"); // §E1 REACH COUNTER
+                            }
+                            self.push_io_handle_call(&h, if m == "bytes" { "read" } else { "read_until" });
+                        }
+                        return;
+                    }
+                    if m == "by_ref" || m == "into_iter" || crate::lang::iterator_lazy(&m) {
+                        x = peel_recv(&mc.receiver);
+                        continue;
+                    }
+                    return;
+                }
+                _ => {
+                    if self.type_of(x).as_deref() == Some("std::fs::ReadDir") {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1295ITER\tstd::fs::ReadDir::next"); // §E1 REACH COUNTER
+                        }
+                        self.push_io_handle_call("std::fs::ReadDir", "next");
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     /// SOUNDNESS R1145 — a CALLER instantiating a generic whose body runs an operator on it. `fn ga<E: Add<u64>>(d: E)
     /// { d + 3 }` cannot name `E`'s impl (SPEC §4's external-abstraction dispatch, R1126 — that body's row is the
     /// documented miss), but `ga(d)` with `d: D` runs `<D as Add<u64>>::add`, and the caller read ABSENT over it
@@ -1696,7 +1763,54 @@ impl<'a> CallCollector<'a> {
             } else {
                 self.type_of(arg).into_iter().collect()
             };
+            // SOUNDNESS R1286 — a handle BOXED at the call site for a `Box<dyn Write>` parameter (`box_dyn(Box::new(f))`): the
+            // strict typer answers the box, the dispatch lands in the handle inside it.
+            if !elem && crate::lang::is_std_io_trait(&tr, &tr) && m != "write_str" {
+                if let syn::Expr::Call(c) = peel_value(arg) {
+                    let boxed = matches!(&*c.func, syn::Expr::Path(p) if p.qself.is_none()
+                        && p.path.segments.len() == 2 && p.path.segments[0].ident == "Box" && p.path.segments[1].ident == "new");
+                    if let Some(h) = boxed.then(|| c.args.first().and_then(|x| self.io_handle_of(x))).flatten() {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1286RESOLVE\t{key}\t{h}::{m}\tboxed"); // §E1 REACH COUNTER
+                        }
+                        self.push_io_handle_call(&h, if tr == "BufRead" { "read" } else { &m });
+                        continue;
+                    }
+                }
+            }
             for t in tys {
+                // SOUNDNESS R1286 — RESOLUTION. A std I/O-trait member the callee runs on this argument, and the
+                // argument is a std I/O HANDLE (`&mut File`, `TcpStream`, through `BufWriter`/`BufReader`/`LineWriter`):
+                // the callee's dispatch lands in the handle's own impl, so the call the receiver spelling would have made
+                // (`f.write(..)` → `std::fs::File::write`) is made here and the handle's classifier rule decides — the
+                // `route_handle_args` move, from the summary instead of a fixed callee list. EXECUTED (vein-r1286 fx1):
+                // `inst_file_gen(f: &mut File) { w_gen(f) }` wrote the file and read ABSENT, beside `direct_file`'s
+                // `f.write` [Fs]. Never by LEAF (the guard below stays): a crate-local `struct File` is not a handle
+                // (`std_io_handle` reads the strict type's FULL path). A pure std writer (`Vec<u8>`, `Cursor`, `Sink`,
+                // `Stdout`) is not a handle and still forms nothing.
+                if !elem && crate::lang::is_std_io_trait(&tr, &tr) && m != "write_str" {
+                    if let Some(h) = std_io_handle(&t).or_else(|| self.io_wrapped_of(arg, &t)) {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1286RESOLVE\t{key}\t{h}::{m}"); // §E1 REACH COUNTER
+                        }
+                        // A `BufRead` member reads through the handle; `Seek` seeks it.
+                        self.push_io_handle_call(&h, if tr == "BufRead" { "read" } else { &m });
+                        continue;
+                    }
+                }
+                // …and a `ReadDir` handed to a generic the summary says ITERATES it (`it_gen(rd)` with
+                // `fn it_gen<I: Iterator>(i: I) { i.count() }`): the `next` that runs is `ReadDir::next`, a directory
+                // read (EXECUTED vein-r1286 fx1 `it_inst_rd`). The generic body itself stays unhedged (`Iterator` is
+                // SPEC §4 / R190(c) territory); only the caller that supplies the concrete `ReadDir` is resolved.
+                if !elem && matches!((tr.as_str(), m.as_str()), ("Iterator", "next") | ("IntoIterator", "into_iter"))
+                    && t == "std::fs::ReadDir"
+                {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1286RESOLVE\t{key}\tstd::fs::ReadDir::next"); // §E1 REACH COUNTER
+                    }
+                    self.push_io_handle_call("std::fs::ReadDir", "next");
+                    continue;
+                }
                 // A std trait's impl for a std or dependency type is never this crate's (the orphan rule), yet
                 // `charge_coercion_ty` asks by LEAF: clap's `Error::raw(kind, e)` with `e: std::fmt::Error` formed
                 // clap's own `Error::fmt`. R1167's entries are std traits only, so such an argument forms nothing.
@@ -6423,6 +6537,15 @@ impl<'a> CallCollector<'a> {
             // `&mut dyn Write`, a `Box<dyn Write>` field) is the same unnamed dispatch the method spelling is hedged
             // for (`writeln!(s, ..)` with `s: &mut S` read ABSENT, vein-r1286 fx1 `w_macro`). `fmt::Write` writers
             // (`String`, a `Formatter`) are concrete or rooted at `std::fmt` and never reach it.
+            // SOUNDNESS R1295 — …and a std I/O HANDLE writer (`writeln!(f, ..)` with `f: &mut File`, a `BufWriter<File>`
+            // parameter) runs the handle's own `write_fmt`, exactly as `f.write_fmt(..)` would: made as that typed call, so
+            // the handle's classifier rule decides. EXECUTED (vein-r1286 fx2 `c_writeln`: wrote the file, read ABSENT).
+            if let Some(h) = self.io_handle_of(writer) {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1295WRITER\t{h}::write_fmt"); // §E1 REACH COUNTER
+                }
+                self.push_io_handle_call(&h, "write_fmt");
+            }
             if self.resolve_recv_type(writer).is_none() {
                 for tr in self.resolve_recv_traits(writer) {
                     if self.local_traits.contains_key(&tr) {
@@ -9150,6 +9273,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         self.note_container_release(node); // SOUNDNESS R1118
         let leaf = node.method.to_string();
+        // SOUNDNESS R1295 — a driven iterator over a std I/O source (`ReadDir`, `lines()` on a handle), and an I/O member on
+        // a buffering-wrapper PARAMETER (`r.read_line(..)` with `r: &mut BufReader<File>`), which the typer answers as
+        // the wrapper and so formed no call (`charge_io_iter_source`, `io_wrapped`).
+        if crate::lang::iterator_drives(&leaf) {
+            self.charge_io_iter_source(&node.receiver);
+        }
+        if !matches!(leaf.as_str(), "lines" | "bytes" | "split")
+            && ["Write", "Read", "BufRead", "Seek"].iter().any(|t| crate::lang::is_driving_io_member(t, &leaf))
+        {
+            if let Some(h) = self.type_of(&node.receiver).and_then(|t| self.io_wrapped_of(&node.receiver, &t)) {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1295WRAP\t{h}::{leaf}"); // §E1 REACH COUNTER
+                }
+                self.push_io_handle_call(&h, &leaf);
+            }
+        }
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
             self.dispatch_sites.len(), self.foreign_dispatch_sites.len());
@@ -10588,6 +10727,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // A `for _ in <concrete-local-iter>` IMPLICITLY drives the iterator's `next()` to completion —
         // charge the local `Type::next` so its effect isn't silently dropped (see `iter_next_target`).
         self.charge_iter_next(&node.expr);
+        self.charge_io_iter_source(&node.expr); // SOUNDNESS R1295 — `for e in rd` over a `ReadDir`, `for l in r.lines()`
         if let Some(name) = single_pat_ident(&node.pat) {
             // SOUNDNESS R1023 — the loop variable is what ONE `for` peels off the iterated value: a plain
             // entry is the element (the one-level route, unchanged); a LAYERED one pops its top layer when
@@ -12587,6 +12727,24 @@ fn std_conventionally_pure(tr: &str, leaf: &str) -> bool {
         "ToString" => leaf == "to_string",
         _ => false,
     }
+}
+
+/// SOUNDNESS R1286/R1295 — the std I/O HANDLE a value of strict type `ty` reads or writes through: the type itself when
+/// it is one of the byte-stream handles `route_handle_args` routes (`File`, `TcpStream`, `UnixStream`), or the handle
+/// inside std's buffering wrappers (`BufWriter<File>`, `BufReader<TcpStream>`, `LineWriter<File>`), whose I/O members
+/// run the inner handle's. FULL paths only: a crate-local `File` is never a handle. `None` for everything else —
+/// `Vec<u8>`, `Cursor`, `Sink`, `Stdout`, a dependency's writer — which keeps its pre-existing answer.
+pub(crate) fn std_io_handle(ty: &str) -> Option<String> {
+    let ty = ty.trim().trim_start_matches('&').trim_start_matches("mut ").trim();
+    let head = ty.split('<').next().unwrap_or(ty).trim();
+    if matches!(head, "std::fs::File" | "std::net::TcpStream" | "std::os::unix::net::UnixStream") {
+        return (!ty.contains('<')).then(|| head.to_string());
+    }
+    if matches!(head, "std::io::BufWriter" | "std::io::BufReader" | "std::io::LineWriter") {
+        let inner = ty.strip_prefix(head)?.trim().strip_prefix('<')?.strip_suffix('>')?;
+        return std_io_handle(inner);
+    }
+    None
 }
 
 /// SOUNDNESS R1279/R1281 — the ENUM segment a struct-variant pattern names (`Inner` in `Inner::Body { body }`).

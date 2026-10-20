@@ -7955,8 +7955,20 @@ pub(crate) fn generic_operator_uses(
         .collect();
     let is_gen = |t: &syn::Type| -> bool {
         match peel_ty_refs(t) {
-            syn::Type::Path(tp) => tp.qself.is_none() && tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string())),
+            syn::Type::Path(tp) => {
+                (tp.qself.is_none() && tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string())))
+                    // SOUNDNESS R1294 — a `Box<dyn Trait>` parameter is erased exactly as `&mut dyn Trait` is.
+                    || tp.path.segments.len() == 1
+                        && tp.path.segments[0].ident == "Box"
+                        && matches!(&tp.path.segments[0].arguments, syn::PathArguments::AngleBracketed(a)
+                            if matches!(a.args.first(), Some(syn::GenericArgument::Type(syn::Type::TraitObject(_)))))
+            }
             syn::Type::ImplTrait(_) => true,
+            // SOUNDNESS R1294 — a TRAIT OBJECT parameter (`&mut dyn Write`) is the caller's coercion of its argument, so
+            // the member the body runs on it lands in the argument's own impl exactly as through `impl Write`: the
+            // R1145/R1167 posture applies unchanged. (`inst_local_dyn(m: &mut Mine) { w_dyn(m) }` read ABSENT while the
+            // same implementor through `impl Write` was charged; EXECUTED vein-r1286 fx2.)
+            syn::Type::TraitObject(_) => true,
             _ => false,
         }
     };
@@ -8157,6 +8169,25 @@ pub(crate) fn generic_operator_uses(
             }
             syn::visit::visit_expr_for_loop(self, f);
         }
+        // SOUNDNESS R1286 — `write!(w, ..)` / `writeln!(w, ..)` is `w.write_fmt(..)`, which runs the writer's own `write`
+        // (an `io::Write`) or `write_str` (a `fmt::Write`). syn leaves a macro's tokens unparsed, so the method-call arm
+        // above never saw it (`w_macro<S: Write>(s) { writeln!(s, ..) }` had no summary).
+        fn visit_macro(&mut self, mac: &'x syn::Macro) {
+            let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            if matches!(name.as_str(), "write" | "writeln") {
+                if let Ok(args) = mac.parse_body_with(
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                ) {
+                    if let Some(n) = args.first().and_then(operand) {
+                        if self.plain(&n) {
+                            self.hit(&n, "Write", "write");
+                            self.hit(&n, "Write", "write_str");
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_macro(self, mac);
+        }
         fn visit_expr_await(&mut self, a: &'x syn::ExprAwait) {
             if let Some(n) = operand(&a.base) {
                 if self.plain(&n) {
@@ -8214,6 +8245,14 @@ pub(crate) fn generic_method_requirements(method: &str, argc: usize, elem: bool)
         ("flush", 0) => vec![("Write", "flush")],
         ("write_str", 1) => vec![("Write", "write_str")],
         ("read", 1) => vec![("Read", "read")],
+        // SOUNDNESS R1286 — the `BufRead`/`Seek` members, and the remaining `Read`/`Write` ones, that run the value's own
+        // impl. `lines`/`split` are `BufRead` iterators whose `next` is the value's `read_until`; `bytes` the value's `read`.
+        ("read_line" | "read_until" | "skip_until", _) | ("fill_buf" | "has_data_left", 0) | ("lines", 0) | ("split", 1) => {
+            vec![("BufRead", "fill_buf")]
+        }
+        ("seek", 1) | ("rewind" | "stream_position" | "stream_len", 0) | ("seek_relative", 1) => vec![("Seek", "seek")],
+        ("bytes", 0) | ("read_vectored", 1) => vec![("Read", "read")],
+        ("write_vectored", 1) => vec![("Write", "write")],
         ("as_ref", 0) => vec![("AsRef", "as_ref")],
         ("borrow", 0) => vec![("Borrow", "borrow")],
         ("deref", 0) => vec![("Deref", "deref")],
@@ -12561,6 +12600,31 @@ pub(crate) fn is_driving_io_member(tr: &str, leaf: &str) -> bool {
         "Seek" => matches!(leaf, "seek" | "rewind" | "stream_position" | "stream_len" | "seek_relative"),
         _ => false,
     }
+}
+
+/// SOUNDNESS R1295 — the std I/O handle inside a written std buffering wrapper type (`&mut BufReader<File>` ->
+/// `std::fs::File`): the wrapper must expand to `std::io::{BufReader, BufWriter, LineWriter}` and its first type
+/// argument to one of the byte-stream handles (`collector::std_io_handle`). `None` otherwise.
+pub(crate) fn wrapped_io_handle(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
+    let t = peel_ty_refs(ty);
+    let syn::Type::Path(tp) = t else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let seg = tp.path.segments.last()?;
+    if !matches!(seg.ident.to_string().as_str(), "BufReader" | "BufWriter" | "LineWriter") {
+        return None;
+    }
+    let head = type_path(t, uses)?;
+    if !matches!(head.as_str(), "std::io::BufReader" | "std::io::BufWriter" | "std::io::LineWriter") {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return None };
+    let inner = a.args.iter().find_map(|g| match g {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })?;
+    crate::collector::std_io_handle(&type_path(inner, uses)?)
 }
 
 /// SOUNDNESS R1286 — COULD `full` (a receiver bound's expanded spelling, `tr` its leaf) be std's I/O trait? `std::io::…`
