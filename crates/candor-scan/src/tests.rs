@@ -7948,6 +7948,17 @@ impl<B: Src> HI<B> { pub fn nb_enum(&mut self) -> usize { match &mut self.i { In
                    "R1281 second fixture: the POSITION that does hold `B` still dispatches:\n{v:#}");
         assert_eq!(fixture_effects(&v, "ret_base"), vec!["Unknown".to_string()],
                    "R1281: an untyped `let` shows no instantiation — hedged, not charged:\n{v:#}");
+        // A CALLABLE payload keeps its `callback:` class (hyper's `Lazy::poll`): the hedge must not displace it.
+        let lz = "\
+pub enum Lz<F> { Init { func: F }, Empty }\n\
+pub struct Lazy<F> { pub inner: Lz<F> }\n\
+impl<F: FnOnce() -> usize> Lazy<F> {\n\
+    pub fn poll(&mut self) -> usize { match std::mem::replace(&mut self.inner, Lz::Empty) { Lz::Init { func } => func(), Lz::Empty => 0 } }\n\
+}\n";
+        let v = scan_fixture("r1281lz", lz);
+        let why: Vec<String> = fn_entry(&v, "Lazy::poll")["unknownWhy"].as_array().into_iter().flatten()
+            .filter_map(|w| w.as_str().map(String::from)).collect();
+        assert!(why.iter().any(|w| w.starts_with("callback:")), "R1281: a callable payload keeps `callback:`:\n{v:#}");
     }
 
     /// SOUNDNESS R1279 — rkyv's `ArchivedResult::deserialize`: the impl's self type is `AR<T::Archived, E::Archived>`, so

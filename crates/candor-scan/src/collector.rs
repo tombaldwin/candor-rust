@@ -6568,6 +6568,19 @@ impl<'a> CallCollector<'a> {
             }
         }
         if self.is_scoped_generic_name(t) {
+            // A CALLABLE bound (`F: FnOnce() -> R`) is the exception: what the scope's bound does with it is the
+            // `callback:` disclosure (`leaves_are_callable` -> `fn_typed_vars`), never an edge, so reading the name as
+            // the scope's parameter can only hedge — and the generic-payload hedge would DROP the `indirect` class a
+            // `func()` call carries (hyper's `Lazy::poll`, `InnerProjReplace::Init { func } => func()`).
+            let mut b: Vec<String> = Vec::new();
+            for l in self.generic_bounds.get(t).into_iter().chain(self.impl_generic_bounds.get(t)).flatten() {
+                if !b.contains(l) {
+                    b.push(l.clone());
+                }
+            }
+            if Self::leaves_are_callable(&b) {
+                return PayloadTy::Dispatch(b);
+            }
             PayloadTy::Hedge
         } else {
             PayloadTy::Old
