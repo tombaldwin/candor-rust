@@ -1669,6 +1669,54 @@ fn a_baseline_regression_beside_an_unparseable_file_still_reaches_the_verdict() 
     assert!(err.contains("baseline guard NOT evaluated"), "and say so: {err}");
 }
 
+/// SOUNDNESS R1231 — THE SAME PRECEDENCE, ON THE ⟨0.32⟩ UNREAD-CLASS ARM. The parse-failure and
+/// out-of-scope arms of the policy gate ask "does the RUN hold a certain violation?"; the unread-class arm
+/// (and the sole-withholding arm beside it) asked only whether the POLICY's own list was empty, so a
+/// baseline regression recorded earlier in the same run was downgraded to "could not certify".
+///
+/// MEASURED before the fix: a fn gaining `Fs` against a frozen baseline + an unparseable `build.rs` (its
+/// class goes unread inside the peek) + a CLEAN `deny Net` → exit 2 while the verdict carried
+/// `violations:[AS-EFF-005]`. Remove the `build.rs` and the same tree exits 1. The control (c) pins that
+/// the unread class still refuses when nothing dominates — the fix must not trade a downgrade for a green.
+#[test]
+fn r1231_a_baseline_regression_dominates_an_unread_class_under_a_clean_policy() {
+    let d = make_crate("r1231unread", "pub fn a() -> u32 { 1 }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    let base = format!("{}.r1231unread.scan.json", pre.to_string_lossy());
+    let pol = d.join("policy");
+    std::fs::write(&pol, "deny Net\n").unwrap();
+    let pol_s = pol.to_string_lossy().to_string();
+    std::fs::write(d.join("src/lib.rs"), "pub fn a() -> u32 { let _ = std::fs::read(\"/x\"); 1 }").unwrap();
+
+    // (a) THE CONTROL: the regression with every class read is exit 1, or (b) measures nothing.
+    let v1 = d.join("v1.json");
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base),
+        &["--policy", &pol_s, "--gate-json", v1.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(1), "the control must fire: {err}");
+
+    // (b) THE ROW: the same regression, plus a build script the peek cannot read.
+    std::fs::write(d.join("build.rs"), "fn main( { not rust\n").unwrap();
+    let v2 = d.join("v2.json");
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base),
+        &["--policy", &pol_s, "--gate-json", v2.to_string_lossy().as_ref()]);
+    assert!(err.contains("did not READ build-script"), "the fixture must reach the unread-class arm: {err}");
+    assert_eq!(rc, Some(1),
+        "a certain baseline regression must dominate an unread class (§3.3(c)) — exit 2 here is \
+         'I could not certify' over 'your code regressed': {err}");
+    let j2: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v2).unwrap()).unwrap();
+    assert!(j2["violations"].as_array().unwrap().iter().any(|gv| gv["rule"] == "AS-EFF-005"), "{j2}");
+    assert_eq!(j2["incomplete"], serde_json::json!(true), "…and the incompleteness is still carried: {j2}");
+    assert!(!err.contains("policy ✓"), "no green tick over a policy that was not certified: {err}");
+
+    // (c) THE OTHER DIRECTION: no regression, same unread class — the refusal MUST survive.
+    std::fs::write(d.join("src/lib.rs"), "pub fn a() -> u32 { 1 }").unwrap();
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base), &["--policy", &pol_s]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "with nothing to dominate, an unread class still refuses: {err}");
+}
+
 #[test]
 fn baseline_guard_clean_compare_exits_0_and_a_new_effectful_fn_fires() {
     // No gains → exit 0 with the guard-✓ receipt. ⟨0.40⟩ (SOUNDNESS R932): a NEW effectful fn (absent

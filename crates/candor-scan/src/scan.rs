@@ -7770,8 +7770,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // producer reading the policy, so §3.1 binds it exactly as it binds the gate: over a policy
             // no route will honour, `outOfScope: []` claims a look taken against rules that never stood —
             // and the denied set it would have looked for is the parser's SALVAGE of an unhonourable
-            // file, which is the rewriting `fatal_messages` exists to refuse. candor-java already
-            // withheld here; this engine, candor-ts and candor-swift did not.
+            // file, which is the rewriting `fatal_messages` exists to refuse. When this rung landed only
+            // candor-java withheld here; all four engines do now (this `return None` is rust's half).
             if !parsed.fatal_messages().is_empty() {
                 return None;
             }
@@ -8725,9 +8725,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // the exit code. The note three lines above describes this exact conflation, and the sibling arm
         // twenty lines below was given the conjuncts while this one was not — the sibling-route habit,
         // inside the fix for it.
-        if had_parse_failure && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation(run) {
+        //
+        // SOUNDNESS R1231 — AND THE FOUR INCOMPLETENESS ARMS BELOW NOW SHARE ONE PREDICATE AND ONE SHAPE.
+        // The parse-failure and scope arms had the three conjuncts; the sole-withholding and unread-class
+        // arms further down tested `v.is_empty()` ALONE — the identical conflation this note records,
+        // surviving in the two arms the ⟨0.30⟩ fix did not reach. MEASURED: a function gaining `Fs`
+        // against a frozen baseline, plus an unparseable `build.rs` (an unread `build-script` class), plus
+        // a clean `deny Net` → exit 2 while the verdict carried `violations:[AS-EFF-005]`; drop the
+        // `build.rs` and the same tree exits 1. So the question is asked ONCE, here, as `held`, and every
+        // arm answers it the same way: print why the POLICY could not be certified, then exit 1 when the
+        // run already holds a certain violation (§3.3(c)) and 2 when it does not. The two arms that used
+        // to SKIP on `held` fell through to `policy ✓`, a green tick over a gate that did not certify —
+        // which the withheld arm's own comment forbids — so all four RETURN now rather than skip.
+        // `guard_code == 1` implies `holds_violation` (the baseline arm records before it sets the code);
+        // both are kept because that is this function's stated idiom at every refusal arm above.
+        // A plain value, not a closure: a closure is a new unit in this engine's own self-guard baseline.
+        let held = guard_code == 1 || crate::gate::holds_violation(run);
+        let incomplete_code = if held { 1 } else { 2 };
+        if had_parse_failure && v.is_empty() {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
-            return (2, json_body);
+            return (incomplete_code, json_body);
         }
         // ⟨0.30⟩ THE SCOPE HALF OF THE SAME POSTURE. `had_parse_failure` above is "I opened this file and
         // could not read it"; this is "I never opened it, and when the peek looked afterwards it performed
@@ -8745,18 +8762,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // The ⟨0.24⟩ note in `write_gate_json` records this exact conflation one cause over; it was read
         // while writing this line and the wrong predicate was used anyway.
         let oos_findings = out_of_scope.as_deref().unwrap_or(&[]);
-        if !oos_findings.is_empty() && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation(run) {
+        if !oos_findings.is_empty() && v.is_empty() {
             eprintln!(
                 "candor-scan: policy NOT enforced — {} function(s) OUTSIDE this scan's scope perform an \
                  effect this policy denies (named above); the gate did not judge them, so the verdict is \
                  incomplete rather than a pass",
                 oos_findings.len()
             );
-            return (2, json_body);
+            return (incomplete_code, json_body);
         }
         // ⟨0.24⟩ A SOLE WITHHOLDING is a refusal (SPEC §3.1). Ordered AFTER the violation exit so the
-        // precedence holds — a rule that fired on carried evidence dominates, and `v.is_empty()` is the
-        // whole of the condition. Never `policy ✓`: the operator asked for a rule that did not run.
+        // precedence holds — a rule that fired on carried evidence dominates. Never `policy ✓`: the
+        // operator asked for a rule that did not run. (R1231: `v.is_empty()` was NOT the whole of the
+        // condition — `v` is the policy gate's own list, and a baseline regression dominates too; see
+        // `held` above.)
         if !outcome.withheld.is_empty() && v.is_empty() {
             let why = format!(
                 "policy NOT enforced — {} (rule, function) pair(s) could not be evaluated (see above); a \
@@ -8765,7 +8784,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             );
             eprintln!("candor-scan: {why}");
             crate::gate::record_gate_refusal(why);
-            return (2, json_body);
+            return (incomplete_code, json_body);
         }
         // ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ. ⟨0.30⟩'s arm keys on what the peek
         // FOUND, and a peek that could not open a file finds nothing, which is byte-identical to
@@ -8789,7 +8808,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     unread.join(", ")
                 );
                 eprintln!("candor-scan: {why}");
-                return (2, json_body);
+                return (incomplete_code, json_body);
             }
         }
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS

@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a baseline regression now dominates a withheld rule or an unread class (SOUNDNESS R1231).** Two of
+  the four incompleteness arms of the policy gate asked only whether the POLICY's own violation list was empty, so a
+  certain AS-EFF-005 regression recorded earlier in the run was downgraded to "could not certify". Measured: a fn
+  gaining `Fs` against a frozen baseline, an unparseable `build.rs` (the `build-script` class goes unread) and a clean
+  `deny Net` exited **2** while the `--gate-json` verdict carried `violations:[AS-EFF-005]`; it now exits **1**, still
+  with `incomplete: true`. The same tree with nothing regressed still exits 2. All four arms now share one predicate
+  and RETURN, so none of them prints `policy ✓` over a policy it did not certify. Moves exit 2→1 only.
+
 ## [0.40.13] — 2026-10-19
 
 - ⚠ **candor-scan: a chained dependency's signature is read only where the consumer's path is known to reach it
