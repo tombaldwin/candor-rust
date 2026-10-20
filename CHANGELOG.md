@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a trait-method call on a receiver typed only by a container's generic parameter NAME dispatches
+  over that parameter's bound (SOUNDNESS R1267, and the dropped arm of R1266).** `w.body.pull()` over `struct Wrap<B>
+  { body: B }`, `match inner { Inner::Body(body) => body.pull() }`, the `if let` / struct-variant / let-else forms, and
+  a pin-project projection arm (`BodyProj::Body { body } => body.poll_frame(cx)`) formed a typed path `B::pull` that
+  named nothing, so the caller read pure while the same call on a parameter `b: &mut B` dispatched. The name is read
+  as the scope's (fn or impl) bounded parameter of that name, unless the container's WRITTEN type arguments refute it
+  (`w: &mut Wrap<Zero>`). Executed: ten shapes that each read a file, two charged before, ten now (`deny Fs` 0→**1**
+  on each of the eight); the refuted controls stay pure. tower-http 0.6.1/0.6.5/0.6.6/0.6.8/0.6.11
+  `limit::body::ResponseBody::poll_frame` reads `Unknown` (`dispatch:Body.poll_frame`, a true reason) where v0.40.13
+  read `Unknown` only through a `macro:` hedge whose premise was false and the R1245 build read `[]`; futures-util's
+  `Either` members (absent before) now disclose `dispatch:`. Additive: no effect or `Unknown` is removed by this
+  change on the crates measured. Cache schema rev122.
 - ⚠ **candor-scan: a bare free-function call is no longer contested by a same-name ASSOCIATED fn (SOUNDNESS R1265).**
   `main(1)` in a module whose `impl` has a `main` method (or an associated fn, or a trait default of that name) was
   refused as a two-way leaf and traded for `Unknown` + `ambiguous:same-name local defs` — but a bare path cannot

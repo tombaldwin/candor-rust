@@ -3186,7 +3186,7 @@ pub(crate) fn fninfo(
         escaping_ctors: escapes.leaves,
         marked_ctors: std::collections::HashSet::new(),
         marked_cross_ctors: std::collections::HashSet::new(),
-        in_pattern: false, untyped_methods: Default::default(),
+        in_pattern: false, scrut_args: None, untyped_methods: Default::default(),
         block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
     };
     // SOUNDNESS R1196 — a `Result` PARAMETER's error type (`CallCollector::err_of`), named by the signature; a generic
