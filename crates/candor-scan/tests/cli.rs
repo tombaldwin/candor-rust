@@ -1669,6 +1669,46 @@ fn a_baseline_regression_beside_an_unparseable_file_still_reaches_the_verdict() 
     assert!(err.contains("baseline guard NOT evaluated"), "and say so: {err}");
 }
 
+/// THE MIRROR ORDERING — a CLEAN baseline guard over unparsed code must not pre-empt the POLICY gate.
+/// The guard's incomplete-analysis refusal used to `return 2` before the policy ran, so a certain policy
+/// violation was never computed: `deny Net` + one unparseable file was exit 1 with `[AS-EFF-006]`, and
+/// adding a baseline under which nothing regressed made it exit 2 with `violations: []`. (c) pins that the
+/// guard still refuses when there is no policy and nothing dominates.
+#[test]
+fn a_clean_baseline_over_an_unparseable_file_does_not_delete_a_policy_violation() {
+    let net = "pub fn n() { let _ = std::net::TcpStream::connect(\"10.0.0.1:80\"); }";
+    let d = make_crate("blpolpf", net);
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    let base = format!("{}.blpolpf.scan.json", pre.to_string_lossy());
+    let pol = d.join("policy");
+    std::fs::write(&pol, "deny Net\n").unwrap();
+    let pol_s = pol.to_string_lossy().to_string();
+    std::fs::write(d.join("src/lib.rs"), format!("pub mod broken;\n{net}")).unwrap();
+    std::fs::write(d.join("src/broken.rs"), "pub fn broken( {{{ not rust\n").unwrap();
+
+    // (a) THE CONTROL: no baseline — the policy fires over the incomplete scan (§3.3.1).
+    let v1 = d.join("v1.json");
+    let (rc, _, err) = scan_with_baseline(&d, None, &["--policy", &pol_s, "--gate-json", v1.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(1), "the control must fire: {err}");
+
+    // (b) THE ROW: the same tree and policy, plus a baseline nothing regressed against.
+    let v2 = d.join("v2.json");
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base),
+        &["--policy", &pol_s, "--gate-json", v2.to_string_lossy().as_ref()]);
+    assert!(err.contains("baseline guard NOT evaluated"), "the fixture must reach the guard's refusal: {err}");
+    assert_eq!(rc, Some(1), "configuring a clean guard must not delete the policy's finding: {err}");
+    let j2: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v2).unwrap()).unwrap();
+    assert!(j2["violations"].as_array().unwrap().iter().any(|gv| gv["rule"] == "AS-EFF-006"), "{j2}");
+    assert_eq!(j2["incomplete"], serde_json::json!(true), "{j2}");
+
+    // (c) THE OTHER DIRECTION: no policy — the guard alone still refuses over unparsed code.
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "with nothing to dominate, the guard still refuses: {err}");
+}
+
 /// SOUNDNESS R1231 — THE SAME PRECEDENCE, ON THE ⟨0.32⟩ UNREAD-CLASS ARM. The parse-failure and
 /// out-of-scope arms of the policy gate ask "does the RUN hold a certain violation?"; the unread-class arm
 /// (and the sole-withholding arm beside it) asked only whether the POLICY's own list was empty, so a

@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a clean baseline guard over unparsed code no longer deletes a policy violation (SOUNDNESS
+  R1236).** The guard's incomplete-analysis refusal returned exit 2 before the policy gate ran, so a certain policy
+  violation was never computed. Measured: `deny Net` over a fn connecting to a host plus one unparseable file exits 1
+  with `[AS-EFF-006]`; adding a baseline nothing regressed against made it exit **2** with `violations: []`. It now
+  exits **1** with the violation and `incomplete: true`. With no policy the guard still refuses (exit 2). Moves exit
+  2→1 only.
 - ⚠ **candor-scan: a baseline regression now dominates a withheld rule or an unread class (SOUNDNESS R1231).** Two of
   the four incompleteness arms of the policy gate asked only whether the POLICY's own violation list was empty, so a
   certain AS-EFF-005 regression recorded earlier in the run was downgraded to "could not certify". Measured: a fn

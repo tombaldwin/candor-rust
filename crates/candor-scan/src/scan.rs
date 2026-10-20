@@ -8269,6 +8269,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // model; see check_baseline for the full contract. Runs BEFORE the policy gate so both record
     // toward the one --gate-json verdict; the exit code is the max of the two (2 short-circuits).
     let mut guard_code = 0;
+    // A configured guard that could not compare (a parse failure, nothing gained) — the run must end 2 if
+    // nothing else dominates. Carried, not returned: see the arm that sets it.
+    let mut baseline_incomplete = false;
     if let Some(bv) = &baseline_value {
         // NOTE: the incomplete-analysis refusal is INSIDE the `Checked` arm below, not here. It used to
         // sit at this point — before `check_baseline` ran at all — and that ordering dropped real
@@ -8319,14 +8322,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // regression found here is real, while a clean compare is exactly the false-pure the
                 // refusal still exists to prevent. The asymmetry is the argument; without it this would
                 // be trading a dropped finding for a fabricated one.
+                //
+                // AND THE REFUSAL DOES NOT RETURN — IT IS CARRIED TO THE END OF THE FUNCTION. It used to
+                // `return (2, …)` here, which is the mirror of the defect described above: the guard is
+                // the EARLIER producer, so returning from it meant the POLICY gate below never ran, and a
+                // certain policy violation was never computed, never recorded, never in the document.
+                // MEASURED: `deny Net` over a fn connecting to a host, plus one unparseable file →
+                // exit 1, `violations:[AS-EFF-006]`; add a CLEAN baseline (no function gained anything)
+                // → exit 2, `violations: []`. Configuring a second gate deleted the first gate's finding.
+                // The policy arm already refuses on `had_parse_failure` with the right precedence, so
+                // a policy run needs nothing more; a policy-FREE run reads `baseline_incomplete` at the
+                // tail.
                 if had_parse_failure && v.is_empty() {
                     let why = "baseline guard NOT evaluated — source failed to parse (see above); the \
                                guard cannot compare unanalyzed code";
                     eprintln!("candor-scan: {why}");
                     crate::gate::record_gate_refusal(why);
-                    return (2, json_body);
-                }
-                if v.is_empty() {
+                    baseline_incomplete = true;
+                } else if v.is_empty() {
                     eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (syntactic floor: resolution-heavy code can under-report silently; see `candor blindspots`)");
                 } else {
                     eprintln!("candor-scan: {} baseline regression(s) — a function gained an effect versus the baseline, or is absent from it and performs one (AS-EFF-005)", v.len());
@@ -8866,6 +8879,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     }
     // No-gate runs record nothing; scan_main's final write_gate_json emits { ok: true, [] } for them.
     // A clean policy still exits 1 when the baseline guard fired above (the codes join by max).
+    // A guard that could not compare over unparsed code refuses here — reached only with no policy, or
+    // with one whose own parse-failure arm already returned; `guard_code` is 0 whenever it is set.
+    if baseline_incomplete && !crate::gate::holds_violation(run) {
+        return (2, json_body);
+    }
     (guard_code, json_body)
 }
 
