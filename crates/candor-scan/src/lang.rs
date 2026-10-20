@@ -67,6 +67,45 @@ pub(crate) fn is_dependency_crate_root(root: &str) -> bool {
 /// SOUNDNESS R562 — `collect_dyn_trait_leaves` as a VALUE, for the two positions whose erasure fact is
 /// keyed per-DECLARATION rather than per-body (a struct field, a fn return). Deterministic order, so a
 /// cached index and a fresh one hash the same.
+/// SOUNDNESS R1321 — every trait-object / `impl` bound a field type WRITES with a qualified path (`fmt::Write`,
+/// `std::io::Write`), as (leaf, written path). Bare leaves are not returned (the `use` map owns those).
+pub(crate) fn written_bound_paths(ty: &syn::Type) -> Vec<(String, String)> {
+    fn bounds(b: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>, out: &mut Vec<(String, String)>) {
+        for x in b {
+            if let syn::TypeParamBound::Trait(t) = x {
+                if t.path.segments.len() >= 2 {
+                    let p: Vec<String> = t.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    out.push((p[p.len() - 1].clone(), p.join("::")));
+                }
+            }
+        }
+    }
+    fn walk(ty: &syn::Type, out: &mut Vec<(String, String)>) {
+        match ty {
+            syn::Type::TraitObject(t) => bounds(&t.bounds, out),
+            syn::Type::ImplTrait(t) => bounds(&t.bounds, out),
+            syn::Type::Reference(r) => walk(&r.elem, out),
+            syn::Type::Paren(p) => walk(&p.elem, out),
+            syn::Type::Group(g) => walk(&g.elem, out),
+            syn::Type::Path(p) => {
+                for seg in &p.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for a in &args.args {
+                            if let syn::GenericArgument::Type(t) = a {
+                                walk(t, out);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(ty, &mut out);
+    out
+}
+
 pub(crate) fn dyn_trait_leaves_of(ty: &syn::Type) -> Vec<String> {
     let mut set = std::collections::HashSet::new();
     collect_dyn_trait_leaves(ty, &mut set);

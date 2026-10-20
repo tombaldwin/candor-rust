@@ -1570,6 +1570,17 @@ impl<'a> CallCollector<'a> {
         if !matches!(tr, "Write" | "Read" | "BufRead" | "Seek") {
             return false;
         }
+        // SOUNDNESS R1321 — a trait-object FIELD's own written bound decides first: rustc-serialize's `writer: &'a mut
+        // (fmt::Write + 'a)` in a file globbing `std::io::prelude::*` expanded the bare leaf to `io::Write`, and 22
+        // `json::Encoder::emit_*` rows were hedged `dispatch:Write.write_fmt` over a `fmt::Write` (false reason).
+        if let syn::Expr::Field(f) = peel_value(receiver) {
+            if let (Some(base), syn::Member::Named(field)) = (self.resolve_recv_type(&f.base), &f.member) {
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                if let Some(q) = self.returns.get(&crate::model::field_trait_qual_key(base_leaf, &field.to_string(), tr)) {
+                    return q.starts_with("std::io::") || q.starts_with("core::io::");
+                }
+            }
+        }
         // The SIGNATURE's own spelling of the bound (`recv_trait_full`'s first two sources) decides when it exists…
         let recv_param = match peel_value(receiver) {
             syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
@@ -10021,8 +10032,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // that supplies a std handle is RESOLVED separately (`charge_generic_operators_at`).
                     let tr_leaf = tr.rsplit("::").next().unwrap_or(&tr);
                     let io_hedge = self.is_io_bound(&node.receiver, &full, tr_leaf) && crate::lang::is_driving_io_member(tr_leaf, &leaf);
+                    // SOUNDNESS R1321 — the ABI arm reads a DIRECT receiver only (or one through a self-returning
+                    // `by_ref`/`as_mut`). `reader.read_exact(buf).is_err()` reaches here with `tr = Read` because the
+                    // receiver walk passes through the chain link, and the outer call is really `Result::is_err` on the
+                    // inner call's RETURN — zstd-safe's `advanced_read` carried `dispatch:Read.is_err` beside the true
+                    // `dispatch:Read.read_exact`, which the inner call (a direct receiver) still records. R551's
+                    // chain-drift gate, for the same reason.
+                    let abi_recv_ok = match peel_recv(&node.receiver) {
+                        syn::Expr::MethodCall(mc) => matches!(mc.method.to_string().as_str(), "by_ref" | "as_mut"),
+                        _ => true,
+                    };
                     if io_hedge
                         || (self.foreign_abi_generic
+                            && abi_recv_ok
                             && (matches!(root, "std" | "core" | "alloc") || !full.contains("::"))
                             && !std_conventionally_pure(&tr, &leaf))
                     {

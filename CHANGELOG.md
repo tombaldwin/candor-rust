@@ -144,6 +144,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   read nothing: chained `deny Fs c_ext_ufcs` 0 → **1**. indexmap 2.x `Q::equivalent(..)`, num-rational / icu / rmp
   `T::from_*`/`T::try_from_u32` now carry the key; the path spellings also feed the existing foreign-dispatch hedges
   exactly as the receiver spelling does. Cache schema rev129.
+- ⚠ **candor-scan: two false `dispatch:` reasons are gone (SOUNDNESS R1321).** A trait-object FIELD's written bound now
+  decides whether it is `io::Write`: rustc-serialize 0.3.25's `writer: &'a mut (fmt::Write + 'a)` in a file globbing
+  `std::io::prelude::*` hedged 22 `json::Encoder::emit_*` rows `dispatch:Write.write_fmt`; `deny Unknown
+  json::Encoder::emit_bool` 1 → **0** (0 in v0.40.13). R1280's foreign-ABI arm reads a direct receiver only, so
+  zstd-safe's `reader.read_exact(buf).is_err()` no longer adds `dispatch:Read.is_err` beside the true
+  `dispatch:Read.read_exact`. Cache schema rev130.
 
 ## [0.40.13] — 2026-10-19
 

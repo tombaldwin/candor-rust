@@ -8255,6 +8255,29 @@ pub fn g_std<T: Default>() -> T { T::default() }\n";
             "R1319 a std bound mints nothing:\n{v:#}");
     }
 
+    /// SOUNDNESS R1321 (rustagent-d) — false reasons. rustc-serialize's `writer: &'a mut (fmt::Write + 'a)` field, in a file
+    /// that globs `std::io::prelude::*`, was hedged `dispatch:Write.write_fmt` by e6129ca (a `fmt::Write`, which the hedge
+    /// excludes by construction), and zstd-safe's `reader.read_exact(buf).is_err()` in a generic `extern "C"` callback
+    /// carried `dispatch:Read.is_err` beside its true `dispatch:Read.read_exact` (R1280's ABI arm read the chain link).
+    #[test]
+    fn r1321_a_fmt_write_field_and_a_result_method_carry_no_io_dispatch_reason() {
+        let src = "\
+use std::fmt;\n\
+use std::io::prelude::*;\n\
+pub struct Enc<'a> { writer: &'a mut (fmt::Write + 'a) }\n\
+impl<'a> Enc<'a> { pub fn emit(&mut self) -> fmt::Result { write!(self.writer, \"true\") } }\n\
+pub struct IoEnc<'a> { w: &'a mut (dyn std::io::Write + 'a) }\n\
+impl<'a> IoEnc<'a> { pub fn emit(&mut self) -> std::io::Result<()> { write!(self.w, \"t\") } }\n\
+pub unsafe extern \"C\" fn cb<R: std::io::Read>(o: *mut u8, n: usize) -> i32 {\n\
+    let reader: &mut R = &mut *(o as *mut R); let mut b = vec![0u8; n];\n\
+    if reader.read_exact(&mut b).is_err() { return -1; } 0 }\n";
+        let v = scan_fixture("r1321reasons", src);
+        assert!(fixture_effects(&v, "Enc::emit").is_empty(), "R1321 fmt::Write field:\n{v:#}");
+        assert!(fn_entry(&v, "IoEnc::emit")["unknownWhy"].to_string().contains("dispatch:Write.write_fmt"),
+            "R1321 control: an io::Write field keeps its hedge:\n{v:#}");
+        let why = fn_entry(&v, "cb")["unknownWhy"].to_string();
+        assert!(why.contains("dispatch:Read.read_exact") && !why.contains("is_err"), "R1321 ABI chain link:\n{v:#}");
+    }
 
     /// SOUNDNESS R1287/R1289/R1290/R1292 — four silences R1265's correct removals exposed (each was covered in v0.40.13
     /// only by a false `ambiguous:` hedge), one crate each so their indexes cannot help each other. EXECUTED fixtures in
@@ -18098,7 +18121,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18109,7 +18132,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev129/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev130/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

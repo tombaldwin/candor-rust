@@ -4637,6 +4637,14 @@ pub(crate) fn collect_decls(
                                             .or_default()
                                             .insert(name.to_string(), dynl);
                                     }
+                                    // SOUNDNESS R1321 — the bound's WRITTEN qualification, which the leaf list drops.
+                                    for (l, w) in crate::lang::written_bound_paths(&f.ty) {
+                                        file_decl_fact(
+                                            rets,
+                                            crate::model::field_trait_qual_key(&s.ident.to_string(), &name.to_string(), &l),
+                                            crate::lang::expand(&w, uses_ty),
+                                        );
+                                    }
                                     trait_fields
                                         .entry(s.ident.to_string())
                                         .or_default()

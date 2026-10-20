@@ -592,6 +592,13 @@ pub(crate) fn impl_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
 /// SOUNDNESS R979 — a struct field's declared type ARGUMENTS, positionally (`inner: PollState<Box<W>,
 /// u8>` -> `W\u{1}u8`; a lifetime is `'`, an untypable argument `_`), so an accessor whose return is
 /// the impl's type parameter can be typed at the call site. Angle-bracketed: no identifier reaches it.
+/// SOUNDNESS R1321 — the WRITTEN qualification of a trait-object field's bound (`writer: &'a mut (fmt::Write + 'a)` →
+/// `std::fmt::Write`), keyed like `trait_fields` plus the bound's leaf. `trait_fields` keeps the leaf only, so a
+/// `fmt::Write` field in a file that globs `std::io::prelude::*` was read as `io::Write`.
+pub(crate) fn field_trait_qual_key(struct_leaf: &str, field: &str, leaf: &str) -> String {
+    format!("<fieldtq>{struct_leaf}\u{1f}{field}\u{1f}{leaf}")
+}
+
 pub(crate) fn field_args_key(struct_leaf: &str, field: &str) -> String {
     format!("<fieldargs>{struct_leaf}\u{1f}{field}")
 }

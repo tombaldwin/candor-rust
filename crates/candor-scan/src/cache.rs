@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev130 (rustagent-d): SOUNDNESS R1321 — `rets` gains `field_trait_qual_key` (a trait-object field's written bound), and R1280's ABI arm
+    // reads a direct receiver only (cached decls and `unresolved_why` move).
     // rev129 (rustagent-d): SOUNDNESS R1319 — a path call on a dependency trait's member through a generic (`T::m`, `<T as Tr>::m`,
     // `T::assoc()`) records the obligation-1 key and the crate-qualified call (cached `foreign_dispatch`, `calls`).
     // rev128 (rustagent-d): SOUNDNESS R1318 — `self` in a blanket impl over a std-I/O bound, and the UFCS spelling of a driving I/O member
@@ -532,7 +534,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev129/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev130/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
