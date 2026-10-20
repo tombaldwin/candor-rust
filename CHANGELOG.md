@@ -138,6 +138,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   and an in-crate caller supplying a `File` to a UFCS-spelled generic body is charged `Fs`. rmp 0.8.14/0.8.15
   `encode::uint::write_uint`/`write_uint8` and 0.8.15 `decode::read_int` `deny Unknown` 0 → **1** (v0.40.13 had 1, by
   a wrong-reason hedge). Cache schema rev128.
+- ⚠ **candor-scan: a path call on a dependency trait's member through a generic publishes its `dispatchesOn` key
+  (SOUNDNESS R1319).** `T::m(t)`, `<T as dep::Tr>::m(t)` and `T::assoc()` under `T: dep::Tr` minted no ⟨0.39⟩
+  obligation-1 key (the receiver spelling `t.m()` did), so a consumer instantiating `T` with an effectful implementor
+  read nothing: chained `deny Fs c_ext_ufcs` 0 → **1**. indexmap 2.x `Q::equivalent(..)`, num-rational / icu / rmp
+  `T::from_*`/`T::try_from_u32` now carry the key; the path spellings also feed the existing foreign-dispatch hedges
+  exactly as the receiver spelling does. Cache schema rev129.
 
 ## [0.40.13] — 2026-10-19
 

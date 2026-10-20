@@ -8230,6 +8230,30 @@ pub fn c_u_gen(f: &mut File) { u_gen(f) }\n";
         }
     }
 
+    /// SOUNDNESS R1319 (rustagent-d) — a PATH call on a DEPENDENCY trait's member through an unnamed implementor
+    /// (`T::m(t)`, `<T as Ext>::m(t)`, `T::mk()` under `T: extd::Ext`) minted no ⟨0.39⟩ obligation-1 key, while the receiver
+    /// spelling `t.m()` mints `extd#Ext::m`: a consumer instantiating `T` with an effectful implementor read nothing (EXECUTED
+    /// rustagent-d `fx/xd`, chained: `c_ext_ufcs`/`c_ext_qself`/`c_ext_static` each wrote a file, `deny Fs` 0 → 1). The
+    /// same key now, for each spelling; a std bound mints nothing.
+    #[test]
+    fn r1319_a_path_call_on_a_dependency_trait_member_through_a_generic_publishes_the_join_key() {
+        let src = "\
+use extd::{Ext, ExtS};\n\
+pub fn g_ext<T: Ext>(t: &T) -> u8 { t.m() }\n\
+pub fn g_ext_ufcs<T: Ext>(t: &T) -> u8 { T::m(t) }\n\
+pub fn g_ext_qself<T: Ext>(t: &T) -> u8 { <T as Ext>::m(t) }\n\
+pub fn g_ext_qual<T: extd::Ext>(t: &T) -> u8 { <T as extd::Ext>::m(t) }\n\
+pub fn g_ext_static<T: ExtS>() -> u8 { T::mk() }\n\
+pub fn g_std<T: Default>() -> T { T::default() }\n";
+        let v = scan_fixture_raw("r1319path", src, "extd = \"1\"", "");
+        let dis = |f: &str| fn_entry(&v, f)["dispatchesOn"].to_string();
+        for f in ["g_ext", "g_ext_ufcs", "g_ext_qself", "g_ext_qual"] {
+            assert!(dis(f).contains("extd#Ext::m"), "R1319 `{f}` key:\n{v:#}");
+        }
+        assert!(dis("g_ext_static").contains("extd#ExtS::mk"), "R1319 static key:\n{v:#}");
+        assert!(!v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "g_std" && !f["dispatchesOn"].is_null()),
+            "R1319 a std bound mints nothing:\n{v:#}");
+    }
 
 
     /// SOUNDNESS R1287/R1289/R1290/R1292 — four silences R1265's correct removals exposed (each was covered in v0.40.13
@@ -18074,7 +18098,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18085,7 +18109,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev128/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev129/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

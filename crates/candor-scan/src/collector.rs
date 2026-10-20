@@ -7466,6 +7466,51 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1319 — a PATH call naming a member of a DEPENDENCY's trait through an unnamed implementor: `T::m(x)` /
+    /// `T::assoc()` with `T: dep::Tr`, and `<T as dep::Tr>::m(x)`. The receiver spelling `x.m()` on the same `T` forms the
+    /// crate-qualified call (`dep::Tr::m`, answered by the owner's `interfaceUnion` when chained) and records the ⟨0.39⟩
+    /// obligation-1 key (`dep#Tr::m`, `foreign_dispatch`) that lets a consumer join ITS implementor; the path spellings
+    /// went to `route_trait_member_path`, which serves LOCAL traits only, and formed neither — no edge, no key, so a
+    /// consumer instantiating `T` with an effectful implementor read the effect nowhere (EXECUTED rustagent-d `fx/xd`:
+    /// `c_ext_ufcs`, `c_ext_qself`, `c_ext_static` each wrote a file and read ABSENT, chained, while `c_ext` (`t.m()`)
+    /// read `Fs`). Measured on the corpus: indexmap 2.x `Q::equivalent(key, ..)` (`equivalent` crate), icu
+    /// `T::try_from_u32`, rmp `T::from_i16`, serde `T::deserialize(..)`. This mints exactly what the receiver spelling
+    /// mints, through the same qualification (`recv_trait_full`) and the same provenance gate; the emission-side
+    /// manifest filter (scan.rs) still drops a root that is not a real dependency. A std/prelude bound, or one that
+    /// stays a bare leaf, forms nothing, as before.
+    fn route_foreign_generic_member(
+        &mut self,
+        p: &syn::ExprPath,
+        segs: &[String],
+        tr: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) {
+        let written = if p.qself.is_some() && segs.len() >= 2 {
+            crate::lang::expand(&segs[..segs.len() - 1].join("::"), &self.uses)
+        } else {
+            String::new()
+        };
+        let full = if written.contains("::") {
+            written
+        } else {
+            let unit: syn::Expr = syn::parse_quote!(());
+            self.recv_trait_full(args.first().unwrap_or(&unit), tr, leaf)
+        };
+        let root = full.split("::").next().unwrap_or("");
+        if !full.contains("::") || !crate::lang::is_dependency_crate_root(root) {
+            return;
+        }
+        let Some((owner, rest)) = full.split_once("::") else { return };
+        if crate::lang::reach_debug() {
+            eprintln!("R1319PATH\t{owner}#{rest}::{leaf}"); // §E1 REACH COUNTER
+        }
+        self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+            path: format!("{full}::{leaf}"), leaf: leaf.to_string(), str_arg: None,
+            path_lits_partial: false, path_lit2: None, typed: true, method: true, is_macro: false });
+    }
+
     /// SOUNDNESS R1318 (UFCS) — the UFCS spelling of a DRIVING std I/O member on a dispatch-typed first argument:
     /// `std::io::Read::read_exact(self, buf)` in rmp's `impl<T: std::io::Read> RmpRead for T`, or `Write::write_all(w, b)`
     /// with `w: &mut W, W: Write`. The receiver spelling of the same call is hedged (`dispatch:<Trait>.<member>`, R1286 /
@@ -7645,6 +7690,10 @@ impl<'a> CallCollector<'a> {
             }
         }
         for (tr, concrete) in targets {
+            if concrete.is_none() && self.local_traits.get(&tr).is_none() {
+                self.route_foreign_generic_member(p, &segs, &tr, leaf, args);
+                continue;
+            }
             let Some(lt) = self.local_traits.get(&tr) else { continue };
             let is_method = self.trait_declares_method(&tr, leaf, 0);
             let is_assoc = lt.assoc.contains(leaf);
