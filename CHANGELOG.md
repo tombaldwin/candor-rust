@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-classify: a U+FEFF at byte offset 0 of a POLICY file is stripped before line-splitting (SOUNDNESS
+  R1224, SPEC §6.2 ⟨0.40⟩).** A BOM'd policy lost its first rule: a one-rule file refused at exit 2 (zero rules), a
+  multi-rule one ran without it. Every policy reader (candor-query `gate`/`whatif`/`fix`/`parsepolicy`/
+  `gate-verdict`, candor-scan `--policy`, the nightly lint) parses through the one function. Measured both routes:
+  one-rule 2→**1**, two-rule 0→**1** where the first rule fires. A BOM anywhere else stays a token character and
+  its line is still ignored-with-a-warning (unchanged, exit 0 in the measured mid-file case).
 - ⚠ **candor-classify: swift's `dynamicMemberLookup:<Root>.<prop>` reason projects to `reflect`, not `unresolved`
   (SOUNDNESS R1218).** §6.2 projects reasons by PREFIX and this was the one alias arm written as an equality test, so
   the spelling swift actually emits fell to the catch-all. Reached when this engine gates a candor-swift report

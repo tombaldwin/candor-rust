@@ -1095,6 +1095,15 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
     // first was glued into the first rule's tokens and dropped (sweep [16], a gateless-green divergence).
     // Java's Files.readAllLines (the reference) breaks on bare \r too — normalize to match it. Allocation
     // only when a bare \r is actually present (the overwhelmingly-common \n / \r\n files are untouched).
+    // ⟨0.40⟩ SOUNDNESS R1224 (SPEC §6.2, the owner's ruling 2026-10-20) — a U+FEFF at BYTE OFFSET 0 is an ENCODING
+    // MARK, removed before the file is split into lines; it is not a character of the first token. An editor
+    // that writes a UTF-8 byte-order mark (PowerShell 5.1 `Out-File -Encoding utf8`) otherwise costs the policy
+    // its FIRST rule: `\u{feff}deny` is no keyword, so a one-rule file refused (exit 2, zero rules) and a
+    // multi-rule one ran without it. ONE mark, at offset 0 only: a second U+FEFF, or one at the start of a later
+    // line or inside a token, stays an ordinary token character and its line is ignored-with-a-warning as before.
+    // Every policy reader in this repo — candor-query's gate/whatif/fix/parsepolicy/gate-verdict, candor-scan's
+    // `--policy` routes and the nightly lint — parses through this function, so this is the one place.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let normalized;
     let text = if text.contains('\r') {
         normalized = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -1479,6 +1488,20 @@ mod tests {
         assert!(cr.rules.iter().any(|r| r.effects.contains("Exec") && r.scope.as_deref() == Some("b")));
         // mixed \r\n and bare \r normalize identically.
         assert_eq!(parse_policy("deny Net a\r\ndeny Exec b\r").rules.len(), 2);
+        // SOUNDNESS R1224 — a U+FEFF at byte offset 0 is stripped, so the first rule is EVALUATED…
+        let bom = parse_policy("\u{feff}deny Fs core\ndeny Net web\n");
+        assert_eq!(bom.rules.len(), 2, "a byte-0 BOM must not cost the first rule: {:?}", bom.rules);
+        assert!(bom.rules[0].effects.contains("Fs") && bom.rules[0].scope.as_deref() == Some("core"));
+        assert!(bom.errors.is_empty(), "a byte-0 BOM is not a malformed line: {:?}", bom.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert_eq!(parse_policy("\u{feff}deny Fs core").rules.len(), 1, "a one-rule BOM'd policy is not zero-rule");
+        // …with CRLF too (the mark is removed before line-splitting and CR normalisation).
+        assert_eq!(parse_policy("\u{feff}deny Fs core\r\ndeny Net web\r\n").rules.len(), 2);
+        // …and ANYWHERE ELSE it stays a token character: the line is still ignored (and reported).
+        let mid = parse_policy("deny Net web\n\u{feff}deny Fs core\n");
+        assert_eq!(mid.rules.len(), 1, "a BOM at the start of a LATER line is not an encoding mark");
+        assert!(!mid.errors.is_empty(), "the BOM'd later line is reported, not silently dropped");
+        assert_eq!(parse_policy("\u{feff}\u{feff}deny Fs core").rules.len(), 0, "only ONE mark is removed");
+        assert_eq!(parse_policy("deny Fs\u{feff} core").rules.len(), 0, "a mid-token BOM stays a token character");
         // `Unknown` is a denyable token; a bare `deny` with no effect is ignored.
         assert_eq!(parse_policy("deny Unknown core").rules[0].effects, ["Unknown"].into_iter().collect());
         assert!(parse_policy("deny\ndeny   \n").rules.is_empty());
