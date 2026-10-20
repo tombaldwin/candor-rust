@@ -124,6 +124,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `deny Net` exited **2** while the `--gate-json` verdict carried `violations:[AS-EFF-005]`; it now exits **1**, still
   with `incomplete: true`. The same tree with nothing regressed still exits 2. All four arms now share one predicate
   and RETURN, so none of them prints `policy ✓` over a policy it did not certify. Moves exit 2→1 only.
+- ⚠ **candor-scan: a crate-local trait member named like a std I/O member is no longer resolved as the std member
+  (SOUNDNESS R1320, a fabrication in the unreleased R1286 resolution).** `trait Flush2 { fn flush(&mut self); } impl
+  Flush2 for File {}` with `fn fl<T: Flush2>(t) { t.flush() }`: `oc_localtrait(f: &mut File) { fl(f) }` writes nothing
+  and read `Fs`; now `deny Fs` 1 → **0** (also the `impl Flush2` / `dyn Flush2` spellings). A local trait whose
+  SUPERTRAIT is `Write` still resolves. And `self` in a local trait's impl FOR a std handle (`impl Rd3 for File { fn
+  read(..) { self.write_all(..) } }`) now forms the handle call: `mc_local_real` `deny Fs` 0 → **1** vs v0.40.13.
+  Cache schema rev127.
 
 ## [0.40.13] — 2026-10-19
 

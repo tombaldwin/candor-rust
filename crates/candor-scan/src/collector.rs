@@ -1602,6 +1602,38 @@ impl<'a> CallCollector<'a> {
         })
     }
 
+    /// SOUNDNESS (rustagent-d, sibling of R1320) — `self` in a LOCAL trait's impl FOR a std I/O handle (`impl Flush3 for
+    /// File { fn flush(&mut self) { self.write_all(b"3") } }`) is typed by the impl's LEAF (`File`), so the call formed
+    /// `File::write_all`, which names no unit and no classifier rule: the contributor read pure, and so did every generic
+    /// dispatch reaching it (EXECUTED rustagent-d `fx/ctl` `mc_local_real` writes; pub 0). The handle call the receiver
+    /// spelling `f.write_all(..)` makes on a `&mut File` parameter is made here, so the handle's own classifier rule
+    /// decides. Only when the leaf expands through this file's `use` map to a std handle (a crate-local `struct File`
+    /// expands to the crate's own path and is untouched), the member is a DRIVING I/O member, and the impl's own trait
+    /// does not declare the member itself.
+    fn self_io_receiver(&mut self, receiver: &syn::Expr, leaf: &str) {
+        let syn::Expr::Path(p) = peel_value(receiver) else { return };
+        if !p.path.is_ident("self") {
+            return;
+        }
+        let Some(g) = self.vars.get("self").cloned() else { return };
+        let own = self.uses.get(crate::decls::IMPL_TRAIT_KEY).cloned();
+        if own.as_deref().is_some_and(|o| self.local_traits.get(o).is_some_and(|lt| lt.methods.contains(leaf))) {
+            return;
+        }
+        if !self.impl_generic_bounds.contains_key(g.as_str()) {
+            if let Some(h) = std_io_handle(&crate::lang::expand(&g, &self.uses)) {
+                if let Some(tr) =
+                    ["Write", "Read", "BufRead", "Seek"].into_iter().find(|t| crate::lang::is_driving_io_member(t, leaf))
+                {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1320SELFHANDLE\t{h}::{leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.push_io_handle_call(&h, if tr == "BufRead" { "read" } else { leaf });
+                }
+            }
+        }
+    }
+
     /// SOUNDNESS R1295 — the handle inside a std buffering wrapper `e` holds, when `e` is a PARAMETER whose written type
     /// says so (`io_wrapped`); `ty` is what the strict typer answered for `e` (the wrapper, without its arguments).
     fn io_wrapped_of(&self, e: &syn::Expr, ty: &str) -> Option<String> {
@@ -1712,6 +1744,20 @@ impl<'a> CallCollector<'a> {
                 let tr = it.next()?.to_string();
                 let m = it.next()?.to_string();
                 let recv = it.next()? == "1";
+                // SOUNDNESS R1320 — `/<written>:<B1+B2>`: the std requirement was read off the method NAME, and the
+                // parameter's own bounds do not include that std trait. A crate-local bound that DECLARES the written
+                // member is the trait the call really reaches (`fn fl<T: Flush2>(t) { t.flush() }` runs `Flush2::flush`,
+                // never `Write::flush`; two traits in scope declaring it would be E0034), so the entry is not this
+                // call's. EXECUTED rustab-c `fx/oc`: `oc_localtrait(f: &mut File) { fl(f) }` writes nothing and read
+                // `Fs` on 9489bca. A dependency or unknown bound keeps the entry (the over-report direction).
+                if let Some((written, bs)) = it.next().and_then(|x| x.split_once(':')) {
+                    if bs.split('+').any(|b| self.local_traits.get(b).is_some_and(|lt| lt.methods.contains(written))) {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1320SKIP\t{key}\t{tr}/{m}\t{written}:{bs}"); // §E1 REACH COUNTER
+                        }
+                        return None;
+                    }
+                }
                 Some((pos, elem, tr, m, recv))
             })
             .collect();
@@ -9289,6 +9335,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.push_io_handle_call(&h, &leaf);
             }
         }
+        self.self_io_receiver(&node.receiver, &leaf);
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
             self.dispatch_sites.len(), self.foreign_dispatch_sites.len());

@@ -8148,6 +8148,46 @@ pub fn c_rd_map(rd: std::fs::ReadDir) -> Vec<String> { rd.filter_map(|e| e.ok())
         assert_eq!(concrete("inst_tcp_gen"), vec!["Net".to_string()], "R1286 `inst_tcp_gen` (executed: Net):\n{v:#}");
     }
 
+    /// SOUNDNESS R1320 (rustagent-d) — FABRICATION. 9489bca's R1286 resolution read a std requirement off the method NAME
+    /// (`t.flush()` → `Write::flush`) whatever `T` was bounded by, so a crate-local trait member named like a std I/O member
+    /// was resolved as the std member on the caller's handle: `oc_localtrait(f: &mut File) { fl(f) }` read `Fs` while the
+    /// EXECUTED program (rustab-c `fx/oc`) writes nothing. MUST-CHARGE controls (rustagent-d `fx/ctl`, executed): a local
+    /// trait whose SUPERTRAIT is `Write` and does not declare the member still resolves, and a local trait's impl for `File`
+    /// that really writes is charged through its own body (the `self`-handle sibling fix).
+    #[test]
+    fn r1320_a_local_trait_member_named_like_a_std_io_member_is_not_the_std_member() {
+        let src = "\
+use std::fs::File;\n\
+use std::io::Write;\n\
+pub trait Flush2 { fn flush(&mut self); }\n\
+impl Flush2 for File { fn flush(&mut self) {} }\n\
+pub fn fl<T: Flush2>(t: &mut T) { t.flush() }\n\
+pub fn fli(t: &mut impl Flush2) { t.flush() }\n\
+pub fn fld(t: &mut dyn Flush2) { t.flush() }\n\
+pub fn oc_localtrait(f: &mut File) { fl(f) }\n\
+pub fn oc_impl(f: &mut File) { fli(f) }\n\
+pub fn oc_dyn(f: &mut File) { fld(f) }\n\
+pub trait MyW: Write {}\n\
+impl MyW for File {}\n\
+pub fn g_super<T: MyW>(t: &mut T) { let _ = t.write_all(b\"s\"); }\n\
+pub fn mc_super(f: &mut File) { g_super(f) }\n\
+pub trait Rd3 { fn read(&mut self, b: &mut [u8]) -> usize; }\n\
+impl Rd3 for File { fn read(&mut self, _b: &mut [u8]) -> usize { let _ = self.write_all(b\"3\"); 0 } }\n\
+pub fn fl3<T: Rd3>(t: &mut T) -> usize { let mut b = [0u8; 1]; t.read(&mut b) }\n\
+pub fn mc_local_real(f: &mut File) -> usize { fl3(f) }\n";
+        let v = scan_fixture("r1320oc", src);
+        let concrete = |f: &str| fixture_effects(&v, f).into_iter().filter(|e| e != "Unknown").collect::<Vec<_>>();
+        for c in ["oc_localtrait", "oc_impl", "oc_dyn"] {
+            assert!(concrete(c).is_empty(), "R1320 fabrication `{c}` (executed: writes nothing):\n{v:#}");
+        }
+        for f in ["mc_super", "mc_local_real"] {
+            assert_eq!(concrete(f), vec!["Fs".to_string()], "R1320 must-charge `{f}` (executed: Fs):\n{v:#}");
+        }
+    }
+
+
+
+
     /// SOUNDNESS R1287/R1289/R1290/R1292 — four silences R1265's correct removals exposed (each was covered in v0.40.13
     /// only by a false `ambiguous:` hedge), one crate each so their indexes cannot help each other. EXECUTED fixtures in
     /// `rustagent-b/fx/r1287`, `r1289`, `r1290`, `r1292_dep`; each has its must-still-charge control asserted first.
@@ -17990,7 +18030,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18001,7 +18041,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev126/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev127/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

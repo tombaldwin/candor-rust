@@ -7973,6 +7973,29 @@ pub(crate) fn generic_operator_uses(
         }
     };
     let recv = sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Receiver(_)));
+    // SOUNDNESS R1320 — the WRITTEN trait bounds of a plain generic parameter's type, when the signature itself says them
+    // (`fn fl<T: Flush2>(t: &mut T)`, `impl Flush2`, `&mut dyn Flush2`, `Box<dyn Flush2>`). `None` for an impl-level
+    // generic (its bounds are not passed here) and for a parameter with no trait bound at all.
+    let fn_bounds = generic_bounds_of_generics(&sig.generics);
+    let bounds_of = |t: &syn::Type| -> Option<Vec<String>> {
+        let b = match peel_ty_refs(t) {
+            syn::Type::Path(tp) if tp.qself.is_none() => match tp.path.get_ident() {
+                Some(g) => fn_bounds.get(&g.to_string()).cloned(),
+                None => match &tp.path.segments[0].arguments {
+                    syn::PathArguments::AngleBracketed(a) => match a.args.first() {
+                        Some(syn::GenericArgument::Type(syn::Type::TraitObject(o))) => Some(bound_leaves(&o.bounds)),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+            },
+            syn::Type::ImplTrait(i) => Some(bound_leaves(&i.bounds)),
+            syn::Type::TraitObject(o) => Some(bound_leaves(&o.bounds)),
+            _ => None,
+        };
+        b.filter(|v| !v.is_empty())
+    };
+    let mut pbounds: HashMap<String, Vec<String>> = HashMap::new();
     // name -> (typed-input position, element mode)
     let mut params: HashMap<String, (usize, bool)> = HashMap::new();
     for (i, pt) in sig
@@ -7987,6 +8010,9 @@ pub(crate) fn generic_operator_uses(
         let syn::Pat::Ident(id) = &*pt.pat else { continue };
         if is_gen(&pt.ty) {
             params.insert(id.ident.to_string(), (i, false));
+            if let Some(b) = bounds_of(&pt.ty) {
+                pbounds.insert(id.ident.to_string(), b);
+            }
             continue;
         }
         // SOUNDNESS R1167 — an element parameter.
@@ -8015,8 +8041,8 @@ pub(crate) fn generic_operator_uses(
         params: &'p HashMap<String, (usize, bool)>,
         self_leaf: Option<&'p str>,
         rebound: std::collections::HashSet<String>,
-        // (param, Trait or @forward, method or arg index)
-        hits: Vec<(String, String, String)>,
+        // (param, Trait or @forward, method or arg index, the METHOD WRITTEN when a std requirement was read off its name)
+        hits: Vec<(String, String, String, Option<String>)>,
     }
     fn operand(e: &syn::Expr) -> Option<String> {
         let mut e = e;
@@ -8049,7 +8075,12 @@ pub(crate) fn generic_operator_uses(
     impl V<'_> {
         fn hit(&mut self, n: &str, tr: &str, m: &str) {
             if self.params.contains_key(n) {
-                self.hits.push((n.to_string(), tr.to_string(), m.to_string()));
+                self.hits.push((n.to_string(), tr.to_string(), m.to_string(), None));
+            }
+        }
+        fn hit_named(&mut self, n: &str, tr: &str, m: &str, written: &str) {
+            if self.params.contains_key(n) {
+                self.hits.push((n.to_string(), tr.to_string(), m.to_string(), Some(written.to_string())));
             }
         }
         fn plain(&self, n: &str) -> bool {
@@ -8102,7 +8133,7 @@ pub(crate) fn generic_operator_uses(
                 }
                 let elem = !self.plain(&n);
                 for (tr, m) in generic_method_requirements(&meth, c.args.len(), elem) {
-                    self.hit(&n, tr, m);
+                    self.hit_named(&n, tr, m, &meth);
                 }
                 if meth == "into_iter" && c.args.is_empty() {
                     self.hit(&n, "IntoIterator", "into_iter");
@@ -8209,10 +8240,17 @@ pub(crate) fn generic_operator_uses(
     let mut out: Vec<String> = v
         .hits
         .into_iter()
-        .filter(|(n, _, _)| !v.rebound.contains(n))
-        .map(|(n, tr, m)| {
+        .filter(|(n, _, _, _)| !v.rebound.contains(n))
+        .map(|(n, tr, m, written)| {
             let (pos, elem) = params[&n];
-            format!("{pos}{}/{tr}/{m}/{}", if elem { "e" } else { "" }, u8::from(recv))
+            // SOUNDNESS R1320 — a std requirement read off a method NAME (`t.flush()` → `Write/flush`) carries the
+            // parameter's written bounds when none of them is that std trait, so the caller can tell `T: Flush2`'s own
+            // `flush` (a crate-local trait declaring the member) from `Write::flush`: `/flush:Flush2`.
+            let tail = match (written, pbounds.get(&n)) {
+                (Some(w), Some(bs)) if !elem && !bs.iter().any(|b| b == &tr) => format!("/{w}:{}", bs.join("+")),
+                _ => String::new(),
+            };
+            format!("{pos}{}/{tr}/{m}/{}{tail}", if elem { "e" } else { "" }, u8::from(recv))
         })
         .collect();
     out.sort();
