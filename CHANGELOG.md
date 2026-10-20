@@ -11,6 +11,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-classify: swift's `dynamicMemberLookup:<Root>.<prop>` reason projects to `reflect`, not `unresolved`
+  (SOUNDNESS R1218).** §6.2 projects reasons by PREFIX and this was the one alias arm written as an equality test, so
+  the spelling swift actually emits fell to the catch-all. Reached when this engine gates a candor-swift report
+  (`candor-query gate --report`) or chains one. Measured on candor-swift's report of a `@dynamicMemberLookup` read:
+  `deny Unknown[reflect]` 0→**1** and `deny Unknown[unresolved]` 1→**0** (both now match swift's own gate; the hole
+  stays named by the unverified note). `deny Unknown`, `Unknown[dynamic]` and `Unknown[*]` do not move.
 - ⚠ **candor-scan: a clean baseline guard over unparsed code no longer deletes a policy violation (SOUNDNESS
   R1236).** The guard's incomplete-analysis refusal returned exit 2 before the policy gate ran, so a certain policy
   violation was never computed. Measured: `deny Net` over a fn connecting to a host plus one unparseable file exits 1

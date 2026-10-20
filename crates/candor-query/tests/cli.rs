@@ -3632,6 +3632,33 @@ fn query_verbs_refuse_a_flag_shaped_value_for_every_value_taking_flag() {
 /// under-report gets introduced. `[reflect]` does not name this entry's `indirect` hole (gate exit 0);
 /// `[indirect]` does (gate exit 1). The gate's own exit code is asserted on each, so the two verbs are
 /// compared against the gate rather than against my expectation of it.
+/// SOUNDNESS R1218 — swift's `dynamicMemberLookup:<Root>.<prop>` reason is a `reflect` hole (§6.2's
+/// table, which lists PREFIXES), and this engine's projection tested the word by EQUALITY, so the real
+/// spelling fell through to the `unresolved` catch-all. MEASURED on candor-swift's own report of a
+/// `@dynamicMemberLookup` read: `deny Unknown[reflect]` exit 0 here (swift's own gate: 1) and
+/// `deny Unknown[unresolved]` exit 1 here (swift: 0). Both arms are asserted: the reflect gate must FIRE,
+/// and the unresolved gate must pass — the hole stays disclosed through the unverified note.
+#[test]
+fn r1218_a_swift_dynamic_member_lookup_reason_projects_to_reflect() {
+    let f = Fixture::new("r1218-dml");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"Dml",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"readIt","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["dynamicMemberLookup:Bag.anything"]}]}"#,
+        None,
+    );
+    let refl = pol(&f.dir, "refl", "deny Unknown[reflect]\n");
+    let (rc, _, err) = run_gate(&loc, &refl, &[]);
+    assert_eq!(rc, 1, "a dynamicMemberLookup hole is a reflect hole (§6.2):\n{err}");
+    let unres = pol(&f.dir, "unres", "deny Unknown[unresolved]\n");
+    let (rc, _, err) = run_gate(&loc, &unres, &[]);
+    assert_eq!(rc, 0, "…and so is NOT an unresolved one:\n{err}");
+    assert!(err.contains("readIt"), "the passing hole is still disclosed:\n{err}");
+}
+
 #[test]
 fn unverified_and_fix_gate_answer_the_narrowed_rule_the_gate_actually_applies() {
     let f = Fixture::new("filter-aware");

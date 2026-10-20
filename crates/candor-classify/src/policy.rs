@@ -205,7 +205,13 @@ impl ReasonClass {
         if let Some(k) = Kind::ALL.into_iter().find(|k| w.starts_with(k.token())) {
             return k.class();
         }
-        if w == "dynamicmemberlookup" {
+        // SOUNDNESS R1218 — A PREFIX, LIKE EVERY OTHER ARM. This was `w == "dynamicmemberlookup"`, an
+        // EQUALITY test, and swift does not emit the bare word: it emits `dynamicMemberLookup:<Root>.<prop>`.
+        // §6.2's table lists "raw `unknownWhy` PREFIXES", so the real token fell through to the catch-all
+        // and a reflect hole was gated as `unresolved`. MEASURED with this engine's `gate --report` over
+        // candor-swift's own report of a `@dynamicMemberLookup` read: `deny Unknown[reflect]` exit 0
+        // (swift's own gate: 1) and `deny Unknown[unresolved]` exit 1 (swift: 0).
+        if w.starts_with("dynamicmemberlookup") {
             ReasonClass::Reflect
         } else if w.starts_with("closure") || w.starts_with("task-handoff") {
             ReasonClass::Indirect
@@ -1572,6 +1578,23 @@ mod tests {
         // pinned so a future prefix arm cannot move them without saying so.
         assert_eq!(ReasonClass::classify("dep:9f2c1a"), Unresolved);
         assert_eq!(ReasonClass::classify("dep-stale:somepkg"), Unresolved);
+
+        // SOUNDNESS R1218 — every SIBLING-PRODUCER alias is a PREFIX (§6.2's table header), so each must
+        // project identically bare and with the `:detail` its producer actually writes. The alias arm that
+        // was an equality test failed exactly here: swift writes `dynamicMemberLookup:Bag.anything`.
+        for (bare, class) in [
+            ("dynamicMemberLookup", Reflect),
+            ("closure", Indirect),
+            ("task-handoff", Indirect),
+            ("indy", Dispatch),
+            ("missing-config", Setup),
+            ("no-tsconfig", Setup),
+            ("no-node_modules", Setup),
+        ] {
+            assert_eq!(ReasonClass::classify(bare), class, "bare `{bare}`");
+            let detailed = format!("{bare}:Owner.member");
+            assert_eq!(ReasonClass::classify(&detailed), class, "`{detailed}` must project like `{bare}`");
+        }
 
         // ── SOUNDNESS R490: THE TYPED HALF AND THE STRING HALF ARE ONE TABLE ────────────────────────
         // Every kind this engine can WRITE must classify to the class it declares, through the same
