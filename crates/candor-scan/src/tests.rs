@@ -7952,6 +7952,50 @@ pub fn run() -> usize { let mut r = limit::ResponseBody::new(FileBody); Pin::new
         }
     }
 
+    /// ⟨0.40⟩ SOUNDNESS R1268 — an `interfaceUnion` entry carrying `Unknown` carries its contributors' TRANSITIVE reasons
+    /// (SPEC §3.1, the 2026-10-20 clarification): one raw reason per class, projecting to exactly their class union.
+    /// Every union row was reasonless, so a chained `deny Unknown[native] go` over `s.put()` on a `&dyn Sink` whose
+    /// implementor calls FFI exited 0 (EXECUTED: `rustagent-b/fx/r1268_use` prints the pid; 0 -> 1 with this change,
+    /// `deny Unknown[unresolved] go` 1 -> 0 since no contributor is `unresolved`). The `callback:` reason is reached
+    /// TRANSITIVELY (`Cb::put` -> `helper`), which is the case a direct-only copy would miss. The R1245 opaque-block
+    /// leg carries its own `macro:` hedge, and a union with no `Unknown` carries no reason.
+    #[test]
+    fn r1268_an_interface_union_carrying_unknown_carries_its_contributors_reasons() {
+        let src = "\
+pub trait Sink { fn put(&self) -> usize; }\n\
+extern \"C\" { fn getpid() -> i32; }\n\
+pub struct Native;\n\
+impl Sink for Native { fn put(&self) -> usize { unsafe { getpid() as usize } } }\n\
+pub struct Cb(pub fn() -> usize);\n\
+impl Sink for Cb { fn put(&self) -> usize { helper(&self.0) } }\n\
+fn helper(f: &dyn Fn() -> usize) -> usize { f() }\n\
+pub trait Pure { fn p(&self) -> usize; }\n\
+impl Pure for Native { fn p(&self) -> usize { 1 } }\n\
+pub trait Report { fn summarize(&self) {} }\n\
+pub struct Reports;\n\
+impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
+        let v = scan_fixture("r1268union", src);
+        let union = |key: &str| -> &serde_json::Value {
+            v["functions"].as_array().unwrap().iter()
+                .find(|f| f["interfaceUnion"].as_bool() == Some(true) && f["fn"] == key)
+                .unwrap_or_else(|| panic!("union `{key}` must be published:\n{v:#}"))
+        };
+        assert_eq!(union("Sink::put")["unknownWhy"], serde_json::json!(["callback:unresolved call", "native:extern fn"]),
+                   "R1268: the union carries one raw reason per contributor class, transitive ones included:\n{v:#}");
+        let classes: std::collections::BTreeSet<_> = ["callback:unresolved call", "native:extern fn"].iter()
+            .map(|w| candor_classify::policy::ReasonClass::classify(w).token()).collect();
+        assert!(!classes.contains(candor_classify::policy::ReasonClass::Unresolved.token()),
+                "the fixture's contributors exclude `unresolved`, which is what moves `deny Unknown[unresolved]` 1 -> 0");
+        assert_eq!(union("Report::summarize")["unknownWhy"],
+                   serde_json::json!(["macro:impl members hidden by an unexpanded macro"]),
+                   "R1268: the R1245 opaque-implementor leg carries its own hedge:\n{v:#}");
+        if let Some(p) = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["interfaceUnion"].as_bool() == Some(true) && f["fn"] == "Pure::p") {
+            assert!(p.get("unknownWhy").is_none_or(|w| w.as_array().is_none_or(|a| a.is_empty())),
+                    "a union with no `Unknown` carries no reason:\n{v:#}");
+        }
+    }
+
     /// SOUNDNESS R340 — SERIALISES EVERY FIXTURE SCAN IN THIS BINARY.
     ///
     /// `lang::CFG_FEATURES` is a process-global `RwLock<FeatureSets>` that `scan_one` writes once per

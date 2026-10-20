@@ -7102,6 +7102,59 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // "gated/opt-in until a floor rung pins it"; §4 ⟨0.39⟩ is that rung and makes the entry REQUIRED, its
     // absence a non-conformance. The gate is not incidental to the defect — it is WHY the silent-purity
     // toggle survived in default scans, which is the one thing a default scan must not let happen.
+    // ⟨0.40⟩ SOUNDNESS R1268 — A UNION ENTRY CARRYING `Unknown` CARRIES ITS CONTRIBUTORS' REASONS. SPEC §3.1 (the
+    // 2026-10-20 interfaceUnion clarification): its `unknownWhy` MUST be non-empty and MUST project to EXACTLY the
+    // union of its contributors' TRANSITIVE reason classes, as this producer's own gate resolves them, plus the union's
+    // own hedge where it publishes one. Every union row this engine published was REASONLESS (7,866 of 7,866 carrying
+    // `Unknown` on the rust A/B's post arm), so a chained consumer read `unresolved` alone and a narrowed `deny
+    // Unknown[native|reflect|…] <caller>` passed over the hole a contributor inherited. The class set is the gate's
+    // own `reason_class_acc`; one RAW reason per class is carried, found by walking `calls` from the contributor
+    // through units whose class set holds it to the unit whose own `unknownWhy` names it. The one class with no raw
+    // source is the gate-side `unresolved` of a reasonless chained `Unknown` (`unknown_via_dep`): that contributor is
+    // named by its own entry's key, `dep:<hash>` — §4's registered kind for exactly that, projecting to `unresolved`.
+    let union_why = |q: &str, out: &mut BTreeSet<String>| {
+        if !inferred.get(q).is_some_and(|s| s.contains("Unknown")) {
+            return;
+        }
+        let classes = reason_class_acc.get(q).cloned().unwrap_or_default();
+        if classes.is_empty() {
+            out.insert(format!("dep:{crate_name}#{q}"));
+            return;
+        }
+        for c in &classes {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::from([q.to_string()]);
+            let mut found: Option<String> = None;
+            while let Some(u) = queue.pop_front() {
+                if !seen.insert(u.clone()) {
+                    continue;
+                }
+                if let Some(w) = unknown_why.get(&u).and_then(|ws| {
+                    ws.iter().find(|w| candor_classify::policy::ReasonClass::classify(w).token() == c.as_str())
+                }) {
+                    found = Some(w.clone());
+                    break;
+                }
+                for v in calls.get(&u).into_iter().flatten() {
+                    if reason_class_acc.get(v).is_some_and(|s| s.contains(c)) && !seen.contains(v) {
+                        queue.push_back(v.clone());
+                    }
+                }
+            }
+            match found {
+                Some(w) => {
+                    out.insert(w);
+                }
+                None if c == candor_classify::policy::ReasonClass::Unresolved.token() => {
+                    out.insert(format!("dep:{crate_name}#{q}"));
+                }
+                // Every other class enters `reason_class_acc` only from a raw `unknown_why` token, so the walk
+                // finds one; reaching here would be a broken invariant, and a guessed token would be a class
+                // nobody reaches.
+                None => debug_assert!(false, "R1268: class {c} of {q} has no raw source"),
+            }
+        }
+    };
     {
         let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
         // SOUNDNESS R598, THE DELEGATION HEDGE — **A TRAIT MEMBER WHOSE DEFAULT BODY CALLS SOMETHING OF
@@ -7194,6 +7247,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             for method in &lt.methods {
                 let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
                 let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let mut why_u: BTreeSet<String> = BTreeSet::new(); // R1268
+                let own_hedge = r529_reason(&format!("{trait_leaf}::{method}")); // R1268 — this union's own hedge
                 for ty in impls {
                     let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
                     // SOUNDNESS R598 — `{ty}::{method}` IS ALSO THE QUAL OF AN INHERENT `impl Ty`.
@@ -7269,6 +7324,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R1245UNION\t{trait_leaf}::{method}\t{ty}"); // §E1 REACH COUNTER
                         }
                         inf_u.insert("Unknown");
+                        why_u.insert("macro:impl members hidden by an unexpanded macro".to_string()); // R1268
                     }
                     if narrowed {
                         // §E1 REACH PROBE — fires only where this narrowing actually withholds
@@ -7288,6 +7344,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             for e in s.iter().filter(|e| admit(e)) {
                                 inf_u.insert(e);
                             }
+                            union_why(&cand, &mut why_u); // R1268 — `Unknown` is admitted on both sides of R598
                         }
                         if let Some(s) = blind_acc.get(&cand) {
                             for c in s.iter().filter(|c| global_blind.contains(*c)) {
@@ -7322,6 +7379,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     // `{ty}::{method}` spelling one index over, so a narrowed candidate
                                     // must not re-enter through it (§F1 Q3, two paths one question).
                                     inf_u.extend(s.iter().copied().filter(|e| admit(e)));
+                                    union_why(&ts[0], &mut why_u); // R1268
                                 }
                                 if let Some(s) = blind_acc.get(&ts[0]) {
                                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -7339,10 +7397,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     for q in qs {
                         if !unit_quals.contains(q) {
                             inf_u.insert("Unknown");
+                            why_u.insert(own_hedge.clone()); // R1268
                             continue;
                         }
                         if let Some(s) = inferred.get(q) {
                             inf_u.extend(s.iter().copied());
+                            union_why(q, &mut why_u); // R1268
                         }
                         if let Some(s) = blind_acc.get(q) {
                             blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -7353,6 +7413,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     || merged.nested_impl_members.contains(&format!("{trait_leaf}::*")) // R828
                 {
                     inf_u.insert("Unknown");
+                    why_u.insert(own_hedge.clone()); // R1268
                     if std::env::var_os("CANDOR_R529_INSTR").is_some() {
                         eprintln!("R529HIT\tUNION-LOCAL\t{trait_leaf}::{method}"); // §E1 REACH PROBE
                     }
@@ -7516,6 +7577,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 {
                     eprintln!("R609HIT\tLOCAL\t{hash}");
                 }
+                if inf_u.contains("Unknown") && why_u.is_empty() {
+                    why_u.insert(own_hedge.clone()); // R1268 — non-empty by construction (see `union_why`)
+                }
                 entries.push(ReportEntry {
                     func: hash.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
                     inferred: inf_u.iter().map(|s| s.to_string()).collect(),
@@ -7523,6 +7587,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     hash,
                     invisible: blind_u.into_iter().collect(),
                     interface_union: true,
+                    unknown_why: if inf_u.contains("Unknown") { why_u.into_iter().collect() } else { Vec::new() },
                     ..Default::default()
                 });
             }
@@ -7563,8 +7628,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
             let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut why_u: BTreeSet<String> = BTreeSet::new(); // R1268
             if merged.nested_impl_foreign.contains(key) {
                 inf_u.insert("Unknown");
+                why_u.insert(r529_reason(key)); // R1268 — this union's own hedge
                 if std::env::var_os("CANDOR_R529_INSTR").is_some() {
                     eprintln!("R529HIT\tUNION-FOREIGN\t{key}"); // §E1 REACH PROBE
                 }
@@ -7572,6 +7639,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             for cand in impl_quals {
                 if let Some(s) = inferred.get(cand) {
                     inf_u.extend(s.iter().copied());
+                    union_why(cand, &mut why_u); // R1268
                 }
                 if let Some(s) = blind_acc.get(cand) {
                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -7584,6 +7652,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if ts.len() == 1 {
                         if let Some(s) = inferred.get(&ts[0]) {
                             inf_u.extend(s.iter().copied());
+                            union_why(&ts[0], &mut why_u); // R1268
                         }
                         if let Some(s) = blind_acc.get(&ts[0]) {
                             blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -7636,6 +7705,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             {
                 eprintln!("R609HIT\tFOREIGN\t{key}"); // §E1 REACH PROBE — see the local leg's note
             }
+            if inf_u.contains("Unknown") && why_u.is_empty() {
+                why_u.insert(r529_reason(key)); // R1268 — non-empty by construction (see `union_why`)
+            }
             entries.push(ReportEntry {
                 func: key.split_once('#').map(|(_, m)| m.to_string()).unwrap_or_default(),
                 inferred: inf_u.iter().map(|s| s.to_string()).collect(),
@@ -7643,6 +7715,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 hash: key.clone(),
                 invisible: blind_u.into_iter().collect(),
                 interface_union: true,
+                unknown_why: if inf_u.contains("Unknown") { why_u.into_iter().collect() } else { Vec::new() },
                 ..Default::default()
             });
         }

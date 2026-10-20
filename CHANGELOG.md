@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an `interfaceUnion` entry carrying `Unknown` now carries its contributors' reasons (SOUNDNESS R1268,
+  SPEC §3.1 ⟨0.40⟩ clarification of 2026-10-20).** Every union row was reasonless, so a chained consumer classed it
+  `unresolved` and a narrowed `deny Unknown[native] <caller>` over a `&dyn dep::Sink` whose implementor calls FFI exited
+  0. The entry now carries one raw reason per class of its contributors' TRANSITIVE reason sets (as this engine's own
+  gate resolves them), plus its own hedge (`macro:impl members hidden by an unexpanded macro` for an opaque implementor
+  block, `dispatch:<Trait>.<member>` for a block-nested or non-nominal one); a reasonless chained contributor is named
+  `dep:<its hash>`. Executed: `deny Unknown[native] go` and `deny Unknown[indirect] go` 0→**1**, `deny Unknown[unresolved]
+  go` 1→**0** (no contributor is `unresolved`). Union rows only; no unit row changes.
 - ⚠ **candor-scan: a trait-method call on a receiver typed only by a container's generic parameter NAME dispatches
   over that parameter's bound (SOUNDNESS R1267, and the dropped arm of R1266).** `w.body.pull()` over `struct Wrap<B>
   { body: B }`, `match inner { Inner::Body(body) => body.pull() }`, the `if let` / struct-variant / let-else forms, and
