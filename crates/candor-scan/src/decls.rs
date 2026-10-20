@@ -3310,6 +3310,7 @@ pub(crate) fn fninfo(
         mbe_op: false,
         reexport_alias: false,
         has_self: sig.receiver().is_some(),
+        assoc: self_ty.is_some() || impl_generics.is_some(), // R1265 — an impl member or a trait default
         recv_rank: crate::model::recv_rank(sig),
         untyped_methods: c.untyped_methods.into_iter().collect(),
     }

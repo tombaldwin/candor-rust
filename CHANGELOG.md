@@ -11,6 +11,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a bare free-function call is no longer contested by a same-name ASSOCIATED fn (SOUNDNESS R1265).**
+  `main(1)` in a module whose `impl` has a `main` method (or an associated fn, or a trait default of that name) was
+  refused as a two-way leaf and traded for `Unknown` + `ambiguous:same-name local defs` — but a bare path cannot
+  name an associated fn in Rust, so the call names exactly the free fn. It now resolves to it. Executed: a caller
+  reading `HOME` through `main(1)` goes `deny Env caller` 0→**1** (hand-written method, macro-made method, `self`-less
+  associated fn, trait default); wasm-bindgen-macro-support 0.2.125 `parser::Item::macro_parse` regains `Env`
+  (`deny Env` 0→**1** against the R1245 build; it read `Env` in v0.40.13 only because the method was opaque). Two
+  FREE claimants still disclose `ambiguous:`, and a leaf only methods claim keeps its old answer. Callers whose
+  hedge was this false contest lose that `Unknown` and gain the free fn's effects. Cache schema rev121.
 - ⚠ **candor-scan: a method a `macro_rules!` declares INSIDE a hand-written trait impl is expanded, or disclosed
   when it cannot be (SOUNDNESS R1245).** `impl Report for Reports { reports_impl!(fn summarize(&self)); }` left the
   impl item opaque, so a call on a `Reports` receiver bound to the trait's PURE default (or to nothing) and its

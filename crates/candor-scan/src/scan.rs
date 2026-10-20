@@ -2489,6 +2489,42 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R1265 — THE BARE-CALL VIEW OF `by_leaf`. A bare call (`main(x)`: no `::`, not a method call) names a
+    // free fn in scope and NEVER an associated one — Rust reaches an `impl` member or a trait default only through
+    // `Self::`/`Type::`/`Trait::` or a method call. `by_leaf` keys every unit, so a free `main` beside an inherent
+    // `Attrs::main(&self)` made the leaf two-way: `resolve_target` refused it and the call was traded for `ambiguous:same-name
+    // local defs` — a reason that is false, over a call that names exactly one definition. EXECUTED (rustab-a/fx/amb):
+    // `caller` reads `HOME` through `main(1)` and `deny Env caller` exited 0, hand-written method and (after R1245
+    // expanded `methods!(main, ..)`) macro-made alike; wasm-bindgen-macro-support's `Item::macro_parse` (`return
+    // main(program, f, tokens)` beside `BindgenAttrs::main`) lost Env on the corpus.
+    //
+    // A RESOLUTION: an associated claimant is dropped only where a NON-associated one remains, so the bucket can only
+    // shrink toward the definitions a bare path can name. Where EVERY claimant is associated, the bucket is kept as it
+    // was — that call names something this crate does not declare as a free fn (a glob import, a prelude fn, a
+    // macro-hidden fn), and the existing answer (classifier suppressed, `ambiguous:` hedge at two or more) is left
+    // exactly as it stood rather than turned into a silence. Two or more FREE claimants still hedge.
+    // Used ONLY where a bare non-method call is resolved (`resolve_target`, which reads `by_leaf` for nothing else)
+    // and at the bare-leaf `ambiguous:` site; `suppress_bare_leaf` and the method-call routes keep `by_leaf`.
+    let by_leaf_call: HashMap<String, Vec<String>> = {
+        let mut free_qual: HashSet<&str> = HashSet::new();
+        for f in fns.iter().filter(|f| !f.assoc) {
+            free_qual.insert(f.qual.as_str());
+        }
+        by_leaf
+            .iter()
+            .map(|(leaf, v)| {
+                let free: Vec<String> = v.iter().filter(|q| free_qual.contains(q.as_str())).cloned().collect();
+                if free.is_empty() || free.len() == v.len() {
+                    (leaf.clone(), v.clone())
+                } else {
+                    if std::env::var_os("CANDOR_R1265_INSTR").is_some() {
+                        eprintln!("R1265LEAF\t{leaf}\t{}\t{}", v.len(), free.len()); // §E1 REACH COUNTER
+                    }
+                    (leaf.clone(), free)
+                }
+            })
+            .collect()
+    };
     // VEIN A — AN `impl` WRITTEN ON A LOCAL TYPE ALIAS IS ALSO AN `impl` OF THE ALIAS'S TARGET.
     // `pub type TzifOwned = Tzif<…>;` + `impl TzifOwned { fn parse64(..) }` (jiff-0.2.28) keys the
     // method under the ALIAS's name, while a receiver whose type is spelled through the alias resolves to
@@ -3265,7 +3301,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // `WakerInternal::wake` bodies that each write a file descriptor and each charge
                     // `Fs` in their own row.
                     let targets: Option<Vec<String>> =
-                        resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf)
+                        resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf_call)
                             .or_else(|| reexport_target(alt, c.method, &by_tail2, &by_reexport))
                             .cloned()
                             .or_else(|| {
@@ -4068,7 +4104,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
             if resolvable && !aliased {
-                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
+                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf_call)
                     .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport))
                     // SOUNDNESS R1154 (and the crate-root import it reduces to) — `use crate::write_it;`
                     // then `write_it()` keeps the `use`-map value `crate::write_it`, whose one-segment
@@ -4100,7 +4136,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let lib = self_lib.as_deref()?;
                         let rest = c.path.strip_prefix(lib)?.strip_prefix("::")?;
                         let hit = if rest.contains("::") {
-                            resolve_target(rest, &c.leaf, c.method, &by_tail2, &by_leaf)
+                            resolve_target(rest, &c.leaf, c.method, &by_tail2, &by_leaf_call)
                         } else if !c.method && !merged.extern_fns.contains(rest) {
                             by_root.get(rest)
                         } else {
@@ -4322,7 +4358,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             while let Some(target) = merged.deref_target.get(&cur).cloned() {
                                 if hops >= 8 { break; }
                                 hops += 1;
-                                if let Some(ts) = resolve_target(&format!("{target}::{}", c.leaf), &c.leaf, false, &by_tail2, &by_leaf) {
+                                if let Some(ts) = resolve_target(&format!("{target}::{}", c.leaf), &c.leaf, false, &by_tail2, &by_leaf_call) {
                                     resolved_local = true;
                                     for t in ts {
                                         if t != &f.qual {
@@ -5551,7 +5587,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // still a SPEC rung rather than an edit here.
             if !c.is_macro && !c.method && classified.is_none() && !resolved_local && suppress_bare_leaf
                 && !c.path.contains("::")
-                && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
+                && by_leaf_call.get(&c.leaf).is_some_and(|v| v.len() >= 2)
             {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs".to_string());

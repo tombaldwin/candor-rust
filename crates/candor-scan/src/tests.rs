@@ -7838,6 +7838,37 @@ pub fn finish_dyn(r: &dyn Report) { r.summarize(); }\n";
         assert!(fixture_effects(&v, "calls_own").is_empty(), "R1245 over-disclosure control:\n{v:#}");
     }
 
+    /// SOUNDNESS R1265 — a BARE call (`main(1)`) cannot name an associated fn, so an `impl` member or a trait default
+    /// of the same leaf is not its rival. The leaf was two-way, `resolve_target` refused it, and the call was traded for
+    /// `ambiguous:same-name local defs` over a free fn that reads `HOME` (EXECUTED: `rustagent-b/fx/r1265_{hand,mac,
+    /// assoc,dflt}` print the probe value; `deny Env caller` 0 -> 1 on each). R1245 widened it to a macro-made method
+    /// (wasm-bindgen-macro-support `Item::macro_parse`). The second fixtures pin what must NOT move: two FREE claimants
+    /// still hedge, and a leaf whose only claimants are methods keeps its old answer.
+    #[test]
+    fn r1265_a_bare_call_is_not_contested_by_a_same_name_associated_fn() {
+        let free = "fn main(x: u32) -> String { std::env::var(\"HOME\").unwrap_or_default() + &x.to_string() }\n";
+        let caller = "pub fn caller() -> String { main(1) }\n";
+        for (tag, rival) in [
+            ("r1265self", "pub struct Attrs;\nimpl Attrs { pub fn main(&self) -> Option<()> { Some(()) } }\n"),
+            ("r1265mac", "pub struct Attrs;\nmacro_rules! methods { ($($n:ident),*) => { $(pub fn $n(&self) -> Option<()> { Some(()) })* }; }\nimpl Attrs { methods!(main, start); }\n"),
+            ("r1265assoc", "pub struct Attrs;\nimpl Attrs { pub fn main(x: u32) -> u32 { x } }\n"),
+            ("r1265dflt", "pub trait T { fn main(&self) -> u32 { 0 } }\n"),
+        ] {
+            let v = scan_fixture(tag, &format!("{rival}{free}{caller}"));
+            assert_eq!(fixture_effects(&v, "caller"), vec!["Env".to_string()],
+                       "R1265 `{tag}`: the bare call names the free fn, not the associated one:\n{v:#}");
+        }
+        // SECOND FIXTURE — two FREE claimants are a real contest and still disclose, method rival or not.
+        let two = format!("mod a {{ pub fn main(_x: u32) -> String {{ String::new() }} }}\npub struct Attrs;\nimpl Attrs {{ pub fn main(&self) -> u32 {{ 0 }} }}\n{free}{caller}");
+        let v = scan_fixture("r1265two", &two);
+        assert_eq!(fixture_effects(&v, "caller"), vec!["Unknown".to_string()], "R1265 two free claimants:\n{v:#}");
+        assert_eq!(fn_entry(&v, "caller")["unknownWhy"], serde_json::json!(["ambiguous:same-name local defs"]));
+        // …and a leaf only METHODS claim keeps its existing answer (a hedge at two or more), never a new silence.
+        let meth = "pub struct A; pub struct B;\nimpl A { pub fn run(&self) {} }\nimpl B { pub fn run(&self) {} }\npub fn caller() { run(); }\n";
+        let v = scan_fixture("r1265meth", meth);
+        assert_eq!(fixture_effects(&v, "caller"), vec!["Unknown".to_string()], "R1265 methods-only leaf:\n{v:#}");
+    }
+
     /// SOUNDNESS R340 — SERIALISES EVERY FIXTURE SCAN IN THIS BINARY.
     ///
     /// `lang::CFG_FEATURES` is a process-global `RwLock<FeatureSets>` that `scan_one` writes once per
@@ -10052,16 +10083,24 @@ pub fn finish_dyn(r: &dyn Report) { r.summarize(); }\n";
                 .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
                     .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
         };
-        // Two local defs of the leaf `process` (a free fn + a method); a bare `process()` call can't be
-        // disambiguated → Unknown, not silent-pure.
+        // Two local FREE defs of the leaf `process`; a bare `process()` call can't be disambiguated →
+        // Unknown, not silent-pure. (SOUNDNESS R1265: this fixture used a free fn + a METHOD, which is not a
+        // contest — a bare path cannot name an associated fn — and that pair now resolves to the free fn.)
         let ambiguous = r#"
             pub fn process() {}
-            struct W;
-            impl W { fn process(&self) {} }
+            pub mod m { pub fn process() {} }
             pub fn caller() { process(); }
         "#;
         assert!(eff(&run("ambig", ambiguous), "caller").contains(&"Unknown".to_string()),
                 "a bare leaf with two same-name local defs must read Unknown, not silent-pure");
+        let free_and_method = r#"
+            pub fn process() { let _ = std::env::var("X"); }
+            struct W;
+            impl W { fn process(&self) {} }
+            pub fn caller() { process(); }
+        "#;
+        assert_eq!(eff(&run("ambigfm", free_and_method), "caller"), vec!["Env".to_string()],
+                "R1265: a free fn beside a same-name method is the bare call's only claimant");
         // CONTROL: a UNIQUE local `solo` resolves cleanly — no spurious Unknown from this branch.
         let unique = r#"
             pub fn solo() {}
@@ -17487,7 +17526,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17498,7 +17537,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev120/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev121/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

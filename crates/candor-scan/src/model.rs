@@ -283,6 +283,11 @@ pub(crate) struct FnInfo {
     /// SOUNDNESS R1095 — the unit takes a `self` receiver, so a method-call site can reach it.
     #[serde(rename = "hs", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) has_self: bool,
+    /// SOUNDNESS R1265 — an ASSOCIATED fn: a member of an `impl` block or a trait default body (with or without
+    /// `self`). A bare call (`main(x)`, no `::`, not a method call) cannot name one in Rust — it needs `Self::`
+    /// or `Type::` — so it is not a claimant of that bare leaf (`scan.rs`, `by_leaf_call`).
+    #[serde(rename = "ac", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) assoc: bool,
     /// SOUNDNESS R1202 — the receiver's autoref RANK, the step of Rust's method probe at which a value receiver reaches
     /// this method: 1 `self`, 2 `&self`, 3 `&mut self`; 0 = not recorded or a typed receiver (`self: Box<Self>`), which
     /// no rule may read as a rank.
