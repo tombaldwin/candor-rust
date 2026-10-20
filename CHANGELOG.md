@@ -11,6 +11,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-classify: `tokio::time::Instant::now` and the clock crates' `now` read `Clock` (SOUNDNESS R1288).** tokio's
+  `Instant::now()` read pure; tokio-util `DelayQueue::insert`/`reset` and tokio-stream `throttle` were covered only by
+  a false `ambiguous:` hedge in v0.40.13. Also `quanta`, `minstant`, `web_time`, `instant`, `coarsetime` `…::now`.
+  tokio-util 0.7.16 `deny Clock time::delay_queue::DelayQueue::insert` 0 → **1**.
 - ⚠ **candor-scan: an `interfaceUnion` entry's reasons are never a strict subset of its contributors' classes (SOUNDNESS
   R1293, fixing R1268).** An implementor whose 2-segment tail several units claim (tower-http's three `ResponseBody`s)
   or that is published under another spelling of the same trait (`futures_core#Stream` beside

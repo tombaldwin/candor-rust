@@ -2575,6 +2575,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Clock");
     }
+    // SOUNDNESS R1288 — THIRD-PARTY CLOCK WRAPPERS. `tokio::time::Instant::now()` reads the monotonic clock (through
+    // tokio's mockable time source) exactly as `std::time::Instant::now()` does, and read PURE: tokio-util's
+    // `DelayQueue::insert`/`reset` and tokio-stream's `throttle` were covered only by a false `ambiguous:` hedge in
+    // v0.40.13. The same `now` accessor on the dedicated clock crates' instant types: `quanta` (`Instant::now`,
+    // `Clock::now`), `minstant`, `web_time`, `instant`, `coarsetime` (`Instant::now`). `now` only — their arithmetic and
+    // conversions are pure.
+    if path.ends_with("::now")
+        && (path.starts_with("tokio::time::Instant::")
+            || matches!(crate_name, "quanta" | "minstant" | "web_time" | "instant" | "coarsetime"))
+    {
+        return Some("Clock");
+    }
     // `tracing`: same principle as the `log` facade below — the crate's TYPES are pure data, so match
     // the emit, not the whole crate. The actual program output is the macro-expanded
     // `Subscriber::event`/`event!`/`Span::*enter*` dispatch and the `Span::new*`/`Span::record`
@@ -5483,6 +5495,11 @@ mod tests {
         assert_eq!(classify("std", "std::fs::read"), Some("Fs"));
         assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
         assert_eq!(classify("tokio", "tokio::net::TcpStream::connect"), Some("Net"));
+        // R1288 — tokio's clock, and only its `now`.
+        assert_eq!(classify("tokio", "tokio::time::Instant::now"), Some("Clock"));
+        assert_eq!(classify("tokio", "tokio::time::Instant::from_std"), None);
+        assert_eq!(classify("quanta", "quanta::Instant::now"), Some("Clock"));
+        assert_eq!(classify("web_time", "web_time::Instant::now"), Some("Clock"));
     }
 
     /// THE PLATFORM `fs` MODULES. `std::fs::` was the whole filesystem rule, so every function in
