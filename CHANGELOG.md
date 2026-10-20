@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an `interfaceUnion` entry's reasons are never a strict subset of its contributors' classes (SOUNDNESS
+  R1293, fixing R1268).** An implementor whose 2-segment tail several units claim (tower-http's three `ResponseBody`s)
+  or that is published under another spelling of the same trait (`futures_core#Stream` beside
+  `futures_core#stream::Stream`) is a contributor the union cannot name; it now contributes the `unresolved` class
+  (`dep:<its key>`, §3.1), one `dep:` per entry. Chained `deny Unknown[unresolved]` back to **1** on axum-core 0.5.6
+  `body::Body::size_hint`, id-arena 2.3.0 `rayon::IntoParIter::drive`, rust_decimal 1.43.0
+  `postgres::diesel::Decimal::to_sql`, tokio-util 0.7.19 `CopyToBytes::poll_next` (v0.40.13 1, R1268 0).
 - ⚠ **candor-scan: a std-trait method on a type parameter inside a GENERIC `extern "C"` callback is disclosed
   (SOUNDNESS R1280).** `unsafe extern "C" fn write_func<S>(..) where S: Write { .. conn.stream.flush() .. }` is
   instantiated only where it is named as a value and handed to foreign code, so no analysed caller ever carries the

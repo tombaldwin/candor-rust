@@ -8007,6 +8007,36 @@ pub fn plain<S: Write>(conn: &mut Connection<S>) -> i32 { if conn.stream.flush()
         assert!(fixture_effects(&v, "plain").is_empty(), "R1280 scope: an ordinary generic fn is not this row:\n{v:#}");
     }
 
+    /// ⟨0.40⟩ SOUNDNESS R1293 — a union's implementor that the never-guess rule refuses (two units claim its tail, the
+    /// tower-http `ResponseBody` shape) or that is published under another spelling of the same trait contributes the
+    /// `unresolved` class (§3.1), so the union's reasons are never a strict subset. EXECUTED (`rustagent-b/fx/r1293_use`,
+    /// FFI through `a::R`): chained `deny Unknown[unresolved] go` v0.40.13 1, 352520d 0, 1.
+    #[test]
+    fn r1293_an_unnamed_union_contributor_contributes_unresolved() {
+        let src = "\
+pub trait Sink { fn put(&self) -> usize; }\n\
+extern \"C\" { fn getpid() -> i32; }\n\
+pub mod a { pub struct R; impl crate::Sink for R { fn put(&self) -> usize { unsafe { crate::getpid() as usize } } } }\n\
+pub mod b { pub struct R; impl crate::Sink for R { fn put(&self) -> usize { 0 } } }\n\
+pub struct Cb(pub fn() -> usize);\n\
+impl Sink for Cb { fn put(&self) -> usize { helper(&self.0) } }\n\
+fn helper(f: &dyn Fn() -> usize) -> usize { f() }\n";
+        let v = scan_fixture("r1293unn", src);
+        let u = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["interfaceUnion"].as_bool() == Some(true) && f["fn"] == "Sink::put").cloned()
+            .unwrap_or_else(|| panic!("union published:\n{v:#}"));
+        let why: Vec<String> = u["unknownWhy"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
+        assert!(why.iter().any(|w| w.starts_with("callback:")), "the named contributor's class stays:\n{v:#}");
+        assert_eq!(why.iter().filter(|w| w.starts_with("dep:")).count(), 1,
+                   "R1293: the refused `R::put` claimants contribute ONE `dep:` (unresolved):\n{v:#}");
+        // CONTROL — the same union with the same-leaf pair renamed apart: every contributor is named, no `dep:`.
+        let v = scan_fixture("r1293ctl", &src.replace("pub mod b { pub struct R; impl crate::Sink for R", "pub mod b { pub struct R2; impl crate::Sink for R2"));
+        let u = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["interfaceUnion"].as_bool() == Some(true) && f["fn"] == "Sink::put").cloned().unwrap();
+        assert!(u["unknownWhy"].as_array().into_iter().flatten().all(|w| !w.as_str().unwrap_or("").starts_with("dep:")),
+                "R1293 control: no unnamed contributor, no `dep:`:\n{v:#}");
+    }
+
     /// SOUNDNESS R1266 — tower-http's `limit::body::ResponseBody::poll_frame` shape: a pin-project projection whose one arm
     /// is a dependency's `Full` (sharing its LEAF with this crate's macro-made `Full`, a unit only since R1245) and whose
     /// other arm is the generic `B: Body`. The generic arm was dropped (R1267) and v0.40.13 covered the row only with a

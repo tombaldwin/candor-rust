@@ -7155,6 +7155,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     };
+    // ⟨0.40⟩ SOUNDNESS R1293 — AN IMPLEMENTOR THE UNION CANNOT NAME IS A CONTRIBUTOR WHOSE CLASSES IT CANNOT COMPLETE. An
+    // implementor's 2-segment tail that SEVERAL units claim (`ResponseBody::poll_frame` in tower-http's `limit`, `metrics`
+    // and `trace`) is refused by the never-guess rule, so neither its effects nor its reasons reach the union (R1246's leaf
+    // identity, Wave B). Once R1268 gave the union the reasons of the contributors it DID name, the refused ones vanished
+    // from its class set: a strict SUBSET, which §3.1 forbids (`deny Unknown[unresolved]` axum-core `Body::size_hint`
+    // 1 -> 0 chained). §3.1's rule for exactly this: such a contributor contributes `unresolved`, as a `dep:` reason does
+    // — here naming each claimant that carries `Unknown`, by its own entry key in this report. Reasons only: the union's
+    // `inferred` is untouched (adding what the refused claimants carry is Wave B's resolution, not this disclosure).
+    let union_unnamed = |tail: &str, out: &mut BTreeSet<String>| {
+        if let Some(ts) = by_tail2.get(tail).filter(|ts| ts.len() >= 2) {
+            for t in ts {
+                if inferred.get(t).is_some_and(|s| s.contains("Unknown")) {
+                    out.insert(format!("dep:{crate_name}#{t}"));
+                }
+            }
+        }
+    };
     {
         let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
         // SOUNDNESS R598, THE DELEGATION HEDGE — **A TRAIT MEMBER WHOSE DEFAULT BODY CALLS SOMETHING OF
@@ -7340,6 +7357,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                     }
                     for cand in [format!("{ty}::{method}"), format!("{ty_leaf}::{method}")] {
+                        if !inferred.contains_key(&cand) {
+                            union_unnamed(&cand, &mut why_u); // R1293
+                        }
                         if let Some(s) = inferred.get(&cand) {
                             for e in s.iter().filter(|e| admit(e)) {
                                 inf_u.insert(e);
@@ -7640,6 +7660,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if let Some(s) = inferred.get(cand) {
                     inf_u.extend(s.iter().copied());
                     union_why(cand, &mut why_u); // R1268
+                } else {
+                    union_unnamed(cand, &mut why_u); // R1293
                 }
                 if let Some(s) = blind_acc.get(cand) {
                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
@@ -7734,6 +7756,48 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // distant code paths rather than of this comparator — and `trait_decls` is a HashMap, so "happens to"
     // is the word the reqwest instance above was also true of until it wasn't. `false < true` puts the
     // analysed unit first, which is the order a reader expects.
+    // ⟨0.40⟩ SOUNDNESS R1293 — ONE ABSTRACTION, TWO SPELLINGS. Obligation 2 keys a foreign implementor by the trait path
+    // its `impl` WROTE, so futures-util publishes `futures_core#Stream::poll_next` (impls importing the re-export) BESIDE
+    // `futures_core#stream::Stream::poll_next` (impls importing the module path) — one trait, two contributor sets, and a
+    // consumer joins only the key it spelled. The other key's contributors are implementors this entry cannot attribute,
+    // so where both carry `Unknown` each names the other (`dep:<its key>`, §3.1's `unresolved` for a contributor whose
+    // classes the producer cannot complete). Same owner, same `Trait::member` tail; reasons only.
+    {
+        let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            if !e.interface_union || !e.inferred.iter().any(|x| x == "Unknown") {
+                continue;
+            }
+            let Some((owner, mem)) = e.hash.split_once('#') else { continue };
+            if owner == crate_name {
+                continue;
+            }
+            if let Some(t2) = tail2(mem) {
+                groups.entry((owner.to_string(), t2)).or_default().push(i);
+            }
+        }
+        for idxs in groups.values().filter(|v| v.len() >= 2) {
+            let keys: Vec<String> = idxs.iter().map(|&i| entries[i].hash.clone()).collect();
+            for &i in idxs {
+                for k in &keys {
+                    if *k != entries[i].hash {
+                        let w = format!("dep:{k}");
+                        if !entries[i].unknown_why.contains(&w) {
+                            entries[i].unknown_why.push(w);
+                        }
+                    }
+                }
+                entries[i].unknown_why.sort();
+            }
+        }
+    }
+    // R1293 — one `dep:` token is enough for the `unresolved` class (§3.1: "one raw reason per class"); a union over many
+    // unnamed claimants (rayon's `drive_unindexed`) would otherwise carry dozens. The first, so the bytes are stable.
+    for e in entries.iter_mut().filter(|e| e.interface_union) {
+        let mut seen_dep = false;
+        e.unknown_why.sort();
+        e.unknown_why.retain(|w| !w.starts_with("dep:") || !std::mem::replace(&mut seen_dep, true));
+    }
     entries.sort_by(|a, b| {
         a.func
             .cmp(&b.func)
