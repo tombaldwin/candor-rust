@@ -587,6 +587,10 @@ pub(crate) struct CallCollector<'a> {
     /// SOUNDNESS R1267/R1279/R1281 — the enclosing `match` scrutinee's INSTANTIATION evidence (`scrut_evidence`): its
     /// type's leaf and type arguments, as this scope writes them. `None` when nothing shows them.
     pub(crate) scrut_args: Option<(String, Vec<String>)>,
+    /// SOUNDNESS R1280 — this body is a GENERIC fn with a foreign ABI (`unsafe extern "C" fn write_func<S>(..)`): its
+    /// only entry is a function pointer handed to foreign code (`SSLSetIOFuncs(.., write_func::<S>)`), so no analysed
+    /// call site ever names its instantiation.
+    pub(crate) foreign_abi_generic: bool,
     /// SOUNDNESS R1095 — the method LEAVES this body calls on a receiver no route typed: no concrete type, no
     /// element/slice/dispatch call formed, no disclosure made at the site. Judged after the
     /// fixpoint (`scan.rs`): where a crate-local method of that name (a unit with a `self` receiver) carries a
@@ -9597,6 +9601,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                     }
                     let root = full.split("::").next().unwrap_or("");
+                    // SOUNDNESS R1280 — A STD-TRAIT DISPATCH IN A GENERIC FOREIGN-ABI CALLBACK. A method on a value whose
+                    // type is a parameter bounded by a std trait (`conn.stream.flush()`, `S: std::io::Write`) forms no
+                    // edge and no disclosure anywhere in this engine: the callee reads pure on the premise that its caller
+                    // instantiates `S`. A generic `extern "C"` fn has no such caller — it is instantiated where it is
+                    // NAMED as a value (`write_func::<S>`) and handed to foreign code, which is what runs it — so the
+                    // effect of `S::flush` is attributed nowhere at all. security-framework 3.7.0's
+                    // `secure_transport::write_func` writes to the caller's stream; v0.40.13 covered it only with a
+                    // `dispatch:Log.flush` hedge naming the WRONG trait (a `log` union reached by leaf). The true answer
+                    // is the dispatch this engine cannot resolve: `dispatch:<Trait>.<member>`, with §4's conventionally-
+                    // pure members exempt (the same set `scan.rs`'s `r533_exempt_leaf` exempts). Scoped to that ABI
+                    // shape: the same call in an ordinary generic fn (`fn wp<S: Write>`) is the open, family-wide
+                    // question of std-trait dispatch, not this row.
+                    // `full` with no `::` is a trait leaf no spelling roots anywhere (security-framework imports
+                    // `Write` through `use std::io::prelude::*`): no dependency key is formed for it below either.
+                    if self.foreign_abi_generic
+                        && (matches!(root, "std" | "core" | "alloc") || !full.contains("::"))
+                        && !std_conventionally_pure(&tr, &leaf)
+                    {
+                        if std::env::var_os("CANDOR_R1280_INSTR").is_some() {
+                            eprintln!("R1280HEDGE\t{tr}\t{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.mark_unresolved(format!("dispatch:{}.{leaf}", tr.rsplit("::").next().unwrap_or(&tr)));
+                    }
                     // SOUNDNESS R504 — SPEC §4 ⟨0.39⟩ obligation 1, for an abstraction THIS CRATE DOES
                     // NOT OWN. The emission below already forms the crate-qualified CALL, which answers
                     // "what does the owner's own report say about this member". It does not answer the
@@ -12442,6 +12469,22 @@ fn written_targs(args: &syn::PathArguments) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// SOUNDNESS R1280 — SPEC §4's conventionally-pure std trait members, as `scan.rs`'s `r533_exempt_leaf` spells them.
+fn std_conventionally_pure(tr: &str, leaf: &str) -> bool {
+    match tr.rsplit("::").next().unwrap_or(tr) {
+        "Debug" | "Display" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp" | "UpperExp" => {
+            leaf == "fmt"
+        }
+        "PartialEq" => matches!(leaf, "eq" | "ne"),
+        "Hash" => leaf == "hash",
+        "Ord" => leaf == "cmp",
+        "PartialOrd" => leaf == "partial_cmp",
+        "Clone" => leaf == "clone",
+        "ToString" => leaf == "to_string",
+        _ => false,
+    }
 }
 
 /// SOUNDNESS R1279/R1281 — the ENUM segment a struct-variant pattern names (`Inner` in `Inner::Body { body }`).

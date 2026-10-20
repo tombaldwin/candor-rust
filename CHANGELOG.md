@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a std-trait method on a type parameter inside a GENERIC `extern "C"` callback is disclosed
+  (SOUNDNESS R1280).** `unsafe extern "C" fn write_func<S>(..) where S: Write { .. conn.stream.flush() .. }` is
+  instantiated only where it is named as a value and handed to foreign code, so no analysed caller ever carries the
+  effect of `S::flush`; it read pure. It now carries `Unknown` with `dispatch:Write.flush` (§4's conventionally-pure
+  members exempt). security-framework 3.7.0 `deny Unknown secure_transport::write_func` (chained) v0.40.13 1 (through a
+  wrong-trait `dispatch:Log.flush`) → R1267 0 → **1**; `read_func` (`dispatch:Read.read`) newly 1. An ordinary generic fn
+  is unchanged.
 - ⚠ **candor-scan: a payload typed by a container's generic parameter NAME is mapped by POSITION, and hedged where its
   instantiation is not visible (SOUNDNESS R1279, R1281; narrows the R1267 entry below).** R1267 read the name as the
   scope's same-named bound, which charged `Fs` on code that does no I/O (`Pair<B, Zero>` against `Pair<A, B>`, a field of
