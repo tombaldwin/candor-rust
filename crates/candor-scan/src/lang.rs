@@ -47,6 +47,24 @@ pub(crate) fn is_std_trait_root(root: &str) -> bool {
 /// **17 fresh `Unknown`s** on value-bag (`ValueBag::to_str`, every `try_from`, `internal_visit`). The
 /// trait there is std's `error::Error` wearing a local re-export — precisely what the std carve-out
 /// exists to exclude, sneaking past it under a different spelling.
+/// SOUNDNESS R1319 (glob half) — a trait LEAF that names a std trait in some edition's prelude, or a std trait a
+/// dependency's prelude commonly re-exports (`Future`, `Error`, the operator traits). `collector::glob_unkeyable_dispatch`
+/// refuses these: a bare leaf of this name may be std's own, and std-trait dispatch is SPEC §4's separate question
+/// (R1286 answers its I/O half). Kept as a closed list on purpose — a missing name over-discloses, it cannot silence.
+pub(crate) fn is_std_prelude_trait_leaf(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "Copy" | "Send" | "Sized" | "Sync" | "Unpin" | "Drop" | "Fn" | "FnMut" | "FnOnce" | "AsMut" | "AsRef" | "From"
+            | "Into" | "DoubleEndedIterator" | "ExactSizeIterator" | "Extend" | "IntoIterator" | "Iterator" | "Clone"
+            | "Default" | "Eq" | "Ord" | "PartialEq" | "PartialOrd" | "ToOwned" | "ToString" | "TryFrom" | "TryInto"
+            | "FromIterator" | "Future" | "IntoFuture" | "Debug" | "Display" | "Hash" | "Hasher" | "Borrow" | "BorrowMut"
+            | "Error" | "Any" | "Deref" | "DerefMut" | "Sum" | "Product" | "FromStr" | "Read" | "Write" | "BufRead"
+            | "Seek" | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor" | "Shl"
+            | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" | "RemAssign" | "Index" | "IndexMut"
+            | "RangeBounds" | "Termination" | "Fused" | "FusedIterator"
+    )
+}
+
 pub(crate) fn is_dependency_crate_root(root: &str) -> bool {
     !is_std_trait_root(root) && !matches!(root, "self" | "crate" | "super")
 }
@@ -3390,7 +3408,7 @@ fn block_tail_value(b: &syn::Block) -> Option<&syn::Expr> {
 /// binding (a binding spelled that way is `non_snake_case` and warns), so it cannot shadow anything.
 /// This is the same Upper-initial convention `resolve_recv_type`'s unit-struct arm already uses. A
 /// SCREAMING_SNAKE const is still treated as a binding here, which only declines.
-fn pat_binds_ident(pat: &syn::Pat) -> bool {
+pub(crate) fn pat_binds_ident(pat: &syn::Pat) -> bool {
     use syn::Pat;
     match pat {
         Pat::Ident(id) => {
@@ -3563,6 +3581,43 @@ pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
             names.all(|n| n.as_deref() == Some(first.as_str())).then_some(first)
         }
         _ => None,
+    }
+}
+
+/// SOUNDNESS R1323 (rustagent-0415) — std's `Some(x)`/`Ok(x)` and nothing wider: the patterns whose payload is exactly
+/// the value `.unwrap()` on the scrutinee yields. `Bound::Included`/`Excluded` (which `std_some_ok_pat` admits) are
+/// not, so they are refused here.
+pub(crate) fn some_ok_unwrap_pat(pat: &syn::Pat) -> bool {
+    if !std_some_ok_pat(pat) {
+        return false;
+    }
+    match pat {
+        syn::Pat::Reference(r) => some_ok_unwrap_pat(&r.pat),
+        syn::Pat::Paren(p) => some_ok_unwrap_pat(&p.pat),
+        syn::Pat::Or(o) => o.cases.iter().all(some_ok_unwrap_pat),
+        syn::Pat::TupleStruct(ts) => ts.path.segments.last().is_some_and(|s| s.ident == "Some" || s.ident == "Ok"),
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R1323 (rustagent-0415) — an arm body that never yields a value to the enclosing expression: `return`,
+/// `continue`, `break`, a `panic!`-family macro, or a block whose LAST statement is one of those. Conservative: anything
+/// else (including a call to a `-> !` fn, which this cannot see) is a value arm, which only declines.
+pub(crate) fn arm_body_diverges(e: &syn::Expr) -> bool {
+    let mac_diverges = |m: &syn::Macro| {
+        m.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "panic" | "unreachable" | "todo" | "unimplemented"))
+    };
+    match e {
+        syn::Expr::Return(_) | syn::Expr::Continue(_) | syn::Expr::Break(_) => true,
+        syn::Expr::Paren(p) => arm_body_diverges(&p.expr),
+        syn::Expr::Group(g) => arm_body_diverges(&g.expr),
+        syn::Expr::Macro(m) => mac_diverges(&m.mac),
+        syn::Expr::Block(b) if b.label.is_none() => match b.block.stmts.last() {
+            Some(syn::Stmt::Expr(e, _)) => arm_body_diverges(e),
+            Some(syn::Stmt::Macro(m)) => mac_diverges(&m.mac),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -12693,6 +12748,36 @@ pub(crate) fn is_driving_io_member(tr: &str, leaf: &str) -> bool {
         "Seek" => matches!(leaf, "seek" | "rewind" | "stream_position" | "stream_len" | "seek_relative"),
         _ => false,
     }
+}
+
+/// SOUNDNESS R1325 (rustagent-0415) — EVERY member std declares on `Read`/`Write`/`BufRead`/`Seek` (stable and the
+/// unstable names a nightly crate can call), not only the driving ones. `collector::blanket_ext_over_std_io` treats a
+/// leaf absent from this list as some OTHER trait's member, so a name missing here would mis-route a std call: the
+/// list is closed on purpose and errs toward naming too much.
+pub(crate) fn std_io_trait_member(tr: &str, leaf: &str) -> bool {
+    let common = matches!(leaf, "by_ref");
+    common
+        || match tr {
+            "Read" => matches!(
+                leaf,
+                "read" | "read_vectored" | "is_read_vectored" | "read_to_end" | "read_to_string" | "read_exact"
+                    | "read_buf" | "read_buf_exact" | "bytes" | "chain" | "take"
+            ),
+            "Write" => matches!(
+                leaf,
+                "write" | "write_vectored" | "is_write_vectored" | "flush" | "write_all" | "write_all_vectored"
+                    | "write_fmt"
+            ),
+            "BufRead" => {
+                matches!(
+                    leaf,
+                    "fill_buf" | "consume" | "has_data_left" | "read_until" | "skip_until" | "read_line" | "split"
+                        | "lines"
+                ) || std_io_trait_member("Read", leaf)
+            }
+            "Seek" => matches!(leaf, "seek" | "rewind" | "stream_len" | "stream_position" | "seek_relative"),
+            _ => true,
+        }
 }
 
 /// SOUNDNESS R1295 — the std I/O handle inside a written std buffering wrapper type (`&mut BufReader<File>` ->

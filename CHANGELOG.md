@@ -96,6 +96,22 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   caller` exit 1 vs **0** (§3.1 byte-equality). The reason is now attached per dependency ENTRY when the dependency
   classified nothing — the registered §4 kinds, projecting to `unresolved`, as candor-swift and candor-java do —
   and the report route now answers **1**. The scan route does not move; reports gain the token on such callers.
+- ⚠ **candor-scan: four dispatch sites that published no key, no edge and no disclosure now do (SOUNDNESS R1319,
+  R1323, R1325, R1322).** Each was covered in v0.40.14 only by the wrong-reason `ambiguous:` hedge R1265 removes. (1) A
+  generic FIELD under a QUALIFIED impl bound (`impl<R: gimli::Reader> FunctionName<R> { self.name.to_string_lossy() }`)
+  now mints the obligation-1 key and `invisible:[owner]` — a RESOLUTION (addr2line `FunctionName::demangle`). (2) A std
+  `Some(x)`/`Ok(x)` payload over a METHOD return is typed as that return's `unwrap()` — `if let`, `while let`, match
+  arms, and `let x = match e { Some(x) => x, None => return }` — a RESOLUTION (tokio-timer 0.2.13 `Entry::register`
+  and 16 callers now reach `Inner::queue` and its `tokio_executor#park::Unpark::unpark` key; R1095-floor rows over a
+  concretely effectful candidate become the concrete effect). (3) A local blanket extension of a std I/O trait called on
+  a receiver bounded only by that trait (`impl<R: BufRead> XmlSource for R`, `self.reader.read_bytes_until(..)`) now
+  fans out to that trait's implementors — a RESOLUTION reaching the existing blanket hedge (quick-xml 0.23.1
+  `Deserializer::deserialize_bool`). (4) HEDGES with the true reason `dispatch:<Trait>.<member>`: a bound brought in only
+  by a dependency glob, whose key cannot be spelled (indexmap 1.8.2 rayon `collect`); a UFCS `io::Write::write_all(self,
+  ..)` in a blanket impl whose own trait declares the same member (R1322); and R1095's untyped-receiver floor now also
+  discloses over an `Unknown`-only candidate that is a member of a local BLANKET trait (diesel 2.3.10
+  `metadata_lookup::lookup_type` → `RunQueryDsl::first`). Executed fixtures: chained `deny Fs` 0→**1** on the field and
+  payload forms, `deny Unknown` 0→**1** on the glob, blanket and UFCS forms. Cache schema rev131.
 
 ## [0.40.14] — 2026-10-21
 

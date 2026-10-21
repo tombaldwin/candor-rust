@@ -6315,9 +6315,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // impls are themselves `Unknown`-only (`hash`, `clone`, `as_ref`, `to_tokens` over a generic
             // `Hasher`/`TokenStream`); a concrete-effect candidate hedges 672. The residual is stated: an
             // untyped call to a crate method whose ONLY effect is `Unknown` stays undisclosed at the caller.
+            // SOUNDNESS R1095 residual, narrowed (rustagent-0415) — …EXCEPT a member of a LOCAL trait with a BLANKET
+            // impl (`impl<T, Conn> RunQueryDsl<Conn> for T {}`, diesel 2.3.10). Its default body is callable on EVERY
+            // receiver with the trait in scope, so for an untyped receiver it is not one guess among std-trait twins but
+            // the body that runs unless the real type shadows it — and the declined form's cost came from the std-trait
+            // names, which no local blanket trait declares. Measured silence: diesel's
+            // `pg::metadata_lookup::lookup_type` runs `.first(conn)` (a SQL round trip through the caller's
+            // connection) on a query-builder chain no route types, its only candidate `RunQueryDsl::first` is
+            // `Unknown`-only, and the caller read ABSENT; `T::lookup_type` above it lost its only cover when R1265
+            // removed a false `ambiguous:` hedge. `CANDOR_R1095B_OFF=1` restores the concrete-only floor.
+            let blanket_unknown = |u: &String| {
+                std::env::var_os("CANDOR_R1095B_OFF").is_none()
+                    && inferred.get(u).is_some_and(|e| e.contains("Unknown"))
+                    && u.rsplit("::").nth(1).is_some_and(|tr| merged.blanket_methods.contains_key(&crate::model::blanket_trait_key(tr)))
+            };
             let impure: Vec<&String> = cands
                 .iter()
-                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")))
+                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")) || blanket_unknown(u))
                 .collect();
             if impure.is_empty() {
                 continue;

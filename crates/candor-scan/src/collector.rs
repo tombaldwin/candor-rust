@@ -1626,13 +1626,25 @@ impl<'a> CallCollector<'a> {
     /// DRIVING member of that trait, and the impl's own trait does not itself declare the member (then `self.m()` is
     /// the blanket's own sibling, which the typed arm already reaches).
     fn self_io_receiver(&mut self, receiver: &syn::Expr, leaf: &str) {
+        self.self_io_receiver_spelled(receiver, leaf, false)
+    }
+
+    /// `explicit`: the call NAMES the std trait (`std::io::Write::write_all(self, b)`, the UFCS spelling), so the impl's
+    /// own trait declaring a same-named member cannot be what runs and the R1320 refusal below does not apply.
+    /// SOUNDNESS R1322 (second half, rustagent-0415): `pub trait Sink { fn write_all(&mut self, b: &[u8]); } impl<T:
+    /// io::Write> Sink for T { fn write_all(&mut self, b: &[u8]) { let _ = io::Write::write_all(self, b); } }` — the
+    /// refusal, written for the METHOD spelling (where `self.write_all(b)` would be `Sink`'s own member), also swallowed
+    /// the UFCS spelling, so the blanket body read pure and `m::handle(f: &mut File) { f.write_all(b"h") }` was ABSENT
+    /// over a program that wrote the byte (EXECUTED rustagent-0415 `fx/r1322`). `CANDOR_R1322U_OFF=1` restores it.
+    fn self_io_receiver_spelled(&mut self, receiver: &syn::Expr, leaf: &str, explicit: bool) {
         let syn::Expr::Path(p) = peel_value(receiver) else { return };
         if !p.path.is_ident("self") {
             return;
         }
         let Some(g) = self.vars.get("self").cloned() else { return };
         let own = self.uses.get(crate::decls::IMPL_TRAIT_KEY).cloned();
-        if own.as_deref().is_some_and(|o| self.local_traits.get(o).is_some_and(|lt| lt.methods.contains(leaf))) {
+        let explicit = explicit && std::env::var_os("CANDOR_R1322U_OFF").is_none();
+        if !explicit && own.as_deref().is_some_and(|o| self.local_traits.get(o).is_some_and(|lt| lt.methods.contains(leaf))) {
             return;
         }
         // SOUNDNESS (rustagent-d, sibling of R1320) — `self` in a LOCAL trait's impl FOR a std I/O handle (`impl Flush3 for
@@ -3632,6 +3644,34 @@ impl<'a> CallCollector<'a> {
             // SOUNDNESS (v052 audit, `fxm` e1/e1d) — a VALUE macro (`let x = make!()`): the invocation expanded
             // (`mbe::expand_invocation`, under the same once-defined rule as the R1144 walk) and its value typed.
             syn::Expr::Macro(mm) => self.type_of_macro_value(&mm.mac),
+            // SOUNDNESS R1323 (rustagent-0415) — `match e { Some(x) => x, None => return }`: the payload arm's value is
+            // `e.unwrap()`'s (`payload_via_unwrap`), a DIVERGING arm yields nothing, and every other arm must type alike.
+            // `merge_value_exprs` drops an ident-binding arm (its name is unbound outside the arm) and then refuses on the
+            // `return`, so the pre-1.65 let-else idiom left the binding untyped. An arm that binds anything else, or a
+            // value arm that does not type, still refuses the whole match.
+            syn::Expr::Match(m)
+                if std::env::var_os("CANDOR_R1323_OFF").is_none()
+                    && m.arms.iter().any(|a| crate::lang::some_ok_unwrap_pat(&a.pat) && arm_yields_own_binding(a)) =>
+            {
+                let mut found: Option<String> = None;
+                for a in &m.arms {
+                    let t = if crate::lang::some_ok_unwrap_pat(&a.pat) && arm_yields_own_binding(a) {
+                        self.payload_via_unwrap(&a.pat, &m.expr)?
+                    } else if crate::lang::arm_body_diverges(&a.body) {
+                        continue;
+                    } else if crate::lang::pat_binds_ident(&a.pat) {
+                        return None;
+                    } else {
+                        self.type_of(&a.body)?
+                    };
+                    match &found {
+                        None => found = Some(t),
+                        Some(prev) if *prev == t => {}
+                        Some(_) => return None,
+                    }
+                }
+                found
+            }
             syn::Expr::If(_) | syn::Expr::Match(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) => {
                 let mut found: Option<String> = None;
                 for b in crate::lang::merge_value_exprs(expr)? {
@@ -4517,7 +4557,41 @@ impl<'a> CallCollector<'a> {
                 eprintln!("R946PAYLOAD\t{t}");
             }
         }
-        t
+        t.or_else(|| self.payload_via_unwrap(pat, expr))
+    }
+
+    /// SOUNDNESS R1323 (rustagent-0415) — the value a std `Some(x)`/`Ok(x)` pattern binds over the scrutinee `e` IS the
+    /// value `e.unwrap()` yields, so the strict typer's answer for that synthesised call is the payload's type. Every
+    /// route above types a payload from a CONTAINER or a CONSTRUCTION; none types it from a METHOD's return, so
+    /// tokio-timer 0.2.13's `let inner = match handle.inner() { Some(inner) => inner, None => return };
+    /// inner.queue(me)` (`fn inner(&self) -> Option<Arc<Inner>>`) left `inner` untyped while the identical
+    /// `handle.inner().unwrap().queue(me)` resolved. Untyped, the call fell to R1095's floor, which discloses only over
+    /// a candidate carrying a CONCRETE effect — and `Inner::queue` is pure-but-DISPATCHING (`dispatchesOn`
+    /// `tokio_executor#park::Unpark::unpark`), so the site formed no edge, no key and no disclosure and the obligation-1
+    /// key never reached 18 callers. A RESOLUTION, not a hedge: the edge is the one `unwrap()` already forms.
+    ///
+    /// `type_of_method`, never `resolve_recv_type`: the strict typer answers a method call only from a fact the
+    /// receiver's own impl declares (VEIN B's mysql_async lesson). Std `Some`/`Ok` only (`Bound::Included` is not an
+    /// unwrap). Asked LAST, so it can only add a type where every other route answered nothing.
+    /// `CANDOR_R1323_OFF=1` restores the old reading.
+    fn payload_via_unwrap(&self, pat: &syn::Pat, e: &syn::Expr) -> Option<String> {
+        if std::env::var_os("CANDOR_R1323_OFF").is_some() || !crate::lang::some_ok_unwrap_pat(pat) {
+            return None;
+        }
+        let mc = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(e.clone()),
+            dot_token: Default::default(),
+            method: syn::Ident::new("unwrap", proc_macro2::Span::call_site()),
+            turbofish: None,
+            paren_token: Default::default(),
+            args: Default::default(),
+        };
+        let t = self.type_of_method(&mc)?;
+        if crate::lang::reach_debug() {
+            eprintln!("R1323PAYLOAD\t{t}"); // §E1 REACH COUNTER
+        }
+        Some(t)
     }
 
     /// SOUNDNESS R1023 — the `Bound` a `Some(x)`/`Ok(x)` pattern installs for a payload answer `t` (from
@@ -6702,6 +6776,83 @@ impl<'a> CallCollector<'a> {
     /// REFUSES rather than picks when two local traits qualify, and when the trait NAME is itself declared
     /// twice in this crate (`count > 1`) — the same "never guess between traits" rule
     /// `dispatch_calls_for_trait_method` applies to an ambiguous local leaf.
+    /// SOUNDNESS R1319 (glob half, rustagent-0415) — is `x.leaf()` a dispatch on a NON-local bound `tr_leaf` whose
+    /// obligation-1 key cannot be spelled because the only thing that brings the bound into scope is a DEPENDENCY's
+    /// glob import? Every gate is a reason the bare leaf could be something this rule must not name:
+    ///  * `full` still has no `::` — every other spelling route (`recv_trait_full`) answered nothing;
+    ///  * the receiver is a binding or a field, never a method chain or a call: `i.into_par_iter().fold(..)` carries
+    ///    `IntoParallelIterator` only because the walk passes through the link (R551's chain-drift gate), and a call's
+    ///    bound is its return type's, instantiated at the site;
+    ///  * the leaf is not a std prelude / std-re-exported trait (a dependency prelude may re-export `Future`,
+    ///    `Iterator`, …; those are §4's own question, not this rule's) and the member is not conventionally pure;
+    ///  * the scope holds a glob whose ROOT is a dependency crate — without one, a bare foreign leaf has some other
+    ///    cause and keeps today's answer.
+    ///
+    /// `CANDOR_R1319G_OFF=1` disables it.
+    fn glob_unkeyable_dispatch(&self, receiver: &syn::Expr, full: &str, tr_leaf: &str, leaf: &str) -> bool {
+        if full.contains("::") || std::env::var_os("CANDOR_R1319G_OFF").is_some() {
+            return false;
+        }
+        // A BINDING or a FIELD only. A CALL's bound is its RETURN type's (`mlaf<T: MulAdd>(..) -> T` then `.max(..)` in
+        // moxcms, under `use pxfm::*`): the call site instantiates `T` concretely, and `max` is not `MulAdd`'s member —
+        // the first corpus probe of this rule named exactly that false `dispatch:MulAdd.max`.
+        if !matches!(peel_value(receiver), syn::Expr::Path(_) | syn::Expr::Field(_)) {
+            return false;
+        }
+        if std_conventionally_pure(tr_leaf, leaf) || crate::lang::is_std_prelude_trait_leaf(tr_leaf) {
+            return false;
+        }
+        let dep_glob = self.uses.get(crate::lang::GLOB_KEY).is_some_and(|v| {
+            v.split('\u{1}').any(|g| {
+                let g = crate::lang::expand(g, &self.uses);
+                let root = g.split("::").next().unwrap_or("");
+                !root.is_empty() && crate::lang::is_dependency_crate_root(root)
+            })
+        });
+        // ONE such bound on the receiver, or no reason can be named truly: under `T: Foo + Bar`, both unkeyable, `x.m()`
+        // is a member of one of them and this cannot tell which (the residual stays silent rather than false).
+        dep_glob
+            && self
+                .resolve_recv_traits(receiver)
+                .iter()
+                .filter(|t| {
+                    let tl = t.rsplit("::").next().unwrap_or(t);
+                    self.local_traits.get(t.as_str()).is_none()
+                        && !crate::lang::is_std_prelude_trait_leaf(tl)
+                        && !self.recv_trait_full(receiver, t, leaf).contains("::")
+                })
+                .count()
+                == 1
+    }
+
+    /// SOUNDNESS R1325 (rustagent-0415) — the LOCAL trait whose member `x.leaf()` must be, when `x` is bounded by a std
+    /// I/O trait (`full`/`tr_leaf`) that does NOT declare `leaf`. Gates, each a way the answer could be another trait's:
+    ///  * the bound is std's own `Read`/`Write`/`BufRead`/`Seek` (`lang::is_std_io_trait`), and `leaf` is none of the
+    ///    members std declares on it (`lang::std_io_trait_member`, the complete stable list — a member it names is std's);
+    ///  * the receiver is DIRECT (a method chain carries the bound by walk-through, R551's chain-drift gate);
+    ///  * EXACTLY ONE local trait declares `leaf` (count 1, no second same-named trait): with the receiver bounded by
+    ///    nothing else, the call compiles only through that trait's blanket impl, so naming it guesses nothing.
+    ///
+    /// `CANDOR_R1325_OFF=1` disables it.
+    fn blanket_ext_over_std_io(&self, receiver: &syn::Expr, full: &str, tr_leaf: &str, leaf: &str) -> Option<String> {
+        if std::env::var_os("CANDOR_R1325_OFF").is_some() || !crate::lang::is_std_io_trait(full, tr_leaf) {
+            return None;
+        }
+        if crate::lang::std_io_trait_member(tr_leaf, leaf) || matches!(peel_recv(receiver), syn::Expr::MethodCall(_)) {
+            return None;
+        }
+        let mut found: Option<&String> = None;
+        for (name, lt) in self.local_traits.iter() {
+            if lt.methods.contains(leaf) {
+                if found.is_some() || lt.count != 1 {
+                    return None; // two candidates, or one leaf declared twice — refuse, never pick
+                }
+                found = Some(name);
+            }
+        }
+        found.cloned()
+    }
+
     fn ext_trait_declaring(&self, tr: &str, leaf: &str) -> Option<String> {
         let mut found: Option<&String> = None;
         for (name, lt) in self.local_traits.iter() {
@@ -7178,9 +7329,28 @@ impl<'a> CallCollector<'a> {
             .and_then(|m| m.get(tr))
             .map(|q| q.as_str())
             .filter(|q| !q.is_empty());   // a tombstone is "unknown", never a path
+        // SOUNDNESS R1319 (generic-FIELD half, rustagent-0415) — …else the ENCLOSING IMPL's written bound. A receiver
+        // that is a FIELD typed by the impl's parameter (`impl<R: gimli::Reader> FunctionName<R> { fn raw_name(&self)
+        // { self.name.to_string_lossy() } }`, addr2line) is no fn parameter, so neither table above can answer, and a
+        // bound written QUALIFIED with no `use` of the leaf left `full` the bare `"Reader"`: no obligation-1 key, no
+        // `dispatchesOn`, no `invisible` — the row read ABSENT and a chained consumer supplying an effectful
+        // `Reader` was silent (EXECUTED rustagent-0415 `fx/gf` `run_field` writes; `deny Fs` 0 in v0.40.14 and HEAD).
+        // `impl_trait_quals` is the same leaf-keyed, tombstoning index `is_io_bound` already reads for this impl
+        // (two crates for one leaf in one impl read as absent), so it can only SUPPLY a spelling where the fn's own
+        // signature has none, never displace one. `CANDOR_R1319F_OFF=1` restores the old reading.
+        let impl_written = || {
+            if std::env::var_os("CANDOR_R1319F_OFF").is_some() {
+                return None;
+            }
+            let q = self.impl_trait_quals.get(tr).map(|q| q.as_str()).filter(|q| !q.is_empty())?;
+            if crate::lang::reach_debug() {
+                eprintln!("R1319FIELD\t{q}::{leaf}"); // §E1 REACH COUNTER
+            }
+            Some(q)
+        };
         let written = per_param.or_else(|| {
             self.trait_quals.get(tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
-        }).unwrap_or(tr);
+        }).or_else(impl_written).unwrap_or(tr);
         let mut full = crate::lang::expand(written, &self.uses);
         // SOUNDNESS R577 — …AND WHEN THAT PRODUCES A BARE LEAF, THE CRATE'S OWN WRITTEN
         // SPELLING, because three of the four declaration sites cannot carry it themselves.
@@ -7543,7 +7713,7 @@ impl<'a> CallCollector<'a> {
         }
         let Some(first) = args.first() else { return };
         let before = self.unresolved_why.len();
-        self.self_io_receiver(first, m);
+        self.self_io_receiver_spelled(first, m, true);
         if self.unresolved_why.len() != before || self.resolve_recv_type(first).is_some() {
             return;
         }
@@ -10055,6 +10225,39 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             eprintln!("R1286HEDGE\t{tr_leaf}\t{leaf}"); // §E1 REACH COUNTER
                         }
                         self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
+                    } else if self.glob_unkeyable_dispatch(&node.receiver, &full, tr_leaf, &leaf) {
+                        // SOUNDNESS R1319 (glob half, rustagent-0415) — A DISPATCH WHOSE KEY CANNOT BE SPELLED. A bound
+                        // brought in by a DEPENDENCY's glob (`use rayon::prelude::*; fn collect<I: IntoParallelIterator>(i: I)
+                        // { i.into_par_iter() .. }`, indexmap 1.8.2) leaves `full` the bare leaf: the glob names the crate
+                        // but not the module the trait is DEFINED in, so obligation 1's key (spelled in the owner's own
+                        // namespace, SPEC §4 ⟨0.39⟩) cannot be formed — and every branch below is gated on `::`, so the site
+                        // published nothing at all: no key, no `invisible`, no disclosure (EXECUTED rustagent-0415 `fx/gf`
+                        // `run_glob`: the consumer's `IntoP::into_p` writes; `deny Fs` 0 in v0.40.14 and HEAD). A key spelled
+                        // through the glob (`rayon#prelude::IntoParallelIterator::..`) would be a second spelling that joins
+                        // nothing. The three-row rule's answer for an unformable key is the disclosure, so this is a HEDGE
+                        // with the true reason `dispatch:<Trait>.<member>`. See `glob_unkeyable_dispatch` for the gates.
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1319GLOB\t{tr_leaf}\t{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
+                    }
+                    // SOUNDNESS R1325 (rustagent-0415) — A LOCAL BLANKET EXTENSION OF A STD I/O TRAIT, CALLED ON A
+                    // RECEIVER BOUND ONLY BY THE STD TRAIT. quick-xml 0.23.1: `impl<'b, R: BufRead> XmlSource<'b, ..> for R`
+                    // and `impl<R: BufRead> Reader<R> { .. self.reader.read_bytes_until(..) .. }`. The receiver's only bound
+                    // is `BufRead`, so this loop sees `std::io::BufRead::read_bytes_until` — a member BufRead does not
+                    // declare — and every branch is std-gated: no call, no key, no disclosure. The edge to the blanket body
+                    // (which a426bc7 hedges `dispatch:BufRead.consume`) was missing, so `Deserializer::deserialize_bool`
+                    // read pure over a body that reads the caller's file (EXECUTED rustagent-0415 `fx/gf` `run_blanket2`
+                    // reads 600 bytes through `Rdr::ev`; `deny Unknown`/`deny Fs` 0 in v0.40.14 and HEAD).
+                    // The member can only be the local trait's: the receiver is bounded by nothing else that declares it,
+                    // so it compiles only through a blanket impl in scope. `blanket_ext_over_std_io` holds the gates.
+                    // A RESOLUTION: the bounded fan-out over that trait's own implementors, exactly as a receiver bounded
+                    // by the local trait itself would get.
+                    if let Some(lt) = self.blanket_ext_over_std_io(&node.receiver, &full, tr_leaf, &leaf) {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1325EXT\t{tr_leaf}\t{lt}::{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.dispatch_calls_for_trait_method(&lt, &leaf, str_arg.clone());
                     }
                     // SOUNDNESS R504 — SPEC §4 ⟨0.39⟩ obligation 1, for an abstraction THIS CRATE DOES
                     // NOT OWN. The emission below already forms the crate-qualified CALL, which answers
@@ -12902,6 +13105,24 @@ fn written_targs(args: &syn::PathArguments) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// SOUNDNESS R1323 (rustagent-0415) — a `Some(x) => x` arm: the body is exactly the pattern's own single binding.
+fn arm_yields_own_binding(a: &syn::Arm) -> bool {
+    let Some(b) = crate::lang::some_ok_binding(&a.pat) else { return false };
+    let mut body = &*a.body;
+    loop {
+        body = match body {
+            syn::Expr::Paren(p) => &p.expr,
+            syn::Expr::Group(g) => &g.expr,
+            syn::Expr::Block(bl) if bl.label.is_none() && bl.block.stmts.len() == 1 => match &bl.block.stmts[0] {
+                syn::Stmt::Expr(e, None) => e,
+                _ => return false,
+            },
+            _ => break,
+        };
+    }
+    matches!(body, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(&b))
 }
 
 /// SOUNDNESS R1280 — SPEC §4's conventionally-pure std trait members, as `scan.rs`'s `r533_exempt_leaf` spells them.

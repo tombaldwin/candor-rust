@@ -4759,10 +4759,13 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                 "R577 (closure half): …and the SIGNATURE's crate must not be published for a name the \
                  closure has rebound — that is a dispatch key naming a crate this body never reaches, \
                  which is what HEAD emitted:\n{body}");
-        assert!(floor_only(&v, "globbed::via_field_globbed"),
+        // SOUNDNESS R1319 glob half (rustagent-0415): the globbed scope still mints no KEY (no spelling guessed), but the
+        // site is no longer silent — the bound is known and the key unformable, so it discloses the true dispatch.
+        assert!(disp("globbed::via_field_globbed").is_empty()
+                    && why_of(&v, "globbed::via_field_globbed").iter().any(|w| w == "dispatch:Q.fetch"),
                 "R577 CARVE-OUT (glob): `use alpha::*;` can bind a leaf to a crate nothing spells, so no \
-                 collision exists for the tombstone to see. A globbed scope keeps today's answer — the \
-                 status quo, and the residual this fix states rather than hides:\n{body}");
+                 collision exists for the tombstone to see — no key is guessed; R1319's glob half discloses \
+                 `dispatch:Q.fetch` instead of the old silence:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -8253,6 +8256,43 @@ pub fn g_std<T: Default>() -> T { T::default() }\n";
         assert!(dis("g_ext_static").contains("extd#ExtS::mk"), "R1319 static key:\n{v:#}");
         assert!(!v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "g_std" && !f["dispatchesOn"].is_null()),
             "R1319 a std bound mints nothing:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1319 generic-field + glob halves, R1323, R1325 (rustagent-0415) — four receiver forms that published no
+    /// key, no edge and no disclosure (EXECUTED rustagent-0415 `fx/gf`, chained `deny Fs` 0 in v0.40.14): a generic FIELD
+    /// under a QUALIFIED impl bound, a bound brought in only by a dependency glob, a std `Some` payload over a METHOD
+    /// return (match with a diverging arm, and if-let), and a local blanket extension of `BufRead` called on a generic
+    /// field bounded only by `BufRead`.
+    #[test]
+    fn r1319_r1323_r1325_receiver_forms_that_published_nothing_now_key_edge_or_disclose() {
+        let src = "\
+use std::io::BufRead;\n\
+use std::sync::{Arc, Weak};\n\
+pub struct FnName<R: extd::Rd> { pub name: R }\n\
+impl<R: extd::Rd> FnName<R> { pub fn raw(&self) -> String { self.name.lossy() } }\n\
+pub mod g { use extd::prelude::*; pub fn col<I: IntoP>(i: I) -> usize { i.into_p() }\n\
+    pub fn chain<I: IntoP>(i: I) -> usize { i.into_p().count_ones() as usize } }\n\
+pub struct Inner { n: u8 }\n\
+impl Inner { fn queue(&self) { std::fs::write(\"/tmp/x\", [self.n]).unwrap(); } }\n\
+pub struct H { inner: Weak<Inner> }\n\
+impl H {\n\
+    fn inner(&self) -> Option<Arc<Inner>> { self.inner.upgrade() }\n\
+    pub fn m_match(&self) { let inner = match self.inner() { Some(inner) => inner, None => return }; inner.queue(); }\n\
+    pub fn m_iflet(&self) { if let Some(i) = self.inner() { i.queue(); } }\n\
+}\n\
+pub trait Src { fn rb(&mut self) -> usize; }\n\
+impl<R: BufRead> Src for R { fn rb(&mut self) -> usize { let n = self.fill_buf().map(|b| b.len()).unwrap_or(0); self.consume(n); n } }\n\
+pub struct Rdr<R: BufRead> { reader: R }\n\
+impl<R: BufRead> Rdr<R> { pub fn ev(&mut self) -> usize { self.reader.rb() } }\n";
+        let v = scan_fixture_raw("r1319forms", src, "extd = \"1\"", "");
+        assert!(fn_entry(&v, "FnName::raw")["dispatchesOn"].to_string().contains("extd#Rd::lossy"), "R1319 field key:\n{v:#}");
+        assert!(fn_entry(&v, "g::col")["unknownWhy"].to_string().contains("dispatch:IntoP.into_p"), "R1319 glob hedge:\n{v:#}");
+        for f in ["H::m_match", "H::m_iflet"] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()), "R1323 `{f}` typed payload edge:\n{v:#}");
+        }
+        assert!(fn_entry(&v, "Rdr::ev")["calls"].to_string().contains("R::rb")
+                && fixture_effects(&v, "Rdr::ev").contains(&"Unknown".to_string()), "R1325 blanket edge:\n{v:#}");
+        assert!(!fn_entry(&v, "g::chain")["unknownWhy"].to_string().contains("count_ones"), "R1319 glob: no chain-link reason:\n{v:#}");
     }
 
     /// SOUNDNESS R1321 (rustagent-d) — false reasons. rustc-serialize's `writer: &'a mut (fmt::Write + 'a)` field, in a file
@@ -18121,7 +18161,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18132,7 +18172,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev130/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev131/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
