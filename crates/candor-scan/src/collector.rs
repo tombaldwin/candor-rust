@@ -4588,6 +4588,42 @@ impl<'a> CallCollector<'a> {
             args: Default::default(),
         };
         let t = self.type_of_method(&mc)?;
+        // NEVER A WRAPPER OR A PRIMITIVE. `type_of_method`'s last arm answers `unwrap` with the receiver's own type,
+        // which is right where the receiver's record is already the payload (`fn inner() -> Option<Arc<Inner>>` is
+        // recorded as `Inner`) and WRONG where the receiver typed as the bare wrapper: walkdir 2.4.0's `match *it {
+        // Ok(ref mut rd) => rd.next() .. }` over `it: Result<ReadDir, ..>` typed `rd` as `std::result::Result`, which
+        // took the site off R1095's floor and left `DirList::next` ABSENT over a `readdir` (the first corpus A/B of
+        // this change, `deny Unknown` 1 -> 0). A wrapper or primitive answer is refused, so the old reading stands.
+        let leaf = t.rsplit("::").next().unwrap_or(&t);
+        if matches!(leaf, "Option" | "Result" | "IoResult" | "Box" | "Arc" | "Rc" | "Cow" | "Pin" | "Vec" | "String")
+            || crate::lang::is_value_wrapper(leaf)
+            || crate::lang::is_sequence_container(leaf)
+            || crate::lang::is_map_container(leaf)
+            || t.contains('<')
+            || matches!(leaf, "bool" | "char" | "str" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16"
+                | "i32" | "i64" | "i128" | "isize" | "f32" | "f64" | "()")
+            || !leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            return None;
+        }
+        // …AND ONLY A NOMINAL TYPE THIS CRATE DECLARES, never one reached through a generic. The same first A/B found the
+        // strict typer answering `connecting.await` (hickory-resolver 0.26, `connecting: P::FutureConn`) with the FUTURE
+        // itself, so `conn.send(..)` typed to `P::FutureConn` and lost the floor's disclosure over a DNS round trip. A
+        // payload typed to a dependency or std type, a generic parameter or a projection (`T`, `L::Handle`, `T::O`)
+        // keeps the old reading; the population this exists for (tokio-timer's `Arc<Inner>`) is crate-local by
+        // construction, and so is every candidate R1095's floor can name.
+        let head = t.split("::").next().unwrap_or(&t);
+        let generic_head = head == "Self"
+            || self.generic_bounds.contains_key(head)
+            || self.impl_generic_bounds.contains_key(head)
+            || (head.len() == 1 && t.len() == 1);
+        // A crate-relative path (`timer::Inner`, `crate::x::Y`) or a bare leaf; never a std or MANIFEST-dependency root.
+        let local_root = !t.contains("::")
+            || matches!(head, "crate" | "self" | "super")
+            || (!crate::lang::is_std_trait_root(head) && !self.is_dependency_type(&t));
+        if generic_head || !local_root || !self.returns.contains_key(&crate::model::nominal_key(leaf)) {
+            return None;
+        }
         if crate::lang::reach_debug() {
             eprintln!("R1323PAYLOAD\t{t}"); // §E1 REACH COUNTER
         }
@@ -6776,6 +6812,26 @@ impl<'a> CallCollector<'a> {
     /// REFUSES rather than picks when two local traits qualify, and when the trait NAME is itself declared
     /// twice in this crate (`count > 1`) — the same "never guess between traits" rule
     /// `dispatch_calls_for_trait_method` applies to an ambiguous local leaf.
+    /// SOUNDNESS R1319 (generic-field half, rustagent-0415) — did `recv_trait_full` spell `tr` ONLY from the enclosing
+    /// impl's written bound (neither the receiver parameter's own bound nor the fn signature answered)? Mirrors its order.
+    fn trait_spelled_by_impl_only(&self, receiver: &syn::Expr, tr: &str) -> bool {
+        if std::env::var_os("CANDOR_R1319F_OFF").is_some() {
+            return false;
+        }
+        let recv_param = match receiver {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            syn::Expr::Reference(r) => match &*r.expr {
+                syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let nonempty = |q: Option<&String>| q.is_some_and(|q| !q.is_empty());
+        !nonempty(recv_param.as_ref().and_then(|n| self.trait_quals_by_param.get(n)).and_then(|m| m.get(tr)))
+            && !nonempty(self.trait_quals.get(tr))
+            && nonempty(self.impl_trait_quals.get(tr))
+    }
+
     /// SOUNDNESS R1319 (glob half, rustagent-0415) — is `x.leaf()` a dispatch on a NON-local bound `tr_leaf` whose
     /// obligation-1 key cannot be spelled because the only thing that brings the bound into scope is a DEPENDENCY's
     /// glob import? Every gate is a reason the bare leaf could be something this rule must not name:
@@ -10365,7 +10421,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                 eprintln!("R504HIT {owner}");
                             }
-                            self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
+                            // SOUNDNESS R1319 (generic-field half, rustagent-0415) — R981's case, reached by the new
+                            // spelling. Where only the enclosing impl's bound named the trait (a generic FIELD:
+                            // aws-smithy-http-client's `impl<I: tower::Service<Uri>> Service<Uri> for ConnectTimeout<I>
+                            // { .. self.inner.call(req) .. }`), the site used to be untyped and R1095's floor disclosed
+                            // over this crate's OWN implementors (`Connector::call`, Net). Now keyed, it would read `[]`
+                            // — but THIS crate implements the member (obligation-2 index), so the body that runs may be
+                            // here, where no chained report can ever charge it (R981's rationale; its driving-member
+                            // filter is about which members of an UNKEYED bound to name, and here the member is known).
+                            // HEDGE, true reason. Measured on the first A/B of the spelling fix: 27 rows (aws-smithy-
+                            // http-client x18, hyper-util x6, color-eyre x3) lost their floor `Unknown` without it.
+                            let key = format!("{owner}#{rest}::{leaf}");
+                            if self.trait_spelled_by_impl_only(&node.receiver, &tr)
+                                && self.foreign_impls.contains_key(&key)
+                                && !std_conventionally_pure(&tr, &leaf)
+                            {
+                                if crate::lang::reach_debug() {
+                                    eprintln!("R1319FIELDIMPL\t{key}"); // §E1 REACH COUNTER
+                                }
+                                self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
+                            }
+                            self.foreign_dispatch_sites.insert(key);
                         }
                     }
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
