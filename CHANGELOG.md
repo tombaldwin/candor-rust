@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.14] — 2026-10-21
+
 - ⚠ **candor-classify: a U+FEFF at byte offset 0 of a POLICY file is stripped before line-splitting (SOUNDNESS
   R1224, SPEC §6.2 ⟨0.40⟩).** A BOM'd policy lost its first rule: a one-rule file refused at exit 2 (zero rules), a
   multi-rule one ran without it. Every policy reader (candor-query `gate`/`whatif`/`fix`/`parsepolicy`/
