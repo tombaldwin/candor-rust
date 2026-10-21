@@ -660,7 +660,8 @@ impl Ctx<'_> {
         }
     }
 
-    fn expand_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::Item>> {
+    /// The invocation's expansion tokens, and whether its definition came from ANOTHER file.
+    fn expand_tokens(&mut self, mac: &syn::Macro, depth: usize) -> Option<(TokenStream, bool)> {
         if depth >= MAX_DEPTH || self.budget == 0 {
             return None;
         }
@@ -676,6 +677,12 @@ impl Ctx<'_> {
         } else {
             ts
         };
+        Some((ts, cross_file))
+    }
+
+    fn expand_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::Item>> {
+        let (ts, cross_file) = self.expand_tokens(mac, depth)?;
+        let name = mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
         let mut file = syn::parse2::<syn::File>(ts).ok()?;
         if !file.attrs.is_empty() {
             return None; // an inner attribute at expansion top level is not something items carry
@@ -700,6 +707,86 @@ impl Ctx<'_> {
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
         Some(file.items)
+    }
+
+    /// SOUNDNESS R1245 — an IMPL-ITEM-position invocation (`impl Report for Reports { reports_impl!(fn
+    /// summarize(&self)); }`) expanded to the impl items it declares, under the same once-defined rule
+    /// as an item-position one. `None` — the invocation stays exactly as written — when the macro is not one
+    /// this crate defines once, no arm matches, the expansion is not a sequence of impl items, or (another
+    /// file's macro) any generated item carries a `#[cfg]` (see `expand_items`).
+    fn expand_impl_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::ImplItem>> {
+        use syn::parse::Parser;
+        let (ts, cross_file) = self.expand_tokens(mac, depth)?;
+        let mut gen = (|input: syn::parse::ParseStream| {
+            let mut v = Vec::new();
+            while !input.is_empty() {
+                v.push(input.parse::<syn::ImplItem>()?);
+            }
+            Ok(v)
+        })
+        .parse2(ts)
+        .ok()?;
+        if cross_file
+            && gen.iter().any(|ii| {
+                impl_item_attrs(ii).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
+            })
+        {
+            return None;
+        }
+        self.budget -= 1;
+        self.splice_impl_items(&mut gen, depth + 1);
+        Some(gen)
+    }
+
+    /// SOUNDNESS R1245 — replace every impl-item-position invocation of a macro this crate defines once (in a
+    /// trait impl or an inherent one) by the impl items it expands to. THE DEFECT: `syn` leaves `reports_impl!(fn summarize(&self));`
+    /// opaque, so the impl had no `Reports::summarize` unit and a call on a `Reports` receiver bound to the
+    /// trait's PURE default body — `criterion`'s `BenchmarkGroup::drop` read `[Net]` while its report fan-out
+    /// writes files. The hand-written twin (`fn summarize(&self) { .. }` in the impl itself) was charged.
+    ///
+    /// A RESOLUTION, NOT A HEDGE — the same argument as R1004: the generated method is the program's own
+    /// member of an impl that is ALREADY hand-written, so this adds no implementor to any dispatch universe
+    /// (the concern that keeps a macro-generated TRAIT impl unexpanded); it only puts the member where rustc
+    /// puts it. A refused expansion leaves the impl exactly as before — opaque, which the call site now discloses
+    /// (`macro:impl members hidden by an unexpanded macro`, `scan.rs`).
+    ///
+    /// EVERY generated impl item is spliced (associated `const`s and `type`s too): unlike a generated `impl`, none of
+    /// them can move a dispatch universe, and the block is then exactly what rustc compiles.
+    fn splice_impl_items(&mut self, items: &mut Vec<syn::ImplItem>, depth: usize) {
+        if !items.iter().any(|ii| matches!(ii, syn::ImplItem::Macro(_))) {
+            return;
+        }
+        let mut out: Vec<syn::ImplItem> = Vec::with_capacity(items.len());
+        for it in std::mem::take(items) {
+            if let syn::ImplItem::Macro(m) = &it {
+                if let Some(mut gen) = self.expand_impl_items(&m.mac, depth) {
+                    for g in &mut gen {
+                        // The invocation's own outer attributes (`#[cfg(..)]`) govern every item it expands to.
+                        if let Some(a) = impl_item_attrs_mut(g) {
+                            let mut na = m.attrs.clone();
+                            na.append(a);
+                            *a = na;
+                        }
+                    }
+                    if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                        eprintln!(
+                            "R1245EXPAND\t{}\t{}",
+                            m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default(),
+                            gen.iter().filter(|g| matches!(g, syn::ImplItem::Fn(_))).count()
+                        ); // §E1 REACH COUNTER, on the CHANGED branch only
+                    }
+                    // The invocation is REPLACED, not kept beside its expansion (unlike item position, where R128
+                    // reads the invocation as module evidence): an impl-item macro left in the block marks the
+                    // block OPAQUE (`lang.rs`, `impl_opaque_key`) — "its members are not all readable" — and once
+                    // the expansion stands in its place that is no longer true. A nested invocation the expansion
+                    // itself could not expand is still a `Macro` item in `gen`, so the block stays opaque for it.
+                    out.extend(gen);
+                    continue;
+                }
+            }
+            out.push(it);
+        }
+        *items = out;
     }
 
     fn splice(&mut self, items: &mut Vec<syn::Item>, depth: usize) {
@@ -795,6 +882,8 @@ impl Ctx<'_> {
                         continue;
                     }
                 }
+                // R1245 — a hand-written impl whose members a local macro declares.
+                syn::Item::Impl(im) => self.splice_impl_items(&mut im.items, depth),
                 syn::Item::Mod(md) => {
                     if let Some((_, inner)) = &mut md.content {
                         // R1156 — a child sees the parent's textual scope; its own definitions leave with it
@@ -811,6 +900,26 @@ impl Ctx<'_> {
             out.push(it);
         }
         *items = out;
+    }
+}
+
+fn impl_item_attrs(ii: &syn::ImplItem) -> &[syn::Attribute] {
+    match ii {
+        syn::ImplItem::Fn(f) => &f.attrs,
+        syn::ImplItem::Const(c) => &c.attrs,
+        syn::ImplItem::Type(t) => &t.attrs,
+        syn::ImplItem::Macro(m) => &m.attrs,
+        _ => &[],
+    }
+}
+
+fn impl_item_attrs_mut(ii: &mut syn::ImplItem) -> Option<&mut Vec<syn::Attribute>> {
+    match ii {
+        syn::ImplItem::Fn(f) => Some(&mut f.attrs),
+        syn::ImplItem::Const(c) => Some(&mut c.attrs),
+        syn::ImplItem::Type(t) => Some(&mut t.attrs),
+        syn::ImplItem::Macro(m) => Some(&mut m.attrs),
+        _ => None,
     }
 }
 

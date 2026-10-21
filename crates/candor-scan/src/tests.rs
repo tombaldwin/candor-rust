@@ -828,9 +828,77 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         // rust and RED on java/ts/swift over byte-identical input. All three of those leave it to the
         // fallback: java attaches nothing, ts attaches nothing on the call path, swift attaches a
         // provenance pointer it documents as projecting to `unresolved`.
+        // ⟨0.40⟩ SOUNDNESS R1243 — …BUT THE REGISTERED PROVENANCE REASON IS NOT AN INVENTED ONE. `dep:<hash>` names no
+        // class-bearing kind: §4 registers it and §6.2 projects it to `unresolved`, which is exactly the class the
+        // empty field was read as — so it changes no single-route verdict, and it is what lets the REPORT carry the
+        // class the scan's gate used (see `r1243_…` below). candor-swift and candor-java attach the same token
+        // under the same condition (the dependency classified nothing).
         let silent = why("from_silent");
-        assert!(silent.is_empty(),
-                "a reason the dependency never gave was INVENTED for the consumer: {silent:?}\n{v:#}");
+        assert_eq!(silent, vec!["dep:deplib#io::mute".to_string()],
+                   "a reasonless chained Unknown carries its registered provenance reason, and nothing else:\n{v:#}");
+        assert!(silent.iter().all(|w| candor_classify::policy::ReasonClass::classify(w)
+                    == candor_classify::policy::ReasonClass::Unresolved),
+                "…and that reason projects to `unresolved` (§6.2), never to a class nothing observed");
+    }
+
+    /// ⟨0.40⟩ SOUNDNESS R1243 — THE REPORT MUST CARRY THE CLASS THE SCAN'S GATE USED (§3.1 byte-equality). The scan
+    /// route CONTRIBUTED `unresolved` for a reasonless chained `Unknown` to its in-memory class map only, so a
+    /// function holding a reason of its own (`callback:`) was gated `{indirect, unresolved}` by the scan and
+    /// `{indirect}` by `candor-query gate --report` over the very report the scan wrote: `deny Unknown[unresolved]`
+    /// exit 1 on one route, 0 on the other (EXECUTED, `candor-handoff/fixture-r1238/chain`). Asserted on the
+    /// WRITTEN report, which is what the report route reads: its reason classes must include `unresolved` exactly
+    /// where the scan route's gate fires on it.
+    #[test]
+    fn r1243_the_written_report_carries_the_unresolved_class_the_scan_gate_used() {
+        let dd = std::env::temp_dir().join(format!("candor-r1243-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dd);
+        std::fs::create_dir_all(&dd).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dd.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.40"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "Sink::put", "inferred": ["Fs", "Unknown"], "unresolved": true, "interfaceUnion": true,
+                "hash": "deplib#Sink::put"}},
+              {{"fn": "io::murky", "inferred": ["Unknown"], "unresolved": true,
+                "unknownWhy": ["dispatch:lib.Store.save"], "hash": "deplib#io::murky"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(dd.to_str());
+        let d = std::env::temp_dir().join(format!("candor-r1243-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\n\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "\
+pub fn caller(s: &dyn deplib::Sink, cb: &dyn Fn()) { cb(); s.put(); }\n\
+pub fn plain(s: &dyn deplib::Sink) { s.put(); }\n\
+pub fn named() { deplib::io::murky(); }\n").unwrap();
+        let p = d.join("candor.policy");
+        std::fs::write(&p, "deny Unknown[unresolved] caller\n").unwrap();
+        let (rc, body) = {
+            let _serial = SCAN_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run())
+        };
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dd);
+        assert_eq!(rc, 1, "CALIBRATION: the scan route fires `deny Unknown[unresolved] caller`");
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let classes = |n: &str| -> BTreeSet<candor_classify::policy::ReasonClass> {
+            fn_entry(&v, n)["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str()).map(candor_classify::policy::ReasonClass::classify).collect()
+        };
+        use candor_classify::policy::ReasonClass as RC;
+        assert_eq!(classes("caller"), BTreeSet::from([RC::Indirect, RC::Unresolved]),
+                   "R1243: the written report must carry `unresolved` beside the caller's own `indirect`, or the \
+                    report route answers 0 where the scan route answered 1:\n{v:#}");
+        assert_eq!(classes("plain"), BTreeSet::from([RC::Unresolved]), "the reasonless caller alone:\n{v:#}");
+        // CONTROL — a CLASSIFIED chained Unknown gains nothing: `dep:` is attached only when the dependency
+        // classified nothing (candor-swift's rule), so the chained consumer gates as the same code unsplit.
+        assert_eq!(classes("named"), BTreeSet::from([RC::Dispatch]), "a classified dep Unknown gains no `unresolved`:\n{v:#}");
     }
 
     /// …and the CLASS is what a gate actually reads, so assert it through the gate rather than through
@@ -1132,7 +1200,14 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let _ = std::fs::remove_dir_all(&d);
         let e = idx.by_key.get("oldlib#io::go").expect("stale entry present");
         assert_eq!(e.effects, BTreeSet::from(["Unknown"]), "the §2.1 downgrade itself must not move");
-        assert!(e.unknown_why.is_empty(),
+        // ⟨0.40⟩ SOUNDNESS R1243 — the blocker above is gone (conformance `run.sh` lists `dep`/`dep-stale` in
+        // `REGISTERED`, accepted silently), and without the token in the REPORT the class reached only the scan's
+        // gate, so `gate --report` over the same report disagreed with it. So rust now follows swift: the
+        // registered provenance reason, which projects to `unresolved` — the class this test was always about.
+        assert_eq!(e.unknown_why, BTreeSet::from(["dep-stale:oldlib".to_string()]),
+                   "a stale entry carries exactly its registered provenance reason");
+        assert!(e.unknown_why.iter().all(|w| candor_classify::policy::ReasonClass::classify(w)
+                    == candor_classify::policy::ReasonClass::Unresolved),
                 "the staleness downgrade INVENTED a reason class: {:?}", e.unknown_why);
         assert_eq!(
             candor_classify::policy::ReasonClass::classify("anything unrecognized"),
@@ -7706,6 +7781,61 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
         // survives only where the expansion is refused (cfg twins, an unreadable matcher).
         assert_eq!(fixture_effects(&scan_fixture("r128assoc", src), "go"), vec!["Exec".to_string()],
                    "R1004: a macro-declared inherent `impl` is expanded and reached");
+    }
+
+    /// SOUNDNESS R1245 — a METHOD a `macro_rules!` declares INSIDE a hand-written trait impl
+    /// (`impl Report for Reports { reports_impl!(fn summarize(&self)); }`, criterion's `report.rs` shape). `syn`
+    /// leaves the impl item opaque, so `Reports::summarize` had no unit and `self.report.summarize()` bound to
+    /// the trait's PURE default: `BenchmarkGroup::drop` read `[Net]` over a report fan-out that writes files
+    /// (EXECUTED, `candor-handoff/fixture-r1238/rust6`). The same-crate macro is now EXPANDED in place (a
+    /// resolution: the report equals the hand-written twin's); another crate's macro, which cannot be, makes the
+    /// block OPAQUE and every caller that could reach the hidden member DISCLOSES `macro:` — at the typed call
+    /// and in the published `Trait::member` union.
+    #[test]
+    fn r1245_a_macro_defined_member_in_a_trait_impl_is_expanded_or_disclosed() {
+        let src = "\
+pub trait Report { fn summarize(&self) {} }\n\
+pub struct Html;\n\
+impl Report for Html { fn summarize(&self) { std::fs::write(\"/tmp/x\", \"y\").unwrap(); } }\n\
+macro_rules! reports_impl {\n\
+    (fn $name:ident(&self)) => { fn $name(&self) { if let Some(h) = &self.html { h.$name(); } } };\n\
+}\n\
+pub struct Reports { pub html: Option<Html> }\n\
+impl Report for Reports { reports_impl!(fn summarize(&self)); }\n\
+pub struct Group { pub report: Reports }\n\
+impl Group { pub fn finish(&self) { self.report.summarize(); } }\n\
+pub fn finish_free(r: &Reports) { r.summarize(); }\n\
+pub fn finish_dyn(r: &dyn Report) { r.summarize(); }\n";
+        // CALIBRATION — the hand-written twin, which was always charged.
+        let hand = src.replacen("reports_impl!(fn summarize(&self));",
+                                "fn summarize(&self) { if let Some(h) = &self.html { h.summarize(); } }", 1);
+        let vh = scan_fixture("r1245hand", &hand);
+        for f in ["Group::finish", "finish_free", "finish_dyn"] {
+            assert_eq!(fixture_effects(&vh, f), vec!["Fs".to_string()], "CALIBRATION `{f}`:\n{vh:#}");
+        }
+        // RESOLVED — the macro form reads exactly as the hand-written one does.
+        let v = scan_fixture("r1245local", src);
+        for f in ["Group::finish", "finish_free", "finish_dyn", "Reports::summarize"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()],
+                       "R1245: the macro-declared member is expanded, so `{f}` reaches `Html::summarize`'s Fs:\n{v:#}");
+        }
+        // REFUSED — another crate's macro cannot be expanded: the block is opaque and the callers DISCLOSE.
+        let ext = src.replacen("reports_impl!(fn summarize(&self));", "mlib::reports_impl!(fn summarize(&self));", 1);
+        let v = scan_fixture("r1245ext", &ext);
+        for f in ["Group::finish", "finish_free"] {
+            assert!(fixture_effects(&v, f).contains(&"Unknown".to_string()),
+                    "R1245: a typed call on a type whose impl holds an unexpanded macro must disclose `{f}`:\n{v:#}");
+            let why: Vec<String> = fn_entry(&v, f)["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w == "macro:impl members hidden by an unexpanded macro"), "R1245 reason `{f}`:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "Report::summarize").contains(&"Unknown".to_string()),
+                "R1245: the published union over an opaque implementor must not read as complete:\n{v:#}");
+        // THE OVER-DISCLOSURE CONTROL — a member the opaque block's TRAIT does not declare cannot be what the
+        // macro defines (a trait impl may define only its trait's members), so a call to it does not hedge.
+        let ctl = format!("{ext}impl Reports {{ pub fn own(&self) {{}} }}\npub fn calls_own(r: &Reports) {{ r.own(); }}\n");
+        let v = scan_fixture("r1245ctl", &ctl);
+        assert!(fixture_effects(&v, "calls_own").is_empty(), "R1245 over-disclosure control:\n{v:#}");
     }
 
     /// SOUNDNESS R340 — SERIALISES EVERY FIXTURE SCAN IN THIS BINARY.
@@ -17304,6 +17434,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        // rustagent-a (R1245) bumped it to rev120.
         // rustagent-v075 (R1207/R1208) bumped it to rev119.
         // rustagent-v072 (R1202) bumped it to rev118.
         // rustagent-v070 (R1200) bumped it to rev117.
@@ -17356,7 +17487,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -17367,7 +17498,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev119/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev120/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

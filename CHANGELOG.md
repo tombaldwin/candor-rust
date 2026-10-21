@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a method a `macro_rules!` declares INSIDE a hand-written trait impl is expanded, or disclosed
+  when it cannot be (SOUNDNESS R1245).** `impl Report for Reports { reports_impl!(fn summarize(&self)); }` left the
+  impl item opaque, so a call on a `Reports` receiver bound to the trait's PURE default (or to nothing) and its
+  callers read pure — criterion's `BenchmarkGroup::drop`/`finish` read `[Net]` over a report fan-out that writes
+  files and spawns gnuplot. A macro this crate defines once is now expanded in place (a RESOLUTION: the report
+  equals the hand-written twin's; criterion's two rows now carry `Clock, Env, Exec, Fs, Net, Unknown`); another
+  crate's macro marks the block opaque and the typed caller and the published `Trait::member` union now carry
+  `Unknown` (`macro:impl members hidden by an unexpanded macro`). Executed fixtures: `deny Fs` 0→**1** (in-crate,
+  concrete/`dyn`/generic callers and a chained consumer); `deny Unknown` 0→**1** for the unexpandable macro. A
+  chained consumer that previously disclosed `dispatch:Reports.summarize` now reads the real `Fs` (`deny Unknown`
+  1→0 there, with the effect it stood for now charged). Cache schema rev120.
+- ⚠ **candor-scan: a reasonless chained `Unknown` now carries its `dep:<hash>` / `dep-stale:<pkg>` reason in the
+  REPORT, not only in the scan's gate (SOUNDNESS R1243).** The scan route contributed `unresolved` for it to its
+  in-memory class map, so a caller with a reason of its own (`cb(); s.put();`) was gated `{indirect, unresolved}`
+  by the scan and `{indirect}` by `candor-query gate --report` over the report it wrote: `deny Unknown[unresolved]
+  caller` exit 1 vs **0** (§3.1 byte-equality). The reason is now attached per dependency ENTRY when the dependency
+  classified nothing — the registered §4 kinds, projecting to `unresolved`, as candor-swift and candor-java do —
+  and the report route now answers **1**. The scan route does not move; reports gain the token on such callers.
+
 ## [0.40.14] — 2026-10-21
 
 - ⚠ **candor-classify: a U+FEFF at byte offset 0 of a POLICY file is stripped before line-splitting (SOUNDNESS

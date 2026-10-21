@@ -730,6 +730,9 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // (see the disclosure below), the channel ts and swift already use for this and the one
                 // rust had nothing on.
                 //
+                // ⟨0.40⟩ SUPERSEDED (SOUNDNESS R1243): the entry now gets `dep-stale:<pkg>` below the branch, so
+                // the paragraph that follows is history — its blocker (PART 10 scoring `dep*` as a divergence)
+                // is gone, `run.sh` lists both kinds in `REGISTERED`.
                 // ⟨0.24⟩ SPEC §4 NOW REGISTERS `dep:<hash>` AND `dep-stale:<pkg>` AS PERMANENT KINDS —
                 // not migration ones — and §6.2 holds swift's per-ENTRY form up as the correct shape.
                 // The blocker on following swift here is no longer the spec, it is the SHIPPED
@@ -781,6 +784,29 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                         de.incomplete.insert(eff);
                     }
                 }
+            }
+            // ⟨0.40⟩ SOUNDNESS R1243 — A REASONLESS `Unknown` GETS ITS REGISTERED PROVENANCE REASON HERE, PER ENTRY,
+            // where §6.2 says to implement it ("at the source, not at the join"): `dep:<hash>` when the entry and
+            // the reasons its published `calls` reach (`chain_why`, above) classify nothing, `dep-stale:<pkg>` for a
+            // report §2.1 refused to trust. Both are REGISTERED §4 kinds and project to `unresolved` (§6.2), the
+            // class this engine already CONTRIBUTED for this case — but only to its in-memory gate map
+            // (`unknown_via_dep` in `scan_one`), never to the report. So a caller holding a reason of its own
+            // (`caller(s: &dyn dep::Sink, cb: &dyn Fn()) { cb(); s.put(); }`) wrote `unknownWhy: [callback:…]`
+            // while its scan-route gate classed `{indirect, unresolved}`, and `candor-query gate --report` over
+            // that same report answered `deny Unknown[unresolved] caller` with 0 where the scan route answered
+            // 1 — §3.1's byte-equality, broken by the writer. With the reason in the entry the join carries it
+            // like any other (`apply_dep_fn`), the report says what the gate used, and a SECOND-hop consumer
+            // of this report inherits the class too. Same rule and same condition as candor-swift (`Deps.swift`,
+            // only when the dependency classified nothing) and candor-java (`synthesizeReasonlessDepReasons`).
+            // The earlier blocker named at the stale branch above — conformance PART 10 scoring `dep*` as a
+            // divergence — no longer holds: `run.sh` lists both in `REGISTERED`, accepted silently.
+            if de.effects.contains("Unknown") && de.unknown_why.is_empty() {
+                de.unknown_why.insert(if stale {
+                    format!("dep-stale:{krate}")
+                } else {
+                    format!("dep:{}", e.get("hash").and_then(|x| x.as_str()).map(str::to_string)
+                        .unwrap_or_else(|| format!("{krate}#{qual}")))
+                });
             }
             // THREE key shapes per entry: leaf, qualified tail2, and the FULL qual. The full qual is
             // the precise one — `deplib#sync::Client::fetch` — and it exists so a join that already

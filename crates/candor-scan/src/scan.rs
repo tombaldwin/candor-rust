@@ -4165,6 +4165,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 resolved_local = true;
                                 calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
                             }
+                            // SOUNDNESS R1245 (the REFUSED half) — T's impl of a trait that declares `leaf` holds a
+                            // macro item `mbe` could not expand (another crate's macro, an unreadable matcher), so
+                            // the block is OPAQUE (`model::impl_opaque_key`) and may define `leaf` itself: the
+                            // default edge above, or no edge at all, is a reading of THIS ENGINE's blindness, not of
+                            // the program. Executed: `impl Report for Reports { mlib::reports_impl!(fn summarize(
+                            // &self)); }` with `self.report.summarize()` bound to the trait's PURE default while
+                            // the macro's body wrote a file. A same-crate macro is EXPANDED instead (`mbe::Ctx::
+                            // splice_impl_items`), which leaves no opaque item behind, so this fires only where the
+                            // resolution was refused. Exact, not a narrowing: a trait impl can define only members
+                            // its trait declares, so the trait-declares-`leaf` conjunct excludes nothing that could
+                            // run. ADDITIVE: the default edge (if any) stays beside the disclosure.
+                            let opaque_tr = trs.iter().find(|tr_leaf| {
+                                merged.impl_members.contains(&crate::model::impl_opaque_key(tr_leaf, &t_type))
+                                    && !merged.impl_members.contains(&crate::model::impl_member_key(tr_leaf, &t_type, &c.leaf))
+                                    && trait_decls.get(*tr_leaf).is_some_and(|lt| lt.methods.contains(&c.leaf))
+                            });
+                            if let Some(tr_leaf) = opaque_tr {
+                                if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                                    eprintln!("R1245OPAQUE\t{}\t{}\t{tr_leaf}", f.qual, c.path); // §E1 REACH COUNTER
+                                }
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why
+                                    .entry(f.qual.clone())
+                                    .or_default()
+                                    .insert("macro:impl members hidden by an unexpanded macro".to_string());
+                            }
                         }
                         // TRAIT-REQUIREMENT dispatch from a trait DEFAULT body: inside `Store::save_all`,
                         // `self` types as the TRAIT `Store` (decls.rs types Self as the trait), so
@@ -6716,6 +6742,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // gate bites them and the disclosure standing beside it does not name them. With TRUSTED reports the
     // split is 0, on both targets measured; it is reachable only through reports the build cannot verify.
     //
+    // ⟨0.40⟩ CLOSED (SOUNDNESS R1243): `load_dep_reports` now attaches `dep:<hash>` / `dep-stale:<pkg>` per ENTRY
+    // when the dependency classified nothing, so the reason reaches `unknown_why` — and the REPORT — through
+    // `apply_dep_fn` like any other, and `gate --report` recomputes the same class set. The loop below stays
+    // as a safety net for a reasonless `DepFn` built anywhere else. History follows.
     // WHAT WOULD CLOSE IT is exactly what §4 ⟨0.24⟩ registered for the purpose — `dep-stale:<pkg>` (and
     // `dep:<hash>`), permanent kinds now, attached per dependency ENTRY the way candor-swift attaches
     // them, so the reason travels IN the report and the two recomputations cannot disagree. It is not
@@ -7189,6 +7219,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             && std::env::var_os("CANDOR_R598_PRE").is_none();
                     // A CONCRETE effect of a narrowed candidate is withheld; `Unknown` rides through.
                     let admit = |e: &str| !narrowed || e == "Unknown";
+                    // SOUNDNESS R1245 (the REFUSED half, union leg) — this implementor's block holds a macro item `mbe`
+                    // could not expand, and no hand-written `method`: the macro may define it, and no unit stands for
+                    // what it defines, so the union over the implementors this engine READ is not the union over the
+                    // ones that run. Executed: a dependency's `impl Report for Reports { mlib::reports_impl!(fn
+                    // summarize(&self)); }` published `Report::summarize` `inferred: []`, and a consumer's `&dyn
+                    // Report` / `T: Report` caller read PURE over a file write. Same answer R529/R828 give a block
+                    // they cannot name. A same-crate macro is expanded and leaves no opaque item, so this is the residue.
+                    if merged.impl_members.contains(&crate::model::impl_opaque_key(trait_leaf, ty))
+                        && !merged.impl_members.contains(&crate::model::impl_member_key(trait_leaf, ty, method))
+                    {
+                        if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                            eprintln!("R1245UNION\t{trait_leaf}::{method}\t{ty}"); // §E1 REACH COUNTER
+                        }
+                        inf_u.insert("Unknown");
+                    }
                     if narrowed {
                         // §E1 REACH PROBE — fires only where this narrowing actually withholds
                         // something, so `CHANGED 0` and "the branch never ran" stay distinguishable.
