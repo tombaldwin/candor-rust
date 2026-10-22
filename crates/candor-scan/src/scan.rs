@@ -4571,7 +4571,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let mut pending: Vec<String> = de.dispatches_on.iter().cloned().collect();
                     let mut seen_members: std::collections::HashSet<String> =
                         pending.iter().cloned().collect();
+                    // R1324 — the members a UNION carried (§4 ⟨0.40⟩ union clause), whose miss is disclosed below.
+                    let mut from_union: std::collections::HashSet<String> =
+                        de.union_dispatches_on.iter().cloned().collect();
                     while let Some(member) = pending.pop() {
+                        let mut answered = false;
                         // R503/R504 — THE VALUE IS THE KEY. ⟨0.39⟩ pins `dispatchesOn` to the owning
                         // package's entry-key spelling, so a conforming producer hands over something
                         // that is already joinable and the consumer prefixes NOTHING. That is not a
@@ -4610,8 +4614,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             });
                             // A union entry may itself dispatch onward; bounded by `seen_members`, which
                             // also makes a cyclic publication terminate.
+                            answered = true;
                             for m2 in &ude.dispatches_on {
                                 if seen_members.insert(m2.clone()) {
+                                    if ude.union_dispatches_on.contains(m2) {
+                                        from_union.insert(m2.clone());
+                                    }
                                     pending.push(m2.clone());
                                 }
                             }
@@ -4644,6 +4652,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         {
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
+                            answered = true;
                             if std::env::var_os("CANDOR_R529_INSTR").is_some() {
                                 eprintln!("R529HIT\tCHAIN\t{}\t{ukey}", f.qual); // §E1 REACH PROBE
                             }
@@ -4651,6 +4660,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if let Some(impl_quals) = merged.foreign_impls.get(&ukey)
                             .or_else(|| foreign_impls_by_tail2.get(&ukey_t2))
                         {
+                            answered = true;
                             for cand in impl_quals {
                                 if let Some(ts) = by_tail2.get(cand) {
                                     // Unambiguous only — `resolve_target`'s never-guess rule. Two units
@@ -4659,6 +4669,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                         calls.entry(f.qual.clone()).or_default().insert(ts[0].clone());
                                     }
                                 }
+                            }
+                        }
+                        // SOUNDNESS R1324 — THE ZERO-IMPLEMENTOR BUCKET. A member a UNION carried that NOTHING
+                        // answers here — no chained entry under its key, no implementor in this crate — is a
+                        // dispatch whose implementor this consumer cannot see. The producer used to disclose it
+                        // with the R1324 hedge on the union; carrying the key instead (§4 ⟨0.40⟩ rule 1) must not
+                        // turn that disclosure into silence (rule 3: the hedge is right for what cannot be
+                        // completed, and here it is the CONSUMER that cannot complete it). Measured in PART 102's
+                        // `*_none` arms. A member an answering entry carries (owner chained, its union pure) is
+                        // ⟨0.39⟩'s model working and stays pure. A ROW's miss is untouched (PART 92 `c3_pure_only`).
+                        if !answered && from_union.contains(&member) && ukey_owner != crate_name
+                            && std::env::var_os("CANDOR_R1324_NOMISS").is_none()
+                        {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
+                            if crate::lang::reach_debug() {
+                                eprintln!("R1324MISS\t{}\t{ukey}", f.qual); // §E1 REACH COUNTER
                             }
                         }
                     }
@@ -7249,7 +7276,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // `CANDOR_R1351_OFF=1` turns the proof off (every key named).
     let r1351_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
     let r1351_off = std::env::var_os("CANDOR_R1351_OFF").is_some();
-    let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>| {
+    // ⟨0.40⟩ SPEC §4 UNION CLAUSE (R1324 RESOLVED) — the members are CARRIED, not hedged. Rule 1 makes a narrow union
+    // entry carry, in `dispatchesOn`, every member its contributors dispatch on transitively (spelling (a), which this
+    // engine's rows already use: `dispatch_acc` is the transitive set); rule 3 makes the hedge below a disclosure for a
+    // member the producer CANNOT name, which here is none — so the hedge survives only behind `CANDOR_R1324_HEDGE=1`
+    // (the 0.40.15 behaviour, for the A/B's attribution). The R1351/R1353 filter above applies to the carried keys too:
+    // a key whose trait provably does not declare the member is not made valid by appearing on a union (rule 1).
+    let r1324_hedge = std::env::var_os("CANDOR_R1324_HEDGE").is_some();
+    let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>, don: &mut BTreeSet<String>| {
         if std::env::var_os("CANDOR_R1324_OFF").is_some() {
             return;
         }
@@ -7276,8 +7310,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if crate::lang::reach_debug() {
                 eprintln!("R1324UNION\t{own_tail}\t{tr}.{m}"); // §E1 REACH COUNTER
             }
-            inf.insert("Unknown");
-            out.insert(format!("dispatch:{tr}.{m}"));
+            if r1324_hedge {
+                inf.insert("Unknown");
+                out.insert(format!("dispatch:{tr}.{m}"));
+            } else {
+                don.insert(k.clone());
+            }
         }
     };
     let union_unnamed = |tail: &str, out: &mut BTreeSet<String>| {
@@ -7382,6 +7420,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
                 let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 let mut why_u: BTreeSet<String> = BTreeSet::new(); // R1268
+                let mut don_u: BTreeSet<String> = BTreeSet::new(); // R1324 — the members this union carries
                 let own_hedge = r529_reason(&format!("{trait_leaf}::{method}")); // R1268 — this union's own hedge
                 for ty in impls {
                     let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
@@ -7483,7 +7522,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                             union_why(&cand, &mut why_u); // R1268 — `Unknown` is admitted on both sides of R598
                         }
-                        union_dispatch_hedge(&cand, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u); // R1324
+                        union_dispatch_hedge(&cand, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u); // R1324
                         if let Some(s) = blind_acc.get(&cand) {
                             for c in s.iter().filter(|c| global_blind.contains(*c)) {
                                 blind_u.insert(c.clone());
@@ -7520,9 +7559,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 // hedges both `cand` and `ts[0]`; the asymmetry was the bug (R513's own words).
                                 // EXECUTED fx3/fx6 (one variable: the `mod`). `CANDOR_R1352_OFF=1` disables it.
                                 if std::env::var_os("CANDOR_R1352_OFF").is_none() {
-                                    let w0 = why_u.len();
-                                    union_dispatch_hedge(&ts[0], &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u);
-                                    if why_u.len() != w0 && crate::lang::reach_debug() {
+                                    let w0 = why_u.len() + don_u.len();
+                                    union_dispatch_hedge(&ts[0], &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
+                                    if why_u.len() + don_u.len() != w0 && crate::lang::reach_debug() {
                                         eprintln!("R1352TAIL\t{trait_leaf}::{method}\t{}", ts[0]); // §E1 REACH COUNTER
                                     }
                                 }
@@ -7558,9 +7597,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         // R1352 — the third contributor route of this union, hedged like the other two (§A.2).
                         if std::env::var_os("CANDOR_R1352_OFF").is_none() {
-                            let w0 = why_u.len();
-                            union_dispatch_hedge(q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u);
-                            if why_u.len() != w0 && crate::lang::reach_debug() {
+                            let w0 = why_u.len() + don_u.len();
+                            union_dispatch_hedge(q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
+                            if why_u.len() + don_u.len() != w0 && crate::lang::reach_debug() {
                                 eprintln!("R1352NONNOM\t{trait_leaf}::{method}\t{q}"); // §E1 REACH COUNTER
                             }
                         }
@@ -7722,7 +7761,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                         }
                     }
-                    if !eff_adds && !blind_adds {
+                    // R1324 — …and every MEMBER: a union carrying a key the default body's row does not is not
+                    // a duplicate (§4 ⟨0.40⟩ union clause, rule 1).
+                    let don_adds = entries.iter().find(|e| e.hash == hash)
+                        .is_some_and(|real| don_u.iter().any(|k| !real.dispatches_on.contains(k)));
+                    if !eff_adds && !blind_adds && !don_adds {
                         // The real entry at this hash already carries every EFFECT **and** every
                         // UNCOVERED PACKAGE the union knows, so a second row would be a duplicate
                         // carrying nothing. 233 of the 244 measured suppressions are this case.
@@ -7748,6 +7791,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     invisible: blind_u.into_iter().collect(),
                     interface_union: true,
                     unknown_why: if inf_u.contains("Unknown") { why_u.into_iter().collect() } else { Vec::new() },
+                    dispatches_on: don_u.into_iter().collect(), // R1324 — §4 ⟨0.40⟩ union clause, spelling (a)
                     ..Default::default()
                 });
             }
@@ -7789,6 +7833,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
             let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             let mut why_u: BTreeSet<String> = BTreeSet::new(); // R1268
+            let mut don_u: BTreeSet<String> = BTreeSet::new(); // R1324 — the members this union carries
             if merged.nested_impl_foreign.contains(key) {
                 inf_u.insert("Unknown");
                 why_u.insert(r529_reason(key)); // R1268 — this union's own hedge
@@ -7804,7 +7849,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 } else {
                     union_unnamed(cand, &mut why_u); // R1293
                 }
-                union_dispatch_hedge(cand, &own_tail, &mut inf_u, &mut why_u); // R1324
+                union_dispatch_hedge(cand, &own_tail, &mut inf_u, &mut why_u, &mut don_u); // R1324
                 if let Some(s) = blind_acc.get(cand) {
                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
                 }
@@ -7814,7 +7859,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // guessing here would charge one type's effects to another type's implementor.
                 if let Some(ts) = by_tail2.get(cand) {
                     if ts.len() == 1 {
-                        union_dispatch_hedge(&ts[0], &own_tail, &mut inf_u, &mut why_u); // R1324
+                        union_dispatch_hedge(&ts[0], &own_tail, &mut inf_u, &mut why_u, &mut don_u); // R1324
                         if let Some(s) = inferred.get(&ts[0]) {
                             inf_u.extend(s.iter().copied());
                             union_why(&ts[0], &mut why_u); // R1268
@@ -7861,7 +7906,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if std::env::var_os("CANDOR_R590_INSTR").is_some() {
                     eprintln!("R590FOREIGN {key} adds_eff={eff_adds} adds_blind={blind_adds}");
                 }
-                if !eff_adds && !blind_adds {
+                let don_adds = entries.iter().find(|e| e.hash == *key)
+                    .is_some_and(|real| don_u.iter().any(|k| !real.dispatches_on.contains(k))); // R1324
+                if !eff_adds && !blind_adds && !don_adds {
                     continue; // the real entry already carries every EFFECT and every package it knows
                 }
             }
@@ -7881,6 +7928,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 invisible: blind_u.into_iter().collect(),
                 interface_union: true,
                 unknown_why: if inf_u.contains("Unknown") { why_u.into_iter().collect() } else { Vec::new() },
+                dispatches_on: don_u.into_iter().collect(), // R1324 — §4 ⟨0.40⟩ union clause, spelling (a)
                 ..Default::default()
             });
         }

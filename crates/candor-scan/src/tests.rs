@@ -8320,13 +8320,17 @@ pub fn prep(sql: &mut impl SqlW) { sql.write_str(\"x\").unwrap(); }\n";
         assert!(fn_entry(&v, "prep")["unknownWhy"].to_string().contains("dispatch:SqlW.write_str"), "R1347 std supertrait:\n{v:#}");
     }
 
-    /// SOUNDNESS R1324 (rustagent-0415) — a union entry whose contributor is pure but DISPATCHES on another member (aws-smithy
-    /// `DocSerializer::serialize_some` -> `Serialize::serialize`) carries the union's own hedge `dispatch:<Trait>.<member>`;
-    /// a contributor dispatching only on the union's OWN member (allocator-api2's `&A` forwarder) adds nothing.
+    /// SOUNDNESS R1324 (rustagent-0415, RESOLVED rustagent-0416) — a union entry whose contributor is pure but DISPATCHES on
+    /// another member (aws-smithy `DocSerializer::serialize_some` -> `Serialize::serialize`) CARRIES that member in its own
+    /// `dispatchesOn` (SPEC §4 ⟨0.40⟩ union clause, spelling (a)) and no longer hedges it; a contributor dispatching only
+    /// on the union's OWN member (allocator-api2's `&A` forwarder) adds nothing. `Val` has a visible pure implementor, so
+    /// the contributor's own row is pure and nothing else can make the union `Unknown` (the earlier form of this fixture
+    /// had none, and its `dispatch:Val.go` came from the contributor's zero-implementor hedge either way).
     #[test]
-    fn r1324_a_union_whose_contributor_dispatches_further_discloses() {
+    fn r1324_a_union_whose_contributor_dispatches_further_carries_the_member() {
         let src = "\
 pub trait Val { fn go(&self); }\n\
+pub struct Nop; impl Val for Nop { fn go(&self) {} }\n\
 pub trait Ser { fn some<T: Val>(&self, v: &T); fn fwd(&self); }\n\
 pub struct Doc;\n\
 impl Ser for Doc { fn some<T: Val>(&self, v: &T) { v.go() } fn fwd(&self) {} }\n\
@@ -8335,9 +8339,10 @@ impl<A: Ser> Ser for &A { fn some<T: Val>(&self, v: &T) { (**self).some(v) } fn 
         let u = |m: &str| v["functions"].as_array().unwrap().iter()
             .find(|f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m))).cloned();
         let some = u("Ser::some").unwrap_or_else(|| panic!("R1324: no Ser::some union:\n{v:#}"));
-        assert!(some["unknownWhy"].to_string().contains("dispatch:Val.go"), "R1324 union hedge:\n{v:#}");
-        assert!(u("Ser::fwd").is_none_or(|f| !f["unknownWhy"].to_string().contains("dispatch:Ser.fwd")),
-            "R1324: own-member forwarding adds no hedge:\n{v:#}");
+        assert!(some["dispatchesOn"].to_string().contains("r1324union#Val::go"), "R1324 union carries the member:\n{v:#}");
+        assert!(!some["inferred"].to_string().contains("Unknown"), "R1324: carried, not hedged:\n{v:#}");
+        assert!(u("Ser::fwd").is_none_or(|f| !f["dispatchesOn"].to_string().contains("Ser::fwd")),
+            "R1324: own-member forwarding adds no key:\n{v:#}");
     }
 
     /// SOUNDNESS R1352 (rustagent-0416) — the R1324 union hedge for an implementor declared in a SUBMODULE (Fable fx6, the
@@ -8354,7 +8359,7 @@ pub use inner::Doc;\n";
         let some = v["functions"].as_array().unwrap().iter()
             .find(|f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with("Ser::some")))
             .unwrap_or_else(|| panic!("R1352: no Ser::some union:\n{v:#}"));
-        assert!(some["unknownWhy"].to_string().contains("dispatch:Val.go"), "R1352 submodule implementor hedges:\n{v:#}");
+        assert!(some["dispatchesOn"].to_string().contains("r1352union#Val::go"), "R1352 submodule implementor's member is carried:\n{v:#}");
     }
 
     /// SOUNDNESS R1321 (rustagent-d) — false reasons. rustc-serialize's `writer: &'a mut (fmt::Write + 'a)` field, in a file

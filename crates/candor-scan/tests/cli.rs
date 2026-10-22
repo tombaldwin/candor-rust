@@ -6802,16 +6802,18 @@ fn r1351_the_union_hedge_names_a_member_by_the_owning_traits_declaration_not_by_
     let _ = std::fs::remove_dir_all(&base);
     let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
         .unwrap_or_else(|| panic!("R1351: no {m} union entry: {v:#}"));
-    assert!(why(u("Sink::put")).iter().any(|w| w == "dispatch:Mapper.map"), "R1351 a real `map` member is named: {v:#}");
-    let res = why(u("Sink::res"));
-    assert!(res.iter().any(|w| w == "dispatch:Plain.go"), "R1351 the real dispatch is named: {v:#}");
+    let don = |m: &str| -> Vec<String> { u(m)["dispatchesOn"].as_array().map(|a| a.iter()
+        .filter_map(|w| w.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    assert!(don("Sink::put").iter().any(|w| w == "base#Mapper::map"), "R1351 a real `map` member is carried: {v:#}");
+    let res = don("Sink::res");
+    assert!(res.iter().any(|w| w == "base#Plain::go"), "R1351 the real dispatch is carried: {v:#}");
     assert!(!res.iter().any(|w| w.contains("map_err") || w.contains("unwrap_or")),
-        "R1351 a member `Plain` does not declare is not named: {v:#}");
-    let both = why(u("Sink::both"));
-    assert!(both.iter().any(|w| w == "dispatch:Mapper.map") && !both.iter().any(|w| w == "dispatch:Plain.map"),
-        "R1353 a multi-bound spread names only the declaring trait: {v:#}");
-    assert!(why(u("Sink::cl")).iter().any(|w| w == "dispatch:Plain.clone"),
-        "R1351 a ⟨0.40⟩ cloning member on a package abstraction is named: {v:#}");
+        "R1351 a member `Plain` does not declare is not carried: {v:#}");
+    let both = don("Sink::both");
+    assert!(both.iter().any(|w| w == "base#Mapper::map") && !both.iter().any(|w| w == "base#Plain::map"),
+        "R1353 a multi-bound spread carries only the declaring trait: {v:#}");
+    assert!(don("Sink::cl").iter().any(|w| w == "base#Plain::clone"),
+        "R1351 a ⟨0.40⟩ cloning member on a package abstraction is carried: {v:#}");
 }
 
 /// SOUNDNESS R1349 (rustagent-0416) — a consumer dispatching DIRECTLY on its own generic over a dependency's trait asks the
@@ -6866,4 +6868,48 @@ fn r1345_a_glob_named_foreign_impl_joins_the_dependencys_dispatch() {
     // …and no wire key is spelled through the glob (a `bv#BitOrder::at` union would be a second spelling).
     assert!(row(&v, |f| f["hash"] == "bv#BitOrder::at" || f["hash"] == "bv#prelude::BitOrder::at").is_none(),
         "R1345: no union entry under a glob spelling: {v:#}");
+}
+
+/// SOUNDNESS R1324 (rustagent-0416, SPEC §4 ⟨0.40⟩ union clause rules 2 and 3) — the CONSUMER half. A union entry's
+/// `dispatchesOn` is joined like a row's: a consumer reaching the union through a dependency row's key whose OWN
+/// implementor performs `Fs` is charged `Fs` (PART 102 `*_far_via`; fx/cpaws c_aws3 over the real aws-smithy-types 1.6.1
+/// report, executed: `deny Fs run3` 0 -> 1). A member the union carries that NOTHING answers (no chained entry, no own
+/// implementor — the zero-implementor bucket) is disclosed at the consumer, so dropping the producer's hedge does not turn
+/// `deny Unknown` 1 -> 0 (PART 102 `u_*_none`). A ROW's unanswered member still adds nothing (PART 92 `c3_pure_only`).
+#[test]
+fn r1324_a_consumer_joins_a_unions_carried_member_and_discloses_one_nothing_answers() {
+    let report = |pkg: &str, rows: &str| format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.40"}},
+        "package": "{pkg}", "analyzed": {{"count": 2, "digest": "0"}}, "functions": [{rows}]}}"#, env!("CARGO_PKG_VERSION"));
+    let mk = |name: &str, src: &str| {
+        let d = make_crate(name, src);
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n\n[dependencies]\napi = \"1\"\nprod = \"1\"\nmid = \"1\"\n")).unwrap();
+        d
+    };
+    // prod: the union for api's `Sink::put` carries `api#Mapper::mapv`; mid: `mid_via` dispatches `Sink::put`; a second mid
+    // row `mid_row` names `api#Mapper::other` on a ROW (no union carries it).
+    let tmp = mk("r1324deps", "");
+    let prod = tmp.join("prod.json");
+    std::fs::write(&prod, report("prod", r#"{"fn": "Sink::put", "hash": "api#Sink::put", "inferred": [], "interfaceUnion": true,
+        "dispatchesOn": ["api#Mapper::mapv"]}"#)).unwrap();
+    let mid = tmp.join("mid.json");
+    std::fs::write(&mid, report("mid", r#"{"fn": "mid_via", "hash": "mid#mid_via", "inferred": [], "dispatchesOn": ["api#Sink::put"]},
+        {"fn": "mid_row", "hash": "mid#mid_row", "inferred": [], "dispatchesOn": ["api#Mapper::other"]}"#)).unwrap();
+    let deps = format!("{} {}", prod.display(), mid.display());
+    let app = mk("r1324app", "pub struct Mine;\n\
+        impl api::Mapper for Mine { fn mapv(&self) { std::fs::write(\"/tmp/r1324\", b\"x\").unwrap(); } }\n\
+        pub fn c_via() { mid::mid_via() }\n");
+    let v = scan_json(&app, &deps);
+    let c = row(&v, |f| f["fn"] == "c_via").unwrap_or_else(|| panic!("R1324: `c_via` ABSENT over its own effectful implementor: {v:#}"));
+    assert!(c["inferred"].as_array().unwrap().iter().any(|e| e == "Fs"), "R1324: the carried member joins the consumer's implementor: {c:#}");
+    let zapp = mk("r1324zapp", "pub fn c_none() { mid::mid_via() }\npub fn c_row() { mid::mid_row() }\n");
+    let z = scan_json(&zapp, &deps);
+    let _ = std::fs::remove_dir_all(&app);
+    let _ = std::fs::remove_dir_all(&zapp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    let n = row(&z, |f| f["fn"] == "c_none").unwrap_or_else(|| panic!("R1324: `c_none` ABSENT over a member nothing answers: {z:#}"));
+    assert!(n["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown")
+        && why(n).iter().any(|w| w == "dispatch:Mapper.mapv"), "R1324: the zero-implementor bucket is disclosed: {n:#}");
+    assert!(row(&z, |f| f["fn"] == "c_row").is_none_or(|r| !r["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown")),
+        "R1324: a ROW's unanswered member still adds nothing (PART 92 c3_pure_only): {z:#}");
 }

@@ -88,6 +88,11 @@ pub(crate) struct DepFn {
     /// whatever the dep's own row already said (its `Unknown`, or its honest purity) rather than to a new
     /// hedge — §4 ⟨0.39⟩ adds a CONTRIBUTOR to the union, not a resolution rule.
     pub(crate) dispatches_on: BTreeSet<String>,
+    /// SOUNDNESS R1324 (SPEC §4 ⟨0.40⟩ union clause) — the subset of `dispatches_on` an `interfaceUnion` entry carried.
+    /// A union has no body of its own, so a member it names that NOTHING answers at the consumer (no chained entry,
+    /// no own implementor) is a dispatch whose implementor is invisible — the case the producer's R1324 hedge used to
+    /// disclose. Kept apart so a ROW's miss keeps PART 92's `c3_pure_only` reading (a miss adds nothing).
+    pub(crate) union_dispatches_on: BTreeSet<String>,
 }
 
 impl DepFn {
@@ -105,7 +110,7 @@ impl DepFn {
     /// invariant belongs in a place a later edit has to walk past, not in a comment.
     pub(crate) fn union_with(&mut self, other: &DepFn) {
         let DepFn { effects, hosts, cmds, paths, tables, invisible, incomplete, unknown_why,
-                    dispatches_on } = other;
+                    dispatches_on, union_dispatches_on } = other;
         self.effects.extend(effects.iter().copied());
         self.hosts.extend(hosts.iter().cloned());
         self.cmds.extend(cmds.iter().cloned());
@@ -115,6 +120,7 @@ impl DepFn {
         self.incomplete.extend(incomplete.iter().copied());
         self.unknown_why.extend(unknown_why.iter().cloned());
         self.dispatches_on.extend(dispatches_on.iter().cloned());
+        self.union_dispatches_on.extend(union_dispatches_on.iter().cloned());
     }
 }
 
@@ -762,6 +768,9 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // whole point of the field — the toggle's silent side is precisely the row that says
                 // nothing else.
                 de.dispatches_on = strs("dispatchesOn");
+                if e.get("interfaceUnion").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    de.union_dispatches_on = de.dispatches_on.clone(); // R1324
+                }
                 de.hosts = strs("hosts");
                 de.cmds = strs("cmds");
                 de.paths = strs("paths");
