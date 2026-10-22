@@ -7001,7 +7001,15 @@ impl<'a> CallCollector<'a> {
                 let full = crate::lang::expand(&t, &self.uses);
                 let head = full.split("::").next().unwrap_or("");
                 let leaf = full.rsplit("::").next().unwrap_or(&full).to_string();
-                if full != t && matches!(head, "crate" | "self" | "super") && leaf != t && self.local_traits.contains_key(&leaf) {
+                // ONE declaration of that leaf only: `local_traits` is leaf-keyed, so with two (redis 1.7's sync and `aio`
+                // `ConnectionLike`, the latter imported `as AsyncConnection`) the leaf names neither, and the bounded fan-out
+                // would refuse with an `ambiguous:` hedge where the alias used to keep its old reading — the first corpus A/B
+                // of this rule measured 6 rows LOSING concrete effects that way.
+                if full != t
+                    && matches!(head, "crate" | "self" | "super")
+                    && leaf != t
+                    && self.local_traits.get(&leaf).is_some_and(|lt| lt.count == 1)
+                {
                     if crate::lang::reach_debug() {
                         eprintln!("R1347ALIAS\t{t}\t{leaf}"); // §E1 REACH COUNTER
                     }
