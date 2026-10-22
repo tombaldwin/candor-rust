@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.15] — 2026-10-22
+
 - ⚠ **candor-scan: four resolution gaps that a false `ambiguous:` hedge used to cover now resolve (SOUNDNESS R1287,
   R1289, R1290, R1292).** (R1287) `use super::{f, ..}` naming a crate-ROOT fn anchors to `crate::f`, so the bare call
   resolves: quinn-udp 0.4.1 `unix::UdpSocketState::send` `deny Clock` 0 → **1**. (R1289) `Type::assoc(..)` takes the
