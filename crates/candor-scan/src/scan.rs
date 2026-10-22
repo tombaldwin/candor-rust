@@ -7579,6 +7579,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                     }
                 }
+                // SOUNDNESS R1367 — A UNION PAST THE BOUND IS PUBLISHED BROAD (SPEC §4 ⟨0.40⟩, the bound paragraph). The
+                // in-scan dispatch over this trait reads `Unknown` once `trait_impls` holds more than 12 implementors
+                // (`collector.rs` `dispatch_trait_member`, the SAME index and the SAME count), so a union published
+                // narrow — pure when every implementor is — hands a chained consumer a purity claim this scan does not
+                // make (PART 103 `c_13`: 13 pure implementors, chained `deny Unknown` 0 while one tree reads 1). The
+                // bounded-CHA hedge on its own key, exactly the in-scan reason. `CANDOR_R1367_OFF=1` disables it.
+                if impls.len() > 12 && std::env::var_os("CANDOR_R1367_OFF").is_none() {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1367BROAD\tLOCAL\t{trait_leaf}::{method}\t{}", impls.len()); // §E1 REACH COUNTER
+                    }
+                    inf_u.insert("Unknown");
+                    why_u.insert(own_hedge.clone());
+                }
                 // SOUNDNESS R529 — an implementor written inside a BLOCK is in no Pass A index, so the
                 // union above is taken over the implementors this engine could NAME, not over the ones
                 // this crate has. Publishing that union as a complete answer is the silent-purity claim
@@ -7842,6 +7855,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
             let own_tail = crate::lang::tail2(key.split_once('#').map(|(_, p)| p).unwrap_or(key)).unwrap_or_default();
+            // SOUNDNESS R1367, the FOREIGN leg — the same bound over this crate's implementors of THAT trait (every
+            // `foreign_impls` key under the same `{owner}#{trait qual}::` prefix, counted by implementing type).
+            if std::env::var_os("CANDOR_R1367_OFF").is_none() {
+                if let Some(pfx) = r533_trait_prefix(key) {
+                    let tys: HashSet<&str> = merged.foreign_impls.iter()
+                        .filter(|(k, _)| k.starts_with(pfx.as_str()) && !k[pfx.len()..].contains("::"))
+                        .flat_map(|(_, v)| v.iter().map(|q| q.rsplit_once("::").map(|(t, _)| t).unwrap_or(q)))
+                        .collect();
+                    if tys.len() > 12 {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1367BROAD\tFOREIGN\t{key}\t{}", tys.len()); // §E1 REACH COUNTER
+                        }
+                        inf_u.insert("Unknown");
+                        why_u.insert(r529_reason(key));
+                    }
+                }
+            }
             for cand in impl_quals {
                 if let Some(s) = inferred.get(cand) {
                     inf_u.extend(s.iter().copied());

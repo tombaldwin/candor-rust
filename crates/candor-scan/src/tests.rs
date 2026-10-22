@@ -8345,6 +8345,24 @@ impl<A: Ser> Ser for &A { fn some<T: Val>(&self, v: &T) { (**self).some(v) } fn 
             "R1324: own-member forwarding adds no key:\n{v:#}");
     }
 
+    /// SOUNDNESS R1367 (rustagent-0416) — a union whose trait has MORE than the bounded-CHA limit of implementors is published
+    /// BROAD, with the in-scan hedge on its own key, even when every implementor is pure (SPEC §4 ⟨0.40⟩ bound paragraph;
+    /// conformance PART 103 `c_13`); at 12 it stays pure (PART 103 `c_12`, PART 92 `c3_pure_only`).
+    #[test]
+    fn r1367_a_union_past_the_bound_is_published_broad() {
+        for (n, want) in [(13usize, true), (12, false)] {
+            let mut src = String::from("pub trait Sink { fn put(&self); }\n");
+            for i in 0..n {
+                src.push_str(&format!("pub struct K{i}; impl Sink for K{i} {{ fn put(&self) {{}} }}\n"));
+            }
+            let v = scan_fixture(&format!("r1367b{n}"), &src);
+            let u = v["functions"].as_array().unwrap().iter()
+                .find(|f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|q| q.ends_with("Sink::put")))
+                .unwrap_or_else(|| panic!("R1367: no Sink::put union at {n}:\n{v:#}"));
+            assert_eq!(u["inferred"].to_string().contains("Unknown"), want, "R1367 at {n} implementors:\n{v:#}");
+        }
+    }
+
     /// SOUNDNESS R1352 (rustagent-0416) — the R1324 union hedge for an implementor declared in a SUBMODULE (Fable fx6, the
     /// ordinary crate shape): the effects reach the union through R513's tail fallback, and so must the hedge.
     #[test]
