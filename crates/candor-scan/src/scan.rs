@@ -7203,6 +7203,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if format!("{tr}::{m}") == own_tail {
                 continue;
             }
+            // Not a member a reason may name: §4's conventionally pure members, and the `Result`/`Option` combinators a
+            // contributor key carries only by R549's chain drift (`visitor.visit_str(..).map_err(..)` keyed
+            // `Visitor::map_err`, a member `Visitor` does not declare). The first corpus A/B of this rule named both
+            // (`dispatch:Visitor.map_err` x190, `dispatch:*.clone` x309); a DENYLIST, so a real member is never dropped
+            // for being unlisted.
+            if matches!(
+                m,
+                "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp" | "to_string" | "map" | "map_err" | "ok"
+                    | "ok_or" | "ok_or_else" | "and_then" | "or_else" | "unwrap" | "unwrap_or" | "unwrap_or_default"
+                    | "unwrap_or_else" | "expect" | "is_ok" | "is_err" | "is_some" | "is_none" | "into" | "as_ref" | "as_mut"
+            ) {
+                continue;
+            }
             if crate::lang::reach_debug() {
                 eprintln!("R1324UNION\t{own_tail}\t{tr}.{m}"); // §E1 REACH COUNTER
             }
