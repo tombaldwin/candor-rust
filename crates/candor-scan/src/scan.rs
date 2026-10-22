@@ -7177,6 +7177,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // 1 -> 0 chained). §3.1's rule for exactly this: such a contributor contributes `unresolved`, as a `dep:` reason does
     // — here naming each claimant that carries `Unknown`, by its own entry key in this report. Reasons only: the union's
     // `inferred` is untouched (adding what the refused claimants carry is Wave B's resolution, not this disclosure).
+    // SOUNDNESS R1324 (rustagent-0415) — A CONTRIBUTOR THAT DISPATCHES FURTHER. A union entry has no body, so it carries no
+    // `dispatchesOn` of its own, and §2/§4 give it none to carry: a consumer that reaches it (a chained dependency's row
+    // keyed `serde#ser::Serializer::serialize_some`) learns the union's EFFECTS and REASONS and nothing else. When a
+    // contributor is pure but dispatches on ANOTHER member (aws-smithy-types `DocSerializer::serialize_some` ->
+    // `serde#ser::Serialize::serialize`, the consumer's own value), the union therefore read `[]` — and the consumer's
+    // implementor of that other member was never reached. EXECUTED rustagent-0415 `fx/cpaws/c_aws3`: the program runs the
+    // consumer's `Serialize::serialize` (writes) through aws-smithy's union; chained over the REAL aws-smithy-types 1.6.1
+    // report, `deny Unknown run3` was 1 on v0.40.14 only because a false `ambiguous:` reason rode the union, and 0 once
+    // R1265 removed it. §3.1 ⟨0.40⟩ admits "the union's own dispatch hedge where it publishes one"; ⟨0.39⟩ has no
+    // placement for `dispatchesOn` on a union entry, so this is the HEDGE: `Unknown` with `dispatch:<Trait>.<member>` for
+    // each further member a contributor reaches. A contributor dispatching on the union's OWN member is the consumer's own
+    // obligation-3 join already and is skipped. `CANDOR_R1324_OFF=1` disables it.
+    let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>| {
+        if std::env::var_os("CANDOR_R1324_OFF").is_some() {
+            return;
+        }
+        for k in dispatch_acc.get(cand).into_iter().flatten() {
+            let path = k.split_once('#').map(|(_, p)| p).unwrap_or(k);
+            let segs: Vec<&str> = path.split("::").collect();
+            if segs.len() < 2 {
+                continue;
+            }
+            let (tr, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
+            if format!("{tr}::{m}") == own_tail {
+                continue;
+            }
+            if crate::lang::reach_debug() {
+                eprintln!("R1324UNION\t{own_tail}\t{tr}.{m}"); // §E1 REACH COUNTER
+            }
+            inf.insert("Unknown");
+            out.insert(format!("dispatch:{tr}.{m}"));
+        }
+    };
     let union_unnamed = |tail: &str, out: &mut BTreeSet<String>| {
         if let Some(ts) = by_tail2.get(tail).filter(|ts| ts.len() >= 2) {
             for t in ts {
@@ -7380,6 +7413,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                             union_why(&cand, &mut why_u); // R1268 — `Unknown` is admitted on both sides of R598
                         }
+                        union_dispatch_hedge(&cand, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u); // R1324
                         if let Some(s) = blind_acc.get(&cand) {
                             for c in s.iter().filter(|c| global_blind.contains(*c)) {
                                 blind_u.insert(c.clone());
@@ -7670,6 +7704,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     eprintln!("R529HIT\tUNION-FOREIGN\t{key}"); // §E1 REACH PROBE
                 }
             }
+            let own_tail = crate::lang::tail2(key.split_once('#').map(|(_, p)| p).unwrap_or(key)).unwrap_or_default();
             for cand in impl_quals {
                 if let Some(s) = inferred.get(cand) {
                     inf_u.extend(s.iter().copied());
@@ -7677,6 +7712,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 } else {
                     union_unnamed(cand, &mut why_u); // R1293
                 }
+                union_dispatch_hedge(cand, &own_tail, &mut inf_u, &mut why_u); // R1324
                 if let Some(s) = blind_acc.get(cand) {
                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
                 }
@@ -7686,6 +7722,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // guessing here would charge one type's effects to another type's implementor.
                 if let Some(ts) = by_tail2.get(cand) {
                     if ts.len() == 1 {
+                        union_dispatch_hedge(&ts[0], &own_tail, &mut inf_u, &mut why_u); // R1324
                         if let Some(s) = inferred.get(&ts[0]) {
                             inf_u.extend(s.iter().copied());
                             union_why(&ts[0], &mut why_u); // R1268

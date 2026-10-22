@@ -118,6 +118,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   lose `Unknown`, each resolved-charged, pure by reading, or `[]`+`invisible` that chaining charges; 3,751 rows newly
   carry `Unknown` (0.074% of 5,100,009 analysed units); 2,975 rows gain a concrete effect (x11rb ×2,861 `Net` through
   the now-typed `RustConnection`). Cache schema rev131.
+- ⚠ **candor-scan: an `interfaceUnion` entry whose contributor dispatches on ANOTHER member now discloses it (SOUNDNESS
+  R1324).** aws-smithy-types' union `serde#ser::Serializer::serialize_some` read `[]` once R1265 removed a false
+  `ambiguous:` reason, while its contributor `DocSerializer::serialize_some` dispatches on `serde#ser::Serialize::serialize`
+  — the consumer's own value. A union entry has nowhere to carry `dispatchesOn` (⟨0.39⟩ gives it none), so a chained
+  consumer reaching it through a dependency's key was silent. The union now carries `Unknown` with
+  `dispatch:<Trait>.<member>` for each further member a contributor reaches (§3.1 ⟨0.40⟩'s "union's own dispatch hedge");
+  forwarding on the union's own member adds nothing. EXECUTED (consumer over the real aws-smithy-types 1.6.1 report):
+  `deny Unknown` 1 (v0.40.14) / 0 (before this change) / **1**. In the R1319 corpus 23 of the 64 residue union entries
+  regain `Unknown`; the other 41 have no contributor dispatching further. Also: a local trait imported under an alias, a
+  `-> Self::<Assoc>` receiver, and a pub trait's std-supertrait member (R1347), see the commits.
 
 ## [0.40.14] — 2026-10-21
 
