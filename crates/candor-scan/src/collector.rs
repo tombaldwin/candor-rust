@@ -7025,13 +7025,21 @@ impl<'a> CallCollector<'a> {
             return Vec::new();
         }
         let syn::Expr::MethodCall(mc) = peel_recv(expr) else { return Vec::new() };
+        let key = crate::model::trait_ret_assoc_key(&mc.method.to_string());
+        // CHEAP FIRST, and never recursive. The first corpus run of this rule HUNG (criterion's builder chains: this was
+        // asked on every link of every chain from both `resolve_recv_type` and `resolve_recv_traits`, each asking the
+        // other about the inner link — exponential). No local trait declares the member `-> Self::<Assoc>`: answer
+        // nothing. Otherwise only a BINDING, a FIELD or `self` as the inner receiver — never another call.
+        if !self.local_traits.values().any(|lt| lt.assoc_types.contains_key(&key)) {
+            return Vec::new();
+        }
         let inner_traits: Vec<String> = match peel_value(&mc.receiver) {
             syn::Expr::Path(p) if p.path.is_ident("self") && self.trait_self.is_some() => {
                 vec![self.trait_self.clone().unwrap_or_default()]
             }
-            _ => self.resolve_recv_traits(&mc.receiver),
+            syn::Expr::Path(_) | syn::Expr::Field(_) => self.resolve_recv_traits(&mc.receiver),
+            _ => Vec::new(),
         };
-        let key = crate::model::trait_ret_assoc_key(&mc.method.to_string());
         let mut out: Vec<String> = Vec::new();
         for t in inner_traits {
             let Some(lt) = self.local_traits.get(&t) else { continue };
