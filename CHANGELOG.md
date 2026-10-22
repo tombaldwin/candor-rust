@@ -111,7 +111,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   ..)` in a blanket impl whose own trait declares the same member (R1322); and R1095's untyped-receiver floor now also
   discloses over an `Unknown`-only candidate that is a member of a local BLANKET trait (diesel 2.3.10
   `metadata_lookup::lookup_type` → `RunQueryDsl::first`). Executed fixtures: chained `deny Fs` 0→**1** on the field and
-  payload forms, `deny Unknown` 0→**1** on the glob, blanket and UFCS forms. Cache schema rev131.
+  payload forms, `deny Unknown` 0→**1** on the glob, blanket and UFCS forms. Where only the enclosing impl's bound
+  spells a foreign trait that THIS crate implements, the now-keyed site also carries `dispatch:<Trait>.<member>`
+  (R981's rationale), and a payload is typed only to a crate-local nominal type. Corpus A/B against the published
+  0.40.14 (1,175 chained + 5,376 standalone): 0 rows lose a concrete effect; against the previous stack HEAD 30 rows
+  lose `Unknown`, each resolved-charged, pure by reading, or `[]`+`invisible` that chaining charges; 3,751 rows newly
+  carry `Unknown` (0.074% of 5,100,009 analysed units); 2,975 rows gain a concrete effect (x11rb ×2,861 `Net` through
+  the now-typed `RustConnection`). Cache schema rev131.
 
 ## [0.40.14] — 2026-10-21
 
