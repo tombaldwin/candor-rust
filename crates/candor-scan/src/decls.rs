@@ -5128,6 +5128,18 @@ pub(crate) fn collect_decls(
                         // never mis-reads `Trait::assoc(&x)` as a receiver call on `x`.
                         if matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
                             e.methods.insert(m.sig.ident.to_string());
+                            // SOUNDNESS R1347 — a receiver method declared `-> Self::<Assoc>` (`model::trait_ret_assoc_key`).
+                            if let syn::ReturnType::Type(_, rt) = &m.sig.output {
+                                if let syn::Type::Path(tp) = &**rt {
+                                    let segs: Vec<String> = tp.path.segments.iter().map(|x| x.ident.to_string()).collect();
+                                    if tp.qself.is_none() && segs.len() == 2 && segs[0] == "Self" {
+                                        let slot = e.assoc_types.entry(crate::model::trait_ret_assoc_key(&m.sig.ident.to_string())).or_default();
+                                        if !slot.contains(&segs[1]) {
+                                            slot.push(segs[1].clone());
+                                        }
+                                    }
+                                }
+                            }
                             // SOUNDNESS R1208 — the DECLARED receiver rank, for a member with no default body (its
                             // only units are impls, which no `<Trait>::<member>` key names); a conflict reads "".
                             let k = crate::model::trait_rank_key(&t.ident.to_string(), &m.sig.ident.to_string());

@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev132 (rustagent-0415): SOUNDNESS R1347 — `LocalTrait::assoc_types` gains the reserved `-> Self::<Assoc>` member key,
+    // an aliased local-trait bound and a projection receiver now dispatch, and a pub trait's std-supertrait member discloses
+    // (cached `assoc_types`, `calls`, `dispatch`, `unresolved_why` move).
     // rev131 (rustagent-0415): SOUNDNESS R1319 (generic-field + glob halves) and R1323 — the enclosing impl's written bound
     // qualifies a generic-FIELD receiver's dispatch, a dependency-glob bound with no spellable key discloses, and a std
     // `Some`/`Ok` payload over a method return is typed as that return's `unwrap()` (cached `foreign_dispatch`,
@@ -538,7 +541,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev131/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev132/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

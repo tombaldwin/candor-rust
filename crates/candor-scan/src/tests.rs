@@ -8295,6 +8295,31 @@ impl<R: BufRead> Rdr<R> { pub fn ev(&mut self) -> usize { self.reader.rb() } }\n
         assert!(!fn_entry(&v, "g::chain")["unknownWhy"].to_string().contains("count_ones"), "R1319 glob: no chain-link reason:\n{v:#}");
     }
 
+    /// SOUNDNESS R1347 (rustagent-0415) — three dispatch sites with no key, edge or disclosure (EXECUTED `fx/r1347`,
+    /// `fx/r1347s`): a local trait bound through an import ALIAS (fancy-regex `Input as HaystackInput`), a receiver that is
+    /// a `-> Self::<Assoc>` member's value (gimli `self.endian().read_u16(..)`), and a pub trait's STD-supertrait member
+    /// (sea-query `SqlWriter: fmt::Write`, `sql.write_str(..)`), which ⟨0.39⟩ cannot key and so discloses.
+    #[test]
+    fn r1347_alias_bound_projection_receiver_and_std_supertrait_member() {
+        let src = "\
+pub mod input { pub trait Input { fn prev(&self, ix: usize) -> usize; }\n\
+    pub struct LoudIn; impl Input for LoudIn { fn prev(&self, ix: usize) -> usize { std::fs::write(\"/tmp/x\", b\"p\").unwrap(); ix } } }\n\
+use crate::input::Input as HaystackInput;\n\
+pub fn alias_prev<S: HaystackInput + ?Sized>(s: &S, ix: usize) -> usize { s.prev(ix) }\n\
+pub trait End: Copy { fn big(self) -> bool; fn rd(self) -> u16 { if self.big() { 1 } else { 0 } } }\n\
+#[derive(Clone, Copy)] pub struct LoudE;\n\
+impl End for LoudE { fn big(self) -> bool { std::fs::write(\"/tmp/x\", b\"b\").unwrap(); true } }\n\
+pub trait Rdr { type E: End; fn endian(&self) -> Self::E; fn read_u16(&mut self) -> u16 { self.endian().rd() } }\n\
+pub fn proj_skip<R: Rdr>(r: &mut R) -> u16 { r.read_u16() }\n\
+pub trait SqlW: std::fmt::Write {}\n\
+impl SqlW for String {}\n\
+pub fn prep(sql: &mut impl SqlW) { sql.write_str(\"x\").unwrap(); }\n";
+        let v = scan_fixture("r1347forms", src);
+        assert!(fixture_effects(&v, "alias_prev").contains(&"Fs".to_string()), "R1347 alias bound:\n{v:#}");
+        assert!(fn_entry(&v, "Rdr::read_u16")["dispatchesOn"].to_string().contains("End::rd"), "R1347 projection key:\n{v:#}");
+        assert!(fn_entry(&v, "prep")["unknownWhy"].to_string().contains("dispatch:SqlW.write_str"), "R1347 std supertrait:\n{v:#}");
+    }
+
     /// SOUNDNESS R1321 (rustagent-d) — false reasons. rustc-serialize's `writer: &'a mut (fmt::Write + 'a)` field, in a file
     /// that globs `std::io::prelude::*`, was hedged `dispatch:Write.write_fmt` by e6129ca (a `fmt::Write`, which the hedge
     /// excludes by construction), and zstd-safe's `reader.read_exact(buf).is_err()` in a generic `extern "C"` callback
@@ -18161,7 +18186,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18172,7 +18197,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev131/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev132/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

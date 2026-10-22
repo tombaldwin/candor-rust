@@ -747,6 +747,13 @@ pub(crate) fn prim_op_key(trait_leaf: &str, ty_leaf: &str, mbe: bool) -> String 
 
 /// SOUNDNESS R1151 — a `ReturnIndex` key: a local trait of this leaf is declared `pub`, so an implementor this scan
 /// cannot see may exist and run the trait's provided body. Value `1`.
+/// SOUNDNESS R1347 (rustagent-0415) — the reserved `LocalTrait::assoc_types` key recording that the trait's receiver
+/// method `member` is declared `-> Self::<Assoc>` (gimli `fn endian(&self) -> Self::Endian`). No associated type can be
+/// named with `\u{1f}`, so it never collides with R1037's real entries and rides the same cache field.
+pub(crate) fn trait_ret_assoc_key(member: &str) -> String {
+    format!("\u{1f}ret:{member}")
+}
+
 pub(crate) fn pub_trait_key(trait_leaf: &str) -> String {
     format!("<pubtrait>{trait_leaf}")
 }

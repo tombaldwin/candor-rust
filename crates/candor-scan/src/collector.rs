@@ -4020,6 +4020,11 @@ impl<'a> CallCollector<'a> {
                 if self.returns.get(&m.method.to_string()).and_then(|t| ret_dyn_leaves(t)).is_some() {
                     return None;
                 }
+                // SOUNDNESS R1347 (gimli half) — a `-> Self::<Assoc>` member's value is the associated type, which
+                // dispatches (`projection_return_traits`); never the receiver's own type.
+                if !self.projection_return_traits(expr).is_empty() {
+                    return None;
+                }
                 // A method that returns a DIFFERENT (std) type — an iterator / slice / string / view
                 // producer — breaks the builder-chain assumption that the chain stays one crate's type.
                 // After `.iter()`/`.get_argv()`/`.as_slice()` the value is a std iterator/slice, so
@@ -6971,8 +6976,75 @@ impl<'a> CallCollector<'a> {
         if old_guard_would_skip && !out.is_empty() && std::env::var_os("CANDOR_R540_INSTR").is_some() {
             eprintln!("R540REACH");
         }
-        if out.is_empty() {
-            return self.scoped_generic_recv(expr);
+        let out = if out.is_empty() { self.scoped_generic_recv(expr) } else { out };
+        let out = if out.is_empty() { self.projection_return_traits(expr) } else { out };
+        self.canon_local_trait_aliases(out)
+    }
+
+    /// SOUNDNESS R1347 (fancy-regex half, rustagent-0415) — a LOCAL trait imported under an ALIAS (`use
+    /// crate::input::{Input as HaystackInput}; fn prev_ix<S: HaystackInput + ?Sized>(s: &S, ..) { s.prev_codepoint_ix(ix) }`,
+    /// fancy-regex 0.19.0) bounds the receiver by a leaf no trait declares, so `local_traits` missed it, every branch read
+    /// it as a foreign bound with no `::`, and the site published no key, no edge and no disclosure. EXECUTED rustagent-0415
+    /// `fx/r1347`: `alias_prev` vs the identical `plain_prev` with only the alias changed, `deny Fs` 0 vs 1. The alias
+    /// is followed through this file's `use` map to the trait it names, only when that path is crate-local and its leaf is
+    /// a declared local trait. A RESOLUTION: the bounded fan-out and the key the plain spelling already gets.
+    /// `CANDOR_R1347A_OFF=1` disables it.
+    fn canon_local_trait_aliases(&self, out: Vec<String>) -> Vec<String> {
+        if std::env::var_os("CANDOR_R1347A_OFF").is_some() {
+            return out;
+        }
+        out.into_iter()
+            .map(|t| {
+                if t.contains("::") || self.local_traits.contains_key(&t) {
+                    return t;
+                }
+                let full = crate::lang::expand(&t, &self.uses);
+                let head = full.split("::").next().unwrap_or("");
+                let leaf = full.rsplit("::").next().unwrap_or(&full).to_string();
+                if full != t && matches!(head, "crate" | "self" | "super") && leaf != t && self.local_traits.contains_key(&leaf) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1347ALIAS\t{t}\t{leaf}"); // §E1 REACH COUNTER
+                    }
+                    leaf
+                } else {
+                    t
+                }
+            })
+            .collect()
+    }
+
+    /// SOUNDNESS R1347 (gimli half, rustagent-0415) — the receiver `x.m()` where `x` is bounded by (or, in a trait default
+    /// body, IS) a local trait whose `m` is declared `-> Self::<Assoc>`: the value is the associated type, bounded by
+    /// what the trait says it is. gimli 0.28.1's `Reader::read_u16` default is `self.endian().read_u16(&a)` with
+    /// `fn endian(&self) -> Self::Endian; type Endian: Endianity;` — no route typed `self.endian()`, so the dispatch on
+    /// `Endianity` formed no edge, no key and no disclosure and `skip_attributes` read pure over a caller-supplied
+    /// `Endianity` (EXECUTED rustagent-0415 `fx/r1347` `proj_skip` reaches `LoudE::big`, which writes; `deny Fs` 0).
+    /// Answers only when every other route answered nothing. A RESOLUTION (bounded fan-out + key). `CANDOR_R1347P_OFF=1`.
+    fn projection_return_traits(&self, expr: &syn::Expr) -> Vec<String> {
+        if std::env::var_os("CANDOR_R1347P_OFF").is_some() {
+            return Vec::new();
+        }
+        let syn::Expr::MethodCall(mc) = peel_recv(expr) else { return Vec::new() };
+        let inner_traits: Vec<String> = match peel_value(&mc.receiver) {
+            syn::Expr::Path(p) if p.path.is_ident("self") && self.trait_self.is_some() => {
+                vec![self.trait_self.clone().unwrap_or_default()]
+            }
+            _ => self.resolve_recv_traits(&mc.receiver),
+        };
+        let key = crate::model::trait_ret_assoc_key(&mc.method.to_string());
+        let mut out: Vec<String> = Vec::new();
+        for t in inner_traits {
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            for a in lt.assoc_types.get(&key).into_iter().flatten() {
+                for b in lt.assoc_types.get(a).into_iter().flatten() {
+                    if !out.contains(b) {
+                        out.push(b.clone());
+                    }
+                }
+            }
+        }
+        if !out.is_empty() && crate::lang::reach_debug() {
+            eprintln!("R1347PROJ\t{}\t{}", mc.method, out.join(",")); // §E1 REACH COUNTER
         }
         out
     }
@@ -7511,6 +7583,25 @@ impl<'a> CallCollector<'a> {
         // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
         if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf))) {
+            // SOUNDNESS R1347 (sea-query half, rustagent-0415) — …UNLESS a STD supertrait declares it. `pub trait
+            // SqlWriter: Write + ..` (`std::fmt::Write`) and `fn prepare_column_type(.., sql: &mut impl SqlWriter) {
+            // write!(sql, ..) }`: the member that runs is the IMPLEMENTOR's `fmt::Write::write_str`, and a `pub` trait's
+            // implementor may be downstream. ⟨0.39⟩ has NO spelling for an obligation-1 key on a std-owned member, so no
+            // consumer can ever join it (and R549 forbids `SqlWriter::write_str`, a member `SqlWriter` does not declare).
+            // The three-row rule's answer for an unformable key is the disclosure: a HEDGE, true reason
+            // `dispatch:<Trait>.<member>`. EXECUTED rustagent-0415 `fx/r1347`. Only for a `pub` trait (a private trait's
+            // implementors are all visible), only for a std supertrait whose member list is closed (`fmt::Write`,
+            // `io::{Read,Write,BufRead,Seek}`). `CANDOR_R1347S_OFF=1` disables it.
+            if std::env::var_os("CANDOR_R1347S_OFF").is_none()
+                && self.returns.contains_key(&crate::model::pub_trait_key(tr))
+                && self.std_supertrait_declares(tr, leaf)
+            {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1347STD\t{tr}\t{leaf}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{tr}.{leaf}"));
+                return true;
+            }
             return false; // blanket/unrelated name — not this trait's dispatch
         }
         let count = lt.count;
@@ -7581,6 +7672,43 @@ impl<'a> CallCollector<'a> {
     /// multi-segment path, rooted at a crate-looking head (`lang::is_dependency_crate_root`) that the
     /// crate root does not itself declare as an item? Same per-parameter-then-signature lookup the
     /// foreign arm uses to form its key, so the two cannot disagree about what was written.
+    /// SOUNDNESS R1347 (sea-query half) — does a STD supertrait of local trait `tr` (transitively through local ones)
+    /// declare `leaf`? Only std's `fmt::Write` and the I/O traits, whose member lists are closed; the supertrait's own
+    /// qualification is read through this file's `use` map (a bare `Write` under `use std::fmt::Write`).
+    fn std_supertrait_declares(&self, tr: &str, leaf: &str) -> bool {
+        let mut seen: Vec<String> = Vec::new();
+        let mut st = vec![tr.to_string()];
+        while let Some(t) = st.pop() {
+            if seen.contains(&t) || seen.len() > 16 {
+                continue;
+            }
+            seen.push(t.clone());
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            for s in &lt.supertraits {
+                if self.local_traits.contains_key(s) {
+                    st.push(s.clone());
+                    continue;
+                }
+                let full = crate::lang::expand(s, &self.uses);
+                // The supertrait is spelled in the TRAIT's file, not this one: sea-query declares `pub trait SqlWriter: Write`
+                // under `pub use std::fmt::Write` in prepare.rs and calls it from files that `use crate::*`, where `Write`
+                // expands to nothing. A bare leaf counts as std's: `write_str`/`write_char` exist only on `fmt::Write`, and
+                // `write_fmt` on `fmt::Write` and `io::Write` alike — std-owned either way.
+                let fmt_write = s == "Write"
+                    && (!full.contains("::") || matches!(full.as_str(), "std::fmt::Write" | "core::fmt::Write" | "fmt::Write" | "std::io::Write"));
+                if fmt_write && matches!(leaf, "write_str" | "write_char" | "write_fmt") {
+                    return true;
+                }
+                if full.contains("::") && crate::lang::is_std_io_trait(&full, s) && leaf != "by_ref"
+                    && crate::lang::std_io_trait_member(s, leaf)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn receiver_written_dep_trait(&self, recv: &syn::Expr, tr: &str) -> bool {
         let recv_param = match peel_recv(recv) {
             syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
