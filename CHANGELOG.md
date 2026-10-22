@@ -126,7 +126,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `dispatch:<Trait>.<member>` for each further member a contributor reaches (§3.1 ⟨0.40⟩'s "union's own dispatch hedge");
   forwarding on the union's own member adds nothing. EXECUTED (consumer over the real aws-smithy-types 1.6.1 report):
   `deny Unknown` 1 (v0.40.14) / 0 (before this change) / **1**. In the R1319 corpus 23 of the 64 residue union entries
-  regain `Unknown`; the other 41 have no contributor dispatching further. Also: a local trait imported under an alias, a
+  regain `Unknown`. 28 units newly carry `Unknown` against the previous candidate (plus 4,439 union entries, never
+  verdict units). **Shipping knowingly PARTIAL:** the hedge never names 27 member names (`map`, `clone`, `fmt`, …)
+  even on a package trait (R1351), it misses an implementor declared in a submodule (R1352 — at least 20 of the
+  remaining residue entries are this shape), and a multi-bound contributor names traits that do not declare the
+  member (R1353, over-disclosure). None of these is a regression against 0.40.14. Also: a local trait imported under an alias, a
   `-> Self::<Assoc>` receiver, and a pub trait's std-supertrait member (R1347), see the commits.
 
 ## [0.40.14] — 2026-10-21
