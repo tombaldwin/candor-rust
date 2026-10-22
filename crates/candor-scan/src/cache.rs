@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev133 (rustagent-0416): SOUNDNESS R1345 — `FileDecls` gains `glob_impl_foreign` (an impl of a dependency trait named
+    // only through that dependency's glob), read by the consumer's tail-keyed implementor index.
     // rev132 (rustagent-0415): SOUNDNESS R1347 — `LocalTrait::assoc_types` gains the reserved `-> Self::<Assoc>` member key,
     // an aliased local-trait bound and a projection receiver now dispatch, and a pub trait's std-supertrait member discloses
     // (cached `assoc_types`, `calls`, `dispatch`, `unresolved_why` move).
@@ -541,7 +543,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev132/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev133/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -768,6 +770,10 @@ pub(crate) struct FileDecls {
     /// methods are filed under the module path. See `lang::collect_nonpath_receivers`.
     #[serde(default)]
     pub(crate) nonpath_receivers: Vec<String>,
+    /// SOUNDNESS R1345 — `"{glob root}#{trait leaf}::{method}\u{1f}{Ty}::{method}"` for an impl of a dependency's trait whose
+    /// name arrives only through that dependency's glob. See `lang::collect_glob_foreign_impls`. Consumer-side only.
+    #[serde(default)]
+    pub(crate) glob_impl_foreign: Vec<String>,
     /// SOUNDNESS R598 — the EVIDENCE about which members this file's `impl Trait for Ty` blocks declare
     /// (`lang::collect_local_impl_members`; three key shapes, `model::impl_seen_key`). A pre-rev41 entry
     /// deserializes EMPTY, which reads as "no evidence" and restores the pre-fix over-approximation for
@@ -906,6 +912,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal);
     let mut nonpath_receivers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_nonpath_receivers(items, include_tests, modpath, &uses, &mut nonpath_receivers); // R1034
+    let mut glob_impl_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    crate::lang::collect_glob_foreign_impls(items, include_tests, &uses, &mut glob_impl_foreign); // R1345
     extern_fns.extend(nested_externs);
     // R598 — which members each `impl Trait for Ty` block actually declares. Walked beside the two
     // above for the same reason and over the same `items`: `collect_decls` records the CHA edge and
@@ -1013,6 +1021,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         nested_impl_foreign: nested_foreign.into_iter().collect(),
         nonnominal_impls: nonnominal.into_iter().collect(),
         nonpath_receivers: nonpath_receivers.into_iter().collect(),
+        glob_impl_foreign: glob_impl_foreign.into_iter().collect(),
         // R598 — same determinism requirement, same reason.
         impl_members: impl_members.into_iter().collect(),
         ts: crate::typesurf::collect_file(items, modpath, include_tests),
@@ -1110,6 +1119,8 @@ pub(crate) struct MergedDecls {
     pub(crate) nonnominal_impls: std::collections::HashSet<String>,
     /// R1034 — every file's `FileDecls::nonpath_receivers`, unioned.
     pub(crate) nonpath_receivers: std::collections::HashSet<String>,
+    /// R1345 — every file's `FileDecls::glob_impl_foreign`, unioned.
+    pub(crate) glob_impl_foreign: std::collections::HashSet<String>,
     /// SOUNDNESS R598 — every file's IMPL-MEMBER EVIDENCE, unioned. See `FileDecls::impl_members` and
     /// `model::impl_seen_key`. Union is the right merge in both directions: two files can write two
     /// `impl Tr for Ty` blocks for two different `Ty`s under one leaf, and a file that cannot read its
@@ -1481,6 +1492,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.nonpath_receivers {
         acc.nonpath_receivers.insert(n.clone()); // set union — order-independent (R1034)
     }
+    for n in &fd.glob_impl_foreign {
+        acc.glob_impl_foreign.insert(n.clone()); // set union — order-independent (R1345)
+    }
     for n in &fd.nested_impl_members {
         acc.nested_impl_members.insert(n.clone()); // set union — order-independent (R529)
     }
@@ -1819,6 +1833,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         ("nested_impl_foreign", &m.nested_impl_foreign),
         ("nonnominal_impls", &m.nonnominal_impls),
         ("nonpath_receivers", &m.nonpath_receivers),
+        ("glob_impl_foreign", &m.glob_impl_foreign),
         ("impl_members", &m.impl_members),
     ] {
         s.push_str(label);

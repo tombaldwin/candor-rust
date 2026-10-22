@@ -440,6 +440,99 @@ fn macro_is_known(root: Option<&str>, name: &str, local: &HashMap<String, FnName
 }
 
 impl SrcIndex {
+    /// R1351 — does this source NAME `leaf` at all (a declaration, a `use` binding, a macro token, an unparsed file)?
+    fn names_leaf(&self, leaf: &str) -> bool {
+        self.local_names.contains(leaf) || self.macro_words.contains(leaf) || self.unparsed.iter().any(|(_, w)| w.contains(leaf))
+    }
+
+    /// SOUNDNESS R1351 — `DepSigs::trait_declares` for one source. See there for what is a proof and what is a doubt.
+    fn trait_answer(&self, leaf: &str, member: &str, depth: usize) -> Option<bool> {
+        if depth > 8 || self.unparsed.iter().any(|(_, w)| w.contains(leaf)) {
+            return None;
+        }
+        // `trait <leaf>` or `trait $x` anywhere in a macro's tokens: the macro may declare (part of) this trait.
+        fn macro_trait(ts: &proc_macro2::TokenStream, leaf: &str) -> bool {
+            let toks: Vec<proc_macro2::TokenTree> = ts.clone().into_iter().collect();
+            for (i, t) in toks.iter().enumerate() {
+                match t {
+                    proc_macro2::TokenTree::Ident(id) if id == "trait" => match toks.get(i + 1) {
+                        Some(proc_macro2::TokenTree::Ident(n)) if n == leaf => return true,
+                        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '$' => return true,
+                        _ => {}
+                    },
+                    proc_macro2::TokenTree::Group(g) if macro_trait(&g.stream(), leaf) => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        #[derive(Default)]
+        struct Traits<'a>(Vec<&'a syn::ItemTrait>, String, bool);
+        impl<'a> Visit<'a> for Traits<'a> {
+            fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
+                if t.ident == self.1.as_str() {
+                    self.0.push(t);
+                }
+                syn::visit::visit_item_trait(self, t);
+            }
+            fn visit_macro(&mut self, m: &'a syn::Macro) {
+                if macro_trait(&m.tokens, &self.1) {
+                    self.2 = true;
+                }
+            }
+        }
+        let mut v = Traits(Vec::new(), leaf.to_string(), false);
+        for f in &self.files {
+            v.visit_file(f);
+        }
+        if v.2 {
+            return None; // a macro may declare this trait, or more of it
+        }
+        if v.0.is_empty() {
+            return None; // re-exported from elsewhere, or made by a macro: not read here
+        }
+        let mut answer = Some(false);
+        for t in &v.0 {
+            for it in &t.items {
+                match it {
+                    syn::TraitItem::Fn(f) if f.sig.ident == member => return Some(true),
+                    syn::TraitItem::Fn(_) | syn::TraitItem::Const(_) | syn::TraitItem::Type(_) => {}
+                    _ => return None, // a macro item (or an unparsed one) may declare anything
+                }
+            }
+            // supertraits: the inline list and `where Self: ..`
+            let mut bounds: Vec<&syn::TypeParamBound> = t.supertraits.iter().collect();
+            if let Some(w) = &t.generics.where_clause {
+                for p in &w.predicates {
+                    if let syn::WherePredicate::Type(pt) = p {
+                        if matches!(&pt.bounded_ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")) {
+                            bounds.extend(pt.bounds.iter());
+                        }
+                    }
+                }
+            }
+            for b in bounds {
+                let syn::TypeParamBound::Trait(tb) = b else { continue };
+                let segs: Vec<String> = tb.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let Some(sl) = segs.last() else { continue };
+                let root = if segs.len() > 1 { segs[0].as_str() } else { "" };
+                let sub = match root {
+                    "std" | "core" | "alloc" => std_trait_has(sl, member, 0),
+                    "crate" | "self" | "super" => self.trait_answer(sl, member, depth + 1),
+                    "" if self.types.contains(sl.as_str()) => self.trait_answer(sl, member, depth + 1),
+                    "" => std_trait_has(sl, member, 0),
+                    _ => None, // another package's trait: not read here
+                };
+                match sub {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => answer = None,
+                }
+            }
+        }
+        answer
+    }
+
     fn build(src: &Path) -> Option<SrcIndex> {
         let mut files = Vec::new();
         let mut unparsed = Vec::new();
@@ -1065,6 +1158,99 @@ pub(crate) struct DepSigs {
     dirs: HashMap<String, Vec<std::path::PathBuf>>,
     /// SOUNDNESS R1186 — `conversion_targets` answers, per (alias, callee, position).
     conv: HashMap<(String, String, usize), ConvTargets>,
+    /// SOUNDNESS R1351 — `trait_declares` answers.
+    tdecl: HashMap<(String, String, usize), Option<bool>>,
+    /// R1351 — source trees over `TRAIT_SRC_CAP`, which `trait_declares` does not parse.
+    too_big: HashMap<std::path::PathBuf, bool>,
+}
+
+/// SOUNDNESS R1351 — the CLOSED method lists of the std traits a package trait commonly names as a supertrait, and their
+/// own supertraits. A trait absent from this table is unknown (`None`), which is what keeps it a denylist of proofs:
+/// `Iterator`, `Future`, `Read`, `Hasher`, … have members this table does not list, so a supertrait naming one proves
+/// nothing.
+fn std_trait_members(leaf: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    Some(match leaf {
+        "Sized" | "Send" | "Sync" | "Unpin" | "UnwindSafe" | "RefUnwindSafe" | "Fn" | "FnMut" | "FnOnce" => (&[], &[]),
+        "Copy" => (&[], &["Clone"]),
+        "Clone" => (&["clone", "clone_from"], &[]),
+        "PartialEq" => (&["eq", "ne"], &[]),
+        "Eq" => (&[], &["PartialEq"]),
+        "PartialOrd" => (&["partial_cmp", "lt", "le", "gt", "ge"], &["PartialEq"]),
+        "Ord" => (&["cmp", "max", "min", "clamp"], &["Eq", "PartialOrd"]),
+        "Hash" => (&["hash", "hash_slice"], &[]),
+        "Debug" | "Display" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp" | "UpperExp" => (&["fmt"], &[]),
+        "Default" => (&["default"], &[]),
+        "Add" => (&["add"], &[]),
+        "Sub" => (&["sub"], &[]),
+        "Mul" => (&["mul"], &[]),
+        "Div" => (&["div"], &[]),
+        "Rem" => (&["rem"], &[]),
+        "Neg" => (&["neg"], &[]),
+        "Not" => (&["not"], &[]),
+        "BitAnd" => (&["bitand"], &[]),
+        "BitOr" => (&["bitor"], &[]),
+        "BitXor" => (&["bitxor"], &[]),
+        "Shl" => (&["shl"], &[]),
+        "Shr" => (&["shr"], &[]),
+        "AddAssign" => (&["add_assign"], &[]),
+        "SubAssign" => (&["sub_assign"], &[]),
+        "MulAssign" => (&["mul_assign"], &[]),
+        "DivAssign" => (&["div_assign"], &[]),
+        "RemAssign" => (&["rem_assign"], &[]),
+        "BitAndAssign" => (&["bitand_assign"], &[]),
+        "BitOrAssign" => (&["bitor_assign"], &[]),
+        "BitXorAssign" => (&["bitxor_assign"], &[]),
+        "ShlAssign" => (&["shl_assign"], &[]),
+        "ShrAssign" => (&["shr_assign"], &[]),
+        "From" => (&["from"], &[]),
+        "Into" => (&["into"], &[]),
+        "TryFrom" => (&["try_from"], &[]),
+        "TryInto" => (&["try_into"], &[]),
+        "AsRef" => (&["as_ref"], &[]),
+        "AsMut" => (&["as_mut"], &[]),
+        "Borrow" => (&["borrow"], &[]),
+        "BorrowMut" => (&["borrow_mut"], &["Borrow"]),
+        "Deref" => (&["deref"], &[]),
+        "DerefMut" => (&["deref_mut"], &["Deref"]),
+        "ToString" => (&["to_string"], &[]),
+        "ToOwned" => (&["to_owned", "clone_into"], &[]),
+        "FromStr" => (&["from_str"], &[]),
+        "Sum" => (&["sum"], &[]),
+        "Product" => (&["product"], &[]),
+        "Drop" => (&["drop"], &[]),
+        "Error" => (&["source", "description", "cause", "provide"], &["Debug", "Display"]),
+        _ => return None,
+    })
+}
+
+/// R1351 — the largest dependency source `trait_declares` parses (bytes of `.rs`).
+const TRAIT_SRC_CAP: u64 = 24 * 1024 * 1024;
+
+fn src_bytes(d: &Path) -> u64 {
+    walkdir::WalkDir::new(d)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rs"))
+        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+        .sum()
+}
+
+/// R1351 — whether a std trait (by leaf) has `member`, through its own closed list and its std supertraits. `None` when
+/// the table does not know the trait.
+fn std_trait_has(leaf: &str, member: &str, depth: usize) -> Option<bool> {
+    if depth > 8 {
+        return None;
+    }
+    let (ms, sup) = std_trait_members(leaf)?;
+    if ms.contains(&member) {
+        return Some(true);
+    }
+    for s in sup {
+        if std_trait_has(s, member, depth + 1)? {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 impl DepSigs {
@@ -1321,6 +1507,64 @@ impl DepSigs {
         let (v, why) = self.judged(dir, alias, real, callee, pos, cand_allows);
         self.say("allo", alias, callee, pos, &why);
         v
+    }
+
+    /// SOUNDNESS R1351 / R1353 — does the dependency's trait `leaf` (as the dependency spelled `alias`, real package `real`)
+    /// declare a METHOD named `member`, itself or through a supertrait? Read from the trait's own declaration in the
+    /// dependency's SOURCE — the authority, rather than a list of member names (§G). `Some(false)` is a PROOF: every
+    /// declaration of that leaf in every source of the package was read, none declares the member, and every supertrait
+    /// was either read the same way (a trait of this package) or is a std trait whose member list is closed and known
+    /// (`std_trait_members`). Every doubt is `None`: no source, no declaration of the leaf (re-exported from elsewhere, or
+    /// macro-made), a file that does not parse and names it, a macro anywhere naming it, a macro item in the trait body, a
+    /// supertrait of another package or an unlisted std trait. A caller may narrow on `Some(false)` only.
+    pub(crate) fn trait_declares(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str) -> Option<bool> {
+        let key = (format!("\u{1}tdecl\u{1}{alias}\u{1}{leaf}"), member.to_string(), 0usize);
+        if let Some(v) = self.tdecl.get(&key) {
+            return *v;
+        }
+        let dirs = self.source_dirs(dir, alias, real);
+        // A source in which the leaf is not even NAMED is a version of the package that does not have the trait; the key came
+        // from code that compiled against one that does, so that source says nothing. All such (or none) is a doubt.
+        let mut answer: Option<bool> = None;
+        let mut read_one = false;
+        for d in &dirs {
+            // A COST bound, and a doubt rather than a proof: a source tree this large (the `windows` bindings) is not
+            // parsed for a reason string — the key is named.
+            let big = match self.too_big.get(d) {
+                Some(b) => *b,
+                None => {
+                    let b = !self.idx.contains_key(d.as_path()) && src_bytes(d) > TRAIT_SRC_CAP;
+                    self.too_big.insert(d.clone(), b);
+                    b
+                }
+            };
+            if big {
+                answer = None;
+                break;
+            }
+            let a = match self.index(d) {
+                Some(ix) if !ix.names_leaf(leaf) => continue,
+                Some(ix) => ix.trait_answer(leaf, member, 0),
+                None => None,
+            };
+            match a {
+                Some(true) => {
+                    answer = Some(true);
+                    break;
+                }
+                Some(false) if !read_one || answer == Some(false) => answer = Some(false),
+                _ => answer = None,
+            }
+            read_one = true;
+            if answer.is_none() {
+                break;
+            }
+        }
+        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() {
+            eprintln!("DSTRAIT\t{alias}\t{leaf}\t{member}\t{answer:?}"); // §E1 REACH COUNTER
+        }
+        self.tdecl.insert(key, answer);
+        answer
     }
 
     /// SOUNDNESS R1186 — what the dependency's callee can CONVERT the value at `pos` into, as `(kind, target leaf)`:

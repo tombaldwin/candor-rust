@@ -2655,6 +2655,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
         }
+        // SOUNDNESS R1345 — an implementor whose trait NAME came through a dependency's glob has no full key, but its
+        // tail is exactly `{glob root}#{Trait}::{member}`, so it joins here and nowhere on the wire (see
+        // `lang::collect_glob_foreign_impls`). Only for a real manifest dependency, and never for a leaf this crate
+        // declares a trait of (a local glob's trait is local). `CANDOR_R1345_OFF=1` disables it.
+        if std::env::var_os("CANDOR_R1345_OFF").is_none() {
+            for g in &merged.glob_impl_foreign {
+                let Some((k, q)) = g.split_once('\u{1f}') else { continue };
+                let Some((owner, member)) = k.split_once('#') else { continue };
+                let tr_leaf = member.split("::").next().unwrap_or("");
+                if !deps.contains(owner) || merged.trait_decls.contains_key(tr_leaf) {
+                    continue;
+                }
+                if crate::lang::reach_debug() {
+                    eprintln!("R1345GLOB\t{k}\t{q}"); // §E1 REACH COUNTER
+                }
+                let e = m.entry(k.to_string()).or_default();
+                if !e.iter().any(|x| x == q) {
+                    e.push(q.to_string());
+                }
+            }
+        }
         m
     };
     // ⟨0.40⟩ SOUNDNESS R608 — THE TRAIT-PREFIX PROJECTION OF BOTH IMPLEMENTOR INDEXES.
@@ -4479,8 +4500,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if r1152_union && std::env::var_os("CANDOR_R1152_INSTR").is_some() && deps_idx.crates.contains(cr_real) {
                 eprintln!("R1152UNION\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
             }
+            // SOUNDNESS R1349 — A KEY ANOTHER CHAINED PACKAGE ANSWERS, WHEN ITS OWNER IS NOT CHAINED. Obligation 2 puts a
+            // package's union for a FOREIGN abstraction under the OWNER's key (aws-smithy-types publishes
+            // `serde#ser::Serializer::serialize_some`), and `load_dep_reports` deliberately does not count that entry as
+            // coverage of `serde`. This join was gated on coverage alone, so a consumer dispatching DIRECTLY on its own
+            // generic (`fn run<S: serde::Serializer>(s: S) { s.serialize_some(&Mine) }`) chained over aws-smithy-types
+            // and not serde never asked the key at all and read `[]` — while the program ran aws's implementor (EXECUTED
+            // fx/cpaws c_aws). §4 ⟨0.39⟩'s headline is "every implementor visible to the consumer — its own and any
+            // chained report's"; the owner being absent does not make aws's implementor invisible. The key is asked
+            // when the call roots at a real dependency and SOME chained report answers it; with the owner uncovered,
+            // only a union entry can (any other entry under `serde#` would have covered `serde`). It is a CONTRIBUTOR
+            // only: `dep_join_hit` stays false, so every disclosure the uncovered owner already draws (its `invisible`
+            // ledger line, R452/R128) still fires, and nothing the call had is withdrawn. `CANDOR_R1349_OFF=1`.
+            let covered_owner = deps_idx.crates.contains(cr_real);
+            let r1349_union_only = !covered_owner
+                && std::env::var_os("CANDOR_R1349_OFF").is_none()
+                && deps.contains(cr_real)
+                && jpath.contains("::")
+                && {
+                    let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
+                    rel.contains("::") && tail2(rel).is_some_and(|t2| deps_idx.by_key.contains_key(&format!("{cr_real}#{t2}")))
+                };
+            if r1349_union_only && crate::lang::reach_debug() {
+                eprintln!("R1349UNION\t{}\t{}", f.qual, jpath); // §E1 REACH COUNTER
+            }
             if classified.is_none() && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
-                && jpath.contains("::") && deps_idx.crates.contains(cr_real)
+                && jpath.contains("::") && (covered_owner || r1349_union_only)
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
                 let key = if rel.contains("::") {
@@ -4490,12 +4535,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 };
                 let hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
                 if let Some(de) = hit {
-                    dep_join_hit = true;
+                    dep_join_hit = covered_owner; // R1349 — a contributor is not a resolution of the call
                     // SOUNDNESS R501 — WHAT THE JOIN ACTUALLY ANSWERED, kept because the disclosure gate
                     // below needs to tell "this call is now resolved" from "this call is now resolved TO
                     // AN UNKNOWN". `de.effects` is the joined entry's own answer and nothing else, so
                     // this flag is a function of the dependency's report, not of accumulation order.
-                    dep_join_unknown = de.effects.contains("Unknown");
+                    dep_join_unknown = covered_owner && de.effects.contains("Unknown");
                     apply_dep_fn(de, &f.qual, DepSink {
                         direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                         tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
@@ -7189,12 +7234,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // placement for `dispatchesOn` on a union entry, so this is the HEDGE: `Unknown` with `dispatch:<Trait>.<member>` for
     // each further member a contributor reaches. A contributor dispatching on the union's OWN member is the consumer's own
     // obligation-3 join already and is skipped. `CANDOR_R1324_OFF=1` disables it.
+    // SOUNDNESS R1351 / R1353 — WHICH CONTRIBUTOR KEYS NAME A MEMBER THEIR TRAIT HAS. A contributor's foreign key is
+    // minted from source and can name a member the trait does not declare: R549's chain drift (`visitor.visit_str(..)
+    // .map_err(..)` keyed `Visitor::map_err`; aws-smithy `self.inner.front().map(Buf::chunk)` keyed `Buf::map`) and the
+    // multi-bound spread (`T: Float + Zero + ..`, `x.is_nan()` keyed under EVERY bound, so `Zero::is_nan`). A reason built
+    // from such a key is false (R1353), and a union whose only further keys are such is a false `Unknown`. The previous
+    // answer was a NAME list (27 members, `map` `fmt` `clone` `into` …) that also dropped real members of those names —
+    // `base#Mapper::map`, executed fx2A — and dropped the formatting/equality/hashing/cloning members SPEC §4 ⟨0.40⟩
+    // (R1304) says a package abstraction's receiver DOES dispatch (R1351). Now the question is asked of the authority, the
+    // owning package's own trait declaration (`depsig::DepSigs::trait_declares`): a key is left out only on a PROOF that
+    // the trait and every supertrait lack the member; every doubt names it. Never asked of: a ⟨0.40⟩ protocol member
+    // (named whatever the trait declares — the composition sentence), and a key of THIS crate (a local trait key is
+    // member-checked where it is minted). Fails toward over-disclosure (an unreadable source names the key).
+    // `CANDOR_R1351_OFF=1` turns the proof off (every key named).
+    let r1351_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    let r1351_off = std::env::var_os("CANDOR_R1351_OFF").is_some();
     let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>| {
         if std::env::var_os("CANDOR_R1324_OFF").is_some() {
             return;
         }
         for k in dispatch_acc.get(cand).into_iter().flatten() {
-            let path = k.split_once('#').map(|(_, p)| p).unwrap_or(k);
+            let (owner, path) = k.split_once('#').unwrap_or((crate_name.as_str(), k));
             let segs: Vec<&str> = path.split("::").collect();
             if segs.len() < 2 {
                 continue;
@@ -7203,18 +7263,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if format!("{tr}::{m}") == own_tail {
                 continue;
             }
-            // Not a member a reason may name: §4's conventionally pure members, and the `Result`/`Option` combinators a
-            // contributor key carries only by R549's chain drift (`visitor.visit_str(..).map_err(..)` keyed
-            // `Visitor::map_err`, a member `Visitor` does not declare). The first corpus A/B of this rule named both
-            // (`dispatch:Visitor.map_err` x190, `dispatch:*.clone` x309); a DENYLIST, so a real member is never dropped
-            // for being unlisted.
-            if matches!(
-                m,
-                "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp" | "to_string" | "map" | "map_err" | "ok"
-                    | "ok_or" | "ok_or_else" | "and_then" | "or_else" | "unwrap" | "unwrap_or" | "unwrap_or_default"
-                    | "unwrap_or_else" | "expect" | "is_ok" | "is_err" | "is_some" | "is_none" | "into" | "as_ref" | "as_mut"
-            ) {
-                continue;
+            let protocol = matches!(m, "fmt" | "to_string" | "eq" | "ne" | "hash" | "clone" | "clone_from");
+            if !r1351_off && !protocol && owner != crate_name {
+                let real = dep_renames.get(owner).map(String::as_str).unwrap_or(owner);
+                if r1351_sigs.borrow_mut().trait_declares(dir, owner, real, tr, m) == Some(false) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1351SKIP\t{own_tail}\t{owner}#{tr}.{m}"); // §E1 REACH COUNTER
+                    }
+                    continue;
+                }
             }
             if crate::lang::reach_debug() {
                 eprintln!("R1324UNION\t{own_tail}\t{tr}.{m}"); // §E1 REACH COUNTER
@@ -7455,6 +7512,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                                     eprintln!("R513HIT {}", ts[0]);
                                 }
+                                // SOUNDNESS R1352 — the R1324 hedge asks the SAME resolved unit the effects come
+                                // from. `cand` is the 2-segment `{ty}::{method}` tail and `dispatch_acc` is keyed by
+                                // the module-qualified qual, so for an implementor declared in a submodule (`pub mod
+                                // inner { impl Sink for Doc { .. } }`, the ordinary crate shape) the call above found
+                                // nothing and only this fallback reaches the unit. The foreign leg below already
+                                // hedges both `cand` and `ts[0]`; the asymmetry was the bug (R513's own words).
+                                // EXECUTED fx3/fx6 (one variable: the `mod`). `CANDOR_R1352_OFF=1` disables it.
+                                if std::env::var_os("CANDOR_R1352_OFF").is_none() {
+                                    let w0 = why_u.len();
+                                    union_dispatch_hedge(&ts[0], &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u);
+                                    if why_u.len() != w0 && crate::lang::reach_debug() {
+                                        eprintln!("R1352TAIL\t{trait_leaf}::{method}\t{}", ts[0]); // §E1 REACH COUNTER
+                                    }
+                                }
                                 if let Some(s) = inferred.get(&ts[0]) {
                                     // R598 — the same `admit`: this fallback resolves the SAME
                                     // `{ty}::{method}` spelling one index over, so a narrowed candidate
@@ -7484,6 +7555,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if let Some(s) = inferred.get(q) {
                             inf_u.extend(s.iter().copied());
                             union_why(q, &mut why_u); // R1268
+                        }
+                        // R1352 — the third contributor route of this union, hedged like the other two (§A.2).
+                        if std::env::var_os("CANDOR_R1352_OFF").is_none() {
+                            let w0 = why_u.len();
+                            union_dispatch_hedge(q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u);
+                            if why_u.len() != w0 && crate::lang::reach_debug() {
+                                eprintln!("R1352NONNOM\t{trait_leaf}::{method}\t{q}"); // §E1 REACH COUNTER
+                            }
                         }
                         if let Some(s) = blind_acc.get(q) {
                             blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());

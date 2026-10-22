@@ -6014,6 +6014,69 @@ pub(crate) fn collect_foreign_trait_impls(
     }
 }
 
+/// SOUNDNESS R1345 — an `impl Tr for Ty` whose trait NAME arrives only through a DEPENDENCY's glob (`use
+/// bitvec::prelude::*; unsafe impl BitOrder for Loud`). `foreign_trait_owner_qual` cannot form obligation 2's key: the
+/// glob names the crate, not the module the trait is declared in, so `expand` leaves the bare leaf and no key exists —
+/// and a chained dependency dispatching `bitvec#order::BitOrder::at` never reaches this crate's implementor, while the
+/// program runs it (EXECUTED rustagent-0416 `fx/cp/c_bvg`). What the glob DOES determine is the owning crate (or one of
+/// them), and the consumer's join already asks every dispatched member under its 2-segment tail too
+/// (`foreign_impls_by_tail2`, `{owner}#{Trait}::{member}`). So this records `"{glob root}#{Leaf}::{method}\u{1f}{Ty}::
+/// {method}"`, one per dependency glob in scope, for the CONSUMER-SIDE tail index ONLY: no wire key is spelled from it
+/// (a `bitvec#BitOrder::at` union entry would be the second spelling §4 ⟨0.39⟩ forbids). A bare leaf std's prelude
+/// supplies is never a dependency's; a crate-local trait of that leaf is filtered where the crate's declarations are
+/// known (`scan.rs`). Several globs: one record per root, a union — a fabrication would need two crates exporting a
+/// same-leaf trait with a same-named member, which is the direction this rule is allowed to fail in.
+pub(crate) fn collect_glob_foreign_impls(
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                let Some((None, tr, _)) = &im.trait_ else { continue };
+                if tr.segments.len() != 1 || tr.leading_colon.is_some() {
+                    continue;
+                }
+                let leaf = tr.segments[0].ident.to_string();
+                if is_std_prelude_trait_leaf(&leaf) || expand(&leaf, uses).contains("::") {
+                    continue; // explicitly imported (obligation 2's own key) or std's
+                }
+                let Some(ty) = impl_type_name(&im.self_ty) else { continue };
+                let roots: std::collections::BTreeSet<String> = uses
+                    .get(GLOB_KEY)
+                    .into_iter()
+                    .flat_map(|v| v.split('\u{1}'))
+                    .filter_map(|g| {
+                        let g = expand(g, uses);
+                        let root = g.split("::").next().unwrap_or("").to_string();
+                        (!root.is_empty() && is_dependency_crate_root(&root)).then_some(root)
+                    })
+                    .collect();
+                for root in &roots {
+                    for ii in &im.items {
+                        if let syn::ImplItem::Fn(m) = ii {
+                            let method = m.sig.ident.to_string();
+                            out.insert(format!("{root}#{leaf}::{method}\u{1f}{ty}::{method}"));
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977
+                    let mut sub = uses.clone();
+                    let mut alts = HashMap::new();
+                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    collect_glob_foreign_impls(inner, include_tests, &sub, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// SOUNDNESS R598 — WHICH MEMBERS AN `impl Trait for Ty` BLOCK ACTUALLY DECLARES.
 ///
 /// `decls.rs` records the CHA edge (`trait_impls[trait leaf] += ty leaf`) and throws the block's

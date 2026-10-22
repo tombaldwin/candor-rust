@@ -6750,3 +6750,120 @@ fn r959_a_renamed_reexport_is_a_unit_a_chained_consumer_can_call() {
     assert_eq!(eff(&v, "c_calm"), None, "{v:#}");
     assert_eq!(eff(&v, "c_type"), None, "{v:#}");
 }
+
+/// Run the binary over `d` with `CANDOR_DEPS` = `deps` (space-separated), returning the JSON report.
+fn scan_json(d: &std::path::Path, deps: &str) -> serde_json::Value {
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .env_remove("CANDOR_CONFIG")
+        .env_remove("CANDOR_POLICY")
+        .env("CANDOR_DEPS", deps)
+        .output()
+        .expect("run candor-scan");
+    serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report")
+}
+
+fn row(v: &serde_json::Value, pred: impl Fn(&serde_json::Value) -> bool) -> Option<&serde_json::Value> {
+    v["functions"].as_array().unwrap().iter().find(|f| pred(f))
+}
+
+fn why(f: &serde_json::Value) -> Vec<String> {
+    f["unknownWhy"].as_array().map(|a| a.iter().filter_map(|w| w.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+/// SOUNDNESS R1351 / R1353 (rustagent-0416) — the R1324 union hedge names a contributor's further member by asking the
+/// OWNING package's trait declaration, not a list of member names. Pinned in every direction the old name list got wrong
+/// or right, over a producer whose dependency is read from SOURCE (a `path` dependency):
+///   * a REAL member that happens to be named `map` is named (`base#Mapper::map`; fx2A executed: the consumer's
+///     `Mapper::map` writes a file) — the name list dropped it;
+///   * a chain-drift key (`v.go().map_err(..)` keyed `Plain::map_err`, a member `Plain` does not declare) is NOT named;
+///   * a multi-bound spread (`T: Mapper + Plain`, `v.map(1)` keyed under both) names only the trait that declares it;
+///   * a ⟨0.40⟩ cloning member on a package abstraction's receiver (`T: Plain + Clone`, `v.clone()`) IS named — the
+///     name list dropped it against SPEC §4 ⟨0.40⟩ (R1304).
+#[test]
+fn r1351_the_union_hedge_names_a_member_by_the_owning_traits_declaration_not_by_its_name() {
+    let base = make_crate("r1351base", "pub trait Mapper { fn map(&self, x: i32) -> i32; }\n\
+        pub trait Plain { fn go(&self) -> Result<i32, ()>; }\n");
+    let prod = make_crate("r1351prod", "use base::{Mapper, Plain};\n\
+        pub trait Sink { fn put<T: Mapper>(&self, v: &T) -> i32; fn res<T: Plain>(&self, v: &T) -> i32;\n\
+            fn both<T: Mapper + Plain>(&self, v: &T) -> i32; fn cl<T: Plain + Clone>(&self, v: &T) -> i32; }\n\
+        pub struct Doc;\n\
+        impl Sink for Doc {\n\
+            fn put<T: Mapper>(&self, v: &T) -> i32 { v.map(1) }\n\
+            fn res<T: Plain>(&self, v: &T) -> i32 { v.go().map_err(|_| 0).unwrap_or(0) }\n\
+            fn both<T: Mapper + Plain>(&self, v: &T) -> i32 { v.map(2) }\n\
+            fn cl<T: Plain + Clone>(&self, v: &T) -> i32 { let _w = v.clone(); 0 }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r1351prod\"\n\n[dependencies]\nbase = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    let _ = std::fs::remove_dir_all(&prod);
+    let _ = std::fs::remove_dir_all(&base);
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("R1351: no {m} union entry: {v:#}"));
+    assert!(why(u("Sink::put")).iter().any(|w| w == "dispatch:Mapper.map"), "R1351 a real `map` member is named: {v:#}");
+    let res = why(u("Sink::res"));
+    assert!(res.iter().any(|w| w == "dispatch:Plain.go"), "R1351 the real dispatch is named: {v:#}");
+    assert!(!res.iter().any(|w| w.contains("map_err") || w.contains("unwrap_or")),
+        "R1351 a member `Plain` does not declare is not named: {v:#}");
+    let both = why(u("Sink::both"));
+    assert!(both.iter().any(|w| w == "dispatch:Mapper.map") && !both.iter().any(|w| w == "dispatch:Plain.map"),
+        "R1353 a multi-bound spread names only the declaring trait: {v:#}");
+    assert!(why(u("Sink::cl")).iter().any(|w| w == "dispatch:Plain.clone"),
+        "R1351 a ⟨0.40⟩ cloning member on a package abstraction is named: {v:#}");
+}
+
+/// SOUNDNESS R1349 (rustagent-0416) — a consumer dispatching DIRECTLY on its own generic over a dependency's trait asks the
+/// key even when the OWNER is not chained, because a non-owner's obligation-2 union answers it (aws-smithy-types publishes
+/// `serde#ser::Serializer::serialize_some`; EXECUTED fx/cpaws c_aws over the real 1.6.1 report: `deny Unknown run` 0 -> 1).
+/// The owner stays uncovered — its `invisible` disclosure is kept.
+#[test]
+fn r1349_a_direct_dispatch_joins_a_non_owners_union_when_the_owner_is_not_chained() {
+    let d = make_crate("r1349cons", "pub struct Mine;\n\
+        pub fn run<S: serde::Serializer>(s: S) -> Result<S::Ok, S::Error> { s.serialize_some(&Mine) }\n");
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r1349cons\"\n\n[dependencies]\nserde = \"1\"\nsmithy = \"1\"\n").unwrap();
+    let dep = d.join("smithy.json");
+    std::fs::write(&dep, format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.40"}},
+        "package": "smithy",
+        "analyzed": {{"count": 1, "digest": "0"}},
+        "functions": [
+            {{"fn": "ser::Serializer::serialize_some", "inferred": ["Unknown"], "unresolved": true, "interfaceUnion": true,
+              "hash": "serde#ser::Serializer::serialize_some", "unknownWhy": ["dispatch:Serialize.serialize"]}}
+        ]}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+    let v = scan_json(&d, &dep.to_string_lossy());
+    let _ = std::fs::remove_dir_all(&d);
+    let run = row(&v, |f| f["fn"] == "run").unwrap_or_else(|| panic!("R1349: `run` ABSENT over a visible implementor: {v:#}"));
+    assert!(run["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "R1349: the union's hedge reaches the caller: {run:#}");
+    assert!(why(run).iter().any(|w| w == "dispatch:Serialize.serialize"), "R1349: with the union's reason: {run:#}");
+    assert!(run["invisible"].as_array().is_some_and(|a| a.iter().any(|e| e == "serde")),
+        "R1349: a union entry is not coverage of its owner: {run:#}");
+}
+
+/// SOUNDNESS R1345 (rustagent-0416) — a consumer's impl of a dependency's trait whose NAME arrives only through that
+/// dependency's glob (`use bv::prelude::*; impl BitOrder for Loud`) joins the dependency's dispatch under its tail.
+/// EXECUTED fx/cp c_bvg over the real bitvec 1.0.1 report: `deny Fs run` 0 -> 1 (the explicit-path twin c_bv was 1).
+#[test]
+fn r1345_a_glob_named_foreign_impl_joins_the_dependencys_dispatch() {
+    let d = make_crate("r1345cons", "use bv::prelude::*;\n\
+        pub struct Loud;\n\
+        impl BitOrder for Loud { fn at(i: u8) -> u8 { std::fs::write(\"/tmp/r1345\", b\"x\").unwrap(); i } }\n\
+        pub fn run() { bv::set(3) }\n");
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r1345cons\"\n\n[dependencies]\nbv = \"1\"\n").unwrap();
+    let dep = d.join("bv.json");
+    std::fs::write(&dep, format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.40"}},
+        "package": "bv",
+        "analyzed": {{"count": 1, "digest": "0"}},
+        "functions": [
+            {{"fn": "set", "inferred": [], "hash": "bv#set", "dispatchesOn": ["bv#order::BitOrder::at"]}}
+        ]}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+    let v = scan_json(&d, &dep.to_string_lossy());
+    let _ = std::fs::remove_dir_all(&d);
+    let run = row(&v, |f| f["fn"] == "run").unwrap_or_else(|| panic!("R1345: `run` ABSENT over its own glob-named implementor: {v:#}"));
+    assert!(run["inferred"].as_array().unwrap().iter().any(|e| e == "Fs"), "R1345: the implementor's Fs reaches the caller: {run:#}");
+    // …and no wire key is spelled through the glob (a `bv#BitOrder::at` union would be a second spelling).
+    assert!(row(&v, |f| f["hash"] == "bv#BitOrder::at" || f["hash"] == "bv#prelude::BitOrder::at").is_none(),
+        "R1345: no union entry under a glob spelling: {v:#}");
+}

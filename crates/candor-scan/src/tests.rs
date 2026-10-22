@@ -8340,6 +8340,23 @@ impl<A: Ser> Ser for &A { fn some<T: Val>(&self, v: &T) { (**self).some(v) } fn 
             "R1324: own-member forwarding adds no hedge:\n{v:#}");
     }
 
+    /// SOUNDNESS R1352 (rustagent-0416) — the R1324 union hedge for an implementor declared in a SUBMODULE (Fable fx6, the
+    /// ordinary crate shape): the effects reach the union through R513's tail fallback, and so must the hedge.
+    #[test]
+    fn r1352_a_submodule_implementors_further_dispatch_hedges_the_union() {
+        let src = "\
+pub trait Val { fn go(&self); }\n\
+pub struct Nop; impl Val for Nop { fn go(&self) {} }\n\
+pub trait Ser { fn some<T: Val>(&self, v: &T); fn fwd(&self); }\n\
+pub mod inner { use crate::{Ser, Val}; pub struct Doc; impl Ser for Doc { fn some<T: Val>(&self, v: &T) { v.go() } fn fwd(&self) {} } }\n\
+pub use inner::Doc;\n";
+        let v = scan_fixture("r1352union", src);
+        let some = v["functions"].as_array().unwrap().iter()
+            .find(|f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with("Ser::some")))
+            .unwrap_or_else(|| panic!("R1352: no Ser::some union:\n{v:#}"));
+        assert!(some["unknownWhy"].to_string().contains("dispatch:Val.go"), "R1352 submodule implementor hedges:\n{v:#}");
+    }
+
     /// SOUNDNESS R1321 (rustagent-d) — false reasons. rustc-serialize's `writer: &'a mut (fmt::Write + 'a)` field, in a file
     /// that globs `std::io::prelude::*`, was hedged `dispatch:Write.write_fmt` by e6129ca (a `fmt::Write`, which the hedge
     /// excludes by construction), and zstd-safe's `reader.read_exact(buf).is_err()` in a generic `extern "C"` callback
@@ -16568,6 +16585,8 @@ trait G {
             nonnominal_impls => |m| { m.nonnominal_impls.insert("T5::go\u{1f}go".into()); },
             // SOUNDNESS R1034 (residual): a non-path impl's receiver alias, which a typed call now edges to.
             nonpath_receivers => |m| { m.nonpath_receivers.insert("str::encode\u{1f}encode".into()); },
+            // SOUNDNESS R1345: a glob-named foreign impl, which a chained dispatch now edges to.
+            glob_impl_foreign => |m| { m.glob_impl_foreign.insert("bv#Ord2::at\u{1f}Loud::at".into()); },
             // SOUNDNESS R598: WHICH members an `impl Trait for Ty` block declares. It decides whether
             // `{ty}::{method}` is read as that trait's implementation at all, so a file gaining or
             // losing an impl member changes what the interface-union publishes for the whole crate.
@@ -18206,7 +18225,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18217,7 +18236,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev132/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev133/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
