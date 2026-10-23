@@ -11,6 +11,40 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: an `interfaceUnion` entry carries its contributors' further members in `dispatchesOn`, and the R1324
+  hedge is gone (SOUNDNESS R1324 RESOLVED, SPEC §4 ⟨0.40⟩ union clause, spelling (a); conformance PART 102).** A narrow
+  union names every member its contributors dispatch on transitively (the union's own key and any key whose trait
+  provably lacks the member excepted), and a consumer joins it as it joins a row's. A member a union carried that
+  NOTHING answers at the consumer (no chained entry, no own implementor) is disclosed there as `Unknown` +
+  `dispatch:<Trait>.<member>`, so the zero-implementor bucket does not go silent (PART 102 `u_*_none`). Executed, chained,
+  `deny Fs` 0 → **1**: aws-smithy-types 1.6.1 + a consumer `Serialize` (c_aws3, c_aws), and Fable's fx2A/fx2B/fx3/fx6.
+  PART 102 rust: 13 xfail arms now pass, every control 0. `CANDOR_R1324_HEDGE=1` restores the 0.40.15 hedge.
+- ⚠ **candor-scan: which further members a union names is asked of the owning trait's declaration, not a name list
+  (SOUNDNESS R1351, R1353).** The 27-name denylist (`map`, `fmt`, `clone`, `into`, …) is replaced by a proof read from the
+  dependency's source: a key is left out only when the trait and every supertrait provably lack the member; ⟨0.40⟩'s
+  formatting/equality/hashing/cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1);
+  a multi-bound spread keeps only the declaring trait where the source proves it. `CANDOR_R1351_OFF=1`.
+- ⚠ **candor-scan: a submodule implementor's further dispatch reaches its union (SOUNDNESS R1352).** The R513 tail
+  fallback and R828's non-nominal implementors now feed the union's members, as the foreign leg already did. fx6
+  (one variable: `pub mod inner`), executed: `deny Fs run3` 0 → **1**. `CANDOR_R1352_OFF=1`.
+- ⚠ **candor-scan: a consumer dispatching on its own generic joins a non-owner's union when the owner is not chained
+  (SOUNDNESS R1349).** A contributor only — the uncovered owner keeps its `invisible` line. fx/cpaws c_aws over the real
+  aws-smithy-types report, executed: `deny Fs run` 0 → **1**; PART 102 `u_busy_near_direct` keeps the union's Clock.
+  `CANDOR_R1349_OFF=1`.
+- ⚠ **candor-scan: an impl of a dependency trait named through that dependency's glob joins its dispatch (SOUNDNESS
+  R1345).** `use bitvec::prelude::*; unsafe impl BitOrder for Loud` (fx/cp c_bvg over real bitvec 1.0.1, executed):
+  `deny Fs run` 0 → **1**. Consumer-side index only; no wire key is spelled through the glob. Cache schema rev133.
+- ⚠ **candor-scan: a union past the bounded-CHA limit is published broad (SOUNDNESS R1367, PART 103).** More than 12
+  implementors (the in-scan index and count) puts the hedge on the union's own key even when all are pure: PART 103
+  `c_13` chained `deny Unknown` 0 → **1**, `c_12` stays 0. `CANDOR_R1367_OFF=1`.
+- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (f2e76cd, sha1
+  9d96632d6ac0), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (4 entries excluded, pre arm exit 3, as
+  every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on 10 (wezterm-dynamic ×5,
+  termwiz ×5; each read: the only implementor reached is `f64` / a local derived enum), 0 → 1 on 9 (CHA edges to the
+  consumer's own `Unknown` implementors), a concrete effect added on 181 (159 through a new edge to an in-crate
+  implementor whose body carries it, 22 through a joined union). Standalone units: no change. Union entries: 23,240 gain
+  `dispatchesOn`, 4,389 lose the hedge's `Unknown` (3,045 now carry every lost member as a key), 2,227 newly `Unknown`.
+
 ## [0.40.15] — 2026-10-22
 
 - ⚠ **candor-scan: four resolution gaps that a false `ambiguous:` hedge used to cover now resolve (SOUNDNESS R1287,
