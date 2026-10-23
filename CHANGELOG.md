@@ -25,7 +25,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   a proven-absent key is dropped only when every site that minted it is a receiver proved std from source — a method
   chain whose inner call is a member of the same trait declared to return a std type (`visitor.visit_str(v).map_err(..)`,
   R549 chain drift; the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
-  never while a closure in the chain dispatches on its own parameter, a call the engine may not key), or a multi-bound
+  never while ANY call in the chain takes a callable argument — a closure literal or a path/method reference — whose
+  calls the engine may not key), or a multi-bound
   spread where a sibling bound at the same site declares the member. Every other
   receiver (a projection anywhere, an RPIT, `Box<dyn>`, a where-bound, a callback parameter) keeps the union's hedge,
   naming the declaring trait where an associated-type bound shows it (SPEC §4 ⟨0.40⟩ union clause rule 3). Fable's
@@ -34,7 +35,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   formatting/equality/hashing/
   cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1). `CANDOR_R1351_OFF=1`;
   `CANDOR_F1_OFF=1` restores the proof-only drop. Fable's fb3 L (`s.get()?.write()`), its `.await` twin and N
-  (`s.list().iter().for_each(|t| t.write())`), executed: chained `deny Unknown` stays 1. Cache schema rev135.
+  (`s.list().iter().for_each(|t| t.write())`) and fb4's method reference, explicit deref and rebinding spellings, executed:
+  chained `deny Unknown` stays 1. STILL OPEN: the dispatch on a std collection's element inside such a callable
+  (`t.write()` above) is never keyed, in this release or v0.40.15 — the kept hedge discloses it under the false reason
+  `dispatch:<Store>.iter`, and `deny Fs` over it stays 0. Cache schema rev136.
 - ⚠ **candor-scan: a submodule implementor's further dispatch reaches its union (SOUNDNESS R1352).** The R513 tail
   fallback and R828's non-nominal implementors now feed the union's members, as the foreign leg already did. fx6
   (one variable: `pub mod inner`), executed: `deny Fs run3` 0 → **1**. `CANDOR_R1352_OFF=1`.

@@ -6921,7 +6921,7 @@ fn r1324_a_consumer_joins_a_unions_carried_member_and_discloses_one_nothing_answ
 ///     executed). The union keeps a hedge naming the declaring trait (SPEC §4 ⟨0.40⟩ union clause rule 3).
 ///   * F2, a supertrait bound by `use` from another package (`use other::Error; trait MyErr: Error`) is not std's `Error`:
 ///     `MyErr::custom` is a doubt, so it is carried.
-///   * DRIFT stays dropped: `v.go().map_err(..)` keys `Plain::map_err`, a member std has and no associated type declares.
+///   * DRIFT stays dropped: `p.go().is_ok()` keys `Plain::is_ok` on the `Result` that `Plain::go` is declared to return.
 #[test]
 fn f1_f2_a_projection_member_is_hedged_a_use_bound_supertrait_is_a_doubt_and_drift_stays_dropped() {
     let other = make_crate("f1other", "pub trait Error { fn custom(&self) -> u8; }\n");
@@ -6937,7 +6937,7 @@ fn f1_f2_a_projection_member_is_hedged_a_use_bound_supertrait_is_a_doubt_and_dri
         pub struct Doc;\n\
         impl Job for Doc {\n\
             fn run<S: Store>(&self, s: S) { let t = s.begin(); t.commit(); }\n\
-            fn res<P: Plain>(&self, p: &P) -> i32 { p.go().map_err(|_| 0).unwrap_or(0) }\n\
+            fn res<P: Plain>(&self, p: &P) -> i32 { p.go().is_ok() as i32 }\n\
             fn err<E: MyErr>(&self, e: &E) -> u8 { e.custom() + e.tag() }\n\
         }\n");
     std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"f1prod\"\n\n[dependencies]\nf1base = {{ path = \"{}\" }}\n",
@@ -6955,7 +6955,9 @@ fn f1_f2_a_projection_member_is_hedged_a_use_bound_supertrait_is_a_doubt_and_dri
         "F1: a projection member is hedged under the trait that declares it: {v:#}");
     assert!(don("Job::err").iter().any(|k| k.ends_with("MyErr::custom")), "F2: a use-bound supertrait's member is carried: {v:#}");
     let res = u("Job::res");
-    assert!(!why(res).iter().any(|w| w.contains("map_err")) && !don("Job::res").iter().any(|k| k.contains("map_err")),
+    // REVIEW4: a one-link chain with no callable argument (`p.go().is_ok()`, `go -> Result`) is std drift and dropped. A
+    // `.map_err(|e| ..)` with a closure, or a second link past a non-member (`.ok().unwrap_or(0)`), keeps the hedge by design.
+    assert!(!why(res).iter().any(|w| w.contains("is_ok")) && !don("Job::res").iter().any(|k| k.contains("is_ok")),
         "drift stays dropped: {v:#}");
 }
 
@@ -7047,25 +7049,35 @@ fn c1_n_a_chain_drop_never_looks_through_try_await_or_a_dispatching_closure() {
     let base = make_crate("c1base", "pub trait Tx { fn write(&self); }\n\
         pub trait StoreL { fn get(&self) -> Result<Box<dyn Tx>, ()>; }\n\
         #[allow(async_fn_in_trait)] pub trait StoreW { async fn get(&self) -> Result<Box<dyn Tx>, ()>; }\n\
-        pub trait StoreN { fn list(&self) -> Vec<Box<dyn Tx>>; }\n");
+        pub trait StoreN { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait StoreN2 { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait StoreN4 { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait StoreN5 { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        impl<T: Tx + ?Sized> Tx for Box<T> { fn write(&self) { (**self).write() } }\n");
     std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"c1base\"\nedition = \"2021\"\n").unwrap();
-    let prod = make_crate("c1prod", "use c1base::{StoreL, StoreW, StoreN};\n\
+    let prod = make_crate("c1prod", "use c1base::{StoreL, StoreW, StoreN, StoreN2, StoreN4, StoreN5};\n\
         #[allow(async_fn_in_trait)]\n\
-        pub trait Job { fn l<S: StoreL>(&self, s: S) -> Result<(), ()>; async fn w<S: StoreW>(&self, s: S) -> Result<(), ()>; fn n<S: StoreN>(&self, s: S); }\n\
+        pub trait Job { fn l<S: StoreL>(&self, s: S) -> Result<(), ()>; async fn w<S: StoreW>(&self, s: S) -> Result<(), ()>; fn n<S: StoreN>(&self, s: S);\n\
+            fn n2<S: StoreN2>(&self, s: S); fn n4<S: StoreN4>(&self, s: S); fn n5<S: StoreN5>(&self, s: S); }\n\
         pub struct Doc;\n\
         impl Job for Doc {\n\
             fn l<S: StoreL>(&self, s: S) -> Result<(), ()> { s.get()?.write(); Ok(()) }\n\
             async fn w<S: StoreW>(&self, s: S) -> Result<(), ()> { s.get().await?.write(); Ok(()) }\n\
             fn n<S: StoreN>(&self, s: S) { s.list().iter().for_each(|t| t.write()); }\n\
+            fn n2<S: StoreN2>(&self, s: S) { s.list().iter().for_each(<Box<dyn c1base::Tx> as c1base::Tx>::write); }\n\
+            fn n4<S: StoreN4>(&self, s: S) { s.list().iter().for_each(|t| (**t).write()); }\n\
+            fn n5<S: StoreN5>(&self, s: S) { s.list().iter().for_each(|t| { let u = t; u.write(); }); }\n\
         }\n");
     std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"c1prod\"\nedition = \"2021\"\n\n[dependencies]\nc1base = {{ path = \"{}\" }}\n",
         base.display())).unwrap();
     let v = scan_json(&prod, "");
     let _ = std::fs::remove_dir_all(&prod);
     let _ = std::fs::remove_dir_all(&base);
-    for m in ["Job::l", "Job::w", "Job::n"] {
+    for (m, kept) in [("Job::l", "dispatch:StoreL.write"), ("Job::w", "dispatch:StoreW.write"), ("Job::n", "dispatch:StoreN.iter"),
+        ("Job::n2", "dispatch:StoreN2.iter"), ("Job::n4", "dispatch:StoreN4.iter"), ("Job::n5", "dispatch:StoreN5.iter")] {
         let u = row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
             .unwrap_or_else(|| panic!("C1/N: no {m} union: {v:#}"));
-        assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "C1/N: {m} keeps the hedge: {u:#}");
+        assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown") && why(u).iter().any(|w| w == kept),
+            "C1/N: {m} keeps the published hedge {kept}: {u:#}");
     }
 }

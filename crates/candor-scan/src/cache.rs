@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev136 (rustagent-0416): Fable REVIEW4 — any callable argument (closure literal or path) in a chain makes its keys non-chain
+    // sites (cached `foreign_dispatch_prov` moves).
     // rev135 (rustagent-0416): Fable REVIEW3 C1/N — a key minted after `?`/`.await`, or under a closure that dispatches on its
     // parameter, is recorded as a non-chain site (cached `foreign_dispatch_prov` moves).
     // rev134 (rustagent-0416): SOUNDNESS F3 — `FnInfo` gains `foreign_dispatch_prov` (where each foreign key was minted).
@@ -546,7 +548,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev135/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev136/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

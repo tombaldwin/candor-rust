@@ -10593,10 +10593,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // receiver, grouped by call site (a multi-bound spread mints one key per bound at one site).
                             // C only for a receiver that IS the inner call's value (Fable REVIEW3 C1): after `?` or `.await`
                             // the receiver is the PAYLOAD, which the inner member's declared std return says nothing about.
-                            // And not when a closure in this chain dispatches on its own parameter (REVIEW3 N): the
+                            // And not when any call in this chain takes a CALLABLE argument (REVIEW3 N, REVIEW4 N2–N5): the
                             // combinator's drop would remove the only disclosure of a call the engine never keyed.
                             let desc = match peel_recv_no_unwrap(&node.receiver) {
-                                syn::Expr::MethodCall(mc) if !fd_tainted() && !closure_dispatches_on_param(&node.args) =>
+                                syn::Expr::MethodCall(mc) if !fd_tainted() && !has_callable_arg(&node.args) =>
                                     format!("C\u{1f}{full}\u{1f}{}", mc.method),
                                 _ => format!("D\u{1f}{fd_site}"),
                             };
@@ -11059,8 +11059,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.charge_dep_rhs_operator(&node.receiver, None, &node.args[0], tr, m);
             }
         }
-        // REVIEW3 N — every key minted in this call's RECEIVER chain sits under a closure that dispatches on its parameter.
-        let taint = closure_dispatches_on_param(&node.args);
+        // REVIEW3 N / REVIEW4 — every key minted in this call's RECEIVER chain sits under a call taking a callable argument.
+        let taint = has_callable_arg(&node.args);
         if taint {
             fd_taint(1);
         }
@@ -14487,41 +14487,13 @@ pub(crate) fn peel_recv_no_unwrap(expr: &syn::Expr) -> &syn::Expr {
     }
 }
 
-/// Fable REVIEW3 N — does a closure among `args` call a method on one of its own parameters (`|t| t.write()`)? Such a call is a
-/// dispatch the engine may not have keyed (a closure parameter typed from a std collection's element), so no key in that chain
-/// may be dropped as drift.
-pub(crate) fn closure_dispatches_on_param(args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) -> bool {
-    struct V<'p>(&'p std::collections::HashSet<String>, bool);
-    impl<'a> syn::visit::Visit<'a> for V<'_> {
-        fn visit_expr_method_call(&mut self, m: &'a syn::ExprMethodCall) {
-            if let syn::Expr::Path(p) = peel_recv(&m.receiver) {
-                if p.path.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
-                    self.1 = true;
-                }
-            }
-            syn::visit::visit_expr_method_call(self, m);
-        }
-    }
-    for a in args {
-        if let syn::Expr::Closure(cl) = a {
-            let mut names = std::collections::HashSet::new();
-            for i in &cl.inputs {
-                struct P<'n>(&'n mut std::collections::HashSet<String>);
-                impl<'a> syn::visit::Visit<'a> for P<'_> {
-                    fn visit_pat_ident(&mut self, pi: &'a syn::PatIdent) {
-                        self.0.insert(pi.ident.to_string());
-                    }
-                }
-                syn::visit::Visit::visit_pat(&mut P(&mut names), i);
-            }
-            let mut v = V(&names, false);
-            syn::visit::Visit::visit_expr(&mut v, &cl.body);
-            if v.1 {
-                return true;
-            }
-        }
-    }
-    false
+/// Fable REVIEW3 N / REVIEW4 N2–N5 — does any argument look CALLABLE: a closure literal, or a path expression (a method or
+/// function reference `<Box<dyn Tx> as Tx>::write`, `helper`, or a variable that may hold a closure)? Deliberately not an
+/// analysis of what the callable does: the earlier "a closure calls a method on its own parameter" proxy missed a method
+/// reference, an explicit deref and a rebinding (fb4 N2/N4/N5, executed). A chain key under such a call is never dropped as
+/// drift, because the callable may dispatch on an element the engine never keyed.
+pub(crate) fn has_callable_arg(args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) -> bool {
+    args.iter().any(|a| matches!(peel_recv_no_unwrap(a), syn::Expr::Closure(_) | syn::Expr::Path(_)))
 }
 
 thread_local! {
