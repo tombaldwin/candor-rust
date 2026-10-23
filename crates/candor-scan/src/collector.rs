@@ -10591,8 +10591,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // judge the RECEIVER, not the member's name: `C` = the receiver is the result of a method call
                             // `full::<inner>` (R549 chain drift is a combinator on THAT call's return), `D` = any other
                             // receiver, grouped by call site (a multi-bound spread mints one key per bound at one site).
-                            let desc = match peel_recv(&node.receiver) {
-                                syn::Expr::MethodCall(mc) => format!("C\u{1f}{full}\u{1f}{}", mc.method),
+                            // C only for a receiver that IS the inner call's value (Fable REVIEW3 C1): after `?` or `.await`
+                            // the receiver is the PAYLOAD, which the inner member's declared std return says nothing about.
+                            // And not when a closure in this chain dispatches on its own parameter (REVIEW3 N): the
+                            // combinator's drop would remove the only disclosure of a call the engine never keyed.
+                            let desc = match peel_recv_no_unwrap(&node.receiver) {
+                                syn::Expr::MethodCall(mc) if !fd_tainted() && !closure_dispatches_on_param(&node.args) =>
+                                    format!("C\u{1f}{full}\u{1f}{}", mc.method),
                                 _ => format!("D\u{1f}{fd_site}"),
                             };
                             fd_prov_push(format!("{key}\u{1f}{desc}"));
@@ -11054,7 +11059,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.charge_dep_rhs_operator(&node.receiver, None, &node.args[0], tr, m);
             }
         }
+        // REVIEW3 N — every key minted in this call's RECEIVER chain sits under a closure that dispatches on its parameter.
+        let taint = closure_dispatches_on_param(&node.args);
+        if taint {
+            fd_taint(1);
+        }
         self.visit_expr(&node.receiver);
+        if taint {
+            fd_taint(-1);
+        }
         if let Some(name) = closure_param {
             for a in &node.args {
                 if let syn::Expr::Closure(cl) = a {
@@ -14459,4 +14472,64 @@ pub(crate) fn fd_prov_push(s: String) {
 }
 pub(crate) fn fd_prov_take() -> Vec<String> {
     FD_PROV.with(|p| std::mem::take(&mut p.borrow_mut().1))
+}
+
+/// Fable REVIEW3 C1 — `peel_recv` without `?`/`.await`: the receiver whose type a method-chain proof is about.
+pub(crate) fn peel_recv_no_unwrap(expr: &syn::Expr) -> &syn::Expr {
+    let mut e = expr;
+    loop {
+        e = match e {
+            syn::Expr::Reference(r) => &r.expr,
+            syn::Expr::Paren(p) => &p.expr,
+            syn::Expr::Group(g) => &g.expr,
+            other => return other,
+        };
+    }
+}
+
+/// Fable REVIEW3 N — does a closure among `args` call a method on one of its own parameters (`|t| t.write()`)? Such a call is a
+/// dispatch the engine may not have keyed (a closure parameter typed from a std collection's element), so no key in that chain
+/// may be dropped as drift.
+pub(crate) fn closure_dispatches_on_param(args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) -> bool {
+    struct V<'p>(&'p std::collections::HashSet<String>, bool);
+    impl<'a> syn::visit::Visit<'a> for V<'_> {
+        fn visit_expr_method_call(&mut self, m: &'a syn::ExprMethodCall) {
+            if let syn::Expr::Path(p) = peel_recv(&m.receiver) {
+                if p.path.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
+                    self.1 = true;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+    }
+    for a in args {
+        if let syn::Expr::Closure(cl) = a {
+            let mut names = std::collections::HashSet::new();
+            for i in &cl.inputs {
+                struct P<'n>(&'n mut std::collections::HashSet<String>);
+                impl<'a> syn::visit::Visit<'a> for P<'_> {
+                    fn visit_pat_ident(&mut self, pi: &'a syn::PatIdent) {
+                        self.0.insert(pi.ident.to_string());
+                    }
+                }
+                syn::visit::Visit::visit_pat(&mut P(&mut names), i);
+            }
+            let mut v = V(&names, false);
+            syn::visit::Visit::visit_expr(&mut v, &cl.body);
+            if v.1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+thread_local! {
+    static FD_TAINT: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+fn fd_taint(d: isize) {
+    FD_TAINT.with(|t| t.set(t.get() + d));
+}
+fn fd_tainted() -> bool {
+    FD_TAINT.with(|t| t.get() > 0)
 }

@@ -24,14 +24,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   dependency's source. "The trait does not declare it" is not by itself drift, and the member's NAME never decides it:
   a proven-absent key is dropped only when every site that minted it is a receiver proved std from source — a method
   chain whose inner call is a member of the same trait declared to return a std type (`visitor.visit_str(v).map_err(..)`,
-  R549 chain drift), or a multi-bound spread where a sibling bound at the same site declares the member. Every other
+  R549 chain drift; the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
+  never while a closure in the chain dispatches on its own parameter, a call the engine may not key), or a multi-bound
+  spread where a sibling bound at the same site declares the member. Every other
   receiver (a projection anywhere, an RPIT, `Box<dyn>`, a where-bound, a callback parameter) keeps the union's hedge,
   naming the declaring trait where an associated-type bound shows it (SPEC §4 ⟨0.40⟩ union clause rule 3). Fable's
   fx/proj and all ten fx/fb2 shapes, executed: chained `deny Unknown` stays 1 (fx/proj owner unchained 0 → 1). A
   supertrait bound by `use` from another package is not read as the std trait of the same leaf (fx/tdecl). ⟨0.40⟩'s
   formatting/equality/hashing/
   cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1). `CANDOR_R1351_OFF=1`;
-  `CANDOR_F1_OFF=1` restores the proof-only drop. Cache schema rev134 (key mint provenance).
+  `CANDOR_F1_OFF=1` restores the proof-only drop. Fable's fb3 L (`s.get()?.write()`), its `.await` twin and N
+  (`s.list().iter().for_each(|t| t.write())`), executed: chained `deny Unknown` stays 1. Cache schema rev135.
 - ⚠ **candor-scan: a submodule implementor's further dispatch reaches its union (SOUNDNESS R1352).** The R513 tail
   fallback and R828's non-nominal implementors now feed the union's members, as the foreign leg already did. fx6
   (one variable: `pub mod inner`), executed: `deny Fs run3` 0 → **1**. `CANDOR_R1352_OFF=1`.
@@ -52,7 +55,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   implementors), a concrete effect added on 181 (159 through a new edge to an in-crate implementor whose body carries
   it, 22 through a joined union). Standalone units: no change. Union entries: 23,467 gain `dispatchesOn`, 4,030 lose the
   hedge's `Unknown` (3,007 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
-  or a multi-bound spread, checked independently from source), 2,327 newly `Unknown`.
+  or a multi-bound spread, checked independently from source — that checker's SPREAD test is ROW-level, weaker than the
+  engine's same-call-site test, so its SPREAD count is an upper bound on what the engine drops), 2,327 newly `Unknown`.
 
 ## [0.40.15] — 2026-10-22
 

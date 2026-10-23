@@ -7034,3 +7034,38 @@ impl Local for DocA { fn commit(&self) {} }
         assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "F3: {job} keeps the hedge: {u:#}");
     }
 }
+
+/// Fable REVIEW3 rust0416 C1 and N (rustagent-0416) — a method-chain drop is a proof about the receiver of the DROPPED call.
+///   * L `s.get()?.write()` and its `.await` twin `s.get().await?.write()`, `get -> Result<Box<dyn Tx>, ()>`: the receiver of
+///     `.write()` is the PAYLOAD (a trait object), not the std wrapper, so `StoreL::write` keeps the hedge. fb3 L and fx/fb-l2,
+///     executed: chained `deny Unknown` pub 1 / 6a9095d 0 / now 1.
+///   * N `s.list().iter().for_each(|t| t.write())`: `StoreN::iter` IS std drift (`Vec::iter`), but the closure's own dispatch on its
+///     parameter is never keyed, so the drift key is not dropped while a closure in its chain dispatches on its parameter
+///     (fb3 N executed: pub 1 / 6a9095d 0 / now 1).
+#[test]
+fn c1_n_a_chain_drop_never_looks_through_try_await_or_a_dispatching_closure() {
+    let base = make_crate("c1base", "pub trait Tx { fn write(&self); }\n\
+        pub trait StoreL { fn get(&self) -> Result<Box<dyn Tx>, ()>; }\n\
+        #[allow(async_fn_in_trait)] pub trait StoreW { async fn get(&self) -> Result<Box<dyn Tx>, ()>; }\n\
+        pub trait StoreN { fn list(&self) -> Vec<Box<dyn Tx>>; }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"c1base\"\nedition = \"2021\"\n").unwrap();
+    let prod = make_crate("c1prod", "use c1base::{StoreL, StoreW, StoreN};\n\
+        #[allow(async_fn_in_trait)]\n\
+        pub trait Job { fn l<S: StoreL>(&self, s: S) -> Result<(), ()>; async fn w<S: StoreW>(&self, s: S) -> Result<(), ()>; fn n<S: StoreN>(&self, s: S); }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn l<S: StoreL>(&self, s: S) -> Result<(), ()> { s.get()?.write(); Ok(()) }\n\
+            async fn w<S: StoreW>(&self, s: S) -> Result<(), ()> { s.get().await?.write(); Ok(()) }\n\
+            fn n<S: StoreN>(&self, s: S) { s.list().iter().for_each(|t| t.write()); }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"c1prod\"\nedition = \"2021\"\n\n[dependencies]\nc1base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    let _ = std::fs::remove_dir_all(&prod);
+    let _ = std::fs::remove_dir_all(&base);
+    for m in ["Job::l", "Job::w", "Job::n"] {
+        let u = row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+            .unwrap_or_else(|| panic!("C1/N: no {m} union: {v:#}"));
+        assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "C1/N: {m} keeps the hedge: {u:#}");
+    }
+}
