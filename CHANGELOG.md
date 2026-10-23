@@ -45,13 +45,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 - ⚠ **candor-scan: a union past the bounded-CHA limit is published broad (SOUNDNESS R1367, PART 103).** More than 12
   implementors (the in-scan index and count) puts the hedge on the union's own key even when all are pure: PART 103
   `c_13` chained `deny Unknown` 0 → **1**, `c_12` stays 0. `CANDOR_R1367_OFF=1`.
-- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (f2e76cd, sha1
-  9d96632d6ac0), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (4 entries excluded, pre arm exit 3, as
-  every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on 10 (wezterm-dynamic ×5,
-  termwiz ×5; each read: the only implementor reached is `f64` / a local derived enum), 0 → 1 on 9 (CHA edges to the
-  consumer's own `Unknown` implementors), a concrete effect added on 181 (159 through a new edge to an in-crate
-  implementor whose body carries it, 22 through a joined union). Standalone units: no change. Union entries: 23,240 gain
-  `dispatchesOn`, 4,389 lose the hedge's `Unknown` (3,045 now carry every lost member as a key), 2,227 newly `Unknown`.
+- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (6a9095d, sha1
+  40bd70263b50), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (6 entries excluded, pre arm exit 3, as
+  every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on 5 (wezterm-dynamic `*::eq`
+  over `OrderedFloat<f64>`: only `f64::is_nan` runs), 0 → 1 on 9 (CHA edges to the consumer's own `Unknown`
+  implementors), a concrete effect added on 181 (159 through a new edge to an in-crate implementor whose body carries
+  it, 22 through a joined union). Standalone units: no change. Union entries: 23,467 gain `dispatchesOn`, 4,030 lose the
+  hedge's `Unknown` (3,007 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
+  or a multi-bound spread, checked independently from source), 2,327 newly `Unknown`.
 
 ## [0.40.15] — 2026-10-22
 
