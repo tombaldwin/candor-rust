@@ -21,16 +21,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   PART 102 rust: 13 xfail arms now pass, every control 0. `CANDOR_R1324_HEDGE=1` restores the 0.40.15 hedge.
 - ⚠ **candor-scan: which further members a union names is asked of the owning trait's declaration, not a name list
   (SOUNDNESS R1351, R1353).** The 27-name denylist (`map`, `fmt`, `clone`, `into`, …) is replaced by a proof read from the
-  dependency's source. "The trait does not declare it" is not by itself drift: a key is left out only when the trait
-  and every supertrait provably lack the member AND the member is one std has or a trait of this crate declares (R549
-  chain/spread drift, `map_err` / `unwrap_or` / a local extension trait) AND no associated-type bound of the trait declares
-  it. A member minted from a PROJECTION receiver (`t.commit()` on `<S as Store>::T`, keyed `Store::commit`; serde's
-  `S::SerializeMap` `.end()`, keyed `Serializer::end`) keeps the union's hedge, naming the trait that declares it
-  (`dispatch:Tx.commit`; SPEC §4 ⟨0.40⟩ union clause rule 3) — Fable's fx/proj, executed: chained `deny Unknown run`
-  stays 1 (and 0 → 1 with the owner unchained). A supertrait bound by `use` from another package is not read as the std
-  trait of the same leaf (fx/tdecl: `MyErr: serde::de::Error` keeps `custom`). ⟨0.40⟩'s formatting/equality/hashing/
+  dependency's source. "The trait does not declare it" is not by itself drift, and the member's NAME never decides it:
+  a proven-absent key is dropped only when every site that minted it is a receiver proved std from source — a method
+  chain whose inner call is a member of the same trait declared to return a std type (`visitor.visit_str(v).map_err(..)`,
+  R549 chain drift), or a multi-bound spread where a sibling bound at the same site declares the member. Every other
+  receiver (a projection anywhere, an RPIT, `Box<dyn>`, a where-bound, a callback parameter) keeps the union's hedge,
+  naming the declaring trait where an associated-type bound shows it (SPEC §4 ⟨0.40⟩ union clause rule 3). Fable's
+  fx/proj and all ten fx/fb2 shapes, executed: chained `deny Unknown` stays 1 (fx/proj owner unchained 0 → 1). A
+  supertrait bound by `use` from another package is not read as the std trait of the same leaf (fx/tdecl). ⟨0.40⟩'s
+  formatting/equality/hashing/
   cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1). `CANDOR_R1351_OFF=1`;
-  `CANDOR_F1_OFF=1` restores the proof-only drop.
+  `CANDOR_F1_OFF=1` restores the proof-only drop. Cache schema rev134 (key mint provenance).
 - ⚠ **candor-scan: a submodule implementor's further dispatch reaches its union (SOUNDNESS R1352).** The R513 tail
   fallback and R828's non-nominal implementors now feed the union's members, as the foreign leg already did. fx6
   (one variable: `pub mod inner`), executed: `deny Fs run3` 0 → **1**. `CANDOR_R1352_OFF=1`.

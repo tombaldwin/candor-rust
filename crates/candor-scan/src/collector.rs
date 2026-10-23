@@ -7886,6 +7886,7 @@ impl<'a> CallCollector<'a> {
         if crate::lang::reach_debug() {
             eprintln!("R1319PATH\t{owner}#{rest}::{leaf}"); // §E1 REACH COUNTER
         }
+        fd_prov_push(format!("{owner}#{rest}::{leaf}\u{1f}D\u{1f}{}", fd_prov_site())); // F3
         self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
         self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{full}::{leaf}"), leaf: leaf.to_string(), str_arg: None,
@@ -9821,6 +9822,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         self.note_container_release(node); // SOUNDNESS R1118
+        let fd_site = fd_prov_site(); // F3 — this call site, for the provenance of every key it mints
         let leaf = node.method.to_string();
         // SOUNDNESS R1295 — a driven iterator over a std I/O source (`ReadDir`, `lines()` on a handle), and an I/O member on
         // a buffering-wrapper PARAMETER (`r.read_line(..)` with `r: &mut BufReader<File>`), which the typer answers as
@@ -10585,6 +10587,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                                 self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
                             }
+                            // SOUNDNESS F3 (Fable REVIEW2 rust0416) — WHERE the key was minted, so the union's drop rule can
+                            // judge the RECEIVER, not the member's name: `C` = the receiver is the result of a method call
+                            // `full::<inner>` (R549 chain drift is a combinator on THAT call's return), `D` = any other
+                            // receiver, grouped by call site (a multi-bound spread mints one key per bound at one site).
+                            let desc = match peel_recv(&node.receiver) {
+                                syn::Expr::MethodCall(mc) => format!("C\u{1f}{full}\u{1f}{}", mc.method),
+                                _ => format!("D\u{1f}{fd_site}"),
+                            };
+                            fd_prov_push(format!("{key}\u{1f}{desc}"));
                             self.foreign_dispatch_sites.insert(key);
                         }
                     }
@@ -11524,6 +11535,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if !bound && std::env::var_os("CANDOR_R693_INSTR").is_some() {
                                 eprintln!("R693KEY\t{key}");
                             }
+                            fd_prov_push(format!("{key}\u{1f}D\u{1f}{}", fd_prov_site())); // F3
                             self.foreign_dispatch_sites.insert(key);
                         }
                     }
@@ -14427,4 +14439,24 @@ fn some_or_ok_kind(pat: &syn::Pat) -> Option<crate::lang::LayerBinder> {
         }
         _ => None,
     }
+}
+
+// SOUNDNESS F3 (Fable REVIEW2 rust0416) — the provenance of every foreign obligation-1 key a body mints (`key\u{1f}C\u{1f}<trait
+// path>\u{1f}<inner method>` for a method-chain receiver, `key\u{1f}D\u{1f}<site>` otherwise). A side channel rather than a
+// `CallCollector` field so the struct literals stay as they are; `decls.rs` takes it once per body, beside `foreign_dispatch`.
+thread_local! {
+    static FD_PROV: std::cell::RefCell<(usize, Vec<String>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+pub(crate) fn fd_prov_site() -> usize {
+    FD_PROV.with(|p| {
+        let mut p = p.borrow_mut();
+        p.0 += 1;
+        p.0
+    })
+}
+pub(crate) fn fd_prov_push(s: String) {
+    FD_PROV.with(|p| p.borrow_mut().1.push(s));
+}
+pub(crate) fn fd_prov_take() -> Vec<String> {
+    FD_PROV.with(|p| std::mem::take(&mut p.borrow_mut().1))
 }

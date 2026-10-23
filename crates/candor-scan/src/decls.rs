@@ -2544,6 +2544,7 @@ pub(crate) fn fninfo(
     local_macros: &HashMap<String, String>,
     drop_relevant: &std::collections::HashSet<String>,
 ) -> FnInfo {
+    let _ = crate::collector::fd_prov_take(); // F3 — nothing from a previous body
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
     // fails to resolve to its crate and is under-reported (found on coreutils `date`: its rustix clock
@@ -3391,6 +3392,12 @@ pub(crate) fn fninfo(
         refusals: c.refusals.into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
+        foreign_dispatch_prov: {
+            let mut v = crate::collector::fd_prov_take(); // F3
+            v.sort();
+            v.dedup();
+            v
+        },
         extern_decl: false,
         derive_synth: false,
         mbe_prim_op: false,

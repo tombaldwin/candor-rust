@@ -31,9 +31,3 @@ pub(crate) fn is_std_method(name: &str, argc: usize) -> bool {
     set().contains(&(name, argc))
 }
 
-/// SOUNDNESS F1 (Fable REVIEW rust0416) — whether std has a stable public method `name` at ANY arity: the drift test for a member
-/// a dependency trait provably does not declare (`Result::map_err`, `Option::unwrap_or`, `Iterator::filter_map` reached through a
-/// chain or a spread bound). A member std does NOT have cannot be std drift.
-pub(crate) fn is_std_method_name(name: &str) -> bool {
-    set().iter().any(|(n, _)| *n == name)
-}

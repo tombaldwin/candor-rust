@@ -2941,6 +2941,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             u.refusals = Vec::new();
             u.dispatch = Vec::new();
             u.foreign_dispatch = Vec::new();
+            u.foreign_dispatch_prov = Vec::new();
             u.untyped_methods = Vec::new();
             u.has_self = false;
             u.reexport_alias = true;
@@ -7275,6 +7276,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // member-checked where it is minted). Fails toward over-disclosure (an unreadable source names the key).
     // `CANDOR_R1351_OFF=1` turns the proof off (every key named).
     let r1351_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    // SOUNDNESS F3 — every foreign key's mint sites, crate-wide: key -> [(fn qual, site)], and (fn qual, site) -> keys.
+    let mut fd_prov: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut fd_site_keys: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for f in &fns {
+        for e in &f.foreign_dispatch_prov {
+            let Some((k, d)) = e.split_once('\u{1f}') else { continue };
+            fd_prov.entry(k.to_string()).or_default().push((f.qual.clone(), d.to_string()));
+            fd_site_keys.entry((f.qual.clone(), d.to_string())).or_default().push(k.to_string());
+        }
+    }
     let r1351_off = std::env::var_os("CANDOR_R1351_OFF").is_some();
     // ⟨0.40⟩ SPEC §4 UNION CLAUSE (R1324 RESOLVED) — the members are CARRIED, not hedged. Rule 1 makes a narrow union
     // entry carry, in `dispatchesOn`, every member its contributors dispatch on transitively (spelling (a), which this
@@ -7310,11 +7321,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // hedge (SPEC §4 ⟨0.40⟩ union clause rule 3), naming the trait that declares it where the source shows one.
                     let f1_off = std::env::var_os("CANDOR_F1_OFF").is_some();
                     let assoc = if f1_off { None } else { r1351_sigs.borrow_mut().assoc_member_trait(dir, owner, real, tr, m) };
-                    // Drift is a member std has, or one a trait THIS crate declares (an extension trait reached through
-                    // its blanket impl, `p.nothere()` under `impl<T: Plain> Nothere for T`: that call's own key is minted
-                    // under the local trait and member-checked). A projection member found above is never drift.
-                    let local_ext = merged.trait_decls.values().any(|lt| lt.methods.contains(m));
-                    if f1_off || assoc.is_none() && (crate::std_methods::is_std_method_name(m) || local_ext) {
+                    // SOUNDNESS F3 (Fable REVIEW2 rust0416) — DRIFT IS PROVED ABOUT THE RECEIVER, NEVER ABOUT THE NAME. 729e181
+                    // dropped a proven-absent key when its member was spelled like a std method or like any local trait's
+                    // method, and fx/fb2 executed five real dispatches it silenced that way (an RPIT, a `Box<dyn>`, a
+                    // where-bound projection, a supertrait's associated type, an unrelated local `commit`). A key is now
+                    // dropped only when EVERY site that minted it is one of two receiver shapes, each read from source:
+                    //   C — a method-chain receiver whose inner call is a member of the same trait DECLARED to return a std
+                    //       type (`visitor.visit_str(v).map_err(..)`: `visit_str -> Result<..>`), so the outer call is a
+                    //       method of that std type (R549 chain drift);
+                    //   D — a multi-bound spread: the same site minted the same member under a sibling bound the owner's
+                    //       source proves declares it (`T: Float + Zero`, `x.is_nan()`), so the call resolves there.
+                    // Every other receiver — RPIT, `dyn`, a projection anywhere, a callback parameter, a key with no recorded
+                    // site — is a member set this producer could not complete and keeps the hedge (SPEC §4 ⟨0.40⟩ union
+                    // clause rule 3), whatever the member is called.
+                    let drift = assoc.is_none() && !f1_off && fd_prov.get(k.as_str()).is_some_and(|sites| !sites.is_empty()
+                        && sites.iter().all(|(q, d)| {
+                            if let Some(rest) = d.strip_prefix("C\u{1f}") {
+                                let Some((full, inner)) = rest.split_once('\u{1f}') else { return false };
+                                let alias = full.split("::").next().unwrap_or("");
+                                let tleaf = full.rsplit("::").next().unwrap_or("");
+                                let areal = dep_renames.get(alias).map(String::as_str).unwrap_or(alias);
+                                r1351_sigs.borrow_mut().returns_std(dir, alias, areal, tleaf, inner) == Some(true)
+                            } else {
+                                fd_site_keys.get(&(q.clone(), d.clone())).is_some_and(|ks| ks.iter().any(|k2| {
+                                    if k2 == k { return false }
+                                    let Some((o2, p2)) = k2.split_once('#') else { return false };
+                                    let s2: Vec<&str> = p2.split("::").collect();
+                                    if s2.len() < 2 || s2[s2.len() - 1] != m { return false }
+                                    let r2 = dep_renames.get(o2).map(String::as_str).unwrap_or(o2);
+                                    r1351_sigs.borrow_mut().trait_declares(dir, o2, r2, s2[s2.len() - 2], m) == Some(true)
+                                }))
+                            }
+                        }));
+                    if f1_off || drift {
                         if crate::lang::reach_debug() {
                             eprintln!("R1351SKIP\t{own_tail}\t{owner}#{tr}.{m}"); // §E1 REACH COUNTER
                         }

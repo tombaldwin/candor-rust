@@ -481,6 +481,58 @@ impl SrcIndex {
         found
     }
 
+    /// SOUNDNESS F3 (Fable REVIEW2 rust0416) — is the declared RETURN type of `leaf::method`, as this source declares the trait
+    /// member, positively a std type (`Result`, `Option`, `bool`, a primitive, `String`, `Vec`, `&str`, `Cow`, …)? That is what
+    /// makes a combinator called on the call's result (`visitor.visit_str(v).map_err(..)`) a std method, whatever its name.
+    /// `Some(true)` only when every declaration of the member the source shows returns one; a projection (`Self::T`),
+    /// `impl Trait`, `dyn`, `Box`, a generic or an undeclared member is `None`.
+    fn member_returns_std(&self, leaf: &str, method: &str) -> Option<bool> {
+        const STD: &[&str] = &["Result", "Option", "bool", "char", "str", "String", "Vec", "Cow", "u8", "u16", "u32", "u64",
+            "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "Ordering", "Duration"];
+        fn std_ty(t: &syn::Type) -> bool {
+            match t {
+                syn::Type::Reference(r) => std_ty(&r.elem),
+                syn::Type::Paren(p) => std_ty(&p.elem),
+                syn::Type::Tuple(tp) => tp.elems.is_empty(),
+                syn::Type::Path(p) if p.qself.is_none() => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    segs.first().is_none_or(|f| f != "Self") && segs.last().is_some_and(|l| STD.contains(&l.as_str()))
+                }
+                _ => false,
+            }
+        }
+        #[derive(Default)]
+        struct Traits<'a>(Vec<&'a syn::ItemTrait>, String);
+        impl<'a> Visit<'a> for Traits<'a> {
+            fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
+                if t.ident == self.1.as_str() {
+                    self.0.push(t);
+                }
+                syn::visit::visit_item_trait(self, t);
+            }
+        }
+        let mut v = Traits(Vec::new(), leaf.to_string());
+        for f in &self.files {
+            v.visit_file(f);
+        }
+        let mut seen = false;
+        for t in &v.0 {
+            for it in &t.items {
+                if let syn::TraitItem::Fn(f) = it {
+                    if f.sig.ident == method {
+                        seen = true;
+                        match &f.sig.output {
+                            syn::ReturnType::Default => {}
+                            syn::ReturnType::Type(_, ty) if std_ty(ty) => {}
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+        }
+        seen.then_some(true)
+    }
+
     /// R1351 — does this source NAME `leaf` at all (a declaration, a `use` binding, a macro token, an unparsed file)?
     fn names_leaf(&self, leaf: &str) -> bool {
         self.local_names.contains(leaf) || self.macro_words.contains(leaf) || self.unparsed.iter().any(|(_, w)| w.contains(leaf))
@@ -1609,6 +1661,25 @@ impl DepSigs {
         }
         self.tdecl.insert(key, answer);
         answer
+    }
+
+    /// SOUNDNESS F3 — `SrcIndex::member_returns_std` over every source of the package: `Some(true)` only if every source that
+    /// declares the member says so.
+    pub(crate) fn returns_std(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, method: &str) -> Option<bool> {
+        let dirs = self.source_dirs(dir, alias, real);
+        let mut any = false;
+        for d in &dirs {
+            if self.too_big.get(d).copied().unwrap_or(false) {
+                return None;
+            }
+            match self.index(d).map(|ix| ix.member_returns_std(leaf, method)) {
+                Some(Some(true)) => any = true,
+                Some(None) if self.index(d).is_some_and(|ix| ix.names_leaf(leaf)) => return None,
+                Some(None) => {}
+                _ => return None,
+            }
+        }
+        any.then_some(true)
     }
 
     /// SOUNDNESS F1 (Fable REVIEW rust0416) — `SrcIndex::assoc_bound_declares` over every source of the package: the trait

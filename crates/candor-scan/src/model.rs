@@ -247,6 +247,10 @@ pub(crate) struct FnInfo {
     /// rev35).
     #[serde(rename = "fd", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign_dispatch: Vec<String>,
+    /// SOUNDNESS F3 (Fable REVIEW2 rust0416) — where each `foreign_dispatch` key was minted (`collector::fd_prov_push`), so a
+    /// union may drop a key only on a proof about the RECEIVER. Cached (`cache_schema` rev134).
+    #[serde(rename = "fdp", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) foreign_dispatch_prov: Vec<String>,
     /// SOUNDNESS R894 — a SYNTHETIC unit for a `pub` foreign-function DECLARATION (`extern "C" { pub fn
     /// creat(..); }`), so the report publishes what in-crate analysis already answers for that name:
     /// `Unknown` + `native:extern fn`. Kept out of the local resolution indexes (`by_leaf`/`by_tail2`):

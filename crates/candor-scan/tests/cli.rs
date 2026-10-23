@@ -6958,3 +6958,79 @@ fn f1_f2_a_projection_member_is_hedged_a_use_bound_supertrait_is_a_doubt_and_dri
     assert!(!why(res).iter().any(|w| w.contains("map_err")) && !don("Job::res").iter().any(|k| k.contains("map_err")),
         "drift stays dropped: {v:#}");
 }
+
+
+/// Fable REVIEW2 rust0416 F3 (rustagent-0416) — a proven-absent key is dropped only on a proof about the RECEIVER, never on
+/// the member's name. Fable's fx/fb2 (all shapes EXECUTED, chained `deny Unknown` pub 1 / 729e181 0 for A B C D H): a
+/// std-NAMED member `Tx::write` reached through an RPIT (A), `Box<dyn Tx>` (B), a producer where-bound (C), a supertrait's
+/// associated type (D), a nested projection (E), and a non-std `commit` beside an unrelated local `Local::commit` (H) — each
+/// union keeps its hedge. The drift control (`p.go().map_err(..)`: `go -> Result`) stays dropped in
+/// `f1_f2_a_projection_member_is_hedged_..`.
+#[test]
+fn f3_a_proven_absent_member_keeps_the_hedge_unless_its_receiver_is_proved_std() {
+    let base = make_crate("f3base", r##"// fable REVIEW2 attack on the new drop rule: real dispatches on a std-NAMED member (`write`) through receivers the engine
+// keys under the wrong trait, where no INLINE associated-type bound names the member.
+pub trait Tx { fn write(&self); }            // std-named member (io::Write::write)
+pub trait TxC { fn commit(&self); }          // non-std member, for the local-extension leg
+// a: return-position impl Trait
+pub trait StoreA { fn begin(&self) -> impl Tx; }
+pub trait JobA { fn run<S: StoreA>(&self, s: S); }
+// b: boxed trait object return
+pub trait StoreB { fn begin(&self) -> Box<dyn Tx>; }
+pub trait JobB { fn run<S: StoreB>(&self, s: S); }
+// c: unbounded associated type; the bound lives in the PRODUCER's where-clause
+pub trait StoreC { type T; fn begin(&self) -> Self::T; }
+pub trait JobC { fn run<S: StoreC>(&self, s: S) where S::T: Tx; }
+// d: associated type declared on a SUPERTRAIT
+pub trait BaseD { type T: Tx; }
+pub trait StoreD: BaseD { fn begin(&self) -> Self::T; }
+pub trait JobD { fn run<S: StoreD>(&self, s: S); }
+// e: nested projection <<S as StoreE>::T as Mid>::U
+pub trait Mid { type U: Tx; fn inner(&self) -> Self::U; }
+pub trait StoreE { type T: Mid; fn begin(&self) -> Self::T; }
+pub trait JobE { fn run<S: StoreE>(&self, s: S); }
+// f: GAT
+pub trait StoreF { type T<'a>: Tx where Self: 'a; fn begin(&self) -> Self::T<'_>; }
+pub trait JobF { fn run<S: StoreF>(&self, s: S); }
+// g: associated type declared through a macro item in the trait body
+macro_rules! assoc { () => { type T: Tx; } }
+pub trait StoreG { assoc!(); fn begin(&self) -> Self::T; }
+pub trait JobG { fn run<S: StoreG>(&self, s: S); }
+// h: where-clause bound on the TRAIT's own associated type, non-std member; producer declares an unrelated local trait with `commit`
+pub trait StoreH { type T; fn begin(&self) -> Self::T; }
+pub trait JobH { fn run<S: StoreH>(&self, s: S) where S::T: TxC; }
+// i: callback parameter typed by the owner's signature
+pub trait StoreI { fn each(&self, f: &mut dyn FnMut(&dyn Tx)); }
+pub trait JobI { fn run<S: StoreI>(&self, s: S); }
+// j: the plain projection with an inline bound (REPORT2's closed case), control
+pub trait StoreJ { type T: Tx; fn begin(&self) -> Self::T; }
+pub trait JobJ { fn run<S: StoreJ>(&self, s: S); }
+"##);
+    let prod = make_crate("f3prod", r##"use base::{Tx, TxC, Mid, StoreA, StoreB, StoreC, StoreD, StoreE, StoreF, StoreG, StoreH, StoreI, StoreJ, JobA, JobB, JobC, JobD, JobE, JobF, JobG, JobH, JobI, JobJ};
+pub struct DocA; pub struct DocB; pub struct DocC; pub struct DocD; pub struct DocE; pub struct DocF; pub struct DocG; pub struct DocH; pub struct DocI; pub struct DocJ;
+impl JobA for DocA { fn run<S: StoreA>(&self, s: S) { s.begin().write(); } }
+impl JobB for DocB { fn run<S: StoreB>(&self, s: S) { s.begin().write(); } }
+impl JobC for DocC { fn run<S: StoreC>(&self, s: S) where S::T: Tx { s.begin().write(); } }
+impl JobD for DocD { fn run<S: StoreD>(&self, s: S) { s.begin().write(); } }
+impl JobE for DocE { fn run<S: StoreE>(&self, s: S) { s.begin().inner().write(); } }
+impl JobF for DocF { fn run<S: StoreF>(&self, s: S) { s.begin().write(); } }
+impl JobG for DocG { fn run<S: StoreG>(&self, s: S) { s.begin().write(); } }
+impl JobH for DocH { fn run<S: StoreH>(&self, s: S) where S::T: TxC { s.begin().commit(); } }
+impl JobI for DocI { fn run<S: StoreI>(&self, s: S) { s.each(&mut |t| t.write()); } }
+impl JobJ for DocJ { fn run<S: StoreJ>(&self, s: S) { s.begin().write(); } }
+/// an unrelated local trait that happens to declare `commit` (the local-extension leg)
+pub trait Local { fn commit(&self); }
+impl Local for DocA { fn commit(&self) {} }
+"##);
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"base\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"f3prod\"\nedition = \"2021\"\n\n[dependencies]\nbase = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    let _ = std::fs::remove_dir_all(&prod);
+    let _ = std::fs::remove_dir_all(&base);
+    for job in ["JobA", "JobB", "JobC", "JobD", "JobE", "JobH"] {
+        let u = row(&v, |f| f["interfaceUnion"] == true && f["hash"].as_str().is_some_and(|h| h.ends_with(&format!("{job}::run"))))
+            .unwrap_or_else(|| panic!("F3: no {job}::run union: {v:#}"));
+        assert!(u["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "F3: {job} keeps the hedge: {u:#}");
+    }
+}
