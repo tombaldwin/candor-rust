@@ -6913,3 +6913,48 @@ fn r1324_a_consumer_joins_a_unions_carried_member_and_discloses_one_nothing_answ
     assert!(row(&z, |f| f["fn"] == "c_row").is_none_or(|r| !r["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown")),
         "R1324: a ROW's unanswered member still adds nothing (PART 92 c3_pure_only): {z:#}");
 }
+
+/// Fable REVIEW rust0416 F1 and F2 (rustagent-0416) — the two ways the R1351 proof dropped a REAL member, pinned beside the
+/// direction that must stay dropped:
+///   * F1, a PROJECTION receiver: `t.commit()` on `<S as Store>::T` is keyed `base#Store::commit`; `Store` does not declare
+///     `commit`, but its associated type's bound `Tx` does, and the program runs the consumer's `Tx::commit` (fx/proj,
+///     executed). The union keeps a hedge naming the declaring trait (SPEC §4 ⟨0.40⟩ union clause rule 3).
+///   * F2, a supertrait bound by `use` from another package (`use other::Error; trait MyErr: Error`) is not std's `Error`:
+///     `MyErr::custom` is a doubt, so it is carried.
+///   * DRIFT stays dropped: `v.go().map_err(..)` keys `Plain::map_err`, a member std has and no associated type declares.
+#[test]
+fn f1_f2_a_projection_member_is_hedged_a_use_bound_supertrait_is_a_doubt_and_drift_stays_dropped() {
+    let other = make_crate("f1other", "pub trait Error { fn custom(&self) -> u8; }\n");
+    let base = make_crate("f1base", "pub trait Tx { fn commit(self); }\n\
+        pub trait Store { type T: Tx; fn begin(&self) -> Self::T; }\n\
+        pub trait Plain { fn go(&self) -> Result<i32, ()>; }\n\
+        use f1other::Error;\n\
+        pub trait MyErr: Error { fn tag(&self) -> u8; }\n");
+    std::fs::write(base.join("Cargo.toml"), format!("[package]\nname = \"f1base\"\n\n[dependencies]\nf1other = {{ path = \"{}\" }}\n",
+        other.display())).unwrap();
+    let prod = make_crate("f1prod", "use f1base::{Store, Tx, Plain, MyErr};\n\
+        pub trait Job { fn run<S: Store>(&self, s: S); fn res<P: Plain>(&self, p: &P) -> i32; fn err<E: MyErr>(&self, e: &E) -> u8; }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn run<S: Store>(&self, s: S) { let t = s.begin(); t.commit(); }\n\
+            fn res<P: Plain>(&self, p: &P) -> i32 { p.go().map_err(|_| 0).unwrap_or(0) }\n\
+            fn err<E: MyErr>(&self, e: &E) -> u8 { e.custom() + e.tag() }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"f1prod\"\n\n[dependencies]\nf1base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    for d in [&prod, &base, &other] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("F1: no {m} union entry: {v:#}"));
+    let don = |m: &str| -> Vec<String> { u(m)["dispatchesOn"].as_array().map(|a| a.iter()
+        .filter_map(|w| w.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    let run = u("Job::run");
+    assert!(run["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown") && why(run).iter().any(|w| w == "dispatch:Tx.commit"),
+        "F1: a projection member is hedged under the trait that declares it: {v:#}");
+    assert!(don("Job::err").iter().any(|k| k.ends_with("MyErr::custom")), "F2: a use-bound supertrait's member is carried: {v:#}");
+    let res = u("Job::res");
+    assert!(!why(res).iter().any(|w| w.contains("map_err")) && !don("Job::res").iter().any(|k| k.contains("map_err")),
+        "drift stays dropped: {v:#}");
+}

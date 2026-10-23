@@ -7301,9 +7301,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !r1351_off && !protocol && owner != crate_name {
                 let real = dep_renames.get(owner).map(String::as_str).unwrap_or(owner);
                 if r1351_sigs.borrow_mut().trait_declares(dir, owner, real, tr, m) == Some(false) {
-                    if crate::lang::reach_debug() {
-                        eprintln!("R1351SKIP\t{own_tail}\t{owner}#{tr}.{m}"); // §E1 REACH COUNTER
+                    // SOUNDNESS F1 (Fable REVIEW rust0416) — "the trait does not declare it" is not "it is drift". A key minted
+                    // from a PROJECTION receiver (`t.commit()` on `<S as Store>::T`, keyed `Store::commit`; serde's
+                    // `S::SerializeSeq` `.end()`, keyed `Serializer::end`) names a member a trait the engine never looked up does
+                    // declare, and the program runs a consumer's implementor of it. Only a member std itself has
+                    // (`map_err`, `unwrap_or`, `into_iter` — R549 chain/spread drift), or one a local trait declares, with no
+                    // associated-type bound declaring it is dropped. Everything else is a member set this producer could not complete: the union keeps the
+                    // hedge (SPEC §4 ⟨0.40⟩ union clause rule 3), naming the trait that declares it where the source shows one.
+                    let f1_off = std::env::var_os("CANDOR_F1_OFF").is_some();
+                    let assoc = if f1_off { None } else { r1351_sigs.borrow_mut().assoc_member_trait(dir, owner, real, tr, m) };
+                    // Drift is a member std has, or one a trait THIS crate declares (an extension trait reached through
+                    // its blanket impl, `p.nothere()` under `impl<T: Plain> Nothere for T`: that call's own key is minted
+                    // under the local trait and member-checked). A projection member found above is never drift.
+                    let local_ext = merged.trait_decls.values().any(|lt| lt.methods.contains(m));
+                    if f1_off || assoc.is_none() && (crate::std_methods::is_std_method_name(m) || local_ext) {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1351SKIP\t{own_tail}\t{owner}#{tr}.{m}"); // §E1 REACH COUNTER
+                        }
+                        continue;
                     }
+                    let tn = assoc.as_deref().unwrap_or(tr);
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1351PROJ\t{own_tail}\t{owner}#{tr}.{m}\t{tn}"); // §E1 REACH COUNTER
+                    }
+                    inf.insert("Unknown");
+                    out.insert(format!("dispatch:{tn}.{m}"));
                     continue;
                 }
             }

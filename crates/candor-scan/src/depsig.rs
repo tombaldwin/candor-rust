@@ -440,6 +440,47 @@ fn macro_is_known(root: Option<&str>, name: &str, local: &HashMap<String, FnName
 }
 
 impl SrcIndex {
+    /// SOUNDNESS F1 (Fable REVIEW rust0416) — when `leaf` does NOT declare `member`, is `member` declared by the BOUND of one
+    /// of `leaf`'s associated types (`trait Store { type T: Tx; }`, `t.commit()` on `<S as Store>::T`)? That is the shape the
+    /// engine keys under the projection's BASE trait (`Store::commit`), and the answer names the trait that really declares it.
+    /// `Some(true)` only on a positive read; everything else is `None` (the caller treats it as a doubt, never as drift).
+    fn assoc_bound_declares(&self, leaf: &str, member: &str, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        let mut found: Option<String> = None;
+        for f in &self.files {
+            for it in &f.items {
+                fn walk<'a>(it: &'a syn::Item, leaf: &str, out: &mut Vec<&'a syn::ItemTrait>) {
+                    match it {
+                        syn::Item::Trait(t) if t.ident == leaf => out.push(t),
+                        syn::Item::Mod(m) => {
+                            for i in m.content.iter().flat_map(|(_, v)| v.iter()) {
+                                walk(i, leaf, out);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut ts = Vec::new();
+                walk(it, leaf, &mut ts);
+                for t in ts {
+                    for ti in &t.items {
+                        let syn::TraitItem::Type(ty) = ti else { continue };
+                        for b in &ty.bounds {
+                            let syn::TypeParamBound::Trait(tb) = b else { continue };
+                            let Some(bl) = tb.path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                            if self.trait_answer(&bl, member, depth + 1) == Some(true) {
+                                found = Some(bl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// R1351 — does this source NAME `leaf` at all (a declaration, a `use` binding, a macro token, an unparsed file)?
     fn names_leaf(&self, leaf: &str) -> bool {
         self.local_names.contains(leaf) || self.macro_words.contains(leaf) || self.unparsed.iter().any(|(_, w)| w.contains(leaf))
@@ -520,6 +561,9 @@ impl SrcIndex {
                     "std" | "core" | "alloc" => std_trait_has(sl, member, 0),
                     "crate" | "self" | "super" => self.trait_answer(sl, member, depth + 1),
                     "" if self.types.contains(sl.as_str()) => self.trait_answer(sl, member, depth + 1),
+                    // SOUNDNESS F2 (Fable REVIEW rust0416) — a bare leaf the source BINDS with `use` (`use serde::de::Error;
+                    // trait MyErr: Error`) is another package's trait, not std's of the same leaf: not read here.
+                    "" if self.local_names.contains(sl.as_str()) => None,
                     "" => std_trait_has(sl, member, 0),
                     _ => None, // another package's trait: not read here
                 };
@@ -1565,6 +1609,21 @@ impl DepSigs {
         }
         self.tdecl.insert(key, answer);
         answer
+    }
+
+    /// SOUNDNESS F1 (Fable REVIEW rust0416) — `SrcIndex::assoc_bound_declares` over every source of the package: the trait
+    /// (by leaf) whose associated-type bound declares `member`, if any source shows one.
+    pub(crate) fn assoc_member_trait(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str) -> Option<String> {
+        let dirs = self.source_dirs(dir, alias, real);
+        for d in &dirs {
+            if self.too_big.get(d).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Some(t) = self.index(d).and_then(|ix| ix.assoc_bound_declares(leaf, member, 0)) {
+                return Some(t);
+            }
+        }
+        None
     }
 
     /// SOUNDNESS R1186 — what the dependency's callee can CONVERT the value at `pos` into, as `(kind, target leaf)`:

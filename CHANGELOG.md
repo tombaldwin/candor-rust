@@ -13,17 +13,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 - ⚠ **candor-scan: an `interfaceUnion` entry carries its contributors' further members in `dispatchesOn`, and the R1324
   hedge is gone (SOUNDNESS R1324 RESOLVED, SPEC §4 ⟨0.40⟩ union clause, spelling (a); conformance PART 102).** A narrow
-  union names every member its contributors dispatch on transitively (the union's own key and any key whose trait
-  provably lacks the member excepted), and a consumer joins it as it joins a row's. A member a union carried that
+  union names every member its contributors dispatch on transitively (the union's own key excepted), and a consumer joins
+  it as it joins a row's. A member a union carried that
   NOTHING answers at the consumer (no chained entry, no own implementor) is disclosed there as `Unknown` +
   `dispatch:<Trait>.<member>`, so the zero-implementor bucket does not go silent (PART 102 `u_*_none`). Executed, chained,
   `deny Fs` 0 → **1**: aws-smithy-types 1.6.1 + a consumer `Serialize` (c_aws3, c_aws), and Fable's fx2A/fx2B/fx3/fx6.
   PART 102 rust: 13 xfail arms now pass, every control 0. `CANDOR_R1324_HEDGE=1` restores the 0.40.15 hedge.
 - ⚠ **candor-scan: which further members a union names is asked of the owning trait's declaration, not a name list
   (SOUNDNESS R1351, R1353).** The 27-name denylist (`map`, `fmt`, `clone`, `into`, …) is replaced by a proof read from the
-  dependency's source: a key is left out only when the trait and every supertrait provably lack the member; ⟨0.40⟩'s
-  formatting/equality/hashing/cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1);
-  a multi-bound spread keeps only the declaring trait where the source proves it. `CANDOR_R1351_OFF=1`.
+  dependency's source. "The trait does not declare it" is not by itself drift: a key is left out only when the trait
+  and every supertrait provably lack the member AND the member is one std has or a trait of this crate declares (R549
+  chain/spread drift, `map_err` / `unwrap_or` / a local extension trait) AND no associated-type bound of the trait declares
+  it. A member minted from a PROJECTION receiver (`t.commit()` on `<S as Store>::T`, keyed `Store::commit`; serde's
+  `S::SerializeMap` `.end()`, keyed `Serializer::end`) keeps the union's hedge, naming the trait that declares it
+  (`dispatch:Tx.commit`; SPEC §4 ⟨0.40⟩ union clause rule 3) — Fable's fx/proj, executed: chained `deny Unknown run`
+  stays 1 (and 0 → 1 with the owner unchained). A supertrait bound by `use` from another package is not read as the std
+  trait of the same leaf (fx/tdecl: `MyErr: serde::de::Error` keeps `custom`). ⟨0.40⟩'s formatting/equality/hashing/
+  cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1). `CANDOR_R1351_OFF=1`;
+  `CANDOR_F1_OFF=1` restores the proof-only drop.
 - ⚠ **candor-scan: a submodule implementor's further dispatch reaches its union (SOUNDNESS R1352).** The R513 tail
   fallback and R828's non-nominal implementors now feed the union's members, as the foreign leg already did. fx6
   (one variable: `pub mod inner`), executed: `deny Fs run3` 0 → **1**. `CANDOR_R1352_OFF=1`.
