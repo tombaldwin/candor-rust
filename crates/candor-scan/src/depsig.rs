@@ -489,14 +489,33 @@ impl SrcIndex {
     fn member_returns_std(&self, leaf: &str, method: &str) -> Option<bool> {
         const STD: &[&str] = &["Result", "Option", "bool", "char", "str", "String", "Vec", "Cow", "u8", "u16", "u32", "u64",
             "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "Ordering", "Duration"];
+        // SOUNDNESS Fable REVIEW5 — CLOSED, not merely std-headed. A `Vec<Box<dyn Tx>>`, an `Option<Self::T>`, a `Result<S::Ok, E>`
+        // is a std container of something the CONSUMER supplies, and whatever the dependency then does with the payload — a `for`
+        // loop, an index, `.first()`, a callable in any spelling — may dispatch on it through a call this engine never keys (the
+        // element of a std collection is not typed). So the combinator's drift key is the payload's only disclosure, and it may
+        // be dropped only when the declared return is std ALL THE WAY DOWN: every type argument (and tuple element) is itself a
+        // closed std type, never `Self`, a generic, a projection, `dyn`, `impl`, `Box` or any non-std path. This is a property
+        // of the TYPE that flows out of the inner call, so no later spelling of its use can get around it.
         fn std_ty(t: &syn::Type) -> bool {
             match t {
                 syn::Type::Reference(r) => std_ty(&r.elem),
                 syn::Type::Paren(p) => std_ty(&p.elem),
-                syn::Type::Tuple(tp) => tp.elems.is_empty(),
+                syn::Type::Tuple(tp) => tp.elems.iter().all(std_ty),
+                syn::Type::Slice(sl) => std_ty(&sl.elem),
+                syn::Type::Array(a) => std_ty(&a.elem),
                 syn::Type::Path(p) if p.qself.is_none() => {
                     let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-                    segs.first().is_none_or(|f| f != "Self") && segs.last().is_some_and(|l| STD.contains(&l.as_str()))
+                    segs.first().is_none_or(|f| f != "Self")
+                        && segs.last().is_some_and(|l| STD.contains(&l.as_str()))
+                        && p.path.segments.iter().all(|sg| match &sg.arguments {
+                            syn::PathArguments::None => true,
+                            syn::PathArguments::AngleBracketed(ab) => ab.args.iter().all(|a| match a {
+                                syn::GenericArgument::Type(t) => std_ty(t),
+                                syn::GenericArgument::Lifetime(_) => true,
+                                _ => false,
+                            }),
+                            syn::PathArguments::Parenthesized(_) => false,
+                        })
                 }
                 _ => false,
             }

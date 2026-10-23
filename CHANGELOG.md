@@ -23,8 +23,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   (SOUNDNESS R1351, R1353).** The 27-name denylist (`map`, `fmt`, `clone`, `into`, …) is replaced by a proof read from the
   dependency's source. "The trait does not declare it" is not by itself drift, and the member's NAME never decides it:
   a proven-absent key is dropped only when every site that minted it is a receiver proved std from source — a method
-  chain whose inner call is a member of the same trait declared to return a std type (`visitor.visit_str(v).map_err(..)`,
-  R549 chain drift; the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
+  chain whose inner call is a member of the same trait declared to return a CLOSED std type, std all the way down with
+  no `Self`, generic, projection, `dyn`, `impl` or `Box` among its type arguments (`s.flag().then_some(..)`, `flag ->
+  bool`; a `Vec<Box<dyn Tx>>` or a `Result<Self::Value, E>` is a container of something the consumer supplies, and the
+  dependency may dispatch on it in any spelling — Fable's fb5 `for` loop, index and block — so its key keeps the
+  hedge); the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
   never while ANY call in the chain takes a callable argument — a closure literal or a path/method reference — whose
   calls the engine may not key), or a multi-bound
   spread where a sibling bound at the same site declares the member. Every other
@@ -35,7 +38,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   formatting/equality/hashing/
   cloning members are always named. A real `map` member is carried (fx2A, executed: 0 → 1). `CANDOR_R1351_OFF=1`;
   `CANDOR_F1_OFF=1` restores the proof-only drop. Fable's fb3 L (`s.get()?.write()`), its `.await` twin and N
-  (`s.list().iter().for_each(|t| t.write())`) and fb4's method reference, explicit deref and rebinding spellings, executed:
+  (`s.list().iter().for_each(|t| t.write())`), fb4's method reference, explicit deref and rebinding, fb5's eight and the
+  lane's eighteen-spelling fx/fb6 (for loops, `while let`, `.first()`, index, `match .pop()`, `HashMap`/`VecDeque`), executed:
   chained `deny Unknown` stays 1. STILL OPEN: the dispatch on a std collection's element inside such a callable
   (`t.write()` above) is never keyed, in this release or v0.40.15 — the kept hedge discloses it under the false reason
   `dispatch:<Store>.iter`, and `deny Fs` over it stays 0. Cache schema rev136.

@@ -7081,3 +7081,39 @@ fn c1_n_a_chain_drop_never_looks_through_try_await_or_a_dispatching_closure() {
             "C1/N: {m} keeps the published hedge {kept}: {u:#}");
     }
 }
+
+/// Fable REVIEW5 rust0416 (rustagent-0416) — a chain key is dropped as drift only when the inner member's declared return is std
+/// ALL THE WAY DOWN. A std container of consumer-supplied trait objects (`Vec<Box<dyn Tx>>`) lets the dependency dispatch on its
+/// elements through calls this engine never keys, in any spelling — a `for` loop (fb5 A), an index (G), a block (H), `.first()`,
+/// `match .pop()`, a `HashMap` iteration — so its `iter`/`first`/… key keeps the published hedge. The closed control
+/// (`s.flag().then_some(1)`, `flag -> bool`) is still dropped. All shapes EXECUTED in fx/fb5 and the lane's fx/fb6 (18 spellings).
+#[test]
+fn review5_a_chain_drop_needs_a_closed_std_payload() {
+    let base = make_crate("r5base", "pub trait Tx { fn write(&self); }\n\
+        pub trait SA { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait SG { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait SH { fn list(&self) -> std::collections::HashMap<u8, Box<dyn Tx>>; }\n\
+        pub trait SZ { fn flag(&self) -> bool; }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"r5base\"\nedition = \"2021\"\n").unwrap();
+    let prod = make_crate("r5prod", "use r5base::{Tx, SA, SG, SH, SZ};\n\
+        fn helper(t: &Box<dyn Tx>) { t.write() }\n\
+        pub trait Job { fn a<X: SA>(&self, s: X); fn g<X: SG>(&self, s: X); fn h<X: SH>(&self, s: X); fn z<X: SZ>(&self, s: X) -> Option<u8>; }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn a<X: SA>(&self, s: X) { for t in s.list().iter() { t.write(); } }\n\
+            fn g<X: SG>(&self, s: X) { let cbs: [fn(&Box<dyn Tx>); 1] = [helper]; s.list().iter().for_each(cbs[0]); }\n\
+            fn h<X: SH>(&self, s: X) { for (_, t) in s.list().iter() { t.write(); } }\n\
+            fn z<X: SZ>(&self, s: X) -> Option<u8> { s.flag().then_some(1) }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r5prod\"\nedition = \"2021\"\n\n[dependencies]\nr5base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    let _ = std::fs::remove_dir_all(&prod);
+    let _ = std::fs::remove_dir_all(&base);
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("REVIEW5: no {m} union: {v:#}"));
+    for (m, kept) in [("Job::a", "dispatch:SA.iter"), ("Job::g", "dispatch:SG.iter"), ("Job::h", "dispatch:SH.iter")] {
+        assert!(why(u(m)).iter().any(|w| w == kept), "REVIEW5: {m} keeps the published hedge {kept}: {v:#}");
+    }
+    assert!(!why(u("Job::z")).iter().any(|w| w.contains("then_some")), "REVIEW5: a closed bool payload is still drift: {v:#}");
+}
