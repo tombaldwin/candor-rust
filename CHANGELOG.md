@@ -28,7 +28,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   bool`; a `Vec<Box<dyn Tx>>` or a `Result<Self::Value, E>` is a container of something the consumer supplies, and the
   dependency may dispatch on it in any spelling — Fable's fb5 `for` loop, index and block — so its key keeps the
   hedge; and a std NAME counts only when it is std's: a bare name the owner declares, imports or could get from a glob,
-  or a path not rooted at `std`/`core`/`alloc`, is a doubt — fb7's `al::Result`/`al::Option` aliases and the lane's
+  or a path not rooted at `std`/`core`/`alloc`, is a doubt (a glob of another package counts; a std or crate-internal glob does not) — fb7's `al::Result`/`al::Option` aliases and the lane's
   twelve-shape fx/fb8, executed); the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
   never while ANY call in the chain takes a callable argument — a closure literal or a path/method reference — whose
   calls the engine may not key), or a multi-bound
@@ -58,13 +58,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 - ⚠ **candor-scan: a union past the bounded-CHA limit is published broad (SOUNDNESS R1367, PART 103).** More than 12
   implementors (the in-scan index and count) puts the hedge on the union's own key even when all are pure: PART 103
   `c_13` chained `deny Unknown` 0 → **1**, `c_12` stays 0. `CANDOR_R1367_OFF=1`.
-- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (6758abc, sha1
-  6218bfd4005d), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (6 entries excluded, pre arm exit 3, as
+- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (ed94d30, sha1
+  26779d7e401c), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (6 entries excluded, pre arm exit 3, as
   every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on 5 (wezterm-dynamic `*::eq`
   over `OrderedFloat<f64>`: only `f64::is_nan` runs), 0 → 1 on 9 (CHA edges to the consumer's own `Unknown`
   implementors), a concrete effect added on 181 (159 through a new edge to an in-crate implementor whose body carries
-  it, 22 through a joined union). Standalone units: no change. Union entries: 23,467 gain `dispatchesOn`, 3,908 lose the
-  hedge's `Unknown` (2,897 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
+  it, 22 through a joined union). Standalone units: no change. Union entries: 23,467 gain `dispatchesOn`, 3,907 lose the
+  hedge's `Unknown` (2,898 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
   or a multi-bound spread, checked independently from source — that checker's SPREAD test is ROW-level, weaker than the
   engine's same-call-site test, so its SPREAD count is an upper bound on what the engine drops), 2,333 newly `Unknown`.
 
