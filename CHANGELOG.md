@@ -19,6 +19,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `dispatch:<Trait>.<member>`, so the zero-implementor bucket does not go silent (PART 102 `u_*_none`). Executed, chained,
   `deny Fs` 0 → **1**: aws-smithy-types 1.6.1 + a consumer `Serialize` (c_aws3, c_aws), and Fable's fx2A/fx2B/fx3/fx6.
   PART 102 rust: 13 xfail arms now pass, every control 0. `CANDOR_R1324_HEDGE=1` restores the 0.40.15 hedge.
+  Rule 3 bounds it (Fable REVIEW9): carried keys replace the hedge only where the member set is complete, and it is not
+  when a contributor's call to a member returns an OPEN value (not provably closed std) that ESCAPES — into a `for`
+  loop, an index, a field, a pattern, a `let`, an argument, a return, `?`/`.await` — rather than into a further call
+  that mints a key, because an element dispatch on it is never keyed. There the union keeps `Unknown` +
+  `dispatch:<Trait>.<member>` beside the key, which still joins, so a resolution keeps its charge. Executed: fx/fb13
+  a–d, f, fb6L `for`/index and fb14's `if let` read 1/1 as on v0.40.15 (0/0 without the guard;
+  `CANDOR_R1324_ESCAPE_OFF=1`); every closed-payload control still drops.
 - ⚠ **candor-scan: which further members a union names is asked of the owning trait's declaration, not a name list
   (SOUNDNESS R1351, R1353).** The 27-name denylist (`map`, `fmt`, `clone`, `into`, …) is replaced by a proof read from the
   dependency's source. "The trait does not declare it" is not by itself drift, and the member's NAME never decides it:
@@ -58,15 +65,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 - ⚠ **candor-scan: a union past the bounded-CHA limit is published broad (SOUNDNESS R1367, PART 103).** More than 12
   implementors (the in-scan index and count) puts the hedge on the union's own key even when all are pure: PART 103
   `c_13` chained `deny Unknown` 0 → **1**, `c_12` stays 0. `CANDOR_R1367_OFF=1`.
-- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (ad562c5, sha1
-  3434a21fd4c6), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (6 entries excluded, pre arm exit 3, as
-  every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on 5 (wezterm-dynamic `*::eq`
-  over `OrderedFloat<f64>`: only `f64::is_nan` runs), 0 → 1 on 9 (CHA edges to the consumer's own `Unknown`
+- Measured: corpus A/B PUBLISHED v0.40.15 (candor-scan-macos-arm64 sha256 91219560…e5b7) → this tree (42934cc, sha1
+  8f00cbf9b2c7), `bin/corpus-ab.py --jobs 2`, 1,175 chained + 5,376 standalone (6 entries excluded, pre arm exit 3, as
+  every run). REMOVED 0, LOSTCONC 0. Chained units (500,199 rows): `deny Unknown` 1 → 0 on none, 0 → 1 on 9 (CHA edges to the consumer's own `Unknown`
   implementors), a concrete effect added on 181 (159 through a new edge to an in-crate implementor whose body carries
-  it, 22 through a joined union). Standalone units: no change. Union entries: 23,493 gain `dispatchesOn`, 4,240 lose the
-  hedge's `Unknown` (3,279 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
+  it, 22 through a joined union). Standalone units: no change. Union entries: 23,495 gain `dispatchesOn`, 289 lose the
+  hedge's `Unknown` (217 now carry every lost member as a key; the proven-absent remainder is a std-typed chain receiver
   or a multi-bound spread, checked independently from source — that checker's SPREAD test is ROW-level, weaker than the
-  engine's same-call-site test, so its SPREAD count is an upper bound on what the engine drops), 2,331 newly `Unknown`.
+  engine's same-call-site test, so its SPREAD count is an upper bound on what the engine drops), 2,490 newly `Unknown`.
 
 ## [0.40.15] — 2026-10-22
 
