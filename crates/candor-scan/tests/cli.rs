@@ -7267,3 +7267,42 @@ fn review8_a_generic_parameter_named_like_a_std_type_is_never_std() {
         assert!(!why(u(m)).iter().any(|w| w.contains("unwrap_or_default")), "REVIEW8: the provably-std control still drops ({m}): {v:#}");
     }
 }
+
+/// Fable REVIEW9 R-b (rustagent-0416) — SPEC §4 ⟨0.40⟩ union clause rule 3: carried keys replace the hedge only when the member set
+/// is complete. A member whose OPEN return value escapes into a `for` loop, an index, a field or a pattern — where the element's
+/// dispatch is never keyed — keeps the union's `Unknown` with the true reason; a CLOSED return (`Option<u32>`) still drops. Executed
+/// family: fx/fb13 a–d, f and fb6L zb, zf (v0.40.15 1/1, ec662b7..87c57e7 0/0, now 1/1); the member is named `list` on purpose, since
+/// a std-accessor name (`get`) makes the collector key the element call and masks the gap (fx/fb13G).
+#[test]
+fn review9_an_escaped_open_payload_keeps_the_union_hedge() {
+    let base = make_crate("r9base", "pub trait Tx { fn write(&self); }\n\
+        pub trait SF { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait SI { fn list(&self) -> Vec<Box<dyn Tx>>; }\n\
+        pub trait SP { fn pair(&self) -> (u32, Vec<Box<dyn Tx>>); }\n\
+        pub trait SY { fn n(&self) -> Option<u32>; }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"r9base\"\nedition = \"2021\"\n").unwrap();
+    let prod = make_crate("r9prod", "use r9base::{SF, SI, SP, SY};\n\
+        pub trait Job { fn f<X: SF>(&self, s: X); fn i<X: SI>(&self, s: X); fn p<X: SP>(&self, s: X); fn y<X: SY>(&self, s: X) -> u32; }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn f<X: SF>(&self, s: X) { for t in s.list() { t.write(); } }\n\
+            fn i<X: SI>(&self, s: X) { s.list()[0].write(); }\n\
+            fn p<X: SP>(&self, s: X) { let (_, v) = s.pair(); for t in v { t.write(); } }\n\
+            fn y<X: SY>(&self, s: X) -> u32 { s.n().unwrap_or_default() }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r9prod\"\nedition = \"2021\"\n\n[dependencies]\nr9base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    for d in [&prod, &base] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("REVIEW9: no {m} union: {v:#}"));
+    for (m, w) in [("Job::f", "dispatch:SF.list"), ("Job::i", "dispatch:SI.list"), ("Job::p", "dispatch:SP.pair")] {
+        let w = w.to_string();
+        assert!(why(u(m)).contains(&w), "REVIEW9: an escaped open payload keeps the hedge ({m}): {v:#}");
+        assert!(u(m)["dispatchesOn"].to_string().contains(w.trim_start_matches("dispatch:").replace('.', "::").as_str()),
+            "REVIEW9: the key is still carried beside the hedge ({m}): {v:#}");
+    }
+    assert!(!why(u("Job::y")).iter().any(|w| w.contains("SY.")), "REVIEW9: a closed return still drops: {v:#}");
+}

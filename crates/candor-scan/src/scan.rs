@@ -7279,9 +7279,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS F3 — every foreign key's mint sites, crate-wide: key -> [(fn qual, site)], and (fn qual, site) -> keys.
     let mut fd_prov: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut fd_site_keys: HashMap<(String, String), Vec<String>> = HashMap::new();
+    // Fable REVIEW9 R-b — the keys whose call's VALUE escaped somewhere in this crate (collector `E` sites). Not mint sites: kept
+    // out of `fd_prov`/`fd_site_keys`, whose drift proof reads only C/D sites.
+    let mut fd_escaped: HashSet<String> = HashSet::new();
     for f in &fns {
         for e in &f.foreign_dispatch_prov {
             let Some((k, d)) = e.split_once('\u{1f}') else { continue };
+            if d.starts_with("E\u{1f}") {
+                fd_escaped.insert(k.to_string());
+                continue;
+            }
             fd_prov.entry(k.to_string()).or_default().push((f.qual.clone(), d.to_string()));
             fd_site_keys.entry((f.qual.clone(), d.to_string())).or_default().push(k.to_string());
         }
@@ -7376,6 +7383,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 out.insert(format!("dispatch:{tr}.{m}"));
             } else {
                 don.insert(k.clone());
+                // SPEC §4 ⟨0.40⟩ union clause RULE 3 — Fable REVIEW9 R-b. A carried key set may REPLACE the hedge only when the
+                // member set is complete, and it is not when a contributor dispatches on the VALUE a member returns through a
+                // spelling the engine never keys: an element of `Vec<Box<dyn Tx>>` reached by a `for` loop, an index, a field,
+                // a pattern, a `let` (fx/fb13 a–d, f; fb6L zb, zf — executed, 1/1 on v0.40.15, 0/0 once ec662b7 carried
+                // `S::list` instead). So where the member's value ESCAPED (it was not the receiver of a further call, whose
+                // own key or drift hedge speaks for it) and its declared return is not PROVABLY closed std (depsig, D1–D3), the
+                // union also keeps `Unknown` with the true reason, beside the key (which still joins: a resolution survives).
+                // A closed return (`bool`, `Option<u32>`, `()`) carries nothing the consumer supplied, so it never hedges.
+                // A key of THIS crate is not read by depsig and is treated as open. `CANDOR_R1324_ESCAPE_OFF=1` disables it.
+                if fd_escaped.contains(k.as_str()) && std::env::var_os("CANDOR_R1324_ESCAPE_OFF").is_none() {
+                    let closed = owner != crate_name && {
+                        let real = dep_renames.get(owner).map(String::as_str).unwrap_or(owner);
+                        r1351_sigs.borrow_mut().returns_std(dir, owner, real, tr, m) == Some(true)
+                    };
+                    if !closed {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1324ESCAPE\t{own_tail}\t{owner}#{tr}.{m}"); // §E1 REACH COUNTER
+                        }
+                        inf.insert("Unknown");
+                        out.insert(format!("dispatch:{tr}.{m}"));
+                    }
+                }
             }
         }
     };

@@ -7887,6 +7887,7 @@ impl<'a> CallCollector<'a> {
             eprintln!("R1319PATH\t{owner}#{rest}::{leaf}"); // §E1 REACH COUNTER
         }
         fd_prov_push(format!("{owner}#{rest}::{leaf}\u{1f}D\u{1f}{}", fd_prov_site())); // F3
+        fd_prov_push(format!("{owner}#{rest}::{leaf}\u{1f}E\u{1f}0")); // REVIEW9 R-b — a path call's value is not followed: escaped
         self.foreign_dispatch_sites.insert(format!("{owner}#{rest}::{leaf}"));
         self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{full}::{leaf}"), leaf: leaf.to_string(), str_arg: None,
@@ -10601,6 +10602,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 _ => format!("D\u{1f}{fd_site}"),
                             };
                             fd_prov_push(format!("{key}\u{1f}{desc}"));
+                            // Fable REVIEW9 R-b — the VALUE this call returns: consumed by a chained call (whose own key, or
+                            // drift hedge, then speaks for it), or ESCAPED into a loop, index, field, pattern, `let`,
+                            // argument, return, `?`/`.await` or a discarded statement, where an element dispatch on it is
+                            // never keyed. The union decides with the member's declared return (scan.rs).
+                            if !fd_chain_recv_has(node) {
+                                fd_prov_push(format!("{key}\u{1f}E\u{1f}{fd_site}"));
+                            }
+                            // …and THIS call consumes its receiver's value only because it minted a key the union judges (the
+                            // receiver is visited after this point). A chained call resolved as std or inherent (`.into_iter()`
+                            // on a typed `Vec`) mints nothing and so does not mark it: the inner value then reads as escaped.
+                            if let syn::Expr::MethodCall(inner) = peel_recv_no_unwrap(&node.receiver) {
+                                fd_chain_recv_mark(inner);
+                            }
                             self.foreign_dispatch_sites.insert(key);
                         }
                     }
@@ -11549,6 +11563,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 eprintln!("R693KEY\t{key}");
                             }
                             fd_prov_push(format!("{key}\u{1f}D\u{1f}{}", fd_prov_site())); // F3
+                            fd_prov_push(format!("{key}\u{1f}E\u{1f}0")); // REVIEW9 R-b — a function reference: its value is not followed
                             self.foreign_dispatch_sites.insert(key);
                         }
                     }
@@ -14471,7 +14486,24 @@ pub(crate) fn fd_prov_push(s: String) {
     FD_PROV.with(|p| p.borrow_mut().1.push(s));
 }
 pub(crate) fn fd_prov_take() -> Vec<String> {
+    FD_CHAIN_RECV.with(|c| c.borrow_mut().clear());
     FD_PROV.with(|p| std::mem::take(&mut p.borrow_mut().1))
+}
+// Fable REVIEW9 R-b — the method calls, in the body being collected, whose value is the receiver of another method call. Keyed by
+// node address AND method name AND span start, and cleared with the provenance per body, so an address reused by a later AST
+// cannot read as "consumed" (that error direction would hide an escape).
+thread_local! {
+    static FD_CHAIN_RECV: std::cell::RefCell<std::collections::HashSet<(usize, String, usize, usize)>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+fn fd_chain_recv_id(mc: &syn::ExprMethodCall) -> (usize, String, usize, usize) {
+    let st = mc.method.span().start();
+    (mc as *const syn::ExprMethodCall as usize, mc.method.to_string(), st.line, st.column)
+}
+fn fd_chain_recv_mark(mc: &syn::ExprMethodCall) {
+    FD_CHAIN_RECV.with(|c| c.borrow_mut().insert(fd_chain_recv_id(mc)));
+}
+fn fd_chain_recv_has(mc: &syn::ExprMethodCall) -> bool {
+    FD_CHAIN_RECV.with(|c| c.borrow().contains(&fd_chain_recv_id(mc)))
 }
 
 /// Fable REVIEW3 C1 — `peel_recv` without `?`/`.await`: the receiver whose type a method-chain proof is about.
