@@ -425,6 +425,8 @@ struct SrcIndex {
     /// SOUNDNESS R1200 — local `macro_rules!` names whose body invokes a FOREIGN macro (directly, or through another
     /// such local macro): an invocation of one may define any fn
     tainted: HashSet<String>,
+    /// REVIEW7 D2 — `has_unseen_items`, computed once.
+    unseen: std::cell::OnceCell<bool>,
 }
 
 /// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
@@ -503,7 +505,7 @@ impl SrcIndex {
         // shadows the prelude); a qualified path counts only when it is rooted at `std`/`core`/`alloc` (not rebound here) and
         // ends in a std name. The same question F2 asked of a supertrait leaf, asked of a type.
         let has_glob = self.has_glob_use();
-        let std_name = |n: &str| !self.local_names.contains(n) && !self.types.contains(n);
+        let std_name = |n: &str| self.std_name_provable(n);
         fn std_ty(t: &syn::Type, std_name: &dyn Fn(&str) -> bool, has_glob: bool) -> bool {
             let rec = |t: &syn::Type| std_ty(t, std_name, has_glob);
             match t {
@@ -564,6 +566,85 @@ impl SrcIndex {
             }
         }
         seen.then_some(true)
+    }
+
+    /// SOUNDNESS Fable REVIEW7 D2 — is `n` PROVABLY the std/prelude name in this source, i.e. could the owner NOT have bound it?
+    /// Default doubt: the answer is yes only when nothing this parse cannot see could bring an item of that name into scope.
+    /// Every route a Rust owner has to bind a name, and how each is answered here:
+    ///   a declared item / alias / struct (incl. under `#[cfg]`, which syn parses regardless) → `local_names`/`types`;
+    ///   a `use` / `pub use` chain → `local_names` (the binding); a glob of another package → `has_glob_use`;
+    ///   a local `macro_rules!` whose body or invocation names it → `macro_words`;
+    ///   a FOREIGN or unaccountable item-position macro (another crate's `macro_rules!`, a function-like proc macro, `include!`,
+    ///   `include!(concat!(env!("OUT_DIR"), ..))` from a build.rs) → `has_unseen_items`, whatever it might emit;
+    ///   an attribute proc macro or a non-std `#[derive]` on any item → `has_unseen_items`;
+    ///   a `#[path]` module (or `cfg_attr(.., path = ..)`), which may live outside this tree → `has_unseen_items`;
+    ///   a file `syn` cannot parse → `has_unseen_items`.
+    fn std_name_provable(&self, n: &str) -> bool {
+        !self.local_names.contains(n) && !self.types.contains(n) && !self.macro_words.contains(n) && !self.has_unseen_items()
+    }
+
+    /// REVIEW7 D2 — does this source contain anything that may bring items into scope that the parse cannot see?
+    fn has_unseen_items(&self) -> bool {
+        const INERT: &[&str] = &["cfg", "allow", "warn", "deny", "forbid", "expect", "doc", "inline", "cold", "must_use", "deprecated",
+            "repr", "non_exhaustive", "macro_export", "macro_use", "automatically_derived", "track_caller", "no_mangle", "export_name",
+            "link", "link_name", "link_section", "used", "test", "ignore", "should_panic", "rustfmt", "clippy", "allow_internal_unstable",
+            "unstable", "stable", "rustc_const_stable", "feature", "diagnostic", "derive", "target_feature", "no_std", "no_implicit_prelude",
+            "recursion_limit", "crate_type", "crate_name", "doc_cfg", "global_allocator", "panic_handler", "naked", "instruction_set",
+            "debugger_visualizer", "collapse_debuginfo", "coverage", "optimize", "windows_subsystem", "type_length_limit", "no_main",
+            "proc_macro", "proc_macro_derive", "proc_macro_attribute"];
+        const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
+        struct V<'a>(bool, &'a SrcIndex);
+        impl<'a, 'b> Visit<'b> for V<'a> {
+            fn visit_attribute(&mut self, a: &'b syn::Attribute) {
+                let segs: Vec<String> = a.path().segments.iter().map(|s| s.ident.to_string()).collect();
+                let head = segs.first().cloned().unwrap_or_default();
+                if segs.len() > 1 && !matches!(head.as_str(), "rustfmt" | "clippy" | "diagnostic") || !INERT.contains(&head.as_str()) {
+                    self.0 = true; // an attribute proc macro, or one this list does not know
+                } else if head == "derive" {
+                    let toks = a.meta.require_list().map(|l| l.tokens.to_string()).unwrap_or_default();
+                    if toks.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty())
+                        .any(|w| !STD_DERIVES.contains(&w) && !matches!(w, "core" | "std" | "fmt" | "cmp" | "hash" | "clone" | "default" | "marker"))
+                    {
+                        self.0 = true;
+                    }
+                } else if head == "cfg" || head == "doc" {
+                } else if matches!(&a.meta, syn::Meta::NameValue(nv) if nv.path.is_ident("path"))
+                    || matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().contains("path"))
+                {
+                    self.0 = true;
+                }
+                if head == "cfg_attr" || head == "path" {
+                    self.0 = true;
+                }
+            }
+            fn visit_item_macro(&mut self, m: &'b syn::ItemMacro) {
+                if m.ident.is_none() {
+                    // an item-position INVOCATION: accounted for only if it is a local, untainted `macro_rules!` (its words are
+                    // in `macro_words`); anything else may emit any item
+                    let segs: Vec<String> = m.mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let local = segs.len() == 1 && self.1.macros.contains_key(&segs[0]) && !self.1.tainted.contains(&segs[0]);
+                    if !local {
+                        self.0 = true;
+                    }
+                }
+                syn::visit::visit_item_macro(self, m);
+            }
+            fn visit_item_mod(&mut self, m: &'b syn::ItemMod) {
+                syn::visit::visit_item_mod(self, m);
+            }
+        }
+        if !self.unparsed.is_empty() {
+            return true;
+        }
+        if let Some(v) = self.unseen.get() {
+            return *v;
+        }
+        let mut v = V(false, self);
+        for f in &self.files {
+            v.visit_file(f);
+        }
+        let _ = self.unseen.set(v.0);
+        v.0
     }
 
     /// Fable REVIEW6 — does any file of this source glob-import ANOTHER package (`use other::*`, `use other::prelude::*`)? A glob
@@ -678,7 +759,7 @@ impl SrcIndex {
                 let root = if segs.len() > 1 { segs[0].as_str() } else { "" };
                 let sub = match root {
                     // REVIEW6 — a root this source rebinds (`extern crate x as std`, a `mod core`) is not std's.
-                    "std" | "core" | "alloc" if self.local_names.contains(root) => None,
+                    "std" | "core" | "alloc" if !self.std_name_provable(root) => None,
                     "std" | "core" | "alloc" => std_trait_has(sl, member, 0),
                     "crate" | "self" | "super" => self.trait_answer(sl, member, depth + 1),
                     "" if self.types.contains(sl.as_str()) => self.trait_answer(sl, member, depth + 1),
@@ -686,7 +767,7 @@ impl SrcIndex {
                     // trait MyErr: Error`) is another package's trait, not std's of the same leaf: not read here.
                     "" if self.local_names.contains(sl.as_str()) => None,
                     // REVIEW6 — …and a glob import may bring a same-named trait from anywhere (a glob shadows the prelude).
-                    "" if self.has_glob_use() => None,
+                    "" if self.has_glob_use() || !self.std_name_provable(sl) => None,
                     "" => std_trait_has(sl, member, 0),
                     _ => None, // another package's trait: not read here
                 };
@@ -905,6 +986,7 @@ impl SrcIndex {
             types: facts.types,
             aliases,
             tainted,
+            unseen: std::cell::OnceCell::new(),
         })
     }
 

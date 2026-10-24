@@ -7181,3 +7181,39 @@ fn review6_a_std_name_under_an_external_glob_is_a_doubt() {
         || u["dispatchesOn"].to_string().contains("SA::unwrap_or_default");
     assert!(kept, "REVIEW6 glob: the drift key is not dropped under an external glob: {u:#}");
 }
+
+/// Fable REVIEW7 D2 (rustagent-0416) — a std name counts as std only when the owner could NOT have bound it: default doubt. Pinned here
+/// for a local `macro_rules!` that emits the alias (fb9c, executed: pub 1/1, ed94d30 0/0, now 1/1) beside a same-crate `Option<u32>`
+/// control that still drops, and for an `include!` of a non-`.rs` file (a binding the parse never sees). The whole family (12 routes:
+/// macro, macro arg, macro-emitted `use`, a dependency's macro, `include!`, `#[path]`, `#[cfg]`, derive, attribute proc macro, build.rs,
+/// `pub use` chain, `cfg_attr(path)`) is the lane's fx/fb10, executed.
+#[test]
+fn review7_a_std_name_the_owner_could_bind_unseen_is_a_doubt() {
+    let base = make_crate("r7base", "pub trait Tx { fn write(&self); }\n\
+        pub mod td { macro_rules! mk { () => { pub type Result = ::core::result::Result<Vec<Box<dyn crate::Tx>>, ()>; } } mk!();\n\
+            pub trait SD { fn get(&self) -> Result; } }\n\
+        pub mod ty { pub trait SY { fn n(&self) -> Option<u32>; } }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"r7base\"\nedition = \"2021\"\n").unwrap();
+    let inc = make_crate("r7inc", "pub trait Tx { fn write(&self); }\ninclude!(\"alias.inc\");\npub trait SE { fn get(&self) -> Result; }\n");
+    std::fs::write(inc.join("Cargo.toml"), "[package]\nname = \"r7inc\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(inc.join("src/alias.inc"), "pub type Result = ::core::result::Result<Vec<Box<dyn Tx>>, ()>;\n").unwrap();
+    let prod = make_crate("r7prod", "use r7base::{td::SD, ty::SY};\nuse r7inc::SE;\n\
+        pub trait Job { fn d<X: SD>(&self, s: X); fn y<X: SY>(&self, s: X) -> u32; fn e<X: SE>(&self, s: X); }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn d<X: SD>(&self, s: X) { for t in s.get().unwrap_or_default() { r7base::Tx::write(&*t); } }\n\
+            fn y<X: SY>(&self, s: X) -> u32 { s.n().unwrap_or_default() }\n\
+            fn e<X: SE>(&self, s: X) { for t in s.get().unwrap_or_default() { r7inc::Tx::write(&*t); } }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r7prod\"\nedition = \"2021\"\n\n[dependencies]\nr7base = {{ path = \"{}\" }}\nr7inc = {{ path = \"{}\" }}\n",
+        base.display(), inc.display())).unwrap();
+    let v = scan_json(&prod, "");
+    for d in [&prod, &base, &inc] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("REVIEW7: no {m} union: {v:#}"));
+    assert!(why(u("Job::d")).iter().any(|w| w == "dispatch:SD.unwrap_or_default"), "REVIEW7: a macro-made alias is a doubt: {v:#}");
+    assert!(why(u("Job::e")).iter().any(|w| w == "dispatch:SE.unwrap_or_default"), "REVIEW7: an include!-made alias is a doubt: {v:#}");
+    assert!(!why(u("Job::y")).iter().any(|w| w.contains("unwrap_or_default")), "REVIEW7: the provably-std control still drops: {v:#}");
+}
