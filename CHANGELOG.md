@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.16] — 2026-10-24
+
 - ⚠ **candor-scan: an `interfaceUnion` entry carries its contributors' further members in `dispatchesOn`, and the R1324
   hedge is gone (SOUNDNESS R1324 RESOLVED, SPEC §4 ⟨0.40⟩ union clause, spelling (a); conformance PART 102).** A narrow
   union names every member its contributors dispatch on transitively (the union's own key excepted), and a consumer joins
