@@ -7154,3 +7154,30 @@ fn review6_a_std_named_alias_is_not_std() {
     }
     assert!(!why(u("Job::z")).iter().any(|w| w.contains("then_some")), "REVIEW6: a really-std bool payload is still drift: {v:#}");
 }
+
+/// Fable REVIEW6 D1, the glob leg (rustagent-0416) — a bare std name read under a glob import of ANOTHER package (`use r6g::*`,
+/// which brings `type Result = ..` over a container of consumer-supplied trait objects) is a doubt: the drift key keeps its hedge
+/// or is carried, never dropped. A crate-internal or std glob is not a doubt (the closed control in `review6_..` drops).
+#[test]
+fn review6_a_std_name_under_an_external_glob_is_a_doubt() {
+    let g = make_crate("r6g", "pub trait Tx { fn write(&self); }\npub type Result = core::result::Result<Vec<Box<dyn Tx>>, ()>;\n");
+    std::fs::write(g.join("Cargo.toml"), "[package]\nname = \"r6g\"\nedition = \"2021\"\n").unwrap();
+    let base = make_crate("r6gbase", "use r6g::*;\npub trait SA { fn get(&self) -> Result; }\n");
+    std::fs::write(base.join("Cargo.toml"), format!("[package]\nname = \"r6gbase\"\nedition = \"2021\"\n\n[dependencies]\nr6g = {{ path = \"{}\" }}\n",
+        g.display())).unwrap();
+    let prod = make_crate("r6gprod", "use r6gbase::SA;\nuse r6g::Tx;\n\
+        pub trait Job { fn a<X: SA>(&self, s: X); }\n\
+        pub struct Doc;\n\
+        impl Job for Doc { fn a<X: SA>(&self, s: X) { for t in s.get().unwrap_or_default() { t.write(); } } }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r6gprod\"\nedition = \"2021\"\n\n[dependencies]\nr6gbase = {{ path = \"{}\" }}\nr6g = {{ path = \"{}\" }}\n",
+        base.display(), g.display())).unwrap();
+    let v = scan_json(&prod, "");
+    for d in [&prod, &base, &g] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let u = row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with("Job::a")))
+        .unwrap_or_else(|| panic!("REVIEW6 glob: no Job::a union: {v:#}"));
+    let kept = why(u).iter().any(|w| w == "dispatch:SA.unwrap_or_default")
+        || u["dispatchesOn"].to_string().contains("SA::unwrap_or_default");
+    assert!(kept, "REVIEW6 glob: the drift key is not dropped under an external glob: {u:#}");
+}

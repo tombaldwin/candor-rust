@@ -566,26 +566,34 @@ impl SrcIndex {
         seen.then_some(true)
     }
 
-    /// Fable REVIEW6 — does any file of this source have a glob `use` (`use x::*`)? A glob shadows the prelude, so a bare std name
-    /// read under one is not known to be std's.
+    /// Fable REVIEW6 — does any file of this source glob-import ANOTHER package (`use other::*`, `use other::prelude::*`)? A glob
+    /// shadows the prelude, so a bare std name read under one is not known to be std's. A glob of std/core/alloc can only bring std
+    /// items, and a crate-internal one (`crate::`/`self::`/`super::`, or a path through a module this source declares) only names
+    /// the source itself DECLARES, which `local_names` already holds; neither is a doubt. An unparsed file is.
     fn has_glob_use(&self) -> bool {
-        fn glob(t: &syn::UseTree) -> bool {
+        fn glob_root(t: &syn::UseTree, root: Option<String>, out: &mut Vec<String>) {
             match t {
-                syn::UseTree::Glob(_) => true,
-                syn::UseTree::Path(p) => glob(&p.tree),
-                syn::UseTree::Group(g) => g.items.iter().any(glob),
-                _ => false,
+                syn::UseTree::Glob(_) => out.push(root.unwrap_or_default()),
+                syn::UseTree::Path(p) => glob_root(&p.tree, root.or_else(|| Some(p.ident.to_string())), out),
+                syn::UseTree::Group(g) => g.items.iter().for_each(|i| glob_root(i, root.clone(), out)),
+                _ => {}
             }
         }
-        struct V(bool);
-        impl<'a> Visit<'a> for V {
+        let glob = |t: &syn::UseTree| -> bool {
+            let mut roots = Vec::new();
+            glob_root(t, None, &mut roots);
+            roots.iter().any(|r| !matches!(r.as_str(), "std" | "core" | "alloc" | "crate" | "self" | "super")
+                && !(self.local_names.contains(r) && !self.extern_roots.contains(r)))
+        };
+        struct V<'g>(bool, &'g dyn Fn(&syn::UseTree) -> bool);
+        impl<'a> Visit<'a> for V<'_> {
             fn visit_item_use(&mut self, u: &'a syn::ItemUse) {
-                if glob(&u.tree) {
+                if (self.1)(&u.tree) {
                     self.0 = true;
                 }
             }
         }
-        let mut v = V(false);
+        let mut v = V(false, &glob);
         for f in &self.files {
             v.visit_file(f);
         }
