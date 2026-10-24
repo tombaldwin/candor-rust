@@ -613,8 +613,28 @@ impl SrcIndex {
                 {
                     self.0 = true;
                 }
-                if head == "cfg_attr" || head == "path" {
+                if head == "path" {
                     self.0 = true;
+                }
+                if head == "cfg_attr" {
+                    // `#[cfg_attr(docsrs, doc(cfg(..)))]` is the common, inert form; anything that may add a `path`, a derive or an
+                    // attribute this list does not know is a doubt. A custom cfg predicate name is a doubt too (conservative).
+                    const PRED: &[&str] = &["all", "any", "not", "feature", "target_os", "target_arch", "target_family", "target_env",
+                        "target_pointer_width", "target_endian", "target_vendor", "target_feature", "target_has_atomic", "unix",
+                        "windows", "debug_assertions", "panic", "docsrs", "miri", "doc_cfg", "doc_auto_cfg"];
+                    let toks = a.meta.require_list().map(|l| l.tokens.to_string()).unwrap_or_default();
+                    let mut words = std::collections::HashSet::new();
+                    let mut in_str = false;
+                    let mut cur = String::new();
+                    for ch in toks.chars() {
+                        if ch == '"' { in_str = !in_str; continue; }
+                        if in_str { continue; }
+                        if ch.is_alphanumeric() || ch == '_' { cur.push(ch); } else if !cur.is_empty() { words.insert(std::mem::take(&mut cur)); }
+                    }
+                    if !cur.is_empty() { words.insert(cur); }
+                    if words.iter().any(|w| w == "path" || w == "derive" || !(INERT.contains(&w.as_str()) || PRED.contains(&w.as_str()))) {
+                        self.0 = true;
+                    }
                 }
             }
             fn visit_item_macro(&mut self, m: &'b syn::ItemMacro) {
