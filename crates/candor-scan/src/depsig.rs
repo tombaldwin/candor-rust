@@ -580,7 +580,55 @@ impl SrcIndex {
     ///   a `#[path]` module (or `cfg_attr(.., path = ..)`), which may live outside this tree → `has_unseen_items`;
     ///   a file `syn` cannot parse → `has_unseen_items`.
     fn std_name_provable(&self, n: &str) -> bool {
-        !self.local_names.contains(n) && !self.types.contains(n) && !self.macro_words.contains(n) && !self.has_unseen_items()
+        let r = (self.local_names.contains(n), self.types.contains(n), self.macro_binds(n), self.has_unseen_items());
+        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() && (r.0 || r.1 || r.2 || r.3) {
+            eprintln!("STDNAME\t{n}\tlocal={} type={} macro={} unseen={}", r.0, r.1, r.2, r.3); // §E1 REACH COUNTER
+        }
+        !(r.0 || r.1 || r.2 || r.3)
+    }
+
+    /// REVIEW7 D2 — could a LOCAL macro (its `macro_rules!` body, or the tokens of an invocation) BIND `n`? A binding is a declaring
+    /// keyword followed by the name or by a metavariable (`type Result`, `struct $n`, `trait $x`, `mod core`), a `use` rename (`as
+    /// Result`, `as $n`), or a `use` path ending in it (`::Result;`, `::Result,`, `::Result}`). A mere reference (`::core::result::
+    /// Result<..>`, `Sized` in a bound) binds nothing, so a crate whose macros only mention std names keeps its proofs.
+    fn macro_binds(&self, n: &str) -> bool {
+        fn scan(ts: &proc_macro2::TokenStream, n: &str, words: &HashSet<String>) -> bool {
+            let toks: Vec<proc_macro2::TokenTree> = ts.clone().into_iter().collect();
+            let is = |t: Option<&proc_macro2::TokenTree>, s: &str| matches!(t, Some(proc_macro2::TokenTree::Ident(i)) if i == s);
+            // a metavariable (`type $n`, `as $t`) binds whatever an invocation passes: only a name some macro token mentions
+            let named = |t: Option<&proc_macro2::TokenTree>| matches!(t, Some(proc_macro2::TokenTree::Ident(i)) if i == n)
+                || matches!(t, Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '$') && words.contains(n);
+            for (i, t) in toks.iter().enumerate() {
+                match t {
+                    proc_macro2::TokenTree::Ident(id) if ["type", "struct", "enum", "union", "trait", "mod", "as", "static", "const"]
+                        .iter().any(|k| id == k) && named(toks.get(i + 1)) => return true,
+                    proc_macro2::TokenTree::Ident(id) if id == n => {
+                        let after = toks.get(i + 1);
+                        let before_colons = i >= 2 && matches!(&toks[i - 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
+                        let ends = matches!(after, Some(proc_macro2::TokenTree::Punct(p)) if matches!(p.as_char(), ';' | ',')) || after.is_none();
+                        if before_colons && ends && toks[..i].iter().any(|x| is(Some(x), "use")) {
+                            return true;
+                        }
+                    }
+                    proc_macro2::TokenTree::Group(g) if scan(&g.stream(), n, words) => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        struct V<'n>(bool, &'n str, &'n HashSet<String>);
+        impl<'a> Visit<'a> for V<'_> {
+            fn visit_macro(&mut self, m: &'a syn::Macro) {
+                if scan(&m.tokens, self.1, self.2) {
+                    self.0 = true;
+                }
+            }
+        }
+        let mut v = V(false, n, &self.macro_words);
+        for f in &self.files {
+            v.visit_file(f);
+        }
+        v.0
     }
 
     /// REVIEW7 D2 — does this source contain anything that may bring items into scope that the parse cannot see?
@@ -599,6 +647,7 @@ impl SrcIndex {
                 let segs: Vec<String> = a.path().segments.iter().map(|s| s.ident.to_string()).collect();
                 let head = segs.first().cloned().unwrap_or_default();
                 if segs.len() > 1 && !matches!(head.as_str(), "rustfmt" | "clippy" | "diagnostic") || !INERT.contains(&head.as_str()) {
+                    if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tattr\t{}", segs.join("::")); }
                     self.0 = true; // an attribute proc macro, or one this list does not know
                 } else if head == "derive" {
                     let toks = a.meta.require_list().map(|l| l.tokens.to_string()).unwrap_or_default();
@@ -633,6 +682,7 @@ impl SrcIndex {
                     }
                     if !cur.is_empty() { words.insert(cur); }
                     if words.iter().any(|w| w == "path" || w == "derive" || !(INERT.contains(&w.as_str()) || PRED.contains(&w.as_str()))) {
+                        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tcfg_attr\t{toks}"); }
                         self.0 = true;
                     }
                 }
@@ -644,6 +694,7 @@ impl SrcIndex {
                     let segs: Vec<String> = m.mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
                     let local = segs.len() == 1 && self.1.macros.contains_key(&segs[0]) && !self.1.tainted.contains(&segs[0]);
                     if !local {
+                        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tmacro\t{}", segs.join("::")); }
                         self.0 = true;
                     }
                 }
