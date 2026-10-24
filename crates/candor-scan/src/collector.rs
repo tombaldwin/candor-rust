@@ -9824,6 +9824,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         self.note_container_release(node); // SOUNDNESS R1118
         let fd_site = fd_prov_site(); // F3 — this call site, for the provenance of every key it mints
+        // REVIEW9 R-b — was this call's VALUE consumed by an enclosing key-minting call? Asked once per call (the entry is taken),
+        // before this call mints: a multi-bound spread mints several keys at one site.
+        let fd_consumed = fd_chain_recv_has(node);
         let leaf = node.method.to_string();
         // SOUNDNESS R1295 — a driven iterator over a std I/O source (`ReadDir`, `lines()` on a handle), and an I/O member on
         // a buffering-wrapper PARAMETER (`r.read_line(..)` with `r: &mut BufReader<File>`), which the typer answers as
@@ -10606,7 +10609,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // drift hedge, then speaks for it), or ESCAPED into a loop, index, field, pattern, `let`,
                             // argument, return, `?`/`.await` or a discarded statement, where an element dispatch on it is
                             // never keyed. The union decides with the member's declared return (scan.rs).
-                            if !fd_chain_recv_has(node) {
+                            if !fd_consumed {
                                 fd_prov_push(format!("{key}\u{1f}E\u{1f}{fd_site}"));
                             }
                             // …and THIS call consumes its receiver's value only because it minted a key the union judges (the
@@ -14489,21 +14492,22 @@ pub(crate) fn fd_prov_take() -> Vec<String> {
     FD_CHAIN_RECV.with(|c| c.borrow_mut().clear());
     FD_PROV.with(|p| std::mem::take(&mut p.borrow_mut().1))
 }
-// Fable REVIEW9 R-b — the method calls, in the body being collected, whose value is the receiver of another method call. Keyed by
-// node address AND method name AND span start, and cleared with the provenance per body, so an address reused by a later AST
-// cannot read as "consumed" (that error direction would hide an escape).
+// Fable REVIEW9 R-b — the method calls, in the body being collected, whose value is the receiver of another method call that
+// minted a key. Keyed by node address, method name and argument count; an entry is TAKEN when the inner call checks it, and the
+// set is cleared with the provenance per body, so an address reused by a later node cannot read as "consumed" (that error
+// direction would hide an escape). No span is read: a span of synthesized tokens panics in proc-macro2 (measured: plotters-svg
+// `src/svg.rs` aborted on the first A/B of this change).
 thread_local! {
-    static FD_CHAIN_RECV: std::cell::RefCell<std::collections::HashSet<(usize, String, usize, usize)>> = std::cell::RefCell::new(std::collections::HashSet::new());
+    static FD_CHAIN_RECV: std::cell::RefCell<std::collections::HashSet<(usize, String, usize)>> = std::cell::RefCell::new(std::collections::HashSet::new());
 }
-fn fd_chain_recv_id(mc: &syn::ExprMethodCall) -> (usize, String, usize, usize) {
-    let st = mc.method.span().start();
-    (mc as *const syn::ExprMethodCall as usize, mc.method.to_string(), st.line, st.column)
+fn fd_chain_recv_id(mc: &syn::ExprMethodCall) -> (usize, String, usize) {
+    (mc as *const syn::ExprMethodCall as usize, mc.method.to_string(), mc.args.len())
 }
 fn fd_chain_recv_mark(mc: &syn::ExprMethodCall) {
     FD_CHAIN_RECV.with(|c| c.borrow_mut().insert(fd_chain_recv_id(mc)));
 }
 fn fd_chain_recv_has(mc: &syn::ExprMethodCall) -> bool {
-    FD_CHAIN_RECV.with(|c| c.borrow().contains(&fd_chain_recv_id(mc)))
+    FD_CHAIN_RECV.with(|c| c.borrow_mut().remove(&fd_chain_recv_id(mc)))
 }
 
 /// Fable REVIEW3 C1 — `peel_recv` without `?`/`.await`: the receiver whose type a method-chain proof is about.
