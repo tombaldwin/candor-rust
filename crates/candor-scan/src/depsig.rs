@@ -496,21 +496,35 @@ impl SrcIndex {
         // be dropped only when the declared return is std ALL THE WAY DOWN: every type argument (and tuple element) is itself a
         // closed std type, never `Self`, a generic, a projection, `dyn`, `impl`, `Box` or any non-std path. This is a property
         // of the TYPE that flows out of the inner call, so no later spelling of its use can get around it.
-        fn std_ty(t: &syn::Type) -> bool {
+        // SOUNDNESS Fable REVIEW6 D1 — and the NAME must really be std's. A std leaf the owner could have bound to something
+        // else (`pub mod al { pub type Result = core::result::Result<Vec<Box<dyn Tx>>, ()>; }`, a crate-root `type Result = ..`,
+        // an imported, glob-imported or re-exported alias, a `struct String(..)`, even `type u8 = ..`) is a doubt, never closed:
+        // a bare std name counts only when this source declares and imports nothing of that name AND has no glob import (a glob
+        // shadows the prelude); a qualified path counts only when it is rooted at `std`/`core`/`alloc` (not rebound here) and
+        // ends in a std name. The same question F2 asked of a supertrait leaf, asked of a type.
+        let has_glob = self.has_glob_use();
+        let std_name = |n: &str| !self.local_names.contains(n) && !self.types.contains(n);
+        fn std_ty(t: &syn::Type, std_name: &dyn Fn(&str) -> bool, has_glob: bool) -> bool {
+            let rec = |t: &syn::Type| std_ty(t, std_name, has_glob);
             match t {
-                syn::Type::Reference(r) => std_ty(&r.elem),
-                syn::Type::Paren(p) => std_ty(&p.elem),
-                syn::Type::Tuple(tp) => tp.elems.iter().all(std_ty),
-                syn::Type::Slice(sl) => std_ty(&sl.elem),
-                syn::Type::Array(a) => std_ty(&a.elem),
-                syn::Type::Path(p) if p.qself.is_none() => {
+                syn::Type::Reference(r) => rec(&r.elem),
+                syn::Type::Paren(p) => rec(&p.elem),
+                syn::Type::Tuple(tp) => tp.elems.iter().all(rec),
+                syn::Type::Slice(sl) => rec(&sl.elem),
+                syn::Type::Array(a) => rec(&a.elem),
+                syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
                     let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-                    segs.first().is_none_or(|f| f != "Self")
-                        && segs.last().is_some_and(|l| STD.contains(&l.as_str()))
+                    let Some(last) = segs.last() else { return false };
+                    let named = if segs.len() == 1 {
+                        STD.contains(&last.as_str()) && std_name(last) && !has_glob
+                    } else {
+                        matches!(segs[0].as_str(), "std" | "core" | "alloc") && std_name(&segs[0]) && STD.contains(&last.as_str())
+                    };
+                    named
                         && p.path.segments.iter().all(|sg| match &sg.arguments {
                             syn::PathArguments::None => true,
                             syn::PathArguments::AngleBracketed(ab) => ab.args.iter().all(|a| match a {
-                                syn::GenericArgument::Type(t) => std_ty(t),
+                                syn::GenericArgument::Type(t) => rec(t),
                                 syn::GenericArgument::Lifetime(_) => true,
                                 _ => false,
                             }),
@@ -542,7 +556,7 @@ impl SrcIndex {
                         seen = true;
                         match &f.sig.output {
                             syn::ReturnType::Default => {}
-                            syn::ReturnType::Type(_, ty) if std_ty(ty) => {}
+                            syn::ReturnType::Type(_, ty) if std_ty(ty, &std_name, has_glob) => {}
                             _ => return None,
                         }
                     }
@@ -550,6 +564,32 @@ impl SrcIndex {
             }
         }
         seen.then_some(true)
+    }
+
+    /// Fable REVIEW6 — does any file of this source have a glob `use` (`use x::*`)? A glob shadows the prelude, so a bare std name
+    /// read under one is not known to be std's.
+    fn has_glob_use(&self) -> bool {
+        fn glob(t: &syn::UseTree) -> bool {
+            match t {
+                syn::UseTree::Glob(_) => true,
+                syn::UseTree::Path(p) => glob(&p.tree),
+                syn::UseTree::Group(g) => g.items.iter().any(glob),
+                _ => false,
+            }
+        }
+        struct V(bool);
+        impl<'a> Visit<'a> for V {
+            fn visit_item_use(&mut self, u: &'a syn::ItemUse) {
+                if glob(&u.tree) {
+                    self.0 = true;
+                }
+            }
+        }
+        let mut v = V(false);
+        for f in &self.files {
+            v.visit_file(f);
+        }
+        v.0 || !self.unparsed.is_empty()
     }
 
     /// R1351 — does this source NAME `leaf` at all (a declaration, a `use` binding, a macro token, an unparsed file)?
@@ -629,12 +669,16 @@ impl SrcIndex {
                 let Some(sl) = segs.last() else { continue };
                 let root = if segs.len() > 1 { segs[0].as_str() } else { "" };
                 let sub = match root {
+                    // REVIEW6 — a root this source rebinds (`extern crate x as std`, a `mod core`) is not std's.
+                    "std" | "core" | "alloc" if self.local_names.contains(root) => None,
                     "std" | "core" | "alloc" => std_trait_has(sl, member, 0),
                     "crate" | "self" | "super" => self.trait_answer(sl, member, depth + 1),
                     "" if self.types.contains(sl.as_str()) => self.trait_answer(sl, member, depth + 1),
                     // SOUNDNESS F2 (Fable REVIEW rust0416) — a bare leaf the source BINDS with `use` (`use serde::de::Error;
                     // trait MyErr: Error`) is another package's trait, not std's of the same leaf: not read here.
                     "" if self.local_names.contains(sl.as_str()) => None,
+                    // REVIEW6 — …and a glob import may bring a same-named trait from anywhere (a glob shadows the prelude).
+                    "" if self.has_glob_use() => None,
                     "" => std_trait_has(sl, member, 0),
                     _ => None, // another package's trait: not read here
                 };

@@ -7117,3 +7117,40 @@ fn review5_a_chain_drop_needs_a_closed_std_payload() {
     }
     assert!(!why(u("Job::z")).iter().any(|w| w.contains("then_some")), "REVIEW5: a closed bool payload is still drift: {v:#}");
 }
+
+/// Fable REVIEW6 D1 (rustagent-0416) — the closed-payload test asks whether a std NAME is really std's. A std-named alias the owner
+/// declares (`pub mod al { pub type Result = core::result::Result<Vec<Box<dyn Tx>>, ()>; }`), a crate-root `type Option = ..`, a
+/// `type u8 = ..` shadowing a primitive: each hides a container of consumer-supplied trait objects, so the drift key keeps the
+/// published hedge (fb7 A2/B and the lane's 12-shape fx/fb8, executed: pub 1/1, 6758abc 0/0, now 1/1). The closed control
+/// (`flag -> bool`, in a crate that binds no std name and has no glob) is still dropped.
+#[test]
+fn review6_a_std_named_alias_is_not_std() {
+    let base = make_crate("r6base", "pub trait Tx { fn write(&self); }\n\
+        pub mod al { pub type Result = core::result::Result<Vec<Box<dyn super::Tx>>, ()>; }\n\
+        pub type Option = core::option::Option<Vec<Box<dyn Tx>>>;\n\
+        pub mod ml { #[allow(non_camel_case_types)] pub type u8 = Vec<Box<dyn super::Tx>>; pub trait SL { fn get(&self) -> core::option::Option<u8>; } }\n\
+        pub trait SA { fn get(&self) -> al::Result; }\n\
+        pub trait SB { fn get(&self) -> Option; }\n\
+        pub trait SZ { fn flag(&self) -> bool; }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"r6base\"\nedition = \"2021\"\n").unwrap();
+    let prod = make_crate("r6prod", "use r6base::{SA, SB, SZ, ml::SL};\n\
+        pub trait Job { fn a<X: SA>(&self, s: X); fn b<X: SB>(&self, s: X); fn l<X: SL>(&self, s: X); fn z<X: SZ>(&self, s: X) -> Option<u8>; }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn a<X: SA>(&self, s: X) { for t in s.get().unwrap_or_default() { t.write(); } }\n\
+            fn b<X: SB>(&self, s: X) { for t in s.get().unwrap_or_default() { t.write(); } }\n\
+            fn l<X: SL>(&self, s: X) { for t in s.get().unwrap_or_default() { t.write(); } }\n\
+            fn z<X: SZ>(&self, s: X) -> Option<u8> { s.flag().then_some(1) }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r6prod\"\nedition = \"2021\"\n\n[dependencies]\nr6base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    let _ = std::fs::remove_dir_all(&prod);
+    let _ = std::fs::remove_dir_all(&base);
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("REVIEW6: no {m} union: {v:#}"));
+    for (m, kept) in [("Job::a", "dispatch:SA.unwrap_or_default"), ("Job::b", "dispatch:SB.unwrap_or_default"), ("Job::l", "dispatch:SL.unwrap_or_default")] {
+        assert!(why(u(m)).iter().any(|w| w == kept), "REVIEW6: {m} keeps the published hedge {kept}: {v:#}");
+    }
+    assert!(!why(u("Job::z")).iter().any(|w| w.contains("then_some")), "REVIEW6: a really-std bool payload is still drift: {v:#}");
+}

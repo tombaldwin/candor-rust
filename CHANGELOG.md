@@ -27,7 +27,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   no `Self`, generic, projection, `dyn`, `impl` or `Box` among its type arguments (`s.flag().then_some(..)`, `flag ->
   bool`; a `Vec<Box<dyn Tx>>` or a `Result<Self::Value, E>` is a container of something the consumer supplies, and the
   dependency may dispatch on it in any spelling — Fable's fb5 `for` loop, index and block — so its key keeps the
-  hedge); the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
+  hedge; and a std NAME counts only when it is std's: a bare name the owner declares, imports or could get from a glob,
+  or a path not rooted at `std`/`core`/`alloc`, is a doubt — fb7's `al::Result`/`al::Option` aliases and the lane's
+  twelve-shape fx/fb8, executed); the receiver must BE that call's value — never through `?` or `.await`, where it is the payload, and
   never while ANY call in the chain takes a callable argument — a closure literal or a path/method reference — whose
   calls the engine may not key), or a multi-bound
   spread where a sibling bound at the same site declares the member. Every other
