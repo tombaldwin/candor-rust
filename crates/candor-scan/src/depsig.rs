@@ -441,6 +441,19 @@ fn macro_is_known(root: Option<&str>, name: &str, local: &HashMap<String, FnName
     }
 }
 
+/// SOUNDNESS Fable REVIEW8 D3 — the type and const parameter names a list of generic scopes binds.
+fn generic_params(scopes: &[&syn::Generics]) -> HashSet<String> {
+    scopes
+        .iter()
+        .flat_map(|g| g.params.iter())
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+            syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect()
+}
+
 impl SrcIndex {
     /// SOUNDNESS F1 (Fable REVIEW rust0416) — when `leaf` does NOT declare `member`, is `member` declared by the BOUND of one
     /// of `leaf`'s associated types (`trait Store { type T: Tx; }`, `t.commit()` on `<S as Store>::T`)? That is the shape the
@@ -504,8 +517,14 @@ impl SrcIndex {
         // a bare std name counts only when this source declares and imports nothing of that name AND has no glob import (a glob
         // shadows the prelude); a qualified path counts only when it is rooted at `std`/`core`/`alloc` (not rebound here) and
         // ends in a std name. The same question F2 asked of a supertrait leaf, asked of a type.
+        // SOUNDNESS Fable REVIEW8 D3 — a GENERIC PARAMETER is a binding too. Where a member's return type is read, the names in
+        // scope are the trait's generic parameters and the member's own (`trait SG<Vec: IntoIterator<..>> { fn list(&self) -> Vec; }`,
+        // `fn get<Option: ..>(&self) -> Option`, `trait SE<core: Holder> { fn get(&self) -> core::Option; }`, a parameter as a std
+        // container's argument). Each is consumer- or caller-supplied by definition, so a bare name, a type argument or a path root
+        // that is one of them is never std's. No other generic scope reaches a trait member's signature: an item nested in a fn
+        // body cannot name the fn's parameters (E0401), and a trait is not declared inside an impl. A lifetime is not a type name;
+        // a const parameter is counted anyway (default doubt). `generic_params` takes both scopes.
         let has_glob = self.has_glob_use();
-        let std_name = |n: &str| self.std_name_provable(n);
         fn std_ty(t: &syn::Type, std_name: &dyn Fn(&str) -> bool, has_glob: bool) -> bool {
             let rec = |t: &syn::Type| std_ty(t, std_name, has_glob);
             match t {
@@ -556,6 +575,14 @@ impl SrcIndex {
                 if let syn::TraitItem::Fn(f) = it {
                     if f.sig.ident == method {
                         seen = true;
+                        let bound = generic_params(&[&t.generics, &f.sig.generics]);
+                        let std_name = |n: &str| {
+                            let g = bound.contains(n);
+                            if g && std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() {
+                                eprintln!("STDNAME\t{n}\tgeneric=true"); // §E1 REACH COUNTER
+                            }
+                            !g && self.std_name_provable(n)
+                        };
                         match &f.sig.output {
                             syn::ReturnType::Default => {}
                             syn::ReturnType::Type(_, ty) if std_ty(ty, &std_name, has_glob) => {}
@@ -830,7 +857,7 @@ impl SrcIndex {
                 let root = if segs.len() > 1 { segs[0].as_str() } else { "" };
                 let sub = match root {
                     // REVIEW6 — a root this source rebinds (`extern crate x as std`, a `mod core`) is not std's.
-                    "std" | "core" | "alloc" if !self.std_name_provable(root) => None,
+                    "std" | "core" | "alloc" if !self.std_name_provable(root) || generic_params(&[&t.generics]).contains(root) => None,
                     "std" | "core" | "alloc" => std_trait_has(sl, member, 0),
                     "crate" | "self" | "super" => self.trait_answer(sl, member, depth + 1),
                     "" if self.types.contains(sl.as_str()) => self.trait_answer(sl, member, depth + 1),
@@ -838,7 +865,7 @@ impl SrcIndex {
                     // trait MyErr: Error`) is another package's trait, not std's of the same leaf: not read here.
                     "" if self.local_names.contains(sl.as_str()) => None,
                     // REVIEW6 — …and a glob import may bring a same-named trait from anywhere (a glob shadows the prelude).
-                    "" if self.has_glob_use() || !self.std_name_provable(sl) => None,
+                    "" if self.has_glob_use() || !self.std_name_provable(sl) || generic_params(&[&t.generics]).contains(sl.as_str()) => None,
                     "" => std_trait_has(sl, member, 0),
                     _ => None, // another package's trait: not read here
                 };

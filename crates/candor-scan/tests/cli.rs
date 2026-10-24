@@ -7217,3 +7217,53 @@ fn review7_a_std_name_the_owner_could_bind_unseen_is_a_doubt() {
     assert!(why(u("Job::e")).iter().any(|w| w == "dispatch:SE.unwrap_or_default"), "REVIEW7: an include!-made alias is a doubt: {v:#}");
     assert!(!why(u("Job::y")).iter().any(|w| w.contains("unwrap_or_default")), "REVIEW7: the provably-std control still drops: {v:#}");
 }
+
+/// Fable REVIEW8 D3 (rustagent-0416) — a GENERIC PARAMETER named like a std type is a binding: in the trait's generics or the member's
+/// own, as the bare return, as a std container's argument, or as the root of a qualified path (`core::Option` = `<core as H>::Option`).
+/// Executed family fx/fb12 (pub 1/1, fin13 0/0 on five shapes, now 1/1); fb11 G is Fable's. The same-crate controls still drop,
+/// including one whose trait HAS a `Vec` parameter that the member does not read: the scope is the member's, not the crate's.
+#[test]
+fn review8_a_generic_parameter_named_like_a_std_type_is_never_std() {
+    let base = make_crate("r8base", "#![allow(non_camel_case_types)]\npub trait Tx { fn write(&self); }\n\
+        pub trait H { type Option: IntoIterator<Item = Box<dyn Tx>>; }\n\
+        pub trait SA<Vec: IntoIterator<Item = Box<dyn Tx>>> { fn list(&self) -> Vec; }\n\
+        pub trait SB { fn list<Option: IntoIterator<Item = Box<dyn Tx>>>(&self) -> Option; }\n\
+        pub trait SC<String: Tx> { fn list(&self) -> Vec<String>; }\n\
+        pub trait SE<core: H> { fn list(&self) -> core::Option; }\n\
+        pub trait SY { fn n(&self) -> Option<u32>; }\n\
+        pub trait SW<Vec> { fn n(&self) -> Option<u32>; fn v(&self) -> Vec; }\n");
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"r8base\"\nedition = \"2021\"\n").unwrap();
+    let prod = make_crate("r8prod", "use r8base::{Tx, H, SA, SB, SC, SE, SY, SW};\n\
+        pub trait Job {\n\
+            fn a<X: SA<V>, V: IntoIterator<Item = Box<dyn Tx>>>(&self, s: X);\n\
+            fn b<V: IntoIterator<Item = Box<dyn Tx>>, X: SB>(&self, s: X);\n\
+            fn c<T: Tx, X: SC<T>>(&self, s: X);\n\
+            fn e<K: H, X: SE<K>>(&self, s: X);\n\
+            fn y<X: SY>(&self, s: X) -> u32;\n\
+            fn w<V, X: SW<V>>(&self, s: X) -> u32;\n\
+        }\n\
+        pub struct Doc;\n\
+        impl Job for Doc {\n\
+            fn a<X: SA<V>, V: IntoIterator<Item = Box<dyn Tx>>>(&self, s: X) { for t in s.list().into_iter() { t.write(); } }\n\
+            fn b<V: IntoIterator<Item = Box<dyn Tx>>, X: SB>(&self, s: X) { for t in s.list::<V>().into_iter() { t.write(); } }\n\
+            fn c<T: Tx, X: SC<T>>(&self, s: X) { for t in s.list().into_iter() { t.write(); } }\n\
+            fn e<K: H, X: SE<K>>(&self, s: X) { for t in s.list().into_iter() { t.write(); } }\n\
+            fn y<X: SY>(&self, s: X) -> u32 { s.n().unwrap_or_default() }\n\
+            fn w<V, X: SW<V>>(&self, s: X) -> u32 { s.n().unwrap_or_default() }\n\
+        }\n");
+    std::fs::write(prod.join("Cargo.toml"), format!("[package]\nname = \"r8prod\"\nedition = \"2021\"\n\n[dependencies]\nr8base = {{ path = \"{}\" }}\n",
+        base.display())).unwrap();
+    let v = scan_json(&prod, "");
+    for d in [&prod, &base] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let u = |m: &str| row(&v, |f| f["interfaceUnion"] == true && f["fn"].as_str().is_some_and(|n| n.ends_with(m)))
+        .unwrap_or_else(|| panic!("REVIEW8: no {m} union: {v:#}"));
+    for (m, t) in [("Job::a", "SA"), ("Job::b", "SB"), ("Job::c", "SC"), ("Job::e", "SE")] {
+        let w = format!("dispatch:{t}.into_iter");
+        assert!(why(u(m)).contains(&w), "REVIEW8: a generic parameter named like a std type is not std ({m}): {v:#}");
+    }
+    for m in ["Job::y", "Job::w"] {
+        assert!(!why(u(m)).iter().any(|w| w.contains("unwrap_or_default")), "REVIEW8: the provably-std control still drops ({m}): {v:#}");
+    }
+}
