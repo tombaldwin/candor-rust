@@ -6297,11 +6297,7 @@ impl<'a> CallCollector<'a> {
     /// hashing, cloning and the operators stay under §4's conventionally-pure MAY). Unset: nothing (shipping behaviour).
     /// `CANDOR_CT2_INSTR` prints every recognised-unresolved site whatever the setting, for pricing.
     fn ct2_unresolved(&mut self, trait_leaf: &str, member: &str) {
-        let class_b = !matches!(
-            trait_leaf,
-            "Display" | "Debug" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp" | "UpperExp"
-                | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Clone" | "ToString" | "ToOwned" | "Default"
-        ) && !crate::lang::OPERATOR_TRAITS.contains(&trait_leaf);
+        let class_b = ct2_class_b(trait_leaf);
         if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
             eprintln!("CT2UNRESOLVED\t{}\t{trait_leaf}.{member}", if class_b { "B" } else { "A" }); // §E1 REACH COUNTER
         }
@@ -6335,7 +6331,7 @@ impl<'a> CallCollector<'a> {
             return;
         }
         if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
-            eprintln!("CT2LICENSED\t{trait_leaf}::{member}\t{head}"); // §E1 REACH COUNTER
+            eprintln!("CT2LICENSED\t{}\t{trait_leaf}::{member}\t{head}", if ct2_class_b(trait_leaf) { "B" } else { "A" }); // §E1 REACH COUNTER
         }
         if self.is_dependency_type(&head) {
             let segs: Vec<&str> = head.split("::").collect();
@@ -6462,7 +6458,7 @@ impl<'a> CallCollector<'a> {
                 work.push((t, h.trait_leaf, h.member));
             }
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2SHAPE\t{trait_leaf}\t{shape}\t{}", work.len()); // §E1 REACH COUNTER
         }
         for (t, tl, m) in work {
@@ -6709,7 +6705,7 @@ impl<'a> CallCollector<'a> {
         if hooks.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
         self.charge_std_hooks(&hooks, recv, &rest, ret, true);
@@ -6782,7 +6778,7 @@ impl<'a> CallCollector<'a> {
         if hooks.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
         self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true);
@@ -15279,6 +15275,17 @@ fn pinned_arg(expr: &syn::Expr) -> Option<&syn::Expr> {
         }
         _ => None,
     }
+}
+
+/// CALL-TARGET ROUND 2 — whether a hook of std trait `trait_leaf` is in proposal §1.3 option B's class (iteration,
+/// callback, I/O, conversion, deferred force, drop) rather than the formatting / comparison / hashing / cloning family
+/// (and the operators) §4's conventionally-pure MAY leaves to option A.
+fn ct2_class_b(trait_leaf: &str) -> bool {
+    !matches!(
+        trait_leaf,
+        "Display" | "Debug" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp" | "UpperExp"
+            | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Clone" | "ToString" | "ToOwned" | "Default"
+    ) && !crate::lang::OPERATOR_TRAITS.contains(&trait_leaf)
 }
 
 thread_local! {
