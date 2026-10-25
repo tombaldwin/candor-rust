@@ -3253,7 +3253,7 @@ pub(crate) fn fninfo(
         macro_twins: elems.macro_twins,
         ambiguous_type_leaves: elems.ambiguous_type_leaves,
         veinb_off: std::cell::Cell::new(false),
-        veinb_typed: HashMap::new(), std_made_vars: Default::default(), err_of: HashMap::new(),
+        veinb_typed: HashMap::new(), std_made_vars: Default::default(), shape_vars: HashMap::new(), clone_vars: Default::default(), err_of: HashMap::new(),
         elem_of,
         elem_trait_of,
         tuple_of,

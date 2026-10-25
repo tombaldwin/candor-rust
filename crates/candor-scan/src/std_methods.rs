@@ -31,3 +31,9 @@ pub(crate) fn is_std_method(name: &str, argc: usize) -> bool {
     set().contains(&(name, argc))
 }
 
+
+/// Whether std has a stable public method `name` of ANY arity (an extension trait's method is one it does not).
+pub(crate) fn is_std_method_name(name: &str) -> bool {
+    static N: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    N.get_or_init(|| set().iter().map(|(n, _)| *n).collect()).contains(name)
+}

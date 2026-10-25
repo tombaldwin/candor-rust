@@ -433,6 +433,13 @@ pub(crate) struct CallCollector<'a> {
     /// SOUNDNESS R1160 — `let` bindings whose `String` std constructed (`std_made_str`), typed `String` by R963. Such a
     /// value is never a glob's same-named type (`glob_retype`). Cleared with `veinb_typed` when the name is re-bound.
     pub(crate) std_made_vars: std::collections::HashSet<String>,
+    /// CALL-TARGET ROUND 2 — a `let` binding whose initializer is a std SHAPE the expression itself spells (`let v =
+    /// vec![x];`, `let a = [x, y];`, `let o = Some(x);`), with its type arguments, for `std_shape_of`. Cleared whenever
+    /// the name is re-bound.
+    pub(crate) shape_vars: HashMap<String, (String, Vec<Option<String>>)>,
+    /// CALL-TARGET ROUND 2 — `let` bindings whose initializer CONSTRUCTS a nominal type (`S`, `S { .. }`, `S(..)`,
+    /// `S::new(..)`), so `x.clone()` provably runs that type's own `clone` (`clone_receiver_unpeeled`).
+    pub(crate) clone_vars: std::collections::HashSet<String>,
     /// SOUNDNESS R1196 — a binding's `Result` ERROR type (`lang::result_err_type`'s string; `model::RET_ERR_SEP`-joined
     /// when a call's declared return names several): `let r: Result<u8, Le> = ..`, `let r = mk()` over `mk() -> Result<_,
     /// Le>`, `let r = Err(Le(1))`, a `Result` parameter. The expression typer records `Result` unwrapped to the `Ok`
@@ -1496,7 +1503,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses.clone(),
             self.bound_names.clone(),
         );
-        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone());
+        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone(), self.shape_vars.clone(), self.clone_vars.clone());
         self.macro_expanding.insert(mname.to_string());
         self.visit_block(block);
         self.macro_expanding.remove(mname);
@@ -1516,7 +1523,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses,
             self.bound_names,
         ) = snap;
-        (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars) = snap2;
+        (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars, self.shape_vars, self.clone_vars) = snap2;
     }
 
     /// SOUNDNESS R1168 — the leaf of `t` when a value typed `t` is itself a FUTURE of this crate, so awaiting it yields its
@@ -1737,7 +1744,7 @@ impl<'a> CallCollector<'a> {
                         }
                         return;
                     }
-                    if m == "by_ref" || m == "into_iter" || crate::lang::iterator_lazy(&m) {
+                    if m == "by_ref" || m == "into_iter" || crate::std_bounds::iterator_member_lazy(&m) {
                         x = peel_recv(&mc.receiver);
                         continue;
                     }
@@ -1864,9 +1871,9 @@ impl<'a> CallCollector<'a> {
             let tys: Vec<String> = if elem {
                 self.generic_elem_arg_types(arg)
             } else if r1145 {
-                self.resolve_recv_type(arg).into_iter().collect()
+                self.resolve_recv_type(arg).or_else(|| self.hook_type_of(arg)).into_iter().collect()
             } else {
-                self.type_of(arg).into_iter().collect()
+                self.hook_type_of(arg).into_iter().collect()
             };
             // SOUNDNESS R1286 — a handle BOXED at the call site for a `Box<dyn Write>` parameter (`box_dyn(Box::new(f))`): the
             // strict typer answers the box, the dispatch lands in the handle inside it.
@@ -1923,6 +1930,15 @@ impl<'a> CallCollector<'a> {
                 // (`impl AsRef<Bytes> for str`), which the leaf cannot see — winnow's `Bytes::new(self)` with `self: &str`
                 // runs std's `AsRef<[u8]>`, and was charged winnow's own `str::as_ref`.
                 let leaf = t.split('<').next().unwrap_or(&t).rsplit("::").next().unwrap_or(&t);
+                // CALL-TARGET ROUND 2 — a DEPENDENCY type's impl is reached through the chained join (the key its report
+                // publishes, `dep::Type::member`), never by this crate's leaf: `charge_licensed`'s dependency route.
+                if !r1145 && self.is_dependency_type(&t) && std::env::var_os("CANDOR_CT2_OFF").is_none() {
+                    if std::env::var_os("CANDOR_R1167_INSTR").is_some() {
+                        eprintln!("R1167DEP\t{tr}\t{m}\t{t}"); // §E1 REACH COUNTER
+                    }
+                    self.charge_licensed(&t, &tr, &m);
+                    continue;
+                }
                 if !r1145
                     && (self.is_dependency_type(&t)
                         || matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
@@ -5477,7 +5493,7 @@ impl<'a> CallCollector<'a> {
             // The std half: `foreign_impls` does not record std traits, so for a std trait the evidence is
             // a local `impl Tr for T` (`trait_impls`) and a member the trait REQUIRES — a required member
             // has no default for an inherent `m` to shadow, which is the whole of R53's fabrication.
-            || (std_required_member(tr, method)
+            || (crate::std_bounds::std_required_member(tr, method)
                 && self.trait_impls.get(tr.as_str()).is_some_and(|v| v.contains(&ty_leaf)));
         if hit {
             if crate::lang::reach_debug() {
@@ -5795,12 +5811,6 @@ impl<'a> CallCollector<'a> {
     /// the argument's) and, failing that, the receiver's element. A method the crate itself defines on that
     /// receiver type never reaches here, because the receiver must be a std type.
     fn charge_std_cmp_method(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
-        #[derive(Clone, Copy, PartialEq)]
-        enum Fam {
-            Eq,
-            Ord,
-            Hash,
-        }
         // SOUNDNESS R1130 — `xs.into_iter().collect::<HashSet<_>>()`: the TURBOFISH form of collecting into a
         // keyed collection (the `let s: HashSet<G> = ..collect()` form is `visit_local`'s).
         if leaf == "collect" && node.args.is_empty() {
@@ -5829,96 +5839,10 @@ impl<'a> CallCollector<'a> {
             }
             return;
         }
-        let provided: Option<Fam> = match (leaf, node.args.len()) {
-            ("ne", 1) => Some(Fam::Eq),
-            ("lt" | "le" | "gt" | "ge" | "max" | "min", 1) | ("clamp", 2) => Some(Fam::Ord),
-            _ => None,
-        };
-        if let Some(f) = provided {
-            if let Some(ty) = self.resolve_recv_type(&node.receiver) {
-                let l = ty.rsplit("::").next().unwrap_or(&ty).to_string();
-                if !self.local_fn_on(&l, leaf) {
-                    self.charge_cmp_family(&ty, f == Fam::Eq, f == Fam::Ord, false);
-                }
-                return;
-            }
-        }
-        // `xs.iter().max()` — a ZERO-argument `max`/`min` can only be `Iterator::max`/`min` (`Ord::max`
-        // takes one), over whatever element the receiver chain yields.
-        if matches!(leaf, "max" | "min") && node.args.is_empty() {
-            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
-                let elem = crate::lang::strip_wrapped(&raw).to_string();
-                if !elem.is_empty() {
-                    self.charge_cmp_family(&elem, false, true, false);
-                }
-            }
-            return;
-        }
-        // `(a..b).contains(&x)` — `RangeBounds::contains` compares `x` against both ends (`PartialOrd`).
-        if leaf == "contains" && node.args.len() == 1 && matches!(peel_value(&node.receiver), syn::Expr::Range(_)) {
-            if let Some(t) = node.args.first().and_then(|a| self.type_of(a)) {
-                self.charge_cmp_family(&t, false, true, false);
-            }
-            return;
-        }
-        let kind = self.std_collection_kind(&node.receiver);
-        let Some(kind) = kind else { return };
-        let fam: Option<(Fam, bool)> = match (kind, leaf) {
-            // (family, payload from ARGUMENT 0 where there is one)
-            (StdColl::Seq, "contains" | "starts_with" | "ends_with") => Some((Fam::Eq, false)),
-            (StdColl::Seq, "dedup") => Some((Fam::Eq, false)),
-            (StdColl::Seq, "sort" | "sort_unstable" | "binary_search" | "is_sorted" | "select_nth_unstable") => {
-                Some((Fam::Ord, false))
-            }
-            (StdColl::Heap, "push") => Some((Fam::Ord, true)),
-            (StdColl::Heap, "pop" | "into_sorted_vec" | "peek_mut") => Some((Fam::Ord, false)),
-            (
-                StdColl::HashKeyed,
-                "insert" | "get" | "get_mut" | "contains_key" | "contains" | "remove" | "entry" | "get_key_value"
-                | "remove_entry" | "take" | "replace",
-            ) => Some((Fam::Hash, true)),
-            (
-                StdColl::OrdKeyed,
-                "insert" | "get" | "get_mut" | "contains_key" | "contains" | "remove" | "entry" | "get_key_value"
-                | "remove_entry" | "take" | "replace" | "range" | "range_mut" | "split_off",
-            ) => Some((Fam::Ord, true)),
-            _ => None,
-        };
-        let Some((fam, from_arg)) = fam else { return };
-        let mut tys: Vec<String> = Vec::new();
-        if from_arg {
-            if let Some(a) = node.args.first() {
-                if let Some(t) = self.type_of(a) {
-                    tys.push(t);
-                }
-            }
-        }
-        if tys.is_empty() && !matches!(kind, StdColl::HashKeyed | StdColl::OrdKeyed) || matches!(leaf, "dedup") {
-            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
-                let elem = crate::lang::strip_wrapped(&raw).to_string();
-                if !elem.is_empty() {
-                    tys.push(elem);
-                }
-            }
-        } else if tys.is_empty() && self.std_set_receiver(&node.receiver) {
-            // A SET's element IS its key, so `set.contains(&k)` over an untyped argument still has one.
-            if let Some(raw) = self.resolve_elem_type_raw(&node.receiver) {
-                let elem = crate::lang::strip_wrapped(&raw).to_string();
-                if !elem.is_empty() {
-                    tys.push(elem);
-                }
-            }
-        }
-        for t in tys {
-            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
-                eprintln!("R1111METHOD\t{leaf}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
-            }
-            match fam {
-                Fam::Eq => self.charge_cmp_family(&t, true, false, false),
-                Fam::Ord => self.charge_cmp_family(&t, false, true, false),
-                Fam::Hash => self.charge_cmp_family(&t, true, false, true),
-            }
-        }
+        // Everything else this method once answered from per-collection NAME lists — the provided comparison
+        // methods (`a.ne(&b)`, `a.max(b)`), `xs.iter().max()`, `(a..b).contains(&x)`, and each std collection's
+        // element-comparing methods (`v.contains`, `v.sort`, `set.insert`, `heap.push`, `m.get`) — is the std bound
+        // table's now (`charge_std_method_site`), read from std's own `where T: PartialEq/Ord/Hash` declarations.
     }
 
     /// SOUNDNESS R1137/R1139 — whether an operator on a value of type `ty` can reach a body this crate (or a
@@ -6083,17 +6007,6 @@ impl<'a> CallCollector<'a> {
         !self.uses.contains_key(&full) && !self.generic_bounds.contains_key(&full)
     }
 
-    fn std_set_receiver(&self, recv: &syn::Expr) -> bool {
-        let leaf = |t: &str| t.rsplit("::").next().unwrap_or(t).to_string();
-        if let Some(t) = self.resolve_recv_type(recv) {
-            return matches!(leaf(&t).as_str(), "HashSet" | "BTreeSet");
-        }
-        self.declared_param_ty(recv).is_some_and(|ty| match crate::lang::peel_ty_refs(ty) {
-            syn::Type::Path(p) => p.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "HashSet" | "BTreeSet")),
-            _ => false,
-        })
-    }
-
     /// SOUNDNESS R1134 — the declared type of a block-local `const`/`static` an operand names (`ONE`, `&ONE`).
     fn local_const_type(&self, e: &syn::Expr) -> Option<String> {
         let mut e = e;
@@ -6144,8 +6057,745 @@ impl<'a> CallCollector<'a> {
     /// A DISPATCH-TYPED operand (a generic/`impl Trait`/`dyn` param in `trait_vars`) has no concrete type
     /// here — for the STRINGIFY family only it falls through to `charge_stringify_dispatch` (bounded CHA
     /// over the bound); every other coercion keeps the old resolve-or-skip behaviour unchanged.
+    // ---------------------------------------------------------------------------------------------------------------
+    // CALL-TARGET ROUND 2 — THE STD BOUND TABLE AT A CONCRETE SITE (`std_bounds.rs`, generated from rust-src).
+    //
+    // A std entry point runs a user member exactly where std's own declaration BOUNDS a generic parameter by a trait
+    // and the user's value fills that parameter: `[T]::contains where T: PartialEq`, `impl<T: Debug> Debug for Vec<T>`,
+    // `mem::take<T: Default>`, `thread::spawn<F: FnOnce()>`. The table says which slot and which trait; these helpers
+    // say which VALUE fills the slot and form the edge — to a local impl through `charge_coercion_ty`, or to a
+    // DEPENDENCY type's impl through the chained join (`dep::Type::member`, the key its report publishes). A slot the
+    // typer cannot fill forms nothing here (the disclosure fallback for that case is measured separately and off).
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /// Whether this crate declares a type whose leaf is `leaf` (a struct/enum with indexed fields or variants, an impl's
+    /// self type) — a bare name it shadows, which is then not std's same-named shape.
+    fn is_local_type_leaf(&self, leaf: &str) -> bool {
+        self.fields.contains_key(leaf)
+            || self.trait_impls.values().any(|v| v.iter().any(|x| x == leaf))
+            || self.enum_variants.contains_key(leaf)
+    }
+
+    /// The std SHAPE a value is (`Vec`, `[;]`, `Option`, `()`, `Box`, a std collection by its leaf) and what the
+    /// expression or the typer says fills each of its type arguments.
+    fn std_shape_of(&self, e: &syn::Expr) -> Option<(String, Vec<Option<String>>)> {
+        if let Some(sh) = self.std_shape_literal(e) {
+            return Some(sh);
+        }
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                _ => break,
+            }
+        }
+        if let syn::Expr::Path(p) = e {
+            if let Some(id) = p.path.get_ident() {
+                if let Some(sh) = self.shape_vars.get(&id.to_string()) {
+                    return Some(sh.clone());
+                }
+            }
+        }
+        // a parameter DECLARED with a std shape (`v: &[Guard]`, `a: Option<Arc<Guard>>`, `m: HashMap<K, V>`): its written
+        // type arguments
+        if let Some(ty) = self.declared_param_ty(e) {
+            match crate::lang::peel_ty_refs(ty) {
+                syn::Type::Slice(sl) => return Some(("[]".into(), vec![crate::lang::type_path(&sl.elem, &self.uses)])),
+                syn::Type::Array(ar) => return Some(("[;]".into(), vec![crate::lang::type_path(&ar.elem, &self.uses)])),
+                syn::Type::Tuple(tu) if !tu.elems.is_empty() => {
+                    return Some(("()".into(), tu.elems.iter().map(|t| crate::lang::type_path(t, &self.uses)).collect()))
+                }
+                syn::Type::Path(tp) if tp.qself.is_none() && self.names_std_type(&tp.path) => {
+                    if let Some(seg) = tp.path.segments.last() {
+                        let leaf = seg.ident.to_string();
+                        let full = expand(&crate::lang::path_to_string_lc(&tp.path), &self.uses);
+                        let std_path = matches!(full.split("::").next(), Some("std" | "core" | "alloc"));
+                        if crate::std_bounds::is_shape(&leaf) && (std_path || !self.is_local_type_leaf(&leaf)) {
+                            let args: Vec<Option<String>> = match &seg.arguments {
+                                syn::PathArguments::AngleBracketed(ab) => ab
+                                    .args
+                                    .iter()
+                                    .filter_map(|a| match a {
+                                        syn::GenericArgument::Type(t) => Some(crate::lang::type_path(t, &self.uses)),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
+                            return Some((leaf, args));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let t = self.resolve_recv_type(e)?;
+        let head = t.split('<').next().unwrap_or(&t);
+        let root = head.split("::").next().unwrap_or(head);
+        let leaf = head.rsplit("::").next().unwrap_or(head);
+        let std_rooted = matches!(root, "std" | "core" | "alloc")
+            || (!head.contains("::") && !self.uses.contains_key(leaf) && !self.is_local_type_leaf(leaf));
+        if !std_rooted || !crate::std_bounds::is_shape(leaf) {
+            return None;
+        }
+        // The typer's ELEMENT is the shape's first type argument only for a one-argument shape (`Vec<T>`, `HashSet<T>`,
+        // `Option<T>`): a map's element is its VALUE, which no comparison or hash of the map's key reaches.
+        let one_arg = matches!(
+            leaf,
+            "Vec" | "VecDeque" | "LinkedList" | "[]" | "[;]" | "Option" | "HashSet" | "BTreeSet" | "BinaryHeap" | "Box"
+        );
+        let elem = if one_arg {
+            self.resolve_elem_type_raw(e).map(|r| crate::lang::strip_wrapped(&r).to_string()).filter(|x| !x.is_empty())
+        } else {
+            None
+        };
+        Some((leaf.to_string(), if one_arg { vec![elem] } else { Vec::new() }))
+    }
+
+    /// The std shape an expression SPELLS (`vec![x]`, `[x; 3]`, `(a, b)`, `Some(x)`, `Box::new(x)`, `None::<T>`, a range,
+    /// a string literal), with what fills its type arguments.
+    fn std_shape_literal(&self, e: &syn::Expr) -> Option<(String, Vec<Option<String>>)> {
+        let mut e = e;
+        loop {
+            match e {
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Reference(r) => e = &r.expr,
+                _ => break,
+            }
+        }
+        match e {
+            syn::Expr::Macro(m) if m.mac.path.is_ident("vec") => {
+                let first = m
+                    .mac
+                    .parse_body_with(syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+                    .ok()
+                    .and_then(|a| a.first().cloned())
+                    .or_else(|| {
+                        m.mac.parse_body::<syn::ExprRepeat>().ok().map(|r| *r.expr)
+                    });
+                Some(("Vec".into(), vec![first.as_ref().and_then(|x| self.hook_type_of(x))]))
+            }
+            syn::Expr::Lit(l) if matches!(l.lit, syn::Lit::Str(_)) => Some(("str".into(), Vec::new())),
+            syn::Expr::Range(r) => {
+                let shape = match (&r.start, &r.end, &r.limits) {
+                    (Some(_), Some(_), syn::RangeLimits::HalfOpen(_)) => "Range",
+                    (Some(_), Some(_), syn::RangeLimits::Closed(_)) => "RangeInclusive",
+                    (Some(_), None, _) => "RangeFrom",
+                    (None, Some(_), syn::RangeLimits::HalfOpen(_)) => "RangeTo",
+                    (None, Some(_), syn::RangeLimits::Closed(_)) => "RangeToInclusive",
+                    _ => return None,
+                };
+                let bound = r.start.as_deref().or(r.end.as_deref()).and_then(|x| self.hook_type_of(x));
+                Some((shape.into(), vec![bound]))
+            }
+            syn::Expr::Array(a) => Some(("[;]".into(), vec![a.elems.first().and_then(|x| self.hook_type_of(x))])),
+            syn::Expr::Repeat(r) => Some(("[;]".into(), vec![self.hook_type_of(&r.expr)])),
+            syn::Expr::Tuple(t) if !t.elems.is_empty() => Some(("()".into(), t.elems.iter().map(|x| self.hook_type_of(x)).collect())),
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return None };
+                if p.qself.is_some() || c.args.len() != 1 {
+                    return None;
+                }
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let shape = match segs.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                    ["Some"] if !self.uses.contains_key("Some") => "Option",
+                    ["Ok"] if !self.uses.contains_key("Ok") => "Result",
+                    ["Box", "new"] if !self.uses.contains_key("Box") => "Box",
+                    [.., "boxed", "Box", "new"] => "Box",
+                    _ => return None,
+                };
+                Some((shape.into(), vec![self.hook_type_of(&c.args[0])]))
+            }
+            // `None::<T>`
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 && p.path.segments[0].ident == "None"
+                && !self.uses.contains_key("None") =>
+            {
+                let t = match &p.path.segments[0].arguments {
+                    syn::PathArguments::AngleBracketed(ab) => match ab.args.first() {
+                        Some(syn::GenericArgument::Type(t)) => crate::lang::type_path(t, &self.uses),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Some(("Option".into(), vec![t]))
+            }
+            _ => None,
+        }
+    }
+
+    /// The ELEMENT type a collection or an element-preserving iterator chain yields (`v`, `v.iter()`, `a.iter().rev()`):
+    /// the typer's element index, else a `shape_vars` / literal shape's first type argument at the chain's root.
+    fn chain_elem(&self, e: &syn::Expr) -> Option<String> {
+        if let Some(raw) = self.resolve_elem_type_raw(e) {
+            let t = crate::lang::strip_wrapped(&raw).to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+        match peel_value(e) {
+            syn::Expr::MethodCall(m)
+                if matches!(m.method.to_string().as_str(), "iter" | "into_iter" | "iter_mut" | "drain")
+                    || crate::lang::is_element_preserving_adapter(&m.method.to_string()) =>
+            {
+                self.chain_elem(&m.receiver)
+            }
+            x => match self.std_shape_of(x) {
+                Some((sh, args)) if matches!(sh.as_str(), "Vec" | "[;]" | "[]" | "VecDeque" | "Option" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList") => {
+                    args.first().cloned().flatten()
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// The type a value at a TABLE SITE is asked under: the strict typer's answer, else — SOUNDNESS R1430
+    /// (DEP-CAPS-SPELLING, DEP-VARIANT-ARG) — a DEPENDENCY value path the typer leaves untyped because its leaf is
+    /// all-caps (`ctlib::S`, `use ctlib::S; .. S ..`) or because it is a unit variant (`ctlib::Kd::Aa` → `ctlib::Kd`).
+    /// Read only at table sites, whose edge to a dependency is the chained JOIN: a path that names a `const` rather than
+    /// a type asks a key no report publishes, which adds nothing (and, unchained, the dependency's `invisible` entry the
+    /// written call already draws).
+    fn hook_type_of(&self, e: &syn::Expr) -> Option<String> {
+        if let Some(t) = self.type_of(e) {
+            return Some(t);
+        }
+        if std::env::var_os("CANDOR_R1430_OFF").is_some() {
+            return None;
+        }
+        let syn::Expr::Path(p) = peel_value(e) else { return None };
+        if p.qself.is_some() {
+            return None;
+        }
+        if let Some(id) = p.path.get_ident() {
+            let n = id.to_string();
+            if self.locally_bound(&n) || self.static_types.contains_key(&n) {
+                return None;
+            }
+        }
+        let full = self.expand_scoped(&crate::lang::path_to_string_lc(&p.path));
+        if full.starts_with("::") || full.contains(crate::decls::ALIAS_ALT_SEP) || !self.is_dependency_type(&full) {
+            return None;
+        }
+        let segs: Vec<&str> = full.split("::").collect();
+        let up = |x: &str| x.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let n = segs.len();
+        if n < 2 || !up(segs[n - 1]) {
+            return None;
+        }
+        let ty = if n >= 3 && up(segs[n - 2]) { segs[..n - 1].join("::") } else { full.clone() };
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("R1430VALUE\t{full}\t{ty}"); // §E1 REACH COUNTER
+        }
+        Some(ty)
+    }
+
+    /// CALL-TARGET ROUND 2, HALF 2 — THE DISCLOSURE FALLBACK, MEASURED AND OFF. A site the table RECOGNISES whose slot
+    /// the typer cannot fill. `CANDOR_CT2_DISCLOSE=A` discloses `Unknown` at every such site (proposal §1.3 option A);
+    /// `=B` only at the iteration / callback / I/O / conversion / deferred / drop class (option B: formatting, comparison,
+    /// hashing, cloning and the operators stay under §4's conventionally-pure MAY). Unset: nothing (shipping behaviour).
+    /// `CANDOR_CT2_INSTR` prints every recognised-unresolved site whatever the setting, for pricing.
+    fn ct2_unresolved(&mut self, trait_leaf: &str, member: &str) {
+        let class_b = !matches!(
+            trait_leaf,
+            "Display" | "Debug" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "Pointer" | "LowerExp" | "UpperExp"
+                | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Clone" | "ToString" | "ToOwned" | "Default"
+        ) && !crate::lang::OPERATOR_TRAITS.contains(&trait_leaf);
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2UNRESOLVED\t{}\t{trait_leaf}.{member}", if class_b { "B" } else { "A" }); // §E1 REACH COUNTER
+        }
+        let on = match std::env::var("CANDOR_CT2_DISCLOSE").as_deref() {
+            Ok("A") => true,
+            Ok("B") => class_b,
+            _ => false,
+        };
+        if on {
+            if member == "call" {
+                self.mark_unresolved(format!("callback:{trait_leaf} argument of a std entry point"));
+            } else {
+                self.mark_unresolved(format!("dispatch:{trait_leaf}.{member}"));
+            }
+        }
+    }
+
+    /// One licensed member on a value of type `ty`: the local impl's body (`charge_coercion_ty`), or a DEPENDENCY
+    /// type's through the chained join. A std / primitive / generic type is std's own impl, which runs nothing of the
+    /// user's at this level.
+    fn charge_licensed(&mut self, ty: &str, trait_leaf: &str, member: &str) {
+        self.charge_licensed_at(ty, trait_leaf, member, 0);
+    }
+
+    fn charge_licensed_at(&mut self, ty: &str, trait_leaf: &str, member: &str, depth: u8) {
+        if member == "call" || depth > 4 {
+            return; // a callable slot is the call site's to form (`charge_std_callable`)
+        }
+        let head = ty.split('<').next().unwrap_or(ty).to_string();
+        if head.is_empty() || self.std_payload(&head) || head.contains(crate::decls::ALIAS_ALT_SEP) {
+            return;
+        }
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2LICENSED\t{trait_leaf}::{member}\t{head}"); // §E1 REACH COUNTER
+        }
+        if self.is_dependency_type(&head) {
+            let segs: Vec<&str> = head.split("::").collect();
+            let leaf = segs.last().copied().unwrap_or("");
+            self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                path: format!("{}::{}::{}", segs[0], leaf, member),
+                leaf: member.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
+                typed: false, method: false, is_macro: false });
+            return;
+        }
+        // A local type reaches a body only through its own impl of the trait (or a derive, or an `&Type` impl): an
+        // edge to a type with neither names no unit and only raises a wrong-reason `Unknown` (R1111's measured cost).
+        let l = head.rsplit("::").next().unwrap_or(&head).to_string();
+        let reachable = self.trait_impls.get(trait_leaf).is_some_and(|v| v.iter().any(|x| x == &l))
+            || self.impl_members.contains(&crate::model::derive_key(trait_leaf, &l))
+            || self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, &l));
+        if !reachable {
+            return;
+        }
+        self.charge_coercion_ty(&head, trait_leaf, member);
+        // A DERIVED impl outside the comparison family (which `charge_coercion_ty` walks itself): the derive runs each
+        // FIELD's own impl of the trait (`#[derive(Debug)] struct W { s: S }` formats `s` with `S::fmt`).
+        if !matches!(trait_leaf, "PartialEq" | "PartialOrd" | "Ord" | "Hash")
+            && self.impl_members.contains(&crate::model::derive_key(trait_leaf, &l))
+        {
+            let mut fs: Vec<String> = self.fields.get(&l).map(|f| f.values().cloned().collect()).unwrap_or_default();
+            if let Some(fe) = self.field_elem.get(&l) {
+                fs.extend(fe.values().map(|e| crate::lang::strip_wrapped(e).to_string()).filter(|e| !e.is_empty()));
+            }
+            fs.sort();
+            fs.dedup();
+            for f in fs {
+                if f.rsplit("::").next() != Some(l.as_str()) {
+                    self.charge_licensed_at(&f, trait_leaf, member, depth + 1);
+                }
+            }
+        }
+    }
+
+    /// Whether `e` constructs a crate type that derives `trait_leaf` (`charge_derive_ctor`'s operand).
+    fn is_derive_ctor(&self, e: &syn::Expr, trait_leaf: &str) -> bool {
+        let path = match peel_value(e) {
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) if p.qself.is_none() => &p.path,
+                _ => return false,
+            },
+            syn::Expr::Struct(st) if st.qself.is_none() => &st.path,
+            _ => return false,
+        };
+        path.segments
+            .last()
+            .is_some_and(|s| self.impl_members.contains(&crate::model::derive_key(trait_leaf, &s.ident.to_string())))
+    }
+
+    /// A value CONSTRUCTED in place of a crate type that DERIVES `trait_leaf` (`Wd(x)`, `Wd { f: x }`, `Wd::<S>::default()`
+    /// — a generic wrapper whose field types are the construction's): each field VALUE's own impl.
+    fn charge_derive_ctor(&mut self, operand: &syn::Expr, trait_leaf: &str) -> bool {
+        let (path, vals): (&syn::Path, Vec<&syn::Expr>) = match peel_value(operand) {
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) if p.qself.is_none() => (&p.path, c.args.iter().collect()),
+                _ => return false,
+            },
+            syn::Expr::Struct(st) if st.qself.is_none() => (&st.path, st.fields.iter().map(|f| &f.expr).collect()),
+            _ => return false,
+        };
+        let Some(leaf) = path.segments.last().map(|s| s.ident.to_string()) else { return false };
+        if !self.impl_members.contains(&crate::model::derive_key(trait_leaf, &leaf)) {
+            return false;
+        }
+        let licensed = crate::std_bounds::licensed_by(trait_leaf);
+        let mut work: Vec<(String, &'static str, &'static str)> = Vec::new();
+        let mut shapes: Vec<&syn::Expr> = Vec::new();
+        for v in vals {
+            match self.hook_type_of(v) {
+                Some(t) => {
+                    for (tl, m) in &licensed {
+                        work.push((t.clone(), tl, m));
+                    }
+                }
+                None => shapes.push(v),
+            }
+        }
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2DERIVE\t{trait_leaf}\t{leaf}\t{}", work.len()); // §E1 REACH COUNTER
+        }
+        for (t, tl, m) in work {
+            self.charge_licensed(&t, tl, m);
+        }
+        for v in shapes {
+            self.charge_shape_hooks(v, trait_leaf);
+        }
+        true
+    }
+
+    /// A std trait member run on a value of std SHAPE (`{:?}` of `vec![x]`, `Some(x).clone()`, `v == v`): the
+    /// members std's impl for that shape licenses on each type argument. `false` when the operand is not a std
+    /// shape or std declares no impl of `trait_leaf` for it.
+    fn charge_shape_hooks(&mut self, operand: &syn::Expr, trait_leaf: &str) -> bool {
+        if std::env::var_os("CANDOR_CT2_OFF").is_some() || CT2_EMPTY_CMP.with(|c| c.get()) {
+            return false;
+        }
+        if self.charge_derive_ctor(operand, trait_leaf) {
+            return true;
+        }
+        let Some((shape, args)) = self.std_shape_of(operand) else { return false };
+        let Some(hooks) = crate::std_bounds::impl_hooks(trait_leaf, &shape) else { return false };
+        let mut work: Vec<(String, &'static str, &'static str)> = Vec::new();
+        let mut unresolved: Vec<(&'static str, &'static str)> = Vec::new();
+        for h in &hooks {
+            let tys: Vec<String> = match h.slot {
+                crate::std_bounds::Slot::Elem(i) => args.get(i).cloned().flatten().into_iter().collect(),
+                crate::std_bounds::Slot::ElemAll => args.iter().flatten().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let missing = match h.slot {
+                crate::std_bounds::Slot::Elem(i) => args.get(i).is_some_and(|a| a.is_none()),
+                crate::std_bounds::Slot::ElemAll => args.iter().any(|a| a.is_none()),
+                _ => false,
+            };
+            if missing && !unresolved.contains(&(h.trait_leaf, h.member)) {
+                unresolved.push((h.trait_leaf, h.member));
+            }
+            for t in tys {
+                work.push((t, h.trait_leaf, h.member));
+            }
+        }
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2SHAPE\t{trait_leaf}\t{shape}\t{}", work.len()); // §E1 REACH COUNTER
+        }
+        for (t, tl, m) in work {
+            self.charge_licensed(&t, tl, m);
+        }
+        for (tl, m) in unresolved {
+            self.ct2_unresolved(tl, m);
+        }
+        true
+    }
+
+    /// A `call` slot (a `FnOnce`/`FnMut`/`Fn` bound on an argument): a fn ITEM handed to the std entry point
+    /// (`thread::spawn(work)`, `o.get_or_init(init)`) is called by it, so the call edges to the item. A closure's body
+    /// is already this fn's; a local binding of a fn value is the callable model's.
+    fn charge_std_callable(&mut self, arg: &syn::Expr) {
+        let syn::Expr::Path(p) = peel_value(arg) else {
+            // a closure's body is this fn's own; any other callable expression (`make_cb()`, `self.f`) is not resolved here
+            if !matches!(peel_value(arg), syn::Expr::Closure(_)) {
+                self.ct2_unresolved("FnOnce", "call");
+            }
+            return;
+        };
+        if p.qself.is_some() {
+            return;
+        }
+        let written = crate::lang::path_to_string_lc(&p.path);
+        if p.path.get_ident().is_some_and(|i| self.locally_bound(&i.to_string()) || self.vars.contains_key(&i.to_string())) {
+            return;
+        }
+        let path = self.expand_scoped(&written);
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2CALLABLE\t{path}"); // §E1 REACH COUNTER
+        }
+        let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
+        self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+            path, leaf, str_arg: None, path_lits_partial: false, path_lit2: None,
+            typed: false, method: false, is_macro: false });
+    }
+
+    /// Charge `hooks` at a call whose slots are filled by: the receiver (`recv`, with its std shape when it has one),
+    /// the call's arguments, and the turbofish's first type (`Ret`).
+    fn charge_std_hooks(
+        &mut self,
+        hooks: &[crate::std_bounds::Hook],
+        recv: Option<&syn::Expr>,
+        args: &[&syn::Expr],
+        ret: Option<String>,
+        skip_deferred_self: bool,
+    ) {
+        use crate::std_bounds::Slot;
+        let shape = recv.and_then(|r| self.std_shape_of(r));
+        let mut work: Vec<(String, &'static str, &'static str)> = Vec::new();
+        let mut callables: Vec<usize> = Vec::new();
+        let mut shape_self: Vec<&'static str> = Vec::new();
+        let mut derive_args: Vec<(usize, &'static str)> = Vec::new();
+        let mut dispatch_self: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut unresolved: Vec<(&'static str, &'static str)> = Vec::new();
+        for h in hooks {
+            if h.member == "call" {
+                if let Slot::Arg(k) = h.slot {
+                    callables.push(k);
+                }
+                continue;
+            }
+            match h.slot {
+                Slot::Elem(i) => {
+                    if let Some(t) = shape.as_ref().and_then(|(_, a)| a.get(i).cloned().flatten()) {
+                        work.push((t, h.trait_leaf, h.member));
+                    } else if shape.as_ref().is_some_and(|(_, a)| a.get(i).is_some()) {
+                        unresolved.push((h.trait_leaf, h.member));
+                    }
+                }
+                Slot::ElemAll => {
+                    for t in shape.iter().flat_map(|(_, a)| a.iter().flatten().cloned()) {
+                        work.push((t, h.trait_leaf, h.member));
+                    }
+                }
+                Slot::SelfRecv => {
+                    if h.deferred && skip_deferred_self {
+                        continue;
+                    }
+                    let Some(r) = recv else { continue };
+                    if shape.is_some() || self.is_derive_ctor(r, h.trait_leaf) {
+                        if !shape_self.contains(&h.trait_leaf) {
+                            shape_self.push(h.trait_leaf);
+                        }
+                    } else if let Some(t) = self.resolve_recv_type(r).filter(|t| {
+                        !(self.generic_bounds.contains_key(t.as_str()) || self.impl_generic_bounds.contains_key(t.as_str()))
+                    }) {
+                        work.push((t, h.trait_leaf, h.member));
+                    } else if self.resolve_recv_type(r).is_none() && self.resolve_recv_traits(r).is_empty() {
+                        unresolved.push((h.trait_leaf, h.member));
+                    } else if !dispatch_self.contains(&(h.trait_leaf, h.member)) {
+                        // a DISPATCH-typed receiver (a generic / `impl Trait` / `dyn` value): its body keeps the bounded
+                        // CHA the coercion route gives it (`charge_stringify_dispatch`); the caller's instantiation
+                        // resolves it exactly (R1167).
+                        dispatch_self.push((h.trait_leaf, h.member));
+                    }
+                }
+                Slot::Item => {
+                    if let Some(t) = recv.and_then(|r| self.chain_elem(r)) {
+                        work.push((t, h.trait_leaf, h.member));
+                    } else {
+                        unresolved.push((h.trait_leaf, h.member));
+                    }
+                }
+                Slot::Arg(k) => {
+                    if let Some(a) = args.get(k) {
+                        if self.is_derive_ctor(a, h.trait_leaf) {
+                            if !derive_args.contains(&(k, h.trait_leaf)) {
+                                derive_args.push((k, h.trait_leaf));
+                            }
+                        } else if let Some(t) = self.hook_type_of(a) {
+                            work.push((t, h.trait_leaf, h.member));
+                        } else if self.std_shape_of(a).is_none()
+                            && self.resolve_recv_traits(a).is_empty()
+                            && self.resolve_recv_type(a).is_none()
+                            && !self.certainly_primitive(a)
+                        {
+                            unresolved.push((h.trait_leaf, h.member));
+                        }
+                    }
+                }
+                Slot::Ret => {
+                    if let Some(t) = &ret {
+                        work.push((t.clone(), h.trait_leaf, h.member));
+                    }
+                }
+            }
+        }
+        for (t, tl, m) in work {
+            self.charge_licensed(&t, tl, m);
+        }
+        // the receiver IS a std shape: its own impl of the trait delegates to its type arguments
+        if let Some(r) = recv {
+            for tl in shape_self {
+                self.charge_shape_hooks(r, tl);
+            }
+        }
+        if let Some(r) = recv {
+            for (tl, m) in dispatch_self {
+                self.charge_coercion(r, tl, m);
+            }
+        }
+        unresolved.sort();
+        unresolved.dedup();
+        for (tl, m) in unresolved {
+            self.ct2_unresolved(tl, m);
+        }
+        for (k, tl) in derive_args {
+            if let Some(a) = args.get(k) {
+                self.charge_derive_ctor(a, tl);
+            }
+        }
+        callables.sort();
+        callables.dedup();
+        for k in callables {
+            if let Some(a) = args.get(k) {
+                self.charge_std_callable(a);
+            }
+        }
+        // an argument that is itself a std shape whose impl the slot's trait reaches (`v.extend(vec![x])` is not this;
+        // `HashSet::insert((a, x))` is): one level, through the same impl table
+        for h in hooks {
+            if let Slot::Arg(k) = h.slot {
+                if let Some(a) = args.get(k) {
+                    if self.type_of(a).is_none() {
+                        self.charge_shape_hooks(a, h.trait_leaf);
+                    }
+                }
+            }
+        }
+    }
+
+    /// THE PATH-CALL SITE: a std free fn (`std::mem::take(&mut y)`, `std::cmp::max(a, b)`, `std::io::copy(r, w)`,
+    /// `std::thread::spawn(f)`), an associated fn of a std shape (`Path::new(&x)`, `Vec::from_iter(i)`), or a std
+    /// trait member spelled as a path (`Clone::clone(&x)`, `Iterator::count(i)`) — asked of the table.
+    fn charge_std_path_call(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        use crate::std_bounds::{method_hooks, Recv};
+        if std::env::var_os("CANDOR_CT2_OFF").is_some() || p.qself.is_some() {
+            return;
+        }
+        let written = crate::lang::path_to_string_lc(&p.path);
+        let full = self.expand_scoped(&written);
+        let segs: Vec<&str> = full.split("::").collect();
+        if segs.len() < 2 {
+            return;
+        }
+        let name = segs[segs.len() - 1];
+        let owner = segs[segs.len() - 2];
+        let root = segs[0];
+        let std_rooted = matches!(root, "std" | "core" | "alloc")
+            || (segs.len() == 2 && !self.uses.contains_key(root) && !self.fields.contains_key(root) && !self.local_traits.contains_key(root)
+                && !self.trait_impls.values().any(|v| v.iter().any(|x| x == root)));
+        if !std_rooted {
+            // `Wdf::<S>::default()`: a crate type that DERIVES the std trait declaring `name`, instantiated by a turbofish —
+            // the derive runs the type argument's own member.
+            let n = p.path.segments.len();
+            if n >= 2 {
+                let tseg = &p.path.segments[n - 2];
+                if let syn::PathArguments::AngleBracketed(ab) = &tseg.arguments {
+                    let tleaf = tseg.ident.to_string();
+                    let tys: Vec<String> = ab
+                        .args
+                        .iter()
+                        .filter_map(|a| match a {
+                            syn::GenericArgument::Type(t) => crate::lang::type_path(t, &self.uses),
+                            _ => None,
+                        })
+                        .collect();
+                    for h in method_hooks(Recv::Implementor, name, args.len(), None) {
+                        if h.slot == crate::std_bounds::Slot::SelfRecv
+                            && self.impl_members.contains(&crate::model::derive_key(h.trait_leaf, &tleaf))
+                        {
+                            for t in &tys {
+                                self.charge_licensed(t, h.trait_leaf, h.member);
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let args: Vec<&syn::Expr> = args.iter().collect();
+        let ret = p.path.segments.last().and_then(|s| match &s.arguments {
+            syn::PathArguments::AngleBracketed(ab) => match ab.args.first() {
+                Some(syn::GenericArgument::Type(t)) => crate::lang::type_path(t, &self.uses),
+                _ => None,
+            },
+            _ => None,
+        });
+        let owner_is_module = owner.chars().next().is_some_and(|c| c.is_lowercase());
+        let (hooks, recv, rest): (Vec<crate::std_bounds::Hook>, Option<&syn::Expr>, Vec<&syn::Expr>) = if owner_is_module {
+            (crate::std_bounds::fn_hooks(owner, name, args.len()), None, args.clone())
+        } else if crate::std_bounds::is_std_trait_leaf(owner) {
+            // UFCS on a std trait: the first argument is the receiver
+            let Some((first, rest)) = args.split_first() else { return };
+            (method_hooks(Recv::Implementor, name, rest.len(), Some(&[segs[..segs.len() - 1].join("::")])), Some(*first), rest.to_vec())
+        } else if crate::std_bounds::is_shape(owner) {
+            (method_hooks(Recv::Shape(owner), name, args.len(), None), None, args.clone())
+        } else {
+            return;
+        };
+        if hooks.is_empty() {
+            return;
+        }
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
+        }
+        self.charge_std_hooks(&hooks, recv, &rest, ret, true);
+    }
+
+    /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
+    /// typer peeled to its pointee: a parameter DECLARED `T` / `&T` / `&mut T`, or a `let` whose initializer constructs
+    /// the type (`S`, `S { .. }`, `S(..)`, `S::new(..)` — `clone_vars`). Anything else is not asked.
+    fn clone_receiver_unpeeled(&self, recv: &syn::Expr, leaf: &str) -> bool {
+        let syn::Expr::Path(p) = peel_value(recv) else { return false };
+        let Some(id) = p.path.get_ident().map(|i| i.to_string()) else { return false };
+        if let Some(ty) = self.declared_param_ty(recv) {
+            return match crate::lang::peel_ty_refs(ty) {
+                syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|s| s.ident == leaf && s.arguments.is_none()),
+                _ => false,
+            };
+        }
+        self.shape_vars.get(&id).is_none() && self.clone_vars.contains(&id)
+    }
+
+    /// THE METHOD SITE: `recv.leaf(args)` asked of the table — as a method of the receiver's std shape (`v.contains(&x)`,
+    /// `v.sort()`), and as a std TRAIT member the receiver's type gets from std (`x.to_string()`, `it.count()`,
+    /// `a.max(b)`, `w.write_all(..)`) when the type does not define the method itself.
+    fn charge_std_method_site(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        if std::env::var_os("CANDOR_CT2_OFF").is_some() {
+            return;
+        }
+        let args: Vec<&syn::Expr> = node.args.iter().collect();
+        let ret = match node.turbofish.as_ref().and_then(|tf| tf.args.first()) {
+            Some(syn::GenericArgument::Type(t)) => crate::lang::type_path(t, &self.uses),
+            _ => None,
+        };
+        let mut hooks: Vec<crate::std_bounds::Hook> = Vec::new();
+        let shape = self.std_shape_of(&node.receiver).map(|(s, _)| s);
+        if let Some(sh) = &shape {
+            hooks.extend(crate::std_bounds::method_hooks(crate::std_bounds::Recv::Shape(sh), leaf, args.len(), None));
+        } else if let Some(t) = self.resolve_recv_type(&node.receiver) {
+            let head = t.split('<').next().unwrap_or(&t).to_string();
+            let tl = head.rsplit("::").next().unwrap_or(&head).to_string();
+            // `x.clone()` is the one REQUIRED member the typed-call route never forms (its receiver typing peels `Arc<T>` /
+            // `Rc<T>` to `T`, whose `clone` the pointer's own never runs). Formed here only where the STRICT typer — which
+            // does not peel — names the same type.
+            let clone_typed = leaf == "clone" && args.is_empty() && self.clone_receiver_unpeeled(&node.receiver, &tl);
+            let bounded_name = self.generic_bounds.contains_key(&head) || self.impl_generic_bounds.contains_key(&head);
+            if (!self.std_payload(&head) || bounded_name) && (!self.local_fn_on(&tl, leaf) || clone_typed) {
+                hooks.extend(crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, leaf, args.len(), None));
+            } else if self.std_payload(&head) && self.chain_elem(&node.receiver).is_some() {
+                // a std iterator chain (`xs.iter().max()`): only its ITEM and arguments are the user's
+                hooks.extend(
+                    crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, leaf, args.len(), None)
+                        .into_iter()
+                        .filter(|h| h.slot != crate::std_bounds::Slot::SelfRecv),
+                );
+            }
+        }
+        if hooks.is_empty() && shape.is_none() && self.resolve_recv_type(&node.receiver).is_none()
+            && !self.resolve_recv_traits(&node.receiver).is_empty()
+        {
+            // a DISPATCH-typed receiver (`x: &mut dyn Display`, `x: impl Iterator`, `x: T`)
+            hooks.extend(crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, leaf, args.len(), None));
+        }
+        if hooks.is_empty() && shape.is_none() && self.chain_elem(&node.receiver).is_some() {
+            // an untyped receiver that is an element chain (`a.iter().cloned()`): its ITEM and arguments
+            hooks.extend(
+                crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, leaf, args.len(), None)
+                    .into_iter()
+                    .filter(|h| h.slot != crate::std_bounds::Slot::SelfRecv),
+            );
+        }
+        if hooks.is_empty() {
+            return;
+        }
+        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+            eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
+        }
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true);
+    }
+
     fn charge_coercion(&mut self, operand: &syn::Expr, trait_leaf: &str, method: &str) {
+        // CALL-TARGET ROUND 2 — a std-SHAPE operand (`{:?}` of `vec![x]`, `Some(x) == y`) runs its type arguments'
+        // members through std's impl for the shape (the table's `I` rows). Beside, never instead of, what follows.
+        let shaped = self.charge_shape_hooks(operand, trait_leaf);
         let Some(ty) = self.resolve_recv_type(operand) else {
+            if !shaped && self.resolve_recv_traits(operand).is_empty() && !self.certainly_primitive(operand) {
+                self.ct2_unresolved(trait_leaf, method);
+            }
             self.charge_stringify_dispatch(operand, trait_leaf, method);
             return;
         };
@@ -9030,7 +9680,14 @@ impl<'a> CallCollector<'a> {
         let p_elem = self.elem_of.remove(name);
         let p_elem_tr = self.elem_trait_of.remove(name);
         let p_tuple = self.tuple_of.remove(name);
-        let p_tuple_tr = self.tuple_trait_of.remove(name);
+        // SOUNDNESS R1444 — EVERY KEY this name is filed under, not only the bare one: R1429's tuple-payload fact lives in
+        // `tuple_trait_of` under `?name` (`model::payload_tuple_key`), which this binder cleared for `let` only, so a
+        // `for`/closure/`match`/`if let` shadow kept the outer parameter's payload positions.
+        let p_tuple_tr: Vec<(String, Option<Vec<Vec<String>>>)> =
+            Self::name_keys(name).into_iter().map(|k| { let v = self.tuple_trait_of.remove(&k); (k, v) }).collect();
+        // CALL-TARGET ROUND 2 — the std-shape and constructed-value facts of a `let` (`shape_vars`, `clone_vars`).
+        let p_shape = self.shape_vars.remove(name);
+        let p_clone = self.clone_vars.remove(name);
         // A free-fn alias: `name()` inside the body would call the OUTER alias's target and inherit its
         // whole transitive effect chain.
         let p_alias = self.fn_alias.remove(name);
@@ -9088,11 +9745,29 @@ impl<'a> CallCollector<'a> {
             Some(v) => { self.tuple_of.insert(name.to_string(), v); }
             None => { self.tuple_of.remove(name); }
         }
-        match p_tuple_tr {
-            Some(v) => { self.tuple_trait_of.insert(name.to_string(), v); }
-            None => { self.tuple_trait_of.remove(name); }
+        for (k, v) in p_tuple_tr {
+            match v {
+                Some(v) => { self.tuple_trait_of.insert(k, v); }
+                None => { self.tuple_trait_of.remove(&k); }
+            }
+        }
+        restore(&mut self.shape_vars, name, p_shape);
+        if p_clone {
+            self.clone_vars.insert(name.to_string());
+        } else {
+            self.clone_vars.remove(name);
         }
         r
+    }
+
+    /// SOUNDNESS R1444 — every key a binding `name` is filed under in a name-keyed table: the bare name, and each
+    /// DERIVED key (`NAME_KEY_FNS`). The binder scopes all of them; `tests::every_derived_name_key_is_scoped` pins that
+    /// no table is written under a derived key this list does not name.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const NAME_KEY_FNS: &'static [&'static str] = &["payload_tuple_key"];
+
+    pub(crate) fn name_keys(name: &str) -> Vec<String> {
+        vec![name.to_string(), crate::model::payload_tuple_key(name)]
     }
 
     /// R100 — capture the name-keyed state of `names` (see `BoundNameState`).
@@ -9631,6 +10306,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         if let syn::Expr::Path(p) = func {
+            self.charge_std_path_call(p, &node.args); // CALL-TARGET ROUND 2
             self.edge_generic_operator_call(p, &node.args);
             // SOUNDNESS R1165 — a dependency call handed a local value with a std-trait impl (`gena::same_eq(n, n)`).
             if p.qself.is_none() && !node.args.is_empty() {
@@ -9941,7 +10617,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SOUNDNESS R1295 — a driven iterator over a std I/O source (`ReadDir`, `lines()` on a handle), and an I/O member on
         // a buffering-wrapper PARAMETER (`r.read_line(..)` with `r: &mut BufReader<File>`), which the typer answers as
         // the wrapper and so formed no call (`charge_io_iter_source`, `io_wrapped`).
-        if crate::lang::iterator_drives(&leaf) {
+        if crate::std_bounds::iterator_member_runs(&leaf) || !crate::std_methods::is_std_method_name(&leaf) {
             self.charge_io_iter_source(&node.receiver);
         }
         if !matches!(leaf.as_str(), "lines" | "bytes" | "split")
@@ -10010,18 +10686,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // forcing site reads silent-pure (only an explicit `.next()` was caught). A generic/opaque
         // iterator receiver yields no concrete type (`iter_next_target` → None), so the RowIter
         // fabrication stays closed. (`.next()` itself isn't here — it resolves directly as a method.)
-        if is_iter_consumer(&leaf) {
-            self.charge_iter_next(&node.receiver);
-        }
+        // CALL-TARGET ROUND 2 — the std bound table answers this site (`charge_std_method_site`): which std member the
+        // call is and what it may run, read from std's declarations. It REPLACES the hand lists that answered it before
+        // (`is_iter_consumer`, the `to_string` special case, `is_write_provided`/`is_read_provided`, R1111's
+        // per-collection method lists), which are deleted. `CANDOR_CT2_OFF=1` turns the table's sites off altogether —
+        // a same-binary ATTRIBUTION control (it is not the published behaviour: the lists it replaced are gone).
+        self.charge_std_method_site(node, &leaf);
         // IMPLICIT `.to_string()` → `Display::fmt` (#2): `ToString` is blanket-impl'd for every `T: Display`
         // by routing through `Display::fmt`, so `v.to_string()` on a concrete local `impl Display` reaches
         // that (possibly effectful) formatter — silent-pure otherwise. Charge it like a `{}` format arg.
         // (A type with its OWN inherent `to_string` is rare; the blanket impl is the universal case, and a
         // local impl Display is the resolve-or-skip gate.) `format_args!`-family macros are handled in
         // `visit_macro`.
-        if leaf == "to_string" && node.args.is_empty() {
-            self.charge_coercion(&node.receiver, "Display", "fmt");
-        }
+
         // IMPLICIT io::Write / io::Read PROVIDED-METHOD forcing (#w): `w.write_all(..)`/`w.write_fmt(..)`
         // and `r.read_to_end(..)`/`r.read_to_string(..)`/`r.read_exact(..)` are driven by the required
         // `write`/`read` INSIDE std, so a call on a CONCRETE LOCAL `impl Write`/`impl Read` whose
@@ -10032,13 +10709,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // absent from `trait_impls` (LOCAL impls only) → no edge; a generic/`dyn` receiver yields no
         // concrete type → the documented external-dispatch miss, unchanged. Both `Write` required-method
         // leaves are tried (io `write`, fmt `write_str`); only the one the local type defines resolves.
-        if is_write_provided(&leaf) {
-            self.charge_coercion(&node.receiver, "Write", "write");
-            self.charge_coercion(&node.receiver, "Write", "write_str");
-        }
-        if is_read_provided(&leaf) {
-            self.charge_coercion(&node.receiver, "Read", "read");
-        }
+
         // SOUNDNESS R1145 — the callee applies an operator to a parameter of a generic type; charge it on this call's
         // concrete argument (`w.g9e(d, 3u64)`, `d: D`).
         if let Some(t) = self.resolve_recv_type(&node.receiver) {
@@ -11508,6 +12179,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // A `for _ in <concrete-local-iter>` IMPLICITLY drives the iterator's `next()` to completion —
         // charge the local `Type::next` so its effect isn't silently dropped (see `iter_next_target`).
         self.charge_iter_next(&node.expr);
+        // CALL-TARGET ROUND 2 — `for x in v` is `IntoIterator::into_iter(v)` then `next` until `None`: the table's
+        // `into_iter` row (with std's blanket `impl<I: Iterator> IntoIterator for I`) on the iterated value's type.
+        if std::env::var_os("CANDOR_CT2_OFF").is_none() && self.std_shape_of(&node.expr).is_none() {
+            let hooks = crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, "into_iter", 0, None);
+            if let Some(t) = self.resolve_recv_type(&node.expr) {
+                for h in hooks.iter().filter(|h| h.slot == crate::std_bounds::Slot::SelfRecv) {
+                    self.charge_licensed(&t, h.trait_leaf, h.member);
+                }
+            }
+        }
         self.charge_io_iter_source(&node.expr); // SOUNDNESS R1295 — `for e in rd` over a `ReadDir`, `for l in r.lines()`
         if let Some(name) = single_pat_ident(&node.pat) {
             // SOUNDNESS R1023 — the loop variable is what ONE `for` peels off the iterated value: a plain
@@ -12138,6 +12819,46 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
             if let Some((n, p)) = payload.filter(|(_, p)| !p.is_empty()) {
                 self.assign_drop.let_payload.insert(n, p);
+            }
+        }
+        // CALL-TARGET ROUND 2 — `let v = vec![x];` carries the shape `std_shape_of` reads at `v.sort()` / `{:?}` of `v`.
+        {
+            let shape = match (&node.pat, &node.init) {
+                (syn::Pat::Ident(pi), Some(init)) if pi.subpat.is_none() && node.init.as_ref().is_some_and(|i| i.diverge.is_none()) => {
+                    let mut out = None;
+                    self.with_pre_bindings(&pre_bindings, |s| out = s.std_shape_literal(&init.expr));
+                    out.map(|sh| (pi.ident.to_string(), sh))
+                }
+                _ => None,
+            };
+            for n in &bound_names {
+                self.shape_vars.remove(n);
+                self.clone_vars.remove(n);
+            }
+            if let Some((n, sh)) = shape {
+                self.shape_vars.insert(n, sh);
+            }
+            if let (syn::Pat::Ident(pi), Some(init)) = (&node.pat, &node.init) {
+                let ctor = match peel_value(&init.expr) {
+                    syn::Expr::Struct(_) => true,
+                    syn::Expr::Path(p) => p.path.segments.last().is_some_and(|s| s.ident.to_string().chars().next().is_some_and(char::is_uppercase)),
+                    syn::Expr::Call(c) => match &*c.func {
+                        syn::Expr::Path(p) => {
+                            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                            let up = |x: &String| x.chars().next().is_some_and(char::is_uppercase);
+                            match segs.as_slice() {
+                                [.., t] if up(t) => !matches!(t.as_str(), "Some" | "Ok" | "Err"),
+                                [.., t, f] if up(t) && f == "new" => !matches!(t.as_str(), "Arc" | "Rc" | "Box" | "Weak"),
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if ctor && pi.subpat.is_none() {
+                    self.clone_vars.insert(pi.ident.to_string());
+                }
             }
         }
         // SOUNDNESS R1130 — `let s: HashSet<G> = xs.into_iter().collect();`: the annotation is the collected-into
@@ -13321,10 +14042,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
                 Some(t)
             });
+            // CALL-TARGET ROUND 2 — a comparison against a literally EMPTY value (`opt == None`, `v == vec![]`) never runs
+            // the element's member (EXECUTED, R1098): the shape's impl is not asked.
+            let empty_cmp = matches!(tr, "PartialEq" | "PartialOrd") && (is_empty_value(&node.left) || is_empty_value(&node.right));
+            CT2_EMPTY_CMP.with(|c| c.set(empty_cmp));
             match &lconst {
                 Some(t) => self.charge_coercion_ty(t, tr, method),
                 None => self.charge_coercion(&node.left, tr, method),
             }
+            CT2_EMPTY_CMP.with(|c| c.set(false));
             // SOUNDNESS R1162 (literal half) — an UNSUFFIXED literal left operand (`&5 % d`) takes its type from impl
             // selection, so it is any primitive of its kind the crate implements this operator on: each such primitive
             // is charged (a union; rustc rejects the ambiguous case, so one of them is the one that runs). EXECUTED:
@@ -14555,33 +15281,31 @@ fn pinned_arg(expr: &syn::Expr) -> Option<&syn::Expr> {
     }
 }
 
+thread_local! {
+    /// CALL-TARGET ROUND 2 — the comparison being charged has a literally EMPTY operand (`charge_shape_hooks`).
+    static CT2_EMPTY_CMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A literally EMPTY std value: `None`, `vec![]`, `[]`, `Vec::new()`, `String::new()`, `""`.
+fn is_empty_value(e: &syn::Expr) -> bool {
+    match peel_value(e) {
+        syn::Expr::Path(p) => p.qself.is_none() && p.path.segments.len() == 1 && p.path.segments[0].ident == "None",
+        syn::Expr::Macro(m) => m.mac.path.is_ident("vec") && m.mac.tokens.is_empty(),
+        syn::Expr::Array(a) => a.elems.is_empty(),
+        syn::Expr::Lit(l) => matches!(&l.lit, syn::Lit::Str(s) if s.value().is_empty()),
+        syn::Expr::Call(c) => c.args.is_empty() && matches!(&*c.func, syn::Expr::Path(p)
+            if p.path.segments.last().is_some_and(|s| s.ident == "new") && p.path.segments.len() == 2
+                && matches!(p.path.segments[0].ident.to_string().as_str(), "Vec" | "String" | "VecDeque" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet")),
+        _ => false,
+    }
+}
+
 /// R980 — the argument of a `pin!(x)` / `std::pin::pin!(x)` / `core::pin::pin!(x)` invocation.
 fn pin_macro_arg(mac: &syn::Macro) -> Option<syn::Expr> {
     if mac.path.segments.last().is_none_or(|s| s.ident != "pin") {
         return None;
     }
     mac.parse_body::<syn::Expr>().ok()
-}
-
-/// R984 — a std trait member with NO default body (so `Trait::m(&t)` over a local `impl Trait for T` can
-/// only run that impl's `m`).
-fn std_required_member(tr: &str, m: &str) -> bool {
-    matches!(
-        (tr, m),
-        ("Display" | "Debug" | "LowerHex" | "UpperHex" | "Binary" | "Octal" | "Pointer", "fmt")
-            | ("Hash", "hash")
-            | ("PartialEq", "eq")
-            | ("PartialOrd", "partial_cmp")
-            | ("Ord", "cmp")
-            | ("Clone", "clone")
-            | ("Iterator", "next")
-            | ("Future", "poll")
-            | ("Read", "read")
-            | ("Write", "write" | "flush")
-            | ("Deref", "deref")
-            | ("DerefMut", "deref_mut")
-            | ("Drop", "drop")
-    )
 }
 
 /// SOUNDNESS R1023 — which layer a std `Some(x)`/`Ok(x)` pattern peels (see `lang::LayerBinder`).
