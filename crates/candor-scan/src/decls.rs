@@ -2474,6 +2474,14 @@ pub(crate) fn seed_elem_of(
                 if let Some(t) = tuple_trait_leaves(&pt.ty, &gbounds) {
                     tuple_trait_of.insert(id.ident.to_string(), t);
                 }
+                // SOUNDNESS R1429 — `fn f(c: Option<(u64, &dyn PacketKey)>)`: the WRAPPED tuple's dispatch positions,
+                // under `model::payload_tuple_key`, for a later `if let Some((n, k)) = c { k.encrypt(..) }`.
+                let inner = crate::lang::unwrap_result_option(&pt.ty);
+                if !std::ptr::eq(inner, &*pt.ty) {
+                    if let Some(t) = tuple_trait_leaves(inner, &gbounds) {
+                        tuple_trait_of.insert(crate::model::payload_tuple_key(&id.ident.to_string()), t);
+                    }
+                }
             }
             // `fn f((s, n): (Sender, usize))` — a tuple-destructured param.
             syn::Pat::Tuple(tup) => {

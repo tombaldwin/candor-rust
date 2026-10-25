@@ -701,6 +701,12 @@ pub(crate) fn is_derive_synth(attrs: &[syn::Attribute]) -> bool {
 /// LEAF (two same-leaf enums that disagree withdraw the key, `file_decl_fact`'s rule). A path to a payload variant used as
 /// a value is a constructor FUNCTION (`.map(Tokio::Unix)`), not a value of the enum, so only a `"1"` licenses typing the
 /// path as the enum.
+/// SOUNDNESS R1429 — the `tuple_trait_of` key for the TUPLE PAYLOAD of an `Option`/`Result`-typed binding
+/// (`c: Option<(u64, &dyn PacketKey)>`). `?` cannot start an identifier, so it cannot meet a binding's own key.
+pub(crate) fn payload_tuple_key(name: &str) -> String {
+    format!("?{name}")
+}
+
 pub(crate) fn unit_variant_key(enum_leaf: &str, variant: &str) -> String {
     format!("<unitvar>{enum_leaf}::{variant}")
 }

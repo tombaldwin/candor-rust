@@ -18248,7 +18248,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18259,7 +18259,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev138/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev139/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -33685,4 +33685,25 @@ pub mod c { use super::super::Runner; pub fn spawn() { let _ = Runner::new(\"tru
     assert!(row("p::b::c::pure").is_none_or(|r| !effs(&r).iter().any(|e| e == "Exec")),
         "R400 `p::b::c::pure` builds a Vec (EXECUTED: no process); `Exec` is the parent's binding read in the \
          grandparent's place:\n{v:#}");
+}
+
+/// SOUNDNESS R1429 — **`if let Some((n, k)) = c` OVER `c: Option<(u64, &dyn PacketKey)>` DISPATCHES `k`.** The tuple
+/// payload's trait-object position was unbound, so `k.encrypt(..)` fell to the bare-leaf route and published no
+/// `PacketKey::encrypt` key: quinn-proto `PartialEncode::finish` (packet.rs:492), where a chained consumer's own
+/// `PacketKey` was unreachable — covered on 0.40.16 only by a wrong-reason hedge R1426's correct typing removed. On the
+/// real quinn-proto 0.11.12 report, a consumer implementing `PacketKey` with a file write and calling
+/// `Endpoint::refuse` now reads `deny Fs` 1 (0 on 0.40.16 and on R1426 alone). EXECUTED fixture
+/// (`rustagent-ct1/ut2`): `caller` writes through `Eff::encrypt`.
+#[test]
+fn r1429_a_trait_object_inside_an_option_tuple_payload_dispatches() {
+    let v = scan_src_to_json("r1429", "\
+pub trait PacketKey { fn encrypt(&self, packet: u64, buf: &mut [u8]); }\n\
+pub struct Eff;\n\
+impl PacketKey for Eff { fn encrypt(&self, _p: u64, _b: &mut [u8]) { let _ = std::fs::write(\"/tmp/r1429\", b\"x\"); } }\n\
+pub fn finish(c: Option<(u64, &dyn PacketKey)>, buf: &mut [u8]) { if let Some((n, k)) = c { k.encrypt(n, buf); } }\n\
+pub fn caller() { let mut b = [0u8; 4]; finish(Some((1, &Eff)), &mut b); }\n");
+    let f = fn_entry(&v, "finish");
+    assert!(f["dispatchesOn"].as_array().is_some_and(|d| d.iter().any(|k| k.as_str().is_some_and(|k| k.ends_with("#PacketKey::encrypt")))),
+        "R1429 `finish` must publish the `PacketKey::encrypt` key a consumer joins:\n{f:#}");
+    assert!(effs(fn_entry(&v, "caller")).iter().any(|e| e == "Fs"), "R1429 `caller` writes through `Eff::encrypt`:\n{v:#}");
 }

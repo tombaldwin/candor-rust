@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev139 (rustagent-ct1): SOUNDNESS R1429 — an `Option`/`Result`-of-tuple parameter records its dispatch positions
+    // (cached `tuple_trait_of`/`calls`/`dispatchesOn` move).
     // rev138 (rustagent-ct1): SOUNDNESS R1426 — a crate-local path value is typed by the `let` route in every position, and
     // R400 — `use super::super::X` resolves against the module it names (cached `calls` move).
     // rev137 (rustagent-0416): Fable REVIEW9 R-b — a key whose call's value escaped is recorded as an `E` site (cached
@@ -552,7 +554,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev138/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev139/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

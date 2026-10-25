@@ -3450,6 +3450,52 @@ impl<'a> CallCollector<'a> {
         self.resolve_recv_type_for(expr, "")
     }
 
+    /// SOUNDNESS R1429 — for `Some((p0, p1, ..))` / `Ok((..))` over a binding whose `Option`/`Result` payload is a tuple
+    /// with dispatch positions (`model::payload_tuple_key`), the (name, trait leaves) of every identifier position
+    /// that is dispatch-typed. `None` for any other pattern or scrutinee shape.
+    fn payload_tuple_dispatch_binds(&self, pat: &syn::Pat, scrut: &syn::Expr) -> Option<Vec<(String, Vec<String>)>> {
+        if !crate::lang::std_some_ok_pat(pat) {
+            return None;
+        }
+        let syn::Pat::TupleStruct(ts) = pat else { return None };
+        if ts.elems.len() != 1 {
+            return None;
+        }
+        let syn::Pat::Tuple(tup) = ts.elems.first()? else { return None };
+        let name = match peel_value(scrut) {
+            syn::Expr::Path(p) => p.path.get_ident()?.to_string(),
+            _ => return None,
+        };
+        let pos = self.tuple_trait_of.get(&crate::model::payload_tuple_key(&name))?;
+        if pos.len() != tup.elems.len() {
+            return None;
+        }
+        let binds: Vec<(String, Vec<String>)> = tup
+            .elems
+            .iter()
+            .zip(pos.iter())
+            .filter(|(_, l)| !l.is_empty())
+            .filter_map(|(p, l)| crate::lang::single_pat_ident(p).map(|n| (n, l.clone())))
+            .collect();
+        if std::env::var_os("CANDOR_R1429_INSTR").is_some() && !binds.is_empty() {
+            eprintln!("R1429BIND\t{name}\t{}", binds.iter().map(|b| b.0.as_str()).collect::<Vec<_>>().join(",")); // §E1 REACH COUNTER
+        }
+        (!binds.is_empty()).then_some(binds)
+    }
+
+    /// Run `body` with every (name, leaves) bound dispatch-typed, each scoped as `scoped_binding` scopes one.
+    fn bind_traits_nested(&mut self, binds: &[(String, Vec<String>)], body: &mut dyn FnMut(&mut Self)) {
+        match binds.split_first() {
+            None => body(self),
+            Some(((n, l), rest)) => {
+                if Self::leaves_are_callable(l) {
+                    self.fn_typed_vars.insert(n.clone());
+                }
+                self.scoped_binding(n, Bound::Traits(l.clone()), |s| s.bind_traits_nested(rest, body))
+            }
+        }
+    }
+
     /// SOUNDNESS R1426 — this crate declares `variant` of the enum `owner` (a type path; its leaf is the key) as a UNIT
     /// variant, and no same-leaf enum disagrees (`model::unit_variant_key`).
     fn variant_is_unit(&self, owner: &str, variant: &str) -> bool {
@@ -11212,6 +11258,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // read silent-pure. Scoped to the then-branch (trait_vars is fn-wide) so it can't leak; the
         // scrutinee + else are visited normally. A concrete/non-dyn payload yields no leaves → default walk.
         if let syn::Expr::Let(el) = &*node.cond {
+            // SOUNDNESS R1429 — `if let Some((n, k)) = c { k.encrypt(..) }` over `c: Option<(u64, &dyn PacketKey)>`:
+            // each tuple position that is a trait object dispatches as the plain `if let Some(k) = c` does. Unbound
+            // before, `k.encrypt` fell to the bare-leaf route, met the crate's own `impl PacketKey for Box<dyn ..>`
+            // under its leaf, read as a resolved concrete call, and published NO `PacketKey::encrypt` key (quinn-proto
+            // `PartialEncode::finish`). Only dispatch-typed positions bind; the rest walk as before.
+            if std::env::var_os("CANDOR_R1429_OFF").is_none() {
+                if let Some(binds) = self.payload_tuple_dispatch_binds(&el.pat, &el.expr) {
+                    self.visit_expr(&el.expr);
+                    let then_branch = &node.then_branch;
+                    self.bind_traits_nested(&binds, &mut |s| s.visit_block(then_branch));
+                    if let Some((_, else_b)) = &node.else_branch {
+                        self.visit_expr(else_b);
+                    }
+                    return;
+                }
+            }
             if let Some(binding) = some_ok_binding(&el.pat) {
                 let leaves = self.resolve_elem_trait_leaves(&el.expr);
                 if !leaves.is_empty() {
@@ -12341,6 +12403,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
                 // …and the tuple's per-position DISPATCH leaves, the `tuple_trait_of` twin of the above.
                 self.tuple_trait_of.remove(&id.ident.to_string());
+                self.tuple_trait_of.remove(&crate::model::payload_tuple_key(&id.ident.to_string()));
                 if let Some(t) = tuple_trait_leaves(&pt.ty, &self.generic_bounds) {
                     self.tuple_trait_of.insert(id.ident.to_string(), t);
                 }
@@ -12864,6 +12927,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // shape binder's stale-rebind hygiene.
                     self.tuple_of.remove(&id.ident.to_string());
                     self.tuple_trait_of.remove(&id.ident.to_string());
+                    self.tuple_trait_of.remove(&crate::model::payload_tuple_key(&id.ident.to_string()));
                     if let syn::Expr::Tuple(it) = &*init.expr {
                         // Independent per-position tables — a MIXED tuple (`(cb, conn)`, position 0
                         // dispatch-typed, position 1 a plain concrete effectful value) needs BOTH: the
