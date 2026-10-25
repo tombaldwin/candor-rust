@@ -10312,19 +10312,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.edge_std_type_dep_trait_member(p, &node.args);
             self.edge_ufcs_operator(p, &node.args);
-            // SOUNDNESS R1111 (boundary) — `std::cmp::max(a, b)` / `min` / `max_by_key`-free spellings run
-            // `Ord` on the arguments' type (EXECUTED: `v_cmpmax` logs the impl). Only the std path, as the
-            // written path expands; a local `max` fn resolves as itself.
-            if p.qself.is_none() && node.args.len() == 2 {
-                let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
-                if matches!(full.as_str(), "std::cmp::max" | "std::cmp::min" | "core::cmp::max" | "core::cmp::min" | "cmp::max" | "cmp::min")
-                    && (full.starts_with("std::") || full.starts_with("core::") || !self.uses.contains_key("cmp"))
-                {
-                    if let Some(t) = node.args.first().and_then(|a| self.type_of(a)) {
-                        self.charge_cmp_family(&t, false, true, false);
-                    }
-                }
-            }
+            // `std::cmp::max(a, b)` / `min` (R1111's spelling list) is the std bound table's `fn:core::cmp max/min` row now
+            // (`charge_std_path_call`).
         }
         match func {
             syn::Expr::Path(p) => {
