@@ -11,6 +11,31 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: a crate-local path VALUE is typed by one route in every position (SOUNDNESS R1426, call-target
+  round 1).** `crate::S` with an all-caps leaf, a UNIT enum variant used as a receiver or argument (`Kd::Aa.go()`,
+  `crate::Kd::Aa`, `m::Mk::Cc`, `Self::Aa`, `hg(Kd::Aa)`, `use Kd::Aa; Aa.go()`) and a TUPLE-variant construction
+  (`Kd::Bb(1).act()`, `let x = Kd::Bb(1)`) read ABSENT or `Unknown`-only on 0.40.16 while the `let` spelling of the same
+  value charged; they now take the `let` route's answer. A PAYLOAD variant's path is its constructor function and is
+  never typed as the enum (a declared-kind fact, `model::unit_variant_key`). Dependency-rooted values keep R856's rule.
+  Executed matrix: SILENT bare 413 → 398, crate 480 → 398. Gates can turn red: `deny E` 0 → 1 on 9 corpus units, all
+  traced to the real body (mongodb nonce `Rand`, termwiz and jni `Log`); `deny Unknown` 0 → 1 on 133 (newly typed
+  receivers reaching contested same-leaf methods). Typing groundwork, not a structural step: nothing is deleted.
+  `CANDOR_R1426_OFF=1` restores 0.40.16.
+- ⚠ **candor-scan: `use super::super::X` names the GRANDPARENT's `X` (SOUNDNESS R400, both directions).** A parent's
+  rebinding was read in its place: a spawn behind the grandparent's alias read ABSENT, and the reversed body charged
+  `Exec` it never runs. Each inline module now carries its ancestors' bindings by depth. 12 executed fixtures, 12/12.
+  `CANDOR_R400_OFF=1` restores 0.40.16.
+- ⚠ **candor-scan: a trait object inside an `Option`/`Result`-of-tuple payload dispatches (SOUNDNESS R1429).**
+  `if let Some((n, k)) = c { k.encrypt(..) }` over `c: Option<(u64, &dyn PacketKey)>` left `k` unbound and published
+  no `PacketKey::encrypt` key, so a chained consumer's own implementor was unreachable (quinn-proto
+  `PartialEncode::finish`; covered on 0.40.16 only by a wrong-reason hedge R1426 removes). On the real quinn-proto
+  0.11.12 report a consumer whose `PacketKey::encrypt` writes a file, calling `Endpoint::refuse`, reads `deny Fs`
+  0 → 1. `CANDOR_R1429_OFF=1` restores 0.40.16.
+- **soundness/calltarget: the call-target matrix is an in-repo instrument** (`bash soundness/calltarget/run.sh`; not
+  in per-commit CI): every cell built and EXECUTED, measured at the caller, three spellings (`crate`, `bare`, `use`),
+  with a committed expected-verdict baseline that moves with the engine.
+- Scan cache rev137 → rev139.
+
 ## [0.40.16] — 2026-10-24
 
 - ⚠ **candor-scan: an `interfaceUnion` entry carries its contributors' further members in `dispatchesOn`, and the R1324
