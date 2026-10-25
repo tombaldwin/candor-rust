@@ -809,8 +809,112 @@ def gen_pathval():
                 gt = (n == "one") and kind != "payload_ctor"
                 add(cid, "pathval", kind, loc, n, E, s.files(), arms_for(loc), gt, False)
 
+# ---------------------------------------------------------------------------------------------
+# 8. CONTROLS (call-target round 2, FABLE-REVIEW §3) — every cell here performs NO effect (EXECUTED) unless it is
+# marked as a positive twin, so any concrete charge at the caller is FABRICATED. Added BEFORE the round-2 change and
+# measured on published 0.40.17 first.
+#   wx_unrel_*   — wx_unrelated_override: the consumer implements a member of the same NAME on a type/trait UNRELATED to
+#                  the dispatched receiver's static type (an unrelated trait, a same-LEAF trait of another crate, a
+#                  sibling sub-trait of a shared base).
+#   wx_exact_*   — wx_exact_producer: the producer dispatches on a value of EXACT type while the consumer implements the
+#                  trait for its own type (a concrete parameter, UFCS on a concrete local, an instantiated holder — the
+#                  rust analogue of the re-key leg; rust has no subclassing, so an "open subclass" leg is not expressible).
+#   nl_*         — the NON-INVOKING LOOK-ALIKE axis: syntax that resembles a hook call but runs none, beside a positive
+#                  twin that does run it (`nl_*_pos`, gt = effect).
+#   arm `chns`   — chained with the dependency report's call-graph SIDECAR deleted (FABLE-REVIEW §3.5).
+def gen_controls():
+    i = 0
+    def cell(cid, where, files_fn, gt, arms):
+        nonlocal i
+        E = rot(i); i += 1
+        cid = "%s_%s" % (cid, E)
+        s = Src()
+        body = eff(E, cid)
+        files_fn(s, body)
+        add(cid, "control", cid.rsplit("_", 1)[0], where, "one" if gt else "pure", E, s.files(), arms, gt, False, src=s)
+    DEP3 = ["ch", "unch", "chns"]
+    # --- wx_unrelated_override
+    def unrel_trait(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub fn run(t: &dyn Tr) { t.act() }" % PURE)
+        s.put("root", "pub trait Tr2 { fn act(&self); }\npub struct S;\nimpl Tr2 for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::run(&ctlib::P); let _s = S;")
+    cell("wx_unrel_trait", "dep", unrel_trait, False, DEP3)
+    def unrel_leaf(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub fn run(t: &dyn Tr) { t.act() }" % PURE)
+        s.put("root", "pub mod m { pub trait Tr { fn act(&self); } }\npub struct S;\nimpl m::Tr for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::run(&ctlib::P); let _s = S;")
+    cell("wx_unrel_leaf", "dep", unrel_leaf, False, DEP3)
+    def unrel_gen(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub fn run<X: Tr>(t: &X) { t.act() }" % PURE)
+        s.put("root", "pub trait Tr2 { fn act(&self); }\npub struct S;\nimpl Tr2 for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::run(&ctlib::P); let _s = S;")
+    cell("wx_unrel_gen", "dep", unrel_gen, False, DEP3)
+    def unrel_sib(s, b):
+        s.put("dep", "pub trait Base { fn act(&self); }\npub trait SubA: Base {}\npub trait SubB: Base {}\npub struct P;\nimpl Base for P { fn act(&self) { %s } }\nimpl SubA for P {}\npub fn run(t: &dyn SubA) { t.act() }" % PURE)
+        s.put("root", "pub struct S;\nimpl ctlib::Base for S { fn act(&self) { %s } }\nimpl ctlib::SubB for S {}" % b)
+        s.caller.append("ctlib::run(&ctlib::P); let _s = S;")
+    cell("wx_unrel_sib", "dep", unrel_sib, False, DEP3)
+    def unrel_local(s, b):
+        s.put("root", "pub trait Tr { fn act(&self); }\npub trait Tr2 { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub struct S;\nimpl Tr2 for S { fn act(&self) { %s } }\npub fn run(t: &dyn Tr) { t.act() }" % (PURE, b))
+        s.caller.append("run(&P); let _s = S;")
+    cell("wx_unrel_local", "root", unrel_local, False, ["solo"])
+    def unrel_local_sib(s, b):
+        s.put("root", "pub trait Base { fn act(&self); }\npub trait SubA: Base {}\npub trait SubB: Base {}\npub struct P;\nimpl Base for P { fn act(&self) { %s } }\nimpl SubA for P {}\npub struct S;\nimpl Base for S { fn act(&self) { %s } }\nimpl SubB for S {}\npub fn run(t: &dyn SubA) { t.act() }" % (PURE, b))
+        s.caller.append("run(&P); let _s = S;")
+    cell("wx_unrel_local_sib", "root", unrel_local_sib, False, ["solo"])
+    # --- wx_exact_producer
+    def exact_param(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub fn run(p: &P) { p.act() }" % PURE)
+        s.put("root", "pub struct S;\nimpl ctlib::Tr for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::run(&ctlib::P); let _s = S;")
+    cell("wx_exact_param", "dep", exact_param, False, DEP3)
+    def exact_ufcs(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub fn run() { let p = P; Tr::act(&p) }" % PURE)
+        s.put("root", "pub struct S;\nimpl ctlib::Tr for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::run(); let _s = S;")
+    cell("wx_exact_ufcs", "dep", exact_ufcs, False, DEP3)
+    def exact_holder(s, b):
+        s.put("dep", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub struct H<T: Tr>(pub T);\nimpl H<P> { pub fn run(&self) { self.0.act() } }" % PURE)
+        s.put("root", "pub struct S;\nimpl ctlib::Tr for S { fn act(&self) { %s } }" % b)
+        s.caller.append("ctlib::H(ctlib::P).run(); let _s = S;")
+    cell("wx_exact_holder", "dep", exact_holder, False, DEP3)
+    def exact_local(s, b):
+        s.put("root", "pub trait Tr { fn act(&self); }\npub struct P;\nimpl Tr for P { fn act(&self) { %s } }\npub struct S;\nimpl Tr for S { fn act(&self) { %s } }\npub fn run(p: &P) { p.act() }" % (PURE, b))
+        s.caller.append("run(&P); let _s = S;")
+    cell("wx_exact_local", "root", exact_local, False, ["solo"])
+    # --- the NON-INVOKING LOOK-ALIKE axis (in-crate and dependency-placed hooks)
+    for loc in ("root", "dep"):
+        tp = path_from_root(loc)
+        arms = ["solo"] if loc == "root" else ["ch", "unch"]
+        def lk(name, impl, trig, gt):
+            def f(s, b, impl=impl, trig=trig):
+                s.put(loc, impl.replace("{B}", b))
+                s.caller.append(trig.replace("{P}", tp))
+            cell("nl_%s_%s" % (name, loc), loc, f, gt, arms)
+        CL = "pub struct S;\nimpl Clone for S { fn clone(&self) -> Self { {B} S } }"
+        DR = "pub struct S;\nimpl Drop for S { fn drop(&mut self) { {B} } }"
+        DI = "pub struct S;\nimpl std::fmt::Display for S { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { {B} write!(f, \"s\") } }"
+        IN = "pub struct S;\nimpl S { pub fn act(&self) { {B} } }\npub fn callee0() { {B} }"
+        FR = "pub struct S;\npub struct E2;\nimpl From<S> for E2 { fn from(_s: S) -> E2 { {B} E2 } }"
+        lk("let_underscore", CL, "let x = {P}S; let _ = x;", False)
+        lk("clone_pos", CL, "let x = {P}S; let _ = x.clone();", True)
+        lk("forget", DR, "let x = {P}S; std::mem::forget(x);", False)
+        lk("drop_pos", DR, "let x = {P}S; drop(x);", True)
+        lk("struct_update", CL + "\npub struct W { pub a: u8, pub s: S }", "let x = {P}W { a: 1, s: {P}S }; let _y = {P}W { a: 2, ..x };", False)
+        lk("fn_item_stored", IN, "let f: fn() = {P}callee0; let _ = f;", False)
+        lk("method_item_stored", IN, "let g = {P}S::act; let _ = g;", False)
+        lk("closure_uncalled", IN, "let x = {P}S; let f = || x.act(); let _ = &f;", False)
+        lk("format_args_unused", DI, "let x = {P}S; let _ = format_args!(\"{}\", x);", False)
+        lk("format_pos", DI, "let x = {P}S; let _ = format!(\"{}\", x);", True)
+        lk("q_neg", FR, "let r: Result<(), {P}S> = Err({P}S); let _ = r.is_err();", False)
+    # `?` is the positive twin that DOES call `From::from` (in-crate: the conversion target is local).
+    def q_pos(s, b):
+        s.put("root", "pub struct S;\npub struct E2;\nimpl From<S> for E2 { fn from(_s: S) -> E2 { %s E2 } }\npub fn q() -> Result<(), E2> { Err(S)?; Ok(()) }" % b)
+        s.caller.append("let _ = q();")
+    cell("nl_q_pos_root", "root", q_pos, True, ["solo"])
+
 def main():
-    gen_explicit_trait(); gen_explicit_plain(); gen_callable(); gen_hooks(); gen_recv(); gen_ident(); gen_pathval()
+    gen_explicit_trait(); gen_explicit_plain(); gen_callable(); gen_hooks(); gen_recv(); gen_ident(); gen_pathval(); gen_controls()
     cdir = os.path.join(OUT, "cells")
     if os.path.exists(cdir):
         shutil.rmtree(cdir)

@@ -110,11 +110,16 @@ def scan_arm(d, meta, arm, bname, bdir):
     if os.path.exists(out): shutil.rmtree(out)
     os.makedirs(out)
     env = dict(ENV)
-    if arm == "ch":
+    if arm in ("ch", "chns"):
         dep = os.path.join(out, "dep")
         os.makedirs(dep)
         rc, o = sh([scan, "lib", "--out", os.path.join(dep, "r")], cwd=d)
         if rc != 0: return {"err": "DEP-SCAN rc=%d %s" % (rc, o[-400:])}
+        if arm == "chns":
+            # FABLE-REVIEW §3.5 — the chained report WITHOUT its §2.2 call-graph sidecar.
+            for fn in os.listdir(dep):
+                if fn.endswith(".callgraph.json"):
+                    os.remove(os.path.join(dep, fn))
         env["CANDOR_DEPS"] = dep
     rc, o = sh([scan, "app", "--out", os.path.join(out, "a")], cwd=d, env=env)
     rep = os.path.join(out, "a.ctapp.scan.json")
