@@ -6232,8 +6232,8 @@ impl<'a> CallCollector<'a> {
     }
 
     /// The type a value at a TABLE SITE is asked under: the strict typer's answer, else — SOUNDNESS R1430
-    /// (DEP-CAPS-SPELLING, DEP-VARIANT-ARG) — a DEPENDENCY value path the typer leaves untyped because its leaf is
-    /// all-caps (`ctlib::S`, `use ctlib::S; .. S ..`) or because it is a unit variant (`ctlib::Kd::Aa` → `ctlib::Kd`).
+    /// (DEP-CAPS-SPELLING) — a DEPENDENCY value path the typer leaves untyped because its leaf is all-caps (`ctlib::S`,
+    /// `use ctlib::S; .. S ..`), the way the `let` route already types it.
     /// Read only at table sites, whose edge to a dependency is the chained JOIN: a path that names a `const` rather than
     /// a type asks a key no report publishes, which adds nothing (and, unchained, the dependency's `invisible` entry the
     /// written call already draws).
@@ -6264,7 +6264,15 @@ impl<'a> CallCollector<'a> {
         if n < 2 || !up(segs[n - 1]) {
             return None;
         }
-        let ty = if n >= 3 && up(segs[n - 2]) { segs[..n - 1].join("::") } else { full.clone() };
+        // `dep::Kd::Aa` is a unit variant — or, for a PAYLOAD variant `dep::Kd::Bb`, the variant's constructor FUNCTION
+        // (round 1's trap: `hg(Kd::Bb)` clones the fn item, never `Kd`). The dependency's declaration is not in this scan,
+        // so a variant path is not typed (EXECUTED: `v_payload_ctor_dep` FABRICATED `Fs` when it was). DEP-VARIANT-ARG
+        // stays the residual. A struct-leaf path is typed by the same assumption R856's `let` route already makes (a
+        // dependency tuple struct's constructor read as a unit value is that route's pre-existing over-charge).
+        if n >= 3 && up(segs[n - 2]) {
+            return None;
+        }
+        let ty = full.clone();
         if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
             eprintln!("R1430VALUE\t{full}\t{ty}"); // §E1 REACH COUNTER
         }
