@@ -18248,7 +18248,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18259,7 +18259,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev137/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev138/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -33587,4 +33587,102 @@ fn v075_trait_may_win_is_the_probe_order() {
     assert!(!w(3, 2, 0, 3), "q8g: `&mut` receiver, &mut self inherent at the first step");
     assert!(!w(1, 1, 0, 1), "a value receiver of a by-value inherent: the first step, the inherent wins");
     assert!(w(2, 2, 0, 0), "form unknown: a `&mut` receiver would let the trait's &self method win");
+}
+
+/// SOUNDNESS R1426 — **A CRATE-LOCAL PATH VALUE IS TYPED BY THE `let` ROUTE, IN EVERY POSITION.** The receiver /
+/// argument / operand typer had its own reading of a qualified value path, and it disagreed with `let x = <path>;`
+/// in two shapes. EXECUTED (calltarget round 1, `rustagent-ct1/ut`: every effectful fn below writes its marker, the
+/// two controls write nothing); on 0.40.16 the seven effectful callers read ABSENT or `Unknown`-only:
+///  - an all-caps leaf one segment under `crate::` (`crate::S`): `expand` drops the head, R879's anchor test read `S`;
+///  - an ENUM VARIANT as a receiver or argument (`Kd::Aa.go()`, `hg(Kd::Aa)`, `Self::Aa.go()`): refused by the
+///    type-shaped-owner rule; an IMPORTED variant (`use Kd::Aa; Aa.go()`), typed as the path `Kd::Aa`; and a TUPLE-variant
+///    construction (`Kp::Wrap(1).act()`, `let x = Kp::Wrap(1); x.act()`), untyped by both routes.
+///
+/// The controls are the two refusals the `let` route keeps: an all-caps ASSOCIATED CONST (`Pz::DEFAULTV`, whose type is
+/// not `Pz`) and a std-rooted variant whose leaf a local type shares (`std::cmp::Ordering::Less` beside a local
+/// `struct Ordering` with an effectful `reverse`), plus the one the variant reading needs: a PAYLOAD variant's path is its
+/// constructor FUNCTION (`hg(Kp::Wrap)` clones a fn item, EXECUTED pure), so only a declared UNIT variant types as the enum.
+#[test]
+fn r1426_a_crate_local_path_value_is_typed_as_the_let_route_types_it() {
+    let v = scan_src_to_json("r1426", "\
+pub struct S;\n\
+impl S { pub fn act(&self) { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); } }\n\
+impl Clone for S { fn clone(&self) -> Self { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); S } }\n\
+impl std::fmt::Display for S { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); write!(f, \"s\") } }\n\
+pub enum Kd { Aa, Bb }\n\
+impl Kd { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); } }\n\
+impl Clone for Kd { fn clone(&self) -> Self { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); Kd::Bb } }\n\
+pub mod m { pub enum Mk { Cc } impl Mk { pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); } } }\n\
+pub struct Qz;\n\
+impl Qz { pub fn go(&self) {} }\n\
+pub struct Pz;\n\
+impl Pz { pub const DEFAULTV: Qz = Qz; pub fn go(&self) { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); } }\n\
+pub struct Ordering;\n\
+impl Ordering { pub fn reverse(self) -> Self { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); self } }\n\
+pub fn hg<X: Clone>(x: X) { let _ = x.clone(); }\n\
+pub fn caps_recv() { crate::S.act(); }\n\
+pub fn caps_arg() { hg(crate::S); }\n\
+pub fn caps_fmt() { let _ = format!(\"{}\", crate::S); }\n\
+pub fn variant() { Kd::Aa.go(); }\n\
+pub fn variant_crate() { crate::Kd::Aa.go(); }\n\
+pub fn variant_arg() { hg(Kd::Aa); }\n\
+pub fn mod_variant() { m::Mk::Cc.go(); }\n\
+pub fn assoc_const_ctl() { Pz::DEFAULTV.go(); }\n\
+pub fn std_variant_ctl() { let _ = std::cmp::Ordering::Less.reverse(); }\n\
+pub fn variant_imported() { use Kd::Aa; Aa.go(); }\n\
+impl Kd { pub fn variant_self(&self) { Self::Aa.go(); } }\n\
+pub enum Kp { Wrap(u8) }\n\
+impl Clone for Kp { fn clone(&self) -> Self { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); Kp::Wrap(0) } }\n\
+pub fn payload_ctor_ctl() { hg(Kp::Wrap); }\n\
+impl Kp { pub fn act(&self) { let _ = std::fs::write(\"/tmp/r1426\", b\"x\"); } }\n\
+pub fn tuple_variant_recv() { Kp::Wrap(1).act(); }\n\
+pub fn tuple_variant_let() { let x = Kp::Wrap(1); x.act(); }\n");
+    let row = |f: &str| v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).cloned();
+    for f in ["caps_recv", "caps_arg", "caps_fmt", "variant", "variant_crate", "variant_arg", "mod_variant",
+              "variant_imported", "Kd::variant_self", "tuple_variant_recv", "tuple_variant_let"] {
+        let r = row(f).unwrap_or_else(|| panic!("R1426 `{f}` writes a file (EXECUTED) and must be in the report:\n{v:#}"));
+        assert!(effs(&r).iter().any(|e| e == "Fs"), "R1426 `{f}` must be charged `Fs`, as its `let` spelling is:\n{r:#}");
+    }
+    for f in ["assoc_const_ctl", "std_variant_ctl", "payload_ctor_ctl"] {
+        assert!(row(f).is_none_or(|r| !effs(&r).iter().any(|e| e == "Fs")),
+            "R1426 control `{f}` writes nothing (EXECUTED); an `Fs` is a fabrication through a leaf the path does not \
+             type to:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R400 — **`use super::super::X` NAMES THE GRANDPARENT'S `X`, EVEN WHEN THE PARENT REBINDS IT.** EXECUTED
+/// (calltarget round 1, `rustagent-ct1/r400`, 12 fixtures): on 0.40.16 the grandparent-`Command` / parent-`Vec` spawn
+/// read ABSENT (`deny Exec` 0) and the reversed pure body read `['Exec']`, likewise at depth 3, through a module
+/// alias, and from an inline module of a FILE module reaching the crate root. The `use` value is now resolved as the
+/// same path written in an expression is (absolutised, then read as `use crate::<path>`), which was right in both
+/// directions already. The no-rebind and one-level spellings are the controls that must not move.
+#[test]
+fn r400_super_super_names_the_grandparents_binding_in_both_directions() {
+    let v = scan_src_to_json_multi("r400gp", &[
+        ("src/lib.rs", "\
+pub use std::process::Command as Runner;\n\
+pub mod fm;\n\
+pub mod a { pub use std::process::Command as Runner; pub mod b { pub use std::vec::Vec as Runner;\n\
+    pub mod c { use super::super::Runner; pub fn spawn() { let _ = Runner::new(\"true\").status(); } } } }\n\
+pub mod p { pub use std::vec::Vec as Runner; pub mod b { pub use std::process::Command as Runner;\n\
+    pub mod c { use super::super::Runner; pub fn pure() { let v: Runner<u8> = Runner::new(); let _ = v.len(); } } } }\n\
+pub mod d3 { pub use std::process::Command as Runner; pub mod b { pub use std::vec::Vec as Runner; pub mod c { pub use std::vec::Vec as Runner;\n\
+    pub mod d { use super::super::super::Runner; pub fn spawn() { let _ = Runner::new(\"true\").status(); } } } } }\n\
+pub mod md { pub use std::process as pr; pub mod b { pub use std::vec as pr;\n\
+    pub mod c { use super::super::pr; pub fn spawn() { let _ = pr::Command::new(\"true\").status(); } } } }\n\
+pub mod nr { pub use std::process::Command as Runner; pub mod b {\n\
+    pub mod c { use super::super::Runner; pub fn spawn() { let _ = Runner::new(\"true\").status(); } } } }\n\
+pub mod one { pub use std::vec::Vec as Runner; pub mod e { pub use std::process::Command as Runner;\n\
+    pub mod f { use super::Runner; pub fn spawn() { let _ = Runner::new(\"true\").status(); } } } }\n"),
+        ("src/fm.rs", "pub use std::vec::Vec as Runner;\n\
+pub mod c { use super::super::Runner; pub fn spawn() { let _ = Runner::new(\"true\").status(); } }\n"),
+    ]);
+    let row = |f: &str| v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).cloned();
+    for f in ["a::b::c::spawn", "d3::b::c::d::spawn", "md::b::c::spawn", "fm::c::spawn", "nr::b::c::spawn", "one::e::f::spawn"] {
+        let r = row(f).unwrap_or_else(|| panic!("R400 `{f}` spawns a process (EXECUTED) and must be in the report:\n{v:#}"));
+        assert!(effs(&r).iter().any(|e| e == "Exec"), "R400 `{f}` must be charged `Exec`:\n{r:#}");
+    }
+    assert!(row("p::b::c::pure").is_none_or(|r| !effs(&r).iter().any(|e| e == "Exec")),
+        "R400 `p::b::c::pure` builds a Vec (EXECUTED: no process); `Exec` is the parent's binding read in the \
+         grandparent's place:\n{v:#}");
 }

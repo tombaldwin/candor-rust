@@ -401,6 +401,30 @@ pub(crate) fn submodule_uses(
             subuses.remove(&name);
         }
     }
+    // SOUNDNESS R400 — EACH ANCESTOR'S OWN BINDINGS TRAVEL, KEYED BY DEPTH. The clone above is the flattened chain, so
+    // `subuses[X]` is the NEAREST enclosing binding; `use super::super::X` names the GRANDPARENT's, which the parent's
+    // rebinding has overwritten (both directions EXECUTED at 0.40.16: a grandparent `Command` read as the parent's
+    // `Vec` — the spawn ABSENT — and the reverse charged `Exec` to a body that builds a Vec). So the child also gets
+    // `super::X` = the parent's binding of every name, and each `super::…::X` the parent carried moves one level up;
+    // `collect_use` reads `super::super::X` from the key with that many `super::`s. Identifier keys only (the reserved
+    // `*…`/`\u{5}…`/`crate::…` keys and `Self` are scope facts, not bindings an ancestor path can name). A key of these
+    // shapes cannot be a real binding: `collect_use` stores bare identifiers. `CANDOR_R400_OFF` carries nothing.
+    if std::env::var_os("CANDOR_R400_OFF").is_none() {
+        let ident = |k: &str| {
+            k != crate::lang::SELF_KEY
+                && k.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && k.chars().all(|c| c.is_alphanumeric() || c == '_')
+        };
+        let carried: Vec<(String, String)> = uses
+            .iter()
+            .filter_map(|(k, v)| {
+                let rest = k.trim_start_matches(SUPER_SCOPE_MARKER);
+                (!rest.is_empty() && ident(rest)).then(|| (format!("{SUPER_SCOPE_MARKER}{k}"), v.clone()))
+            })
+            .collect();
+        subuses.retain(|k, _| k == SUPER_SCOPE_MARKER || !k.starts_with(SUPER_SCOPE_MARKER));
+        subuses.extend(carried);
+    }
     // SOUNDNESS R378 — MARK THIS MAP AS THE CHILD'S PARENT SCOPE. `use super::X` inside an INLINE
     // module names an item of the enclosing module, and for an inline module this map IS that module's
     // `use` map — so `X` can be resolved through it. For a FILE module it is NOT: `hyper`'s
@@ -4943,6 +4967,8 @@ pub(crate) fn collect_decls(
                     if has_cfg(&v.attrs) {
                         continue;
                     }
+                    file_decl_fact(rets, crate::model::unit_variant_key(&en.ident.to_string(), &v.ident.to_string()),
+                        if matches!(v.fields, syn::Fields::Unit) { "1" } else { "0" }.to_string());
                     match &v.fields {
                         syn::Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
                             let payload_ty = &unnamed.unnamed[0].ty;

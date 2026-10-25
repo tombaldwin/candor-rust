@@ -3450,6 +3450,13 @@ impl<'a> CallCollector<'a> {
         self.resolve_recv_type_for(expr, "")
     }
 
+    /// SOUNDNESS R1426 — this crate declares `variant` of the enum `owner` (a type path; its leaf is the key) as a UNIT
+    /// variant, and no same-leaf enum disagrees (`model::unit_variant_key`).
+    fn variant_is_unit(&self, owner: &str, variant: &str) -> bool {
+        let leaf = owner.rsplit("::").next().unwrap_or(owner);
+        self.returns.get(&crate::model::unit_variant_key(leaf, variant)).is_some_and(|v| v == "1")
+    }
+
     /// SOUNDNESS R862 — is this resolved type path rooted at a MANIFEST dependency (`ratescore::Node`)?
     /// Read from the dependency list Pass B seeds (`lang::DEPS_KEY`); a map without it answers `false`,
     /// which is today's behaviour. A local module spelled like a dependency is anchored to `crate::` by
@@ -4204,6 +4211,55 @@ impl<'a> CallCollector<'a> {
                     //    that spelling back into a silent typed miss;
                     //  - `qself`, `Self::…` and a `<`-bearing expansion are refused by the shape checks.
                     // Every refusal leaves today's answer (None), so this can only ADD a typed route.
+                    //
+                    // SOUNDNESS R1426 — ONE TYPER FOR A CRATE-LOCAL VALUE PATH. The rules above were a second
+                    // reading of a question the `let` route already answers (`nominal_ctor_type` →
+                    // `lang::type_from_value_path`, plus the const-shadow refusal and the `#[cfg]`-arm union),
+                    // and the two disagreed in both of the shapes that matter, EXECUTED (calltarget round 1):
+                    //  - `crate::S` (an all-caps leaf one segment under `crate::`): `expand` drops the
+                    //    `crate::` head of a one-segment rest, so R879's "anchored in this crate" test read
+                    //    `S` and refused — `hg(crate::S)` and `crate::S.act()` lost the edge while
+                    //    `let x = crate::S; hg(x)` charged;
+                    //  - an ENUM VARIANT receiver or argument (`Kd::Aa.go()`, `crate::Kd::Aa.go()`, `hg(Kd::Aa)`):
+                    //    refused by the type-shaped-owner rule, the caller ABSENT, while `let x = Kd::Aa;
+                    //    x.go()` charged `Kd::go`. The variant's type is the ENUM, which is what the `let`
+                    //    route answers (an all-caps trailing segment is an associated const and is refused
+                    //    there).
+                    // So a path that is NOT rooted in a dependency or in std is typed by the `let` route and
+                    // by nothing else. A DEPENDENCY-rooted value keeps the rule below unchanged: R856's
+                    // disclosure for `dep::SHARED` is decided at the join (`<untyped>` marker, typed key
+                    // tried first), and a typed dependency call that misses is silent, so typing more of
+                    // them here could only trade a disclosure for a miss. A std/core/alloc-rooted value
+                    // (`std::cmp::Ordering::Less`) keeps today's answer too: its leaf would be asked of this
+                    // crate's leaf-keyed impl tables. `CANDOR_R1426_OFF` restores the old reading.
+                    let written_full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
+                    let std_rooted = matches!(written_full.split("::").next(), Some("std" | "core" | "alloc"))
+                        || written_full.starts_with("::");
+                    if std::env::var_os("CANDOR_R1426_OFF").is_none()
+                        && p.qself.is_none()
+                        && !std_rooted
+                        && !self.is_dependency_type(&written_full)
+                        && p.path.segments.iter().all(|s| s.arguments.is_none())
+                    {
+                        let mut t = self.nominal_ctor_type(expr);
+                        // An ENUM VARIANT reading (a type-shaped segment before the leaf, `Self` included) is the enum's
+                        // value only for a UNIT variant: a payload variant's path is its constructor FUNCTION
+                        // (`.map(Tokio::Unix)`), and typing it as the enum removed redis's true `dispatch:From.from`
+                        // hedge on the first A/B. A variant this crate does not declare as unit keeps today's None.
+                        let segs = &p.path.segments;
+                        if segs.len() >= 2 && crate::lang::is_type_ident(&segs[segs.len() - 2].ident.to_string()) {
+                            let v = segs[segs.len() - 1].ident.to_string();
+                            if !t.as_deref().is_some_and(|o| self.variant_is_unit(o, &v)) {
+                                t = None;
+                            }
+                        }
+                        if let Some(t) = &t {
+                            if std::env::var_os("CANDOR_R1426_INSTR").is_some() {
+                                eprintln!("R1426VALUE\t{}\t{t}", crate::lang::path_to_string_lc(&p.path)); // §E1 REACH COUNTER
+                            }
+                        }
+                        return t;
+                    }
                     let segs = &p.path.segments;
                     if p.qself.is_none() && segs.len() >= 2 {
                         let leaf = segs[segs.len() - 1].ident.to_string();
@@ -4297,7 +4353,15 @@ impl<'a> CallCollector<'a> {
                 concrete.or(via_static).or_else(|| {
                     // VEIN A — `expand_scoped`: a unit value only a glob can supply (`use dep::*;
                     // SHARED.ping()`) gets the named-import spelling's reading (R863).
-                    upper_no_underscore.then(|| self.expand_scoped(&name))
+                    upper_no_underscore.then(|| {
+                        // SOUNDNESS R1426 — an imported UNIT enum variant (`use Kd::Aa; Aa.go()`) is a value of the enum
+                        // (`lang::imported_variant_owner`), not of a type named after the path.
+                        let e = self.expand_scoped(&name);
+                        match crate::lang::imported_variant_owner(&e) {
+                            Some(o) if self.variant_is_unit(&o, e.rsplit("::").next().unwrap_or(&e)) => o,
+                            _ => e,
+                        }
+                    })
                 })
             }
             syn::Expr::Field(f) => {

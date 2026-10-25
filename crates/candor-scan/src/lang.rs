@@ -1655,6 +1655,23 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                         return Some(inner);
                     }
                 }
+                // SOUNDNESS R1426 — a TUPLE-VARIANT construction (`Kd::Bb(1)`) is a value of the enum, in a `let` and as a
+                // receiver alike (both routes ask this function): it read untyped in both, so `Kd::Bb(1).act()` and
+                // `let x = Kd::Bb(1); x.act()` were ABSENT where `Kd::Cc { f: 1 }.act()` charged (EXECUTED, calltarget
+                // round 1). Only a variant this crate DECLARES with a payload (`model::unit_variant_key` = "0"), so a
+                // same-shaped associated fn (`Type::Make(..)`) is never read as one.
+                if type_like
+                    && std::env::var_os("CANDOR_R1426_OFF").is_none()
+                    && returns.get(&crate::model::unit_variant_key(ty_leaf, last)).is_some_and(|v| v == "0")
+                {
+                    let owner = expand(ty, uses);
+                    if !owner.contains(crate::decls::ALIAS_ALT_SEP) && !matches!(owner.split("::").next(), Some("std" | "core" | "alloc")) {
+                        if std::env::var_os("CANDOR_R1426_INSTR").is_some() {
+                            eprintln!("R1426VALUE\ttuple-variant\t{full}\t{owner}"); // §E1 REACH COUNTER, CHANGED branch only
+                        }
+                        return Some(owner);
+                    }
+                }
                 if is_ctor(last) && type_like {
                     // R807 REACH PROBE — the one name R807 adds, so the A/B can count what it typed.
                     if last == "bind" && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
@@ -1950,6 +1967,29 @@ pub(crate) fn type_from_value_path(full: &str, uses: &HashMap<String, String>) -
         eprintln!("R722CAPS {full}");
     }
     Some(expand(full, uses))
+}
+
+/// SOUNDNESS R1426 — a BARE value that names an enum VARIANT through an import (`use Kd::Aa; Aa`) expands to `Kd::Aa`,
+/// a path `type_from_value_path`'s variant rule never sees because it is asked of the WRITTEN path. The value's type is
+/// the enum, as for the written `Kd::Aa`. Answered only when the expansion's penultimate segment is type-shaped and its
+/// leaf is not an all-caps associated const (that rule's two tests), and never for a std/core/alloc root: there the
+/// owner's leaf would be asked of this crate's leaf-keyed impl tables (a local `Ordering`). The caller must still prove
+/// the variant is a UNIT variant (`model::unit_variant_key`). `CANDOR_R1426_OFF` restores the old answer.
+pub(crate) fn imported_variant_owner(e: &str) -> Option<String> {
+    if std::env::var_os("CANDOR_R1426_OFF").is_some() || e.contains(crate::decls::ALIAS_ALT_SEP) || e.contains('<') {
+        return None;
+    }
+    if matches!(e.split("::").next(), Some("std" | "core" | "alloc")) {
+        return None;
+    }
+    let segs: Vec<&str> = e.split("::").collect();
+    if segs.len() < 2 || !is_type_ident(segs[segs.len() - 2]) || caps_only_ident(segs[segs.len() - 1]) {
+        return None;
+    }
+    if std::env::var_os("CANDOR_R1426_INSTR").is_some() {
+        eprintln!("R1426VALUE\timported-variant\t{e}"); // §E1 REACH COUNTER, on the CHANGED branch only
+    }
+    Some(segs[..segs.len() - 1].join("::"))
 }
 
 /// Peel `Result<T, _>` / `Option<T>` / `io::Result<T>` to the inner `T` — a fallible constructor's
@@ -5483,6 +5523,51 @@ pub(crate) fn collect_use(
             r
         };
         if !std::ptr::eq(supers, full) && out.contains_key(crate::decls::SUPER_SCOPE_MARKER) {
+            // SOUNDNESS R400 — DEPTH ≥ 2 IS RESOLVED AS AN EXPRESSION PATH IS, NOT AGAINST `out`. `out` is the
+            // flattened chain and `out[X]` the NEAREST enclosing binding, so `use super::super::X` read the
+            // PARENT's `X` whenever the parent rebinds it — both directions EXECUTED at 0.40.16 (grandparent
+            // `Command`, parent `Vec`: the spawn ABSENT, `deny Exec` 0; reversed: a `Vec`-only body charged
+            // `['Exec']`), plus depth 3 and a module alias. The same path WRITTEN IN AN EXPRESSION
+            // (`super::super::Runner::new(..)`) was right in both directions, because it is absolutised
+            // against this module's own path and resolved through the module-qualified alias map — the
+            // binding of the module it names, not the nearest one. So the `use` value takes that route
+            // (`anchored_value`), which is stored crate-rooted and re-expanded at each use. The refusal
+            // 6b7acba tried instead was a silence (9889929). Only where this pass seeded the module path;
+            // otherwise `anchored_value` declines and today's reading stands. Depth 1 is unchanged: there
+            // the nearest binding IS the parent's. `CANDOR_R400_OFF` restores the old reading.
+            let depth = (full.len() - supers.len()) / "super::".len();
+            if depth >= 2 && std::env::var_os("CANDOR_R400_OFF").is_none() {
+                // The ancestor's own BINDING first, where `submodule_uses` carried it (`super::super::X` keys): that is
+                // the binding the path names, whatever the module between rebinds. A name no ancestor `use` binds (an
+                // item it DECLARES) has no key and takes the module-path route below.
+                let segs: Vec<&str> = supers.split("::").collect();
+                let key = format!("{}{}", crate::decls::SUPER_SCOPE_MARKER.repeat(depth), segs[0]);
+                if let Some(v) = out.get(&key) {
+                    let r = alias_join(v, &segs[1..]);
+                    if std::env::var_os("CANDOR_R400_INSTR").is_some() {
+                        eprintln!("R400ANCHOR\t{full}\tcarried\t{r}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                    }
+                    return r;
+                }
+                if let Some(a) = anchored_value(full, out) {
+                    // …and then read exactly as the equivalent `use crate::<that path>` is (the crate-root branch
+                    // at the end of this closure): a root re-export or module-qualified alias that fires is
+                    // followed, else the crate-rooted literal is kept. Without this a grandparent that is the
+                    // CRATE ROOT (`use super::super::Runner` in an inline mod of a file module) stored
+                    // `crate::Runner`, which no later expansion reads.
+                    let r = match a.strip_prefix("crate::") {
+                        Some(local) => {
+                            let e = expand(&a, out);
+                            if e == local { a.clone() } else { e }
+                        }
+                        None => a.clone(),
+                    };
+                    if std::env::var_os("CANDOR_R400_INSTR").is_some() {
+                        eprintln!("R400ANCHOR\t{full}\t{a}\t{r}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                    }
+                    return r;
+                }
+            }
             let head = supers.split("::").next().unwrap_or(supers);
             if out.contains_key(head) {
                 let resolved = expand(supers, out);

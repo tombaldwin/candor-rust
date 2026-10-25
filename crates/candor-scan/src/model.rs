@@ -697,6 +697,14 @@ pub(crate) fn is_derive_synth(attrs: &[syn::Attribute]) -> bool {
 /// SOUNDNESS R1279/R1281 — a struct's or enum's TYPE parameters in declaration order (`<tparams>Wrap` -> `B`), filed
 /// under the conflict rule so two same-leaf containers that disagree withdraw the fact. Read by the collector to map
 /// a payload typed by a parameter NAME to the argument at its POSITION in the scrutinee's written type.
+/// SOUNDNESS R1426 — whether `Enum::Variant` is a UNIT variant (`"1"`) or carries a payload (`"0"`), keyed by the enum's
+/// LEAF (two same-leaf enums that disagree withdraw the key, `file_decl_fact`'s rule). A path to a payload variant used as
+/// a value is a constructor FUNCTION (`.map(Tokio::Unix)`), not a value of the enum, so only a `"1"` licenses typing the
+/// path as the enum.
+pub(crate) fn unit_variant_key(enum_leaf: &str, variant: &str) -> String {
+    format!("<unitvar>{enum_leaf}::{variant}")
+}
+
 pub(crate) fn type_params_key(type_leaf: &str) -> String {
     format!("<tparams>{type_leaf}")
 }
