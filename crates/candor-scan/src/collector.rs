@@ -5837,7 +5837,6 @@ impl<'a> CallCollector<'a> {
                     self.charge_coercion_ty(&ty, tr, m);
                 }
             }
-            return;
         }
         // Everything else this method once answered from per-collection NAME lists — the provided comparison
         // methods (`a.ne(&b)`, `a.max(b)`), `xs.iter().max()`, `(a..b).contains(&x)`, and each std collection's
@@ -6038,25 +6037,6 @@ impl<'a> CallCollector<'a> {
         });
     }
 
-    /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when
-    /// `operand` resolves to a CONCRETE LOCAL type (via `resolve_recv_type`) that locally `impl <trait>`
-    /// (present in `trait_impls[trait_leaf]`, keyed by type leaf per `impl_type_name`). This covers the
-    /// constructs whose hidden call is dispatched on the operand's OWN type: `{}`/`{:?}` format args
-    /// (`Display::fmt`/`Debug::fmt`), `*w`/auto-deref (`Deref::deref`), and the operator overloads
-    /// (`a + b`→`Add::add`, `a == b`→`PartialEq::eq`, …). (`From::from`, dispatched on the TARGET type,
-    /// has its own `charge_from`.)
-    ///
-    /// GOVERNING DISCIPLINE (critical — these constructs are PERVASIVE): a PURE local impl contributes
-    /// nothing (its `Type::method` FnInfo carries no effect — the edge resolves to a pure body); an
-    /// UNRESOLVABLE operand (a std/external value like `String`/`i32`, an opaque return) yields None →
-    /// NO edge, NOT a disclosed Unknown — a blanket Unknown here would FLOOD every `format!`/`+`/`concat`
-    /// in real code. We never fabricate; only a real LOCAL effectful impl lights up. An impl whose method
-    /// body isn't a UNIQUE local def is an honest miss (`resolve_target`'s uniqueness filter), e.g. a
-    /// type impl'ing both Display and Debug (two `T::fmt`).
-    ///
-    /// A DISPATCH-TYPED operand (a generic/`impl Trait`/`dyn` param in `trait_vars`) has no concrete type
-    /// here — for the STRINGIFY family only it falls through to `charge_stringify_dispatch` (bounded CHA
-    /// over the bound); every other coercion keeps the old resolve-or-skip behaviour unchanged.
     // ---------------------------------------------------------------------------------------------------------------
     // CALL-TARGET ROUND 2 — THE STD BOUND TABLE AT A CONCRETE SITE (`std_bounds.rs`, generated from rust-src).
     //
@@ -6723,7 +6703,7 @@ impl<'a> CallCollector<'a> {
                 _ => false,
             };
         }
-        self.shape_vars.get(&id).is_none() && self.clone_vars.contains(&id)
+        !self.shape_vars.contains_key(&id) && self.clone_vars.contains(&id)
     }
 
     /// THE METHOD SITE: `recv.leaf(args)` asked of the table — as a method of the receiver's std shape (`v.contains(&x)`,
@@ -6784,6 +6764,25 @@ impl<'a> CallCollector<'a> {
         self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true);
     }
 
+    /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when
+    /// `operand` resolves to a CONCRETE LOCAL type (via `resolve_recv_type`) that locally `impl <trait>`
+    /// (present in `trait_impls[trait_leaf]`, keyed by type leaf per `impl_type_name`). This covers the
+    /// constructs whose hidden call is dispatched on the operand's OWN type: `{}`/`{:?}` format args
+    /// (`Display::fmt`/`Debug::fmt`), `*w`/auto-deref (`Deref::deref`), and the operator overloads
+    /// (`a + b`→`Add::add`, `a == b`→`PartialEq::eq`, …). (`From::from`, dispatched on the TARGET type,
+    /// has its own `charge_from`.)
+    ///
+    /// GOVERNING DISCIPLINE (critical — these constructs are PERVASIVE): a PURE local impl contributes
+    /// nothing (its `Type::method` FnInfo carries no effect — the edge resolves to a pure body); an
+    /// UNRESOLVABLE operand (a std/external value like `String`/`i32`, an opaque return) yields None →
+    /// NO edge, NOT a disclosed Unknown — a blanket Unknown here would FLOOD every `format!`/`+`/`concat`
+    /// in real code. We never fabricate; only a real LOCAL effectful impl lights up. An impl whose method
+    /// body isn't a UNIQUE local def is an honest miss (`resolve_target`'s uniqueness filter), e.g. a
+    /// type impl'ing both Display and Debug (two `T::fmt`).
+    ///
+    /// A DISPATCH-TYPED operand (a generic/`impl Trait`/`dyn` param in `trait_vars`) has no concrete type
+    /// here — for the STRINGIFY family only it falls through to `charge_stringify_dispatch` (bounded CHA
+    /// over the bound); every other coercion keeps the old resolve-or-skip behaviour unchanged.
     fn charge_coercion(&mut self, operand: &syn::Expr, trait_leaf: &str, method: &str) {
         // CALL-TARGET ROUND 2 — a std-SHAPE operand (`{:?}` of `vec![x]`, `Some(x) == y`) runs its type arguments'
         // members through std's impl for the shape (the table's `I` rows). Beside, never instead of, what follows.

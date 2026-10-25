@@ -8658,7 +8658,7 @@ pub(crate) fn generic_operator_uses(
                                         crate::std_bounds::Recv::Implementor,
                                         m,
                                         c.args.len().saturating_sub(1),
-                                        Some(&[t.clone()]),
+                                        Some(std::slice::from_ref(t)),
                                     ) {
                                         if h.slot == crate::std_bounds::Slot::SelfRecv {
                                             self.hit_named(&n, h.trait_leaf, h.member, m);
