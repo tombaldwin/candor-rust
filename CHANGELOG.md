@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.17] — 2026-10-25
+
 - ⚠ **candor-scan: a crate-local path VALUE is typed by one route in every position (SOUNDNESS R1426, call-target
   round 1).** `crate::S` with an all-caps leaf, a UNIT enum variant used as a receiver or argument (`Kd::Aa.go()`,
   `crate::Kd::Aa`, `m::Mk::Cc`, `Self::Aa`, `hg(Kd::Aa)`, `use Kd::Aa; Aa.go()`) and a TUPLE-variant construction
