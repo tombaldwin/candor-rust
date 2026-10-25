@@ -157,6 +157,8 @@ TKINDS = {
     "dynret":    (True, "pub fn mk(b: bool) -> Box<dyn {T}> {{ MKBODY }}", "{H}mk(true).act();", True),
     "assocfn":   (True, "pub fn h<X: {T}>() {{ X::make() }}", "{H}h::<{S}>();", True),
     "genprov":   (True, "pub fn h<X: {T}>(t: &X) {{ t.go() }}", "{H}h(&{S});", True),
+    # R1429: a trait object inside an Option-of-tuple payload, destructured by `if let Some((_, t))`.
+    "opt_tuple_dyn": (True, "pub fn h(c: Option<(u8, &dyn {T})>) {{ if let Some((_, t)) = c {{ t.act() }} }}", "{H}h(Some((1, &{S})));", True),
 }
 TRAIT_DEF = "pub trait Tr { fn act(&self); fn go(&self) { self.act() } fn make() where Self: Sized; }"
 
