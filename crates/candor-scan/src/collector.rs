@@ -12635,6 +12635,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 saved_mono.push((name, prev));
             }
         }
+        // SOUNDNESS R1444 — the closure is the SECOND binder, and it enumerated tables by hand, so R1429's `?name` payload
+        // key (and round 2's `let` facts) survived into a closure parameter that shadows a parameter of the same name:
+        // EXECUTED (`~/candor-handoff/calltarget-round2/rust/r1444/`, `shadow_closure_conc`): the outer `&dyn PK` payload
+        // keyed the shadow's `b.enc()` to `Loud::enc` (Net, never run) while `Conc::enc` (Fs) ran. Every key `name_keys`
+        // names is scoped here as `scoped_binding` scopes it.
+        let mut saved_keys: Vec<(String, Option<Vec<Vec<String>>>)> = Vec::new();
+        let mut saved_shape: Vec<(String, Option<(String, Vec<Option<String>>)>, bool)> = Vec::new();
+        for input in &node.inputs {
+            let pat = match input {
+                syn::Pat::Type(pt) => &*pt.pat,
+                other => other,
+            };
+            for name in crate::decls::pat_bound_idents(pat) {
+                for k in Self::name_keys(&name).into_iter().skip(1) {
+                    let prev = self.tuple_trait_of.remove(&k);
+                    saved_keys.push((k, prev));
+                }
+                let sh = self.shape_vars.remove(&name);
+                let cv = self.clone_vars.remove(&name);
+                saved_shape.push((name, sh, cv));
+            }
+        }
         // SOUNDNESS R1196 — a closure parameter shadows an enclosing binding's `Result` error type (`err_of`) for the
         // body; an annotated `|r: Result<u8, Le>|` gives its own. Saved and restored like the tables above.
         let mut saved_err: Vec<(String, Option<String>)> = Vec::new();
@@ -12728,6 +12750,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 Some(v) => { self.err_of.insert(name, v); }
                 None => { self.err_of.remove(&name); }
             }
+        }
+        for (k, prev) in saved_keys {
+            match prev {
+                Some(v) => { self.tuple_trait_of.insert(k, v); }
+                None => { self.tuple_trait_of.remove(&k); }
+            }
+        }
+        for (name, sh, cv) in saved_shape {
+            match sh {
+                Some(v) => { self.shape_vars.insert(name.clone(), v); }
+                None => { self.shape_vars.remove(&name); }
+            }
+            if cv { self.clone_vars.insert(name); } else { self.clone_vars.remove(&name); }
         }
         for (name, prev) in saved_mono {
             match prev {

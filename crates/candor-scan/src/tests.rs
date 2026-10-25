@@ -33812,3 +33812,35 @@ pub fn n_let_underscore() { let x = S; let _ = x; }
     // a lazy adapter on a CONCRETE iterator is the deferred model's (charged where it is driven); never more than OVER
     let _ = veina_row_effs(&v, "n_lazy");
 }
+
+/// SOUNDNESS R1444 — a `for` binding and a closure parameter that SHADOW a parameter named `crypto` whose type is an
+/// `Option`-of-tuple with a trait object must not inherit its payload positions (`?crypto`). EXECUTED
+/// (`~/candor-handoff/calltarget-round2/rust/r1444/`): `call_conc` runs `Conc::enc` (Fs) and never `Loud::enc` (Net);
+/// published 0.40.17 charged `Net` (fabricated) and missed `Fs`, `deny Fs call_conc` exiting 0. The shadow's own
+/// element type is not typed here, so the call now DISCLOSES (`Unknown`) rather than resolving through the outer key.
+#[test]
+fn r1444_a_shadowing_for_or_closure_binding_does_not_inherit_the_payload_key() {
+    let v = scan_src_to_json_multi("r1444", &[("Cargo.toml", "[package]\nname = \"r1444\"\n"), ("src/lib.rs", r##"
+pub trait PK { fn enc(&self) -> u8; }
+pub struct Quiet;
+impl PK for Quiet { fn enc(&self) -> u8 { 0 } }
+pub struct Loud;
+impl PK for Loud { fn enc(&self) -> u8 { let _ = std::net::TcpStream::connect("127.0.0.1:1"); 1 } }
+pub struct Conc;
+impl Conc { pub fn enc(&self) -> u8 { let _ = std::fs::write("/tmp/r1444-conc", b"x"); 3 } }
+pub fn shadow_for_conc(crypto: Option<(u64, &dyn PK)>, v: Vec<Option<(u64, &Conc)>>) {
+    let _ = crypto;
+    for crypto in v { if let Some((_a, b)) = crypto { let _ = b.enc(); } }
+}
+pub fn shadow_closure_conc(crypto: Option<(u64, &dyn PK)>, c: Option<(u64, &Conc)>) {
+    let _ = crypto;
+    let f = |crypto: Option<(u64, &Conc)>| { if let Some((_a, b)) = crypto { let _ = b.enc(); } };
+    f(c);
+}
+"##)]);
+    for f in ["shadow_for_conc", "shadow_closure_conc"] {
+        let e = veina_row_effs(&v, f);
+        assert!(!e.iter().any(|x| x == "Net"), "`{f}` never runs `Loud::enc` — the OUTER payload key answered: {e:?}\n{v:#}");
+        assert!(!e.is_empty(), "`{f}` runs `Conc::enc`: it must charge or disclose, never read pure: {v:#}");
+    }
+}
