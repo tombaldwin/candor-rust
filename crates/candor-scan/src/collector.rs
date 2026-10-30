@@ -12695,7 +12695,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // keyed the shadow's `b.enc()` to `Loud::enc` (Net, never run) while `Conc::enc` (Fs) ran. Every key `name_keys`
         // names is scoped here as `scoped_binding` scopes it.
         let mut saved_keys: Vec<(String, Option<Vec<Vec<String>>>)> = Vec::new();
-        let mut saved_shape: Vec<(String, Option<(String, Vec<Option<String>>)>, bool)> = Vec::new();
+        let mut saved_shape: Vec<(String, Option<StdShape>, bool)> = Vec::new();
         for input in &node.inputs {
             let pat = match input {
                 syn::Pat::Type(pt) => &*pt.pat,
@@ -15375,6 +15375,9 @@ fn ct2_class_b(trait_leaf: &str) -> bool {
             | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Clone" | "ToString" | "ToOwned" | "Default"
     ) && !crate::lang::OPERATOR_TRAITS.contains(&trait_leaf)
 }
+
+/// CALL-TARGET ROUND 2 — a std shape and the types filling its type arguments (`std_shape_of`).
+pub(crate) type StdShape = (String, Vec<Option<String>>);
 
 thread_local! {
     /// CALL-TARGET ROUND 2 — the comparison being charged has a literally EMPTY operand (`charge_shape_hooks`).
