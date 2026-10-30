@@ -62,8 +62,8 @@ pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
 /// segment keeps it out of every local key lookup.
 pub(crate) const OP_RHS_MARKER: &str = "<oprhs>";
 
-/// CALL-TARGET ROUND 2 — `cr::<hookjoin>::<Type leaf>::<member>`: a member the std bound table licenses on a value of the
-/// DEPENDENCY `cr`'s type (`{:?}` of `vec![ctlib::S]`, `hg(ctlib::S)` over `hg<X: Clone>`). Consumed exactly as
+/// CALL-TARGET ROUND 2 — `cr::<hookjoin>::<Type leaf>::<member>`: a member the std bound table licenses on a value of a
+/// SYSCALL-TABLE dependency `cr`'s type (libc / nix / rustix; every other dependency's hook edge is spelled plainly) (`{:?}` of `vec![ctlib::S]`, `hg(ctlib::S)` over `hg<X: Clone>`). Consumed exactly as
 /// `OP_RHS_MARKER` is: `cr`'s own entry is joined where one exists (a miss in a covered report is its purity claim), and
 /// the site is a κ ledger entry for `cr` either way — NEVER handed to the classifier, which judged the plain spelling
 /// `rustix::PollFlags::clone` by its crate prefix and fabricated `Exec` (polling `Events::iter`, EXECUTED pure).

@@ -6359,8 +6359,18 @@ impl<'a> CallCollector<'a> {
         if self.is_dependency_type(&head) {
             let segs: Vec<&str> = head.split("::").collect();
             let leaf = segs.last().copied().unwrap_or("");
+            // The JOIN answers it where the dependency is chained, and the CLASSIFIER may judge the spelled member where it is
+            // not — `quinn::RecvStream::read` is socket I/O, `Net` (EXECUTED: hickory `QuicStream::receive_bytes` lost `Net`
+            // when this edge was join-only). Except a SYSCALL-TABLE crate (libc / nix / rustix), whose classifier reads a
+            // path's LEAF as a syscall name: `rustix::PollFlags::clone` is not `clone(2)` (EXECUTED fabrication: polling
+            // `Events::iter` read `Exec`). Those are join-only (`HOOK_JOIN_MARKER`).
+            let path = if candor_classify::is_syscall_crate(segs[0]) {
+                format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member)
+            } else {
+                format!("{}::{}::{}", segs[0], leaf, member)
+            };
             self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
-                path: format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member),
+                path,
                 leaf: member.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false });
             return;

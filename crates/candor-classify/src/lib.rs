@@ -3513,7 +3513,7 @@ pub const LIBC_NET_NO_DESTINATION: &[&str] = &[
 ];
 
 /// Whether `crate_name` is one of the three crates `classify` routes through the libc syscall tables.
-fn is_syscall_crate(crate_name: &str) -> bool {
+pub fn is_syscall_crate(crate_name: &str) -> bool {
     matches!(crate_name, "libc" | "nix" | "rustix")
 }
 
