@@ -62,6 +62,13 @@ pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
 /// segment keeps it out of every local key lookup.
 pub(crate) const OP_RHS_MARKER: &str = "<oprhs>";
 
+/// CALL-TARGET ROUND 2 — `cr::<hookjoin>::<Type leaf>::<member>`: a member the std bound table licenses on a value of the
+/// DEPENDENCY `cr`'s type (`{:?}` of `vec![ctlib::S]`, `hg(ctlib::S)` over `hg<X: Clone>`). Consumed exactly as
+/// `OP_RHS_MARKER` is: `cr`'s own entry is joined where one exists (a miss in a covered report is its purity claim), and
+/// the site is a κ ledger entry for `cr` either way — NEVER handed to the classifier, which judged the plain spelling
+/// `rustix::PollFlags::clone` by its crate prefix and fabricated `Exec` (polling `Events::iter`, EXECUTED pure).
+pub(crate) const HOOK_JOIN_MARKER: &str = "<hookjoin>";
+
 /// SOUNDNESS R1165 — `cr::<witness>::<Type leaf>::<arg position>::<callee rest>`: a call into the dependency `cr`
 /// (a path call, or a method on a value of `cr`'s type) that hands it a value of a CRATE-LOCAL type carrying a
 /// hand-written impl of a std trait (`model::STD_WITNESS_TRAITS`). A generic body in `cr` may run that impl

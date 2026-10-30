@@ -33800,13 +33800,19 @@ pub fn n_none_cmp(a: Option<S>) -> bool { a == None }
 pub fn n_lazy() { let _m = It(0).map(|b| b); }
 pub fn n_into_iter_returned() { let _t = take_it(It(0)); }
 pub fn n_let_underscore() { let x = S; let _ = x; }
+pub struct R;
+impl std::io::Read for R { fn read(&mut self, _b: &mut [u8]) -> std::io::Result<usize> { note(); Ok(0) } }
+pub struct Holder { pub r: std::io::BufReader<R> }
+pub fn n_bufreader_built(h: &mut Holder) { h.r = std::io::BufReader::new(R); }
+pub fn c_bufwriter() { use std::io::Write as _; let mut w = std::io::BufWriter::new(W); let _ = w.write_all(b"a"); }
 "##)]);
     for f in ["c_clone", "c_clone_vec", "c_clone_box", "c_to_owned", "c_debug_option", "c_debug_tuple", "c_debug_derive",
               "c_contains", "c_set_insert", "c_take", "c_unwrap_default", "c_is_sorted", "c_for", "c_zip", "c_copy", "c_spawn",
-              "c_generic_clone", "c_generic_fmt"] {
+              "c_generic_clone", "c_generic_fmt", "c_bufwriter"] {
         assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "`{f}` runs a user member through a std entry point:\n{v:#}");
     }
-    for f in ["n_arc_clone", "n_rc_clone", "n_arc_param", "n_map_value", "n_none_cmp", "n_into_iter_returned", "n_let_underscore"] {
+    for f in ["n_arc_clone", "n_rc_clone", "n_arc_param", "n_map_value", "n_none_cmp", "n_into_iter_returned", "n_let_underscore",
+              "n_bufreader_built"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` runs no user member — FABRICATION:\n{v:#}");
     }
     // a lazy adapter on a CONCRETE iterator is the deferred model's (charged where it is driven); never more than OVER

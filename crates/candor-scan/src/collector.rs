@@ -6176,10 +6176,33 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Tuple(t) if !t.elems.is_empty() => Some(("()".into(), t.elems.iter().map(|x| self.hook_type_of(x)).collect())),
             syn::Expr::Call(c) => {
                 let syn::Expr::Path(p) = &*c.func else { return None };
-                if p.qself.is_some() || c.args.len() != 1 {
+                if p.qself.is_some() {
                     return None;
                 }
                 let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                // `BufWriter::new(x)`, `std::io::BufReader::with_capacity(n, x)`: a std shape built by MOVING arguments in
+                if segs.len() >= 2 {
+                    let (sh, f) = (&segs[segs.len() - 2], &segs[segs.len() - 1]);
+                    let full = self.expand_scoped(&crate::lang::path_to_string_lc(&p.path));
+                    let std_path = matches!(full.split("::").next(), Some("std" | "core" | "alloc"))
+                        || (segs.len() == 2 && !self.uses.contains_key(sh.as_str()) && !self.is_local_type_leaf(sh));
+                    let moved = if std_path && crate::std_bounds::is_shape(sh) {
+                        crate::std_bounds::moved_args(sh, f, c.args.len())
+                    } else {
+                        Vec::new()
+                    };
+                    if !moved.is_empty() {
+                        let n = moved.iter().map(|(i, _)| *i).max().unwrap_or(0) + 1;
+                        let mut targs: Vec<Option<String>> = vec![None; n];
+                        for (i, k) in moved {
+                            targs[i] = c.args.iter().nth(k).and_then(|a| self.hook_type_of(a));
+                        }
+                        return Some((sh.clone(), targs));
+                    }
+                }
+                if c.args.len() != 1 {
+                    return None;
+                }
                 let shape = match segs.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
                     ["Some"] if !self.uses.contains_key("Some") => "Option",
                     ["Ok"] if !self.uses.contains_key("Ok") => "Result",
@@ -6314,9 +6337,21 @@ impl<'a> CallCollector<'a> {
         if member == "call" || depth > 4 {
             return; // a callable slot is the call site's to form (`charge_std_callable`)
         }
-        let head = ty.split('<').next().unwrap_or(ty).to_string();
+        let mut head = ty.split('<').next().unwrap_or(ty).to_string();
         if head.is_empty() || self.std_payload(&head) || head.contains(crate::decls::ALIAS_ALT_SEP) {
             return;
+        }
+        // A RELATIVE path the typer left unexpanded (`sys::EventExtra`, a field's declared type): never a dependency's key.
+        // `charge_coercion_ty` would read a non-`crate::` multi-segment path as `dep::Type::member` and the classifier then
+        // judged that phantom path (EXECUTED fabrication: polling `Events::iter` read `Exec` through `sys::EventExtra::clone`).
+        // Expanded through the module's `use`s: a std path is std's impl; a `crate::` path is the crate's; anything else is
+        // asked by its LEAF only, the local impl route.
+        if head.contains("::") && !head.starts_with("crate::") && !self.is_dependency_type(&head) {
+            let full = self.expand_scoped(&head);
+            if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
+                return;
+            }
+            head = if full.starts_with("crate::") { full } else { head.rsplit("::").next().unwrap_or(&head).to_string() };
         }
         if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
             eprintln!("CT2LICENSED\t{}\t{trait_leaf}::{member}\t{head}", if ct2_class_b(trait_leaf) { "B" } else { "A" }); // §E1 REACH COUNTER
@@ -6325,7 +6360,7 @@ impl<'a> CallCollector<'a> {
             let segs: Vec<&str> = head.split("::").collect();
             let leaf = segs.last().copied().unwrap_or("");
             self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
-                path: format!("{}::{}::{}", segs[0], leaf, member),
+                path: format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member),
                 leaf: member.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false });
             return;
@@ -6477,6 +6512,13 @@ impl<'a> CallCollector<'a> {
             return;
         }
         let path = self.expand_scoped(&written);
+        // a fn ITEM is lower-cased by convention; an ALL-CAPS path is a `const`/`static` VALUE handed over (EXECUTED
+        // fabrication: dylint_internal's `std::env::consts::DLL_SUFFIX` argument read `Env`), and a capitalised one is a
+        // tuple-struct / variant constructor, whose body is the language's.
+        let last = path.rsplit("::").next().unwrap_or(&path);
+        if !last.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') || !last.chars().any(|c| c.is_lowercase()) {
+            return;
+        }
         if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
             eprintln!("CT2CALLABLE\t{path}"); // §E1 REACH COUNTER
         }
@@ -6495,6 +6537,7 @@ impl<'a> CallCollector<'a> {
         args: &[&syn::Expr],
         ret: Option<String>,
         skip_deferred_self: bool,
+        iter_adapter: bool,
     ) {
         use crate::std_bounds::Slot;
         let shape = recv.and_then(|r| self.std_shape_of(r));
@@ -6553,6 +6596,13 @@ impl<'a> CallCollector<'a> {
                         unresolved.push((h.trait_leaf, h.member));
                     }
                 }
+                // a DEFERRED argument is moved into the call's result (`BufReader::new(stream)`): nothing of it runs at the
+                // call (EXECUTED: lettre's `set_stream` read `Net` when it was charged here); the result's own shape
+                // carries it (`std_shape_literal`, `moved_args`) to the call that does run it.
+                // …except an ITERATOR adapter's argument (`a.zip(it)`, `a.chain(it)`): the adapter is driven later in the
+                // same chain, and the chain model follows only its receiver, so the argument is licensed here (OVER when the
+                // adapter is never driven, as `iter_undriven` records).
+                Slot::Arg(_) if h.deferred && !iter_adapter => {}
                 Slot::Arg(k) => {
                     if let Some(a) = args.get(k) {
                         if self.is_derive_ctor(a, h.trait_leaf) {
@@ -6611,6 +6661,9 @@ impl<'a> CallCollector<'a> {
         // an argument that is itself a std shape whose impl the slot's trait reaches (`v.extend(vec![x])` is not this;
         // `HashSet::insert((a, x))` is): one level, through the same impl table
         for h in hooks {
+            if h.deferred && !iter_adapter {
+                continue;
+            }
             if let Slot::Arg(k) = h.slot {
                 if let Some(a) = args.get(k) {
                     if self.type_of(a).is_none() {
@@ -6696,7 +6749,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, recv, &rest, ret, true);
+        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_member_lazy(name));
     }
 
     /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
@@ -6769,7 +6822,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true);
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_member_lazy(leaf));
     }
 
     /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when

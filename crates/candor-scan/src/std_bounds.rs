@@ -513,6 +513,33 @@ pub(crate) fn is_shape(leaf: &str) -> bool {
     t.shapes.contains(leaf)
 }
 
+/// For a std CONSTRUCTOR-like fn that MOVES an argument into the value it returns (`BufWriter::new(inner: W)`,
+/// `BufReader::with_capacity(cap, inner: R)`): (type-argument index, argument index) pairs, read off the row's deferred
+/// `eN` and `aN` slots that carry the same bounds. The argument is not used at the call (nothing of it runs there); it
+/// becomes the returned value's type argument, which a later call on that value reaches through the shape's impl.
+pub(crate) fn moved_args(shape: &str, name: &str, nargs: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for r in table().inherent(shape, name, nargs) {
+        let elems: Vec<(usize, &Vec<&'static str>)> = r
+            .slots
+            .iter()
+            .filter_map(|s| match s.slot {
+                Slot::Elem(i) if s.deferred => Some((i, &s.traits)),
+                _ => None,
+            })
+            .collect();
+        for s in &r.slots {
+            if let (Slot::Arg(k), true) = (s.slot, s.deferred) {
+                let m: Vec<usize> = elems.iter().filter(|(_, t)| **t == s.traits).map(|(i, _)| *i).collect();
+                if m.len() == 1 && !out.contains(&(m[0], k)) {
+                    out.push((m[0], k));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Whether `leaf` names a std trait (`Clone`, `Iterator`, `Write`).
 pub(crate) fn is_std_trait_leaf(leaf: &str) -> bool {
     !table().traits_by_leaf(leaf).is_empty()
