@@ -6548,6 +6548,7 @@ impl<'a> CallCollector<'a> {
         ret: Option<String>,
         skip_deferred_self: bool,
         iter_adapter: bool,
+        moved_ctor: bool,
     ) {
         use crate::std_bounds::Slot;
         let iter_chain = iter_adapter;
@@ -6610,13 +6611,13 @@ impl<'a> CallCollector<'a> {
                         unresolved.push((h.trait_leaf, h.member));
                     }
                 }
-                // a DEFERRED argument is moved into the call's result (`BufReader::new(stream)`): nothing of it runs at the
-                // call (EXECUTED: lettre's `set_stream` read `Net` when it was charged here); the result's own shape
-                // carries it (`std_shape_literal`, `moved_args`) to the call that does run it.
-                // …except an ITERATOR adapter's argument (`a.zip(it)`, `a.chain(it)`): the adapter is driven later in the
-                // same chain, and the chain model follows only its receiver, so the argument is licensed here (OVER when the
-                // adapter is never driven, as `iter_undriven` records).
-                Slot::Arg(_) if h.deferred && !iter_adapter => {}
+                // a DEFERRED argument of a std CONSTRUCTOR (an associated fn with no receiver: `BufReader::new(stream)`) is
+                // moved into the value it builds: nothing of it runs at the call (EXECUTED: lettre's `set_stream` read `Net`
+                // when it was charged here); the built value's shape carries it (`std_shape_literal`, `moved_args`). A
+                // METHOD's deferred argument is licensed: whether the body uses it before storing it is a body fact the
+                // signature does not give (`BTreeMap::entry(k)` compares `k` first — hickory's `Context::insert` lost its
+                // `RrKey::cmp` edge when this applied to methods too).
+                Slot::Arg(_) if h.deferred && moved_ctor => {}
                 Slot::Arg(k) => {
                     if let Some(a) = args.get(k) {
                         if self.is_derive_ctor(a, h.trait_leaf) {
@@ -6675,7 +6676,7 @@ impl<'a> CallCollector<'a> {
         // an argument that is itself a std shape whose impl the slot's trait reaches (`v.extend(vec![x])` is not this;
         // `HashSet::insert((a, x))` is): one level, through the same impl table
         for h in hooks {
-            if h.deferred && !iter_adapter {
+            if h.deferred && moved_ctor {
                 continue;
             }
             if let Slot::Arg(k) = h.slot {
@@ -6763,7 +6764,8 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name));
+        let ctor = recv.is_none() && !owner_is_module;
+        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name), ctor);
     }
 
     /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
@@ -6836,7 +6838,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf));
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf), false);
     }
 
     /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when

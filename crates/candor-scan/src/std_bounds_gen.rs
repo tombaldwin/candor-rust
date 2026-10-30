@@ -412,7 +412,9 @@ impl Ctx<'_> {
                 }
                 for ti in &t.items {
                     if let syn::TraitItem::Fn(f) = ti {
-                        if is_unstable(&f.attrs) {
+                        // An UNSTABLE provided member (`Write::write_all_vectored`) is still a member a nightly caller runs
+                        // and that drives the required ones; an unstable REQUIRED member no stable implementor defines.
+                        if is_unstable(&f.attrs) && f.default.is_none() {
                             continue;
                         }
                         let n = f.sig.ident.to_string();
@@ -442,7 +444,7 @@ impl Ctx<'_> {
                     .collect();
                 for ti in &t.items {
                     if let syn::TraitItem::Fn(f) = ti {
-                        if is_unstable(&f.attrs) {
+                        if is_unstable(&f.attrs) && f.default.is_none() {
                             continue;
                         }
                         self.fn_decl(&format!("trait:{}", d.path), &f.sig, &[&t.generics], &tparams, None, true);
@@ -509,7 +511,7 @@ impl Ctx<'_> {
                 // An inherent impl: each `pub` method is an `F` row on the shape.
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(f) = ii {
-                        if !matches!(f.vis, syn::Visibility::Public(_)) || is_unstable(&f.attrs) {
+                        if !matches!(f.vis, syn::Visibility::Public(_)) {
                             continue;
                         }
                         let recv_args: Vec<Option<String>> = args.iter().map(|a| as_param(a, &params)).collect();
