@@ -492,6 +492,14 @@ pub(crate) fn iterator_member_lazy(name: &str) -> bool {
     t.provided_deferred(ITERATOR, name) || t.provided_deferred(DOUBLE_ENDED, name)
 }
 
+/// Whether a call of `name` hands its receiver back as (part of) an ITERATOR the chain model follows by its receiver:
+/// a lazy `Iterator` / `DoubleEndedIterator` adapter (`map`, `rev`) or `IntoIterator::into_iter`. A deferred member of any
+/// other trait (`BufRead::lines`, `Read::bytes`) wraps the receiver in a value whose own drive runs a DIFFERENT member, so
+/// it is licensed at the call.
+pub(crate) fn iterator_chain_member(name: &str) -> bool {
+    iterator_member_lazy(name) || name == "into_iter"
+}
+
 /// Whether `name` is a member of `DoubleEndedIterator` (so a chain naming it drives `next_back`).
 pub(crate) fn double_ended_member(name: &str) -> bool {
     let t = table();

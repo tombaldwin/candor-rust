@@ -6540,6 +6540,7 @@ impl<'a> CallCollector<'a> {
         iter_adapter: bool,
     ) {
         use crate::std_bounds::Slot;
+        let iter_chain = iter_adapter;
         let shape = recv.and_then(|r| self.std_shape_of(r));
         let mut work: Vec<(String, &'static str, &'static str)> = Vec::new();
         let mut callables: Vec<usize> = Vec::new();
@@ -6568,7 +6569,10 @@ impl<'a> CallCollector<'a> {
                     }
                 }
                 Slot::SelfRecv => {
-                    if h.deferred && skip_deferred_self {
+                    // a deferred `Self` is the chain model's only for an ITERATOR adapter (`it.map(f)`); any other member
+                    // that hands the receiver back inside its result (`r.lines()`, `r.bytes()`) is licensed here, the way
+                    // R1167's `lines` entry already ran it
+                    if h.deferred && skip_deferred_self && iter_chain {
                         continue;
                     }
                     let Some(r) = recv else { continue };
@@ -6749,7 +6753,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_member_lazy(name));
+        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name));
     }
 
     /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
@@ -6822,7 +6826,7 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_member_lazy(leaf));
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf));
     }
 
     /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when

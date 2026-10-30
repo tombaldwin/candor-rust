@@ -8432,7 +8432,7 @@ pub(crate) fn generic_operator_uses(
                                 }
                             }
                         } else if let Some(n) = recv_param {
-                            if !h.deferred {
+                            if !(h.deferred && crate::std_bounds::iterator_chain_member(written)) {
                                 self.hit_named(n, h.trait_leaf, h.member, written);
                             }
                         }
@@ -8525,7 +8525,9 @@ pub(crate) fn generic_operator_uses(
                 };
                 for h in crate::std_bounds::method_hooks(recv, &meth, c.args.len(), None) {
                     match h.slot {
-                        crate::std_bounds::Slot::SelfRecv if !elem && !h.deferred => self.hit_named(&n, h.trait_leaf, h.member, &meth),
+                        crate::std_bounds::Slot::SelfRecv if !elem && !(h.deferred && crate::std_bounds::iterator_chain_member(&meth)) => {
+                            self.hit_named(&n, h.trait_leaf, h.member, &meth)
+                        }
                         crate::std_bounds::Slot::Elem(_) if elem => self.hit_named(&n, h.trait_leaf, h.member, &meth),
                         _ => {}
                     }
