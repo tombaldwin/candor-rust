@@ -6556,6 +6556,7 @@ impl<'a> CallCollector<'a> {
         skip_deferred_self: bool,
         iter_adapter: bool,
         moved_ctor: bool,
+        cha_self: bool,
     ) {
         use crate::std_bounds::Slot;
         let iter_chain = iter_adapter;
@@ -6601,6 +6602,14 @@ impl<'a> CallCollector<'a> {
                     } else if let Some(t) = self.resolve_recv_type(r).filter(|t| {
                         !(self.generic_bounds.contains_key(t.as_str()) || self.impl_generic_bounds.contains_key(t.as_str()))
                     }) {
+                        // A DEFERRED member on a non-std receiver (`resp.bytes()`, `r.by_ref()`) hands the receiver back inside
+                        // its result; what runs later is the result's business. Only a std SHAPE receiver (`BufReader::new(x)
+                        // .lines()`, above) is licensed at the call (EXECUTED-shape fabrication otherwise: reqwest's async
+                        // `Response::json` gained blocking `Response::read`'s `Clock` through its own inherent `self.bytes()`,
+                        // the leaf `Response` naming both types).
+                        if h.deferred {
+                            continue;
+                        }
                         work.push((t, h.trait_leaf, h.member));
                     } else if self.resolve_recv_type(r).is_none() && self.resolve_recv_traits(r).is_empty() {
                         unresolved.push((h.trait_leaf, h.member));
@@ -6658,7 +6667,11 @@ impl<'a> CallCollector<'a> {
                 self.charge_shape_hooks(r, tl);
             }
         }
-        if let Some(r) = recv {
+        // The bounded CHA over a dispatch receiver's implementors is the one `to_string` always had (R1247 era); it is NOT
+        // extended to other members or spellings — a union over a generic bound's visible implementors is what the
+        // instantiating caller resolves exactly instead (R1167), and extending it charged anyhow's `DisplayError::fmt`
+        // (`Display::fmt(&self.0, f)` over `M: Display`) with every local `Display` impl's effects.
+        if let (Some(r), true) = (recv, cha_self) {
             for (tl, m) in dispatch_self {
                 self.charge_coercion(r, tl, m);
             }
@@ -6772,7 +6785,7 @@ impl<'a> CallCollector<'a> {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
         let ctor = recv.is_none() && !owner_is_module;
-        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name), ctor);
+        self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name), ctor, false);
     }
 
     /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
@@ -6845,7 +6858,8 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf), false);
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf), false,
+            leaf == "to_string" && args.is_empty());
     }
 
     /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when
