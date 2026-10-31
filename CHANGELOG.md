@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.40.18] — 2026-10-31
+
 - ⚠ **candor-scan: the std bound table — which user members a std entry point may run, GENERATED from rust-src (call-target
   round 2).** `src/std_bounds.tsv` is derived from the pinned toolchain's rust-src (`gen/std_bounds.sh [--check]`:
   std traits and members, std impls' type-argument bounds — written, derived, macro-made and the compiler's tuple impls —
