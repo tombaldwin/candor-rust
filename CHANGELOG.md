@@ -11,6 +11,39 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: the std bound table — which user members a std entry point may run, GENERATED from rust-src (call-target
+  round 2).** `src/std_bounds.tsv` is derived from the pinned toolchain's rust-src (`gen/std_bounds.sh [--check]`:
+  std traits and members, std impls' type-argument bounds — written, derived, macro-made and the compiler's tuple impls —
+  and every stable std fn's bounded slots). One rule is read off it: a bound licenses the bound trait's required members
+  and its supertraits' on the value that fills the slot — narrowed where executed reports said std does less: a call of
+  a trait's own member licenses that trait's required members only (a REQUIRED member, only itself); `Copy` licenses
+  nothing; a deferred member (`by_ref`, an iterator adapter, a std constructor's moved argument) is licensed where the
+  value is driven, not where it is built. Method calls, std path calls, format operands, comparisons and
+  `for` loops on concrete values, and the R1167 generic summaries, all ask that one entry point; a dependency type's impl
+  is reached through the chained join. **Gates can turn red:** `deny E` 0 → 1 where std runs a user `Clone`/`Debug`/
+  `PartialEq`/`Hash`/`Ord`/`Default`/`Iterator`/`Read`/`Write`/`AsRef`/`FromStr` impl, or a fn item handed to
+  `thread::spawn`/`OnceLock::get_or_init`/`iter::repeat_with` (`{:?}` of `vec![x]`, `v.sort()`, `set.insert(x)`,
+  `x.to_owned()`, `mem::take`, `io::copy`, `"..".parse::<T>()`, `hg(x)` over `hg<X: Clone>`). Executed matrix, three
+  spellings: SILENT 400 → 154 (bare/crate), 397 → 155 (use); std→user hook silences 355 → 114; 0 cells move toward
+  silence; FABRICATED 22 → 22, OVER 87 → 87. A dependency type's hook edge is judged by the classifier only for an
+  `io::Read`/`Write`/`BufRead`/`Seek` member (and never for libc/nix/rustix, whose rules read a leaf as a syscall);
+  otherwise only the chained join answers it. The bounded CHA at a `dyn`/generic receiver stays `to_string`'s. Deleted hand lists: `generic_method_requirements`, `iterator_drives`, `iterator_lazy`,
+  `is_iter_consumer`, `is_write_provided`, `is_read_provided`, `std_required_member`, R1111's per-collection method
+  lists and its `cmp::max/min` spelling list, the `to_string` special case, the four-trait derive list.
+  `CANDOR_CT2_OFF=1` turns the table's sites off (an attribution control, not 0.40.17's behaviour). Corpus A/B vs
+  published 0.40.17 (6,485 entries, chained and unchained): 398 rows gain a concrete effect, 3,044 newly carry only
+  `Unknown`, 0 lose a concrete effect; 23 rows lose `Unknown` and 26 rows are removed, every one read and traced to an
+  edge that named the wrong body (a same-leaf local type, an overriding impl, a wrong receiver).
+- ⚠ **candor-scan: SOUNDNESS R1444 — a `for` / closure binding that shadows a parameter no longer inherits R1429's
+  tuple-payload key.** Executed: a shadow resolved through the outer `&dyn PK` payload (fabricated `Net`, missed `Fs`,
+  `deny Fs` exit 0 over a write); it now discloses. Both binders scope every derived name key (`name_keys`), pinned by a
+  key-enumerating test.
+- ⚠ **candor-scan: SOUNDNESS R1430 (part) — a dependency value with an all-caps leaf (`hg(ctlib::S)`) is typed at
+  table sites the way the `let` route already types it.** A dependency VARIANT path is not typed (its payload form is a
+  constructor function; executed fabrication when it was). DEP-VARIANT-ARG stays open.
+- The disclosure fallback for an unresolvable table site is implemented and OFF (`CANDOR_CT2_DISCLOSE=A|B`, measured
+  for proposal §1.4; not shipped). Cache rev 140.
+
 ## [0.40.17] — 2026-10-25
 
 - ⚠ **candor-scan: a crate-local path VALUE is typed by one route in every position (SOUNDNESS R1426, call-target
