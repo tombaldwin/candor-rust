@@ -13,6 +13,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## [0.40.18] — 2026-10-31
 
+- **Build: dylint 6.0.1 → 6.3.2.** dylint ≤6.2 builds its driver from rust-clippy's `master` branch, which upstream renamed to
+  `main`, so an uncached build (every CI run) failed. No change to what the lint or the engines report.
 - ⚠ **candor-scan: the std bound table — which user members a std entry point may run, GENERATED from rust-src (call-target
   round 2).** `src/std_bounds.tsv` is derived from the pinned toolchain's rust-src (`gen/std_bounds.sh [--check]`:
   std traits and members, std impls' type-argument bounds — written, derived, macro-made and the compiler's tuple impls —
