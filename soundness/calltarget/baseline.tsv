@@ -785,7 +785,7 @@ h_deref_method_depH_gen_pure_Net	crate	unch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	crate	ch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	crate	unch	PURE-OK
 h_deref_method_dep_gen_one_Fs	crate	ch	SILENT
-h_deref_method_dep_gen_one_Fs	crate	unch	LEDGER-ONLY
+h_deref_method_dep_gen_one_Fs	crate	unch	SILENT
 h_deref_method_dep_gen_pure_Net	crate	ch	PURE-OK
 h_deref_method_dep_gen_pure_Net	crate	unch	PURE-OK
 h_deref_method_dep_one_Net	crate	ch	DISCLOSED
@@ -4413,7 +4413,7 @@ h_deref_method_depH_gen_pure_Net	bare	unch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	bare	ch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	bare	unch	PURE-OK
 h_deref_method_dep_gen_one_Fs	bare	ch	SILENT
-h_deref_method_dep_gen_one_Fs	bare	unch	LEDGER-ONLY
+h_deref_method_dep_gen_one_Fs	bare	unch	SILENT
 h_deref_method_dep_gen_pure_Net	bare	ch	PURE-OK
 h_deref_method_dep_gen_pure_Net	bare	unch	PURE-OK
 h_deref_method_dep_one_Net	bare	ch	DISCLOSED
@@ -8041,7 +8041,7 @@ h_deref_method_depH_gen_pure_Net	use	unch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	use	ch	PURE-OK
 h_deref_method_dep_gen_mixP_Exec	use	unch	PURE-OK
 h_deref_method_dep_gen_one_Fs	use	ch	SILENT
-h_deref_method_dep_gen_one_Fs	use	unch	LEDGER-ONLY
+h_deref_method_dep_gen_one_Fs	use	unch	SILENT
 h_deref_method_dep_gen_pure_Net	use	ch	PURE-OK
 h_deref_method_dep_gen_pure_Net	use	unch	PURE-OK
 h_deref_method_dep_one_Net	use	ch	DISCLOSED
