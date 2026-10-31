@@ -119,7 +119,7 @@ jobs:
     # ONE place for the pinned dylint version — the cache key and the install command both read it.
     # See the trap spelled out at the cache step: two spellings can drift, and the drift is silent.
     env:
-      DYLINT_VERSION: 6.0.1
+      DYLINT_VERSION: 6.3.2
     steps:
       - uses: actions/checkout@v6
 
