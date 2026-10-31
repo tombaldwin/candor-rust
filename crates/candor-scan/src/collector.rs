@@ -6364,7 +6364,12 @@ impl<'a> CallCollector<'a> {
             // when this edge was join-only). Except a SYSCALL-TABLE crate (libc / nix / rustix), whose classifier reads a
             // path's LEAF as a syscall name: `rustix::PollFlags::clone` is not `clone(2)` (EXECUTED fabrication: polling
             // `Events::iter` read `Exec`). Those are join-only (`HOOK_JOIN_MARKER`).
-            let path = if candor_classify::is_syscall_crate(segs[0]) {
+            // The classifier judges the spelled member only for a std I/O trait's member on a dependency STREAM type
+            // (`Read`/`Write`/`BufRead`/`Seek`: its rules key on those verbs — quinn, tokio, console); a comparison, hash,
+            // clone, format or iteration member is the dependency's report's to answer, and its NAME is no evidence of an
+            // effect (`console::Term::finish`, licensed through `Hasher` on a `.write(..)`, is not a terminal call).
+            let io_member = matches!(trait_leaf, "Read" | "Write" | "BufRead" | "Seek");
+            let path = if candor_classify::is_syscall_crate(segs[0]) || !io_member {
                 format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member)
             } else {
                 format!("{}::{}::{}", segs[0], leaf, member)
