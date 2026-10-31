@@ -207,6 +207,14 @@ impl Table {
         self.by_leaf.get(leaf).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// The trait's OWN required members (no supertraits), as (trait leaf, member). A sealed trait has none user-side.
+    pub(crate) fn own_required(&self, path: &str) -> Vec<(&'static str, &'static str)> {
+        match self.traits.get_key_value(path) {
+            Some((&k, r)) if !r.sealed => r.required.iter().map(|m| (leaf(k), *m)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// THE RULE: the members a bound on `path` licenses — its REQUIRED members and every supertrait's, as
     /// (declaring trait leaf, member). A sealed trait licenses nothing (no user type implements it).
     pub(crate) fn licensed(&self, path: &str) -> Vec<(&'static str, &'static str)> {
@@ -420,8 +428,37 @@ pub(crate) fn method_hooks(recv: Recv<'_>, name: &str, nargs: usize, bounds: Opt
                     if row.nargs != nargs {
                         continue;
                     }
-                    // the row's own `Self` slot already carries the trait, and `hooks_of` adds its blanket impl's bound
-                    hooks_of(&row.slots, &mut out);
+                    // The row's own `Self` slot names the trait itself. A call of the trait's member `name` on an
+                    // implementor runs that implementor's `name` — or, for a PROVIDED member it does not override, the
+                    // default body, which drives the trait's OWN required members (`count` → `next`, `write_all` →
+                    // `write`, `max` → `cmp`). It does not run the SUPERTRAITS' members (EXECUTED-shape over-charge:
+                    // `cause.source()` licensed `Error`'s supertraits `Debug`/`Display` and charged anyhow's `Chain::len`
+                    // with `Backtrace::fmt`'s `Env`). So that one trait licenses its own required members (and its blanket
+                    // impl's bound, `ToString` → `Display`); every other slot reads the full rule.
+                    let mut rest: Vec<SlotBound> = Vec::new();
+                    for sb in &row.slots {
+                        if sb.slot == Slot::SelfRecv && sb.traits.first() == Some(&tr) {
+                            for (tl, m) in t.own_required(tr) {
+                                let h = Hook { slot: Slot::SelfRecv, trait_leaf: tl, member: m, deferred: sb.deferred };
+                                if !out.contains(&h) {
+                                    out.push(h);
+                                }
+                            }
+                            let mut others = sb.clone();
+                            others.traits.remove(0);
+                            if let Some(bl) = t.impl_bounds(tr, "*") {
+                                for b in bl.iter().filter(|b| b.slot == Slot::SelfRecv) {
+                                    others.traits.extend(b.traits.iter().copied());
+                                }
+                            }
+                            if !others.traits.is_empty() {
+                                rest.push(others);
+                            }
+                        } else {
+                            rest.push(sb.clone());
+                        }
+                    }
+                    hooks_of(&rest, &mut out);
                     continue;
                 } else {
                     // a member with no bounded slot row is still the trait's own member, run on the receiver
