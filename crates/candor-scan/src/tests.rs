@@ -33832,6 +33832,7 @@ pub struct R;
 impl std::io::Read for R { fn read(&mut self, _b: &mut [u8]) -> std::io::Result<usize> { note(); Ok(0) } }
 pub struct Holder { pub r: std::io::BufReader<R> }
 pub fn n_bufreader_built(h: &mut Holder) { h.r = std::io::BufReader::new(R); }
+pub fn n_extend_by_value(v: &mut Vec<S>, w: Vec<S>) { v.extend(w); }
 pub fn c_bufwriter() { use std::io::Write as _; let mut w = std::io::BufWriter::new(W); let _ = w.write_all(b"a"); }
 pub struct Hw { pub w: W }
 pub fn c_write_all_field(h: &mut Hw) { use std::io::Write as _; let _ = h.w.write_all(b"a"); }
@@ -33842,7 +33843,7 @@ pub fn c_write_all_field(h: &mut Hw) { use std::io::Write as _; let _ = h.w.writ
         assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "`{f}` runs a user member through a std entry point:\n{v:#}");
     }
     for f in ["n_arc_clone", "n_rc_clone", "n_arc_param", "n_map_value", "n_none_cmp", "n_into_iter_returned", "n_let_underscore",
-              "n_bufreader_built"] {
+              "n_bufreader_built", "n_extend_by_value"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}` runs no user member — FABRICATION:\n{v:#}");
     }
     // a lazy adapter on a CONCRETE iterator is the deferred model's (charged where it is driven); never more than OVER

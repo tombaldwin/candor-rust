@@ -229,6 +229,12 @@ impl Table {
             if row.sealed {
                 continue;
             }
+            // `Copy` is a marker: std moves a `T: Copy` value by bits and never calls its supertrait's `clone` through
+            // that bound (EXECUTED-shape fabrication: subprocess `Pipeline::bitor`'s `self.cmds.extend(rhs.cmds)` read
+            // `Extend<&T> for Vec<T> where T: Copy` and charged `Exec::clone`'s `Fs`). A `T: Clone` bound still licenses it.
+            if leaf(key) == "Copy" {
+                continue;
+            }
             // The `Fn` family's own member (`call_once`, `extern "rust-call"`) is unstable to IMPLEMENT, so the table does
             // not list it — but a bound on it is exactly "this argument is called". It is licensed as the pseudo-member
             // `call`, which the collector reads as "invoke the callable argument".
