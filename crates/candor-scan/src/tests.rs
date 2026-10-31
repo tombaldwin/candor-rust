@@ -33756,9 +33756,8 @@ pub fn caller() { let mut b = [0u8; 4]; finish(Some((1, &Eff)), &mut b); }\n");
 /// zopfli declares its own no_std `Write` (leaf collision with std's), and `GzipEncoder::flush` —
 /// `self.deflate_encoder.as_mut().unwrap().flush()` — gained `DeflateEncoder::write`'s `Log` when a required call licensed
 /// every required member. A PROVIDED member (`write_all`) still drives the required ones (core2's `io::Write::write_fmt`).
-/// NOTE: this fixture does NOT reproduce the zopfli over-charge (it passes with the required-only rule switched off — four
-/// shapes tried); the over-charge is reproduced on zopfli-0.8.1 itself (`GzipEncoder::flush` +`Log` with the rule off). What
-/// it pins is the other half: the narrowing must not lose the provided member's charge.
+/// The shape needs zopfli's two ingredients: `D` implements BOTH the crate's `Write` and `std::io::Write` (so a `.flush()`
+/// on it reads as std's member), and its crate `write` has the effect. Fails with the required-only rule off.
 #[test]
 fn ct2_a_required_member_call_licenses_that_member_only() {
     let v = scan_src_to_json_multi("ct2req", &[("Cargo.toml", "[package]\nname = \"ct2req\"\n"), ("src/lib.rs", r##"
@@ -33769,6 +33768,10 @@ mod io {
 pub use io::Write;
 pub struct D<W: Write> { pub w: W }
 impl<W: Write> Write for D<W> { fn write(&mut self, b: &[u8]) -> usize { note(); self.w.write(b) } fn flush(&mut self) { self.w.flush() } }
+impl<W: Write> std::io::Write for D<W> {
+    fn write(&mut self, _b: &[u8]) -> std::io::Result<usize> { unimplemented!() }
+    fn flush(&mut self) -> std::io::Result<()> { unimplemented!() }
+}
 pub struct G<W: Write> { pub d: Option<crate::D<W>> }
 impl<W: Write> Write for G<W> {
     fn write(&mut self, b: &[u8]) -> usize { b.len() }

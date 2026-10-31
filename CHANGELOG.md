@@ -33,7 +33,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `CANDOR_CT2_OFF=1` turns the table's sites off (an attribution control, not 0.40.17's behaviour). Corpus A/B vs
   published 0.40.17 (6,485 entries, chained and unchained): 398 rows gain a concrete effect, 3,044 newly carry only
   `Unknown`, 0 lose a concrete effect; 23 rows lose `Unknown` and 26 rows are removed, every one read and traced to an
-  edge that named the wrong body (a same-leaf local type, an overriding impl, a wrong receiver).
+  edge that named the wrong body (a same-leaf local type, an overriding impl, a wrong receiver). Of the 3,044 newly
+  `Unknown`-only rows (1,819 of them rows 0.40.17 did not list), 1,895 carry no new reason of their own (propagation
+  from a callee); 1,149 carry at least one new `unknownWhy` (273 carry more than one, so these counts overlap):
+  `ambiguous:same-name` 1,009 (local defs 993, local methods 13, fns with different return types 2, `macro_rules!` 1),
+  `dep:toml#ser` 198, `macro:module items hidden by an unexpanded macro` 77, `macro:unexpanded` 48,
+  `ambiguous:path-redirected module` 71, `dispatch:Array.size` 48, `callback:unresolved call` 7, `native:extern fn` 3,
+  other `dispatch:` 8. 66 of the 6,551 planned entries are excluded: their source trees are no longer in the local
+  registry, so the 0.40.17 arm produced no report (the harness's exit 3, not the engine's).
 - ⚠ **candor-scan: SOUNDNESS R1444 — a `for` / closure binding that shadows a parameter no longer inherits R1429's
   tuple-payload key.** Executed: a shadow resolved through the outer `&dyn PK` payload (fabricated `Net`, missed `Fs`,
   `deny Fs` exit 0 over a write); it now discloses. Both binders scope every derived name key (`name_keys`), pinned by a
