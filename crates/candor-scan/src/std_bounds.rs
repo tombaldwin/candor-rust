@@ -438,7 +438,16 @@ pub(crate) fn method_hooks(recv: Recv<'_>, name: &str, nargs: usize, bounds: Opt
                     let mut rest: Vec<SlotBound> = Vec::new();
                     for sb in &row.slots {
                         if sb.slot == Slot::SelfRecv && sb.traits.first() == Some(&tr) {
-                            for (tl, m) in t.own_required(tr) {
+                            // A REQUIRED member is the implementor's own body and runs no sibling: `w.flush()` is `flush`
+                            // only (EXECUTED-shape over-charge: zopfli `GzipEncoder::flush` gained `DeflateEncoder::write`'s
+                            // `Log` when a required call licensed every required member).
+                            let own = t.own_required(tr);
+                            let own: Vec<_> = if own.iter().any(|(_, m)| *m == name) {
+                                own.into_iter().filter(|(_, m)| *m == name).collect()
+                            } else {
+                                own
+                            };
+                            for (tl, m) in own {
                                 let h = Hook { slot: Slot::SelfRecv, trait_leaf: tl, member: m, deferred: sb.deferred };
                                 if !out.contains(&h) {
                                     out.push(h);

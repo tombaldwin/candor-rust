@@ -33752,6 +33752,34 @@ pub fn caller() { let mut b = [0u8; 4]; finish(Some((1, &Eff)), &mut b); }\n");
 /// entry point (each EXECUTED in `soundness/calltarget`'s matrix shapes); every `n_*` runs none — the negatives the
 /// table's rules must not cross: an `Arc`/`Rc` clone (the pointer's own `clone`), a map's VALUE handed to `insert`,
 /// a comparison against `None`, a lazy adapter / `into_iter` returned unconsumed, `let _ = x`.
+/// CALL-TARGET ROUND 2 — a call of a std trait's REQUIRED member runs that implementor's member only, never its siblings.
+/// zopfli declares its own no_std `Write` (leaf collision with std's), and `GzipEncoder::flush` —
+/// `self.deflate_encoder.as_mut().unwrap().flush()` — gained `DeflateEncoder::write`'s `Log` when a required call licensed
+/// every required member. A PROVIDED member (`write_all`) still drives the required ones (core2's `io::Write::write_fmt`).
+/// NOTE: this fixture does NOT reproduce the zopfli over-charge (it passes with the required-only rule switched off — four
+/// shapes tried); the over-charge is reproduced on zopfli-0.8.1 itself (`GzipEncoder::flush` +`Log` with the rule off). What
+/// it pins is the other half: the narrowing must not lose the provided member's charge.
+#[test]
+fn ct2_a_required_member_call_licenses_that_member_only() {
+    let v = scan_src_to_json_multi("ct2req", &[("Cargo.toml", "[package]\nname = \"ct2req\"\n"), ("src/lib.rs", r##"
+fn note() { let _ = std::fs::write("/tmp/ct2req", b"x"); }
+mod io {
+    pub trait Write { fn write(&mut self, b: &[u8]) -> usize; fn flush(&mut self); fn write_all(&mut self, b: &[u8]) { let _ = self.write(b); } }
+}
+pub use io::Write;
+pub struct D<W: Write> { pub w: W }
+impl<W: Write> Write for D<W> { fn write(&mut self, b: &[u8]) -> usize { note(); self.w.write(b) } fn flush(&mut self) { self.w.flush() } }
+pub struct G<W: Write> { pub d: Option<crate::D<W>> }
+impl<W: Write> Write for G<W> {
+    fn write(&mut self, b: &[u8]) -> usize { b.len() }
+    fn flush(&mut self) { self.d.as_mut().unwrap().flush() }
+}
+pub fn c_write_all<W: Write>(g: &mut G<W>) { g.d.as_mut().unwrap().write_all(b"a") }
+"##)]);
+    assert!(veina_row_effs(&v, "G::flush").is_empty(), "a required `flush` runs no `write` — FABRICATION:\n{v:#}");
+    assert_eq!(veina_row_effs(&v, "c_write_all"), vec!["Fs".to_string()], "a provided `write_all` runs `write`:\n{v:#}");
+}
+
 #[test]
 fn ct2_the_std_bound_table_charges_std_entry_points_and_not_their_look_alikes() {
     let v = scan_src_to_json_multi("ct2table", &[("Cargo.toml", "[package]\nname = \"ct2table\"\n"), ("src/lib.rs", r##"
@@ -33805,10 +33833,12 @@ impl std::io::Read for R { fn read(&mut self, _b: &mut [u8]) -> std::io::Result<
 pub struct Holder { pub r: std::io::BufReader<R> }
 pub fn n_bufreader_built(h: &mut Holder) { h.r = std::io::BufReader::new(R); }
 pub fn c_bufwriter() { use std::io::Write as _; let mut w = std::io::BufWriter::new(W); let _ = w.write_all(b"a"); }
+pub struct Hw { pub w: W }
+pub fn c_write_all_field(h: &mut Hw) { use std::io::Write as _; let _ = h.w.write_all(b"a"); }
 "##)]);
     for f in ["c_clone", "c_clone_vec", "c_clone_box", "c_to_owned", "c_debug_option", "c_debug_tuple", "c_debug_derive",
               "c_contains", "c_set_insert", "c_take", "c_unwrap_default", "c_is_sorted", "c_for", "c_zip", "c_copy", "c_spawn",
-              "c_generic_clone", "c_generic_fmt", "c_bufwriter"] {
+              "c_generic_clone", "c_generic_fmt", "c_bufwriter", "c_write_all_field"] {
         assert_eq!(veina_row_effs(&v, f), vec!["Fs".to_string()], "`{f}` runs a user member through a std entry point:\n{v:#}");
     }
     for f in ["n_arc_clone", "n_rc_clone", "n_arc_param", "n_map_value", "n_none_cmp", "n_into_iter_returned", "n_let_underscore",

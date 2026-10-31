@@ -6380,13 +6380,6 @@ impl<'a> CallCollector<'a> {
                 typed: false, method: false, is_macro: false });
             return;
         }
-        // A crate that declares its OWN trait under the std trait's leaf (zopfli's no_std `io::Write`): `trait_impls` is
-        // keyed by leaf, so a local type's impl of the crate's trait reads as an impl of std's, and std's licensed member
-        // edges into the crate trait's methods (EXECUTED-shape over-charge: zopfli `GzipEncoder::flush` gained
-        // `DeflateEncoder::write`'s `Log`). Which trait the impl is cannot be told by leaf, so nothing is formed.
-        if self.local_traits.contains_key(trait_leaf) {
-            return;
-        }
         // A local type reaches a body only through its own impl of the trait (or a derive, or an `&Type` impl): an
         // edge to a type with neither names no unit and only raises a wrong-reason `Unknown` (R1111's measured cost).
         let l = head.rsplit("::").next().unwrap_or(&head).to_string();
@@ -6552,6 +6545,7 @@ impl<'a> CallCollector<'a> {
 
     /// Charge `hooks` at a call whose slots are filled by: the receiver (`recv`, with its std shape when it has one),
     /// the call's arguments, and the turbofish's first type (`Ret`).
+    #[allow(clippy::too_many_arguments)]
     fn charge_std_hooks(
         &mut self,
         hooks: &[crate::std_bounds::Hook],
@@ -6863,8 +6857,8 @@ impl<'a> CallCollector<'a> {
         if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
-        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf), false,
-            leaf == "to_string" && args.is_empty());
+        let cha_self = leaf == "to_string" && args.is_empty();
+        self.charge_std_hooks(&hooks, Some(&node.receiver), &args, ret, true, crate::std_bounds::iterator_chain_member(leaf), false, cha_self);
     }
 
     /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when
