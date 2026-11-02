@@ -1737,7 +1737,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let opaque_scope = crate::lang::opaque_include_scope(&merged.opaque_include_modules, &merged.local_globs);
     let trait_fields = &merged.trait_fields;
     // SOUNDNESS R1246 — each trait's implementor BLOCKS with the qual their units are minted under (`model::impl_owner_key`).
-    let impl_owners = crate::model::impl_owners_by_trait(&merged.impl_members);
+    let mut impl_owners = crate::model::impl_owners_by_trait(&merged.impl_members);
+    // …and each trait's own declaration qual, where it is unique (two same-leaf traits refuse, as `union_trait_qual`).
+    for (leaf, quals) in &merged.trait_quals {
+        if let (Some(q), 1) = (quals.iter().next(), quals.len()) {
+            if let Some(v) = impl_owners.get_mut(leaf) {
+                v.push(crate::model::ImplOwner { ty: crate::model::TRAIT_DECL_TY.to_string(), owner: q.clone(), ..Default::default() });
+            }
+        }
+    }
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,

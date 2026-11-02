@@ -2900,8 +2900,26 @@ pub(crate) fn fninfo(
     // `u: &U` does (`seed_trait_vars`). It was untyped: `self.cast()` formed no edge, the impl's unit read pure and the
     // published `TryIntoParam::try_into_param` union read `[]` over an FFI call. Only where `self` has no type of its
     // own and the self type IS (a reference to) a bounded generic of the impl or the method.
+    // SOUNDNESS R1465 — …AND WHERE `self` IS TYPED AS THAT PARAMETER'S BARE NAME. `impl<T: Visitor> Expected for T` gives
+    // `self` the type `T` (the impl's key), which names no type: `self.expecting(f)` went down the typed arm as
+    // `T::expecting`, resolved to nothing, disclosed nothing, and serde's `Expected::fmt` — the body behind every
+    // `invalid_type` message — read PURE over a `Visitor::expecting` that runs the caller's code (EXECUTED,
+    // rustagent-r1246/fx/h3_blanket: `show(&dyn Expected)` reads pure, writes a file). The bound dispatch is added BESIDE
+    // the name typing, which R1318's std-I/O hedge reads. `CANDOR_R1465_OFF=1` restores the skip.
+    let self_is_param_name = |gb: &HashMap<String, Vec<String>>| {
+        std::env::var_os("CANDOR_R1465_OFF").is_none() && vars.get("self").is_some_and(|g| gb.contains_key(g))
+    };
     if let Some(st) = impl_self {
-        if !vars.contains_key("self") && !trait_vars.contains_key("self") {
+        let gb0 = {
+            let mut gb = generic_bounds_of(sig);
+            if let Some(g) = impl_generics {
+                for (k, v) in crate::lang::generic_bounds_of_generics(g) {
+                    gb.entry(k).or_default().extend(v);
+                }
+            }
+            gb
+        };
+        if (!vars.contains_key("self") || self_is_param_name(&gb0)) && !trait_vars.contains_key("self") {
             let mut gb = generic_bounds_of(sig);
             if let Some(g) = impl_generics {
                 for (k, v) in crate::lang::generic_bounds_of_generics(g) {
@@ -4627,13 +4645,38 @@ pub(crate) fn collect_decls(
                 match &s.fields {
                     syn::Fields::Named(named) => {
                         let entry = fields.entry(s.ident.to_string()).or_default();
+                        // SOUNDNESS R1464 — a field declared ONCE PER `#[cfg]` ARM with ONE type (tracing-futures'
+                        // `#[cfg(feature = "std-future")] #[pin] inner: T` beside `#[cfg(not(..))] inner: T`) is
+                        // present in every build with that type, so the skip below does not apply to it. Skipped,
+                        // `self.inner` typed to nothing and `self.inner.spawn_obj(..)` on the `T: Spawn` it holds
+                        // formed no edge, no key and no disclosure (EXECUTED, rustagent-r1246/fx/r1464; the one-arm
+                        // control `fx/r1464c` charges the dispatch key). Admitted only where every arm wrote the SAME
+                        // type (syn equality, spans ignored) — then whichever arm is built, the field is that type.
+                        let cfg_twins: std::collections::HashSet<String> = {
+                            let mut by: HashMap<String, Vec<&syn::Field>> = HashMap::new();
+                            for f in named.named.iter() {
+                                if let Some(n) = &f.ident {
+                                    by.entry(n.to_string()).or_default().push(f);
+                                }
+                            }
+                            by.into_iter()
+                                .filter(|(_, v)| v.len() >= 2 && v.iter().all(|f| has_cfg(&f.attrs)) && v.iter().all(|f| f.ty == v[0].ty))
+                                .map(|(n, _)| n)
+                                .collect()
+                        };
+                        let mut cfg_twin_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                         for f in &named.named {
                             // Skip `#[cfg(...)]`-gated fields: they aren't unconditionally present, so
                             // inferring effects through them mis-fires. (tokio's `resource_span:
                             // tracing::Span`, gated on the off-by-default `tracing` feature, otherwise made
                             // every `self.resource_span.in_scope(..)` read as Log — 452 phantom functions.)
                             if has_cfg(&f.attrs) {
-                                continue;
+                                let twin = f.ident.as_ref().map(|i| i.to_string())
+                                    .filter(|n| cfg_twins.contains(n) && std::env::var_os("CANDOR_R1464_OFF").is_none());
+                                match twin {
+                                    Some(n) if cfg_twin_seen.insert(n.clone()) => {}
+                                    _ => continue,
+                                }
                             }
                             if let Some(name) = &f.ident {
                                 // SOUNDNESS R718 — the ownership fact, recorded BEFORE the

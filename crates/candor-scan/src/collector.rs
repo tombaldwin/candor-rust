@@ -1634,6 +1634,29 @@ impl<'a> CallCollector<'a> {
     /// trait (read through the impl's own written qualification, so a `fmt::Write` bound is out), the member is a
     /// DRIVING member of that trait, and the impl's own trait does not itself declare the member (then `self.m()` is
     /// the blanket's own sibling, which the typed arm already reaches).
+    /// SOUNDNESS R1465 — `self` in a blanket impl whose self type IS a bounded parameter (`impl<T: Visitor> Expected for
+    /// T`) is typed as the parameter's NAME (`T`), so `self.expecting(f)` formed `T::expecting`, which names nothing; Pass B
+    /// also records the bound dispatch (`trait_vars["self"]`, decls.rs' R1292/R1465 seeding) and this asks the dispatch
+    /// authority for it, exactly as a parameter `t: &T` would. Local bound traits only (`dispatch_trait_member`); a
+    /// member the trait does not declare forms nothing. EXECUTED rustagent-r1246/fx/h3_blanket. `CANDOR_R1465_OFF=1`.
+    fn self_param_bound_dispatch(&mut self, receiver: &syn::Expr, leaf: &str) {
+        let syn::Expr::Path(p) = peel_value(receiver) else { return };
+        if !p.path.is_ident("self") || std::env::var_os("CANDOR_R1465_OFF").is_some() {
+            return;
+        }
+        let Some(g) = self.vars.get("self") else { return };
+        if !self.impl_generic_bounds.contains_key(g.as_str()) {
+            return;
+        }
+        let trs = self.trait_vars.get("self").cloned().unwrap_or_default();
+        for tr in trs {
+            let tr = tr.rsplit("::").next().unwrap_or(&tr).to_string();
+            if self.dispatch_calls_for_trait_method(&tr, leaf, None) && crate::lang::reach_debug() {
+                eprintln!("R1465SELF\t{tr}\t{leaf}"); // §E1 REACH COUNTER
+            }
+        }
+    }
+
     fn self_io_receiver(&mut self, receiver: &syn::Expr, leaf: &str) {
         self.self_io_receiver_spelled(receiver, leaf, false)
     }
@@ -8564,7 +8587,15 @@ impl<'a> CallCollector<'a> {
                                 if o.declares(leaf) {
                                     owner_paths.insert((format!("crate::{}::{leaf}", o.owner), true));
                                 } else {
-                                    owner_paths.insert((format!("{tr}::{leaf}"), false));
+                                    // The block INHERITS `leaf`: the trait's default runs. Named by the trait's own
+                                    // declaration qual where known — the bare `{tr}::{leaf}` tail collides when a twin
+                                    // type shares the trait's name (tracing-subscriber's `reload::Layer` beside `trait
+                                    // Layer`: the tail had two claimants, the default edge was refused, and every
+                                    // caller and the union lost what the default reaches — measured on the first A/B).
+                                    match crate::model::trait_decl_qual(self.impl_owners, tr) {
+                                        Some(q) => owner_paths.insert((format!("crate::{q}::{leaf}"), true)),
+                                        None => owner_paths.insert((format!("{tr}::{leaf}"), false)),
+                                    };
                                 }
                             }
                             continue;
@@ -8609,13 +8640,24 @@ impl<'a> CallCollector<'a> {
                     if std::env::var_os("CANDOR_V053_INSTR").is_some() {
                         eprintln!("R1151DEFAULT\t{tr}::{leaf}"); // §E1 REACH COUNTER
                     }
+                    // SOUNDNESS R1246 — by the trait's own declaration qual where known: the bare `{tr}::{leaf}` tail is
+                    // contested whenever a type shares the trait's name (serde's `private::ser::content::SerializeMap`
+                    // beside `trait SerializeMap`), and the default was then reached only by accident, through the
+                    // leaf-tail implementor edge the owner naming above replaced (measured: `FlatMapSerializeMap::
+                    // serialize_entry` lost the default's `serialize_key`/`serialize_value` keys).
+                    let (path, exact) = match crate::model::trait_decl_qual(self.impl_owners, tr)
+                        .filter(|_| std::env::var_os("CANDOR_R1246_OFF").is_none())
+                    {
+                        Some(q) => (format!("crate::{q}::{leaf}"), true),
+                        None => (format!("{tr}::{leaf}"), false),
+                    };
                     self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
-                        path: format!("{tr}::{leaf}"),
+                        path,
                         leaf: leaf.to_string(),
                         str_arg: str_arg.clone(),
                         path_lits_partial: false, path_lit2: None,
-                        typed: false,
-                        method: false,
+                        typed: exact,
+                        method: exact,
                         is_macro: false,
                     });
                 }
@@ -10806,6 +10848,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         self.self_io_receiver(&node.receiver, &leaf);
+        self.self_param_bound_dispatch(&node.receiver, &leaf);
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
             self.dispatch_sites.len(), self.foreign_dispatch_sites.len());

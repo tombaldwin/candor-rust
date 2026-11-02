@@ -7937,6 +7937,36 @@ pub fn eat(_g: m2::Guard) {{}}\npub fn eat1(_g: m1::Guard) {{}}\n"));
         assert!(fixture_effects(&v, "outer").contains(&"Unknown".to_string()), "R1253 unspelled twin discloses:\n{v:#}");
     }
 
+    /// SOUNDNESS R1246 (the audit's half) — a trait DEFAULT stays reachable when a TYPE shares the trait's name. The owner
+    /// naming first emitted the inheriting block's default as the bare `{tr}::{leaf}` tail, which the twin type contests
+    /// (tracing-subscriber's `reload::Layer` beside `trait Layer`; serde's `content::SerializeMap` beside `trait
+    /// SerializeMap`), so the default edge was refused and its effects and keys vanished (EXECUTED: `rustagent-r1246/fx/
+    /// h1_trname`, `h1_pubdflt` read Fs on c048e28 and lost it on the first cut). R1464: a field declared once per `#[cfg]`
+    /// arm with one type keeps that type. R1465: `self` in a blanket impl over a bounded parameter dispatches on the bound.
+    #[test]
+    fn r1246_r1464_r1465_trait_named_twins_cfg_twin_fields_and_blanket_self() {
+        let fs = vec!["Fs".to_string()];
+        let w = "std::fs::write(\"/tmp/x\", \"y\").unwrap();";
+        let v = scan_fixture("r1246trname", &format!("pub trait Layer {{ fn reg(&self) {{ {w} }} }}\n\
+pub mod reload {{ pub struct Layer; impl crate::Layer for Layer {{ fn reg(&self) {{ println!(\"r\"); }} }} }}\n\
+pub mod fmt {{ pub struct Layer; impl crate::Layer for Layer {{}} }}\n\
+pub fn viadyn(s: &dyn Layer) {{ s.reg(); }}\n"));
+        assert_eq!(fixture_effects(&v, "viadyn"), fs, "R1246 inherited default under a trait-named twin:\n{v:#}");
+        let v = scan_fixture("r1246pubdflt", &format!("pub trait SerializeMap {{ fn entry(&self) {{ {w} }} }}\n\
+pub mod content {{ pub struct SerializeMap; impl crate::SerializeMap for SerializeMap {{ fn entry(&self) {{ println!(\"c\"); }} }} }}\n\
+pub struct FlatMap<M>(pub M);\nimpl<M: SerializeMap> FlatMap<M> {{ pub fn entry(&self) {{ self.0.entry(); }} }}\n"));
+        assert_eq!(fixture_effects(&v, "FlatMap::entry"), fs, "R1246 pub default (R1151 path) under a trait-named twin:\n{v:#}");
+        let v = scan_fixture("r1464", &format!("pub trait Spawn {{ fn spawn_obj(&self); }}\n\
+pub struct WithDispatch<T> {{ #[cfg(feature = \"pp\")] pub inner: T, #[cfg(not(feature = \"pp\"))] pub inner: T }}\n\
+impl<T> Spawn for WithDispatch<T> where T: Spawn {{ fn spawn_obj(&self) {{ self.inner.spawn_obj(); }} }}\n\
+pub struct Exec; impl Spawn for Exec {{ fn spawn_obj(&self) {{ {w} }} }}\n"));
+        assert_eq!(fixture_effects(&v, "WithDispatch::spawn_obj"), fs, "R1464 cfg-twin field keeps its type:\n{v:#}");
+        let v = scan_fixture("r1465", &format!("pub trait Visitor {{ fn expecting(&self); }}\npub trait Expected {{ fn fmt(&self); }}\n\
+impl<T: Visitor> Expected for T {{ fn fmt(&self) {{ self.expecting(); }} }}\n\
+pub struct V; impl Visitor for V {{ fn expecting(&self) {{ {w} }} }}\npub fn show(e: &dyn Expected) {{ e.fmt(); }}\n"));
+        assert_eq!(fixture_effects(&v, "show"), fs, "R1465 blanket self dispatches on its bound:\n{v:#}");
+    }
+
     /// SOUNDNESS R1265 — a BARE call (`main(1)`) cannot name an associated fn, so an `impl` member or a trait default
     /// of the same leaf is not its rival. The leaf was two-way, `resolve_target` refused it, and the call was traded for
     /// `ambiguous:same-name local defs` over a free fn that reads `HOME` (EXECUTED: `rustagent-b/fx/r1265_{hand,mac,
