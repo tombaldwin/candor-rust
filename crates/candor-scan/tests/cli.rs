@@ -7306,3 +7306,94 @@ fn review9_an_escaped_open_payload_keeps_the_union_hedge() {
     }
     assert!(!why(u("Job::y")).iter().any(|w| w.contains("SY.")), "REVIEW9: a closed return still drops: {v:#}");
 }
+
+// ═══ ⟨0.41⟩ `accept` on the SCAN route (SPEC §6.2) ═══════════════════════════════════════════════════════════════
+//
+// The scan gates a workspace one MEMBER at a time and concatenates the rows. These rows pin the consequence: an
+// entry is settled once over the WHOLE run, so it is neither stale in the member that lacks its function nor blind
+// to a twin living in another member.
+
+fn accept_workspace(name: &str, members: &[(&str, &str)], policy: &str) -> (PathBuf, PathBuf) {
+    let d = std::env::temp_dir().join(format!("candor-scan-accept-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let list = members.iter().map(|(n, _)| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+    std::fs::write(d.join("Cargo.toml"), format!("[workspace]\nmembers = [{list}]\nresolver = \"2\"\n")).unwrap();
+    for (n, src) in members {
+        std::fs::create_dir_all(d.join(n).join("src")).unwrap();
+        std::fs::write(d.join(n).join("Cargo.toml"), format!("[package]\nname = \"{n}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")).unwrap();
+        std::fs::write(d.join(n).join("src/lib.rs"), src).unwrap();
+    }
+    let pol = d.join("p.policy");
+    std::fs::write(&pol, policy).unwrap();
+    (d, pol)
+}
+
+fn accept_scan(d: &std::path::Path, pol: &std::path::Path) -> (i32, serde_json::Value, String) {
+    let gj = d.join("g.json");
+    let out = Command::new(bin())
+        .arg(d)
+        .args(["--policy", &pol.to_string_lossy(), "--out", &d.join("out/r").to_string_lossy(), "--gate-json", &gj.to_string_lossy()])
+        .output()
+        .expect("run candor-scan");
+    let doc = serde_json::from_str(&std::fs::read_to_string(&gj).unwrap()).unwrap();
+    (out.status.code().unwrap_or(-1), doc, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn accept_over_a_workspace_is_not_stale_in_the_member_that_lacks_the_function() {
+    let (d, pol) = accept_workspace(
+        "ws",
+        &[
+            ("ma", "pub mod dao { pub fn a() { let _ = std::fs::read(\"/x\"); } }"),
+            ("mb", "pub mod dao { pub fn b() -> i32 { 2 } }"),
+        ],
+        "deny Fs dao\naccept dao::a Fs for deny Fs dao because known\n",
+    );
+    let (rc, v, err) = accept_scan(&d, &pol);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, 0, "{err}\n{v}");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["accepted"][0]["status"], "accepted");
+    assert_eq!(v["accepted"][0]["hash"], "ma#dao::a");
+    assert!(err.contains("1 violation(s) accepted by policy; 0 new"), "{err}");
+    assert!(err.contains("policy ✓"), "a clean settled run still says so:\n{err}");
+}
+
+#[test]
+fn a_twin_in_another_member_makes_the_entry_ambiguous_and_both_rows_stay_red() {
+    let (d, pol) = accept_workspace(
+        "twin",
+        &[
+            ("ma", "pub mod dao { pub fn t() { let _ = std::fs::read(\"/t\"); } }"),
+            ("mb", "pub mod dao { pub fn t() { let _ = std::fs::read(\"/u\"); } }"),
+        ],
+        "deny Fs dao\naccept dao::t Fs for deny Fs dao because known\n",
+    );
+    let (rc, v, err) = accept_scan(&d, &pol);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, 1, "member `ma` settled it provisionally; only the whole run can see the twin\n{err}");
+    assert_eq!(v["violations"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(v["accepted"][0]["status"], "ambiguous");
+    assert!(!err.contains("policy ✓"), "the deferred ✓ must not be printed over a run the settlement reddened:\n{err}");
+}
+
+#[test]
+fn a_stale_entry_is_exit_1_and_a_policy_without_accept_prints_the_same_tick_as_before() {
+    let (d, pol) = accept_workspace(
+        "stale",
+        &[("ma", "pub mod dao { pub fn a() -> i32 { 1 } pub fn k() { let _ = std::time::SystemTime::now(); } }")],
+        "deny Fs dao\naccept dao::a Fs for deny Fs dao because gone\n",
+    );
+    let (rc, v, err) = accept_scan(&d, &pol);
+    assert_eq!(rc, 1, "{err}");
+    assert_eq!(v["violations"][0]["rule"], "AS-EFF-012");
+    assert!(v["violations"][0]["detail"].as_str().unwrap().contains("Delete line 2"), "the message names the line and the remedy:\n{v}");
+    // CONTROL: the same tree, no accept line — clean, and the tick is printed by the member as it always was
+    std::fs::write(&pol, "deny Fs dao\n").unwrap();
+    let (rc0, v0, err0) = accept_scan(&d, &pol);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc0, 0, "{err0}");
+    assert!(v0.get("accepted").is_none());
+    assert!(err0.contains("policy ✓"));
+}

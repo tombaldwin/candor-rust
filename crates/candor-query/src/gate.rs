@@ -489,6 +489,60 @@ impl ReportSignature {
     }
 }
 
+/// ⟨0.41⟩ `accept` over a report route's rows (SPEC §6.2). The units are EVERY key the gate ranged over, named as
+/// a policy scope names them (twins are two keys under one name); the unevaluated rules are the ones this route
+/// REFUSED — `forbid`/`only`/`allow` and an unanswerable filter — whose entries are `unjudged`, never stale.
+/// Shared by `gate` and the advisory verbs, so "what the gate would accept" has one implementation.
+pub(crate) fn settle_accepts(
+    p: &candor_classify::policy::ParsedPolicy,
+    sig: &ReportSignature,
+    rows: Vec<candor_report::GateViolation>,
+    refused: &[candor_report::Unevaluated],
+) -> candor_classify::accept::Settled {
+    let gi = sig.as_input();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let units: Vec<(String, String)> = gi
+        .all
+        .iter()
+        .filter(|k| seen.insert(k.as_str()))
+        .map(|k| (gi.disp(k).to_string(), k.clone()))
+        .collect();
+    let unevaluated: BTreeSet<String> =
+        refused.iter().map(|u| candor_classify::policy::rule_key(&u.rule)).collect();
+    candor_classify::accept::settle(
+        &p.accepts,
+        rows,
+        &candor_classify::accept::RunFacts { units: &units, unevaluated: &unevaluated },
+    )
+}
+
+/// ⟨0.41⟩ THE UNITS A POLICY'S `accept` LINES TAKE OUT OF THE GATE over this report — what the advisory verbs
+/// need (SPEC §6.2 ⟨0.41⟩: they "apply the same parse and the same matching", `unverified` MUST NOT describe a
+/// unit with an accepted violation as clean, and `fix-gate` must be at least as pessimistic as the gate).
+///
+/// Not a re-implementation: the gate's own `gate()` over the deny/pure rules (the only ones this route
+/// evaluates), then the SAME [`settle_accepts`]. `refused` is what the caller already knows this report cannot
+/// answer, so an entry on such a rule is `unjudged` here exactly as it is on `gate --report`. Returns the
+/// accepted unit names (direct and nested) and the stale `AS-EFF-012` rows.
+pub(crate) fn review_accepts(
+    parsed: &candor_classify::policy::ParsedPolicy,
+    sig: &ReportSignature,
+    refused: &[candor_report::Unevaluated],
+) -> (BTreeSet<String>, Vec<candor_report::GateViolation>) {
+    if parsed.accepts.is_empty() {
+        return (BTreeSet::new(), Vec::new());
+    }
+    let p = candor_classify::policy::ParsedPolicy {
+        rules: parsed.rules.clone(),
+        accepts: parsed.accepts.clone(),
+        ..Default::default()
+    };
+    let outcome = candor_classify::gate::gate(&p, &sig.as_input());
+    let settled = settle_accepts(&p, sig, outcome.violations, refused);
+    let names = settled.accepted.iter().filter(|i| i.status == "accepted").map(|i| i.func.clone()).collect();
+    (names, settled.stale)
+}
+
 /// ⟨0.24⟩ THE REPORT ROUTE INTO THE GATE — a signature read from a written report, with no scan and no
 /// classifier.
 ///
@@ -1680,6 +1734,24 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // identically — the shared `gate()` computes it once, both writers serialize it.
     let zero_match = outcome.zero_match;
     let mut violations = outcome.violations;
+    // ⟨0.41⟩ SPEC §6.2 `accept`: take the rows a policy line names out of `violations`, over the WHOLE run (this
+    // route gates one merged unit set, so the cross-member question the scan route defers to its end is asked
+    // here once). `None` when no `accept` line became an entry, which is what keeps every other verdict
+    // byte-identical. The rules this route REFUSED are the ones whose entries are `unjudged`.
+    let accepted: Option<Vec<candor_report::AcceptedItem>> = if p.accepts.is_empty() {
+        None
+    } else {
+        let settled = settle_accepts(&p, &sig, violations, &refused);
+        for note in &settled.notes {
+            eprintln!("candor-query gate: {note}");
+        }
+        violations = settled.remaining;
+        violations.extend(settled.stale);
+        if let Some(line) = candor_classify::accept::announce(settled.accepted_rows, violations.len()) {
+            eprintln!("candor-query gate: {line}");
+        }
+        Some(settled.accepted)
+    };
     if violations.is_empty() && !refused.is_empty() {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated. THIS is
         // the branch that gets to say "Refusing (exit 2)", and it says it because it is about to do it.
@@ -1809,6 +1881,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // asked about (SPEC §2 ⟨0.33⟩) — computed off THIS RUN's `own_rules` above, never re-derived by
         // the writer, so the document and the exit code below read the identical value.
         &unasked_rules,
+        // ⟨0.41⟩ the `accepted` list; `None` unless an `accept` line became an entry.
+        accepted.as_deref(),
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1974,6 +2048,8 @@ fn write_verdict(
     // ⟨0.33⟩ the rules THIS gate's policy holds that some peeked class's producer was never asked about
     // (SPEC §2 ⟨0.33⟩), off the report's `scannedUnder` key.
     unasked_rules: &[String],
+    // ⟨0.41⟩ SPEC §6.2 — the `accepted` list, `None` when no `accept` line became an entry.
+    accepted: Option<&[candor_report::AcceptedItem]>,
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1989,7 +2065,7 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v33(
+    let json = match candor_report::gate_verdict_json_v41(
         violations,
         coverage,
         analyzed_count,
@@ -2003,6 +2079,7 @@ fn write_verdict(
         // ⟨0.32⟩ the unread classes, off the report's `excluded` key.
         unpeeked,
         unasked_rules,
+        accepted,
     ) {
         Ok(j) => j,
         Err(e) => {

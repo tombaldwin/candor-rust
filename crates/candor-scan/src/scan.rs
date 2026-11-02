@@ -956,6 +956,8 @@ pub(crate) fn scan_main() {
     enforce_engine_pin(&dir);
     if deps_mode {
         let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline, &run_tok);
+        // ⟨0.41⟩ settle the whole run's `accept` entries (a no-op without any).
+        let code = crate::gate::finalize_accept(code, want_json, &run_tok);
         // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
         crate::gate::disarm_unwritten_out_reports();
         write_gate_json(code);
@@ -975,6 +977,9 @@ pub(crate) fn scan_main() {
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
     let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx, &run_tok);
+    // ⟨0.41⟩ SPEC §6.2 `accept`: the AUTHORITATIVE settlement, over every member's rows at once (a no-op without
+    // an entry). Stale entries and cross-member twins can only be seen here, and only ever make the run redder.
+    let code = crate::gate::finalize_accept(code, want_json, &run_tok);
     // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
     crate::gate::disarm_unwritten_out_reports();
     write_gate_json(code);
@@ -9110,7 +9115,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // Unknown`, while the same line claimed the rule was being ignored. One of those is a false
         // disclosure and the other is fail-open; the fail-open one is the common case, because a typo
         // lands beside correct tokens far more often than alone.
-        let (perrs, used_aliases, pignored) = crate::gate::policy_precheck(&text, unknown_aliases);
+        let (perrs, used_aliases, pignored, paccepts) = crate::gate::policy_precheck(&text, unknown_aliases);
         // ⟨0.28⟩ SPEC §6.2: the dropped lines ride the VERDICT as `ignored` — recorded here, written
         // once by `write_gate_json` beside the violations and `zeroMatch`. The per-line stderr
         // warnings are unchanged; this is their machine half. (On the fatal/zero-rule refusal arms
@@ -9239,7 +9244,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
-        let outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, unknown_aliases, &net_partners);
+        let mut outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, unknown_aliases, &net_partners);
+        // ⟨0.41⟩ SPEC §6.2 `accept`: settle THIS member's rows provisionally (its own exit decisions below read `v`),
+        // recording what `finalize_accept` needs to settle the whole run. A no-op without an entry.
+        crate::gate::settle_member(&paccepts, &crate_name, &all, &mut outcome, run);
         // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
         // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES,
         // so a function calling into a dep has an EMPTY adjacency and the crossing is invisible to them.
@@ -9500,10 +9508,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // AND THE FIRST CLAUSE WAS WRONG IN THE OTHER DIRECTION — "under-reports", unqualified, is more
             // pessimistic than anything measured. The numbers below are this repo's own standing gates, so
             // the disclosure is now item 7 done properly: what it misses, stated as a measurement.
-            eprintln!("candor-scan: policy ✓ (syntactic floor — a clean run is necessary, not sufficient: \
+            // ⟨0.41⟩ …unless an `accept` entry exists: whether the RUN is clean (no stale entry anywhere, no twin
+            // across members) is not decidable until the last member has been settled, so the line moves to
+            // `finalize_accept` rather than claiming a pass the whole-run settlement may withdraw.
+            if paccepts.is_empty() {
+                eprintln!("candor-scan: policy ✓ (syntactic floor — a clean run is necessary, not sufficient: \
                        resolution-heavy code can under-report SILENTLY. Measured: 0 silent-pure across 19 \
                        syscall-oracle drivers on executed Fs/Net/Exec, and 0 fabrications across 76 \
                        curated-pure crates. Run `candor blindspots` for what this scan could not see.)");
+            } else {
+                crate::gate::defer_policy_ok(run);
+            }
             // A CLEAN gate has no violation lines for the exploration opener to contradict, so emit it HERE
             // (after the ✓) — the pre-gate suppression at the top only exists to avoid a "nothing hidden"
             // line ABOVE a FAILING gate's violations (#18); a passing gated scan should not lose it (#8).

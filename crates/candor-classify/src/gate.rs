@@ -311,6 +311,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // obligation, on 15 of 90 rows over ebman/pgman/the candor workspace — which is the whole argument
     // for the verb: no end-to-end test could have separated this from a classifier defect.
     let mut seen_fn: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let accepting = !p.accepts.is_empty();
     for q in gi.all {
         // ⟨0.32⟩ the key identifies the unit; the NAME is what a human reads and a scope matches.
         let disp_q = gi.disp(q);
@@ -365,6 +366,9 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     reason_class,
                     net_class,
                     origin: String::new(),
+                    // ⟨0.41⟩ the producing LINE, for an `accept` entry to name. Computed only when the policy has
+                    // an entry, so a policy without one pays nothing and a row never carries a key it cannot use.
+                    rule_key: if accepting { crate::policy::rule_key(&r.raw) } else { String::new() },
                 });
             }
         }
@@ -447,6 +451,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     hash: gi.unit(q).to_string(),   // ⟨0.32⟩ SPEC §2 — every verdict row
                     effects: Vec::new(), // a layer-flow has no single effect
                     detail: format!("`{disp_q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
+                    rule_key: if accepting { crate::policy::rule_key(&r.raw) } else { String::new() },
                     ..Default::default()
                 });
             }

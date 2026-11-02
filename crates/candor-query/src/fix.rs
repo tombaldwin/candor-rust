@@ -647,6 +647,22 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
             }
         }
     }
+    // ⟨0.41⟩ SPEC §6.2 `accept`: this verb ACCEPTS NOTHING — it still plans a remedy for a crossing a policy line
+    // took out of the gate, which is the pessimistic direction §6.2 requires ("MUST NOT accept anything the gate
+    // would not"). But the gate also FAILS on a STALE `accept` entry (`AS-EFF-012`, exit 1), and a verb whose
+    // `--strict` exit read 0 beside that would be the more optimistic one, so a stale entry is an outstanding
+    // finding here too: the remedy it names is deleting the line.
+    let stale: Vec<candor_report::GateViolation> = {
+        let refused: Vec<candor_report::Unevaluated> = unanswered
+            .iter()
+            .map(|u| candor_report::Unevaluated { rule: u.rule.clone(), why: u.why.clone() })
+            .collect();
+        crate::gate::review_accepts(&parsed, &sig, &refused).1
+    };
+    for st in &stale {
+        eprintln!("candor fix-gate: [{}] {}", st.rule, st.detail);
+    }
+    let outstanding = !plans.is_empty() || !stale.is_empty();
 
     if want_json {
         let remedies: Vec<_> = plans.values().map(|p| p.to_json()).collect();
@@ -662,7 +678,10 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         // ⟨0.28⟩ `must_hedge`: count-0 withdraws `ok` too (SPEC §2), on the same OMIT-don't-falsify
         // rule, and in step with the prose branch below. The exit argument stays `incomplete()`.
         if unanswered.is_empty() && !comp.must_hedge() {
-            out["ok"] = serde_json::json!(plans.is_empty());
+            out["ok"] = serde_json::json!(!outstanding);
+        }
+        if !stale.is_empty() {
+            out["staleAccepts"] = serde_json::json!(stale.iter().map(|v| serde_json::json!({"fn": v.func, "detail": v.detail})).collect::<Vec<_>>());
         }
         if !unanswered.is_empty() {
             out["unevaluated"] = serde_json::json!(unevaluated_json(&unanswered));
@@ -672,7 +691,7 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes
         // the exit code follow `ok`, so a CI job can REQUIRE zero outstanding crossings (mirrors
         // `unverified --strict`). exit 2 (no report / unreadable policy) already returned above.
-        return fix_gate_exit(g.strict, !plans.is_empty(), !unanswered.is_empty(), comp.incomplete());
+        return fix_gate_exit(g.strict, outstanding, !unanswered.is_empty(), comp.incomplete());
     }
 
     // ONE LINE PER RULE, matching the gate's own channel: the first function that defeats a rule is the
@@ -720,7 +739,14 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         ),
     );
     if plans.is_empty() {
-        if unanswered.is_empty() && !comp.must_hedge() {
+        if !stale.is_empty() {
+            println!(
+                "candor fix-gate: no deny/pure boundary crossing needs a remedy, but {} `accept` entr{} STALE (above) — \
+                 the gate fails on them; delete the line(s) named.",
+                stale.len(),
+                if stale.len() == 1 { "y is" } else { "ies are" }
+            );
+        } else if unanswered.is_empty() && !comp.must_hedge() {
             println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
         } else {
             // NO `✓`. The tick is the same claim in prose, over a report the gate refused to judge or
@@ -764,7 +790,7 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
                 }
             );
         }
-        return fix_gate_exit(g.strict, false, !unanswered.is_empty(), comp.incomplete());
+        return fix_gate_exit(g.strict, !stale.is_empty(), !unanswered.is_empty(), comp.incomplete());
     }
     let n = plans.len();
     println!(

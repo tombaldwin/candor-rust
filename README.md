@@ -272,6 +272,15 @@ Three boundary kinds, all checked *transitively* so they catch what a local diff
 - **`forbid <A> -> <B>`** (AS-EFF-009) — *who* a layer may depend on. The domain layer must not reach
   into infra, even through a chain of helpers.
 
+- **`accept <fn> <Effect>… for <rule> because <reason>`** (SPEC §6.2 ⟨0.41⟩) — a *known* violation, written down
+  where a reviewer reads it. The `for … because` span must be the rule line's own tokens, and the entry names ONE
+  function by exact name (`candor-scan` and `candor-query gate --report`; the `cargo candor` lint route does not
+  evaluate it and leaves the violation red). The row leaves `violations`, appears in the verdict's `accepted`
+  list, and the human channel prints `N violation(s) accepted by policy; M new`. A function that now does *more*
+  than was accepted stays red; an entry that matches nothing is itself a violation (`AS-EFF-012`, delete the line);
+  a closure's `{closure#N}` key cannot be accepted — accept the enclosing function. `allow` and `only` rules
+  cannot be accepted.
+
 `cargo candor policy` enforces all three across a whole workspace in one command — it snapshots every
 crate, then enforces with the siblings loaded, so an effect or endpoint that lives in a *shared crate*
 still gets caught at the boundary that forbids it. See [examples/candor-policy](examples/candor-policy)

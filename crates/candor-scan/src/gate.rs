@@ -46,7 +46,7 @@ pub(crate) use candor_classify::gate::net_classes_of;
 pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> (Vec<(String, String)>, UsedAliases, Vec<candor_report::IgnoredLine>) {
+) -> (Vec<(String, String)>, UsedAliases, Vec<candor_report::IgnoredLine>, Vec<candor_classify::policy::AcceptEntry>) {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
     // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
     // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
@@ -70,7 +70,9 @@ pub(crate) fn policy_precheck(
             reason: e.message.clone(),
         })
         .collect();
-    (fatal, p.used_aliases, ignored)
+    // ⟨0.41⟩ …and the valid `accept` entries (SPEC §6.2), from the SAME parse that produced `ignored`, so the two
+    // cannot disagree about which accept lines were honoured.
+    (fatal, p.used_aliases, ignored, p.accepts)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -718,12 +720,146 @@ pub(crate) fn record_gate_violations(violations: &[GateViolation], _run: &RunTok
     GATE_VIOLATIONS.with(|v| v.borrow_mut().extend(violations.iter().cloned()));
 }
 
+thread_local! {
+    /// ⟨0.41⟩ THE WHOLE RUN'S ACCEPT STATE (SPEC §6.2 `accept`). A workspace is gated one MEMBER at a time and the
+    /// rows concatenated, so a match made per member would call an entry written for member A stale in member B and
+    /// could not see a twin living in a third. Each member therefore settles PROVISIONALLY (so its own exit
+    /// decisions see the rows it can already account for), and records here what [`finalize_accept`] needs to settle
+    /// the WHOLE run once: the pre-settle policy rows, every unit, and the rules this run could not evaluate.
+    static ACCEPT_STATE: std::cell::RefCell<AcceptState> = std::cell::RefCell::new(AcceptState::default());
+    /// ⟨0.41⟩ The `accepted` list `write_gate_json` publishes. `Some` exactly when an `accept` line became an entry.
+    static GATE_ACCEPTED: std::cell::RefCell<Option<Vec<candor_report::AcceptedItem>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Default)]
+struct AcceptState {
+    entries: Vec<candor_classify::policy::AcceptEntry>,
+    rows: Vec<GateViolation>,
+    units: Vec<(String, String)>,
+    unevaluated: BTreeSet<String>,
+    /// A member finished clean while entries existed: its `policy ✓` line was DEFERRED to [`finalize_accept`],
+    /// because whether the run is clean is not decidable until the whole run has been settled.
+    deferred_ok: bool,
+}
+
+/// ⟨0.41⟩ PROVISIONAL, PER-MEMBER settlement. Records what the final pass needs and returns the rows this member
+/// can already account for removed. NEVER produces stale rows (staleness is a property of the whole run) and never
+/// prints (the final pass owns the human channel).
+pub(crate) fn settle_member(
+    entries: &[candor_classify::policy::AcceptEntry],
+    crate_name: &str,
+    all: &[String],
+    outcome: &mut candor_classify::gate::GateOutcome,
+    _run: &RunToken,
+) {
+    if entries.is_empty() || recording_suppressed() {
+        return;
+    }
+    let units: Vec<(String, String)> = all.iter().map(|q| (q.clone(), format!("{crate_name}#{q}"))).collect();
+    // A withheld pair means the rule could not be evaluated there: its entries are `unjudged`, not stale.
+    let unevaluated: BTreeSet<String> =
+        outcome.withheld.iter().map(|w| candor_classify::policy::rule_key(&w.rule)).collect();
+    ACCEPT_STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        if st.entries.is_empty() {
+            st.entries = entries.to_vec();
+        }
+        st.rows.extend(outcome.violations.iter().filter(|v| !v.rule_key.is_empty()).cloned());
+        st.units.extend(units.iter().cloned());
+        st.unevaluated.extend(unevaluated.iter().cloned());
+    });
+    let settled = candor_classify::accept::settle(
+        entries,
+        std::mem::take(&mut outcome.violations),
+        &candor_classify::accept::RunFacts { units: &units, unevaluated: &unevaluated },
+    );
+    outcome.violations = settled.remaining;
+}
+
+/// ⟨0.41⟩ A member that finished clean under entries owes the run a `policy ✓` line it did not print.
+pub(crate) fn defer_policy_ok(_run: &RunToken) {
+    ACCEPT_STATE.with(|s| s.borrow_mut().deferred_ok = true);
+}
+
+/// ⟨0.41⟩ THE AUTHORITATIVE SETTLEMENT, once, after the last member and before the verdict is written.
+///
+/// Re-settles EVERY pre-settle policy row against EVERY unit of the run, so it can only ever make the answer
+/// REDDER than the members' provisional one: a twin across members un-accepts what a member accepted, and an
+/// entry that accepted nothing anywhere is stale (`AS-EFF-012`, exit 1). Returns the exit code: a violation the
+/// run now holds dominates (§3.1), otherwise `code` is untouched.
+pub(crate) fn finalize_accept(code: i32, want_json: bool, _run: &RunToken) -> i32 {
+    let st = ACCEPT_STATE.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if st.entries.is_empty() {
+        return code;
+    }
+    let before = GATE_VIOLATIONS.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    // Rows no `accept` line can touch (the AS-EFF-005 baseline guard, 008, 011) pass through; the policy rows are
+    // replaced by the pre-settle set, of which `before` held only the provisional remainder.
+    let mut rows: Vec<GateViolation> = before.iter().filter(|v| v.rule_key.is_empty()).cloned().collect();
+    rows.extend(st.rows);
+    let settled = candor_classify::accept::settle(
+        &st.entries,
+        rows,
+        &candor_classify::accept::RunFacts { units: &st.units, unevaluated: &st.unevaluated },
+    );
+    for note in &settled.notes {
+        eprintln!("candor-scan: {note}");
+    }
+    let stdout_is_json = want_json || matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-");
+    // Print only the rows a member did NOT already print: the stale entries, and any row a member accepted that
+    // the whole run could not.
+    let mut printed: Vec<(String, String, String)> =
+        before.iter().map(|v| (v.rule.clone(), v.detail.clone(), v.hash.clone())).collect();
+    let mut fresh = 0usize;
+    let mut finals: Vec<GateViolation> = settled.remaining;
+    finals.extend(settled.stale);
+    for gv in &finals {
+        let key = (gv.rule.clone(), gv.detail.clone(), gv.hash.clone());
+        if let Some(i) = printed.iter().position(|k| *k == key) {
+            printed.swap_remove(i);
+            continue;
+        }
+        fresh += 1;
+        let line = format!("[{}] {}", gv.rule, gv.detail);
+        if stdout_is_json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+    if fresh > 0 {
+        eprintln!(
+            "candor-scan: {fresh} further policy violation(s) once the WHOLE run was judged (a stale `accept` entry, \
+             or an acceptance the run as a whole cannot honour)"
+        );
+    }
+    if let Some(line) = candor_classify::accept::announce(settled.accepted_rows, finals.len()) {
+        eprintln!("candor-scan: {line}");
+    }
+    let clean = finals.is_empty();
+    GATE_VIOLATIONS.with(|v| *v.borrow_mut() = finals);
+    GATE_ACCEPTED.with(|a| *a.borrow_mut() = Some(settled.accepted));
+    if clean && st.deferred_ok && code == 0 {
+        eprintln!("{}", POLICY_OK_LINE);
+    }
+    if clean { code } else { 1 }
+}
+
+/// The `policy ✓` line a clean gated scan prints (conformance-pinned text; ONE copy, because ⟨0.41⟩ can defer it).
+pub(crate) const POLICY_OK_LINE: &str = "candor-scan: policy ✓ (syntactic floor — a clean run is necessary, not sufficient: \
+                       resolution-heavy code can under-report SILENTLY. Measured: 0 silent-pure across 19 \
+                       syscall-oracle drivers on executed Fs/Net/Exec, and 0 fabrications across 76 \
+                       curated-pure crates. Run `candor blindspots` for what this scan could not see.)";
+
 /// ⟨0.30⟩ Clear the per-RUN gate accumulators. These are process statics with no reset, which a CLI never
 /// noticed (one run per process) and which now matters twice: recording is unconditional above, and a
 /// stale violation from an earlier run would suppress a later run's ⟨0.30⟩ exit. Called by `scan_main`;
 /// a test driving `scan_one` directly calls it for the same isolation.
 pub(crate) fn reset_gate_run_state() {
     GATE_VIOLATIONS.with(|v| v.borrow_mut().clear());
+    ACCEPT_STATE.with(|s| *s.borrow_mut() = AcceptState::default());
+    GATE_ACCEPTED.with(|a| *a.borrow_mut() = None);
     if let Some(m) = GATE_OUT_OF_SCOPE.get() {
         m.lock().unwrap().clear();
     }
@@ -1624,7 +1760,8 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v33(
+    let accepted: Option<Vec<candor_report::AcceptedItem>> = GATE_ACCEPTED.with(|a| a.borrow().clone());
+    match candor_report::gate_verdict_json_v41(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
@@ -1640,6 +1777,8 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         // own producer and consumer, so the recorded `scannedUnder` set IS this policy and `P ⊆ P` holds
         // — SPEC §2 ⟨0.33⟩'s §3.1 route-equality argument.
         &[],
+        // ⟨0.41⟩ the `accepted` list; `None` unless an `accept` line became an entry.
+        accepted.as_deref(),
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {

@@ -709,7 +709,8 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
             let aliases = candor_classify::policy::discover_config_text(std::path::Path::new(pl))
                 .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
                 .unwrap_or_default();
-            candor_classify::policy::parse_policy_silent(&text, &aliases)
+            let parsed = candor_classify::policy::parse_policy_silent(&text, &aliases);
+            let mut ig: Vec<candor_report::IgnoredLine> = parsed
                 .errors
                 .iter()
                 .filter(|e| !e.fatal)
@@ -718,7 +719,19 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
                     text: e.text.clone(),
                     reason: e.message.clone(),
                 })
-                .collect()
+                .collect();
+            // ⟨0.41⟩ The dylint lint route does not evaluate `accept` lines (see the note in `src/lib.rs`), so
+            // each VALID entry is a line that ran as ignored: the violation it meant to accept is in the parts
+            // file this verb assembled, and the verdict must say the gate that ran is smaller than the one written.
+            ig.extend(parsed.accepts.iter().map(|a| candor_report::IgnoredLine {
+                line: a.line,
+                text: a.text.clone(),
+                reason: "`accept` is not evaluated on the dylint lint route — the violation it names stays in `violations`; \
+                         gate with candor-scan --policy to honour it"
+                    .to_string(),
+            }));
+            ig.sort_by_key(|i| i.line);
+            ig
         }
     };
     // SOUNDNESS R1033 — ⟨0.27⟩'s `zeroMatch`: the lint appends each crate's scoped-rule binding counts to

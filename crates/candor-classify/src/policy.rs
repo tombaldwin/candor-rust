@@ -603,6 +603,71 @@ pub struct OnlyRule {
     pub raw: String,
 }
 
+/// ⟨0.41⟩ A RULE LINE'S KEY: its RAW lexed tokens (comment removed, ASCII-whitespace runs collapsed) joined by
+/// single spaces — the text an `accept` entry's `for … because` span must equal token for token (SPEC §6.2
+/// ⟨0.41⟩), and the `policyRule` a verdict item carries. The RAW tokens, not the tokens the rule kind consumed:
+/// `deny Fs dao extra` parses as `deny Fs dao`, and only `for deny Fs dao extra` names it.
+///
+/// Takes the rule's `raw` (already comment-stripped and trimmed by the parser) and re-lexes it with the parser's
+/// own separator, so `deny   Fs\tdao` and `deny Fs dao` are one key and `deny\u{a0}Fs` is not two tokens.
+pub fn rule_key(raw: &str) -> String {
+    raw.split(is_ascii_ws).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// ⟨0.41⟩ IS THIS `fn` A POSITIONAL KEY — one an engine assigns by ordinal position rather than by a declared
+/// name (SPEC §6.2 ⟨0.41⟩: "a property it checks, not a pattern the document lists")? In this engine's own
+/// spellings that is any `{<kind>#<N>}` segment the compiler numbers: `{closure#0}`, `{async_block#1}`,
+/// `{constant#2}`, `{impl#3}`. Inserting one unrelated closure renumbers every later one in the function, so an
+/// entry keyed on it would silently accept DIFFERENT code after the edit. Over-matching errs RED: the line is
+/// ignored and the violation stays.
+pub fn is_positional_key(func: &str) -> bool {
+    let b = func.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'{' {
+            // `{` <ident chars>+ `#` <digits>+ `}`
+            let mut j = i + 1;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                j += 1;
+            }
+            if j > i + 1 && j < b.len() && b[j] == b'#' {
+                let mut k = j + 1;
+                while k < b.len() && b[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > j + 1 && k < b.len() && b[k] == b'}' {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// ⟨0.41⟩ ONE VALID `accept` LINE (SPEC §6.2 ⟨0.41⟩): `accept <fn> [<Effect>…] for <rule tokens…> because <why…>`.
+/// Built only when every check passed — a line that is otherwise malformed is an [`PolicyError`] (non-fatal,
+/// listed in the verdict's `ignored`) and no entry, so the violation it meant to accept stays in `violations`.
+#[derive(Debug, Clone)]
+pub struct AcceptEntry {
+    /// 1-based line of the `accept` line in the policy file.
+    pub line: usize,
+    /// The source line verbatim.
+    pub text: String,
+    /// ONE token, compared by exact string equality with a verdict row's `fn`.
+    pub func: String,
+    /// The §1 effect names listed (and `Unknown`, only with a class filter). Empty for a `forbid` entry.
+    pub effects: BTreeSet<&'static str>,
+    /// The reason-class TOKENS an `Unknown[…]` filter listed. `None` when the entry does not list `Unknown`.
+    pub classes: Option<BTreeSet<String>>,
+    /// [`rule_key`] of the `deny`/`pure`/`forbid` line it names.
+    pub rule_key: String,
+    /// True when the named rule is a `forbid` (AS-EFF-009); false for `deny`/`pure` (AS-EFF-006).
+    pub forbid: bool,
+    /// The operator's justification: its tokens joined by single spaces.
+    pub because: String,
+}
+
 /// ⟨0.24⟩ ONE POLICY LINE THE PARSER DID NOT HONOUR AS WRITTEN (SPEC §3.1 `901f14d` / `195d45a`).
 ///
 /// **THE DEFECT.** `parsepolicy` emitted **no `errors` key at all** (measured 2026-07-28 on the
@@ -711,6 +776,11 @@ pub struct ParsedPolicy {
     /// Class TOKENS rather than `ReasonClass`, so the wire order is the token's alphabetical one (which
     /// is what candor-ts's `[...set].sort()` produces) and not `ReasonClass`'s declaration order.
     pub used_aliases: BTreeMap<String, BTreeSet<String>>,
+    /// ⟨0.41⟩ The VALID `accept` entries (SPEC §6.2 ⟨0.41⟩), in source order. Directives, not rules: an entry is
+    /// never counted by the zero-rules check, never fires, and `rules`/`allow_rules`/`layer_rules`/`only_rules`
+    /// are exactly what they were without it. Empty on every policy without an `accept` line, which is what
+    /// keeps every verdict of such a policy byte-identical.
+    pub accepts: Vec<AcceptEntry>,
 }
 
 impl ParsedPolicy {
@@ -1111,6 +1181,9 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
     } else {
         text
     };
+    // ⟨0.41⟩ `accept` lines, held until every rule line has been read: an entry may name a rule that comes
+    // AFTER it. (line number, source line verbatim, comment-stripped line.)
+    let mut pending_accepts: Vec<(usize, &str, &str)> = Vec::new();
     for (line_idx, raw_line) in text.lines().enumerate() {
         cur_line = line_idx + 1;
         cur_text = raw_line;
@@ -1120,6 +1193,7 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
         }
         let mut toks = line.split(is_ascii_ws).filter(|s| !s.is_empty());
         match toks.next().unwrap_or("") {
+            "accept" => pending_accepts.push((cur_line, raw_line, line)),
             "allow" => {
                 let effect = match toks.next().unwrap_or("") {
                     "Net" => "Net",
@@ -1409,7 +1483,214 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
             }
         }
     }
+    resolve_accepts(&mut out, &pending_accepts, aliases, warn);
     out
+}
+
+/// ⟨0.41⟩ TURN EACH HELD `accept` LINE INTO AN [`AcceptEntry`], A NON-FATAL IGNORED LINE, OR A FATAL POLICY ERROR
+/// (SPEC §6.2 ⟨0.41⟩).
+///
+/// **THE CARDINAL DIRECTION HERE IS ACCEPTING A VIOLATION THAT IS NEW**, so every doubt leaves the row RED: a line
+/// this function cannot read exactly is ignored (and listed in `ignored`), a key it cannot trust is refused, and
+/// an unrecognised effect or class token is the policy error the unrecognised-token rule already makes it
+/// (exit 2) — `Fss`, or `dispatchh` inside the brackets, exactly as `deny Nett app` is. A bug here may cost a
+/// false red; it must not cost a false green.
+///
+/// Called AFTER the rule loop: the named rule may come later in the file, and "a `deny`, `pure` or `forbid` line
+/// that PARSED as a rule" is only decidable once every line has been read.
+fn resolve_accepts(
+    out: &mut ParsedPolicy,
+    pending: &[(usize, &str, &str)],
+    aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>,
+    warn: bool,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let deny_keys: BTreeSet<String> = out.rules.iter().map(|r| rule_key(&r.raw)).collect();
+    let forbid_keys: BTreeSet<String> = out.layer_rules.iter().map(|r| rule_key(&r.raw)).collect();
+    let other_keys: BTreeSet<String> = out
+        .allow_rules
+        .iter()
+        .map(|r| rule_key(&r.raw))
+        .chain(out.only_rules.iter().map(|r| rule_key(&r.raw)))
+        .collect();
+    for &(line_no, text, line) in pending {
+        let t: Vec<&str> = line.split(is_ascii_ws).filter(|s| !s.is_empty()).collect();
+        // A line this function cannot read exactly: ignored with a warning, listed in `ignored`, and the violation it
+        // meant to accept STAYS. NOT fatal — the rest of the policy means what it says.
+        let ignore = |out: &mut ParsedPolicy, why: String| {
+            let msg = format!("`accept` line not honoured — {why}: {line}");
+            if warn {
+                eprintln!("candor: ignoring policy rule ({msg})");
+            }
+            out.errors.push(PolicyError {
+                kind: PolicyError::KIND_RULE_KIND,
+                token: "accept".to_string(),
+                accepted: Vec::new(),
+                rule: line.to_string(),
+                message: msg,
+                line: line_no,
+                text: text.to_string(),
+                fatal: false,
+            });
+        };
+        if t.len() < 2 {
+            ignore(out, "it names no function (want `accept <fn> [<Effect>…] for <rule> because <why>`)".into());
+            continue;
+        }
+        let func = t[1];
+        let Some(for_at) = (2..t.len()).find(|&i| t[i] == "for") else {
+            ignore(out, "it lacks the literal `for` between the effects and the rule it names".into());
+            continue;
+        };
+        let bec_at = (for_at + 1..t.len()).find(|&i| t[i] == "because");
+        let Some(bec_at) = bec_at.filter(|&b| b + 1 < t.len()) else {
+            ignore(
+                out,
+                "it carries no reason — write `because <why>` (a `#` begins a comment, so `because #123` is \
+                 empty: write `ticket-123`)"
+                    .into(),
+            );
+            continue;
+        };
+        let key = t[for_at + 1..bec_at].join(" ");
+        let because = t[bec_at + 1..].join(" ");
+        // ---- the effect list --------------------------------------------------------------------------------
+        let mut names: BTreeSet<&'static str> = BTreeSet::new();
+        let mut classes: Option<BTreeSet<String>> = None;
+        let mut malformed: Option<String> = None;
+        let mut fatal = false;
+        for &e in &t[2..for_at] {
+            if e == UNKNOWN {
+                malformed.get_or_insert("bare `Unknown` is not accepted here — write an explicit class list, `Unknown[dispatch]`".into());
+            } else if let Some(inner) = e.strip_prefix("Unknown[").and_then(|x| x.strip_suffix(']')) {
+                let mut any = false;
+                for cn in inner.split(',') {
+                    let cn = cn.trim();
+                    if cn.is_empty() {
+                        malformed.get_or_insert(format!("empty class in `{e}`"));
+                    } else if cn == "*" || cn == "dynamic" || aliases.contains_key(cn) {
+                        malformed.get_or_insert(format!(
+                            "`{cn}` is an alias, not a reason class — list the classes by name"
+                        ));
+                    } else if let Some(rc) = ReasonClass::from_token(cn) {
+                        classes.get_or_insert_with(BTreeSet::new).insert(rc.token().to_string());
+                        any = true;
+                    } else {
+                        // The policy error the unrecognised-token rule already makes it: dropping the token would
+                        // silently NARROW what the entry covers (or widen it, were it the only one).
+                        let msg = format!(
+                            "unrecognised reason-class/alias `{cn}` in `{line}` — an `accept` line lists classes \
+                             by name: reflect, dispatch, indirect, native, unresolved, setup"
+                        );
+                        if warn {
+                            eprintln!("candor: policy error — {msg}");
+                        }
+                        out.errors.push(PolicyError {
+                            kind: PolicyError::KIND_REASON_CLASS,
+                            token: cn.to_string(),
+                            accepted: ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                            rule: line.to_string(),
+                            message: msg,
+                            line: line_no,
+                            text: text.to_string(),
+                            fatal: true,
+                        });
+                        fatal = true;
+                    }
+                }
+                if any {
+                    names.insert(UNKNOWN);
+                }
+            } else if e.contains('[') {
+                malformed.get_or_insert(format!("`{e}`: only `Unknown` takes a bracketed filter on an `accept` line"));
+            } else if let Some(n) = cap_from_name(e) {
+                names.insert(n);
+            } else {
+                let mut acc: Vec<&str> = candor_report::EFFECTS.to_vec();
+                acc.sort_unstable();
+                let msg = format!(
+                    "unknown effect-name `{e}` in `{line}` (accepted: {})",
+                    acc.join(", ")
+                );
+                if warn {
+                    eprintln!("candor: policy error — {msg}");
+                }
+                out.errors.push(PolicyError {
+                    kind: PolicyError::KIND_EFFECT_NAME,
+                    token: e.to_string(),
+                    accepted: acc.iter().map(|s| s.to_string()).collect(),
+                    rule: line.to_string(),
+                    message: msg,
+                    line: line_no,
+                    text: text.to_string(),
+                    fatal: true,
+                });
+                fatal = true;
+            }
+        }
+        if fatal {
+            continue; // the whole policy is refused; nothing else to say about this line
+        }
+        if let Some(why) = malformed {
+            ignore(out, why);
+            continue;
+        }
+        // ---- the rule it names -------------------------------------------------------------------------------
+        let is_deny = deny_keys.contains(&key);
+        let is_forbid = forbid_keys.contains(&key);
+        if other_keys.contains(&key) && !is_deny && !is_forbid {
+            ignore(
+                out,
+                "it cannot name an `allow` or `only` rule — its verdict row does not say which value or scope was \
+                 reached, so an entry would silently accept a NEW one"
+                    .into(),
+            );
+            continue;
+        }
+        if !is_deny && !is_forbid {
+            ignore(
+                out,
+                "it names no `deny`/`pure`/`forbid` line of this file — the tokens between `for` and `because` must \
+                 equal a rule line's tokens, token for token"
+                    .into(),
+            );
+            continue;
+        }
+        if is_deny && names.is_empty() {
+            ignore(out, "an entry for a `deny`/`pure` rule must list at least one effect".into());
+            continue;
+        }
+        if is_forbid && !names.is_empty() {
+            ignore(out, "an entry for a `forbid` rule takes no effects".into());
+            continue;
+        }
+        if is_positional_key(func) {
+            ignore(
+                out,
+                format!(
+                    "`{func}` is a POSITIONAL key (numbered by the compiler): an unrelated edit renumbers it and the \
+                     entry would accept DIFFERENT code. Accept the enclosing function instead — its entry also covers \
+                     the closure it contains"
+                ),
+            );
+            continue;
+        }
+        out.accepts.push(AcceptEntry {
+            line: line_no,
+            text: text.to_string(),
+            func: func.to_string(),
+            effects: names,
+            classes,
+            rule_key: key,
+            forbid: is_forbid,
+            because,
+        });
+    }
 }
 
 #[cfg(test)]

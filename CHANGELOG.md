@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **`accept` lines for KNOWN policy violations (SPEC §6.2 ⟨0.41⟩; the declared `spec` stays ⟨0.40⟩ until the family
+  floor moves).** `accept <fn> <Effect>… for <rule tokens> because <reason>` takes ONE named row out of `violations`
+  and lists it in a new `accepted` verdict key (statuses `accepted`, `exceeded`, `ambiguous`, `unjudged`), on both
+  `candor-scan --policy` and `candor-query gate --report`. A row is accepted only when the entry names the producing
+  rule LINE (by its raw tokens), the unit's exact `fn` (no prefix) and covers every effect of the row (an `Unknown`
+  only under an explicit `Unknown[class,…]` holding every class of the row's `reasonClass`). Anything that cannot be
+  read exactly stays red: a malformed line is ignored and listed in `ignored`; a `{closure#N}`-style positional key is
+  refused (accept the enclosing function — its entry also covers the closure only when the same entry accepts the
+  enclosing row in the same run and the closure's effects are a subset); `(hash, fn)` twins are accepted by neither;
+  `allow` and `only` lines cannot be accepted; a typo'd effect or class (`Fss`, `Unknown[dispatchh]`) is the exit-2
+  policy error. A STALE entry is a new violation, `AS-EFF-012` (exit 1), whose message names the policy line and says
+  to delete it. A workspace is settled once over every member, so an entry written for one member is not stale in
+  another, and a twin across members is caught. An all-accepted run beside an unevaluated rule or an incomplete
+  analysis exits 2. `candor-query unverified` no longer calls a layer PROVABLY clean while an accepted violation is in
+  it, and `fix-gate --strict` fails on a stale entry. The `cargo candor` dylint lint route does NOT evaluate `accept`
+  (it has no unit table to settle against): it says so, every violation stays red, and `gate-verdict --policy` lists each
+  line in `ignored`. Without `accept` lines every verdict, report and exit code is byte-identical to the previous
+  build. Pinned by conformance PART 105.
+
 - ⚠ **candor-scan: two types that share a name in different modules (`m1::Bytes`, `m2::Bytes`) are now told apart
   at trait dispatch, in the published interface union, and at drop glue (SOUNDNESS R1246, R1253).** Before, every one
   of these was keyed by the type's last path segment, and three places turned the resulting tie into a purity claim:

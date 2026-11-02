@@ -413,8 +413,23 @@ impl Candor {
             }
             std::process::exit(2);
         }
+        // ⟨0.41⟩ THIS LINT DOES NOT EVALUATE `accept` LINES (SPEC §6.2), AND SAYS SO RATHER THAN BEING SILENT. The
+        // rung is matched over a whole run's rows by `candor_classify::accept::settle`; this lint emits one NDJSON
+        // record per violation per crate and has no signature to settle against (no unit table for the twin check,
+        // no per-line attribution once rows are appended). The posture is the one the spec gives an engine that
+        // predates the rung — the line is read as ignored, so EVERY violation it meant to accept STAYS red and no
+        // `AS-EFF-012` is minted — and `candor-query gate-verdict --policy` lists each such line in the verdict's
+        // `ignored`. Errs red, never green. Gate with `candor-scan --policy` (or `candor-query gate --report`) to
+        // honour `accept`.
+        if !parsed_policy.accepts.is_empty() {
+            eprintln!(
+                "candor: {} `accept` line(s) in this policy are NOT evaluated by the dylint lint route — every violation \
+                 stays in the verdict (fail-closed). Gate with `candor-scan <dir> --policy <file>` to honour them.",
+                parsed_policy.accepts.len()
+            );
+        }
         let ParsedPolicy {
-            rules: policy, allow_rules, layer_rules, only_rules: _, errors: _, used_aliases: _
+            rules: policy, allow_rules, layer_rules, only_rules: _, errors: _, used_aliases: _, accepts: _
         } = parsed_policy;
         Self {
             direct: HashMap::new(),

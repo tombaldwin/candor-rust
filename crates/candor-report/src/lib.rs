@@ -1285,6 +1285,37 @@ pub struct GateViolation {
     /// code — a renamed key reads as absent. Omitted on every other rule.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub origin: String,
+    /// ⟨0.41⟩ NEVER ON THE WIRE. The producing policy LINE of an AS-EFF-006 / AS-EFF-009 row, as that line's raw
+    /// tokens joined by single spaces — the key an `accept` entry names (SPEC §6.2 ⟨0.41⟩). It rides the row
+    /// from `candor_classify::gate::gate` to `candor_classify::accept::settle` and is stripped by `skip`, so a
+    /// document without `accept` lines is byte-identical to a pre-⟨0.41⟩ one. Empty on every other row, which
+    /// is what makes those rows unacceptable: an `accept` line can only name a policy rule.
+    #[serde(skip)]
+    pub rule_key: String,
+}
+
+/// ⟨0.41⟩ ONE ITEM OF THE VERDICT'S `accepted` LIST (SPEC §6.2 ⟨0.41⟩) — one `accept` entry, carrying the row it
+/// took out of `violations` when its status is `accepted`, and otherwise the code its rule would charge with
+/// the entry's own `fn` and effect names. Plus one item per nested row accepted under the nested-unit rule,
+/// with `fn` the nested unit and `enclosing` the entry's.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AcceptedItem {
+    pub rule: String,
+    #[serde(rename = "fn")]
+    pub func: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hash: String,
+    pub effects: Vec<String>,
+    /// The 1-based line of the `accept` line in the policy file.
+    pub line: usize,
+    /// The named rule's raw tokens, single-spaced.
+    #[serde(rename = "policyRule")]
+    pub policy_rule: String,
+    pub because: String,
+    /// `accepted` | `exceeded` | `ambiguous` | `unjudged`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub enclosing: String,
 }
 
 /// Serialize the §3.3 gate verdict `{ spec, ok, violations }` — the machine analog of the `AS-EFF`
@@ -1558,7 +1589,7 @@ pub fn gate_verdict_json_v28(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        &[], &[], &[], &[],
+        &[], &[], &[], &[], None,
     )
 }
 
@@ -1581,7 +1612,7 @@ pub fn gate_verdict_json_v30(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, &[], &[], &[],
+        out_of_scope, &[], &[], &[], None,
     )
 }
 
@@ -1612,7 +1643,7 @@ pub fn gate_verdict_json_v31(
     // `P ⊆ P` holds by construction, SPEC §2 ⟨0.33⟩) or a pre-⟨0.33⟩ call site.
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, net_partners, unpeeked, &[],
+        out_of_scope, net_partners, unpeeked, &[], None,
     )
 }
 
@@ -1649,7 +1680,39 @@ pub fn gate_verdict_json_v33(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, net_partners, unpeeked, unasked_rules,
+        out_of_scope, net_partners, unpeeked, unasked_rules, None,
+    )
+}
+
+/// ⟨0.41⟩ [`gate_verdict_json_v33`] plus the `accepted` list (SPEC §6.2 ⟨0.41⟩). `accepted` is `Some` exactly
+/// when an `accept` line became an entry (possibly with an empty list), and `None` otherwise — which is what
+/// keeps a policy without the directive byte-identical. Two consequences the clause pins and this writer
+/// enforces, so no caller can forget them:
+///
+/// - the key rides VERDICT documents only: an INCOMPLETE verdict (exit 2) makes no claim about violations,
+///   so it makes none about which were accepted and omits `accepted`;
+/// - on that same exit-2 incomplete document, with entries present and no violation left, the `violations`
+///   key is omitted too (the reference engine's behaviour; PART 105 row s13 pins it). Without entries the
+///   incomplete document keeps the `violations: []` every engine has always written.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_verdict_json_v41(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+    out_of_scope: &[OutOfScopeFinding],
+    net_partners: &[NetPartners],
+    unpeeked: &[String],
+    unasked_rules: &[String],
+    accepted: Option<&[AcceptedItem]>,
+) -> serde_json::Result<String> {
+    gate_verdict_json_impl(
+        violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+        out_of_scope, net_partners, unpeeked, unasked_rules, accepted,
     )
 }
 
@@ -1685,7 +1748,7 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
-    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[], &[], &[])
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[], &[], &[], None)
 }
 
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
@@ -1708,6 +1771,8 @@ fn gate_verdict_json_impl(
     // (SPEC §2 ⟨0.33⟩) — canonical, deduplicated and code-point sorted. NOT its own wire key (see
     // `gate_verdict_json_v33`); it only widens `incomplete`/`ok`, exactly as the reference engine does.
     unasked_rules: &[String],
+    // ⟨0.41⟩ the `accepted` list; `None` when no `accept` line became an entry. See `gate_verdict_json_v41`.
+    accepted: Option<&[AcceptedItem]>,
 ) -> serde_json::Result<String> {
     // ⟨0.32⟩ …AND `hash` IS PART OF THE KEY (SPEC §2). `(rule, detail)` TIES on two units that share a
     // name — a two-member workspace where both violate `deny Exec` produces twin rows differing only in
@@ -1746,7 +1811,10 @@ fn gate_verdict_json_impl(
         spec: &'static str,
         ok: bool,
         analyzed: Count,
-        violations: &'a [GateViolation],
+        /// ⟨0.41⟩ omitted ONLY on an incomplete verdict that holds no violation while `accept` entries exist
+        /// (see `gate_verdict_json_v41`); every other document carries it, `[]` included.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        violations: Option<&'a [GateViolation]>,
         /// ⟨0.24⟩ SPEC §3.1 `fc4b5f6` — the rules the verdict above does NOT answer. Beside the
         /// violations, never instead of them: a firing rule is certain regardless of how these would
         /// have resolved (Lemma 2), and exit 1 reports the violation it is sure of without concealing
@@ -1780,6 +1848,9 @@ fn gate_verdict_json_impl(
         /// re-classifying through the consumer's own config is the re-derivation ⟨0.24⟩ forbids.
         #[serde(rename = "netPartners", skip_serializing_if = "<[_]>::is_empty")]
         net_partners: &'a [NetPartners],
+        /// ⟨0.41⟩ SPEC §6.2 — the rows an `accept` line took out of `violations`. A VERDICT key.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        accepted: Option<&'a [AcceptedItem]>,
     }
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
@@ -1794,11 +1865,13 @@ fn gate_verdict_json_impl(
     // question nobody here asked. Empty on the scan route by construction (§3.1 route equality, `P ⊆ P`).
     let incomplete =
         !unanalyzed.is_empty() || !out_of_scope.is_empty() || !unpeeked.is_empty() || !unasked_rules.is_empty();
+    let violations_key: Option<&[GateViolation]> =
+        if incomplete && accepted.is_some() && violations.is_empty() { None } else { Some(&*violations) };
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
         ok: violations.is_empty() && !incomplete,
         analyzed: Count { count: analyzed_count },
-        violations,
+        violations: violations_key,
         unevaluated,
         zero_match,
         ignored,
@@ -1808,6 +1881,7 @@ fn gate_verdict_json_impl(
         out_of_scope,
         net_partners,
         vocabulary,
+        accepted: if incomplete { None } else { accepted },
     })
 }
 
@@ -1995,7 +2069,7 @@ mod tests {
         b.reverse();
 
         let render = |oos: &[OutOfScopeFinding]| {
-            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[], &[], &[]).unwrap()
+            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[], &[], &[], None).unwrap()
         };
         assert_eq!(render(&a), render(&b),
                    "the same findings in a different order produced different verdict documents. That is \

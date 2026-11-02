@@ -233,6 +233,17 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         crate::policy::emit_zero_rule_caveat("unverified", &pp, want_json, &comp);
         return unverified_exit(strict, false, false, comp.incomplete());
     }
+    // ⟨0.41⟩ SPEC §6.2 `accept`: a unit whose violation a policy line took out of the gate is NOT described as clean.
+    // An accepted violation is still a violation, only a reviewed one — so "no Unknown holes" must not be read as
+    // "provably clean" over it. The units come from the gate's own rows (`review_accepts`), never a second match.
+    // The exit does not move: this verb answers about Unknown holes (§3.3.1 `--strict`), not about violations.
+    let accepted_units: std::collections::BTreeSet<String> = {
+        let refused: Vec<candor_report::Unevaluated> = unanswered
+            .iter()
+            .map(|u| candor_report::Unevaluated { rule: u.rule.clone(), why: u.why.clone() })
+            .collect();
+        crate::gate::review_accepts(&parsed, &sig, &refused).0
+    };
 
     if want_json {
         let mut items: Vec<_> = holes
@@ -285,6 +296,14 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
             out.as_object_mut().unwrap().remove("ok");
             comp.write_json(&mut out);
         }
+        // ⟨0.41⟩ …and an ACCEPTED violation withdraws `ok` on the same OMIT-don't-falsify rule (`false` would
+        // assert an unverified hole beside a list that names none), naming the units so the withdrawal is
+        // legible. Absent unless a unit is accepted, so every other document is byte-identical.
+        if !accepted_units.is_empty() {
+            let o = out.as_object_mut().unwrap();
+            o.remove("ok");
+            o.insert("accepted".to_string(), serde_json::json!(accepted_units));
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty(), comp.incomplete());
     }
@@ -318,6 +337,16 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
             // channels disagree about one run — prose `--strict` exited 2 where `--json --strict`
             // exited 0 over identical bytes (measured).
             return unverified_exit(strict, false, false, comp.incomplete());
+        }
+        if !accepted_units.is_empty() {
+            println!(
+                "candor unverified: no Unknown holes — but {} function(s) carry a violation that a policy `accept` \
+                 line took out of the gate ({}). NOT described as clean: an accepted violation is still a \
+                 violation, only a reviewed one.",
+                accepted_units.len(),
+                accepted_units.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            return 0;
         }
         println!("candor unverified: every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓");
         return 0;

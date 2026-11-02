@@ -7207,3 +7207,186 @@ fn r511_control_a_locless_entry_without_the_marker_is_still_gated() {
          mandatory; the R511 filter must not widen into a `loc`-based heuristic.\nstdout:\n{out}\nstderr:\n{err}"
     );
 }
+
+// ═══ ⟨0.41⟩ `accept` — a KNOWN violation, written down where a reviewer reads it (SPEC §6.2) ═══════════════════════
+//
+// The conformance part (PART 105) pins the cross-engine contract; these rows pin THIS engine's `gate --report`
+// route and its advisory siblings, each in the direction that matters: an acceptance that must NOT happen.
+
+fn accept_report(dir: &std::path::Path, sub: &str, fns: &str) -> String {
+    gate_fixture(
+        dir,
+        sub,
+        &format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.40"}},"package":"dao",
+                "analyzed":{{"count":9,"digest":"0"}},"functions":[{fns}]}}"#
+        ),
+        None,
+    )
+}
+const FS_A: &str = r#"{"fn":"dao.a","hash":"dao#dao.a","inferred":["Fs"],"direct":["Fs"]}"#;
+const CLOCK_K: &str = r#"{"fn":"dao.k","hash":"dao#dao.k","inferred":["Clock"],"direct":["Clock"]}"#;
+
+fn verdict(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn accept_takes_exactly_the_named_row_out_of_violations() {
+    let f = Fixture::new("accept-basic");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K},{}", r#"{"fn":"dao.b","hash":"dao#dao.b","inferred":["Fs"],"direct":["Fs"]}"#));
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because known since 2026 # why\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 1, "dao.b is NOT named: it stays red\n{err}");
+    let v = verdict(&doc);
+    let viol: Vec<&str> = v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    assert_eq!(viol, ["dao.b"], "{v}");
+    let a = &v["accepted"][0];
+    assert_eq!((a["fn"].as_str(), a["status"].as_str(), a["line"].as_u64()), (Some("dao.a"), Some("accepted"), Some(2)));
+    assert_eq!(a["because"], "known since 2026");
+    assert_eq!(a["policyRule"], "deny Fs dao");
+    assert_eq!(a["hash"], "dao#dao.a");
+    assert!(err.contains("1 violation(s) accepted by policy; 1 new"), "the human channel owes the count:\n{err}");
+}
+
+#[test]
+fn only_accepted_exits_0_and_a_policy_without_accept_has_no_accepted_key() {
+    let f = Fixture::new("accept-clean");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K}"));
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because known\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(verdict(&doc)["ok"], true);
+    // the same report and rule with NO accept line: byte-for-byte the pre-⟨0.41⟩ document shape
+    let p0 = pol(&f.dir, "p0", "deny Fs dao\n");
+    let (rc0, _, _) = run_gate(&loc, &p0, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc0, 1);
+    assert!(verdict(&doc).get("accepted").is_none());
+}
+
+#[test]
+fn a_stale_entry_is_a_violation_whose_remedy_is_deleting_the_line() {
+    let f = Fixture::new("accept-stale");
+    let loc = accept_report(&f.dir, "r", CLOCK_K);
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because gone\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 1, "{err}");
+    let v = verdict(&doc);
+    assert_eq!(v["violations"][0]["rule"], "AS-EFF-012");
+    assert!(v["violations"][0]["detail"].as_str().unwrap().contains("Delete line 2"), "{v}");
+    assert_eq!(v["accepted"].as_array().unwrap().len(), 0, "a stale entry is not an item of `accepted`");
+}
+
+#[test]
+fn an_entry_on_a_rule_this_route_cannot_judge_is_unjudged_never_stale() {
+    let f = Fixture::new("accept-unjudged");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K}"));
+    let doc = f.dir.join("v.json");
+    // `forbid` is refused on `gate --report` (a report's call graph is effect-relevant). The deny rule still fires.
+    let p = pol(&f.dir, "p", "deny Fs dao\nforbid dao -> infra\naccept dao.a for forbid dao -> infra because x\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 1, "{err}");
+    let v = verdict(&doc);
+    assert_eq!(v["accepted"][0]["status"], "unjudged", "{v}");
+    assert!(v["violations"].as_array().unwrap().iter().all(|x| x["rule"] != "AS-EFF-012"), "{v}");
+    // …and the forbid entry accepted nothing of the deny rule's row: the deny row stays red
+    assert_eq!(v["violations"][0]["fn"], "dao.a");
+}
+
+#[test]
+fn all_accepted_beside_a_refusal_is_exit_2_and_the_refusal_document_carries_no_accepted() {
+    let f = Fixture::new("accept-refusal");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K}"));
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\nforbid dao -> infra\naccept dao.a Fs for deny Fs dao because x\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 2, "an accepted row is not an ESTABLISHED violation, so the refused forbid rule dominates\n{err}");
+    let v = verdict(&doc);
+    assert_eq!(v["refused"], true);
+    assert!(v.get("violations").is_none() && v.get("accepted").is_none(), "{v}");
+    assert!(err.contains("1 violation(s) accepted by policy"), "the human channel still prints the count:\n{err}");
+}
+
+#[test]
+fn all_accepted_over_an_unanalyzed_unit_is_incomplete_without_violations_or_accepted_keys() {
+    let f = Fixture::new("accept-incomplete");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        &format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.40"}},"package":"dao",
+                "analyzed":{{"count":3,"digest":"0"}},"unanalyzed":[{{"path":"src/bad.rs","reason":"source failed to parse"}}],
+                "functions":[{FS_A}]}}"#
+        ),
+        None,
+    );
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because x\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 2, "{err}");
+    let v = verdict(&doc);
+    assert_eq!(v["incomplete"], true);
+    assert!(v.get("violations").is_none() && v.get("accepted").is_none(), "{v}");
+    // CONTROL: without an accept entry the incomplete document keeps `violations: []`, as it always has
+    let p0 = pol(&f.dir, "p0", "deny Net dao\n");
+    let (rc0, _, _) = run_gate(&loc, &p0, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc0, 2);
+    assert_eq!(verdict(&doc)["violations"], serde_json::json!([]));
+}
+
+#[test]
+fn twins_in_one_run_are_accepted_by_neither() {
+    let f = Fixture::new("accept-twins");
+    let loc = accept_report(
+        &f.dir,
+        "r",
+        r#"{"fn":"dao.t","hash":"p#dao.t","inferred":["Fs"],"direct":["Fs"]},{"fn":"dao.t","hash":"q#dao.t","inferred":["Fs"],"direct":["Fs"]}"#,
+    );
+    let doc = f.dir.join("v.json");
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.t Fs for deny Fs dao because x\n");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &doc.to_string_lossy()]);
+    assert_eq!(rc, 1, "{err}");
+    let v = verdict(&doc);
+    assert_eq!(v["violations"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(v["accepted"][0]["status"], "ambiguous");
+    assert!(err.contains("Gate the modules separately"), "the message carries its remedy:\n{err}");
+}
+
+#[test]
+fn the_advisory_verbs_do_not_call_an_accepted_layer_clean_and_fix_gate_fails_on_a_stale_entry() {
+    let f = Fixture::new("accept-advisory");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K}"));
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because x\n");
+    let (rc, out, _) = run(&["unverified", "--report", &loc, "--policy", &p.to_string_lossy(), "--strict"]);
+    assert_eq!(rc, 0, "unverified answers about Unknown holes, not violations");
+    assert!(!out.contains("PROVABLY clean"), "an accepted violation is not clean:\n{out}");
+    assert!(out.contains("NOT described as clean"), "{out}");
+    // CONTROL: the same report with no accept line and a rule nothing violates IS provably clean
+    let clean = pol(&f.dir, "clean", "deny Net dao\n");
+    let (_, out, _) = run(&["unverified", "--report", &loc, "--policy", &clean.to_string_lossy(), "--strict"]);
+    assert!(out.contains("PROVABLY clean"), "{out}");
+    // fix-gate: a stale entry is a gate failure, so `--strict` must not exit 0 beside it
+    let loc2 = accept_report(&f.dir, "r2", CLOCK_K);
+    let stale = pol(&f.dir, "stale", "deny Fs dao\naccept dao.a Fs for deny Fs dao because gone\n");
+    let (rc, _, err) = run(&["fix-gate", "--report", &loc2, "--policy", &stale.to_string_lossy(), "--strict"]);
+    assert_eq!(rc, 1, "{err}");
+    assert!(err.contains("AS-EFF-012"), "{err}");
+}
+
+#[test]
+fn gate_verdict_lists_every_accept_line_as_ignored_because_the_lint_route_does_not_evaluate_them() {
+    let f = Fixture::new("accept-lint");
+    let parts = f.dir.join("g.parts");
+    std::fs::write(&parts, "{\"rule\":\"AS-EFF-006\",\"fn\":\"dao.a\",\"effects\":[\"Fs\"],\"detail\":\"d\"}\n").unwrap();
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because x\n");
+    let out = f.dir.join("v.json");
+    let (rc, _, err) = run(&["gate-verdict", &parts.to_string_lossy(), &out.to_string_lossy(), "--policy", &p.to_string_lossy()]);
+    assert_eq!(rc, 0, "{err}");
+    let v = verdict(&out);
+    assert_eq!(v["ok"], false, "the lint route accepts nothing: the violation stays");
+    assert_eq!(v["ignored"][0]["line"], 2);
+    assert!(v["ignored"][0]["reason"].as_str().unwrap().contains("not evaluated on the dylint lint route"), "{v}");
+}

@@ -21,6 +21,9 @@ pub mod propagate;
 /// `candor-query gate --report` (SPEC §3.1) are the same gate reached by two routes, not two gates.
 pub mod gate;
 
+/// ⟨0.41⟩ `accept` lines for known policy violations (SPEC §6.2) — matched over a whole run's rows.
+pub mod accept;
+
 /// Project-supplied rules, consulted only when the built-in `classify` returns None.
 pub fn classify_extra(
     crate_name: &str,
