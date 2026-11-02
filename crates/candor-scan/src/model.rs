@@ -1275,16 +1275,6 @@ pub(crate) struct ImplOwner {
 /// can equal it, so every reader that filters blocks by `ty` skips it.
 pub(crate) const TRAIT_DECL_TY: &str = "\u{1f}decl";
 
-/// SOUNDNESS R1246 — the reserved trait key under which the self-type keys filed by TWO OR MORE distinct owners, across
-/// all traits, are listed (`ty` only): `impl Layer for Option<L>` in `layer` and `impl Filter for Option<F>` in
-/// `layer_filters` make the tail `Option::on_close` two-way although neither trait has two `Option` implementors.
-pub(crate) const CONTESTED_TRAIT: &str = "\u{1f}contested";
-
-/// SOUNDNESS R1246 — is `ty` a self-type key two impl sites file units under (`CONTESTED_TRAIT`)?
-pub(crate) fn owner_ty_contested(owners: &HashMap<String, Vec<ImplOwner>>, ty: &str) -> bool {
-    owners.get(CONTESTED_TRAIT).is_some_and(|v| v.iter().any(|o| o.ty == ty))
-}
-
 /// SOUNDNESS R1246 — the trait's own declaration qual, where exactly one declaration has this leaf.
 pub(crate) fn trait_decl_qual<'a>(owners: &'a HashMap<String, Vec<ImplOwner>>, trait_leaf: &str) -> Option<&'a str> {
     owners.get(trait_leaf)?.iter().find(|o| o.ty == TRAIT_DECL_TY).map(|o| o.owner.as_str())
