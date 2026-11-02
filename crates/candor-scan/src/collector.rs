@@ -8581,7 +8581,8 @@ impl<'a> CallCollector<'a> {
                             .unwrap_or_default();
                         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
                         let owners: std::collections::BTreeSet<&str> = blocks.iter().map(|o| o.owner.as_str()).collect();
-                        let twin = self.assign_drop.twin_leaves.is_some_and(|t| t.contains(ty_leaf)) || owners.len() >= 2;
+                        let twin = self.assign_drop.twin_leaves.is_some_and(|t| t.contains(ty_leaf)) || owners.len() >= 2
+                            || crate::model::owner_ty_contested(self.impl_owners, ty);
                         if twin && !blocks.is_empty() {
                             for o in blocks {
                                 if o.declares(leaf) {

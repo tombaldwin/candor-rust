@@ -1738,6 +1738,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_fields = &merged.trait_fields;
     // SOUNDNESS R1246 — each trait's implementor BLOCKS with the qual their units are minted under (`model::impl_owner_key`).
     let mut impl_owners = crate::model::impl_owners_by_trait(&merged.impl_members);
+    // …the self-type keys two distinct impl sites file units under, across all traits (`model::CONTESTED_TRAIT`)…
+    {
+        let mut by_ty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for o in impl_owners.values().flatten() {
+            by_ty.entry(o.ty.clone()).or_default().insert(o.owner.clone());
+        }
+        let contested: Vec<crate::model::ImplOwner> = by_ty.into_iter().filter(|(_, v)| v.len() >= 2)
+            .map(|(ty, _)| crate::model::ImplOwner { ty, ..Default::default() }).collect();
+        impl_owners.insert(crate::model::CONTESTED_TRAIT.to_string(), contested);
+    }
     // …and each trait's own declaration qual, where it is unique (two same-leaf traits refuse, as `union_trait_qual`).
     for (leaf, quals) in &merged.trait_quals {
         if let (Some(q), 1) = (quals.iter().next(), quals.len()) {
