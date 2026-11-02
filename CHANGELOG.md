@@ -20,17 +20,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   scanner now records, per impl block, the module its methods are filed under, and names each implementor exactly.
   Where it still cannot tell which twin is meant (a field-owned or `self` value), it discloses
   `ambiguous:same-name local methods` instead of reading pure. Kill switches: `CANDOR_R1246_OFF=1`, `CANDOR_R1253_OFF=1`.
+  - The audit's follow-ups, same change: a trait's default body stays reachable when a type shares the trait's name
+    (tracing-subscriber's `reload::Layer`, serde's `content::SerializeMap`), named by the trait's own path. ⚠ SOUNDNESS
+    R1464: a field written once per `#[cfg]` arm with one type now keeps that type (tracing-futures
+    `WithDispatch::spawn_obj` read pure, chained). ⚠ SOUNDNESS R1465: `self` in a blanket impl over a bounded parameter
+    (`impl<T: Visitor> Expected for T`) now dispatches on the bound (serde `Expected::fmt` read pure). Kill switches
+    `CANDOR_R1464_OFF=1`, `CANDOR_R1465_OFF=1`.
   - Gates turn red on real code. Published v0.40.18 → this build, `bin/corpus-ab.py`, 5,059 standalone registry crates
-    and 1,143 consumers with every dependency chained (each crate version counts separately): 351 rows newly carry a
-    concrete effect (294 standalone, 57 chained) and **no row loses one**. Checked on both binaries: `deny Exec
+    and 1,143 consumers with every dependency chained (each crate version counts separately): 414 rows newly carry a
+    concrete effect (336 standalone, 78 chained) and **no row loses one**. Checked on both binaries: `deny Exec
     process::ChildDropGuard::kill` (tokio), `deny Fs api::devicename_os` (whoami) and `deny Clock
     fmt::fmt_layer::Layer::on_event` (tracing-subscriber) go from exit 0 to exit 1.
-  - New `Unknown`: 628 of 2,877,064 standalone rows (0.022%) and 147 of 501,221 chained rows (0.029%) newly carry only
-    `Unknown`, nearly all `ambiguous:same-name local methods` from twin `Drop` types the source does not spell.
-  - Withdrawn `Unknown`: 1,056 rows lose `Unknown` (a twin dispatch's `ambiguous:` hedge, directly or through a
-    callee) because the call now names its implementors exactly, and 18 Unknown-only rows leave the report. Each removal was checked against an independent list of same-named units
-    the new rule did NOT name. Every excluded unit was one of three kinds: an inherent method on a non-implementor, the
-    trait's own default body (still reached by its own path), or a unit the implementing block reaches through a call.
+  - New `Unknown`: 1,657 of 2,878,671 standalone rows (0.058%) and 390 of 501,502 chained rows (0.078%) newly carry only
+    `Unknown`: twin `Drop` types the source does not spell, and the R1464/R1465 dispatches over implementors outside
+    the crate.
+  - Withdrawn `Unknown`: 1,047 rows lose `Unknown` because the call now names its implementors exactly, and 16
+    Unknown-only rows leave the report. No row loses an `invisible` package. 190 rows that keep `Unknown` lose an edge:
+    either the edge went to a same-named type that does not implement the trait (regex-automata's `hybrid::dfa::DFA`),
+    or the call that lost it now carries its own `ambiguous:` / `dispatch:` reason.
 
 ## [0.40.18] — 2026-10-31
 
