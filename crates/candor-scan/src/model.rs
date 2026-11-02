@@ -1248,6 +1248,53 @@ pub(crate) fn impl_path_key(trait_leaf: &str, ty: &str, written: &str, member: O
     }
 }
 
+/// SOUNDNESS R1246 — THE OWNER KEY SHAPE: `\u{1f}owner\u{1f}<tr>\u{1f}<ty>\u{1f}<owner>\u{1f}<m1,m2,..>` — one `impl <tr>
+/// for <ty>` block, whose units are filed under the qual `<owner>` (the IMPL SITE's module plus the same self-type key
+/// the unit is minted with, `lang::impl_key_avoiding_free_fns`), declaring the listed members (`*` among them = an item
+/// this engine cannot read). Every other shape keys the block by `<ty>`, the self type's LEAF, so `m1::Bytes` and
+/// `m2::Bytes` both implementing `Th` were one `Bytes` there and `by_tail2` refused the two-claimant tail `Bytes::put`:
+/// the dispatch over `Th` fell onto `Th`'s pure DEFAULT and the published union read `[]` (EXECUTED). With the owner the
+/// dispatch and the union can name each implementor's unit exactly. One key per BLOCK (two blocks of one owner — cfg
+/// arms — stay two, so "some block inherits the default" is still answerable). Leading separator, as `impl_path_key`.
+/// SOUNDNESS R1253 — a sixth field: the self type as WRITTEN, expanded and anchored (`norm_type_path`), `""` if unknown.
+pub(crate) fn impl_owner_key(trait_leaf: &str, ty: &str, owner: &str, members: &[String], written: &str) -> String {
+    format!("\u{1f}owner\u{1f}{trait_leaf}\u{1f}{ty}\u{1f}{owner}\u{1f}{}\u{1f}{written}", members.join(","))
+}
+
+/// SOUNDNESS R1246 — one implementor block read back from `impl_owner_key`: its self-type key, owner qual, members.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ImplOwner {
+    pub(crate) ty: String,
+    pub(crate) owner: String,
+    pub(crate) members: Vec<String>,
+    pub(crate) written: String,
+}
+
+impl ImplOwner {
+    /// The block declares `m` itself (or holds an item that may) — `{owner}::{m}` is, or may be, this block's unit.
+    pub(crate) fn declares(&self, m: &str) -> bool {
+        self.members.iter().any(|x| x == m || x == "*")
+    }
+}
+
+/// SOUNDNESS R1246 — `trait leaf -> its implementor blocks`, from the owner keys in `impl_members`.
+pub(crate) fn impl_owners_by_trait(impl_members: &std::collections::HashSet<String>) -> HashMap<String, Vec<ImplOwner>> {
+    let mut m: HashMap<String, Vec<ImplOwner>> = HashMap::new();
+    for k in impl_members {
+        let Some(rest) = k.strip_prefix("\u{1f}owner\u{1f}") else { continue };
+        let p: Vec<&str> = rest.splitn(5, '\u{1f}').collect();
+        let [tr, ty, owner, mem, written] = p.as_slice() else { continue };
+        let members: Vec<String> = mem.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+        m.entry(tr.to_string()).or_default().push(ImplOwner {
+            ty: ty.to_string(), owner: owner.to_string(), members, written: written.to_string() });
+    }
+    // `impl_members` is a set: sort so the order every reader sees is a function of the crate, not of hashing.
+    for v in m.values_mut() {
+        v.sort_by(|a, b| (&a.ty, &a.owner, &a.members, &a.written).cmp(&(&b.ty, &b.owner, &b.members, &b.written)));
+    }
+    m
+}
+
 /// SOUNDNESS R1171 — a type path with its crate-relative head (`crate::`/`self::`/`super::`) dropped, the one spelling
 /// `impl_path_key` stores and its reader compares (§G: writer and reader both go through this).
 pub(crate) fn norm_type_path(p: &str) -> String {
@@ -1446,6 +1493,9 @@ pub(crate) struct TraitIndexes<'a> {
     pub(crate) impl_members: &'a std::collections::HashSet<String>,
     /// SOUNDNESS R897 — see `cache::MergedDecls::unbound_gen_fields`.
     pub(crate) unbound_gen_fields: &'a TraitFieldIndex,
+    /// SOUNDNESS R1246 — trait leaf -> its implementor BLOCKS with their owner quals (`impl_owners_by_trait`). Read by
+    /// the bounded-CHA dispatch to name a same-leaf implementor's unit exactly instead of by its two-claimant tail.
+    pub(crate) owners: &'a HashMap<String, Vec<ImplOwner>>,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

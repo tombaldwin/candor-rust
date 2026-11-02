@@ -3200,6 +3200,7 @@ pub(crate) fn fninfo(
         // block (see the three call sites in `scan_items`), so this is exactly that case.
         trait_self: if impl_generics.is_none() { self_ty.map(str::to_string) } else { None },
         impl_members: traits.impl_members,
+        impl_owners: traits.owners,
         // The crate-qualified spelling of any bound written in full (`&dyn deplib::Handler`) — R6.
         trait_quals: crate::lang::sig_trait_quals(sig),
         bound_trait_leaves: {

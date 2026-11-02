@@ -2822,6 +2822,17 @@ pub(crate) fn module_declares(uses: &HashMap<String, String>, name: &str) -> Opt
     uses.get(MODDECL_KEY).map(|list| list.split('\u{1}').any(|n| n == name))
 }
 
+/// SOUNDNESS R1253 — a BARE type name this module itself declares, qualified by the module (`Guard` inside `mod m2` is
+/// `m2::Guard`): `expand` leaves such a name bare, which cannot tell same-leaf twins apart. A declared name cannot also be
+/// a non-glob import (E0255), and a glob loses to it, so the declaration is what it names. Any other spelling is returned
+/// unchanged; `modpath` must be the module `uses` was seeded for.
+pub(crate) fn anchor_declared_type(path: &str, uses: &HashMap<String, String>, modpath: &str) -> String {
+    if !path.contains("::") && module_declares(uses, path) == Some(true) {
+        return crate::decls::qualify(modpath, path);
+    }
+    path.to_string()
+}
+
 /// SOUNDNESS R751 — **THE CONFLATION ITSELF, NOT A THIRD GUARD OVER ITS SYMPTOMS.**
 ///
 /// `expand` strips `crate`/`self`/`super` in ONE loop and then resolves all three as if crate-rooted, so
@@ -6198,13 +6209,47 @@ pub(crate) fn collect_glob_foreign_impls(
 pub(crate) fn collect_local_impl_members(
     items: &[syn::Item],
     include_tests: bool,
+    // SOUNDNESS R1246 — this scope's MODULE PATH, the prefix `scan_items` mints the block's units under (`qual`), so the
+    // owner key names the same unit. Threaded rather than read from `uses`: an inline module's map here is its parent's
+    // clone, whose `MODPATH_KEY` is one level short.
+    modpath: &str,
     uses: &HashMap<String, String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
+    // SOUNDNESS R1253 — THIS module's anchoring facts for the owner key's written self path. `uses` is the parent's clone
+    // in an inline module (one level short, see above), and re-seeding it would move the R652/R1171 keys below; so a
+    // copy, for the owner key alone, and only where the caller anchors at all.
+    let anchored: Option<HashMap<String, String>> = uses.contains_key(MODPATH_KEY).then(|| {
+        let mut u = uses.clone();
+        seed_modpath(modpath, &mut u);
+        seed_moddecls(items, include_tests, &mut u);
+        u
+    });
     for it in items {
         match it {
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
                 let Some((None, tr, _)) = &im.trait_ else { continue }; // `impl !Tr for X` is not an impl
+                // SOUNDNESS R1246 — the OWNER key (`model::impl_owner_key`), for every self type `collect_decls` files the
+                // CHA edge under (`impl_key_avoiding_free_fns`, the same key `scan_items` mints the units with), before
+                // the path-only `impl_type_name` gate below narrows to the other shapes.
+                if let (Some(key), Some(seg)) = (impl_key_avoiding_free_fns(im, items, uses), tr.segments.last()) {
+                    let tr_leaf = impl_trait_leaf(tr, uses).unwrap_or_else(|| seg.ident.to_string());
+                    let mut mem: Vec<String> = im.items.iter().filter_map(|ii| match ii {
+                        syn::ImplItem::Fn(m) => Some(m.sig.ident.to_string()),
+                        syn::ImplItem::Const(_) | syn::ImplItem::Type(_) => None,
+                        _ => Some("*".to_string()),
+                    }).collect();
+                    mem.sort();
+                    mem.dedup();
+                    // R1253 — the self type as WRITTEN, expanded and anchored (`impl_path_key`'s spelling), so a value whose
+                    // type the source spells (`m2::Guard`) can be matched to the block whose units run for it.
+                    let written = anchored.as_ref()
+                        .and_then(|u| type_path(&im.self_ty, u).map(|w| anchor_declared_type(&w, u, modpath)))
+                        .filter(|w| !w.contains(crate::decls::ALIAS_ALT_SEP))
+                        .map(|w| crate::model::norm_type_path(&w))
+                        .unwrap_or_default();
+                    out.insert(crate::model::impl_owner_key(&tr_leaf, &key, &crate::decls::qualify(modpath, &key), &mem, &written));
+                }
                 let Some(ty) = impl_type_name(&im.self_ty) else { continue };
                 let Some(seg) = tr.segments.last() else { continue };
                 // The TRAIT LEAF, which is what `trait_impls`/`trait_decls` are keyed by throughout this
@@ -6297,7 +6342,7 @@ pub(crate) fn collect_local_impl_members(
                     let mut sub = uses.clone();
                     let mut alts = HashMap::new();
                     collect_item_uses(inner, include_tests, &mut sub, &mut alts);
-                    collect_local_impl_members(inner, include_tests, &sub, out);
+                    collect_local_impl_members(inner, include_tests, &crate::decls::qualify(modpath, &m.ident.to_string()), &sub, out);
                 }
             }
             _ => {}

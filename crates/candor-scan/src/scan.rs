@@ -1736,10 +1736,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R145 — every module whose namespace an unreadable `include!` may be supplying names to.
     let opaque_scope = crate::lang::opaque_include_scope(&merged.opaque_include_modules, &merged.local_globs);
     let trait_fields = &merged.trait_fields;
+    // SOUNDNESS R1246 — each trait's implementor BLOCKS with the qual their units are minted under (`model::impl_owner_key`).
+    let impl_owners = crate::model::impl_owners_by_trait(&merged.impl_members);
     let traits =
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,
-                       impl_members: &merged.impl_members, unbound_gen_fields: &merged.unbound_gen_fields };
+                       impl_members: &merged.impl_members, unbound_gen_fields: &merged.unbound_gen_fields,
+                       owners: &impl_owners };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -3008,6 +3011,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // direction (a constructed value is assumed to drop in this scope); gated to LOCAL drop types only,
         // so an external type's invisible Drop is never fabricated.
         let mut drops_here: BTreeSet<String> = BTreeSet::new();
+        // SOUNDNESS R1253 — per drop leaf, the spelled twin type of each construction that put it in `drops_here`
+        // (`None` = not recoverable: a parameter, an assignment, a field-owned drop, an unspelled constructor).
+        let mut drop_quals: HashMap<String, BTreeSet<Option<String>>> = HashMap::new();
         // ESCAPE GATE (R49): a drop-type built here whose value can ESCAPE via the return must NOT be charged
         // — its `Drop` runs in the CALLER's scope (a constructor `Compress::new -> Compress` that builds an
         // owned `Stream` and returns the `Compress` otherwise FABRICATES the Stream's FFI-Drop; the flate2
@@ -3890,6 +3896,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let ty = c.path.split("::").next().unwrap_or("").to_string();
                 if merged.drop_types.contains(&ty) {
                     drops_here.insert(ty.clone());
+                    drop_quals.entry(ty.clone()).or_default().insert(c.str_arg.clone());
                 }
                 // FIELD edition (R49): constructing `ty` also runs the drop glue of any local drop-type
                 // it transitively OWNS through a field. The collector's lexical escape gate has already
@@ -3899,6 +3906,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if !returns_escapable {
                     if let Some(owned) = owned_drops.get(&ty) {
                         drops_here.extend(owned.iter().cloned());
+                        for o in owned {
+                            drop_quals.entry(o.clone()).or_default().insert(None); // R1253 — a field's twin is not spelled
+                        }
                     }
                 }
                 // The marker is consumed HERE and nowhere else: it names no crate, resolves to no unit,
@@ -4224,8 +4234,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     }
                                 }
                             }
+                            // SOUNDNESS R1246 — "T does not declare `leaf`" is what licenses this route, and a REFUSED tail
+                            // is not that fact: `T::leaf` with two or more claimants means some type of this LEAF does
+                            // declare it, and `resolve_target` declined to pick which. Taking the default then CERTIFIED the
+                            // call (`resolved_local`) and R452's `ambiguous:` hedge below never ran — two same-leaf
+                            // implementors of `Th` overriding its pure default read PURE over a file write (EXECUTED, vein
+                            // fixtures f1d/f3d). The default edge stays (a twin may really inherit it, R1171); only the
+                            // certification is withheld, so the call is disclosed as the refusal it is.
+                            // `CANDOR_R1246_OFF=1` restores the certification.
+                            let refused_tail = tail2(&c.path).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.len() >= 2)
+                                && std::env::var_os("CANDOR_R1246_OFF").is_none();
                             if hits.len() == 1 && hits[0] != &f.qual {
-                                resolved_local = true;
+                                if refused_tail {
+                                    if crate::lang::reach_debug() {
+                                        eprintln!("R1246DFLT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                                    }
+                                } else {
+                                    resolved_local = true;
+                                }
                                 calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
                             }
                             // SOUNDNESS R1245 (the REFUSED half) — T's impl of a trait that declares `leaf` holds a
@@ -5971,6 +5997,51 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(targets) = by_tail2.get(&format!("{ty}::drop")) {
                 if targets.len() == 1 && targets[0] != f.qual {
                     calls.entry(f.qual.clone()).or_default().insert(targets[0].clone());
+                } else if targets.len() >= 2 && std::env::var_os("CANDOR_R1253_OFF").is_none() {
+                    // RESOLVED where every construction of the leaf in this body spelled its type and that type is the
+                    // written self type of an `impl Drop` block whose unit is a claimant (`model::ImplOwner::written`):
+                    // the destructor that runs is that block's, and only that. Anything less — one construction this
+                    // engine could not spell, a spelled type no block was recorded for — discloses, below.
+                    let quals = drop_quals.get(ty);
+                    let picked: Option<BTreeSet<String>> = quals.filter(|qs| !qs.is_empty()).and_then(|qs| {
+                        let mut out = BTreeSet::new();
+                        for q in qs {
+                            let q = q.as_ref()?;
+                            let hit: Vec<String> = impl_owners.get("Drop").into_iter().flatten()
+                                .filter(|o| &o.written == q && o.declares("drop"))
+                                .map(|o| format!("{}::drop", o.owner))
+                                .filter(|u| targets.contains(u))
+                                .collect();
+                            if hit.is_empty() {
+                                return None;
+                            }
+                            out.extend(hit);
+                        }
+                        Some(out)
+                    });
+                    if let Some(picked) = picked {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1253PICK\t{}\t{ty}\t{picked:?}", f.qual); // §E1 REACH COUNTER
+                        }
+                        for t in picked {
+                            if t != f.qual {
+                                calls.entry(f.qual.clone()).or_default().insert(t);
+                            }
+                        }
+                        continue;
+                    }
+                    // SOUNDNESS R1253 — TWO SAME-LEAF TYPES WITH THEIR OWN `Drop` (`m1::Guard`, `m2::Guard`): the marker
+                    // carries the LEAF, so which destructor runs is not recoverable here, and edging every claimant
+                    // would charge one type's destructor to the other's frame (a fabrication). The refusal was right; the
+                    // silence after it was not — `let _g = m2::Guard;` read PURE over a destructor that writes a file
+                    // (EXECUTED, vein fixture f7: `deny Fs mk` exit 0). It is the R452(a) condition on the implicit call:
+                    // the crate declares `Guard::drop` more than once and declined to choose. `CANDOR_R1253_OFF=1`
+                    // restores the silence.
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1253DROP\t{}\t{ty}\t{}", f.qual, targets.len()); // §E1 REACH COUNTER
+                    }
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local methods".to_string());
                 }
             }
         }
@@ -7517,6 +7588,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let mut why_u: BTreeSet<String> = BTreeSet::new(); // R1268
                 let mut don_u: BTreeSet<String> = BTreeSet::new(); // R1324 — the members this union carries
                 let own_hedge = r529_reason(&format!("{trait_leaf}::{method}")); // R1268 — this union's own hedge
+                let mut r1246_seen: HashSet<String> = HashSet::new(); // R1246 — owner units already unioned
                 for ty in impls {
                     let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
                     // SOUNDNESS R598 — `{ty}::{method}` IS ALSO THE QUAL OF AN INHERENT `impl Ty`.
@@ -7670,6 +7742,34 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 if let Some(s) = blind_acc.get(&ts[0]) {
                                     blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
                                 }
+                            }
+                        }
+                    }
+                    // SOUNDNESS R1246 — AND EACH IMPLEMENTOR BLOCK BY ITS OWNER. Both lookups above key on the self type's
+                    // LEAF: when two types share it (`m1::Bytes`, `m2::Bytes`) the exact `{ty}::{method}` names neither
+                    // module unit and R513's tail fallback refuses the two-claimant tail — also with ONE implementor beside
+                    // an unrelated same-leaf type (an inherent `m2::Bytes::put`). Nothing entered the union and it was
+                    // PUBLISHED as `inferred: []`, a purity claim a chained consumer's `deny Fs` passed on over a file
+                    // write (EXECUTED, R1238 chain2). The owner (`model::impl_owner_key`) names the block's unit exactly,
+                    // and only a block that DECLARES `method` contributes — an inheriting block runs the trait's default,
+                    // which has its own row at this key (R597). Same contributions as an exact candidate.
+                    // `CANDOR_R1246_OFF=1` disables it.
+                    if std::env::var_os("CANDOR_R1246_OFF").is_none() {
+                        for o in impl_owners.get(trait_leaf).into_iter().flatten().filter(|o| &o.ty == ty && o.declares(method)) {
+                            let q = format!("{}::{method}", o.owner);
+                            if !unit_quals.contains(&q) || !r1246_seen.insert(q.clone()) {
+                                continue;
+                            }
+                            if crate::lang::reach_debug() && !by_tail2.get(&format!("{ty_leaf}::{method}")).is_some_and(|v| v.len() == 1) {
+                                eprintln!("R1246UNION\t{trait_leaf}::{method}\t{q}"); // §E1 REACH COUNTER (a tail R513 could not name)
+                            }
+                            if let Some(s) = inferred.get(&q) {
+                                inf_u.extend(s.iter().copied().filter(|e| admit(e)));
+                                union_why(&q, &mut why_u);
+                            }
+                            union_dispatch_hedge(&q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
+                            if let Some(s) = blind_acc.get(&q) {
+                                blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
                             }
                         }
                     }

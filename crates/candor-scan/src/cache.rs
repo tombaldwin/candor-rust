@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev141 (rustagent-r1246): SOUNDNESS R1246/R1253 — `impl_members` gains the OWNER key shape (`model::impl_owner_key`);
+    // a rev140 entry has none, so the dispatch and the union would fall back to the leaf tail warm and resolve cold.
     // rev140 (rustagent-ct2): call-target round 2 — the std bound table (`std_bounds.rs`) forms new edges at std entry points
     // (cached `calls`), every std derive now files a `derive_key` (cached `impl_members`), and a generic fn's summary is read
     // off the table (`<genop>` facts). A rev139 entry would serve every silence this closes.
@@ -557,7 +559,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev140/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev141/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -934,7 +936,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // discards the block's contents, so `{ty}::{method}` cannot be told apart from an inherent
     // `impl Ty { fn method }`.
     let mut impl_members: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    crate::lang::collect_local_impl_members(items, include_tests, &uses, &mut impl_members);
+    crate::lang::collect_local_impl_members(items, include_tests, modpath, &uses, &mut impl_members);
     FileDecls {
         fields,
         field_borrows,

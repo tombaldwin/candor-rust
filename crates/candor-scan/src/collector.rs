@@ -278,6 +278,8 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) trait_self: Option<String>,
     /// R598's member index, for `route_trait_member_path`'s R53 guard (see `TraitIndexes::impl_members`).
     pub(crate) impl_members: &'a std::collections::HashSet<String>,
+    /// SOUNDNESS R1246 — see `TraitIndexes::owners`.
+    pub(crate) impl_owners: &'a HashMap<String, Vec<crate::model::ImplOwner>>,
     /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
     /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
     /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
@@ -2744,8 +2746,34 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
-        self.note_release(leaf, true)
+    /// SOUNDNESS R1253 — a construction whose source SPELLS its type (`m2::Guard`, `m2::Guard { .. }`,
+    /// `m2::Guard::new()`): for a LEAF this crate declares at two quals, the marker carries the anchored type path
+    /// (`ctor_twin_qual`) so scan.rs can pick that type's own `Drop` among the twins instead of refusing both.
+    /// Every other construction gets the leaf-only marker it always had. (This is `note_construction`.)
+    fn note_construction_spelled(&mut self, leaf: Option<String>, written: &str, expand_it: bool) {
+        let q = self.ctor_twin_qual(leaf.as_deref(), written, expand_it);
+        self.note_release_q(leaf, true, q)
+    }
+
+    /// SOUNDNESS R1253 — the anchored type path a construction spells, for a twin leaf only: `written` expanded through
+    /// this scope's `use` map (unless the caller already did), cut at the LAST segment equal to the leaf, and kept only
+    /// when that leaves a module prefix (a bare `Guard` that `expand` did not anchor could name any twin) that is not a
+    /// relative `self`/`super` head `expand` failed to resolve. `None` = the type is not recoverable, which reads exactly
+    /// as the leaf-only marker always has.
+    fn ctor_twin_qual(&self, leaf: Option<&str>, written: &str, expand_it: bool) -> Option<String> {
+        let l = leaf?;
+        if std::env::var_os("CANDOR_R1253_OFF").is_some() || !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(l)) {
+            return None;
+        }
+        let full = if expand_it { crate::lang::expand(written, &self.uses) } else { written.to_string() };
+        // A bare name this module declares is this module's type, not "any twin".
+        let full = crate::lang::anchor_declared_type(&full, &self.uses, &self.modpath);
+        let segs: Vec<&str> = full.split("::").collect();
+        let i = segs.iter().rposition(|s| *s == l)?;
+        if i == 0 || matches!(segs[0], "self" | "super") || full.contains(crate::decls::ALIAS_ALT_SEP) {
+            return None;
+        }
+        Some(crate::model::norm_type_path(&segs[..=i].join("::")))
     }
 
     /// SOUNDNESS R168 — the PARAMETER-OWNED entry point, which must NOT consult the leaf-keyed escape
@@ -3196,6 +3224,10 @@ impl<'a> CallCollector<'a> {
     }
 
     fn note_release(&mut self, leaf: Option<String>, gate_on_escape: bool) {
+        self.note_release_q(leaf, gate_on_escape, None)
+    }
+
+    fn note_release_q(&mut self, leaf: Option<String>, gate_on_escape: bool, qual: Option<String>) {
         let Some(leaf) = leaf else { return };
         if !self.drop_relevant.contains(&leaf)
             || (gate_on_escape && !charge_at_construction() && self.escaping_ctors.contains(&leaf))
@@ -3216,7 +3248,12 @@ impl<'a> CallCollector<'a> {
             // A/B means the corpus never reached the change rather than that the change was quiet.
             eprintln!("R168OWNED {} in {}", leaf, self.modpath);
         }
-        if !self.marked_ctors.insert(leaf.clone()) {
+        // R1253 — a spelled twin type is its own marker (two twins built in one body are two destructors).
+        let mark_key = match &qual {
+            Some(q) => format!("{leaf}\u{1f}{q}"),
+            None => leaf.clone(),
+        };
+        if !self.marked_ctors.insert(mark_key) {
             return;
         }
         // Instrument the PRECONDITION, not just the output (the standing bar, and the sibling of
@@ -3230,7 +3267,7 @@ impl<'a> CallCollector<'a> {
         self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{leaf}::{CONSTRUCT_MARKER}"),
             leaf: CONSTRUCT_MARKER.to_string(),
-            str_arg: None,
+            str_arg: qual, // R1253 — the spelled twin type, read only by scan.rs' drop edge
             path_lits_partial: false,
             path_lit2: None,
             typed: false,
@@ -8489,7 +8526,42 @@ impl<'a> CallCollector<'a> {
         }
         match self.trait_impls.get(tr) {
             Some(impls) if impls.len() <= 12 => {
+                // SOUNDNESS R1246 — A SAME-LEAF IMPLEMENTOR IS NAMED BY ITS OWNER, NOT BY ITS TAIL. `{ty}::{leaf}` is the
+                // two-segment tail, and when two types share the leaf (`m1::Bytes`, `m2::Bytes`, both `impl Th`) that
+                // tail has two claimants: `resolve_target` refuses it, and the refused typed call then fell into
+                // scan.rs' inherited-default route, which read "T does not declare `put`" and edged it to `Th`'s PURE
+                // default — `deny Fs` exit 0 over a `dyn Th` call that writes a file (EXECUTED, vein fixtures f1d/f3d).
+                // For such a leaf each implementor BLOCK is named instead (`model::impl_owner_key`): a block declaring
+                // `leaf` by its unit's crate-anchored qual (`crate::m2::Bytes::put`, which `arm_exact_target`'s exact
+                // pass picks and nothing else can), a block inheriting it by the trait's own default (the R1151 path).
+                // Only where the leaf is a twin (`twin_type_leaves`) or one trait has two owners under it, so every other
+                // implementor keeps the spelling it had; only where `tr` itself declares `leaf` (a supertrait's member
+                // lives in another trait's blocks). A block the walk did not record leaves the old spelling in place.
+                // `CANDOR_R1246_OFF=1` disables it.
+                let r1246 = std::env::var_os("CANDOR_R1246_OFF").is_none()
+                    && (lt.methods.contains(leaf) || (assoc && lt.assoc.contains(leaf)));
+                let mut owner_paths: std::collections::BTreeSet<(String, bool)> = std::collections::BTreeSet::new();
                 for ty in impls {
+                    if r1246 {
+                        let blocks: Vec<&crate::model::ImplOwner> = self
+                            .impl_owners
+                            .get(tr)
+                            .map(|v| v.iter().filter(|o| &o.ty == ty).collect())
+                            .unwrap_or_default();
+                        let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+                        let owners: std::collections::BTreeSet<&str> = blocks.iter().map(|o| o.owner.as_str()).collect();
+                        let twin = self.assign_drop.twin_leaves.is_some_and(|t| t.contains(ty_leaf)) || owners.len() >= 2;
+                        if twin && !blocks.is_empty() {
+                            for o in blocks {
+                                if o.declares(leaf) {
+                                    owner_paths.insert((format!("crate::{}::{leaf}", o.owner), true));
+                                } else {
+                                    owner_paths.insert((format!("{tr}::{leaf}"), false));
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                         path: format!("{ty}::{leaf}"),
                         leaf: leaf.to_string(),
@@ -8497,6 +8569,20 @@ impl<'a> CallCollector<'a> {
                         path_lits_partial: false, path_lit2: None,
                         typed: true,
                         method: true,
+                        is_macro: false,
+                    });
+                }
+                for (path, exact) in owner_paths {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1246OWNER\t{tr}::{leaf}\t{path}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                        path,
+                        leaf: leaf.to_string(),
+                        str_arg: str_arg.clone(),
+                        path_lits_partial: false, path_lit2: None,
+                        typed: exact,
+                        method: exact,
                         is_macro: false,
                     });
                 }
@@ -10608,7 +10694,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if ctor.is_none() {
                             self.note_ctor_refusal(&path);
                         }
-                        self.note_construction(ctor);
+                        self.note_construction_spelled(ctor, &path, false);
                         // CROSS-CRATE sibling — R68(1). `path` is already the resolved (use-expanded)
                         // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
                         // crate segment `ctor_leaf_from_call_path` discards.
@@ -12600,7 +12686,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let ctor = (!caps_const)
                 .then(|| crate::lang::ctor_leaf_from_value_path(&full, &self.uses, self.fields))
                 .flatten();
-            self.note_construction(ctor);
+            self.note_construction_spelled(ctor, &full, true);
             // CROSS-CRATE sibling — R68(1). Before this, this was the ONLY spelling reaching a
             // correctly-keyed cross-crate marker, and only by accident (the lazy-static forcing code's
             // `dep_lazy_keys` shared this same visit and derived the right key purely because a
@@ -12644,7 +12730,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if node.qself.is_none() {
             let ctor = crate::lang::ctor_leaf_of_expr(
                 &syn::Expr::Struct(node.clone()), &self.uses, self.fields, self.returns);
-            self.note_construction(ctor);
+            self.note_construction_spelled(ctor, &path_to_string(&node.path), true);
             // CROSS-CRATE sibling — R68(1). This spelling had NO route to a cross-crate marker at all
             // before this fix; `deplib::Guard { n: 1 }` read silent-pure regardless of what deplib's own
             // report said.
