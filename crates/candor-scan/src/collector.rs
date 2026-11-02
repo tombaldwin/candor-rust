@@ -8593,7 +8593,7 @@ impl<'a> CallCollector<'a> {
                                     // Layer`: the tail had two claimants, the default edge was refused, and every
                                     // caller and the union lost what the default reaches — measured on the first A/B).
                                     match crate::model::trait_decl_qual(self.impl_owners, tr) {
-                                        Some(q) => owner_paths.insert((format!("crate::{q}::{leaf}"), true)),
+                                        Some(q) => owner_paths.insert((format!("crate::{q}::{leaf}"), false)),
                                         None => owner_paths.insert((format!("{tr}::{leaf}"), false)),
                                     };
                                 }
@@ -8648,7 +8648,10 @@ impl<'a> CallCollector<'a> {
                     let (path, exact) = match crate::model::trait_decl_qual(self.impl_owners, tr)
                         .filter(|_| std::env::var_os("CANDOR_R1246_OFF").is_none())
                     {
-                        Some(q) => (format!("crate::{q}::{leaf}"), true),
+                        // NOT typed: a typed method path to a requirement with no default body falls into scan.rs'
+                        // trait-requirement CHA, which fans out by leaf tail and reached regex-automata's `hybrid::dfa::DFA`
+                        // (not an `Automaton` implementor) on the first cut. As a plain path it names the default or nothing.
+                        Some(q) => (format!("crate::{q}::{leaf}"), false),
                         None => (format!("{tr}::{leaf}"), false),
                     };
                     self.calls.push(Call { recv_form: 0, dot: false, argc: 0, entropy_arg: false,
