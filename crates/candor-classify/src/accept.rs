@@ -279,7 +279,10 @@ mod tests {
             "deny Unknown dao\naccept dao.a Unknown for deny Unknown dao because x",       // bare Unknown
             "deny Unknown dao\naccept dao.a Unknown[*] for deny Unknown dao because x",
             "deny Unknown dao\naccept dao.a Unknown[dynamic] for deny Unknown dao because x",
-            "deny Fs dao\naccept dao.f::{closure#0} Fs for deny Fs dao because x",         // positional key
+            // `{closure#N}` is UNWRITABLE here — the `#` begins a comment, so the line is cut before `for` and is
+            // ignored for that reason (§6.2: "which §6.2's comment rule makes unwritable anyway"). This engine has no
+            // writable positional spelling; `is_positional_key` is exercised directly below and by the nested-unit rule.
+            "deny Fs dao\naccept dao.f::{closure#0} Fs for deny Fs dao because x",
             "deny Fs dao\nallow Net in dao ok.example\naccept dao.a Net for allow Net in dao ok.example because x",
             "forbid dao -> infra\naccept dao.a Fs for forbid dao -> infra because x",       // forbid takes none
             "deny Fs dao\naccept dao.a Fs for deny Fs dao extra because x",                // not the raw tokens
