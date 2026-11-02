@@ -11,6 +11,27 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **candor-scan: two types that share a name in different modules (`m1::Bytes`, `m2::Bytes`) are now told apart
+  at trait dispatch, in the published interface union, and at drop glue (SOUNDNESS R1246, R1253).** Before, every one
+  of these was keyed by the type's last path segment, and three places turned the resulting tie into a purity claim:
+  a `dyn Th` / `T: Th` call over two same-named implementors resolved to `Th`'s default body (`deny Fs` passed over a
+  call that writes a file); the published `Th::put` union read `inferred: []`, so a consumer chaining the report passed
+  `deny Fs` too; and a value of one of two same-named `Drop` types was dropped with no effect and no disclosure. The
+  scanner now records, per impl block, the module its methods are filed under, and names each implementor exactly.
+  Where it still cannot tell which twin is meant (a field-owned or `self` value), it discloses
+  `ambiguous:same-name local methods` instead of reading pure. Kill switches: `CANDOR_R1246_OFF=1`, `CANDOR_R1253_OFF=1`.
+  - Gates turn red on real code. Published v0.40.18 → this build, `bin/corpus-ab.py`, 5,059 standalone registry crates
+    and 1,143 consumers with every dependency chained (each crate version counts separately): 351 rows newly carry a
+    concrete effect (294 standalone, 57 chained) and **no row loses one**. Checked on both binaries: `deny Exec
+    process::ChildDropGuard::kill` (tokio), `deny Fs api::devicename_os` (whoami) and `deny Clock
+    fmt::fmt_layer::Layer::on_event` (tracing-subscriber) go from exit 0 to exit 1.
+  - New `Unknown`: 628 of 2,877,064 standalone rows (0.022%) and 147 of 501,221 chained rows (0.029%) newly carry only
+    `Unknown`, nearly all `ambiguous:same-name local methods` from twin `Drop` types the source does not spell.
+  - Withdrawn `Unknown`: 1,056 rows lose `Unknown` (a twin dispatch's `ambiguous:` hedge, directly or through a
+    callee) because the call now names its implementors exactly, and 18 Unknown-only rows leave the report. Each removal was checked against an independent list of same-named units
+    the new rule did NOT name. Every excluded unit was one of three kinds: an inherent method on a non-implementor, the
+    trait's own default body (still reached by its own path), or a unit the implementing block reaches through a call.
+
 ## [0.40.18] — 2026-10-31
 
 - **Build: dylint 6.0.1 → 6.3.2.** dylint ≤6.2 builds its driver from rust-clippy's `master` branch, which upstream renamed to
