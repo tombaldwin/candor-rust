@@ -3219,6 +3219,14 @@ impl<'a> CallCollector<'a> {
         crate::lang::decode_owned_result(&enc)
     }
 
+    /// SOUNDNESS R1253 — a by-value parameter's drop, with its DECLARED type path when the signature spells one
+    /// (`_g: m2::Guard`): for a twin leaf the marker then names which type dies here (`ctor_twin_qual`). `type_path`
+    /// has already expanded it.
+    pub(crate) fn note_owned_param_drop_spelled(&mut self, leaf: String, spelled: Option<&str>) {
+        let q = spelled.and_then(|t| self.ctor_twin_qual(Some(&leaf), t, false));
+        self.note_release_q(Some(leaf), false, q)
+    }
+
     pub(crate) fn note_owned_param_drop(&mut self, leaf: Option<String>) {
         self.note_release(leaf, false)
     }

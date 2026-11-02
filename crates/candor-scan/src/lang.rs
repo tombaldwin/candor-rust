@@ -9301,8 +9301,11 @@ pub(crate) fn owned_drop_params(
     escaping_names: &std::collections::HashSet<String>,
     // SOUNDNESS R1121 — the body, read only for `param_never_consumed`.
     block: &syn::Block,
-) -> Vec<String> {
-    let mut out = Vec::new();
+) -> Vec<(String, Option<String>)> {
+    // SOUNDNESS R1253 — each leaf beside the parameter's declared type path where the source spells one (the
+    // direct by-value type; `None` for `self` and for a leaf reached through a wrapper), so a twin leaf's
+    // destructor can be picked by type rather than refused.
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
     let leaf_of = |t: String| t.rsplit("::").next().unwrap_or(&t).to_string();
     for input in &sig.inputs {
         match input {
@@ -9330,7 +9333,7 @@ pub(crate) fn owned_drop_params(
                     eprintln!("S2SELF {}", self_ty.unwrap_or("?"));
                 }
                 if let Some(t) = self_ty {
-                    out.push(leaf_of(t.to_string()));
+                    out.push((leaf_of(t.to_string()), None));
                 }
             }
             syn::FnArg::Typed(pt) => {
@@ -9369,7 +9372,7 @@ pub(crate) fn owned_drop_params(
                     eprintln!("S2PARAM {name}");
                 }
                 if let Some(t) = direct {
-                    out.push(leaf_of(t));
+                    out.push((leaf_of(t.clone()), Some(t)));
                 }
                 // SOUNDNESS R1121 — a leaf reached THROUGH a wrapper is charged only when the body never
                 // CONSUMES the parameter. Unlike a bare `Drop` type (which cannot be destructured, E0509),
@@ -9384,7 +9387,7 @@ pub(crate) fn owned_drop_params(
                         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
                             eprintln!("R1121WRAP {t}"); // §E1 REACH COUNTER — a leaf only the unwrapping finds
                         }
-                        out.push(t);
+                        out.push((t, None));
                     }
                 }
             }

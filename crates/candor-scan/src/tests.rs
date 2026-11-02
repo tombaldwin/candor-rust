@@ -7926,9 +7926,13 @@ fn viadyn(s: &dyn Th) { s.put(); }\npub fn go() { viadyn(&m1::Bytes); }\n");
         let drops = "pub mod m1 { pub struct Guard; impl Drop for Guard { fn drop(&mut self) { println!(\"m1\"); } } }\n\
 pub mod m2 { pub struct Guard; impl Drop for Guard { fn drop(&mut self) { std::fs::write(\"/tmp/x\", \"y\").unwrap(); } } }\n";
         let v = scan_fixture("r1253drop", &format!("{drops}pub fn mk() {{ let _g = m2::Guard; }}\npub fn mk1() {{ let _g = m1::Guard; }}\n\
-pub struct Outer {{ pub g: m2::Guard }}\npub fn outer() {{ let _o = Outer {{ g: m2::Guard }}; }}\n"));
+pub struct Outer {{ pub g: m2::Guard }}\npub fn outer() {{ let _o = Outer {{ g: m2::Guard }}; }}\n\
+pub fn eat(_g: m2::Guard) {{}}\npub fn eat1(_g: m1::Guard) {{}}\n"));
         assert_eq!(fixture_effects(&v, "mk"), fs, "R1253 spelled twin (f7):\n{v:#}");
         assert!(fixture_effects(&v, "mk1").is_empty(), "R1253 fabrication control (the pure twin):\n{v:#}");
+        // …and a by-value PARAMETER whose declared type spells the twin.
+        assert_eq!(fixture_effects(&v, "eat"), fs, "R1253 spelled twin parameter:\n{v:#}");
+        assert!(fixture_effects(&v, "eat1").is_empty(), "R1253 fabrication control (pure twin parameter):\n{v:#}");
         // A field-owned twin is not spelled at the drop: disclosed, never pure.
         assert!(fixture_effects(&v, "outer").contains(&"Unknown".to_string()), "R1253 unspelled twin discloses:\n{v:#}");
     }
