@@ -28,6 +28,15 @@ pub(crate) use candor_classify::gate::net_classes_of;
 /// signature read from a written report. This function's remaining job is to build the [`GateInput`]
 /// from the classifier's accumulators — including materializing the ⟨0.20⟩ destination classes for
 /// every `Net`-bearing fn, exactly the set the lazy call used to compute on demand.
+/// ⟨0.41⟩ [`policy_precheck`]'s answer: `(fatal errors as (raw line, message), aliases used, ignored lines, valid
+/// `accept` entries)`.
+pub(crate) type PolicyPrecheck = (
+    Vec<(String, String)>,
+    UsedAliases,
+    Vec<candor_report::IgnoredLine>,
+    Vec<candor_classify::policy::AcceptEntry>,
+);
+
 /// ⟨0.24⟩ What the caller must know about `policy_text` BEFORE any verdict is derived from it: its §6.2
 /// POLICY ERRORS (empty ⇒ the policy can be honoured AS WRITTEN), and the `unknown-alias` names it
 /// actually resolved through (non-empty ⇒ a config supplied vocabulary the verdict used, and §3.1 makes
@@ -46,7 +55,7 @@ pub(crate) use candor_classify::gate::net_classes_of;
 pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> (Vec<(String, String)>, UsedAliases, Vec<candor_report::IgnoredLine>, Vec<candor_classify::policy::AcceptEntry>) {
+) -> PolicyPrecheck {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
     // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
     // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
