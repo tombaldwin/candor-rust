@@ -1689,8 +1689,9 @@ pub fn gate_verdict_json_v33(
 /// keeps a policy without the directive byte-identical. Two consequences the clause pins and this writer
 /// enforces, so no caller can forget them:
 ///
-/// - the key rides VERDICT documents only: an INCOMPLETE verdict (exit 2) makes no claim about violations,
-///   so it makes none about which were accepted and omits `accepted`;
+/// - the key rides VERDICT documents only: an INCOMPLETE verdict that is exit 2 (no violation left) makes no
+///   claim about violations, so it makes none about which were accepted and omits `accepted`. An incomplete
+///   document that still holds a violation is exit 1 and a verdict (SPEC §6.2 ⟨0.41⟩ follow-up), so it CARRIES it;
 /// - on that same exit-2 incomplete document, with entries present and no violation left, the `violations`
 ///   key is omitted too (the reference engine's behaviour; PART 105 row s13 pins it). Without entries the
 ///   incomplete document keeps the `violations: []` every engine has always written.
@@ -1881,7 +1882,7 @@ fn gate_verdict_json_impl(
         out_of_scope,
         net_partners,
         vocabulary,
-        accepted: if incomplete { None } else { accepted },
+        accepted: if incomplete && violations.is_empty() { None } else { accepted },
     })
 }
 

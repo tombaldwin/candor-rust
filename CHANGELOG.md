@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **`accepted` is carried on an exit-1 verdict that is also incomplete (SPEC §6.2 ⟨0.41⟩ follow-up).** The verdict writer dropped the key whenever the document was incomplete; only an exit-2 document (no violation left) omits it. PART 105 row r33.
+
 - **`accept` lines for KNOWN policy violations (SPEC §6.2 ⟨0.41⟩; the declared `spec` stays ⟨0.40⟩ until the family
   floor moves).** `accept <fn> <Effect>… for <rule tokens> because <reason>` takes ONE named row out of `violations`
   and lists it in a new `accepted` verdict key (statuses `accepted`, `exceeded`, `ambiguous`, `unjudged`), on both
