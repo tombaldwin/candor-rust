@@ -34,6 +34,7 @@ mod containment;
 mod state;
 mod fix;
 mod gate;
+mod accepts;
 mod unverified;
 mod tour;
 
@@ -51,6 +52,7 @@ pub(crate) use containment::*;
 pub(crate) use state::*;
 pub(crate) use fix::*;
 pub(crate) use gate::*;
+pub(crate) use accepts::*;
 pub(crate) use unverified::*;
 pub(crate) use tour::*;
 
@@ -87,6 +89,10 @@ fn main() {
         // ⟨0.24⟩ SPEC §3.1: apply a policy to an EXISTING report, with no scan.
         "gate" => cmd_gate(rest),
         "unverified" => cmd_unverified(rest),
+        // ⟨0.41⟩ SPEC §6.2: a PROPOSED policy that refreshes (or adopts) the `accept` lines. Writes no file.
+        "accepts" => cmd_accepts(rest),
+        // `accept` is the policy LINE kind, one letter short of the verb; a usage error that names `accepts`.
+        "accept" => cmd_accept_typo(rest),
         "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
@@ -108,7 +114,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|units|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|gate|unverified|accepts|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|units|merge-hook|--agents)"
             );
             2
         }
@@ -173,6 +179,7 @@ fn print_help() {
         ("fix-gate [--report <loc>] [--policy <f>] [--json] [--strict]", "a fix for EVERY boundary crossing — advisory; --strict exits 1 while any remains"),
         ("gate     --report <loc> --policy <f> [--json] [--gate-json <f>]", "apply a policy to an EXISTING report — no scan, no re-derivation (§3.1)"),
         ("unverified [--report <loc>] [--policy <f>] [--strict]", "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"),
+        ("accepts  [--report <loc>] [--policy <f>] [--json] [--adopt --because <why>]", "print a PROPOSED policy that refreshes the `accept` lines (stale deleted, wide narrowed, exceeded proposed in a comment); --adopt adds a line per unnamed violation; writes no file"),
         ("rewire   <cur_prefix> <base_prefix> [0|1]", "call edges a function DROPPED vs a baseline (de-wiring)"),
         ("receipt  <prefix>", "the Claude Code receipt's report-derived fields (key<TAB>value)"),
         ("gains    <current> <baseline> [--json] [--strict]", "every effect a fn gained since the baseline — --strict exits 1 on ANY gain"),

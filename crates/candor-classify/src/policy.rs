@@ -781,6 +781,11 @@ pub struct ParsedPolicy {
     /// are exactly what they were without it. Empty on every policy without an `accept` line, which is what
     /// keeps every verdict of such a policy byte-identical.
     pub accepts: Vec<AcceptEntry>,
+    /// ⟨0.41⟩ stamp every policy row with its producing line's key even when the policy holds no `accept` entry — what
+    /// the `accepts` verb needs to say which line produced a row it proposes to adopt. Never set by a parse; the
+    /// verb sets it on its own copy. It changes no verdict: a key is read only by [`crate::accept::settle`], and
+    /// only against entries.
+    pub stamp_rule_keys: bool,
 }
 
 impl ParsedPolicy {

@@ -44,6 +44,13 @@ pub struct Settled {
     /// One human sentence per entry that is `unjudged`, `ambiguous`, `exceeded` — each carrying a remedy.
     /// Unprefixed: the caller prefixes its own binary name.
     pub notes: Vec<String>,
+    /// ⟨0.41⟩ `accepts` (the verb that proposes a refreshed policy): for every entry that accepted at least one row
+    /// DIRECTLY, `(its line, those rows)`. The verb narrows an entry to the union of these, so it reads the rows
+    /// from HERE and not from a second matcher. Nested rows are not in it (they ride the enclosing entry).
+    pub direct_rows: Vec<(usize, Vec<GateViolation>)>,
+    /// ⟨0.41⟩ the input line of every entry that produced an `AS-EFF-012` row in `stale`, in entry order — the verb
+    /// deletes exactly these lines.
+    pub stale_lines: Vec<usize>,
 }
 
 const DENY: &str = "AS-EFF-006";
@@ -95,6 +102,16 @@ fn item(e: &AcceptEntry, rule: &str, func: &str, hash: &str, effects: Vec<String
     }
 }
 
+/// The names two or more units of the run share with DIFFERENT identities — `(hash, fn)` twins (§3.1 ⟨0.40⟩). An entry on
+/// such a name accepts neither, and the `accepts` verb writes no line for one: one definition for both.
+pub fn twin_names(units: &[(String, String)]) -> BTreeSet<String> {
+    let mut by_name: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (n, id) in units {
+        by_name.entry(n.as_str()).or_default().insert(id.as_str());
+    }
+    by_name.into_iter().filter(|(_, s)| s.len() > 1).map(|(n, _)| n.to_string()).collect()
+}
+
 /// Decide a whole run's rows against its `accept` entries. `rows` is every violation of the run (policy rows carry
 /// their producing line in [`GateViolation::rule_key`]; every other row passes through untouched).
 pub fn settle(entries: &[AcceptEntry], rows: Vec<GateViolation>, facts: &RunFacts) -> Settled {
@@ -104,11 +121,8 @@ pub fn settle(entries: &[AcceptEntry], rows: Vec<GateViolation>, facts: &RunFact
         return out;
     }
     // (hash, fn) TWINS: >1 distinct identity under one name.
-    let mut by_name: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for (n, id) in facts.units {
-        by_name.entry(n.as_str()).or_default().insert(id.as_str());
-    }
-    let twin = |name: &str| by_name.get(name).is_some_and(|s| s.len() > 1);
+    let twins = twin_names(facts.units);
+    let twin = |name: &str| twins.contains(name);
     let usable = |e: &AcceptEntry| !facts.unevaluated.contains(&e.rule_key) && !twin(&e.func);
     let policy_row = |r: &GateViolation| !r.rule_key.is_empty() && (r.rule == DENY || r.rule == FORBID);
 
@@ -188,6 +202,7 @@ pub fn settle(entries: &[AcceptEntry], rows: Vec<GateViolation>, facts: &RunFact
             continue;
         }
         if !direct[k].is_empty() {
+            out.direct_rows.push((e.line, direct[k].iter().map(|&i| rows[i].clone()).collect()));
             // The row this entry accepted. Several rows (identical duplicate lines) are picked deterministically,
             // so the two routes — which accumulate in different orders — carry the same item.
             let &first = direct[k].iter().min_by_key(|&&i| (rows[i].hash.clone(), rows[i].effects.clone())).unwrap();
@@ -215,6 +230,7 @@ pub fn settle(entries: &[AcceptEntry], rows: Vec<GateViolation>, facts: &RunFact
             continue;
         }
         // STALE: its rule was evaluated, and it accepted nothing and is not exceeded.
+        out.stale_lines.push(e.line);
         out.stale.push(GateViolation {
             rule: "AS-EFF-012".into(),
             func: e.func.clone(),

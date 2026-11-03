@@ -429,7 +429,7 @@ impl Candor {
             );
         }
         let ParsedPolicy {
-            rules: policy, allow_rules, layer_rules, only_rules: _, errors: _, used_aliases: _, accepts: _
+            rules: policy, allow_rules, layer_rules, only_rules: _, errors: _, used_aliases: _, accepts: _, stamp_rule_keys: _
         } = parsed_policy;
         Self {
             direct: HashMap::new(),

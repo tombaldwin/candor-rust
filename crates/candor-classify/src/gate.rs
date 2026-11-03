@@ -311,7 +311,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // obligation, on 15 of 90 rows over ebman/pgman/the candor workspace — which is the whole argument
     // for the verb: no end-to-end test could have separated this from a classifier defect.
     let mut seen_fn: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let accepting = !p.accepts.is_empty();
+    let accepting = !p.accepts.is_empty() || p.stamp_rule_keys;
     for q in gi.all {
         // ⟨0.32⟩ the key identifies the unit; the NAME is what a human reads and a scope matches.
         let disp_q = gi.disp(q);

@@ -280,6 +280,10 @@ Three boundary kinds, all checked *transitively* so they catch what a local diff
   than was accepted stays red; an entry that matches nothing is itself a violation (`AS-EFF-012`, delete the line);
   a closure's `{closure#N}` key cannot be accepted — accept the enclosing function. `allow` and `only` rules
   cannot be accepted.
+  `candor-query accepts` prints a *proposed* policy that refreshes these lines after an upgrade — stale entries
+  deleted, over-wide ones narrowed to what they accepted, an exceeded one proposed in a comment (never widened) — and
+  with `--adopt --because <reason>` appends a line, carrying your reason, per violation no entry names. It writes no
+  file: `candor-query accepts --policy p > p.new && diff p p.new` (never `> p`, which empties it first).
 
 `cargo candor policy` enforces all three across a whole workspace in one command — it snapshots every
 crate, then enforces with the siblings loaded, so an effect or endpoint that lives in a *shared crate*

@@ -205,7 +205,14 @@ candor-query tour     [<N>] [--report <locator>] [--json]   # the N (default 10)
 candor-query gains    <cur_prefix> <base_prefix> [--json]   # supply-chain alarm: effects a surface gained
 candor-query diff     <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
 candor-query gate     --report <locator> --policy <file> [--json] [--gate-json <f>]
+candor-query accepts  [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]
 ```
+
+`accepts` prints a PROPOSED policy that refreshes the `accept` lines (SPEC §6.2 ⟨0.41⟩) and writes no file: a stale
+entry's line is deleted, an over-wide accepted entry is narrowed to the rows it accepted, an exceeded entry is kept and
+followed by one `# candor-accepts: exceeded … REPLACE the line above with: …` comment (it never widens a line), and with
+`--adopt --because <reason>` one `accept` line per violation no entry names is appended carrying your reason. Write the
+proposal to ANOTHER path and diff it — `accepts > <the policy>` empties the policy before it is read.
 
 `gate` applies a policy to a report you ALREADY HAVE — no scan, no source. It is the supply-chain
 verb (gate a dependency's published report without re-analysing code you do not have) and its exit

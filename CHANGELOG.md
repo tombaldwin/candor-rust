@@ -11,6 +11,22 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **`candor-query accepts` — a PROPOSED policy that refreshes (or adopts) the `accept` lines (SPEC §6.2 ⟨0.41⟩, PART 106).**
+  `candor-query accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]` prints the policy it
+  read with three changes and nothing else: a STALE entry's line deleted (exactly the lines the gate calls `AS-EFF-012`), an
+  accepted entry wider than the rows it accepted NARROWED to them (an `Unknown` to `Unknown[<the rows' classes>]`), and an
+  EXCEEDED entry left as it is with one comment line proposing the wider replacement — it never widens a line. Under
+  `--adopt --because <reason>` it also appends one `accept` line, carrying only the reason the operator typed, per violation
+  row no entry names. It writes NO file; `--json` prints the plan whose `text` is those bytes, and `after` is the gate's own
+  verdict over the proposal. It decides nothing itself: `gate` was split into one function that parses, settles and returns
+  the rows (`gate_core`), `gate` prints from it exactly as before (byte-identical over 369 fixture/policy pairs and every
+  verb), and `accepts` reads the same facts from it — and gates its own proposal with it. It answers only over a complete
+  analysis (an unreadable report or policy, a whole-policy refusal or an incomplete analysis is exit 2 with no proposal),
+  and says where the redirect trap is sprung: `accepts > <the policy>` empties the policy before it is read, so a refusal
+  for a policy with no rules names that, and the stderr summary prints the next command. `accept` typed as a verb is a
+  usage error naming `accepts`. The `cargo candor` wrapper does not carry it (nor `gate`/`fix-gate`): its report route can
+  scan and write files, which this verb must not.
+
 - **`accepted` is carried on an exit-1 verdict that is also incomplete (SPEC §6.2 ⟨0.41⟩ follow-up).** The verdict writer dropped the key whenever the document was incomplete; only an exit-2 document (no violation left) omits it. PART 105 row r33.
 
 - **`accept` lines for KNOWN policy violations (SPEC §6.2 ⟨0.41⟩; the declared `spec` stays ⟨0.40⟩ until the family

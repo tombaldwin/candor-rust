@@ -7390,3 +7390,119 @@ fn gate_verdict_lists_every_accept_line_as_ignored_because_the_lint_route_does_n
     assert_eq!(v["ignored"][0]["line"], 2);
     assert!(v["ignored"][0]["reason"].as_str().unwrap().contains("not evaluated on the dylint lint route"), "{v}");
 }
+
+// ═══ ⟨0.41⟩ `accepts` — a PROPOSED policy that refreshes the `accept` lines (SPEC §6.2) ═════════════════════════════
+//
+// PART 106 pins the cross-engine contract through the CLI. These rows pin what is specific to THIS engine: that the
+// verb is the gate's own settlement (not a second matcher), that it writes nothing, and the two places the redirect
+// trap is named.
+
+fn accepts(loc: &str, policy: &std::path::Path, extra: &[&str]) -> (i32, String, String) {
+    let mut a: Vec<String> = vec!["accepts".into(), "--report".into(), loc.into(), "--policy".into(), policy.to_string_lossy().into_owned()];
+    a.extend(extra.iter().map(|s| s.to_string()));
+    let o = Command::new(bin()).args(&a).output().expect("run candor-query");
+    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+const FS_RAND_B: &str = r#"{"fn":"dao.b","hash":"dao#dao.b","inferred":["Fs","Rand"],"direct":["Fs","Rand"]}"#;
+
+#[test]
+fn accepts_refreshes_stale_narrows_wide_proposes_exceeded_and_writes_nothing() {
+    let f = Fixture::new("accepts-refresh");
+    // dao.a performs Fs only; dao.b performs Fs AND Rand; dao.gone no longer exists.
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K},{FS_RAND_B}"));
+    let text = "deny Fs Rand dao\n\
+                accept dao.gone Fs for deny Fs Rand dao because old\n\
+                accept dao.a Rand Fs for deny Fs Rand dao because known  # why\n\
+                accept dao.b Fs for deny Fs Rand dao because was-smaller\n";
+    let p = pol(&f.dir, "p", text);
+    let before = std::fs::read_dir(&f.dir).unwrap().count();
+    let (rc, out, err) = accepts(&loc, &p, &[]);
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(
+        out,
+        "deny Fs Rand dao\n\
+         accept dao.a Fs for deny Fs Rand dao because known # why\n\
+         accept dao.b Fs for deny Fs Rand dao because was-smaller\n\
+         # candor-accepts: exceeded (adds Rand) — REPLACE the line above with: accept dao.b Fs Rand for deny Fs Rand dao because was-smaller\n",
+        "stale line 2 deleted, line 3 narrowed to what it accepted, line 4 UNCHANGED with the wider line only in a comment"
+    );
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), text, "the policy file must be byte-identical afterwards");
+    assert_eq!(std::fs::read_dir(&f.dir).unwrap().count(), before, "the verb must create no file");
+    // A second run over its own output prints it unchanged (the verb's own comments are dropped and regenerated).
+    let p2 = pol(&f.dir, "p2", &out);
+    let (rc2, out2, err2) = accepts(&loc, &p2, &[]);
+    assert_eq!(rc2, 0, "{err2}");
+    assert_eq!(out2, out, "idempotent over its own output");
+}
+
+#[test]
+fn accepts_json_plan_carries_the_gates_own_after_and_never_widens() {
+    let f = Fixture::new("accepts-json");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K},{FS_RAND_B}"));
+    let p = pol(&f.dir, "p", "deny Fs Rand dao\naccept dao.b Fs for deny Fs Rand dao because x\n");
+    let (rc, out, err) = accepts(&loc, &p, &["--json"]);
+    assert_eq!(rc, 0, "{err}");
+    let plan: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(plan["mode"], "refresh");
+    assert_eq!(plan["proposals"][0]["adds"][0], "Rand");
+    assert_eq!(plan["proposals"][0]["text"], "accept dao.b Fs Rand for deny Fs Rand dao because x");
+    assert_eq!(plan["after"]["exit"], 1, "an exceeded row stays red until a human takes the proposal");
+    assert!(plan.get("created").is_none(), "a refresh carries no `created`");
+    let un: Vec<&str> = plan["unnamed"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    assert_eq!(un, ["dao.a"], "the row no entry names is listed, not accepted");
+}
+
+#[test]
+fn accepts_adopt_appends_one_line_per_unnamed_row_with_the_operators_reason_only() {
+    let f = Fixture::new("accepts-adopt");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K},{FS_RAND_B}"));
+    let p = pol(&f.dir, "p", "deny Fs Rand dao");
+    let (rc, out, err) = accepts(&loc, &p, &["--adopt", "--because", "  at   adoption "]);
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(
+        out,
+        "deny Fs Rand dao\naccept dao.a Fs for deny Fs Rand dao because at adoption\naccept dao.b Fs Rand for deny Fs Rand dao because at adoption\n",
+        "a newline is added before the appended lines; the reason is the operator's tokens, single-spaced"
+    );
+    for bad in [&["--adopt"][..], &["--because", "x"][..], &["--adopt", "--because", "see #1"][..], &["--adopt", "--because", "  "][..]] {
+        let (rc, out, err) = accepts(&loc, &p, bad);
+        assert_eq!(rc, 2, "{bad:?}: {err}");
+        assert!(out.is_empty(), "{bad:?}: a usage error prints no proposal");
+    }
+    let (rc, _, err) = accepts(&loc, &p, &["--strict"]);
+    assert_eq!(rc, 2, "--strict is a usage error, not a swallowed flag\n{err}");
+}
+
+#[test]
+fn accepts_names_the_redirect_trap_and_the_accept_verb_names_accepts() {
+    let f = Fixture::new("accepts-trap");
+    let loc = accept_report(&f.dir, "r", &format!("{FS_A},{CLOCK_K}"));
+    let empty = pol(&f.dir, "empty", "");
+    let (rc, out, err) = accepts(&loc, &empty, &[]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("redirect") && err.contains("EMPTIES"), "a policy with no rules must name the redirect trap:\n{err}");
+    let (rc, _, err) = run(&["accept", "--report", &loc]);
+    assert_eq!(rc, 2);
+    assert!(err.contains("accepts"), "`accept` as a verb is a usage error that names `accepts`:\n{err}");
+}
+
+#[test]
+fn accepts_answers_nothing_over_an_incomplete_analysis() {
+    let f = Fixture::new("accepts-incomplete");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        &format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.40"}},"package":"dao","analyzed":{{"count":9,"digest":"0"}},
+                "unanalyzed":[{{"path":"src/x.rs","reason":"parse"}}],"functions":[{CLOCK_K}]}}"#
+        ),
+        None,
+    );
+    let p = pol(&f.dir, "p", "deny Fs dao\naccept dao.a Fs for deny Fs dao because gone\n");
+    let (rc, out, err) = accepts(&loc, &p, &[]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(err.contains("INCOMPLETE"), "the refusal must say WHY (an incomplete analysis), not just exit 2:\n{err}");
+    assert!(out.is_empty(), "an unread unit makes its entries look stale; pruning them would delete reasons: no proposal");
+}
