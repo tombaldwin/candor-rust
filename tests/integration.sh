@@ -537,6 +537,21 @@ gjc_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" policy policy-clean --gate-json verdi
 gjclean=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["ok"], len(d["violations"]))' "$GJ/verdict-clean.json" 2>/dev/null)
 want "a clean policy --gate-json writes { ok: true, [] }" "$gjclean" "True 0"
 if [ "$gjc_rc" -eq 0 ]; then echo "  ok   clean policy --gate-json exits 0"; pass=$((pass+1)); else echo "  FAIL clean policy --gate-json exited $gjc_rc (want 0)"; fail=$((fail+1)); fi
+# ⟨0.41⟩ `accept` on the LIGHT-weight lint route: NOT evaluated (the row's producing line is not on the NDJSON wire and the
+# lint holds no unit table for the twin check, so honouring it would risk accepting a violation that is new), and the
+# console must SAY so with the remedy. The gate flips on the other route: the same policy that exits 1 here exits 0
+# under candor-scan. Control: a policy with no `accept` line prints none of it.
+printf 'deny Fs  domain\naccept domain_logic Fs for deny Fs  domain because legacy reader\n' > "$GJ/policy-acc"
+gja_rc=0; gja=$( cd "$GJ"; "$ROOT/cargo-candor" policy policy-acc --gate-json verdict-acc.json 2>&1 ) || gja_rc=$?
+gjplain=$( cd "$GJ"; "$ROOT/cargo-candor" policy policy 2>&1 ) || true
+"$ROOT/target/debug/candor-scan" "$GJ" --policy "$GJ/policy-acc" >/dev/null 2>&1; gjs_rc=$?
+if [ "$gja_rc" -eq 1 ]; then echo "  ok   ⟨0.41⟩ lint route: an accepted violation STAYS red (exit 1, fail-closed)"; pass=$((pass+1)); else echo "  FAIL ⟨0.41⟩ lint route exited $gja_rc over an accept line (want 1)"; fail=$((fail+1)); fi
+if [ "$gjs_rc" -eq 0 ]; then echo "  ok   ⟨0.41⟩ gate flip: the SAME policy exits 0 under candor-scan --policy"; pass=$((pass+1)); else echo "  FAIL ⟨0.41⟩ candor-scan exited $gjs_rc over the accepted policy (want 0)"; fail=$((fail+1)); fi
+want   "⟨0.41⟩ the console says accept lines are not evaluated on this route" "$gja" 'does NOT evaluate'
+want   "⟨0.41⟩ …and names the remedy (candor-scan --policy)" "$gja" 'candor-scan <dir> --policy policy-acc'
+absent "⟨0.41⟩ CONTROL: a policy with no accept line prints no such note (output unchanged)" "$gjplain" 'accept'
+gjaig=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["ok"], [i["line"] for i in d.get("ignored",[])])' "$GJ/verdict-acc.json" 2>/dev/null)
+want   "⟨0.41⟩ the verdict carries the accept line in \`ignored\`" "$gjaig" "False [2]"
 # SOUNDNESS R1033 — ⟨0.27⟩'s `zeroMatch` rides the DEEP verdict too (it was stderr-only), with the same list
 # the scan route's verdict carries, and is omitted when every rule bound something (the clean verdict above).
 # SOUNDNESS R1028 — and the routes bind the SAME rules: a crate-QUALIFIED scope (`gj::domain_logic`) binds

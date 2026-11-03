@@ -1096,6 +1096,15 @@ case "$cmd" in
     rc=0
     out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
+    # ⟨0.41⟩ `accept` lines are NOT evaluated on this route (the lint's own notice, src/lib.rs; the verdict's `ignored`
+    # carries the machine half). The grep above shows violations only, so without this the console reads "blocked"
+    # beside a policy whose author wrote an `accept` for exactly that row and has no way to learn why it did not take.
+    # Name the remedy here too. Keyed on the policy's own lines, not on the lint's prose, so a reworded notice cannot
+    # silence it: a line whose first token is `accept` is an accept line under the shared grammar.
+    if grep -qE '^[[:space:]]*accept[[:space:]]' "$pol" 2>/dev/null; then
+      echo "candor: this policy has \`accept\` line(s), which the cargo-candor lint route does NOT evaluate — a violation an \`accept\` names stays red above," >&2
+      echo "candor: and a stale entry is not reported. To honour them, gate with: candor-scan <dir> --policy $pol  (or: candor-query gate --report <locator> --policy $pol)" >&2
+    fi
     # A nonzero dylint exit is NEVER a violation verdict (the engine reports violations via the sentinel
     # and diagnostics, not the exit code): it means the enforce pass could not run to completion — a
     # build failure mid-workspace, or the engine's own §6.2 fail-closed exit 2 (an unreadable policy).

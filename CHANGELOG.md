@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **`cargo candor policy` says so on the console when the policy has `accept` lines (SPEC §6.2 ⟨0.41⟩).** The lint route still does not
+  evaluate them (the producing policy line is not on the NDJSON wire and the lint holds no unit table for the `(hash, fn)` twin check,
+  so honouring an entry there could accept a violation that is new), and its verdict already listed each line in `ignored` with the
+  remedy. The console printed only the AS-EFF rows and "blocked", so an author who had written an `accept` for exactly that row had no
+  way to learn why it did not take. It now names the route's limit and the remedy (`candor-scan <dir> --policy <file>`). Output is
+  unchanged for a policy with no `accept` line. Fixture: the same policy exits 1 here and 0 under `candor-scan --policy`.
+
 - **`accepts` exits 2 over a SOLE refusal (SPEC §6.2 ⟨0.41⟩, PART 106 q31/q31b).** An unevaluated `forbid`/`only` beside a policy that
   establishes nothing is the gate's refusal document, which makes no claim about violations; the verb used to answer anyway and
   narrow an over-wide entry beside it. It now prints no proposal and exits 2, as the other three engines do.
