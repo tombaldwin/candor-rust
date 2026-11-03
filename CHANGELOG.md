@@ -11,6 +11,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **`accepts` exits 2 over a SOLE refusal (SPEC §6.2 ⟨0.41⟩, PART 106 q31/q31b).** An unevaluated `forbid`/`only` beside a policy that
+  establishes nothing is the gate's refusal document, which makes no claim about violations; the verb used to answer anyway and
+  narrow an over-wide entry beside it. It now prints no proposal and exits 2, as the other three engines do.
+
 - **`candor-query accepts` — a PROPOSED policy that refreshes (or adopts) the `accept` lines (SPEC §6.2 ⟨0.41⟩, PART 106).**
   `candor-query accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]` prints the policy it
   read with three changes and nothing else: a STALE entry's line deleted (exactly the lines the gate calls `AS-EFF-012`), an

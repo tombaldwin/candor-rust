@@ -327,6 +327,17 @@ pub(crate) fn cmd_accepts(args: &[String]) -> i32 {
         return 2;
     }
 
+    // A SOLE refusal (nothing established and a rule this route cannot evaluate) is the gate's refusal document: it makes
+    // no claim about violations, so no entry is stale, accepted or narrowable beside it (SPEC §6.2 "When it answers").
+    if tail_kind(&first.violations, &first.refused, &first.rep, &first.unasked_rules) == Tail::SoleRefusal {
+        eprintln!(
+            "candor-query accepts: the gate over this policy and report is a SOLE REFUSAL (a rule it cannot evaluate on \
+             this route and no violation established) — it makes no claim about violations, so no entry can be judged — \
+             no proposal. The policy was not changed. Gate at scan time to evaluate the unevaluated rule."
+        );
+        return 2;
+    }
+
     // ---- 2. what each entry is, from the gate's own settlement ------------------------------------------------------
     let aux = first.aux.as_ref();
     let rows_left: &[GateViolation] = aux.map(|a| a.remaining.as_slice()).unwrap_or(&first.violations);
