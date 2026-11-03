@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.41.0] — 2026-11-03
+
 - **`cargo candor policy` says so on the console when the policy has `accept` lines (SPEC §6.2 ⟨0.41⟩).** The lint route still does not
   evaluate them (the producing policy line is not on the NDJSON wire and the lint holds no unit table for the `(hash, fn)` twin check,
   so honouring an entry there could accept a violation that is new), and its verdict already listed each line in `ignored` with the
