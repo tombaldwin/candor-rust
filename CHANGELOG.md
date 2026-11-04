@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.41.1] — 2026-11-04
+
 - `candor-query accepts` with no report: still refuses (the current scan, not the baseline, is what the CI gate judges), but now names the config's `baseline` it did not use and why, and prints the two commands that work (`candor-scan . --out .candor/report`, then `candor-query accepts --report .candor/report …`). The policy already came from `.candor/config`.
 - `candor-query accepts`: every violation the proposal leaves red now carries its reason and remedy on stderr, grouped by reason (positional `{closure#N}` key, `(hash, fn)` twin, unwritable name, `Unknown` with no reason class). The JSON plan is unchanged.
 
