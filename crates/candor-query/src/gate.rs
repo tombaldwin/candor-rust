@@ -2252,7 +2252,7 @@ fn write_verdict(
 /// Read a single-value `.candor/config` key (`<key> <value>`), case-insensitive on the key like every
 /// other config reader in the family. Only ever asked for `policy` here — the `deps` key this file
 /// deliberately never consults is what the §3.1 MUST NOT is about.
-fn config_value(text: &str, key: &str) -> Option<String> {
+pub(crate) fn config_value(text: &str, key: &str) -> Option<String> {
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {

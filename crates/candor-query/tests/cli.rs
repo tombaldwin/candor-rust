@@ -7506,3 +7506,72 @@ fn accepts_answers_nothing_over_an_incomplete_analysis() {
     assert!(err.contains("INCOMPLETE"), "the refusal must say WHY (an incomplete analysis), not just exit 2:\n{err}");
     assert!(out.is_empty(), "an unread unit makes its entries look stale; pruning them would delete reasons: no proposal");
 }
+
+// ═══ ⟨0.41.1⟩ `accepts` field fixes: the no-report refusal names working commands; every unhandled row carries its reason ═══
+
+fn accepts_in(cwd: &std::path::Path, extra: &[&str]) -> (i32, String, String) {
+    let o = Command::new(bin())
+        .args(["accepts"].iter().chain(extra.iter()))
+        .current_dir(cwd)
+        .env_remove("CANDOR_REPORT")
+        .env_remove("CANDOR_POLICY")
+        .env_remove("CANDOR_BASELINE")
+        .output()
+        .expect("run candor-query");
+    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+#[test]
+fn accepts_with_no_report_still_refuses_but_names_the_baseline_it_did_not_use_and_the_two_commands_that_work() {
+    let f = Fixture::new("accepts-noreport");
+    std::fs::create_dir_all(f.dir.join(".candor")).unwrap();
+    std::fs::write(f.dir.join(".candor/policy"), "deny Fs dao\n").unwrap();
+    std::fs::write(f.dir.join(".candor/config"), "policy .candor/policy\nbaseline .candor/baseline\n").unwrap();
+    let (rc, out, err) = accepts_in(&f.dir, &["--adopt", "--because", "x"]);
+    assert_eq!(rc, 2, "no report is still a refusal (the CI gate judges the CURRENT scan): {err}");
+    assert!(out.is_empty(), "a refusal prints no proposal");
+    assert!(err.contains(".candor/baseline"), "it must name the configured baseline it did not use:\n{err}");
+    assert!(err.contains("PREVIOUS") && err.contains("not used"), "and say why it is not used:\n{err}");
+    assert!(err.contains("candor-scan . --out .candor/report"), "the command that writes the current scan, in this engine's names:\n{err}");
+    assert!(err.contains("candor-query accepts --report .candor/report --adopt --because"), "then accepts over it:\n{err}");
+    // No config at all: still the two commands, and no baseline sentence.
+    let g = Fixture::new("accepts-noreport-bare");
+    let (rc, _, err) = accepts_in(&g.dir, &[]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(err.contains("candor-scan . --out .candor/report") && !err.contains("PREVIOUS"), "{err}");
+    // An explicit --report that matches nothing keeps the gate's own wording (the operator named it).
+    let (rc, _, err) = accepts_in(&f.dir, &["--report", "nothing-here"]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(!err.contains("PREVIOUS"), "an explicit locator is not rewritten:\n{err}");
+}
+
+#[test]
+fn accepts_names_the_reason_and_remedy_of_every_row_it_leaves_red() {
+    let f = Fixture::new("accepts-reasons");
+    let fns = [
+        r#"{"fn":"dao.f::{closure#0}","hash":"dao#c0","inferred":["Fs"],"direct":["Fs"]}"#,
+        r#"{"fn":"dao.t","hash":"dao#t1","inferred":["Fs"],"direct":["Fs"]}"#,
+        r#"{"fn":"dao.t","hash":"dao#t2","inferred":["Fs"],"direct":["Fs"]}"#,
+        r#"{"fn":"dao.sp ace","hash":"dao#sp","inferred":["Fs"],"direct":["Fs"]}"#,
+        r#"{"fn":"dao.u","hash":"dao#u","inferred":["Unknown"]}"#,
+        r#"{"fn":"dao.w","hash":"dao#w1","inferred":["Fs"],"direct":["Fs"]}"#,
+        r#"{"fn":"dao.w","hash":"dao#w2","inferred":["Fs"],"direct":["Fs"]}"#,
+    ]
+    .join(",");
+    let loc = accept_report(&f.dir, "r", &fns);
+    let p = pol(&f.dir, "p", "deny Fs Unknown dao\naccept dao.t Fs for deny Fs Unknown dao because twin\n");
+    let (rc, out, err) = accepts(&loc, &p, &["--adopt", "--because", "x"]);
+    assert_eq!(rc, 0, "{err}");
+    assert!(!out.contains("closure#0"), "no line is written for a positional key:\n{out}");
+    for (what, token) in [
+        ("positional", "dao.f::{closure#0}"),
+        ("twin", "dao.w"),
+        ("unwritable", "dao.sp ace"),
+        ("no class", "dao.u"),
+    ] {
+        let line = err.lines().find(|l| l.contains(&format!("`{token}`")) && l.contains("Remedy:"));
+        assert!(line.is_some(), "{what}: a row left red must carry its reason AND a remedy on stderr:\n{err}");
+    }
+    assert!(err.contains("POSITION"), "{err}");
+    assert!(err.contains("AMBIGUOUS") && err.contains("dao.t"), "the ambiguous entry says what it is:\n{err}");
+}

@@ -223,6 +223,83 @@ fn usage(why: &str) -> i32 {
     2
 }
 
+/// ⟨0.41.1⟩ Every violation the proposal leaves red because NO line could be written for it, with the reason and the remedy,
+/// so "after the proposal the gate exits 1 with N violation(s)" is never a number with no cause. Human channel only: the JSON
+/// plan is unchanged. Up to five names per reason, then a count. (An AMBIGUOUS entry is already said, with its remedy, by the
+/// gate's own pass over the policy.)
+fn print_refused(refused: &BTreeMap<&'static str, BTreeSet<String>>) {
+    const WHY: [(&str, &str, &str); 4] = [
+        (
+            "positional",
+            "keyed by POSITION (a compiler-numbered `{closure#N}` / `{async_block#N}`), which an `accept` line cannot name — \
+             inserting an unrelated closure would re-point it at a different unit",
+            "give it a NAME (extract the closure to a named fn), re-scan, and run `accepts` again; or fix the violation",
+        ),
+        (
+            "twin",
+            "a (hash, fn) TWIN — two units with this name and different hashes, so no line could name one of them",
+            "rename one of the two, or gate the crates separately; or fix the violation",
+        ),
+        (
+            "unwritable",
+            "named with a `#` or whitespace, which cannot be written on a policy line",
+            "rename it, or fix the violation",
+        ),
+        (
+            "noclass",
+            "carries an `Unknown` whose reason class this report does not carry, so no `Unknown[…]` line would cover it",
+            "re-scan with the current engine so the report carries its reason classes, then run `accepts` again; or fix the violation",
+        ),
+    ];
+    for (key, why, remedy) in WHY {
+        let Some(fns) = refused.get(key).filter(|f| !f.is_empty()) else { continue };
+        let shown: Vec<String> = fns.iter().take(5).map(|f| format!("`{f}`")).collect();
+        let more = if fns.len() > shown.len() { format!(", … and {} more", fns.len() - shown.len()) } else { String::new() };
+        eprintln!(
+            "candor-query accepts: {} violation(s) get NO accept line — {why}: {}{more}. Remedy: {remedy}.",
+            fns.len(),
+            shown.join(", ")
+        );
+    }
+}
+
+/// Does `accepts` have a report to read with no `--report`? `CANDOR_REPORT` counts as named (the operator chose it; the gate's
+/// own wording stays for a locator that matches nothing). Otherwise the discovered prefix must match at least one report file.
+fn report_discoverable() -> bool {
+    if std::env::var("CANDOR_REPORT").is_ok_and(|v| !v.is_empty()) {
+        return true;
+    }
+    discover_report_prefix().is_some_and(|p| !glob_reports(&p).is_empty())
+}
+
+/// ⟨0.41.1⟩ `accepts` with no report named and none discovered. The refusal says which report each choice would judge and
+/// prints commands that run. It does not fall back to the config's `baseline`: that is the PREVIOUS recorded scan, and a
+/// refresh against it would delete the entries of code written since and adopt only what the baseline held — a proposal the CI
+/// gate, which judges the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is
+/// not the missing piece.
+fn no_report_message(policy_flag: Option<&str>) -> String {
+    let base = std::env::var("CANDOR_BASELINE").ok().filter(|s| !s.is_empty()).or_else(|| {
+        candor_classify::policy::discover_config_text(Path::new(".")).and_then(|t| config_value(&t, "baseline"))
+    });
+    let cur = ".candor/report";
+    let mut m = String::from(
+        "candor-query accepts: no report to judge — no report files found (and no --report / CANDOR_REPORT).\n  \
+         `accepts` reads a REPORT; it does not scan. The report that matches what CI gates is the CURRENT scan:\n",
+    );
+    m.push_str(&format!(
+        "      candor-scan . --out {cur}     # exits 1 when the policy has violations, but the report is still written (`|| true` under `set -e`)\n"
+    ));
+    let pol = policy_flag.map(|p| format!(" --policy {p}")).unwrap_or_default();
+    m.push_str(&format!("      candor-query accepts --report {cur}{pol} --adopt --because <reason>\n"));
+    if let Some(b) = base {
+        m.push_str(&format!(
+            "  The config's baseline `{b}` is the PREVIOUS recorded scan, so it is not used unasked (a refresh against it \
+             deletes entries for code written since). To judge it on purpose: candor-query accepts --report {b} ...\n"
+        ));
+    }
+    m
+}
+
 /// `accept` written as a verb: the line kind, one letter short. A usage error that names the verb meant.
 pub(crate) fn cmd_accept_typo(_args: &[String]) -> i32 {
     eprintln!(
@@ -285,6 +362,12 @@ pub(crate) fn cmd_accepts(args: &[String]) -> i32 {
         Ok(b) => b,
         Err(why) => return usage(&why),
     };
+
+    // ---- no report named and none discovered ------------------------------------------------------------------------
+    if report.is_none() && !report_discoverable() {
+        eprint!("{}", no_report_message(policy.as_deref()));
+        return 2;
+    }
 
     // ---- the policy (the gate's own ladder) and its bytes ---------------------------------------------------------
     let Some(policy_path) = resolve_policy_path(policy) else {
@@ -402,7 +485,8 @@ pub(crate) fn cmd_accepts(args: &[String]) -> i32 {
                     // The row's classes are not determinable: no line could name them, so no wider line is proposed.
                     notes.push(format!(
                         "line {} (`{}`) is EXCEEDED by an `Unknown` whose reason classes this report does not carry — \
-                         no wider line can be written for it; kept as is, and the row stays red.",
+                         no wider line can be written for it; kept as is, and the row stays red. Remedy: re-scan with the current \
+                         engine so the report carries its reason classes, then run `accepts` again; or fix the violation.",
                         e.line, e.func
                     ));
                     continue;
@@ -456,18 +540,30 @@ pub(crate) fn cmd_accepts(args: &[String]) -> i32 {
     }
     let mut cands: Vec<Cand> = Vec::new();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    // reason key -> the fns no entry could be written for (⟨0.41.1⟩: said on stderr, never in the JSON plan)
+    let mut refused: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     for r in rows_left.iter().filter(|r| policy_row(r)) {
         if first.p.accepts.iter().any(|e| e.func == r.func && e.rule_key == r.rule_key) {
             continue; // an entry names it already: an exceeded row is PROPOSED, never adopted
         }
-        if !seen.insert((r.rule_key.clone(), r.func.clone())) || twins.contains(&r.func) {
+        if !seen.insert((r.rule_key.clone(), r.func.clone())) {
             continue;
         }
-        if is_positional_key(&r.func) || r.func.chars().any(|c| c == '#' || is_ws(c)) {
+        if twins.contains(&r.func) {
+            refused.entry("twin").or_default().insert(r.func.clone());
+            continue;
+        }
+        if is_positional_key(&r.func) {
+            refused.entry("positional").or_default().insert(r.func.clone());
             continue; // a line the gate would not honour: a nested unit rides its enclosing entry instead
+        }
+        if r.func.chars().any(|c| c == '#' || is_ws(c)) {
+            refused.entry("unwritable").or_default().insert(r.func.clone());
+            continue;
         }
         let (conc, unk, cls) = union_effects(std::iter::once(r));
         if unk && cls.is_empty() {
+            refused.entry("noclass").or_default().insert(r.func.clone());
             continue;
         }
         cands.push(Cand {
@@ -620,6 +716,7 @@ pub(crate) fn cmd_accepts(args: &[String]) -> i32 {
     for u in &unjudged_say {
         eprintln!("{u}");
     }
+    print_refused(&refused);
     for l in ignored_lines {
         eprintln!("candor-query accepts: line {l} is IGNORED by the gate and kept as written — repairing it is yours.");
     }
