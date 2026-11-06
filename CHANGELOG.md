@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.41.3] — 2026-11-06
+
 - **No change to candor-rust.** The version moves with the 0.41.3 family patch (a candor-java fix).
 
 
