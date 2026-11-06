@@ -13,7 +13,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## [0.41.2] — 2026-11-05
 
-- **No change to candor-rust.** The version moves with the 0.41.2 family patch (a candor-java fix).
+- **No change to candor-rust.** The version moves with the 0.41.2 family patch (candor-java and candor-ts fixes).
 
 
 ## [0.41.1] — 2026-11-04
