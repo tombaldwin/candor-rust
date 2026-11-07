@@ -1929,6 +1929,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // module-qualified path; a `#[cfg]` twin of ONE path is one type and does not count.
     // SOUNDNESS R1116 — every type LEAF this crate declares at two or more quals, whatever their fields.
     let mut twin_type_leaves: HashSet<String> = HashSet::new();
+    // EXACT-FIRST — every type a leaf-keyed FIELD index can answer for a twin owner's field (`fields`/`field_elem` keep
+    // the LAST twin merged), so a receiver typed through one may name the OTHER twin's field type. A held qual equal to
+    // one of these is not a claim the exact pick may trust (EXECUTED: `fx/adv/i_field_inline*`, the pure twin's field
+    // type answered for the effectful twin's `self.x`; and micromap's `Drain.iter`, found by the removal audit).
+    let mut twin_field_tys: HashSet<String> = HashSet::new();
     let ambiguous_type_leaves: HashSet<String> = {
         let mut quals: HashMap<String, BTreeSet<&str>> = HashMap::new();
         let mut files_of: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1978,6 +1983,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             });
             if same_file {
                 out.insert(format!("{leaf}\u{1f}*"));
+                for &fi in &fis {
+                    // Both the file's own decls and the alias-expanded ones (R978), whichever the typer reads.
+                    for fd in [Some(&decls_per_file[fi].2), expanded.get(fi).and_then(Option::as_ref)].into_iter().flatten() {
+                        for idx in [fd.fields.get(leaf.as_str()), fd.field_elem.get(leaf.as_str())].into_iter().flatten() {
+                            twin_field_tys.extend(idx.values().cloned());
+                        }
+                    }
+                }
                 continue;
             }
             // R978 — the alias-EXPANDED decls where the R99 second merge produced them (see `expanded`).
@@ -1996,6 +2009,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let vals: BTreeSet<&str> = vs.iter().map(|x| x.split('\u{1f}').nth(1).unwrap_or("")).collect();
                 if files.len() >= 2 && vals.len() >= 2 {
                     out.insert(format!("{leaf}\u{1f}{k}"));
+                    twin_field_tys.extend(vals.iter().map(|v| v.to_string()));
                     // VEIN A — when every twin's type for this field is CRATE-ANCHORED and shares one LEAF
                     // (`crate::deflate::window::Window` / `crate::inflate::window::Window`), record that
                     // leaf: the receiver walk answers with it (see `CallCollector::field_twin_leaf`).
@@ -4203,6 +4217,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if t != &f.qual {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
                         }
+                    }
+                } else if let Some(t) = c
+                    .exact_ty
+                    .as_deref()
+                    .and_then(|q| {
+                        let t = exact_ty_target(q, &c.path, &by_tail2)?;
+                        let w = crate::collector::exact_ty_writer(q);
+                        let g = ExactGuard {
+                            use_bound: &merged.use_bound,
+                            redirect_mods: &redirect_mods,
+                            macro_modules: &merged.macro_modules,
+                            twin_field_tys: &twin_field_tys,
+                        };
+                        exact_ty_module_settled(t, w, &g, &f.qual, &c.path)
+                            .then_some(t)
+                    })
+                {
+                    if std::env::var_os("CANDOR_EXACTTY_INSTR").is_some() {
+                        eprintln!("EXACTTY\tPICK\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER, the ADDED branch only
+                    }
+                    resolved_local = true;
+                    if t != &f.qual {
+                        calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }
                 } else if let Some(t) = arm_exact_target(&c.path, &by_tail2) {
                     // SOUNDNESS R452 (a) — THE WRITTEN PATH NAMES ONE OF THE CLAIMANTS, so the tail's
@@ -9850,3 +9887,60 @@ fn opaque_scope_names(
         }
     }
 }
+
+
+/// EXACT-FIRST (Track A step 2) — whether the module a held qual names (`sys` in `sys::R::fmt`) settles that name in
+/// EVERY configuration this scanner reads, so the claimant whose qual equals it is the one the program runs. It does
+/// not where the module ALSO binds the name by `use` (or imports a glob) — Rust allows that beside a declaration
+/// under exclusive `#[cfg]`s, and this scanner reads both arms (executed: `fx/adv/b3_*`, `b5_child`, `b6_glob*`,
+/// `c3_modtwin` all wrote the file while the declared, dead arm was pure) — nor where the module, or one it sits in,
+/// is placed by a `#[path]` this scanner does not follow (`c6_path_nat_rev`: the naturally placed file is the DEAD
+/// arm), nor where a macro hid some of its items. Each refusal keeps today's answer (the contested tail's hedge).
+pub(crate) struct ExactGuard<'a> {
+    pub(crate) use_bound: &'a HashSet<String>,
+    pub(crate) redirect_mods: &'a [String],
+    pub(crate) macro_modules: &'a HashSet<String>,
+    pub(crate) twin_field_tys: &'a HashSet<String>,
+}
+
+pub(crate) fn exact_ty_module_settled(target: &str, writer: &str, g: &ExactGuard, caller: &str, path: &str) -> bool {
+    let ExactGuard { use_bound, redirect_mods, macro_modules, twin_field_tys } = *g;
+    let Some((ty_qual, _member)) = target.rsplit_once("::") else { return false };
+    let (module, name) = ty_qual.rsplit_once("::").unwrap_or(("", ty_qual));
+    let why = if twin_field_tys.contains(&format!("crate::{ty_qual}")) || twin_field_tys.contains(ty_qual) {
+        // The held type is one a twin owner's leaf-keyed field answers with: it may be the OTHER twin's field.
+        Some("twin-owner field type")
+    } else if std::iter::successors(Some(ty_qual), |m| m.rsplit_once("::").map(|(p, _)| p))
+        .any(|m| use_bound.contains(&format!("{}{m}", crate::decls::ARM_SRC_MARK)))
+    {
+        // The held type, or a module it sits in, is ONE arm of a `#[cfg]`-duplicated `use` (`pub use crate::x86 as
+        // default;` beside its `arm`/`scalar` twins): the typer's answer is one configuration's.
+        Some("cfg-arm of a duplicated use")
+    } else if use_bound.contains(&crate::decls::qualify(module, name)) {
+        Some("use-bound name")
+    } else if use_bound.contains(&crate::decls::qualify(module, "*")) {
+        Some("glob in module")
+    } else if [module, writer].iter().any(|&start| {
+        redirect_mods.iter().any(|m| start == m || start.starts_with(&format!("{m}::")))
+            || std::iter::successors(Some(start), |m| m.rsplit_once("::").map(|(p, _)| p))
+                .any(|m| use_bound.contains(&format!("{}{m}", crate::decls::UNSETTLED_MOD_MARK)))
+    }) {
+        Some("path-redirected module")
+    } else if macro_modules.contains(module) || macro_modules.contains(writer) {
+        Some("macro-hidden module")
+    } else if use_bound.contains(&format!("{}{}", crate::decls::CONTESTED_NAME_MARK, crate::decls::qualify(writer, name))) {
+        // The module the name was WRITTEN in both declares it and binds it by `use`/glob: its `use`-map answer is
+        // one configuration's (`fx/adv/b7_*`).
+        Some("contested name in the writing module")
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        if std::env::var_os("CANDOR_EXACTTY_INSTR").is_some() {
+            eprintln!("EXACTTY\tREFUSE\t{caller}\t{path}\t{target}\t{why}"); // §E1 — the guard's own reach
+        }
+        return false;
+    }
+    true
+}
+

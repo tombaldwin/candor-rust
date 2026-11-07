@@ -7937,6 +7937,75 @@ pub fn eat(_g: m2::Guard) {{}}\npub fn eat1(_g: m1::Guard) {{}}\n"));
         assert!(fixture_effects(&v, "outer").contains(&"Unknown".to_string()), "R1253 unspelled twin discloses:\n{v:#}");
     }
 
+    /// EXACT-FIRST (Track A step 2) — a coercion edge (`{}` / `{:?}` / `==` / `<` / `+` / a std bound) on a type whose LEAF
+    /// two modules share was refused on the leaf tail and hedged, while the typer HELD the crate-anchored type. The
+    /// claimant whose qual equals that type is now taken (both directions EXECUTED, `rustagent-exactfirst/fx/pos`: the fs
+    /// arm writes and gates 1, the pure arm writes nothing and no longer hedges). The second half pins the refusals: a
+    /// held qual whose module ALSO binds the name by `use`/glob, whose writing module both declares and imports it, or
+    /// whose module a `#[path]` places, or that a twin owner's leaf-keyed FIELD may have answered — each EXECUTED silent on
+    /// the first cut (`fx/adv/b3_*`, `b6_glob`, `b7_*`, `c6_path_nat_rev`, `c8_redir_super`, `i_field_inline*`, `j_modalias_lf`) — keeps the hedge.
+    #[test]
+    fn exact_first_takes_the_held_anchored_claimant_and_refuses_an_unsettled_name() {
+        let fs = vec!["Fs".to_string()];
+        let w = "std::fs::write(\"/tmp/x\", \"y\").unwrap();";
+        let twins = |eff: &str| format!("pub mod fs_m {{ #[derive(Clone, Copy)] pub struct T(pub u8);\n\
+impl core::fmt::Display for T {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ {e1} write!(f, \"t\") }} }}\n\
+impl PartialEq for T {{ fn eq(&self, o: &Self) -> bool {{ {e2} self.0 == o.0 }} }}\n\
+impl core::ops::Add for T {{ type Output = T; fn add(self, o: T) -> T {{ {e3} T(self.0 + o.0) }} }} }}\n\
+pub mod pure_m {{ #[derive(Clone, Copy)] pub struct T(pub u8);\n\
+impl core::fmt::Display for T {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ write!(f, \"t\") }} }}\n\
+impl PartialEq for T {{ fn eq(&self, o: &Self) -> bool {{ self.0 == o.0 }} }}\n\
+impl core::ops::Add for T {{ type Output = T; fn add(self, o: T) -> T {{ T(self.0 + o.0) }} }} }}\n",
+            e1 = if eff == "fmt" { w } else { "" }, e2 = if eff == "eq" { w } else { "" }, e3 = if eff == "add" { w } else { "" });
+        for (eff, body) in [
+            ("fmt", "pub fn subj(t: M::T) -> String { format!(\"{}\", t) }\npub fn subj2() -> String { let t: M::T = M::T(1); t.to_string() }\n"),
+            ("eq", "pub fn subj(a: M::T, b: M::T) -> bool { a == b }\npub fn subj2(v: Vec<M::T>, x: M::T) -> bool { v.contains(&x) }\n"),
+            ("add", "pub fn subj(a: M::T, b: M::T) -> u8 { (a + b).0 }\npub fn subj2() -> u8 { let a: M::T = M::T(1); (a + a).0 }\n"),
+        ] {
+            let v = scan_fixture(&format!("exactfs{eff}"), &format!("{}{}", twins(eff), body.replace("M::", "crate::fs_m::")));
+            let p = scan_fixture(&format!("exactpure{eff}"), &format!("{}{}", twins(eff), body.replace("M::", "crate::pure_m::")));
+            for f in ["subj", "subj2"] {
+                assert_eq!(fixture_effects(&v, f), fs, "exact-first `{f}` ({eff}, the effectful twin):\n{v:#}");
+                assert!(fixture_effects(&p, f).is_empty(), "exact-first `{f}` ({eff}, the pure twin resolves pure):\n{p:#}");
+            }
+        }
+        // The refusals. Each fixture's LIVE arm (unix) is the effectful one and the held qual names a pure declaration.
+        let tw = "pub mod pure_m { pub struct R; impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { write!(f, \"p\") } } }\n\
+pub mod fs_m { pub struct R; impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { std::fs::write(\"/tmp/x\", \"y\").unwrap(); write!(f, \"f\") } } }\n";
+        let dpure = "pub struct R;\n#[cfg(not(unix))] impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { write!(f, \"s\") } }\n";
+        let dfs = "pub struct R;\n#[cfg(unix)] impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { std::fs::write(\"/tmp/x\", \"y\").unwrap(); write!(f, \"s\") } }\n";
+        let subj = "pub fn subj() -> String { let r: R = R; format!(\"{}\", r) }\n";
+        type Case<'a> = (&'a str, String, Vec<(&'a str, &'a str)>);
+        let cases: Vec<Case> = vec![
+            // b3: module `sys` re-exports the live twin under one cfg and DECLARES a pure `R` under the other.
+            ("b3", format!("{tw}pub mod sys {{ #[cfg(unix)] pub use crate::fs_m::R;\n#[cfg(not(unix))] {dpure} }}\nuse crate::sys::R;\n{subj}"), vec![]),
+            // b6: …through a glob.
+            ("b6", format!("{tw}pub mod sys {{ #[cfg(unix)] pub use crate::fs_m::*;\n#[cfg(not(unix))] {dpure} }}\nuse crate::sys::R;\n{subj}"), vec![]),
+            // b7: the WRITING module imports the pure twin under the dead cfg and declares the live, effectful `R`.
+            ("b7", format!("{tw}#[cfg(not(unix))] use crate::pure_m::R;\n#[cfg(unix)] {dfs}{subj}"), vec![]),
+            // c3: an inline `mod imp` declaring a pure `R` (dead) beside the file `imp.rs` re-exporting the live twin.
+            ("c3", format!("{tw}#[cfg(not(unix))] pub mod imp {{ pub struct R; impl core::fmt::Display for R {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ write!(f, \"s\") }} }} }}\n#[cfg(unix)] pub mod imp;\nuse crate::imp::R;\n{subj}"),
+                vec![("imp.rs", "pub use crate::fs_m::R;\n")]),
+            // i_field: twin owners `a::Outer`/`b::Outer` in ONE file; the leaf-keyed field index answers `self.x` with the
+            // LAST twin's field type (`pure_m::R`) inside `b::Outer::show`, whose `x` is the effectful one.
+            ("ifield", format!("{tw}pub mod b {{ pub struct Outer {{ pub x: crate::fs_m::R }} impl Outer {{ pub fn show(&self) -> String {{ format!(\"{{}}\", self.x) }} }} }}\n\
+pub mod a {{ pub struct Outer {{ pub x: crate::pure_m::R }} impl Outer {{ pub fn show(&self) -> String {{ format!(\"{{}}\", self.x) }} }} }}\n\
+pub fn subj() -> String {{ b::Outer {{ x: crate::fs_m::R }}.show() }}\n"), vec![]),
+            // j: a `#[cfg]`-duplicated MODULE alias (pathfinder_simd's `pub use crate::x86 as default;`), the dead arm last.
+            ("jmod", format!("{tw}#[cfg(unix)] pub use crate::fs_m as imp;\n#[cfg(not(unix))] pub use crate::pure_m as imp;\nuse crate::imp::R;\n{subj}"), vec![]),
+            // c6: the live arm is `#[path]`-placed; the naturally placed `imp.rs` is the dead, pure one.
+            ("c6", format!("{tw}#[cfg(unix)] #[path = \"imp_fs.rs\"] pub mod imp;\n#[cfg(not(unix))] pub mod imp;\nuse crate::imp::R;\n{subj}"),
+                vec![("imp.rs", "pub struct R; impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { write!(f, \"j\") } }\n"),
+                     ("imp_fs.rs", "pub struct R; impl core::fmt::Display for R { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { std::fs::write(\"/tmp/x\", \"y\").unwrap(); write!(f, \"i\") } }\n")]),
+        ];
+        for (tag, src, extra) in &cases {
+            let v = scan_fixture_files(&format!("exactrefuse{tag}"), src, extra);
+            let e = fixture_effects(&v, "subj");
+            assert!(e.contains(&"Unknown".to_string()) || e.contains(&"Fs".to_string()),
+                    "exact-first must refuse ({tag}): the held qual names the dead, pure arm:\n{v:#}");
+        }
+    }
+
     /// SOUNDNESS R1246 (the audit's half) — a trait DEFAULT stays reachable when a TYPE shares the trait's name. The owner
     /// naming first emitted the inheriting block's default as the bare `{tr}::{leaf}` tail, which the twin type contests
     /// (tracing-subscriber's `reload::Layer` beside `trait Layer`; serde's `content::SerializeMap` beside `trait
@@ -16695,6 +16764,7 @@ trait G {
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
+            use_bound => |m| { m.use_bound.insert("sys::R".into()); },
             // R128: `mod blocking { cfg_rt! { pub(crate) use crate::runtime::spawn_blocking; } }` — read
             // at the CALL RESOLVER, so a file gaining or losing an item-position macro changes how EVERY
             // other file's crate-local calls into that module resolve.
@@ -18382,7 +18452,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev141/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev142/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

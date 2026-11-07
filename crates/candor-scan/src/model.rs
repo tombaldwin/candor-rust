@@ -96,6 +96,12 @@ pub(crate) struct Call {
     /// type, so it decides which autoref step an inherent and a trait method each match at.
     #[serde(rename = "rf", default, skip_serializing_if = "crate::model::is_zero_u8")]
     pub(crate) recv_form: u8,
+    /// EXACT-FIRST (Track A step 2) — the crate-anchored qual (`fallback::Ident::fmt`, `crate::` stripped) the typer
+    /// HELD for this call's receiver before the edge was formed on its type LEAF (`Ident::fmt`). `path` is unchanged and
+    /// every route reads it exactly as before; this is consulted at ONE place, where the leaf tail is contested, and
+    /// only to take the claimant whose qual EQUALS it (`scan::exact_ty_target`). `None` everywhere else.
+    #[serde(rename = "xq", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) exact_ty: Option<String>,
 }
 
 /// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,

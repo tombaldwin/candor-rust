@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev142 (rustagent-exactfirst): Track A step 2 — `Call` gains `exact_ty` (the typer's crate-anchored receiver qual at a
+    // coercion edge) and `FileDecls` gains `use_bound`; a rev141 entry has neither, so it would refuse warm and pick cold.
     // rev141 (rustagent-r1246): SOUNDNESS R1246/R1253 — `impl_members` gains the OWNER key shape (`model::impl_owner_key`);
     // a rev140 entry has none, so the dispatch and the union would fall back to the leaf tail warm and resolve cold.
     // rev140 (rustagent-ct2): call-target round 2 — the std bound table (`std_bounds.rs`) forms new edges at std entry points
@@ -559,7 +561,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev141/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev142/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -713,6 +715,13 @@ pub(crate) struct FileDecls {
     /// silent under-report this field closes — hence the rev bump in `cache_schema`.
     #[serde(default)]
     pub(crate) mod_aliases: HashMap<String, String>,
+    /// EXACT-FIRST (Track A step 2) — `{module}::{name}` for every name a `use` item binds in a module of this
+    /// file, any visibility and any `#[cfg]`, `*` for a glob (`decls::collect_use_bound`). A module that binds a
+    /// name by `use` AND declares one of that name (under exclusive `#[cfg]`s) makes the declared unit's qual
+    /// a claim about ONE configuration; the exact pick refuses there. Deserializes EMPTY from an older entry,
+    /// which would pick where it must refuse — hence rev142.
+    #[serde(default)]
+    pub(crate) use_bound: Vec<String>,
     /// R128 — MODULE QUALS in this file whose item list carries an unexpanded item-position MACRO
     /// INVOCATION (`foo!();`, `cfg_rt! { .. }`, `include!("gen.rs")`). Those items are skipped by
     /// `collect_decls`, so the module's decl/re-export entries are INCOMPLETE and a call naming a name
@@ -869,6 +878,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut reexports = Vec::new();
     let mut mod_aliases = HashMap::new();
     collect_reexports(items, modpath, &dir, include_tests, &uses, &mut reexports, &mut mod_aliases);
+    let mut use_bound = Vec::new();
+    crate::decls::collect_use_bound(items, modpath, &dir, include_tests, &mut use_bound);
     // R128 + R452 — ONE walk, two facts: which of this file's modules had items hidden behind an
     // unexpanded macro, and which TYPES those modules declare. Computed here rather than in the struct
     // literal so the second cannot be derived from a different module set than the first.
@@ -996,6 +1007,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // the two answer different questions — see `Reexport`).
         reexports,
         mod_aliases,
+        use_bound,
         // R128 — which of this file's modules had items hidden behind an unexpanded macro invocation.
         // Keyed on the module QUAL (the file's own `modpath` for its top level), which is the same key
         // space a call's resolved `crate::…` path reduces to at the resolver.
@@ -1101,6 +1113,8 @@ pub(crate) struct MergedDecls {
     /// carries its module path, so two files collide only where they declare the SAME name in the SAME
     /// module, which no crate that compiles does.
     pub(crate) mod_aliases: HashMap<String, String>,
+    /// EXACT-FIRST — every file's `use`-bound `{module}::{name}` (see `FileDecls::use_bound`), unioned.
+    pub(crate) use_bound: std::collections::HashSet<String>,
     /// R128 — every file's MACRO-HIDDEN module quals, unioned. A module in this set had item-position
     /// macro invocations its decl walk could not read, so "this module declares no such name" is a
     /// statement candor is NOT entitled to make about it. See `collect_macro_modules`.
@@ -1608,6 +1622,7 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     // caller walks files in a fixed order and `reexport_aliases` folds them into sorted maps, so the
     // resulting index does not depend on this order.
     acc.reexports.extend(fd.reexports.iter().cloned());
+    acc.use_bound.extend(fd.use_bound.iter().cloned());
     for (k, v) in &fd.mod_aliases {
         // R105 — this used to be a plain insert, carrying the assertion that "a cross-file collision means
         // two declarations of one name in one module — not a program that compiles". MEASURED FALSE, by
@@ -2063,6 +2078,16 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.mod_aliases[k]);
+    }
+    s.push('\n');
+    // EXACT-FIRST — `use_bound` is read live by `scan_one` (the exact pick's refusal), not baked into an FnInfo; folded
+    // in anyway, for the reason `deref_target` is (the day a Pass-B route reads it, a stale entry would replay).
+    s.push_str("use_bound");
+    let mut ub: Vec<&String> = m.use_bound.iter().collect();
+    ub.sort();
+    for k in ub {
+        s.push('|');
+        s.push_str(k);
     }
     s.push('\n');
     // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the

@@ -11,6 +11,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A formatting, comparison, operator or std-bound call on a value whose type shares its name with a type in another
+  module now resolves to the right body instead of reporting `Unknown`** (`ambiguous:same-name local defs`), but only
+  where the engine read the value's full crate path and exactly one definition has that path. Example: `format!("{}",
+  t)` with `t: crate::fs_m::T` beside a `pure_m::T`. A gate scoped to such a caller can turn green (`deny Unknown`)
+  when the resolved body is pure, or red on the real effect when it is not. The call is still disclosed as before when
+  that module also brings the name in through `use` or a glob, when the name is one arm of a `#[cfg]`-duplicated `use`
+  (including a module alias such as `pub use crate::x86 as default;`), when a `#[path]` attribute places the module,
+  when the type was read from a field that another struct of the same name also declares, or when a macro hid part of
+  the module. Corpus A/B against 0.41.3 (5,301 registry crates, standalone): no row gained or lost a concrete effect;
+  numbers are in the commit message.
+
 ## [0.41.3] — 2026-11-06
 
 - **No change to candor-rust.** The version moves with the 0.41.3 family patch (a candor-java fix).

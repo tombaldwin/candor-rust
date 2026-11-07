@@ -2121,6 +2121,136 @@ pub(crate) fn collect_reexports(
     }
 }
 
+/// EXACT-FIRST (Track A step 2) — every name a `use` item binds in each module of this file (`{module}::{name}`, `*`
+/// for a glob), whatever its visibility and whatever `#[cfg]` it carries, inline modules included. Rust lets one module
+/// bind a name by `use` in one configuration and DECLARE it in another (`#[cfg(unix)] pub use crate::a::R;` beside
+/// `#[cfg(not(unix))] pub struct R;`), and this scanner reads both: there the declared unit's qual `m::R` is the
+/// program's `m::R` in ONE configuration only, so an exact pick on it may choose the dead arm. `scan` refuses the pick
+/// for any held qual whose module binds its name (or a glob) here. A `use` inside a fn body binds in that block, not
+/// the module, and is not recorded.
+/// EXACT-FIRST — the `use_bound` entry prefix marking a MODULE (not a name) whose `mod` item carries a `#[path]`.
+pub(crate) const UNSETTLED_MOD_MARK: &str = "\u{6}pathmod\u{6}";
+
+/// EXACT-FIRST — the `use_bound` entry prefix marking the SOURCE (crate-relative item or module path) of one arm of a
+/// `#[cfg]`-duplicated `use` binding.
+pub(crate) const ARM_SRC_MARK: &str = "\u{6}armsrc\u{6}";
+
+/// The crate-relative path a `use` leaf names (`crate::`/`self::`/`super::` resolved against `modpath`); a path with no
+/// such head is taken as written (a local module in edition 2015 spelling, or another crate — never a crate qual).
+fn use_source_qual(segs: &[String], name: &str, modpath: &str) -> String {
+    let mut base: Vec<String> = Vec::new();
+    let mut rest = segs;
+    match segs.first().map(String::as_str) {
+        Some("crate") => rest = &segs[1..],
+        Some("self") => {
+            base.extend(modpath.split("::").filter(|x| !x.is_empty()).map(String::from));
+            rest = &segs[1..];
+        }
+        Some("super") => {
+            base.extend(modpath.split("::").filter(|x| !x.is_empty()).map(String::from));
+            while rest.first().map(String::as_str) == Some("super") {
+                base.pop();
+                rest = &rest[1..];
+            }
+        }
+        _ => {}
+    }
+    base.extend(rest.iter().cloned());
+    if name != "*" {
+        base.push(name.to_string());
+    }
+    base.join("::")
+}
+
+/// EXACT-FIRST — the `use_bound` entry prefix marking a NAME the module both DECLARES and binds by `use` (or under a
+/// glob), keyed by the declared name and by every `use` source name bound as it (`use a::R as A1` beside `struct A1`
+/// records `A1` and `R`). Written IN such a module, a name's `use`-map answer is one configuration's (EXECUTED:
+/// `fx/adv/b7_*`, the typer held the dead `use` arm while the declared, effectful arm ran).
+pub(crate) const CONTESTED_NAME_MARK: &str = "\u{6}contested\u{6}";
+
+pub(crate) fn collect_use_bound(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool, out: &mut Vec<String>) {
+    let declared: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|it| !matches!(it, syn::Item::Use(_) | syn::Item::Macro(_) | syn::Item::ExternCrate(_)))
+        .filter_map(|it| declared_item_name(it, true))
+        .collect();
+    let mut has_glob = false;
+    let mut bound: Vec<(String, String)> = Vec::new(); // (visible-as, source name)
+    let mut arms: HashMap<String, Vec<String>> = HashMap::new(); // visible-as -> every source it is bound to
+    for it in items {
+        let syn::Item::Use(u) = it else { continue };
+        if !include_tests && is_cfg_test(&u.attrs) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        use_leaves(&u.tree, Vec::new(), &mut leaves);
+        for (segs, name, alias) in leaves {
+            arms.entry(alias.clone()).or_default().push(use_source_qual(&segs, &name, modpath));
+            if alias == "*" {
+                has_glob = true;
+            } else {
+                bound.push((alias, name));
+            }
+        }
+    }
+    // A name (or glob) bound by `use` more than once in one module is a `#[cfg]` arm set (it does not compile
+    // otherwise). The typer answers it with ONE arm, so every arm's SOURCE is marked: a held qual under one names a
+    // single configuration (EXECUTED: `fx/adv/j_modalias_lf`, `pub use crate::fs_m as imp;` beside a dead
+    // `pub use crate::pure_m as imp;` held `pure_m::R`; pathfinder_simd's `pub use crate::x86 as default;`).
+    for srcs in arms.values().filter(|v| v.len() >= 2) {
+        for src in srcs {
+            out.push(format!("{ARM_SRC_MARK}{src}"));
+        }
+    }
+    for d in &declared {
+        let named: Vec<&(String, String)> = bound.iter().filter(|(a, _)| a == d).collect();
+        if has_glob || !named.is_empty() {
+            out.push(format!("{CONTESTED_NAME_MARK}{}", qualify(modpath, d)));
+            for (_, src) in named {
+                out.push(format!("{CONTESTED_NAME_MARK}{}", qualify(modpath, src)));
+            }
+        }
+    }
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                if !include_tests && is_cfg_test(&u.attrs) {
+                    continue;
+                }
+                let mut leaves = Vec::new();
+                use_leaves(&u.tree, Vec::new(), &mut leaves);
+                for (_segs, _name, alias) in leaves {
+                    out.push(qualify(modpath, &alias));
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                // A `mod NAME` placed by `#[path]` / `#[cfg_attr(.., path = ..)]`: this scanner places that file where
+                // it SITS, so units under it do not carry the module's own name, and a cfg twin declared WITHOUT the
+                // attribute then owns that name alone (`fx/adv/c6_path_nat_rev`, executed: the naturally placed twin
+                // is the dead arm). Recorded as the whole module, not per name. `mod_targets` keeps one entry per
+                // name and so cannot be asked (it keeps the LAST `mod` item of a twin pair).
+                // The FILE's placement is marked too: a `super::`/`self::` written inside it is resolved against where
+                // the file sits, not against the module tree rustc builds (`fx/adv/c8_redir_super`, executed).
+                let pattrs = mod_path_attrs(&m.attrs);
+                if !pattrs.is_empty() {
+                    out.push(format!("{UNSETTLED_MOD_MARK}{}", qualify(modpath, &m.ident.to_string())));
+                    for p in pattrs {
+                        out.push(format!("{UNSETTLED_MOD_MARK}{}", module_path(&normalize_rel(&dir.join(p)))));
+                    }
+                }
+                if let Some((_, inner)) = &m.content {
+                    let name = m.ident.to_string();
+                    collect_use_bound(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether a lazy-static synthetic unit will be EMITTED for `it` — a `static`/`const`/macro lazy with a
 /// walkable thunk that is NOT `#[cfg(test)]`-gated (unless tests are included). The single source of
 /// truth shared by `scan_items` (emits the unit) and `fn_locs` (emits its loc), so the two walks stay in
