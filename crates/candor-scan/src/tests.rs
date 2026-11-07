@@ -18441,7 +18441,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18452,7 +18452,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev142/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev143/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28898,6 +28898,83 @@ fn veina_a_cfg_duplicated_alias_on_the_type_route_is_the_union() {
         pub fn r369_type(x: &A1) { x.go() }\n");
     let e = veina_row_effs(&v, "r369_type");
     assert!(e.contains(&"Fs".to_string()) && e.contains(&"Net".to_string()), "both arms: {e:?}");
+}
+
+/// SOUNDNESS R1474 — R369's union on the IMPLICIT trait-call routes. A `#[cfg]`-duplicated `use … as A1` reached
+/// `{}`/`{:?}`/`==`/`+`/`*`/`[]` (`charge_coercion_ty`) as the arms joined by `ALIAS_ALT_SEP`, whose LEAF is one arm;
+/// `.to_string()` and `for x in r` (`charge_licensed`) refused the joined type outright; and a destructor
+/// (construction, by-value parameter, a callee's return) followed `uses`, i.e. the arm WRITTEN LAST. EXECUTED
+/// (rustagent-cfgalias fx2/fx3/fx4): the unix arm wrote a file while `deny Fs` and `deny Unknown` both exited 0.
+/// Two DISTINGUISHABLE arms (`Fs` / `Net`), both write orders; plain-alias and both-pure controls.
+#[test]
+fn r1474_cfg_duplicated_alias_on_the_implicit_trait_routes_is_the_union() {
+    let imp = |t: &str, eff: &str| format!("\
+        pub struct {t};\n\
+        impl core::fmt::Display for {t} {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ {eff} write!(f, \"d\") }} }}\n\
+        impl core::fmt::Debug for {t} {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ {eff} write!(f, \"d\") }} }}\n\
+        impl PartialEq for {t} {{ fn eq(&self, _o: &Self) -> bool {{ {eff} true }} }}\n\
+        impl core::ops::Add for {t} {{ type Output = u8; fn add(self, _o: Self) -> u8 {{ {eff} 1 }} }}\n\
+        impl IntoIterator for {t} {{ type Item = u8; type IntoIter = std::vec::IntoIter<u8>; fn into_iter(self) -> Self::IntoIter {{ {eff} vec![1].into_iter() }} }}\n");
+    let drp = |t: &str, eff: &str| format!("pub struct {t}; impl Drop for {t} {{ fn drop(&mut self) {{ {eff} }} }}\n");
+    let fs = "let _ = std::fs::write(\"/tmp/r1474\", \"x\");";
+    let net = "let _ = std::net::TcpStream::connect(\"127.0.0.1:9\");";
+    let src = format!("\
+        pub mod fs_arm {{ {} {} }}\n\
+        pub mod net_arm {{ {} {} }}\n\
+        pub mod pa {{ {} {} }}\n\
+        pub mod pb {{ {} {} }}\n\
+        #[cfg(unix)] use crate::fs_arm::FsR as A1;\n\
+        #[cfg(not(unix))] use crate::net_arm::NetR as A1;\n\
+        #[cfg(not(unix))] use crate::net_arm::NetR as A2;\n\
+        #[cfg(unix)] use crate::fs_arm::FsR as A2;\n\
+        #[cfg(unix)] use crate::fs_arm::FsD as D1;\n\
+        #[cfg(not(unix))] use crate::net_arm::NetD as D1;\n\
+        #[cfg(not(unix))] use crate::net_arm::NetD as D2;\n\
+        #[cfg(unix)] use crate::fs_arm::FsD as D2;\n\
+        use crate::fs_arm::FsR as P1;\n\
+        #[cfg(unix)] use crate::pa::PaR as Z1;\n\
+        #[cfg(not(unix))] use crate::pb::PbR as Z1;\n\
+        #[cfg(unix)] use crate::pa::PaD as ZD;\n\
+        #[cfg(not(unix))] use crate::pb::PbD as ZD;\n\
+        pub fn c_fmt() -> String {{ let r: A1 = A1; format!(\"{{}}\", r) }}\n\
+        pub fn c_fmt2() -> String {{ let r: A2 = A2; format!(\"{{}}\", r) }}\n\
+        pub fn c_dbg(r: A1) -> String {{ format!(\"{{:?}}\", r) }}\n\
+        pub fn c_eq(r: A2) -> bool {{ r == A2 }}\n\
+        pub fn c_add(r: A1) -> u8 {{ r + A1 }}\n\
+        pub fn c_ts() -> String {{ let r: A1 = A1; r.to_string() }}\n\
+        pub fn c_ts2(r: &A2) -> String {{ r.to_string() }}\n\
+        pub fn c_iter(r: A1) -> u8 {{ let mut n = 0; for x in r {{ n += x; }} n }}\n\
+        pub fn d_let() {{ let _d: D1 = D1; }}\n\
+        pub fn d_let2() {{ let _d = D2; }}\n\
+        pub fn d_param(_d: D1) {{}}\n\
+        fn mk() -> D1 {{ D1 }}\n\
+        pub fn d_ret() {{ let _d = mk(); }}\n\
+        pub fn k_plain() -> String {{ let r: P1 = P1; r.to_string() }}\n\
+        pub fn k_pure() -> String {{ let r: Z1 = Z1; format!(\"{{}} {{:?}}\", r.to_string(), r) }}\n\
+        pub fn k_pure_drop(_d: ZD) {{ let _e: ZD = ZD; }}\n\
+        pub mod gm {{ {} }}\n\
+        pub fn mmap() -> Option<gm::GmD> {{ None }}\n\
+        #[cfg(unix)] use extdep::mmap as mmap64;\n\
+        #[cfg(not(unix))] use extdep::mmap64;\n\
+        pub fn k_dep_arm() -> usize {{ let p = unsafe {{ mmap64(0, 1) }}; p as usize }}\n",
+        imp("FsR", fs), drp("FsD", fs), imp("NetR", net), drp("NetD", net),
+        imp("PaR", ""), drp("PaD", ""), imp("PbR", ""), drp("PbD", ""), drp("GmD", fs));
+    let v = scan_src_to_json("r1474", &src);
+    for f in ["c_fmt", "c_fmt2", "c_dbg", "c_eq", "c_add", "c_ts", "c_ts2", "c_iter", "d_let", "d_let2", "d_param", "d_ret"] {
+        let e = veina_row_effs(&v, f);
+        assert!(e.contains(&"Fs".to_string()) && e.contains(&"Net".to_string()), "`{f}` must carry both arms: {e:?}\n{v:#}");
+        // (`for x in r` over a plain alias already carries an `Unknown` of its own — the loop variable's element; not this row)
+        assert!(f == "c_iter" || !e.contains(&"Unknown".to_string()), "`{f}`: both arms resolve, nothing to hedge: {e:?}");
+    }
+    // the factory hands its construction out: the CALLER drops it, not `mk`
+    assert!(veina_row_effs(&v, "mk").is_empty(), "an escaping construction is charged at the caller only:\n{v:#}");
+    assert_eq!(veina_row_effs(&v, "k_plain"), vec!["Fs".to_string()], "a plain alias is one type");
+    // an arm naming a DEPENDENCY's fn (`extdep::mmap`) never borrows the local same-leaf `mmap`'s return type: nothing of
+    // `GmD` is built here (corpus A/B: backtrace's `use libc::mmap as mmap64` beside its own `fn mmap`)
+    assert!(!veina_row_effs(&v, "k_dep_arm").contains(&"Fs".to_string()), "a dependency arm built a local type:\n{v:#}");
+    for f in ["k_pure", "k_pure_drop"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}`: both arms pure — no charge, no hedge:\n{v:#}");
+    }
 }
 
 /// VEIN A — THE RESIDUE: a contested tail no written path settles (a `#[cfg]` arm set re-exported under one

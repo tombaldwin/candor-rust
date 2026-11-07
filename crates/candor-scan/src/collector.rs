@@ -2778,6 +2778,42 @@ impl<'a> CallCollector<'a> {
         self.note_release_q(leaf, true, q)
     }
 
+    /// SOUNDNESS R1474 — a construction WRITTEN through a `#[cfg]`-duplicated name (`#[cfg(unix)] use a::R as A1;` beside
+    /// `#[cfg(not(unix))] use b::Q as A1;`, then `A1`, `A1 { .. }` or `A1::new()`) builds whichever arm the build
+    /// compiles; `uses` is single-valued, so the leaf the marker above carries is the arm WRITTEN LAST, and a destructor
+    /// on the other arm was never charged (EXECUTED `fx3/dropscope_*_ff`: the unix arm's `Drop` wrote a file, `deny Fs`
+    /// and `deny Unknown` both exit 0; swapping the two `use` lines charged it). Every arm's construction is marked: the
+    /// union, as for every other position of a cfg-duplicated name (`union_over_arms`). `leaf_under` is the call site's
+    /// own leaf rule asked with the use map pinned to one arm. Whether the construction escapes is a fact about the
+    /// EXPRESSION, not the arm, so an escaping primary construction gates every arm's (and each arm's own leaf is gated
+    /// by `note_release_q` as before). Only ever ADDS markers; an arm leaf already marked is deduplicated there.
+    fn note_construction_arms(
+        &mut self,
+        written: &str,
+        primary: Option<&str>,
+        leaf_under: impl Fn(&HashMap<String, String>) -> Option<String>,
+    ) {
+        if std::env::var_os("CANDOR_R1474_OFF").is_some() {
+            return;
+        }
+        let head = written.split("::").next().unwrap_or(written);
+        let Some(arms) = self.use_alts.get(head).filter(|a| a.len() >= 2).cloned() else { return };
+        if primary.is_some_and(|p| self.escaping_ctors.contains(p)) && !charge_at_construction() {
+            return;
+        }
+        for a in arms {
+            let mut u2: HashMap<String, String> = (*self.uses).clone();
+            u2.insert(head.to_string(), a);
+            let Some(l) = leaf_under(&u2) else { continue };
+            let full = crate::lang::expand(written, &u2);
+            let q = self.ctor_twin_qual(Some(&l), &full, false);
+            if std::env::var_os("CANDOR_R1474_INSTR").is_some() && self.drop_relevant.contains(&l) {
+                eprintln!("R1474ARMS\tctor\t{written}\t{l}\t{}", q.as_deref().unwrap_or("-")); // §E1
+            }
+            self.note_release_q(Some(l), true, q);
+        }
+    }
+
     /// SOUNDNESS R1253 — the anchored type path a construction spells, for a twin leaf only: `written` expanded through
     /// this scope's `use` map (unless the caller already did), cut at the LAST segment equal to the leaf, and kept only
     /// when that leaves a module prefix (a bare `Guard` that `expand` did not anchor could name any twin) that is not a
@@ -6405,6 +6441,19 @@ impl<'a> CallCollector<'a> {
         if member == "call" || depth > 4 {
             return; // a callable slot is the call site's to form (`charge_std_callable`)
         }
+        // SOUNDNESS R1474 — a `#[cfg]`-duplicated type's arms (`ALIAS_ALT_SEP`, R369/R899) were REFUSED here outright, so a
+        // std entry point's licensed member on such a value (`r.to_string()` → the arm's `Display::fmt`, `for x in r` → its
+        // `IntoIterator::into_iter`) formed no edge and no disclosure (EXECUTED: `deny Fs` and `deny Unknown` both exit 0
+        // over a file write). Each arm is licensed on its own: the union.
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) && std::env::var_os("CANDOR_R1474_OFF").is_none() {
+            if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+                eprintln!("R1474ARMS\tlicensed\t{trait_leaf}.{member}\t{}", ty.replace(crate::decls::ALIAS_ALT_SEP, " | ")); // §E1
+            }
+            for arm in ty.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                self.charge_licensed_at(arm, trait_leaf, member, depth);
+            }
+            return;
+        }
         let mut head = ty.split('<').next().unwrap_or(ty).to_string();
         if head.is_empty() || self.std_payload(&head) || head.contains(crate::decls::ALIAS_ALT_SEP) {
             return;
@@ -6969,6 +7018,20 @@ impl<'a> CallCollector<'a> {
     }
 
     fn charge_coercion_ty_at(&mut self, ty: &str, trait_leaf: &str, method: &str, depth: u8) {
+        // SOUNDNESS R1474 — a `#[cfg]`-DUPLICATED type (`use a::R as A1` / `use b::Q as A1` under opposite cfgs) reaches
+        // here as its arms joined by `ALIAS_ALT_SEP` (R369/R899: the typer's union). The leaf below was read off the WHOLE
+        // joined string, i.e. the LAST arm in sorted order, so `format!("{}", r)` edged one arm alone (EXECUTED: the unix
+        // arm's `Display::fmt` wrote a file, `deny Fs` exit 0). Each arm is charged on its own, the union every other
+        // position of a cfg-duplicated name already takes (`union_over_arms`).
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) && std::env::var_os("CANDOR_R1474_OFF").is_none() {
+            if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+                eprintln!("R1474ARMS\tcoercion\t{trait_leaf}.{method}\t{}", ty.replace(crate::decls::ALIAS_ALT_SEP, " | ")); // §E1
+            }
+            for arm in ty.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                self.charge_coercion_ty_at(arm, trait_leaf, method, depth);
+            }
+            return;
+        }
         let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
         // SOUNDNESS R1131 — the crate's operator impl on `&Type` (`lang::operator_ref_self`), keyed `&Type::m`. The
         // typer collapses references, so whether this operand is `&Type` or `Type` is not known here: the edge
@@ -10757,6 +10820,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if ctor.is_none() {
                             self.note_ctor_refusal(&path);
                         }
+                        // SOUNDNESS R1474 — a callee whose RETURN is a `#[cfg]`-duplicated type (`fn mk() -> A1`): the
+                        // R165 route above answered one arm's leaf; every arm dies here (EXECUTED `fx3/dropscope_escape_ff`).
+                        // Gated on the expression's escape exactly as that answer is.
+                        if std::env::var_os("CANDOR_R1474_OFF").is_none()
+                            && crate::lang::ctor_leaf_from_call_path(&path, &self.uses).is_none()
+                            && !(ctor.as_ref().is_some_and(|c| self.escaping_ctors.contains(c)) && !charge_at_construction())
+                        {
+                            for l in crate::lang::ctor_arm_leaves_from_call_returns(&path, self.returns) {
+                                if std::env::var_os("CANDOR_R1474_INSTR").is_some() && self.drop_relevant.contains(&l) {
+                                    eprintln!("R1474ARMS\tret\t{path}\t{l}"); // §E1
+                                }
+                                self.note_release_q(Some(l), true, None);
+                            }
+                        }
+                        // SOUNDNESS R1474 — the other `#[cfg]` arms of the WRITTEN head (`A1::new()`).
+                        let written_call = path_to_string(&p.path);
+                        let returns = self.returns;
+                        // The R165 RETURN rescue is leaf-keyed, so it is asked of an arm only where that arm names a fn of
+                        // THIS crate: an arm naming a dependency's fn (`use libc::mmap as mmap64`) would otherwise borrow a
+                        // same-leaf local fn's return type (backtrace's `fn mmap(..) -> Option<Mmap>`) — a construction no
+                        // arm performs (measured in the corpus A/B: backtrace `Mmap::map` lost its resolved `Mmap::drop`).
+                        self.note_construction_arms(&written_call, ctor.as_deref(), |u| {
+                            crate::lang::ctor_leaf_from_call_path(&written_call, u).or_else(|| {
+                                let full = crate::lang::expand(&written_call, u);
+                                (full.starts_with("crate::") || !full.contains("::"))
+                                    .then(|| crate::lang::ctor_leaf_from_call_returns(&full, returns))
+                                    .flatten()
+                            })
+                        });
                         self.note_construction_spelled(ctor, &path, false);
                         // CROSS-CRATE sibling — R68(1). `path` is already the resolved (use-expanded)
                         // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
@@ -12750,6 +12842,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let ctor = (!caps_const)
                 .then(|| crate::lang::ctor_leaf_from_value_path(&full, &self.uses, self.fields))
                 .flatten();
+            if !caps_const {
+                let fields = self.fields;
+                self.note_construction_arms(&full, ctor.as_deref(), |u| crate::lang::ctor_leaf_from_value_path(&full, u, fields));
+            }
             self.note_construction_spelled(ctor, &full, true);
             // CROSS-CRATE sibling — R68(1). Before this, this was the ONLY spelling reaching a
             // correctly-keyed cross-crate marker, and only by accident (the lazy-static forcing code's
@@ -12794,6 +12890,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if node.qself.is_none() {
             let ctor = crate::lang::ctor_leaf_of_expr(
                 &syn::Expr::Struct(node.clone()), &self.uses, self.fields, self.returns);
+            let (fields, returns) = (self.fields, self.returns);
+            self.note_construction_arms(&path_to_string(&node.path), ctor.as_deref(), |u| {
+                crate::lang::ctor_leaf_of_expr(&syn::Expr::Struct(node.clone()), u, fields, returns)
+            });
             self.note_construction_spelled(ctor, &path_to_string(&node.path), true);
             // CROSS-CRATE sibling — R68(1). This spelling had NO route to a cross-crate marker at all
             // before this fix; `deplib::Guard { n: 1 }` read silent-pure regardless of what deplib's own

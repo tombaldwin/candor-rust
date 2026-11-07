@@ -6926,6 +6926,28 @@ pub(crate) fn local_type_leaf(ty: &str) -> Option<String> {
     Some(ty.rsplit("::").next().unwrap_or(ty).to_string())
 }
 
+/// SOUNDNESS R1474 — `ctor_leaf_from_call_returns` for a callee whose recorded return is a `#[cfg]`-DUPLICATED type
+/// (Pass A types it through `uses_ty`, so the index holds the arms joined by `ALIAS_ALT_SEP`, R372): the route above
+/// read the leaf off the whole joined string, i.e. ONE arm. Every arm's leaf, under exactly the same refusals (the route
+/// above must answer first); empty for an ordinary return.
+pub(crate) fn ctor_arm_leaves_from_call_returns(full: &str, returns: &ReturnIndex) -> Vec<String> {
+    if ctor_leaf_from_call_returns(full, returns).is_none() {
+        return Vec::new();
+    }
+    let last = full.rsplit("::").next().unwrap_or(full);
+    let Some(rt) = recorded_return_type(last, returns) else { return Vec::new() };
+    if !rt.contains(crate::decls::ALIAS_ALT_SEP) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for l in rt.split(crate::decls::ALIAS_ALT_SEP).filter_map(local_type_leaf) {
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
+}
+
 /// The type LEAF a bare VALUE path denotes: a unit struct (`Guard`) or a unit enum variant
 /// (`State::Open`, whose value's type is the ENUM). `None` for a local, a const, a module path.
 pub(crate) fn ctor_leaf_from_value_path(

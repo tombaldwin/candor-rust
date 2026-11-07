@@ -21,6 +21,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   when the type was read from a field that another struct of the same name also declares, or when a macro hid part of
   the module. Corpus A/B against 0.41.3 (5,301 registry crates, standalone): no row gained or lost a concrete effect;
   numbers are in the commit message.
+- ⚠ **A type named through a `#[cfg]`-duplicated `use` now charges every arm at an implicit trait call and at a
+  destructor** (SOUNDNESS R1474). With `#[cfg(unix)] use a::R as A1;` beside `#[cfg(not(unix))] use b::Q as A1;`,
+  `format!("{}", r)`, `{:?}`, `==`, `+`, `*r`, `r[i]`, `r.to_string()` and `for x in r` on an `A1` value reached only
+  one arm, or none, and the destructor of an `A1` built, passed by value or returned from a call was charged only for
+  the arm written last. When the effectful impl sat on the other arm, `deny Fs` and `deny Unknown` both passed over
+  code that writes a file. Both arms are now charged (the union this engine already applied to a method call on such
+  a value). A gate scoped to such a caller can turn red, including on the arm the build does not compile. Where both
+  arms share a type name, a formatting, comparison, operator or std-bound call is reported as `Unknown`
+  (`ambiguous:same-name local defs`) rather than resolved; a destructor is resolved per arm.
+  Numbers are in the commit message.
 
 ## [0.41.3] — 2026-11-06
 

@@ -3482,6 +3482,40 @@ pub(crate) fn fninfo(
     for (leaf, spelled) in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names, block) {
         c.note_owned_param_drop_spelled(leaf, spelled.as_deref()); // R1253 — the declared type picks a twin's `Drop`
     }
+    // SOUNDNESS R1474 — a by-value parameter whose declared type is WRITTEN through a `#[cfg]`-duplicated name
+    // (`fn show(_r: A1)` over `use a::R as A1` / `use b::Q as A1`): `uses` answers the arm written last, so the other
+    // arm's `Drop` was never charged (EXECUTED `fx3/dropscope_param_ff`: `deny Fs` 0 over a file write). Each arm is
+    // asked with the use map pinned to it — the same function, the same escape gate — and every marker it names is
+    // added (a leaf already marked is deduplicated in `note_release_q`).
+    if std::env::var_os("CANDOR_R1474_OFF").is_none() && !use_alts.is_empty() {
+        let mut heads: Vec<String> = Vec::new();
+        for input in &sig.inputs {
+            let syn::FnArg::Typed(pt) = input else { continue };
+            let mut t: &syn::Type = &pt.ty;
+            while let syn::Type::Reference(r) = t {
+                t = &r.elem;
+            }
+            if let syn::Type::Path(tp) = t {
+                if let Some(h) = tp.path.segments.first().map(|s| s.ident.to_string()) {
+                    if use_alts.get(&h).is_some_and(|a| a.len() >= 2) && !heads.contains(&h) {
+                        heads.push(h);
+                    }
+                }
+            }
+        }
+        for h in heads {
+            for a in &use_alts[&h] {
+                let mut u2 = uses.clone();
+                u2.insert(h.clone(), a.clone());
+                for (leaf, spelled) in crate::lang::owned_drop_params(sig, self_ty, &u2, &escapes.names, block) {
+                    if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+                        eprintln!("R1474ARMS\tparam\t{qual}\t{leaf}\t{}", spelled.as_deref().unwrap_or("-")); // §E1
+                    }
+                    c.note_owned_param_drop_spelled(leaf, spelled.as_deref());
+                }
+            }
+        }
+    }
     // SOUNDNESS R1116 — a by-value parameter that leaves only through FIELD PROJECTIONS (`self.file`)
     // is PARTIALLY moved: the fields not moved drop here, at the end of this frame.
     for leaf in partial_move_leaves(
