@@ -1047,7 +1047,17 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1080 (residual) — and a `VecDeque`'s slice views: `d.make_contiguous()` is a `&mut [T]`,
         // `d.as_slices().0` / `.1` (and `as_mut_slices`) each a `[T]`; untyped, so `d.make_contiguous().ew()`
         // was ABSENT over a write (executed, scratchpad `rustagent-v045/fx1`).
-        let sliced: Option<&syn::Expr> = match peel_recv(&node.receiver) {
+        // SOUNDNESS R1494 — a re-slice of a byte-string / string LITERAL (`b"x"[..].ser(w)`, `"x"[1..].ser(w)`): `[u8]` /
+        // `str`, whatever the literal's length.
+        let lit_slice: Option<&'static str> = match peel_recv(&node.receiver) {
+            syn::Expr::Index(ix) if is_range_index(ix) && std::env::var_os("CANDOR_R1494_OFF").is_none() => match peel_recv(&ix.expr) {
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::ByteStr(_), .. }) => Some("[u8]"),
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }) => Some("str"),
+                _ => None,
+            },
+            _ => None,
+        };
+        let sliced: Option<&syn::Expr> = if lit_slice.is_some() { None } else { match peel_recv(&node.receiver) {
             syn::Expr::MethodCall(mc)
                 if mc.args.is_empty()
                     && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice" | "make_contiguous") =>
@@ -1067,10 +1077,81 @@ impl<'a> CallCollector<'a> {
             }
             syn::Expr::Index(ix) if is_range_index(ix) => Some(&ix.expr),
             _ => None,
-        };
+        } };
         // A range index is a re-slice even where the receiver typer answers it (it reads `v[..]` as an
         // ELEMENT access), so the re-slice forms are asked first.
-        let typed = if sliced.is_some() { None } else { self.resolve_recv_type_for(&node.receiver, leaf) };
+        // SOUNDNESS R1494 — a str/String's own VIEW, or a string LITERAL. `self.as_bytes().ser(w)` (borsh's `impl
+        // BorshSerialize for String`), `s.as_str().ser(w)` and `"x".ser(w)` / `b"x".ser(w)` are a `[u8]`, a `str`, a `str`
+        // and a `[u8; N]`, and none typed, so the call formed only its bare-leaf twin. That twin's R1095 floor discloses
+        // only a CONCRETELY effectful candidate, and a slice impl that writes through a generic `W: Write` is
+        // `Unknown`-only (R1286's hedge), so the caller read ABSENT over the write its writer took (EXECUTED
+        // rustagent-r1494 fx1 `w_slice_u8`, `w_string`, `w_str`, `w_borsh_string`). Only `as_bytes`/`as_bytes_mut` on a
+        // value typed std's `String`/`str` (or a string literal), and `as_str`/`as_mut_str` on std's `String`: those are
+        // std's inherent members and their result type is fixed. The key is then asked exactly as a typed slice/str
+        // receiver's is (the inherent-surface denylists and `NONPATH_RECV_TAILS` below). `CANDOR_R1494_OFF=1`.
+        let r1494 = std::env::var_os("CANDOR_R1494_OFF").is_none();
+        let view: Vec<&'static str> = if let Some(k) = lit_slice {
+            vec![k]
+        } else if !r1494 || sliced.is_some() {
+            Vec::new()
+        } else {
+            match peel_recv(&node.receiver) {
+                syn::Expr::MethodCall(mc) if mc.args.is_empty() => {
+                    let m = mc.method.to_string();
+                    let base_is_lit = matches!(peel_recv(&mc.receiver), syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }));
+                    let base = if base_is_lit { None } else { self.resolve_recv_type_for(&mc.receiver, &m) };
+                    // `String` imported through the crate's own re-export (`use maybestd::String;`, borsh's shape) names std's
+                    // when every arm of its expansion does.
+                    let std_string = |t: &str| {
+                        crate::lang::std_deref_owner(t, &self.uses) == Some("String")
+                            || crate::lang::expand(t, &self.uses).split(crate::decls::ALIAS_ALT_SEP)
+                                .all(|a| crate::lang::std_deref_owner(a, &self.uses) == Some("String"))
+                    };
+                    let base_string = base.as_deref().is_some_and(std_string) && !self.fields.contains_key("String");
+                    let base_str = base_is_lit || base.as_deref() == Some("str");
+                    match m.as_str() {
+                        "as_bytes" | "as_bytes_mut" if base_string || base_str => vec!["[u8]"],
+                        "as_str" | "as_mut_str" if base_string => vec!["str"],
+                        _ => Vec::new(),
+                    }
+                }
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }) => vec!["str"],
+                // …and a TUPLE literal whose every position names its type (`(1u8, 2u8).ser(w)`): `(u8,u8)`.
+                syn::Expr::Tuple(t) if !t.elems.is_empty() => {
+                    let parts: Option<Vec<String>> = t.elems.iter()
+                        .map(|e| self.nominal_ctor_type(e).or_else(|| typed_literal_prim(e)).map(|x| short(&x)))
+                        .collect();
+                    if let Some(p) = parts {
+                        let k = format!("({})", p.join(","));
+                        if tails.contains(&format!("{k}::{leaf}")) {
+                            keys.push(k);
+                            route = "R1494VIEW";
+                        }
+                    }
+                    Vec::new()
+                }
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::ByteStr(_), .. }) => vec!["[u8;_]", "[u8]"],
+                _ => Vec::new(),
+            }
+        };
+        if !view.is_empty() {
+            let inherent = |k: &str| {
+                if k == "str" {
+                    crate::lang::STR_SURFACE.contains(&leaf)
+                } else {
+                    SLICE_INHERENT.contains(&leaf)
+                }
+            };
+            if view.iter().any(|k| inherent(k)) {
+                return;
+            }
+            if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1494_INSTR").is_some() {
+                eprintln!("R1494VIEW\t{}\t{leaf}", view.join(",")); // §E1 REACH COUNTER
+            }
+            keys.extend(view.iter().map(|k| k.to_string()));
+            route = "R1494VIEW";
+        }
+        let typed = if sliced.is_some() || !view.is_empty() { None } else { self.resolve_recv_type_for(&node.receiver, leaf) };
         if let Some(t) = typed {
             route = "R1056DEREF";
             // SOUNDNESS R1056 (residual) — THE DEREF STEP. A receiver typed as std's `Vec<T>` or `String`
@@ -1115,7 +1196,7 @@ impl<'a> CallCollector<'a> {
                     keys.push("str".to_string());
                 }
             }
-        } else {
+        } else if view.is_empty() {
             if let Some(base) = sliced {
                 if SLICE_INHERENT.contains(&leaf) {
                     return;
@@ -1179,6 +1260,7 @@ impl<'a> CallCollector<'a> {
                 tails.contains(&format!("{wild}::{leaf}")).then(|| wild.to_string())
             })
             .collect();
+        let mut formed: Vec<String> = Vec::new();
         for k in keys {
             let t2 = format!("{k}::{leaf}");
             if tails.contains(&t2) {
@@ -1188,6 +1270,21 @@ impl<'a> CallCollector<'a> {
                 self.calls.push(Call { exact_ty: None, recv_form: 0, dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
                     leaf: leaf.to_string(), str_arg: None, typed: true, method: true, is_macro: false,
                     path_lits_partial: false, path_lit2: None });
+                formed.push(k);
+            }
+        }
+        drop(tails);
+        // SOUNDNESS R1494 — …and the caller-side resolution a NOMINAL receiver's method already gets (R1145/R1286, the
+        // `resolve_recv_type` arm of `visit_expr_method_call`): `"x".as_bytes().ser(f)` / `b.ser(f)` over `impl Ser for
+        // [u8] { fn ser<W: Write>(&self, w: &mut W) { w.write_all(self) } }` with `f: &mut File` runs `File::write_all`,
+        // and the slice body can only hedge it (`dispatch:Write.write_all`). The impl's operator summary is filed under the
+        // SAME key (`lang::nonpath_impl_recv_key`, `decls`), so the handle the caller passes is charged here exactly as
+        // for `g(f)` with `fn g<W: Write>(w: &mut W)`. A pure std writer (`Vec<u8>`, `Sink`) is no handle and forms
+        // nothing. `CANDOR_R1494_OFF=1`.
+        if r1494 && !formed.is_empty() {
+            let args: Vec<&syn::Expr> = node.args.iter().collect();
+            for k in formed {
+                self.charge_generic_operators(&crate::model::impl_gen_op_key(&k, leaf), &args, true);
             }
         }
     }
@@ -1712,7 +1809,11 @@ impl<'a> CallCollector<'a> {
         // classifier rule decides. Only when the leaf expands through this file's `use` map to a std handle (a crate-local
         // `struct File` expands to the crate's own path and is untouched) and the member is a DRIVING I/O member.
         if !self.impl_generic_bounds.contains_key(g.as_str()) {
-            if let Some(h) = std_io_handle(&crate::lang::expand(&g, &self.uses)) {
+            // SOUNDNESS R1494 — or the impl's self type WRITTEN as the handle's full path (`decls::IMPL_STD_HANDLE_KEY`).
+            let written = self.uses.get(crate::decls::IMPL_STD_HANDLE_KEY)
+                .filter(|w| w.rsplit("::").next() == Some(g.as_str()))
+                .and_then(|w| std_io_handle(w));
+            if let Some(h) = std_io_handle(&crate::lang::expand(&g, &self.uses)).or(written) {
                 if let Some(tr) =
                     ["Write", "Read", "BufRead", "Seek"].into_iter().find(|t| crate::lang::is_driving_io_member(t, leaf))
                 {
@@ -9331,7 +9432,23 @@ impl<'a> CallCollector<'a> {
                 Some(ty) if crate::model::impl_does_not_declare(
                     self.impl_members, &tr, ty.rsplit("::").next().unwrap_or(&ty), leaf) => {}
                 Some(ty) => {
-                    let p2 = crate::lang::alias_join(&ty, &[leaf]);
+                    // SOUNDNESS R1494 — the implementor is a STD type (`Ser::ser(d, w)` with `d: &String` over the crate's
+                    // own `impl Ser for String`): the std-rooted path (`std::string::String::ser`) is the classifier's by
+                    // `resolvable`'s rule and links no unit, so the edge to the crate's impl vanished and the caller read
+                    // ABSENT (EXECUTED the previous lane's `sib/bx` `subj2`). The trait is LOCAL and NAMED, so no inherent
+                    // std method can be what runs, and the impl's unit is keyed by the type's leaf: the leaf path is the
+                    // one that reaches it. `CANDOR_R1494_OFF=1`.
+                    let std_root = matches!(ty.split("::").next().unwrap_or(""), "std" | "core" | "alloc")
+                        && !ty.contains(crate::decls::ALIAS_ALT_SEP)
+                        && std::env::var_os("CANDOR_R1494_OFF").is_none();
+                    let p2 = if std_root {
+                        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1494_INSTR").is_some() {
+                            eprintln!("R1494UFCSSTD\t{tr}::{leaf}\t{ty}"); // §E1 REACH COUNTER
+                        }
+                        format!("{}::{leaf}", ty.rsplit("::").next().unwrap_or(&ty))
+                    } else {
+                        crate::lang::alias_join(&ty, &[leaf])
+                    };
                     self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: p2, leaf: leaf.to_string(),
                         str_arg: str_arg.clone(), typed: true, method: true, is_macro: false,
                         path_lits_partial: false, path_lit2: None });
@@ -11617,7 +11734,65 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             //    param) must not flood Unknown;
             //  - the dispatch must be narrow (≤12 impls, the cross-engine bound) → edges to
             //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
-            for tr in self.resolve_recv_traits(&node.receiver) {
+            // SOUNDNESS R1495 (found by its A/B) — a member a LOCAL trait does not declare, called on an object of it, is
+            // a member of one of its NON-local supertraits (`trait AsyncConn: hyper_util::…::Connection {}`,
+            // `self.inner.connected()` on `Box<dyn AsyncConn>`): the local arm finds no `connected` in the local closure and
+            // formed nothing, so the caller read ABSENT where `&dyn Connection` discloses or joins the dependency
+            // (EXECUTED rustagent-r1494 fx3 `supdep`; aws-smithy-http-client's `Conn::connected`, which kept `invisible`
+            // only while its `BoxConn` alias mistyped the field as `Box`). Dispatch on those supertraits too, exactly as
+            // if the receiver had been written as an object of each. `CANDOR_R1495_OFF=1`.
+            let mut recv_trs = self.resolve_recv_traits(&node.receiver);
+            if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+                let mut extra: Vec<String> = Vec::new();
+                for tr in &recv_trs {
+                    if self.local_traits.contains_key(tr) && !self.trait_declares_method(tr, &leaf, 0) {
+                        let mut stack = vec![(tr.clone(), 0usize)];
+                        while let Some((t, dep)) = stack.pop() {
+                            let Some(lt) = self.local_traits.get(&t) else { continue };
+                            for s in &lt.supertraits {
+                                if self.local_traits.contains_key(s) {
+                                    if dep < 16 {
+                                        stack.push((s.clone(), dep + 1));
+                                    }
+                                } else if !recv_trs.contains(s) && !extra.contains(s)
+                                    && !matches!(s.as_str(), "Send" | "Sync" | "Unpin" | "Sized" | "Copy")
+                                    // A STD supertrait is asked only for a member std declares on it (`Future::poll`,
+                                    // `Read::read`): `trait Stream: Clone + Debug` makes `s.map(..)` no member of either.
+                                    // A dependency's member list is not known here, so it is always asked.
+                                    && (!crate::std_bounds::is_std_trait_leaf(s) || {
+                                        let t = crate::std_bounds::table();
+                                        t.traits_by_leaf(s).iter().any(|p| t.trait_method(p, &leaf).is_some())
+                                    })
+                                {
+                                    extra.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                if !extra.is_empty() && (crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some()) {
+                    eprintln!("R1495SUPER\t{leaf}\t{}", extra.join(",")); // §E1 REACH COUNTER
+                }
+                // The foreign route answers for the DEPENDENCY's implementors only; where THIS crate implements that
+                // supertrait itself (tower's `RateLimit: Service`, reachable through `Box<dyn CloneService>` by its
+                // blanket impl), one of those local bodies may be what runs, so the site discloses the dispatch it
+                // cannot bound — the true reason — instead of reading the local implementors as absent. Measured on
+                // this lane's own A/B: without it, tower's `BoxCloneService::call` and hyper's `KeepAlive::maybe_timeout`
+                // traded an untyped-receiver hedge naming effectful local candidates for `[]`.
+                // A std member §4 reads as conventionally pure (`clone`, `fmt`, `eq`, `deref`, …) is not hedged on.
+                let conventional = matches!(leaf.as_str(), "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp"
+                    | "to_string" | "deref" | "deref_mut" | "as_ref" | "as_mut" | "borrow" | "borrow_mut");
+                for s in &extra {
+                    if crate::std_bounds::is_std_trait_leaf(s) && conventional {
+                        continue;
+                    }
+                    if self.trait_impls.get(s.as_str()).is_some_and(|v| !v.is_empty()) {
+                        self.mark_unresolved(format!("dispatch:{s}.{leaf}"));
+                    }
+                }
+                recv_trs.extend(extra);
+            }
+            for tr in recv_trs {
                 // SOUNDNESS (vein C, same-leaf collision) — A WRITTEN DEPENDENCY TRAIT IS NOT THE LOCAL
                 // TRAIT THAT SHARES ITS LEAF. Every trait index here is leaf-keyed, so a crate that
                 // declares its own `trait Handler` and ALSO takes `h: &dyn zdep::Handler` sent the
@@ -14193,8 +14368,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if leaves.iter().any(|l| !l.is_empty()) {
                             self.tuple_trait_of.insert(id.ident.to_string(), leaves);
                         }
-                        let types: Vec<Option<String>> =
-                            it.elems.iter().map(|e| self.nominal_ctor_type(e)).collect();
+                        let types: Vec<Option<String>> = it.elems.iter()
+                            .map(|e| self.nominal_ctor_type(e).or_else(|| {
+                                // SOUNDNESS R1494 — a suffixed literal names its primitive (`(1u8, 2u8)` is `(u8,u8)`).
+                                std::env::var_os("CANDOR_R1494_OFF").is_none().then(|| typed_literal_prim(e)).flatten()
+                            }))
+                            .collect();
                         if types.iter().any(|t| t.is_some()) {
                             self.tuple_of.insert(id.ident.to_string(), types);
                         }
@@ -14798,6 +14977,19 @@ fn std_conventionally_pure(tr: &str, leaf: &str) -> bool {
 /// inside std's buffering wrappers (`BufWriter<File>`, `BufReader<TcpStream>`, `LineWriter<File>`), whose I/O members
 /// run the inner handle's. FULL paths only: a crate-local `File` is never a handle. `None` for everything else —
 /// `Vec<u8>`, `Cursor`, `Sink`, `Stdout`, a dependency's writer — which keeps its pre-existing answer.
+/// SOUNDNESS R1494 — the primitive a SUFFIXED (or `bool` / `char`) literal names: `1u8` is `u8` whatever surrounds it. An
+/// unsuffixed number is left alone (its type is inference's, `i32` only by default).
+fn typed_literal_prim(e: &syn::Expr) -> Option<String> {
+    let syn::Expr::Lit(l) = peel_paren(e) else { return None };
+    match &l.lit {
+        syn::Lit::Int(i) if !i.suffix().is_empty() => Some(i.suffix().to_string()),
+        syn::Lit::Float(f) if !f.suffix().is_empty() => Some(f.suffix().to_string()),
+        syn::Lit::Bool(_) => Some("bool".to_string()),
+        syn::Lit::Char(_) => Some("char".to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn std_io_handle(ty: &str) -> Option<String> {
     let ty = ty.trim().trim_start_matches('&').trim_start_matches("mut ").trim();
     let head = ty.split('<').next().unwrap_or(ty).trim();

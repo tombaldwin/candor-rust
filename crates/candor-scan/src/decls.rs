@@ -166,6 +166,18 @@ pub(crate) fn scan_items(
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
                 }
+                // SOUNDNESS R1494 — the impl's self type WRITTEN as a full std I/O handle path (`impl Wr for
+                // std::fs::File`). `Self` binds the LEAF (`File`), which expands to nothing without a `use`, so
+                // `self_io_receiver_spelled` could not see the handle: `std::io::Write::write_all(self, b)` in the body
+                // read pure (EXECUTED rustagent-r1494 fx1 `w_localtrait`, the previous lane's `sib/bx`).
+                if let syn::Type::Path(tp) = &*im.self_ty {
+                    if tp.qself.is_none() && tp.path.segments.len() >= 2 && std::env::var_os("CANDOR_R1494_OFF").is_none() {
+                        let full = crate::lang::expand(&path_to_string(&tp.path), uses);
+                        if crate::collector::std_io_handle(&full).is_some() {
+                            uses.insert(IMPL_STD_HANDLE_KEY.to_string(), full);
+                        }
+                    }
+                }
                 // SOUNDNESS R1292 — the trait this impl implements (its leaf), for `self`'s typing in a blanket forwarder.
                 if let Some((_, tp, _)) = &im.trait_ {
                     if let Some(l) = tp.segments.last() {
@@ -235,6 +247,7 @@ pub(crate) fn scan_items(
                 uses.remove(IMPL_ARGS_KEY);
                 uses.remove(IMPL_TARGS_KEY);
                 uses.remove(IMPL_TRAIT_KEY);
+                uses.remove(IMPL_STD_HANDLE_KEY);
             }
             // SOUNDNESS R894 — A PUBLISHED FOREIGN DECLARATION IS A UNIT THE REPORT MUST ANSWER FOR. Its body
             // is in another language, so in-crate analysis already answers a call to it with `Unknown` +
@@ -480,6 +493,8 @@ pub(crate) const IMPL_ARGS_KEY: &str = "*implargs";
 pub(crate) const IMPL_TARGS_KEY: &str = "*impltargs";
 /// SOUNDNESS R1292 — the leaf of the trait the enclosing `impl` implements.
 pub(crate) const IMPL_TRAIT_KEY: &str = "*impltrait";
+/// SOUNDNESS R1494 — the impl self type's full path when it is WRITTEN as a std I/O handle (`std::fs::File`).
+pub(crate) const IMPL_STD_HANDLE_KEY: &str = "*implstdhandle";
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
 /// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
@@ -3772,6 +3787,92 @@ pub(crate) fn collect_type_idents(ty: &syn::Type, out: &mut Vec<String>) {
 ///
 /// Runs to a FIXPOINT (bounded) so a same-file alias CHAIN resolves: `type A = fn(); type B = A;` needs
 /// `A` in the set before `B` can be judged, and source order does not guarantee it.
+/// SOUNDNESS R1495 — THIS FILE's `type` aliases to a trait object (`lang::alias_rhs_object_leaves`), with same-file
+/// chains (`type B = B0;`) followed to a fixpoint, and the file's own module names; a leaf the file ALSO declares as a
+/// struct / enum / union / trait or imports from outside the crate is left out. Pass A reads it through `trait_leaves`
+/// (`lang::set_file_dyn_aliases`), so a field, a return and a parameter typed through such an alias get the dispatch
+/// leaves the written `Box<dyn Tw>` gets. Same-file only, by the per-file cache boundary R177 states.
+pub(crate) fn seed_dyn_aliases(
+    items: &[syn::Item],
+    include_tests: bool,
+) -> crate::lang::DynAliasMaps {
+    let mut out: crate::lang::DynAliasMaps = Default::default();
+    if std::env::var_os("CANDOR_R1495_OFF").is_some() {
+        return out;
+    }
+    fn walk<'a>(
+        items: &'a [syn::Item],
+        include_tests: bool,
+        aliases: &mut Vec<(String, &'a syn::Type)>,
+        other: &mut std::collections::HashSet<String>,
+        mods: &mut std::collections::HashSet<String>,
+    ) {
+        for it in items {
+            match it {
+                syn::Item::Type(t) if include_tests || !is_cfg_test(&t.attrs) => aliases.push((t.ident.to_string(), &t.ty)),
+                syn::Item::Struct(x) => { other.insert(x.ident.to_string()); }
+                syn::Item::Enum(x) => { other.insert(x.ident.to_string()); }
+                syn::Item::Union(x) => { other.insert(x.ident.to_string()); }
+                syn::Item::Trait(x) => { other.insert(x.ident.to_string()); }
+                syn::Item::TraitAlias(x) => { other.insert(x.ident.to_string()); }
+                syn::Item::Use(u) => {
+                    fn names(t: &syn::UseTree, root: Option<&str>, out: &mut Vec<(String, String)>) {
+                        match t {
+                            syn::UseTree::Path(p) => {
+                                let r = root.map(str::to_string).unwrap_or_else(|| p.ident.to_string());
+                                names(&p.tree, Some(&r), out)
+                            }
+                            syn::UseTree::Name(n) => out.push((root.unwrap_or("").to_string(), n.ident.to_string())),
+                            syn::UseTree::Rename(r) => out.push((root.unwrap_or("").to_string(), r.rename.to_string())),
+                            syn::UseTree::Group(g) => g.items.iter().for_each(|i| names(i, root, out)),
+                            syn::UseTree::Glob(_) => {}
+                        }
+                    }
+                    let mut v = Vec::new();
+                    names(&u.tree, None, &mut v);
+                    for (root, n) in v {
+                        let sibling = items.iter().any(|o| matches!(o, syn::Item::Mod(m) if m.ident == root));
+                        if !matches!(root.as_str(), "crate" | "self" | "super") && !sibling {
+                            other.insert(n);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                    mods.insert(m.ident.to_string());
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, include_tests, aliases, other, mods);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut aliases = Vec::new();
+    let mut other = std::collections::HashSet::new();
+    walk(items, include_tests, &mut aliases, &mut other, &mut out.1);
+    // Two aliases of one leaf that disagree (a `#[cfg]` twin to an object and to a struct) name no one object.
+    let mut conflicted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..8 {
+        let before = out.0.clone();
+        crate::lang::set_file_dyn_aliases(out.clone());
+        let mut next: HashMap<String, Vec<String>> = HashMap::new();
+        for (n, ty) in &aliases {
+            let l = crate::lang::alias_rhs_object_leaves(ty);
+            match next.get(n) {
+                Some(prev) if *prev != l => { conflicted.insert(n.clone()); }
+                _ => { next.insert(n.clone(), l); }
+            }
+        }
+        next.retain(|n, l| !l.is_empty() && !other.contains(n) && !conflicted.contains(n));
+        out.0 = next;
+        if out.0 == before {
+            break;
+        }
+    }
+    crate::lang::set_file_dyn_aliases(Default::default());
+    out
+}
+
 pub(crate) fn seed_callable_aliases(
     items: &[syn::Item],
     include_tests: bool,
@@ -4813,6 +4914,50 @@ pub(crate) fn collect_decls(
             }
             _ => {}
         }
+        // SOUNDNESS R1495 — the facts `lang::dyn_alias_cell` is built from: an alias to a trait object files its leaves,
+        // every OTHER type-namespace name files `""` (so the conflict rule withdraws a leaf that names anything else
+        // anywhere in the crate), and the crate's own module names. See `lang::DYN_ALIASES`.
+        if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+            let other = |rets: &mut HashMap<String, Option<String>>, n: String| {
+                file_decl_fact(rets, format!("{}{n}", crate::lang::DYN_ALIAS_PREFIX), String::new())
+            };
+            match it {
+                syn::Item::Type(t) if include_tests || !is_cfg_test(&t.attrs) => {
+                    let l = crate::lang::alias_rhs_object_leaves(&t.ty);
+                    file_decl_fact(rets, format!("{}{}", crate::lang::DYN_ALIAS_PREFIX, t.ident), l.join(","));
+                }
+                syn::Item::Struct(x) => other(rets, x.ident.to_string()),
+                syn::Item::Enum(x) => other(rets, x.ident.to_string()),
+                syn::Item::Union(x) => other(rets, x.ident.to_string()),
+                syn::Item::Trait(x) => other(rets, x.ident.to_string()),
+                syn::Item::TraitAlias(x) => other(rets, x.ident.to_string()),
+                syn::Item::Mod(m) => file_decl_fact(rets, format!("{}{}", crate::lang::LOCAL_MOD_PREFIX, m.ident), "1".to_string()),
+                syn::Item::Use(u) => {
+                    // A name a `use` binds from OUTSIDE the crate (not `crate`/`self`/`super`, not a sibling module).
+                    let sibling = |r: &str| items.iter().any(|o| matches!(o, syn::Item::Mod(m) if m.ident == r));
+                    fn walk(t: &syn::UseTree, root: Option<&str>, out: &mut Vec<(String, String)>) {
+                        match t {
+                            syn::UseTree::Path(p) => {
+                                let r = root.map(str::to_string).unwrap_or_else(|| p.ident.to_string());
+                                walk(&p.tree, Some(&r), out)
+                            }
+                            syn::UseTree::Name(n) => out.push((root.unwrap_or("").to_string(), n.ident.to_string())),
+                            syn::UseTree::Rename(r) => out.push((root.unwrap_or("").to_string(), r.rename.to_string())),
+                            syn::UseTree::Group(g) => g.items.iter().for_each(|i| walk(i, root, out)),
+                            syn::UseTree::Glob(_) => {}
+                        }
+                    }
+                    let mut bound = Vec::new();
+                    walk(&u.tree, None, &mut bound);
+                    for (root, name) in bound {
+                        if !matches!(root.as_str(), "crate" | "self" | "super") && !sibling(&root) {
+                            other(rets, name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         match it {
             syn::Item::Struct(s) => {
                 // SOUNDNESS R1279/R1281 — the struct's type parameters, by position (`model::type_params_key`).
@@ -5802,6 +5947,15 @@ pub(crate) fn collect_decls(
                             let tl = ty.rsplit("::").next().unwrap_or(ty);
                             let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params, Some(tl));
                             file_decl_fact(rets, crate::model::impl_gen_op_key(tl, &m.sig.ident.to_string()), g.join(","));
+                        }
+                        // SOUNDNESS R1494 — a slice / array / tuple impl's summary under the receiver key the collector
+                        // forms for it (`lang::nonpath_impl_recv_key`: `[u8]`, `[_]`, `(u8,u8)`), which a non-colliding
+                        // such impl had no key for at all. See `CallCollector::nonpath_recv_calls`.
+                        if let Some(k) = crate::lang::nonpath_impl_recv_key(im)
+                            .filter(|k| impl_key_ty.as_deref() != Some(k.as_str()) && std::env::var_os("CANDOR_R1494_OFF").is_none())
+                        {
+                            let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params, Some(&k));
+                            file_decl_fact(rets, crate::model::impl_gen_op_key(&k, &m.sig.ident.to_string()), g.join(","));
                         }
                         // SOUNDNESS R451 — record that `Type::method` EXISTS, for EVERY impl method
                         // whatever it returns (inherent or trait impl). `record_return` above cannot

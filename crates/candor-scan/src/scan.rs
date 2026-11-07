@@ -1123,6 +1123,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // unreadable/absent Cargo.toml → empty string → no features, the same result as before the hoist).
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     set_cfg_features(parse_features(&cargo_toml));
+    // SOUNDNESS R1495 — empty for Pass A (a cached Pass A fact cannot depend on it); installed before Pass B.
+    *crate::lang::dyn_alias_cell().write().unwrap() = Default::default();
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
     // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's
@@ -1603,6 +1605,61 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         *crate::lang::nonpath_recv_cell().write().unwrap() = tails;
+    }
+    // SOUNDNESS R1495 — the crate's trait-object aliases (`lang::DYN_ALIASES`), from Pass A's merged facts; a leaf the
+    // conflict rule withdrew (`None`) or one that names something else (`""`) is left out.
+    {
+        let mut leaves: HashMap<String, Vec<String>> = HashMap::new();
+        let mut mods: HashSet<String> = HashSet::new();
+        for (k, v) in &merged.rets {
+            if let Some(n) = k.strip_prefix(crate::lang::DYN_ALIAS_PREFIX) {
+                if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
+                    leaves.insert(n.to_string(), v.split(',').map(str::to_string).collect());
+                }
+            } else if let Some(m) = k.strip_prefix(crate::lang::LOCAL_MOD_PREFIX) {
+                mods.insert(m.to_string());
+            }
+        }
+        *crate::lang::dyn_alias_cell().write().unwrap() = (leaves, mods);
+        // …and the two Pass A positions a CROSS-FILE alias cannot reach there (the per-file cache boundary, R177): a
+        // struct field and a fn's return written through an alias another file declares (`r: al::B`, `-> al::B`) were
+        // recorded as that alias's PATH, which the alias map then expanded to the bare wrapper (`Box`). Read from each
+        // file's own facts (before the expansion) and re-filed as the written `Box<dyn Tw>` files them: the field into
+        // `trait_fields` / `dyn_trait_fields` (out of `fields`), the return as the `<dyn>` sentinel. A key the merge
+        // withdrew (`None`) stays withdrawn.
+        if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+            for (_, _, fd) in &decls_per_file {
+                for (st, fm) in &fd.fields {
+                    for (f, t) in fm {
+                        let Some(l) = crate::lang::dyn_alias_leaves_str(t) else { continue };
+                        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some() {
+                            eprintln!("R1495FIELD\t{st}.{f}\t{t}"); // §E1 REACH COUNTER
+                        }
+                        if let Some(m) = merged.fields.get_mut(st) {
+                            m.remove(f);
+                        }
+                        merged.trait_fields.entry(st.clone()).or_default().insert(f.clone(), l.clone());
+                        merged.dyn_trait_fields.entry(st.clone()).or_default().insert(f.clone(), l);
+                    }
+                }
+                // `record_return` files a dispatch-object return ONLY as the leaf-keyed sentinel and returns early, so
+                // every other key the alias path was filed under (`<retqual>`, the impl-qualified return) is dropped.
+                for (k, v) in &fd.rets {
+                    let Some(l) = v.as_deref().and_then(crate::lang::dyn_alias_leaves_str) else { continue };
+                    if !matches!(merged.rets.get(k), Some(Some(_))) {
+                        continue;
+                    }
+                    if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some() {
+                        eprintln!("R1495RET\t{k}\t{}", v.as_deref().unwrap_or("")); // §E1 REACH COUNTER
+                    }
+                    if k.starts_with('<') {
+                        merged.rets.remove(k);
+                    } else {
+                        merged.rets.insert(k.clone(), Some(crate::model::ret_dyn_encode(&l)));
+                    }
+                }
+            }
+        }
     }
     // SOUNDNESS R529c — JOIN THE BLOCK-LOCAL STRUCTS' FIELDS. A struct declared inside a fn body was in no
     // `fields` entry, so `h.c.go()` through it typed to nothing and the caller read PURE over a module-level

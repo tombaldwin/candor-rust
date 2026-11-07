@@ -18441,7 +18441,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18452,7 +18452,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev146/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev147/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -34414,5 +34414,139 @@ fn r1487_r1488_r1489_type_alias_reference_cfg_twin_and_mixed_twin_reach_their_ty
     }
     for f in ["kr_pure", "kr_clone_ref", "kr_drop_param", "kr_drop_field", "kr_drop_ret", "kc_pure_field", "kx_pure"] {
         assert!(veina_row_effs(&v, f).is_empty(), "`{f}`: no effect is reached — no charge, no hedge:\n{v:#}");
+    }
+}
+
+/// SOUNDNESS R1494 — a write through a GENERIC WRITER reached via a slice / str receiver was silent: borsh's `impl
+/// BorshSerialize for String { fn serialize<W: Write>(&self, w: &mut W) { self.as_bytes().serialize(w) } }` formed only the
+/// bare-leaf twin for `self.as_bytes().serialize(w)` (the receiver typed to nothing), the R1095 floor discloses only a
+/// CONCRETELY effectful candidate, and the slice impl that writes through `W` is `Unknown`-only — so the caller read ABSENT
+/// (EXECUTED rustagent-r1494 fx1/fx2; the previous lane's `sib/bx`). Four routes: a str/String VIEW (`as_bytes`, `as_str`),
+/// a string / byte-string / tuple LITERAL receiver, the caller-side writer resolution for a slice impl's method (its
+/// `<genop>` summary under the receiver key), and two links to a std type: `impl Wr for std::fs::File` written by its full
+/// path, and the UFCS `Ser::ser(&s, w)` with `s: std String` over the crate's own `impl Ser for String`.
+///
+/// Controls: a pure `Vec<u8>` writer is never CHARGED (the slice body's own hedge rides along, as for a generic fn); an
+/// inherent std method (`as_bytes().len()`) is never charged a crate impl of the same name.
+#[test]
+fn r1494_generic_writer_through_a_slice_or_str_receiver_reaches_the_write() {
+    let src = "\
+        use std::io::Write;\n\
+        pub trait Ser { fn ser<W: Write>(&self, w: &mut W) -> std::io::Result<()>; }\n\
+        impl Ser for [u8] { fn ser<W: Write>(&self, w: &mut W) -> std::io::Result<()> { w.write_all(self) } }\n\
+        impl Ser for String { fn ser<W: Write>(&self, w: &mut W) -> std::io::Result<()> { self.as_bytes().ser(w) } }\n\
+        impl Ser for str { fn ser<W: Write>(&self, w: &mut W) -> std::io::Result<()> { w.write_all(self.as_bytes()) } }\n\
+        impl Ser for (u8, u8) { fn ser<W: Write>(&self, w: &mut W) -> std::io::Result<()> { w.write_all(&[self.0, self.1]) } }\n\
+        pub fn w_view(f: &mut std::fs::File) -> u8 { let _ = \"x\".as_bytes().ser(f); 0 }\n\
+        pub fn w_string(f: &mut std::fs::File) -> u8 { let s = String::from(\"x\"); let _ = s.ser(f); 0 }\n\
+        pub fn w_as_str(f: &mut std::fs::File) -> u8 { let s = String::from(\"x\"); let _ = s.as_str().ser(f); 0 }\n\
+        pub fn w_strlit(f: &mut std::fs::File) -> u8 { let _ = \"x\".ser(f); 0 }\n\
+        pub fn w_bytelit(f: &mut std::fs::File) -> u8 { let _ = b\"x\"[..].ser(f); 0 }\n\
+        pub fn w_tuple(f: &mut std::fs::File) -> u8 { let a = (1u8, 2u8); let _ = a.ser(f); 0 }\n\
+        pub fn w_tuple_lit(f: &mut std::fs::File) -> u8 { let _ = (1u8, 2u8).ser(f); 0 }\n\
+        pub fn k_vec() -> u8 { let mut v: Vec<u8> = Vec::new(); let _ = \"x\".as_bytes().ser(&mut v); v.len() as u8 }\n\
+        pub trait Ln { fn len(&self) -> usize; }\n\
+        impl Ln for [u8] { fn len(&self) -> usize { let _ = std::fs::write(\"/tmp/r1494\", \"x\"); 0 } }\n\
+        pub fn k_inherent() -> u8 { \"x\".as_bytes().len() as u8 }\n\
+        pub mod lw {\n\
+            pub trait Wr { fn wa(&mut self, b: &[u8]) -> std::io::Result<()>; }\n\
+            impl Wr for std::fs::File { fn wa(&mut self, b: &[u8]) -> std::io::Result<()> { std::io::Write::write_all(self, b) } }\n\
+            pub trait S2 { fn s2<W: Wr>(&self, w: &mut W) -> std::io::Result<()>; }\n\
+            impl S2 for [u8] { fn s2<W: Wr>(&self, w: &mut W) -> std::io::Result<()> { w.wa(self) } }\n\
+            impl S2 for String { fn s2<W: Wr>(&self, w: &mut W) -> std::io::Result<()> { self.as_bytes().s2(w) } }\n\
+            pub struct C { pub d: String }\n\
+            impl S2 for C { fn s2<W: Wr>(&self, w: &mut W) -> std::io::Result<()> { let d = &self.d; S2::s2(d, w) } }\n\
+            pub fn w_localtrait(f: &mut std::fs::File) -> u8 { let _ = \"x\".as_bytes().s2(f); 0 }\n\
+            pub fn w_ufcs_std(c: &C, f: &mut std::fs::File) -> u8 { let _ = c.s2(f); 0 }\n\
+        }\n";
+    let v = scan_src_to_json("r1494", src);
+    for f in ["w_view", "w_string", "w_as_str", "w_strlit", "w_bytelit", "w_tuple", "w_tuple_lit",
+              "lw::w_localtrait", "lw::w_ufcs_std"] {
+        assert!(veina_row_effs(&v, f).contains(&"Fs".to_string()), "`{f}` reaches the handle's write:\n{v:#}");
+    }
+    assert!(!veina_row_effs(&v, "k_vec").contains(&"Fs".to_string()), "a pure `Vec` writer is never charged:\n{v:#}");
+    // (Its `Unknown` is the pre-existing R1095 floor over the untyped `len`, unchanged from 366de9c.)
+    assert!(!veina_row_effs(&v, "k_inherent").contains(&"Fs".to_string()), "an inherent std member reaches no crate impl:\n{v:#}");
+}
+
+/// SOUNDNESS R1495 — a `type` alias to a TRAIT OBJECT (`type B = Box<dyn Tw>;`, `type A = &'static dyn Tw;`, `type D = dyn
+/// Tw;`, `Rc`/`Arc`/`Pin`, a chain `type B1 = B;`) named no type and no trait, so `r.tw()` on a value typed through it
+/// formed nothing and the caller read ABSENT, while the written `Box<dyn Tw>` dispatched over `Tw`'s implementors
+/// (EXECUTED rustagent-r1494 fx1 `a_*`, fx2 `a2_*`; the previous lane's `sib/s9`, `s6`, `s10`). Every position:
+/// parameter, `let`, field, `Option` field, return, `Vec` element, module and crate paths, and — through the crate-wide
+/// map Pass B installs and the re-filing of Pass A's field / return facts — an alias another FILE declares.
+///
+/// Found by its A/B: a member a local trait inherits from a NON-local supertrait (`trait AsyncConn: hyper_util::Connection`,
+/// `trait Rg: rand_core::RngCore`) formed nothing on an object or bound of the local trait, written or aliased.
+///
+/// Controls: an alias whose only implementor is pure stays pure; a leaf that is ALSO a struct elsewhere in the crate is
+/// withdrawn (the struct's own method is what runs).
+#[test]
+fn r1495_a_trait_object_alias_dispatches_like_the_written_object() {
+    let tw = "\
+        pub trait Tw { fn tw(&self) -> u8; }\n\
+        pub struct R;\n\
+        impl Tw for R { fn tw(&self) -> u8 { let _ = std::fs::write(\"/tmp/r1495\", \"x\"); 4 } }\n\
+        pub trait Tp { fn tp(&self) -> u8; }\n\
+        pub struct Q;\n\
+        impl Tp for Q { fn tp(&self) -> u8 { 2 } }\n";
+    let src = format!("{tw}\
+        pub type B = Box<dyn Tw>;\n\
+        pub type A = &'static dyn Tw;\n\
+        pub type D = dyn Tw;\n\
+        pub type B1 = B;\n\
+        pub type P<'a> = std::pin::Pin<Box<dyn Tw + 'a>>;\n\
+        pub type BP = Box<dyn Tp>;\n\
+        pub mod m {{ pub type B = Box<dyn super::Tw>; }}\n\
+        pub struct H {{ pub r: B, pub o: Option<B>, pub a: A }}\n\
+        pub fn a_param(r: B) -> u8 {{ r.tw() }}\n\
+        pub fn a_ref(r: A) -> u8 {{ r.tw() }}\n\
+        pub fn a_dyn(r: &D) -> u8 {{ r.tw() }}\n\
+        pub fn a_chain(r: B1) -> u8 {{ r.tw() }}\n\
+        pub fn a_pin(r: P<'_>) -> u8 {{ r.tw() }}\n\
+        pub fn a_let() -> u8 {{ let r: B = Box::new(R); r.tw() }}\n\
+        pub fn a_field(h: &H) -> u8 {{ h.r.tw() + h.a.tw() }}\n\
+        pub fn a_opt(h: &H) -> u8 {{ h.o.as_ref().map(|x| x.tw()).unwrap_or(0) }}\n\
+        pub fn mk() -> B {{ Box::new(R) }}\n\
+        pub fn a_ret() -> u8 {{ mk().tw() }}\n\
+        pub fn a_vec(v: Vec<B>) -> u8 {{ v[0].tw() }}\n\
+        pub fn a_mod(r: m::B) -> u8 {{ r.tw() }}\n\
+        pub fn a_crate(r: crate::m::B) -> u8 {{ r.tw() }}\n\
+        pub fn k_pure(r: BP) -> u8 {{ r.tp() }}\n\
+        pub mod sa {{ pub type S = Box<dyn super::Tw>; }}\n\
+        pub mod sb {{ pub struct S; impl S {{ pub fn tw(&self) -> u8 {{ 1 }} }} }}\n\
+        pub fn k_shadow(r: sb::S) -> u8 {{ r.tw() }}\n");
+    let v = scan_src_to_json("r1495", &src);
+    for f in ["a_param", "a_ref", "a_dyn", "a_chain", "a_pin", "a_let", "a_field", "a_opt", "a_ret", "a_vec", "a_mod", "a_crate"] {
+        assert!(veina_row_effs(&v, f).contains(&"Fs".to_string()), "`{f}` dispatches over `Tw`'s implementors:\n{v:#}");
+    }
+    for f in ["k_pure", "k_shadow"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}`: no effect is reached:\n{v:#}");
+    }
+    // A member a LOCAL trait inherits from a DEPENDENCY supertrait (`Rg: rand_core::RngCore`, `r.next_u32()` on `R: Rg` or
+    // `&mut dyn Rg`) is that supertrait's dispatch, exactly as on `R: RngCore` / `&mut dyn RngCore` — not absent.
+    let v = scan_src_to_json_multi("r1495s", &[
+        ("Cargo.toml", "[package]\nname = \"r1495s\"\n[dependencies]\nrand_core = \"0.6\"\n"),
+        ("src/lib.rs", "use rand_core::RngCore;\npub trait Rg: RngCore {}\n\
+            pub fn s_bound<R: Rg>(r: &mut R) -> u32 { r.next_u32() }\n\
+            pub fn s_dyn(r: &mut dyn Rg) -> u32 { r.next_u32() }\n\
+            pub fn w_bound<R: RngCore>(r: &mut R) -> u32 { r.next_u32() }\n"),
+    ]);
+    for f in ["s_bound", "s_dyn", "w_bound"] {
+        assert!(veina_row_effs(&v, f).contains(&"Rand".to_string()), "`{f}` dispatches through `RngCore`:\n{v:#}");
+    }
+    // An alias another FILE declares: the parameter through Pass B's crate-wide map, the field and the return through
+    // the re-filed Pass A facts.
+    let v = scan_src_to_json_multi("r1495x", &[
+        ("src/lib.rs", format!("{tw}pub mod al;\n\
+            pub struct H {{ pub r: al::B }}\n\
+            pub fn x_param(r: al::B) -> u8 {{ r.tw() }}\n\
+            pub fn x_field(h: &H) -> u8 {{ h.r.tw() }}\n\
+            pub fn mk() -> al::B {{ Box::new(R) }}\n\
+            pub fn x_ret() -> u8 {{ mk().tw() }}\n").as_str()),
+        ("src/al.rs", "pub type B = Box<dyn crate::Tw>;\n"),
+    ]);
+    for f in ["x_param", "x_field", "x_ret"] {
+        assert!(veina_row_effs(&v, f).contains(&"Fs".to_string()), "`{f}` (cross-file alias) dispatches:\n{v:#}");
     }
 }

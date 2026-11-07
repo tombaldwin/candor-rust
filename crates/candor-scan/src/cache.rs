@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev147 (rustagent-r1494): SOUNDNESS R1494 — Pass A files a slice / array / tuple impl's `<genop>` summary under its
+    // receiver key and forwards `self.as_bytes().m(w)` in a `String`/`str` impl (cached decls move); Pass B forms the typed
+    // call for a str/String view or a string literal receiver and binds the written std-handle self (cached `calls` move).
     // rev146 (rustagent-aliasres): SOUNDNESS R1487 — Pass A's `mod_aliases` gains a reference alias's `REF_ALIAS_SUF` key
     // (a rev145 entry has none, so the pointee would be lost warm); R1488/R1489 — Pass B's cached `calls` change: a
     // by-value parameter and a construction through a seeded MODULE alias's `#[cfg]` arms mark every arm. Mandatory.
@@ -574,7 +577,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev146/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev147/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -865,6 +868,15 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // R177 — this file's `type NAME = <callable>` aliases BEFORE the walk that consumes them. See
     // `seed_callable_aliases` for why it is a separate pass and why its boundary is one file.
     crate::decls::seed_callable_aliases(items, include_tests, &mut callable_aliases);
+    // SOUNDNESS R1495 — this file's trait-object aliases, for the length of its decl walks (cleared on every exit).
+    struct ClearDyn;
+    impl Drop for ClearDyn {
+        fn drop(&mut self) {
+            crate::lang::set_file_dyn_aliases(Default::default());
+        }
+    }
+    crate::lang::set_file_dyn_aliases(crate::decls::seed_dyn_aliases(items, include_tests));
+    let _clear_dyn = ClearDyn;
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut dyn_trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases, &mut field_borrows);

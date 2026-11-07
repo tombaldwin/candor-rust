@@ -11,6 +11,26 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A write through a generic writer reached from a slice or string receiver is now charged** (SOUNDNESS R1494). In
+  `impl Ser for String { fn ser<W: Write>(&self, w: &mut W) { self.as_bytes().ser(w) } }` (the shape of borsh's
+  `BorshSerialize for String`), the call on `self.as_bytes()` had no type, so it reached no body and was not disclosed;
+  a caller passing a `File` passed `deny Fs` and `deny Unknown`. Now `as_bytes()`/`as_str()` on a `String`/`str`, a
+  string, byte-string or typed tuple literal receiver, and a re-slice of a literal reach the crate's own `[u8]`/`[T]`/
+  `str`/tuple impl. A caller that hands such a method a `File`, `TcpStream` or a buffered wrapper of one is charged that
+  handle's effect, as it already was for a generic function. Two links to std types are fixed as well: `impl Tr for
+  std::fs::File` written with the full path, and `Tr::m(&s, w)` where `s` is std's `String` and the crate implements
+  `Tr` for `String`. A caller that passes a pure writer (`Vec<u8>`, `io::sink()`) now inherits the generic body's
+  `Unknown`, exactly as through a generic function; it is never charged an effect.
+- ⚠ **A `type` alias to a trait object now dispatches like the written type** (SOUNDNESS R1495). With `type B =
+  Box<dyn Tw>;` (also `&'a dyn Tw`, `&'a mut dyn Tw`, `dyn Tw`, `Rc`/`Arc`/`Pin` wrappers, and an alias of such an alias),
+  a call on a value typed `B` reached nothing, while the same value written `Box<dyn Tw>` reached every implementor of
+  `Tw`. This applied to parameters, `let` annotations, fields, `Option` fields, return types, `Vec` elements and module
+  paths, and to an alias declared in another file. The alias is used only when no struct, enum, trait, other alias or
+  external import in the crate has the same name; otherwise it is ignored as before. Aliases to closure types
+  (`Box<dyn Fn()>`) keep their existing handling. Related, found while measuring this: a method that a crate's own trait
+  inherits from a trait in a dependency or in std (`trait Rg: rand_core::RngCore {}`, `r.next_u32()` on `R: Rg` or
+  `&mut dyn Rg`) was dropped, while the same call written on `R: RngCore` was reported. It now dispatches through the
+  supertrait, and it reports `Unknown` when the crate also implements that supertrait itself.
 - ⚠ **A formatting, comparison, operator or std-bound call on a value whose type shares its name with a type in another
   module now resolves to the right body instead of reporting `Unknown`** (`ambiguous:same-name local defs`), but only
   where the engine read the value's full crate path and exactly one definition has that path. Example: `format!("{}",

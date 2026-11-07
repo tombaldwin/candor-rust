@@ -145,6 +145,12 @@ pub(crate) fn collect_dyn_trait_leaves(ty: &syn::Type, out: &mut std::collection
         // Any generic container, at any nesting: `Vec<Box<dyn T>>`, `Arc<Mutex<Box<dyn T>>>`,
         // `HashMap<String, Box<dyn T>>`. `impl Trait` is deliberately NOT a case here.
         syn::Type::Path(p) => {
+            // SOUNDNESS R1495 — a trait-object alias IS a `dyn` position (`DYN_ALIASES` records objects only).
+            if p.qself.is_none() {
+                if let Some(l) = dyn_alias_leaves_of(&p.path) {
+                    out.extend(l);
+                }
+            }
             for seg in &p.path.segments {
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     for a in &args.args {
@@ -545,6 +551,124 @@ pub(crate) fn collection_literal_elems(expr: &syn::Expr) -> Option<Vec<syn::Expr
 /// `Unknown` and going ABSENT, the cardinal-sin direction. (The remaining 6 were diesel's and have a
 /// different, benign cause; the CHANGELOG entry traces them.) The MODIFIER is the discriminator, not
 /// the name: `T: Sized` is a real (if useless) bound, `T: ?Sized` is its removal.
+/// SOUNDNESS R1495 — the crate's `type` aliases to a TRAIT OBJECT (`type B = Box<dyn Tw>;`, `type A<'a> = &'a dyn Tw;`,
+/// `type D = dyn Tw;`, `Rc`/`Arc`/`Pin` wrappers): alias LEAF -> the object's trait leaves, and the crate's own module
+/// names. A value typed through such an alias named no type and no trait, so `r.tw()` on `r: B` formed nothing and the
+/// caller read ABSENT over the implementor's write, while the WRITTEN `r: Box<dyn Tw>` dispatched over `Tw`'s implementors
+/// (EXECUTED rustagent-r1494 fx1 `a_*`; the previous lane's `sib/s9`, `s6`, `s10`). `trait_leaves` answers the alias exactly
+/// as it answers the written type, so every position that asks it (parameter, `let`, element, return) agrees.
+///
+/// Only an alias leaf the WHOLE crate agrees on: a leaf that is also a struct / enum / union / trait, a non-object alias,
+/// or a name a `use` brings in from outside the crate is withdrawn (Pass A's `file_decl_fact` conflict rule), so the
+/// lookup can only ever answer for a name that, wherever it is written in this crate, is that alias. A multi-segment path
+/// is asked only when it is rooted at `crate`/`self`/`super` or at one of the crate's own modules. `Fn*`-only objects are
+/// R161's (`callable_aliases`) and are not recorded. Installed per crate, after the last decl merge and before Pass B;
+/// EMPTY during Pass A, so a cached Pass A fact cannot depend on it. `CANDOR_R1495_OFF=1`.
+/// SOUNDNESS R1495 — (alias leaf -> trait-object leaves, the crate's own module names).
+pub(crate) type DynAliasMaps = (HashMap<String, Vec<String>>, std::collections::HashSet<String>);
+
+pub(crate) static DYN_ALIASES: std::sync::OnceLock<std::sync::RwLock<DynAliasMaps>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn dyn_alias_cell() -> &'static std::sync::RwLock<DynAliasMaps> {
+    DYN_ALIASES.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
+/// SOUNDNESS R1495 — `rets` key: alias leaf -> its trait-object leaves (`""` = this leaf names something else here).
+pub(crate) const DYN_ALIAS_PREFIX: &str = "<dynalias>";
+/// SOUNDNESS R1495 — `rets` key: a module this crate declares (value `"1"`).
+pub(crate) const LOCAL_MOD_PREFIX: &str = "<localmod>";
+
+thread_local! {
+    /// SOUNDNESS R1495 — Pass A's view: THIS FILE's own trait-object aliases (`decls::seed_dyn_aliases`), set for the
+    /// length of the file's decl walk. A fact from another file cannot enter a `FileDecls` (it is keyed on one file's
+    /// content), the boundary R177 states for `callable_aliases`; the crate-wide map is Pass B's (`DYN_ALIASES`).
+    static FILE_DYN_ALIASES: std::cell::RefCell<DynAliasMaps> =
+        std::cell::RefCell::new(Default::default());
+}
+
+/// Install (or, with an empty map, clear) the current file's trait-object aliases for Pass A. See `FILE_DYN_ALIASES`.
+pub(crate) fn set_file_dyn_aliases(m: DynAliasMaps) {
+    FILE_DYN_ALIASES.with(|c| *c.borrow_mut() = m);
+}
+
+/// SOUNDNESS R1495 — `dyn_alias_leaves_of` over a RECORDED type path (`crate::al::B`, `B`), as Pass A filed it.
+pub(crate) fn dyn_alias_leaves_str(t: &str) -> Option<Vec<String>> {
+    if t.contains(crate::decls::ALIAS_ALT_SEP) || t.contains('<') || t.contains('\u{1}') {
+        return None;
+    }
+    let p: syn::Path = syn::parse_str(t).ok()?;
+    dyn_alias_leaves_of(&p)
+}
+
+fn dyn_alias_leaves_of(path: &syn::Path) -> Option<Vec<String>> {
+    let leaf = path.segments.last()?.ident.to_string();
+    let root = (path.segments.len() > 1).then(|| path.segments[0].ident.to_string());
+    let pick = |map: &HashMap<String, Vec<String>>, mods: &std::collections::HashSet<String>| -> Option<Vec<String>> {
+        let hit = map.get(&leaf)?;
+        if let Some(r) = &root {
+            if !matches!(r.as_str(), "crate" | "self" | "super") && !mods.contains(r) {
+                return None;
+            }
+        }
+        Some(hit.clone())
+    };
+    let hit = {
+        let cell = dyn_alias_cell().read().ok()?;
+        if cell.0.is_empty() {
+            FILE_DYN_ALIASES.with(|c| {
+                let c = c.borrow();
+                pick(&c.0, &c.1)
+            })
+        } else {
+            pick(&cell.0, &cell.1)
+        }
+    }?;
+    if reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some() {
+        eprintln!("R1495ALIAS\t{leaf}\t{}", hit.join(",")); // §E1 REACH COUNTER
+    }
+    Some(hit)
+}
+
+/// SOUNDNESS R1495 — the trait leaves of a `type` alias's right-hand side when it IS a trait object (bare, behind a
+/// reference, or inside the wrappers `trait_leaves` peels); empty otherwise. Read with NO generic bounds, so an alias to
+/// one of its own parameters (`type B<T> = Box<T>`) names nothing. `Fn*`-only objects are R161's.
+pub(crate) fn alias_rhs_object_leaves(ty: &syn::Type) -> Vec<String> {
+    fn object(t: &syn::Type) -> bool {
+        match t {
+            syn::Type::TraitObject(_) => true,
+            syn::Type::Reference(r) => object(&r.elem),
+            syn::Type::Paren(p) => object(&p.elem),
+            syn::Type::Group(g) => object(&g.elem),
+            syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().is_some_and(|seg| {
+                matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "Pin")
+                    && matches!(&seg.arguments, syn::PathArguments::AngleBracketed(a)
+                        if a.args.iter().find_map(|g| match g { syn::GenericArgument::Type(t) => Some(t), _ => None })
+                            .is_some_and(object))
+            }),
+            _ => false,
+        }
+    }
+    if !object(ty) {
+        // An alias to another trait-object alias (`type B = B0;`), when that one is known here.
+        let mut t = ty;
+        while let syn::Type::Paren(p) = t {
+            t = &p.elem;
+        }
+        return match t {
+            syn::Type::Path(p) if p.qself.is_none() => dyn_alias_leaves_of(&p.path)
+                .filter(|l| !l.iter().all(|x| matches!(x.as_str(), "Fn" | "FnMut" | "FnOnce")))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    }
+    let l = trait_leaves(ty, &HashMap::new());
+    if l.iter().all(|x| matches!(x.as_str(), "Fn" | "FnMut" | "FnOnce")) {
+        return Vec::new();
+    }
+    l
+}
+
 pub(crate) fn bound_leaves(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<String> {
     bounds
         .iter()
@@ -607,7 +731,15 @@ pub(crate) fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<
         syn::Type::ImplTrait(t) => bound_leaves(&t.bounds),
         syn::Type::Path(p) => {
             if let Some(id) = p.path.get_ident() {
-                return generic_bounds.get(&id.to_string()).cloned().unwrap_or_default();
+                if let Some(b) = generic_bounds.get(&id.to_string()) {
+                    return b.clone();
+                }
+                return dyn_alias_leaves_of(&p.path).unwrap_or_default();
+            }
+            if p.qself.is_none() {
+                if let Some(l) = dyn_alias_leaves_of(&p.path) {
+                    return l;
+                }
             }
             // Box<dyn T> / Rc / Arc / RefCell / Mutex / RwLock — peel the wrapper, recurse on the arg.
             //
@@ -1335,6 +1467,15 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
 /// although the type contains a `&`.
 pub(crate) fn elem_type_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<(String, bool)> {
     let plain = elem_type_b_plain(ty, uses);
+    // SOUNDNESS R1495 — an element typed through a trait-object alias (`Vec<B>`, `type B = Box<dyn Tw>`) expands, through
+    // the alias map, to the bare WRAPPER (`Box`), a type that names no method; the written `Vec<Box<dyn Tw>>` names no
+    // element type at all and is answered by the element's dispatch leaves (`elem_trait_leaves`). Answer the alias the same.
+    if plain.as_ref().is_some_and(|(t, _)| {
+        matches!(t.rsplit("::").next().unwrap_or(t), "Box" | "Rc" | "Arc" | "Pin") && !t.contains('<')
+    }) && !elem_trait_leaves(ty, &HashMap::new(), &std::collections::HashSet::new()).is_empty()
+    {
+        return None;
+    }
     // SOUNDNESS R1023 — the one-level answer stands wherever it names a NOMINAL element (`Vec<G>` -> `G`,
     // `Mutex<G>` -> `G`): that is every entry the collector's one-level consumers were written for, and
     // it is unchanged. Where it names a std container/`Option` instead (`Option<Vec<G>>` -> `Vec`, one
@@ -8476,6 +8617,9 @@ pub(crate) fn generic_operator_uses(
                         && tp.path.segments[0].ident == "Box"
                         && matches!(&tp.path.segments[0].arguments, syn::PathArguments::AngleBracketed(a)
                             if matches!(a.args.first(), Some(syn::GenericArgument::Type(syn::Type::TraitObject(_)))))
+                    // SOUNDNESS R1495 — …and a trait-object ALIAS (`type W<'a> = &'a mut dyn Write;`), erased the same way.
+                    || tp.qself.is_none() && !tp.path.get_ident().is_some_and(|g| gens.contains(&g.to_string()))
+                        && dyn_alias_leaves_of(&tp.path).is_some()
             }
             syn::Type::ImplTrait(_) => true,
             // SOUNDNESS R1294 — a TRAIT OBJECT parameter (`&mut dyn Write`) is the caller's coercion of its argument, so
@@ -8494,7 +8638,7 @@ pub(crate) fn generic_operator_uses(
     let bounds_of = |t: &syn::Type| -> Option<Vec<String>> {
         let b = match peel_ty_refs(t) {
             syn::Type::Path(tp) if tp.qself.is_none() => match tp.path.get_ident() {
-                Some(g) => fn_bounds.get(&g.to_string()).cloned(),
+                Some(g) => fn_bounds.get(&g.to_string()).cloned().or_else(|| dyn_alias_leaves_of(&tp.path)),
                 None => match &tp.path.segments[0].arguments {
                     syn::PathArguments::AngleBracketed(a) => match a.args.first() {
                         Some(syn::GenericArgument::Type(syn::Type::TraitObject(o))) => Some(bound_leaves(&o.bounds)),
@@ -8868,6 +9012,24 @@ pub(crate) fn generic_operator_uses(
             if let (Some(sl), syn::Expr::Path(p)) = (self.self_leaf, &*c.receiver) {
                 if p.path.is_ident("self") {
                     self.forward(format!("@M:{sl}:{meth}"), &c.args);
+                }
+            }
+            // SOUNDNESS R1494 — …and through a std VIEW of `self` in an impl for std's `String` / `str`: borsh's
+            // `self.as_bytes().serialize(writer)` runs the crate's `[u8]` (or `[T]`) impl with `writer`, so a caller
+            // handing this method a handle reaches that impl's writer (`CallCollector::nonpath_recv_calls` forms the same
+            // keys for the call itself). Both slice keys are forwarded: whichever the crate files answers, a missing one
+            // names no summary.
+            if let (Some(sl @ ("String" | "str")), syn::Expr::MethodCall(v)) = (self.self_leaf, &*c.receiver) {
+                let on_self = matches!(&*v.receiver, syn::Expr::Path(p) if p.path.is_ident("self"));
+                if on_self && v.args.is_empty() && std::env::var_os("CANDOR_R1494_OFF").is_none() {
+                    match v.method.to_string().as_str() {
+                        "as_bytes" | "as_bytes_mut" => {
+                            self.forward(format!("@M:[u8]:{meth}"), &c.args);
+                            self.forward(format!("@M:[_]:{meth}"), &c.args);
+                        }
+                        "as_str" | "as_mut_str" if sl == "String" => self.forward(format!("@M:str:{meth}"), &c.args),
+                        _ => {}
+                    }
                 }
             }
             syn::visit::visit_expr_method_call(self, c);
@@ -12750,33 +12912,8 @@ pub(crate) fn collect_nonpath_receivers(
                         _ => break,
                     };
                 }
-                // SOUNDNESS R1056 — a SLICE / ARRAY / TUPLE referent is keyed the way `impl_unit_type_name`
-                // spells it (`[u8]`, `[u8;_]`, `(u8,u8)`), which is also what the collector builds from a
-                // receiver's element / per-position types. A key naming one of the impl's OWN parameters
-                // (`impl<T: Tr> Tr for [T]`) is a forwarder over T's implementors, not a receiver, and is skipped.
                 if matches!(t, syn::Type::Slice(_) | syn::Type::Array(_) | syn::Type::Tuple(_)) {
-                    let Some(key) = impl_unit_type_name(t, &im.generics) else { continue };
-                    let own = |k: &str| im.generics.type_params().any(|p| {
-                        let id = p.ident.to_string();
-                        k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
-                    });
-                    // SOUNDNESS R1056 (residual) — `impl<T> Tr for [T]` (or `[T; N]`) is not a forwarder: its
-                    // body is the method EVERY slice (array) receiver runs, whatever its element, and skipping
-                    // it left `s.gen_w()` on `&[String]` / `Vec<String>` ABSENT over a write (EXECUTED,
-                    // scratchpad `rustagent-v044/fxvec2`). Filed under the wildcard element `[_]` / `[_;_]`,
-                    // which the collector asks only where no exact key answers. Where the body forwards to
-                    // `T`'s own implementor (`for x in self { x.m() }`), that call is the unit's bounded
-                    // dispatch, the same over-approximation a generic caller already gets. A key that only
-                    // CONTAINS a parameter (`[Vec<T>]`, `(T, u8)`) is still skipped: no receiver forms it.
-                    let elem_is_own_param = |e: &syn::Type| matches!(e, syn::Type::Path(tp)
-                        if tp.qself.is_none() && tp.path.get_ident()
-                            .is_some_and(|id| im.generics.type_params().any(|p| &p.ident == id)));
-                    let key = match t {
-                        syn::Type::Slice(sl) if own(&key) && elem_is_own_param(&sl.elem) => "[_]".to_string(),
-                        syn::Type::Array(ar) if own(&key) && elem_is_own_param(&ar.elem) => "[_;_]".to_string(),
-                        _ if own(&key) => continue,
-                        _ => key,
-                    };
+                    let Some(key) = nonpath_impl_recv_key(im) else { continue };
                     for ii in &im.items {
                         if let syn::ImplItem::Fn(f) = ii {
                             if !include_tests && is_cfg_test(&f.attrs) {
@@ -12811,6 +12948,46 @@ pub(crate) fn collect_nonpath_receivers(
             }
             _ => {}
         }
+    }
+}
+
+/// SOUNDNESS R1056 — the receiver key a SLICE / ARRAY / TUPLE impl (`impl Tr for &[u8]`, `for [T]`, `for (u8, u8)`) is
+/// filed under in `NONPATH_RECV_TAILS`, spelled the way `impl_unit_type_name` spells it (`[u8]`, `[u8;_]`, `(u8,u8)`),
+/// which is also what the collector builds from a receiver's element / per-position types. A key naming one of the impl's
+/// OWN parameters (`impl<T: Tr> Tr for (T, u8)`) is a forwarder over T's implementors, not a receiver: `None`.
+/// `impl<T> Tr for [T]` (or `[T; N]`) is not a forwarder: its body is the method EVERY slice (array) receiver runs,
+/// whatever its element, and skipping it left `s.gen_w()` on `&[String]` / `Vec<String>` ABSENT over a write (EXECUTED,
+/// scratchpad `rustagent-v044/fxvec2`). Filed under the wildcard element `[_]` / `[_;_]`, which the collector asks only
+/// where no exact key answers. Where the body forwards to `T`'s own implementor (`for x in self { x.m() }`), that call is
+/// the unit's bounded dispatch, the same over-approximation a generic caller already gets. A key that only CONTAINS a
+/// parameter (`[Vec<T>]`, `(T, u8)`) is still skipped: no receiver forms it. SOUNDNESS R1494 — the same key files the
+/// impl's R1145 operator summary (`decls`), so a caller handing such a method a std I/O handle resolves the writer.
+pub(crate) fn nonpath_impl_recv_key(im: &syn::ItemImpl) -> Option<String> {
+    let mut t: &syn::Type = &im.self_ty;
+    loop {
+        t = match t {
+            syn::Type::Reference(r) => &r.elem,
+            syn::Type::Paren(p) => &p.elem,
+            syn::Type::Group(g) => &g.elem,
+            _ => break,
+        };
+    }
+    if !matches!(t, syn::Type::Slice(_) | syn::Type::Array(_) | syn::Type::Tuple(_)) {
+        return None;
+    }
+    let key = impl_unit_type_name(t, &im.generics)?;
+    let own = |k: &str| im.generics.type_params().any(|p| {
+        let id = p.ident.to_string();
+        k.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == id)
+    });
+    let elem_is_own_param = |e: &syn::Type| matches!(e, syn::Type::Path(tp)
+        if tp.qself.is_none() && tp.path.get_ident()
+            .is_some_and(|id| im.generics.type_params().any(|p| &p.ident == id)));
+    match t {
+        syn::Type::Slice(sl) if own(&key) && elem_is_own_param(&sl.elem) => Some("[_]".to_string()),
+        syn::Type::Array(ar) if own(&key) && elem_is_own_param(&ar.elem) => Some("[_;_]".to_string()),
+        _ if own(&key) => None,
+        _ => Some(key),
     }
 }
 
