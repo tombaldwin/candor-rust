@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **A call from inside a `#[path]`-redirected module's own-name file no longer reports `Unknown` for the other arms**
+  (SOUNDNESS R1500). With `#[cfg_attr(windows, path = "winsock_c.rs")] mod c;`, rustix's `c.rs` defines `preadv` and
+  calls its own `readwrite_pv64::preadv64` through `crate::backend::c`. The call resolved to `c.rs`, but because the
+  redirected `winsock_c.rs` lacks that item the row was also given `Unknown` with `ambiguous:path-redirected module`.
+  That reason is now dropped when the scan proves the caller is compiled only inside the own-name file, using the same
+  proof as R1484. Every module from that file down to the caller must be placed by exactly one `mod` item, and no macro
+  in the crate may place a module. If the file is also compiled through a second `#[path]` or `mod` item, through the
+  other arm, or through a macro, the reason stays. Callers outside the module and callers in the redirected arm keep it
+  too. Across 1,046 registry crates with a `path` attribute (699,999 rows), 150 rows carry this reason. 80 of them
+  (rustix, 20 versions) lose it. No `inferred` value changed, and no `deny Unknown` gate moved, plain or by reason
+  class, because those rows still inherit `Unknown` from their callee. The other 70 are portable-atomic, which the
+  proof refuses because of its item-position `include!`. `CANDOR_R1500_OFF=1` turns the change off.
 - **A call inside one `#[cfg]` arm of a `#[path]`-redirected module no longer reaches the other arms** (SOUNDNESS R1484).
   In rustix, `backend/libc/process/syscalls.rs` calls `crate::backend::conv::ret_c_int`. That call was linked to both
   the libc and the linux_raw `conv`, but the file is only compiled when `mod backend` is loaded from the libc arm.

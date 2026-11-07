@@ -5693,7 +5693,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         && hits == 0
                         && resolved_local
                         && tail2(&own_q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&own_q));
-                    if !already_handled || twin_only {
+                    // ── SOUNDNESS R1500 — A CALLER PROVEN INSIDE THE TWIN IS NOT ASKING ABOUT THE OTHER ARMS ─────────────
+                    // `twin_only` discloses the redirected arms as unread where the call resolved to the own-name twin
+                    // alone. That is a true disclosure for a caller that could compile beside a redirected arm, and a
+                    // false `Unknown` for one R1484's placement proof puts INSIDE the twin: in every build that compiles
+                    // the caller, `crate::<m>` is the twin (one name, one `mod` item per build), and the twin holds the
+                    // item exactly, so the redirected arms are not candidates for this call. rustix's `backend::libc::c`
+                    // (`#[cfg_attr(windows, path = "winsock_c.rs")] mod c;`) hedged its own `preadv` this way. Dropped only
+                    // where `r1484_own_arm` returns the twin itself — the same proof: every module from the twin to the
+                    // caller placed by exactly one `mod` item, no macro that may place a module. A twin file compiled a
+                    // second time (`#[path]`, a second `mod`, the other arm including it, a macro) keeps the hedge (EXECUTED,
+                    // `rustagent-ownname/fx` `k_*`: each WROTE through the other arm's re-export, and the hedge is the
+                    // only charge). `CANDOR_R1500_OFF=1` restores R1475's hedge here.
+                    let own_twin = twin_only
+                        && own_arm.as_deref() == Some(m.as_str())
+                        && std::env::var_os("CANDOR_R1500_OFF").is_none();
+                    if twin_only && std::env::var_os("CANDOR_R1500_INSTR").is_some() {
+                        eprintln!("R1500TWIN\t{}\t{}\t{}", f.qual, c.path, if own_twin { "drop" } else { "keep" }); // §E1
+                    }
+                    if !already_handled || (twin_only && !own_twin) {
                         direct.entry(f.qual.clone()).or_default().insert("Unknown");
                         unknown_why
                             .entry(f.qual.clone())

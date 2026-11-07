@@ -29166,11 +29166,51 @@ fn r1484_a_caller_inside_one_arm_names_its_own_arm_only_where_that_is_proven() {
         ("src/a.rs", &format!("#[path = \"b.rs\"] mod inner;\npub use inner::*;\n{caller}")),
         ("src/b.rs", &format!("{fs_w}{caller}"))]);
     assert!(fs(&v, "a::caller"), "own arm misses the item exactly — keep the union:\n{v:#}");
-    // R1475's disclosure is not moved: a caller inside the twin whose redirected arm lacks the item keeps its hedge
+    // R1500 moved R1475's disclosure for this shape: a caller PROVEN inside the twin is not asking about the other arm
     let v = scan_src_to_json_multi("r1484j", &[
         ("src/lib.rs", "#[cfg(unix)] mod imp { pub fn helper() {} pub fn caller() { crate::imp::helper() } }\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n"),
         ("src/w.rs", "pub fn other() {}\n")]);
-    assert!(row_why(&v, "imp::caller").iter().any(|w| w == "ambiguous:path-redirected module crate::imp"), "{v:#}");
+    assert!(veina_row_effs(&v, "imp::caller").is_empty(), "{v:#}");
+}
+
+/// SOUNDNESS R1500 — R1475's `twin_only` hedge (a call through a path-redirected module's own name that resolved to the
+/// own-name twin while no redirected arm holds the item exactly) fired for a caller R1484's placement proof puts INSIDE
+/// the twin, where `crate::imp` IS the twin in every build that compiles the caller: a false `Unknown` (EXECUTED,
+/// `rustagent-ownname/fx` `d_*`: never write, `deny Unknown` 1). Dropped only under that proof. KEEP: the twin's file
+/// compiled a second time — a `#[path]` mod, the OTHER arm including it, a macro — where `crate::imp` is the redirected
+/// arm reaching a WRITING helper through a re-export (EXECUTED `k_*`: each WROTE, and the hedge is its only charge; with
+/// the proof bypassed every one of them passed both gates), a caller outside the twin, and a caller in the redirected arm.
+#[test]
+fn r1500_a_caller_proven_inside_the_own_name_twin_is_not_hedged_about_the_other_arms() {
+    let w = "mod x { pub fn helper() { let _ = std::fs::write(\"/tmp/r1500\", \"x\"); } }\npub use x::helper;\n";
+    let imp = "pub fn helper() {}\npub fn caller() { crate::imp::helper() }\n";
+    let hedged = |v: &serde_json::Value, f: &str| {
+        veina_row_effs(v, f).contains(&"Unknown".to_string())
+            && row_why(v, f).iter().any(|w| w == "ambiguous:path-redirected module crate::imp")
+    };
+    let twin = "#[cfg(unix)] mod imp;\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n";
+    // DROP: a file twin, a single `cfg_attr` item, a caller in a submodule of the twin
+    let v = scan_src_to_json_multi("r1500a", &[("src/lib.rs", twin), ("src/imp.rs", imp), ("src/w.rs", w)]);
+    assert!(veina_row_effs(&v, "imp::caller").is_empty(), "file twin:\n{v:#}");
+    let v = scan_src_to_json_multi("r1500b", &[("src/lib.rs", "#[cfg_attr(windows, path = \"w.rs\")]\nmod imp;\n"), ("src/imp.rs", imp), ("src/w.rs", w)]);
+    assert!(veina_row_effs(&v, "imp::caller").is_empty(), "one cfg_attr item:\n{v:#}");
+    let v = scan_src_to_json_multi("r1500c", &[("src/lib.rs", twin), ("src/imp/mod.rs", "pub fn helper() {}\npub mod sub;\n"),
+        ("src/imp/sub.rs", "pub fn caller() { crate::imp::helper() }\n"), ("src/w.rs", w)]);
+    assert!(veina_row_effs(&v, "imp::sub::caller").is_empty(), "submodule of the twin:\n{v:#}");
+    // KEEP: the twin's file compiled a second time where `crate::imp` is the redirected arm
+    let other = "#[cfg(windows)] mod imp;\n#[cfg(unix)] #[path = \"w.rs\"] mod imp;\n";
+    for (tag, lib, wsrc) in [
+        ("r1500d", format!("{other}#[path = \"imp.rs\"] mod shared;\n"), w.to_string()),
+        ("r1500e", other.to_string(), format!("#[path = \"imp.rs\"] mod inner;\npub use inner::caller;\n{w}")),
+        ("r1500f", format!("macro_rules! m {{ ($($t:tt)*) => {{ $($t)* }} }}\n{other}m! {{ #[path = \"imp.rs\"] mod shared; }}\n"), w.to_string()),
+    ] {
+        let v = scan_src_to_json_multi(tag, &[("src/lib.rs", &lib), ("src/imp.rs", imp), ("src/w.rs", &wsrc)]);
+        assert!(hedged(&v, "imp::caller"), "{tag}: the twin's file also compiles under the redirected arm:\n{v:#}");
+    }
+    // KEEP: a caller outside the twin, and one in the redirected arm (its own arm reaches the item only by re-export)
+    let v = scan_src_to_json_multi("r1500g", &[("src/lib.rs", &format!("{other}pub fn outside() {{ imp::helper() }}\n")),
+        ("src/imp.rs", "pub fn helper() {}\n"), ("src/w.rs", &format!("{w}pub fn caller() {{ crate::imp::helper() }}\n"))]);
+    assert!(hedged(&v, "outside") && hedged(&v, "w::caller"), "{v:#}");
 }
 
 /// VEIN A — THE RESIDUE: a contested tail no written path settles (a `#[cfg]` arm set re-exported under one
