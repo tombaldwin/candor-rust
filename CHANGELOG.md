@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **A call inside one `#[cfg]` arm of a `#[path]`-redirected module no longer reaches the other arms** (SOUNDNESS R1484).
+  In rustix, `backend/libc/process/syscalls.rs` calls `crate::backend::conv::ret_c_int`. That call was linked to both
+  the libc and the linux_raw `conv`, but the file is only compiled when `mod backend` is loaded from the libc arm.
+  Several `mod` items with the same name in one module never compile together, so the call now reaches only the
+  caller's own arm. This only happens when the scan can prove that the caller's file is compiled nowhere else:
+  - every module from the arm down to the caller is placed by exactly one `mod` item;
+  - the crate has no macro that might place a module the scan cannot see;
+  - the caller's own arm defines the item at exactly that path.
+  Otherwise the call still reaches every arm, as before. A caller outside the arms still reaches every arm, and no
+  `Unknown` or `unknownWhy` changes. Across 908 registry crates with a `#[path]` module, 11,270 cross-arm links went
+  (rustix, native-tls, net2), along with 12,918 `invisible` entries that came only through them. No `inferred` value
+  changed on any of the 660,516 rows. `CANDOR_R1484_OFF=1` turns the change off. Cache rev148.
 - ⚠ **A write through a generic writer reached from a slice or string receiver is now charged** (SOUNDNESS R1494). In
   `impl Ser for String { fn ser<W: Write>(&self, w: &mut W) { self.as_bytes().ser(w) } }` (the shape of borsh's
   `BorshSerialize for String`), the call on `self.as_bytes()` had no type, so it reached no body and was not disclosed;

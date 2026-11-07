@@ -5645,6 +5645,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // A/B: core_detect, every call inside its redirected `os` file read `ambiguous:` beside its own edge).
                     let in_arm = arms.iter().any(|a| a != m && body.strip_prefix(a.as_str()).is_some_and(|r| r.starts_with("::")));
                     let r1475 = std::env::var_os("CANDOR_R1475_OFF").is_none() && !in_arm;
+                    // ── SOUNDNESS R1484 — A CALLER INSIDE ONE ARM NAMES ITS OWN ARM ─────────────────────────────────
+                    // `crate::backend::conv::ret_c_int` written in rustix's `backend/libc/process/syscalls.rs` was edged
+                    // to the libc AND the linux_raw `conv` — but the caller compiles only where `mod backend` was loaded
+                    // from the libc file, and in that build `crate::backend` IS the libc arm. Exclusivity is not decided by
+                    // evaluating `#[cfg]` predicates (they overlap: `unix` and `target_os = "macos"`): the arms are
+                    // targets of `mod` items of ONE name at ONE parent, and a module name is declared once per build
+                    // (E0428; one item takes one `path`), so no build compiles two of them. What must be PROVEN is that the
+                    // caller sits ONLY inside its arm: `r1484_own_arm` requires every module from the arm down to the
+                    // caller to be placed by exactly one `mod` item (a file `#[path]`-included or `mod`-declared a second
+                    // time compiles where `crate::backend` is the OTHER arm — EXECUTED `fx1484/k_shared_*`), and refuses
+                    // the whole crate when a macro may place a module unseen. The sibling arms are dropped only when the
+                    // own arm holds the item EXACTLY; a miss (a re-export of the other arm's file, `k_reexport_other`)
+                    // keeps the union. The disclosure below is untouched. `CANDOR_R1484_OFF=1` restores R1475.
+                    let own_arm = if r1475 && std::env::var_os("CANDOR_R1484_OFF").is_none() {
+                        r1484_own_arm(&f.qual, &f.loc, m, arms, &merged.mod_places).filter(|a| {
+                            let q = format!("{a}::{rest}");
+                            tail2(&q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&q))
+                        })
+                    } else {
+                        None
+                    };
+                    if std::env::var_os("CANDOR_R1484_INSTR").is_some() && r1475 {
+                        let cross: Vec<&String> = arms.iter().filter(|a| *a != m && Some(*a) != own_arm.as_ref()).collect();
+                        eprintln!("R1484ARM\t{}\t{}\t{}\t{}", f.qual, c.path, own_arm.as_deref().unwrap_or("-"),
+                            cross.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(",")); // §E1
+                    }
                     let (mut tried, mut hits) = (0usize, 0usize);
                     for arm in arms.iter().filter(|a| *a != m && r1475) {
                         tried += 1;
@@ -5652,7 +5678,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let hit = tail2(&q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&q));
                         if hit {
                             hits += 1;
-                            if q != f.qual {
+                            // `tried`/`hits` still count every arm: R1475's `twin_only` disclosure below is not this
+                            // row's to move (R1484 removes EDGES only; measured — narrowing the count withdrew 80 hedges).
+                            if q != f.qual && own_arm.as_ref().is_none_or(|o| o == arm) {
                                 calls.entry(f.qual.clone()).or_default().insert(q.clone());
                             }
                         }
@@ -10076,3 +10104,57 @@ pub(crate) fn exact_ty_module_settled(target: &str, writer: &str, g: &ExactGuard
     true
 }
 
+/// SOUNDNESS R1484 — the arm of path-redirected module `m` that the caller `qual` (defined at `loc`) PROVABLY compiles
+/// inside, or `None` when that is not proven. The arm is the longest of `arms` the qual sits under (`m` itself — a twin at
+/// the module's own name — only when no other arm holds it). Proof: every module from the arm down to the caller is placed
+/// by exactly ONE `mod` item (`places`, `decls::collect_mod_places`), the arm by `m`'s own and each deeper one by an item
+/// declared inside the chain, and every module between the arm and the caller's FILE is placed at all (an unplaced one
+/// was declared somewhere this scan cannot see). A crate where a macro may place a module refuses outright.
+fn r1484_own_arm(
+    qual: &str,
+    loc: &str,
+    m: &str,
+    arms: &[String],
+    places: &HashMap<String, std::collections::BTreeSet<String>>,
+) -> Option<String> {
+    if places.contains_key(crate::decls::HIDDEN_MOD_PLACE) {
+        return None;
+    }
+    let under = |q: &str, a: &str| q.strip_prefix(a).is_some_and(|r| r.starts_with("::"));
+    let arm = arms
+        .iter()
+        .filter(|a| a.as_str() != m && under(qual, a))
+        .max_by_key(|a| a.len())
+        .cloned()
+        .or_else(|| under(qual, m).then(|| m.to_string()))?;
+    let file = loc.rsplitn(3, ':').nth(2).unwrap_or("");
+    if file.is_empty() {
+        return None;
+    }
+    let file_mod = crate::lang::module_path(Path::new(file));
+    let segs: Vec<&str> = qual.split("::").collect();
+    let arm_n = arm.split("::").count();
+    for n in arm_n..segs.len() {
+        let q = segs[..n].join("::");
+        let to_file = q == file_mod || under(&file_mod, &q);
+        match places.get(&q) {
+            Some(by) if by.len() == 1 => {
+                let d = by.iter().next().unwrap();
+                if n == arm_n {
+                    if d != m {
+                        return None;
+                    }
+                } else {
+                    let parent = d.rsplit_once("::").map_or("", |(p, _)| p);
+                    if !(parent == arm || under(parent, &arm)) || !(qual == parent || under(qual, parent)) {
+                        return None;
+                    }
+                }
+            }
+            Some(_) => return None,
+            None if to_file || n == arm_n => return None,
+            None => {}
+        }
+    }
+    Some(arm)
+}

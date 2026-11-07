@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev148 (rustagent-r1484): SOUNDNESS R1484 — `FileDecls` gains `mod_places` (every `mod` item's placed module paths);
+    // a rev147 entry has none and would narrow nothing warm while the cold scan narrows. Mandatory.
     // rev147 (rustagent-r1494): SOUNDNESS R1494 — Pass A files a slice / array / tuple impl's `<genop>` summary under its
     // receiver key and forwards `self.as_bytes().m(w)` in a `String`/`str` impl (cached decls move); Pass B forms the typed
     // call for a str/String view or a string literal receiver and binds the written std-handle self (cached `calls` move).
@@ -577,7 +579,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev147/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev148/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -738,6 +740,11 @@ pub(crate) struct FileDecls {
     /// which would pick where it must refuse — hence rev142.
     #[serde(default)]
     pub(crate) use_bound: Vec<String>,
+    /// SOUNDNESS R1484 — `(placed module path, declaring item's own path)` for every `mod` item in the file
+    /// (`decls::collect_mod_places`). Deserializes EMPTY from an older entry, which proves no placement and so
+    /// narrows nothing (the pre-R1484 union, an over-charge) — rev148 re-derives it anyway.
+    #[serde(default)]
+    pub(crate) mod_places: Vec<(String, String)>,
     /// R128 — MODULE QUALS in this file whose item list carries an unexpanded item-position MACRO
     /// INVOCATION (`foo!();`, `cfg_rt! { .. }`, `include!("gen.rs")`). Those items are skipped by
     /// `collect_decls`, so the module's decl/re-export entries are INCOMPLETE and a call naming a name
@@ -905,6 +912,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     collect_reexports(items, modpath, &dir, include_tests, &uses, &mut reexports, &mut mod_aliases);
     let mut use_bound = Vec::new();
     crate::decls::collect_use_bound(items, modpath, &dir, include_tests, &mut use_bound);
+    let mut mod_places = Vec::new();
+    crate::decls::collect_mod_places(items, modpath, &dir, include_tests, &mut mod_places);
     // R128 + R452 — ONE walk, two facts: which of this file's modules had items hidden behind an
     // unexpanded macro, and which TYPES those modules declare. Computed here rather than in the struct
     // literal so the second cannot be derived from a different module set than the first.
@@ -1033,6 +1042,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         reexports,
         mod_aliases,
         use_bound,
+        mod_places,
         // R128 — which of this file's modules had items hidden behind an unexpanded macro invocation.
         // Keyed on the module QUAL (the file's own `modpath` for its top level), which is the same key
         // space a call's resolved `crate::…` path reduces to at the resolver.
@@ -1140,6 +1150,9 @@ pub(crate) struct MergedDecls {
     pub(crate) mod_aliases: HashMap<String, String>,
     /// EXACT-FIRST — every file's `use`-bound `{module}::{name}` (see `FileDecls::use_bound`), unioned.
     pub(crate) use_bound: std::collections::HashSet<String>,
+    /// SOUNDNESS R1484 — placed module path -> every `mod` item (by its own declared path) that places a body there,
+    /// unioned over the crate's files (see `FileDecls::mod_places`).
+    pub(crate) mod_places: HashMap<String, std::collections::BTreeSet<String>>,
     /// R128 — every file's MACRO-HIDDEN module quals, unioned. A module in this set had item-position
     /// macro invocations its decl walk could not read, so "this module declares no such name" is a
     /// statement candor is NOT entitled to make about it. See `collect_macro_modules`.
@@ -1959,6 +1972,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     // resulting index does not depend on this order.
     acc.reexports.extend(fd.reexports.iter().cloned());
     acc.use_bound.extend(fd.use_bound.iter().cloned());
+    for (placed, by) in &fd.mod_places {
+        acc.mod_places.entry(placed.clone()).or_default().insert(by.clone());
+    }
     for (k, v) in &fd.mod_aliases {
         // R105 — this used to be a plain insert, carrying the assertion that "a cross-file collision means
         // two declarations of one name in one module — not a program that compiles". MEASURED FALSE, by
@@ -2424,6 +2440,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for k in ub {
         s.push('|');
         s.push_str(k);
+    }
+    s.push('\n');
+    // SOUNDNESS R1484 — `mod_places` is read live by `scan_one` (the cross-arm narrowing), not baked into an FnInfo; folded
+    // in for the same reason `use_bound` is.
+    s.push_str("mod_places");
+    let mut mp: Vec<(&String, &std::collections::BTreeSet<String>)> = m.mod_places.iter().collect();
+    mp.sort();
+    for (k, v) in mp {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&v.iter().cloned().collect::<Vec<_>>().join(","));
     }
     s.push('\n');
     // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the

@@ -16807,6 +16807,8 @@ trait G {
             // `{ty}::{method}` is read as that trait's implementation at all, so a file gaining or
             // losing an impl member changes what the interface-union publishes for the whole crate.
             impl_members => |m| { m.impl_members.insert(crate::model::impl_member_key("Enc", "RData", "to_bytes")); },
+            // SOUNDNESS R1484: which `mod` items place a module, which decides whether a cross-arm edge is dropped.
+            mod_places => |m| { m.mod_places.entry("u".into()).or_default().insert("imp".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -18441,7 +18443,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18452,7 +18454,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev147/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev148/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -29099,6 +29101,76 @@ fn r1475_a_call_through_a_path_redirected_module_reaches_every_arm() {
     ]);
     assert!(fs(&v, "only_a") && !unk(&v, "only_a"), "one arm holds it: {v:#}");
     assert!(fs(&v, "imp::a::extra") && !unk(&v, "imp::a::extra"), "a call inside the arm file: {v:#}");
+}
+
+/// SOUNDNESS R1484 — a caller INSIDE one arm of a path-redirected module, writing `crate::imp::helper()`, was edged to the
+/// same-named item in EVERY arm (R1475's union), though no build compiles two arms of one `mod` name together (EXECUTED,
+/// `rustagent-r1484/fx`: `d_*` never write and `deny Fs` was 1). It now names its own arm alone — but only where the caller
+/// provably compiles nowhere else: a file `#[path]`-included or `mod`-declared a second time (`k_shared_*`, EXECUTED WROTE
+/// through the OTHER arm), an own arm reaching the item only through a re-export of the other arm's file, and a crate whose
+/// macros may place a module unseen all keep the union. A caller OUTSIDE the arms keeps the union.
+#[test]
+fn r1484_a_caller_inside_one_arm_names_its_own_arm_only_where_that_is_proven() {
+    let fs_w = "pub fn helper() { let _ = std::fs::write(\"/tmp/r1484\", \"x\"); }\n";
+    let pure = "pub fn helper() {}\n";
+    let caller = "pub fn caller() { crate::imp::helper() }\n";
+    let uw = "#[cfg(unix)] #[path = \"u.rs\"] mod imp;\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n";
+    let fs = |v: &serde_json::Value, f: &str| veina_row_effs(v, f).contains(&"Fs".to_string());
+    let calls = |v: &serde_json::Value, f: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f)
+            .and_then(|r| r["calls"].as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    // DROP: the sibling arm alone writes; the in-arm caller keeps its own-arm edge and loses the sibling's
+    let v = scan_src_to_json_multi("r1484a", &[
+        ("src/lib.rs", &format!("{uw}pub fn outside() {{ imp::helper() }}\n")),
+        ("src/u.rs", &format!("{pure}{caller}")), ("src/w.rs", &format!("{fs_w}{caller}"))]);
+    assert!(!fs(&v, "u::caller"), "u::caller names its own pure arm:\n{v:#}");
+    assert!(fs(&v, "w::caller"), "w::caller keeps its own writing arm:\n{v:#}");
+    assert!(fs(&v, "outside"), "a caller OUTSIDE the arms keeps the union:\n{v:#}");
+    let cw = calls(&v, "w::caller");
+    assert!(cw.contains(&"w::helper".to_string()) && !cw.contains(&"u::helper".to_string()), "{cw:?}");
+    // DROP, nested (rustix's `backend/<arm>/process` -> `crate::backend::conv`), and an inline twin at the own name
+    let nested = |tag: &str, u_conv: &str, w_conv: &str| scan_src_to_json_multi(tag, &[
+        ("src/lib.rs", "#[cfg_attr(unix, path = \"backend/u/mod.rs\")]\n#[cfg_attr(windows, path = \"backend/w/mod.rs\")]\nmod backend;\n"),
+        ("src/backend/u/mod.rs", "pub mod conv;\npub mod process;\n"), ("src/backend/u/conv.rs", u_conv),
+        ("src/backend/u/process.rs", "pub fn caller() { crate::backend::conv::helper() }\n"),
+        ("src/backend/w/mod.rs", "pub mod conv;\npub mod process;\n"), ("src/backend/w/conv.rs", w_conv),
+        ("src/backend/w/process.rs", "pub fn caller() { crate::backend::conv::helper() }\n")]);
+    assert!(!fs(&nested("r1484b", pure, fs_w), "backend::u::process::caller"), "nested drop");
+    assert!(fs(&nested("r1484c", fs_w, pure), "backend::u::process::caller"), "nested mirror: own arm writes");
+    let v = scan_src_to_json_multi("r1484d", &[
+        ("src/lib.rs", "#[cfg(unix)] mod imp { pub fn helper() {} pub fn caller() { crate::imp::helper() } }\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n"),
+        ("src/w.rs", &format!("{fs_w}{caller}"))]);
+    assert!(!fs(&v, "imp::caller") && veina_row_effs(&v, "imp::caller").is_empty(), "inline twin:\n{v:#}");
+    // KEEP: the caller's file is compiled a second time where `crate::imp` is the writing arm
+    for (tag, lib, gate) in [
+        ("r1484e", "#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n#[cfg(unix)] #[path = \"u.rs\"] mod imp;\n#[path = \"w.rs\"] mod shared;\n", "w::caller"),
+        ("r1484f", "mod w;\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n#[cfg(unix)] #[path = \"u.rs\"] mod imp;\n", "w::caller"),
+        ("r1484g", &format!("macro_rules! m {{ ($($t:tt)*) => {{ $($t)* }} }}\nm! {{ mod hidden; }}\n{uw}"), "w::caller"),
+    ] {
+        let (wsrc, usrc) = if gate == "w::caller" && tag != "r1484g" { (format!("{pure}{caller}"), fs_w.to_string()) } else { (format!("{fs_w}{caller}"), format!("{pure}{caller}")) };
+        let probe = if tag == "r1484g" { "u::caller" } else { gate };
+        let v = scan_src_to_json_multi(tag, &[("src/lib.rs", lib), ("src/w.rs", &wsrc), ("src/u.rs", &usrc)]);
+        assert!(fs(&v, probe), "{tag}: `{probe}` must keep the other arm's write:\n{v:#}");
+    }
+    let v = scan_src_to_json_multi("r1484h", &[
+        ("src/lib.rs", "#[cfg_attr(windows, path = \"backend/w/mod.rs\")]\n#[cfg_attr(unix, path = \"backend/u/mod.rs\")]\nmod backend;\n"),
+        ("src/backend/w/mod.rs", "pub mod conv;\npub fn helper() {}\n"),
+        ("src/backend/w/conv.rs", "pub fn caller() { crate::backend::helper() }\n"),
+        ("src/backend/u/mod.rs", &format!("#[path = \"../w/conv.rs\"] pub mod conv;\n{fs_w}"))]);
+    assert!(fs(&v, "backend::w::conv::caller"), "a file the OTHER arm `#[path]`-includes keeps the union:\n{v:#}");
+    // KEEP: the own arm reaches the item only through a re-export of the other arm's file
+    let v = scan_src_to_json_multi("r1484i", &[
+        ("src/lib.rs", "#[cfg(unix)] #[path = \"a.rs\"] mod imp;\n#[cfg(windows)] #[path = \"b.rs\"] mod imp;\n"),
+        ("src/a.rs", &format!("#[path = \"b.rs\"] mod inner;\npub use inner::*;\n{caller}")),
+        ("src/b.rs", &format!("{fs_w}{caller}"))]);
+    assert!(fs(&v, "a::caller"), "own arm misses the item exactly — keep the union:\n{v:#}");
+    // R1475's disclosure is not moved: a caller inside the twin whose redirected arm lacks the item keeps its hedge
+    let v = scan_src_to_json_multi("r1484j", &[
+        ("src/lib.rs", "#[cfg(unix)] mod imp { pub fn helper() {} pub fn caller() { crate::imp::helper() } }\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n"),
+        ("src/w.rs", "pub fn other() {}\n")]);
+    assert!(row_why(&v, "imp::caller").iter().any(|w| w == "ambiguous:path-redirected module crate::imp"), "{v:#}");
 }
 
 /// VEIN A — THE RESIDUE: a contested tail no written path settles (a `#[cfg]` arm set re-exported under one

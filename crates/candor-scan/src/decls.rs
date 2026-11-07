@@ -2234,6 +2234,91 @@ fn use_source_qual(segs: &[String], name: &str, modpath: &str) -> String {
 /// `fx/adv/b7_*`, the typer held the dead `use` arm while the declared, effectful arm ran).
 pub(crate) const CONTESTED_NAME_MARK: &str = "\u{6}contested\u{6}";
 
+/// SOUNDNESS R1484 — the `mod_places` entry recorded for a file that holds an item-position macro whose text could
+/// declare a module (`mod` / `path =` tokens): a placement this walk cannot see may exist, so no placement count in
+/// the crate is trusted (`scan.rs` refuses every cross-arm narrowing when it is present).
+pub(crate) const HIDDEN_MOD_PLACE: &str = "\u{6}hidden-mod\u{6}";
+
+/// SOUNDNESS R1484 — every module path a `mod` item in this file PLACES a body at, paired with the item's own
+/// declared path (`{modpath}::{name}`). An item with `#[path]` / `#[cfg_attr(_, path = ..)]` places each named file
+/// (as `mod_targets` resolves it); an item with no PLAIN `#[path]` also places its default `{modpath}::{name}`, since a
+/// `cfg_attr` path may not apply. Inline modules recurse. `scan.rs` reads the crate-wide union to prove that a caller
+/// sits in exactly one compiled position, which is what licenses resolving `crate::<m>::..` written inside an arm of
+/// `m` to that arm alone.
+pub(crate) fn collect_mod_places(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+    out: &mut Vec<(String, String)>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Mod(md) => {
+                if !include_tests && is_cfg_test(&md.attrs) {
+                    continue;
+                }
+                let name = md.ident.to_string();
+                let own = qualify(modpath, &name);
+                let plain_path = md.attrs.iter().any(|a| a.path().is_ident("path"));
+                for p in mod_path_attrs(&md.attrs) {
+                    out.push((module_path(&normalize_rel(&dir.join(p))), own.clone()));
+                }
+                if !plain_path {
+                    out.push((own.clone(), own.clone()));
+                }
+                if let Some((_, inner)) = &md.content {
+                    collect_mod_places(inner, &own, &dir.join(&name), include_tests, out);
+                }
+            }
+            // A `macro_rules!` DEFINITION places nothing (its invocation is its own item); any other item-position macro
+            // whose tokens hold a `mod NAME;` / `mod NAME { .. }` item or a `path = ".."` attribute, or an `include!`,
+            // may place a module this walk does not see.
+            syn::Item::Macro(m)
+                if m.ident.is_none()
+                    && (m.mac.path.is_ident("include") || tokens_may_place_mod(m.mac.tokens.clone())) =>
+            {
+                out.push((HIDDEN_MOD_PLACE.to_string(), modpath.to_string()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1484 — whether a macro's tokens hold a `mod NAME;` / `mod NAME { .. }` item or a `path = "…"` attribute, at
+/// any depth. Token-level, so a `path` PARAMETER or a `mod` inside a string does not count.
+fn tokens_may_place_mod(ts: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::{Delimiter, TokenTree};
+    let toks: Vec<TokenTree> = ts.into_iter().collect();
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            TokenTree::Group(g) => {
+                if tokens_may_place_mod(g.stream()) {
+                    return true;
+                }
+            }
+            TokenTree::Ident(id) if id == "mod" => {
+                if let (Some(TokenTree::Ident(_)), Some(next)) = (toks.get(i + 1), toks.get(i + 2)) {
+                    match next {
+                        TokenTree::Punct(p) if p.as_char() == ';' => return true,
+                        TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => return true,
+                        _ => {}
+                    }
+                }
+            }
+            TokenTree::Ident(id) if id == "path" => {
+                if let (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(l))) = (toks.get(i + 1), toks.get(i + 2)) {
+                    if p.as_char() == '=' && l.to_string().starts_with('"') {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(crate) fn collect_use_bound(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool, out: &mut Vec<String>) {
     let declared: std::collections::HashSet<String> = items
         .iter()
