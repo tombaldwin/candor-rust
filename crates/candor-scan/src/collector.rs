@@ -2822,13 +2822,30 @@ impl<'a> CallCollector<'a> {
             return;
         }
         let head = written.split("::").next().unwrap_or(written);
-        let Some(arms) = self.use_alts.get(head).filter(|a| a.len() >= 2).cloned() else { return };
+        // SOUNDNESS R1488/R1489 — or a MODULE alias whose seeded value carries the arms (`#[cfg]`-duplicated `type A1`,
+        // and a mixed alias/struct twin): keyed by the LONGEST written prefix it is seeded under (`mm::T`). `uses` holds
+        // the joined value, so the primary leaf above was read off the LAST arm of it — a pick by sort order (EXECUTED
+        // `fx2/drop_mxa_let`: the active alias arm's `Drop` writes and only the inactive struct's was marked).
+        let (key, arms) = match self.use_alts.get(head).filter(|a| a.len() >= 2).cloned() {
+            Some(a) => (head.to_string(), a),
+            None if std::env::var_os("CANDOR_R1488_OFF").is_none() => {
+                let segs: Vec<&str> = written.split("::").collect();
+                let Some((k, v)) = (1..=segs.len()).rev().find_map(|n| {
+                    let k = segs[..n].join("::");
+                    self.uses.get(&k).filter(|v| v.contains(crate::decls::ALIAS_ALT_SEP)).map(|v| (k, v.clone()))
+                }) else {
+                    return;
+                };
+                (k, v.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()).map(String::from).collect())
+            }
+            None => return,
+        };
         if primary.is_some_and(|p| self.escaping_ctors.contains(p)) && !charge_at_construction() {
             return;
         }
         for a in arms {
             let mut u2: HashMap<String, String> = (*self.uses).clone();
-            u2.insert(head.to_string(), a);
+            u2.insert(key.clone(), a);
             let Some(l) = leaf_under(&u2) else { continue };
             let full = crate::lang::expand(written, &u2);
             let q = self.ctor_twin_qual(Some(&l), &full, false);
@@ -4088,24 +4105,47 @@ impl<'a> CallCollector<'a> {
             }
         }
         let base = recv?;
+        let one = |base: String| -> Option<String> {
+            if let Some(g) = self.impl_generic_return(&m.receiver, &base, &name, "") {
+                return Some(g); // R979
+            }
+            let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+            let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, &name));
+            let same = self.returns.contains_key(&crate::model::impl_self_ret_key(base_leaf, &name));
+            match (ret, same) {
+                (Some(r), false) => Some(r.clone()),
+                (None, true) => Some(base),
+                // Both declared (two same-leaf types disagree) — the index cannot say which: unknown.
+                (Some(_), true) => None,
+                // Nothing declared. `unwrap`/`expect` are the `?` of a method chain, and every fact above
+                // is recorded with `Result`/`Option` already unwrapped, so they pass the receiver's type on.
+                (None, false) => matches!(name.as_str(), "unwrap" | "expect" | "unwrap_unchecked").then_some(base),
+            }
+        };
         if base.contains(crate::decls::ALIAS_ALT_SEP) {
-            return None;
+            // SOUNDNESS R1488/R1489 — a `#[cfg]`-duplicated receiver type (the decl index now carries the arms of a `type`
+            // alias twin and of a mixed alias/struct twin): each arm's return, joined — the union, as the receiver is.
+            // Refused outright before, which the joined spelling made the common case: `poll_fd.revents().intersects(..)`
+            // lost its edge once `PollFd` carried its two arms (polling, measured in the R1488 A/B). An arm whose return
+            // the index cannot answer contributes nothing, exactly as a single receiver of that type would; if none
+            // answers, unknown, as before.
+            if std::env::var_os("CANDOR_R1488_OFF").is_some() {
+                return None;
+            }
+            let mut arms: Vec<String> = Vec::new();
+            for a in base.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                if let Some(r) = one(a.to_string()) {
+                    for x in r.split(crate::decls::ALIAS_ALT_SEP) {
+                        if !arms.iter().any(|y| y == x) {
+                            arms.push(x.to_string());
+                        }
+                    }
+                }
+            }
+            arms.sort_unstable();
+            return (!arms.is_empty()).then(|| arms.join(&crate::decls::ALIAS_ALT_SEP.to_string()));
         }
-        if let Some(g) = self.impl_generic_return(&m.receiver, &base, &name, "") {
-            return Some(g); // R979
-        }
-        let base_leaf = base.rsplit("::").next().unwrap_or(&base);
-        let ret = self.returns.get(&crate::model::impl_ret_key(base_leaf, &name));
-        let same = self.returns.contains_key(&crate::model::impl_self_ret_key(base_leaf, &name));
-        match (ret, same) {
-            (Some(r), false) => Some(r.clone()),
-            (None, true) => Some(base),
-            // Both declared (two same-leaf types disagree) — the index cannot say which: unknown.
-            (Some(_), true) => None,
-            // Nothing declared. `unwrap`/`expect` are the `?` of a method chain, and every fact above
-            // is recorded with `Result`/`Option` already unwrapped, so they pass the receiver's type on.
-            (None, false) => matches!(name.as_str(), "unwrap" | "expect" | "unwrap_unchecked").then_some(base),
-        }
+        one(base)
     }
 
     /// VEIN B — A STD WRAPPER'S TYPE IS ITS TYPE ARGUMENT, through the accessors that yield it. `kind` is
@@ -7026,12 +7066,23 @@ impl<'a> CallCollector<'a> {
 
     /// SOUNDNESS R1477 — `lang::clone_peeled_ty` with this scope's `use` map, every `#[cfg]` arm of a duplicated name joined.
     pub(crate) fn clone_peeled_decl(&self, ty: &syn::Type) -> bool {
-        crate::lang::clone_peeled_ty(ty, &|p: &syn::Path| {
-            let written = crate::lang::path_to_string_lc(p);
-            let head = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
-            let full = crate::lang::expand(&written, &self.uses);
-            self.union_over_arms(&head, full, |u| Some(crate::lang::expand(&written, u)))
-        })
+        crate::lang::clone_peeled_ty_ra(
+            ty,
+            &|p: &syn::Path| {
+                let written = crate::lang::path_to_string_lc(p);
+                let head = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+                let full = crate::lang::expand(&written, &self.uses);
+                self.union_over_arms(&head, full, |u| Some(crate::lang::expand(&written, u)))
+            },
+            // SOUNDNESS R1487 — a reference alias is one `&` of its own.
+            &|p: &syn::Path| {
+                let w = crate::lang::path_to_string_lc(p);
+                // a mixed reference/nominal twin is not a reference in every arm: the written type's own rule answers
+                crate::lang::ref_alias_union(&w, &crate::lang::expand(&w, &self.uses), &self.uses)
+                    .filter(|(_, all_ref, _)| *all_ref)
+                    .map(|(_, _, pl)| pl)
+            },
+        )
     }
 
     /// THE METHOD SITE: `recv.leaf(args)` asked of the table — as a method of the receiver's std shape (`v.contains(&x)`,

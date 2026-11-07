@@ -1525,8 +1525,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1483 — an alias CHAIN (`type A1 = A0; type A0 = R;`) recorded one hop per entry, so `A1` expanded
     // to `A0` and named nothing. Chased to its end here, once the map is crate-wide; see `chase_alias_chains`.
     let r1483 = std::env::var_os("CANDOR_R1483_OFF").is_none();
+    // SOUNDNESS R1489 — the crate's nominal type quals, for a MIXED `#[cfg]` twin (an alias in one arm, a struct in the
+    // other). See `add_nominal_twin_arms`. Empty under the kill switch, which reproduces the pre-R1489 map exactly.
+    let nominal_quals: HashSet<String> = if std::env::var_os("CANDOR_R1489_OFF").is_none() {
+        decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.ts.types.iter())
+            .filter(|(_, kind, _)| kind == crate::typesurf::KIND_VALUE)
+            .map(|(q, _, _)| q.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    add_nominal_twin_arms(&mut merged.mod_aliases, &nominal_quals);
     if r1483 {
-        chase_alias_chains(&mut merged.mod_aliases);
+        chase_alias_chains_n(&mut merged.mod_aliases, &nominal_quals);
     }
     // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
     // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in
@@ -1556,8 +1569,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             for ((_, _, fd), ex) in decls_per_file.iter().zip(&expanded) {
                 merge_decls(&mut merged, ex.as_ref().unwrap_or(fd));
             }
+            add_nominal_twin_arms(&mut merged.mod_aliases, &nominal_quals); // R1489 — likewise
             if r1483 {
-                chase_alias_chains(&mut merged.mod_aliases); // R1483 — the re-merge rebuilt the map from the files
+                chase_alias_chains_n(&mut merged.mod_aliases, &nominal_quals); // R1483 — the re-merge rebuilt the map from the files
             }
         }
     }

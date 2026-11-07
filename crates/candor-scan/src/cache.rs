@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev146 (rustagent-aliasres): SOUNDNESS R1487 — Pass A's `mod_aliases` gains a reference alias's `REF_ALIAS_SUF` key
+    // (a rev145 entry has none, so the pointee would be lost warm); R1488/R1489 — Pass B's cached `calls` change: a
+    // by-value parameter and a construction through a seeded MODULE alias's `#[cfg]` arms mark every arm. Mandatory.
     // rev145 (rustagent-alias2): SOUNDNESS R1483 — Pass B's cached `calls` change: a `use m::A1;` binding follows a module's
     // alias, and a block alias naming one declared after it is bound; the merged alias map's chase moves the decl-index
     // digest by itself, but these two do not, so a rev144 entry would replay the silence warm. Mandatory.
@@ -571,7 +574,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev145/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev146/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1168,6 +1171,253 @@ pub(crate) struct MergedDecls {
     pub(crate) impl_members: std::collections::HashSet<String>,
 }
 
+/// SOUNDNESS R1489 — a MIXED `#[cfg]` twin: one arm declares `type T = R;` (or `pub use x::R as T;`), the other a
+/// STRUCT/ENUM/UNION `T` at the same qualified name. The alias map recorded only the alias arm, so `T` (and every alias
+/// naming it) expanded to `R` alone and the nominal arm's methods and destructor were never reached — even with no alias
+/// hop at all (`fn f(x: &mm::T) { x.go() }`; EXECUTED `rustagent-aliasres/fx2` `*_mxs_*`, the struct arm active and
+/// writing a file, `deny Fs` and `deny Unknown` both 0). The union rule of R105/R1474 applies: the nominal arm is added
+/// to the alias's value as its own crate-rooted path, which `chase_alias_chains` keeps as a terminal arm (it names the
+/// type, not the alias). One build cannot declare both at one name (E0428/E0255), so where both appear they are arms of
+/// a split the scan cannot decide. `nominal` is every `struct`/`enum`/`union` qual the crate declares (typesurf).
+pub(crate) fn add_nominal_twin_arms(aliases: &mut HashMap<String, String>, nominal: &std::collections::HashSet<String>) -> usize {
+    if nominal.is_empty() {
+        return 0;
+    }
+    let mut hits: Vec<String> = aliases.keys().filter(|k| nominal.contains(*k)).cloned().collect();
+    hits.sort();
+    for k in &hits {
+        if std::env::var_os("CANDOR_R1489_INSTR").is_some() {
+            eprintln!("R1489TWIN\t{k}\t{}", aliases.get(k).map_or("-", |s| s.as_str()).replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+        }
+        crate::decls::record_alias(aliases, k.clone(), format!("crate::{k}"));
+    }
+    hits.len()
+}
+
+/// SOUNDNESS R1483 — follow every crate-local ALIAS CHAIN in the merged module-alias map to its end, in place.
+///
+/// THE DEFECT. Pass A records `type A1 = A0;` as `A1 -> A0` — `expand` against the declaring file's own `use` map,
+/// which does not hold `A0` (the alias map is a crate-wide fact that only exists after the merge). `expand` then
+/// answers a written `A1` with ONE hop, `A0`, a name with no `impl` anywhere, so a value typed through a two-hop
+/// alias was untyped for EVERY consumer: `r.write_it()`, `r.clone()`, `format!("{}", r)`, `r == r`, `-r`,
+/// `for x in r`, a trait method, and the param/return destructor — executed, each writes a file, and `deny Fs`
+/// and `deny Unknown` both exited 0 (fixtures `rustagent-alias2/fx`, 471 silent cells at 279c046 and on the
+/// published 0.41.3). A one-hop alias worked only because its single hop already lands on the type.
+///
+/// THE RULE. A value arm names another entry of this map when it is that entry's key in the arm's own module:
+/// `crate::q` names `q`; anything else is relative to the module the KEY was declared in (`qualify`). The whole
+/// chain is substituted, arm by arm, so a `#[cfg]`-duplicated alias anywhere in it stays the UNION of its arms
+/// (R105/R1474) — `A1 = A0`, `A0 = R | Q` gives `A1 = Q | R`, sorted exactly as `record_alias` sorts. An arm
+/// that names no entry is kept as written: this only ever replaces an intermediate alias name — which names no
+/// type, so nothing could resolve through it — by what that name means.
+///
+/// The R978 pointee key (`A{DEREF_ALIAS_SUF}`) is chased the same way (`type A1 = Box<A0>; type A0 = R;`), and an
+/// alias with none of its own INHERITS the pointee of the single alias it names (`type A1 = A0; type A0 =
+/// Arc<R>;`), so a receiver typed `A1` peels to `R` exactly as one typed `A0` does.
+///
+/// THE BOUND, AND WHAT HAPPENS AT IT. There is no hop limit on an acyclic chain — each key is resolved once and
+/// memoised, so the work is linear in the map. A CYCLE (`type A = B; type B = A;`) is detected by the on-stack
+/// set and every arm that enters it is KEPT AS WRITTEN, i.e. the 279c046 answer. Such a crate does not compile
+/// (rustc E0391), so no executed effect sits behind it; the fixtures `z_cyc_*` pin that the scan terminates. A
+/// recursion depth of `CHASE_DEPTH` is the only other stop and is treated exactly like a cycle.
+///
+/// SOUNDNESS R1489 — `nominal` is the crate's NOMINAL twins (`add_nominal_twin_arms`): an arm of such a key that names the
+/// key itself is the type, a terminal arm, not the cycle `type A = A;` would be. Empty = the R1483 behaviour exactly.
+pub(crate) fn chase_alias_chains_n(aliases: &mut HashMap<String, String>, nominal: &std::collections::HashSet<String>) -> usize {
+    use crate::lang::r1487_off;
+    use crate::decls::{qualify, ALIAS_ALT_SEP, ITEM_SENTINEL, MOD_GLOB_KEY, REDIRECT_MOD_MARK};
+    use crate::lang::{DEREF_ALIAS_SUF, REF_ALIAS_PEELED, REF_ALIAS_SUF};
+    const CHASE_DEPTH: usize = 512;
+    fn chaseable(k: &str) -> bool {
+        !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
+    }
+    fn module_of(k: &str) -> &str {
+        k.rsplit_once("::").map_or("", |(m, _)| m)
+    }
+    /// The entry an arm written in `module` names, if it names one.
+    fn names_entry(aliases: &HashMap<String, String>, module: &str, arm: &str) -> Option<String> {
+        if arm.is_empty()
+            || arm.contains('<')
+            || arm.contains(ITEM_SENTINEL)
+            || arm.contains(DEREF_ALIAS_SUF)
+            || arm.contains(REF_ALIAS_SUF)
+            || arm.starts_with(REF_ALIAS_PEELED)
+        {
+            return None;
+        }
+        let k = match arm.strip_prefix("crate::") {
+            Some(q) => q.to_string(),
+            None => qualify(module, arm),
+        };
+        (chaseable(&k) && aliases.contains_key(&k)).then_some(k)
+    }
+    /// The fully chased arms of `key`, or `None` when the chase entered a cycle / hit the depth stop.
+    fn resolve(
+        aliases: &HashMap<String, String>,
+        nominal: &std::collections::HashSet<String>,
+        key: &str,
+        memo: &mut HashMap<String, Option<Vec<String>>>,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(m) = memo.get(key) {
+            return m.clone();
+        }
+        if stack.iter().any(|s| s == key) || stack.len() >= CHASE_DEPTH {
+            return None;
+        }
+        let value = aliases.get(key)?;
+        let is_ref = key.ends_with(REF_ALIAS_SUF);
+        let base = key.strip_suffix(DEREF_ALIAS_SUF).or_else(|| key.strip_suffix(REF_ALIAS_SUF)).unwrap_or(key);
+        let module = module_of(base).to_string();
+        stack.push(key.to_string());
+        let mut out: Vec<String> = Vec::new();
+        let mut cyclic = false;
+        for arm_w in value.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+            // SOUNDNESS R1487 — a reference alias's arm carries its clone-peel mark; the PATH behind it is chased.
+            let arm = arm_w.trim_start_matches(REF_ALIAS_PEELED);
+            let mark = &arm_w[..arm_w.len() - arm.len()];
+            if is_ref && !r1487_off() {
+                // `type A1 = &'static A0; type A0 = &'static R;` — the pointee of a reference to a reference alias is
+                // ITS pointee, and `.clone()` then clones a reference (peeled).
+                let k = match arm.strip_prefix("crate::") { Some(q) => q.to_string(), None => qualify(&module, arm) };
+                let rk = format!("{k}{REF_ALIAS_SUF}");
+                if rk != key && chaseable(&k) && aliases.contains_key(&rk) && !aliases.contains_key(&k) {
+                    match resolve(aliases, nominal, &rk, memo, stack) {
+                        Some(arms) => out.extend(arms.into_iter().map(|a| format!("{REF_ALIAS_PEELED}{}", a.trim_start_matches(REF_ALIAS_PEELED)))),
+                        None => {
+                            cyclic = true;
+                            out.push(arm_w.to_string());
+                        }
+                    }
+                    continue;
+                }
+            }
+            match names_entry(aliases, &module, arm).filter(|k| k != key) {
+                Some(k2) => match resolve(aliases, nominal, &k2, memo, stack) {
+                    Some(arms) => out.extend(arms.into_iter().map(|a| format!("{mark}{a}"))),
+                    None => {
+                        cyclic = true;
+                        out.push(arm_w.to_string());
+                    }
+                },
+                // R1489 — the nominal twin's own arm (`crate::K` in K's value) is the type: terminal.
+                None if nominal.contains(key) && names_entry(aliases, &module, arm).as_deref() == Some(key) => {
+                    out.push(arm_w.to_string());
+                }
+                None if names_entry(aliases, &module, arm).is_some() => {
+                    cyclic = true; // `type A = A;`
+                    out.push(arm_w.to_string());
+                }
+                None => out.push(arm_w.to_string()),
+            }
+        }
+        stack.pop();
+        out.sort_unstable();
+        out.dedup();
+        let r = if cyclic { None } else { Some(out) };
+        memo.insert(key.to_string(), r.clone());
+        r
+    }
+    let keys: Vec<String> = {
+        let mut k: Vec<String> = aliases.keys().filter(|k| chaseable(k)).cloned().collect();
+        k.sort();
+        k
+    };
+    let mut memo: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut moved = 0usize;
+    let mut new_vals: Vec<(String, String)> = Vec::new();
+    for k in &keys {
+        let mut stack = Vec::new();
+        if let Some(arms) = resolve(aliases, nominal, k, &mut memo, &mut stack) {
+            let v = arms.join(&ALIAS_ALT_SEP.to_string());
+            if aliases.get(k) != Some(&v) {
+                new_vals.push((k.clone(), v));
+            }
+        }
+    }
+    // The R978 pointee an alias inherits from the single alias it names (followed to the end of the chain).
+    let mut inherit: Vec<(String, String)> = Vec::new();
+    for k in keys.iter().filter(|k| !k.ends_with(DEREF_ALIAS_SUF) && !k.ends_with(REF_ALIAS_SUF)) {
+        let own = format!("{k}{DEREF_ALIAS_SUF}");
+        if aliases.contains_key(&own) {
+            continue;
+        }
+        let mut cur = k.clone();
+        let mut seen: Vec<String> = Vec::new();
+        let found = loop {
+            if seen.contains(&cur) || seen.len() >= CHASE_DEPTH {
+                break None;
+            }
+            seen.push(cur.clone());
+            let Some(v) = aliases.get(&cur) else { break None };
+            if v.contains(ALIAS_ALT_SEP) {
+                break None; // a decl type has no call site to adjudicate arms at — `deref_alias_target`'s own refusal
+            }
+            let Some(next) = names_entry(aliases, module_of(&cur), v) else { break None };
+            let pk = format!("{next}{DEREF_ALIAS_SUF}");
+            if aliases.contains_key(&pk) {
+                break Some(pk);
+            }
+            cur = next;
+        };
+        if let Some(pk) = found {
+            let mut stack = Vec::new();
+            if let Some(arms) = resolve(aliases, nominal, &pk, &mut memo, &mut stack) {
+                inherit.push((own, arms.join(&ALIAS_ALT_SEP.to_string())));
+            }
+        }
+    }
+    // SOUNDNESS R1487 — the same inheritance for a REFERENCE alias's pointee (`type A1 = A0; type A0 = &'static R;`). A
+    // reference alias has no path entry of its own, so the step that names it is asked by key, not by `names_entry`.
+    let mut inherit_ref: Vec<(String, String)> = Vec::new();
+    if !r1487_off() {
+        for k in keys.iter().filter(|k| !k.ends_with(DEREF_ALIAS_SUF) && !k.ends_with(REF_ALIAS_SUF)) {
+            let own = format!("{k}{REF_ALIAS_SUF}");
+            if aliases.contains_key(&own) {
+                continue;
+            }
+            let mut cur = k.clone();
+            let mut seen: Vec<String> = Vec::new();
+            let found = loop {
+                if seen.contains(&cur) || seen.len() >= CHASE_DEPTH {
+                    break None;
+                }
+                seen.push(cur.clone());
+                let Some(v) = aliases.get(&cur) else { break None };
+                if v.contains(ALIAS_ALT_SEP) || v.is_empty() || v.contains('<') || v.contains(ITEM_SENTINEL) {
+                    break None; // a decl type has no call site to adjudicate arms at, as above
+                }
+                let next = match v.strip_prefix("crate::") { Some(q) => q.to_string(), None => qualify(module_of(&cur), v) };
+                if !chaseable(&next) {
+                    break None;
+                }
+                let rk = format!("{next}{REF_ALIAS_SUF}");
+                if aliases.contains_key(&rk) {
+                    break Some(rk);
+                }
+                if !aliases.contains_key(&next) {
+                    break None;
+                }
+                cur = next;
+            };
+            if let Some(rk) = found {
+                let mut stack = Vec::new();
+                if let Some(arms) = resolve(aliases, nominal, &rk, &mut memo, &mut stack) {
+                    inherit_ref.push((own, arms.join(&ALIAS_ALT_SEP.to_string())));
+                }
+            }
+        }
+    }
+    for (k, v) in new_vals.into_iter().chain(inherit).chain(inherit_ref) {
+        if std::env::var_os("CANDOR_R1483_INSTR").is_some() {
+            eprintln!("R1483CHASE\t{}\t{}\t{}", k.replace(DEREF_ALIAS_SUF, "~deref"), aliases.get(&k).map_or("-", |s| s.as_str()).replace(ALIAS_ALT_SEP, "|"), v.replace(ALIAS_ALT_SEP, "|")); // §E1 REACH
+        }
+        aliases.insert(k, v);
+        moved += 1;
+    }
+    moved
+}
+
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
 ///
 /// THE DEFECT THIS CLOSES. Pass A runs per file, in isolation, so `type_path`/`record_return` expand a
@@ -1199,154 +1449,6 @@ pub(crate) struct MergedDecls {
 ///
 /// Returns `None` when nothing moved, which is the case for every file in a crate with no module alias —
 /// the caller then keeps the original and does not re-merge at all.
-/// SOUNDNESS R1483 — follow every crate-local ALIAS CHAIN in the merged module-alias map to its end, in place.
-///
-/// THE DEFECT. Pass A records `type A1 = A0;` as `A1 -> A0` — `expand` against the declaring file's own `use` map,
-/// which does not hold `A0` (the alias map is a crate-wide fact that only exists after the merge). `expand` then
-/// answers a written `A1` with ONE hop, `A0`, a name with no `impl` anywhere, so a value typed through a two-hop
-/// alias was untyped for EVERY consumer: `r.write_it()`, `r.clone()`, `format!("{}", r)`, `r == r`, `-r`,
-/// `for x in r`, a trait method, and the param/return destructor — executed, each writes a file, and `deny Fs`
-/// and `deny Unknown` both exited 0 (fixtures `rustagent-alias2/fx`, 471 silent cells at 279c046 and on the
-/// published 0.41.3). A one-hop alias worked only because its single hop already lands on the type.
-///
-/// THE RULE. A value arm names another entry of this map when it is that entry's key in the arm's own module:
-/// `crate::q` names `q`; anything else is relative to the module the KEY was declared in (`qualify`). The whole
-/// chain is substituted, arm by arm, so a `#[cfg]`-duplicated alias anywhere in it stays the UNION of its arms
-/// (R105/R1474) — `A1 = A0`, `A0 = R | Q` gives `A1 = Q | R`, sorted exactly as `record_alias` sorts. An arm
-/// that names no entry is kept as written: this only ever replaces an intermediate alias name — which names no
-/// type, so nothing could resolve through it — by what that name means.
-///
-/// The R978 pointee key (`A{DEREF_ALIAS_SUF}`) is chased the same way (`type A1 = Box<A0>; type A0 = R;`), and an
-/// alias with none of its own INHERITS the pointee of the single alias it names (`type A1 = A0; type A0 =
-/// Arc<R>;`), so a receiver typed `A1` peels to `R` exactly as one typed `A0` does.
-///
-/// THE BOUND, AND WHAT HAPPENS AT IT. There is no hop limit on an acyclic chain — each key is resolved once and
-/// memoised, so the work is linear in the map. A CYCLE (`type A = B; type B = A;`) is detected by the on-stack
-/// set and every arm that enters it is KEPT AS WRITTEN, i.e. the 279c046 answer. Such a crate does not compile
-/// (rustc E0391), so no executed effect sits behind it; the fixtures `z_cyc_*` pin that the scan terminates. A
-/// recursion depth of `CHASE_DEPTH` is the only other stop and is treated exactly like a cycle.
-pub(crate) fn chase_alias_chains(aliases: &mut HashMap<String, String>) -> usize {
-    use crate::decls::{qualify, ALIAS_ALT_SEP, ITEM_SENTINEL, MOD_GLOB_KEY, REDIRECT_MOD_MARK};
-    use crate::lang::DEREF_ALIAS_SUF;
-    const CHASE_DEPTH: usize = 512;
-    fn chaseable(k: &str) -> bool {
-        !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
-    }
-    fn module_of(k: &str) -> &str {
-        k.rsplit_once("::").map_or("", |(m, _)| m)
-    }
-    /// The entry an arm written in `module` names, if it names one.
-    fn names_entry(aliases: &HashMap<String, String>, module: &str, arm: &str) -> Option<String> {
-        if arm.is_empty() || arm.contains('<') || arm.contains(ITEM_SENTINEL) || arm.contains(DEREF_ALIAS_SUF) {
-            return None;
-        }
-        let k = match arm.strip_prefix("crate::") {
-            Some(q) => q.to_string(),
-            None => qualify(module, arm),
-        };
-        (chaseable(&k) && aliases.contains_key(&k)).then_some(k)
-    }
-    /// The fully chased arms of `key`, or `None` when the chase entered a cycle / hit the depth stop.
-    fn resolve(
-        aliases: &HashMap<String, String>,
-        key: &str,
-        memo: &mut HashMap<String, Option<Vec<String>>>,
-        stack: &mut Vec<String>,
-    ) -> Option<Vec<String>> {
-        if let Some(m) = memo.get(key) {
-            return m.clone();
-        }
-        if stack.iter().any(|s| s == key) || stack.len() >= CHASE_DEPTH {
-            return None;
-        }
-        let value = aliases.get(key)?;
-        let base = key.strip_suffix(DEREF_ALIAS_SUF).unwrap_or(key);
-        let module = module_of(base).to_string();
-        stack.push(key.to_string());
-        let mut out: Vec<String> = Vec::new();
-        let mut cyclic = false;
-        for arm in value.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
-            match names_entry(aliases, &module, arm).filter(|k| k != key) {
-                Some(k2) => match resolve(aliases, &k2, memo, stack) {
-                    Some(arms) => out.extend(arms),
-                    None => {
-                        cyclic = true;
-                        out.push(arm.to_string());
-                    }
-                },
-                None if names_entry(aliases, &module, arm).is_some() => {
-                    cyclic = true; // `type A = A;`
-                    out.push(arm.to_string());
-                }
-                None => out.push(arm.to_string()),
-            }
-        }
-        stack.pop();
-        out.sort_unstable();
-        out.dedup();
-        let r = if cyclic { None } else { Some(out) };
-        memo.insert(key.to_string(), r.clone());
-        r
-    }
-    let keys: Vec<String> = {
-        let mut k: Vec<String> = aliases.keys().filter(|k| chaseable(k)).cloned().collect();
-        k.sort();
-        k
-    };
-    let mut memo: HashMap<String, Option<Vec<String>>> = HashMap::new();
-    let mut moved = 0usize;
-    let mut new_vals: Vec<(String, String)> = Vec::new();
-    for k in &keys {
-        let mut stack = Vec::new();
-        if let Some(arms) = resolve(aliases, k, &mut memo, &mut stack) {
-            let v = arms.join(&ALIAS_ALT_SEP.to_string());
-            if aliases.get(k) != Some(&v) {
-                new_vals.push((k.clone(), v));
-            }
-        }
-    }
-    // The R978 pointee an alias inherits from the single alias it names (followed to the end of the chain).
-    let mut inherit: Vec<(String, String)> = Vec::new();
-    for k in keys.iter().filter(|k| !k.ends_with(DEREF_ALIAS_SUF)) {
-        let own = format!("{k}{DEREF_ALIAS_SUF}");
-        if aliases.contains_key(&own) {
-            continue;
-        }
-        let mut cur = k.clone();
-        let mut seen: Vec<String> = Vec::new();
-        let found = loop {
-            if seen.contains(&cur) || seen.len() >= CHASE_DEPTH {
-                break None;
-            }
-            seen.push(cur.clone());
-            let Some(v) = aliases.get(&cur) else { break None };
-            if v.contains(ALIAS_ALT_SEP) {
-                break None; // a decl type has no call site to adjudicate arms at — `deref_alias_target`'s own refusal
-            }
-            let Some(next) = names_entry(aliases, module_of(&cur), v) else { break None };
-            let pk = format!("{next}{DEREF_ALIAS_SUF}");
-            if aliases.contains_key(&pk) {
-                break Some(pk);
-            }
-            cur = next;
-        };
-        if let Some(pk) = found {
-            let mut stack = Vec::new();
-            if let Some(arms) = resolve(aliases, &pk, &mut memo, &mut stack) {
-                inherit.push((own, arms.join(&ALIAS_ALT_SEP.to_string())));
-            }
-        }
-    }
-    for (k, v) in new_vals.into_iter().chain(inherit) {
-        if std::env::var_os("CANDOR_R1483_INSTR").is_some() {
-            eprintln!("R1483CHASE\t{}\t{}\t{}", k.replace(DEREF_ALIAS_SUF, "~deref"), aliases.get(&k).map_or("-", |s| s.as_str()).replace(ALIAS_ALT_SEP, "|"), v.replace(ALIAS_ALT_SEP, "|")); // §E1 REACH
-        }
-        aliases.insert(k, v);
-        moved += 1;
-    }
-    moved
-}
-
 pub(crate) fn alias_expand_decls(
     fd: &FileDecls,
     modpath: &str,
@@ -1390,7 +1492,30 @@ pub(crate) fn alias_expand_decls(
     // effect is genuinely absent either way (`with_mut` is a pure local trait method on the arm that
     // actually compiles), but `deny Unknown` flips 1 -> 0, which is a DISCLOSURE LOSS whatever the
     // underlying truth is. Refusing leaves those rows exactly as they were.
-    let re_plain = |p: &str| {
+    // SOUNDNESS R1488 — …AND THAT REFUSAL IS NOW LIFTED FOR A PLAIN (UN-LAYERED) ENTRY. The paragraph above was written
+    // 2026-09-02, when a joined value in a decl index was read as ONE path by every consumer. R372 (2026-09-15) then made
+    // the decl index carry exactly that spelling — Pass A types a field/return through `uses_ty`, whose collided names hold
+    // the `ALIAS_ALT_SEP`-joined arm set — and R1474 made the field/return/destructor consumers adjudicate it per arm. So a
+    // `#[cfg]`-duplicated `use … as A1` reached every position, while the SAME duplication spelled `#[cfg(unix)] type A1 =
+    // R; #[cfg(not(unix))] type A1 = Q;` (which only this re-expansion can see — Pass A's own map holds no `type` alias)
+    // was refused here, left the field/return typed by the bare name `A1`, and every consumer of it was dropped with no
+    // edge and no disclosure (EXECUTED: `rustagent-aliasres/fx2`, field/return/letret silent, the `use … as` twin charged
+    // in the same cells). Two routes answering one question differently is the defect the family closes by unifying (R347).
+    // A LAYERED entry (`Vec<A1>`) keeps the refusal: `rewrap` puts the layer codes after the WHOLE string, which is not a
+    // shape any element consumer splits. Kill switch `CANDOR_R1488_OFF` (attribution).
+    let r1488 = std::env::var_os("CANDOR_R1488_OFF").is_none();
+    // SOUNDNESS R1487 — a field/return typed through a `type A = &'a T;` alias: the POINTEE (arms joined) and whether
+    // `.clone()` on it is peeled. Asked BEFORE the path entry, which for a chain names only the next alias.
+    // (arms joined, every arm a reference, clone-peeled); a mixed reference/nominal `#[cfg]` twin is the union of both
+    // (`lang::ref_alias_union`) and keeps Pass A's OWNED facts — the nominal arm owns its value.
+    let ref_of = |p: &str| -> Option<(String, bool, bool)> {
+        let one = |q: &str| crate::lang::ref_alias_union(q, &crate::lang::expand(q, &uses), &uses);
+        one(p).or_else(|| (p.contains("::") && !p.starts_with("crate::")).then(|| one(&format!("crate::{p}"))).flatten())
+    };
+    let re_plain = |p: &str, multi: bool| {
+        if let Some((pt, _, _)) = ref_of(p).filter(|(pt, _, _)| multi || !pt.contains(crate::decls::ALIAS_ALT_SEP)) {
+            return Some(pt);
+        }
         // SOUNDNESS R978 — a field/return typed through a `type A = Arc<T>;` alias re-expands to the
         // POINTEE, as `type_path` peels the written `Arc<T>`. Asked first: the plain alias entry would
         // otherwise rewrite it to the bare wrapper, which has no impl in the crate.
@@ -1401,7 +1526,7 @@ pub(crate) fn alias_expand_decls(
         }
         let try_one = |q: &str| {
             let e = crate::lang::expand(q, &uses);
-            (e != q && !e.contains(crate::decls::ALIAS_ALT_SEP)).then_some(e)
+            (e != q && (multi || !e.contains(crate::decls::ALIAS_ALT_SEP))).then_some(e)
         };
         if let Some(e) = try_one(p) {
             return Some(e);
@@ -1416,9 +1541,15 @@ pub(crate) fn alias_expand_decls(
     let re = |p: &str| -> Option<String> {
         // R893 / R1023 — a LAYERED element keeps its layers through the re-expansion of its leaf.
         if crate::lang::is_wrapped(p) {
-            return re_plain(crate::lang::strip_wrapped(p)).map(|e| crate::lang::rewrap(p, &e));
+            return re_plain(crate::lang::strip_wrapped(p), false).map(|e| crate::lang::rewrap(p, &e));
         }
-        re_plain(p)
+        let e = re_plain(p, r1488);
+        if r1488 && std::env::var_os("CANDOR_R1488_INSTR").is_some() {
+            if let Some(e) = e.as_deref().filter(|e| e.contains(crate::decls::ALIAS_ALT_SEP)) {
+                eprintln!("R1488DECL\t{p}\t{}", e.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+            }
+        }
+        e
     };
     let moves_nested = |src: &HashMap<String, HashMap<String, String>>| {
         src.values().any(|m| m.values().any(|v| re(v).is_some()))
@@ -1434,6 +1565,29 @@ pub(crate) fn alias_expand_decls(
         return None;
     }
     let mut out = fd.clone();
+    // SOUNDNESS R1487 — the ownership facts Pass A read off the WRITTEN type (`A`, which it could not resolve) are
+    // re-read for a reference alias: the field holds a BORROW (its drop glue drops no pointee, R718), `.clone()` on it
+    // clones the reference's target unless the alias is peeled (R1477), and a return hands out a borrow (R1120).
+    // Collected from the ORIGINAL entries, before the rewrite below replaces them with the pointee.
+    let mut field_refs: Vec<(String, String, bool, bool)> = Vec::new(); // (struct, field, elem?, peeled)
+    for (elem, src) in [(false, &fd.fields), (true, &fd.field_elem)] {
+        for (st, m) in src {
+            for (f, v) in m {
+                if let Some((_, true, peeled)) = ref_of(crate::lang::strip_wrapped(v)) {
+                    field_refs.push((st.clone(), f.clone(), elem, peeled));
+                }
+            }
+        }
+    }
+    let ret_refs: Vec<String> = fd
+        .rets
+        .iter()
+        .filter(|(k, v)| {
+            v.as_deref().is_some_and(|t| ref_of(t).is_some_and(|(_, all_ref, _)| all_ref))
+                && fd.rets.contains_key(&crate::model::ret_borrow_key(k))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
     for m in out.fields.values_mut().chain(out.field_elem.values_mut()) {
         for v in m.values_mut() {
             if let Some(e) = re(v) {
@@ -1445,6 +1599,18 @@ pub(crate) fn alias_expand_decls(
         if let Some(t) = v.as_deref().and_then(re) {
             *v = Some(t);
         }
+    }
+    for (st, f, elem, peeled) in field_refs {
+        let fb = out.field_borrows.entry(st).or_default().entry(f).or_default();
+        if elem {
+            fb.elem = Some(true);
+        } else {
+            fb.leaf = Some(true);
+            fb.shared = Some(peeled);
+        }
+    }
+    for k in ret_refs {
+        out.rets.insert(crate::model::ret_borrow_key(&k), Some(crate::model::RET_BORROWED.to_string()));
     }
     Some(out)
 }

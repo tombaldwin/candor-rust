@@ -1047,6 +1047,20 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
             }
             let written = path_to_string_lc(&p.path);
             let t = expand(&written, uses);
+            // SOUNDNESS R1487 — a `type A = &'a T;` alias is the written `&'a T`: the pointee, reached through a borrow.
+            // Asked only of a path with no TYPE arguments (`A<'a>` is the same alias with its lifetime written).
+            if p.qself.is_none()
+                && p.path.segments.last().is_some_and(|s| match &s.arguments {
+                    syn::PathArguments::None => true,
+                    syn::PathArguments::AngleBracketed(ab) => ab.args.iter().all(|a| matches!(a, syn::GenericArgument::Lifetime(_))),
+                    _ => false,
+                })
+            {
+                if let Some((joined, all_ref, _)) = ref_alias_union(&written, &t, uses) {
+                    // OWNED wins for a mixed twin: the nominal arm's value is owned (the drop direction of R718).
+                    return Some((joined, all_ref));
+                }
+            }
             // SOUNDNESS R978 — the same peel, through a `type A = Arc<T>;` alias. See `DEREF_ALIAS_SUF`.
             if is_deref_wrapper_leaf(&t)
                 && p.path.segments.last().is_some_and(|s| matches!(s.arguments, syn::PathArguments::None))
@@ -1071,6 +1085,17 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
 /// peeled. `expand` names a written path's target; a `#[cfg]`-duplicated one arrives `ALIAS_ALT_SEP`-joined and is peeled
 /// only if EVERY arm is. One authority for the collector's binders and Pass A's field record (`FieldBorrow::shared`).
 pub(crate) fn clone_peeled_ty(ty: &syn::Type, expand: &dyn Fn(&syn::Path) -> String) -> bool {
+    clone_peeled_ty_ra(ty, expand, &|_| None)
+}
+
+/// SOUNDNESS R1487 — `clone_peeled_ty` where a written path may name a `type` alias to a REFERENCE (`type A = &'static
+/// R;`). `ref_alias` answers `Some(peeled)` for such a name: the alias is itself one `&`, so a written `&A` is `&&R`
+/// (clones the `&R`, pure); `peeled` is the alias's own verdict (`&&R`, `&Arc<R>`). `None` = not a reference alias.
+pub(crate) fn clone_peeled_ty_ra(
+    ty: &syn::Type,
+    expand: &dyn Fn(&syn::Path) -> String,
+    ref_alias: &dyn Fn(&syn::Path) -> Option<bool>,
+) -> bool {
     fn inner(t: &syn::Type, expand: &dyn Fn(&syn::Path) -> String, depth: u8) -> bool {
         if depth > 4 {
             return false;
@@ -1116,6 +1141,13 @@ pub(crate) fn clone_peeled_ty(ty: &syn::Type, expand: &dyn Fn(&syn::Path) -> Str
             _ => break,
         }
     }
+    if let syn::Type::Path(tp) = t {
+        if tp.qself.is_none() {
+            if let Some(peeled) = ref_alias(&tp.path) {
+                return peeled || refs >= 1;
+            }
+        }
+    }
     refs >= 2 || inner(t, expand, 0)
 }
 
@@ -1125,6 +1157,98 @@ pub(crate) fn clone_peeled_ty(ty: &syn::Type, expand: &dyn Fn(&syn::Path) -> Str
 /// `alias_expand_decls`) under exactly the spellings the alias itself is seeded under, and only
 /// `type_path` and `alias_expand_decls` ever read it — never a call path, so `A::new(..)` stays `Arc::new`.
 pub(crate) const DEREF_ALIAS_SUF: &str = "\u{4}deref";
+
+/// SOUNDNESS R1487 — the suffix of the TYPE-ONLY key under which a `type A = &'a T;` / `&'a mut T` alias records its
+/// POINTEE, beside `DEREF_ALIAS_SUF`'s wrapper pointee. A reference type is NON-NOMINAL (`is_non_nominal_type`), so the
+/// alias was never recorded at all, and a value typed `A` — a parameter, a `let`, a field, a return — named nothing: every
+/// method, `.clone()`, `{}`, `to_string`, `==` and trait call on it was dropped with no edge and no disclosure, where the
+/// identical WRITTEN `&'static R` charges (EXECUTED: `rustagent-alias2/fx` `*_a1ref_*`/`*_a2ref*`, `rustagent-aliasres/fx2`
+/// `*_w1ref_*` the control). There is NO path key: `A::new()` names no item of a reference type, so a path call keeps its
+/// pre-existing (empty) answer. The value is the pointee path, prefixed with `REF_ALIAS_PEELED` when `.clone()` on an `A`
+/// does not reach the pointee (`&&T`, `&Arc<T>` — `clone_peeled_ty`'s rule applied to the alias's own target). Read only by
+/// `type_path_b` (pointee, BORROWED), `ref_alias_target`, `chase_alias_chains` and `alias_expand_decls`.
+pub(crate) const REF_ALIAS_SUF: &str = "\u{4}ref";
+/// SOUNDNESS R1487 — see `REF_ALIAS_SUF`. Cannot begin a Rust path.
+pub(crate) const REF_ALIAS_PEELED: char = '&';
+
+/// SOUNDNESS R1487 — a `type` alias's target peeled of its REFERENCES (and parens): the inner type and how many `&`
+/// were peeled, or `None` when the target is not a reference.
+pub(crate) fn ref_alias_pointee(ty: &syn::Type) -> Option<(&syn::Type, usize)> {
+    let mut t = ty;
+    let mut refs = 0usize;
+    loop {
+        match t {
+            syn::Type::Reference(r) => {
+                refs += 1;
+                t = &r.elem;
+            }
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            _ => break,
+        }
+    }
+    (refs >= 1 && matches!(t, syn::Type::Path(_))).then_some((t, refs))
+}
+
+/// SOUNDNESS R1487 — the kill switch (attribution only).
+pub(crate) fn r1487_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("CANDOR_R1487_OFF").is_some())
+}
+
+/// SOUNDNESS R1487 — the pointee (arms `ALIAS_ALT_SEP`-joined, a `#[cfg]` twin is the union) and the clone-peel verdict
+/// (every arm peeled) recorded for the reference alias spelled `written`, under the keys `deref_alias_target` asks.
+pub(crate) fn ref_alias_target(written: &str, uses: &HashMap<String, String>) -> Option<(String, bool)> {
+    if r1487_off() {
+        return None;
+    }
+    let mut bases: Vec<String> = vec![written.to_string()];
+    if let Some(v) = uses.get(written).filter(|v| !v.contains(crate::decls::ALIAS_ALT_SEP)) {
+        bases.push(v.clone());
+    }
+    let v = bases.iter().find_map(|b| {
+        uses.get(&format!("{b}{REF_ALIAS_SUF}"))
+            .or_else(|| if b.starts_with("crate::") { None } else { uses.get(&format!("crate::{b}{REF_ALIAS_SUF}")) })
+    })?;
+    let mut arms: Vec<&str> = Vec::new();
+    let mut peeled = true;
+    for a in v.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+        let p = a.trim_start_matches(REF_ALIAS_PEELED);
+        peeled &= p.len() != a.len();
+        if !arms.contains(&p) {
+            arms.push(p);
+        }
+    }
+    if arms.is_empty() {
+        return None;
+    }
+    arms.sort_unstable();
+    if std::env::var_os("CANDOR_R1487_INSTR").is_some() {
+        eprintln!("R1487REF\t{written}\t{}", arms.join("|")); // §E1 REACH
+    }
+    Some((arms.join(&crate::decls::ALIAS_ALT_SEP.to_string()), peeled))
+}
+
+/// SOUNDNESS R1487 — `ref_alias_target` joined with the alias's PATH arm when a `#[cfg]` twin mixes a reference alias with
+/// a nominal one (`#[cfg(x)] type A = S<&'static str>; #[cfg(not(x))] type A = &'static str;` — env_logger's
+/// `SubtleStyle`): the union, as for every other cfg twin. `t` is `written` expanded through the path entry; it is an arm
+/// only when it is not the written name itself (no path entry) and not a chain intermediate that is itself a reference
+/// alias. Returns (arms joined, every arm a reference, every arm clone-peeled).
+pub(crate) fn ref_alias_union(written: &str, t: &str, uses: &HashMap<String, String>) -> Option<(String, bool, bool)> {
+    let (pointee, peeled) = ref_alias_target(written, uses)?;
+    let bare = |x: &str| x.trim_start_matches("crate::").to_string();
+    let other = (bare(t) != bare(written) && ref_alias_target(t, uses).is_none()).then_some(t);
+    let mut arms: Vec<&str> = pointee.split(crate::decls::ALIAS_ALT_SEP).collect();
+    if let Some(o) = other {
+        for a in o.split(crate::decls::ALIAS_ALT_SEP) {
+            if !arms.contains(&a) {
+                arms.push(a);
+            }
+        }
+    }
+    arms.sort_unstable();
+    Some((arms.join(&crate::decls::ALIAS_ALT_SEP.to_string()), other.is_none(), peeled && other.is_none()))
+}
 
 /// The single type argument of a written `Box<T>` / `Arc<T>` / `Rc<T>` — the three wrappers `type_path_b`
 /// peels (owned, `Deref<Target = T>`). `None` for anything else.

@@ -30,6 +30,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   still gives the union of its arms. Two related cases are fixed too: a block-local alias that names an alias declared
   after it in the same block, and an alias brought in with `use m::A1;` (silent even at one hop). A cyclic alias, which
   rustc rejects, is left as before. A gate scoped to such a caller can turn red. Numbers are in the commit message.
+- ⚠ **Three more type-alias shapes now reach their type** (SOUNDNESS R1487, R1488, R1489). Each was silent at one hop:
+  calls on the value were dropped without disclosure, and `deny Fs` and `deny Unknown` both passed over code that
+  writes a file. (1) An alias to a reference (`type A = &'static R;`, `&'a mut R`, `&'a &'a R`, or a chain through
+  one): a value typed `A` in any position now behaves like the written `&'static R`. A borrow still drops nothing,
+  and `.clone()` through `&A` still clones the reference. (2) A `#[cfg]`-duplicated `type` alias (`#[cfg(unix)] type A
+  = R;` beside `#[cfg(not(unix))] type A = Q;`) used as a field type, a return type, or the type of a by-value
+  parameter whose destructor runs: every arm is now charged, as the `use … as A` form already was. (3) A module whose
+  `#[cfg]` arms declare `type T = Q;` in one and `struct T` in the other: a value typed `T`, or an alias naming it, now
+  reaches both, including the struct's destructor. A gate scoped to such a caller can turn red, including on the arm
+  the build does not compile. Numbers are in the commit message.
 - ⚠ **A type named through a `#[cfg]`-duplicated `use` now charges every arm at an implicit trait call and at a
   destructor** (SOUNDNESS R1474). With `#[cfg(unix)] use a::R as A1;` beside `#[cfg(not(unix))] use b::Q as A1;`,
   `format!("{}", r)`, `{:?}`, `==`, `+`, `*r`, `r[i]`, `r.to_string()` and `for x in r` on an `A1` value reached only

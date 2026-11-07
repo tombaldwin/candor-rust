@@ -18441,7 +18441,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18452,7 +18452,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev145/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev146/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -22992,12 +22992,23 @@ pub fn go() {{ imp::doit(); }}
             out.fields["Holder"]["d"], "std::process::Command",
             "the single-arm alias is exactly what this fix exists to resolve"
         );
+        // SOUNDNESS R1488 — INVERTED. Since R372 the decl index carries exactly this joined spelling for a `use … as`
+        // twin (Pass A's `uses_ty`), and R1474 made the field/return/destructor consumers adjudicate it per arm; the
+        // refusal left the SAME duplication spelled as a `type` alias typed by its bare name, and every consumer of it
+        // was dropped silently (EXECUTED `rustagent-aliasres/fx2`). The async-lock shape this test was written for is
+        // accounted for in the R1488 commit's A/B. A LAYERED entry keeps the refusal (`rewrap` cannot carry arms).
+        let mut joined: Vec<&str> = vec!["std::fs::File", "std::process::Command"];
+        joined.sort_unstable();
         assert_eq!(
-            out.fields["Holder"]["c"], "facade::Cmd",
-            "a `#[cfg]`-DUPLICATED alias must be left as written: the decl index has no call site to \
-             adjudicate the arms at, and a `\\u{{1}}`-joined string in `fields` is read as one path by \
-             every consumer of it"
+            out.fields["Holder"]["c"], joined.join("\u{1}"),
+            "a `#[cfg]`-DUPLICATED alias reaches the decl index as the union of its arms (R1488)"
         );
+        let mut fd2 = FileDecls::default();
+        fd2.field_elem.entry("Holder".into()).or_default().insert(
+            "v".into(), format!("facade::Cmd{}V", crate::lang::WRAPPED_CONTAINER_MARK));
+        if let Some(o2) = alias_expand_decls(&fd2, "", &aliases) {
+            assert!(!o2.field_elem["Holder"]["v"].contains('\u{1}'), "a LAYERED entry keeps the refusal");
+        }
     }
 
     /// R99 (SHAPE 2) — THE WARM CACHE MUST NOT SERVE AN EXPANSION THE ALIAS NO LONGER SUPPORTS.
@@ -34297,4 +34308,111 @@ fn r1483_a_value_typed_through_an_alias_chain_reaches_its_type() {
     }
     // the cycle terminates (the scan returned) and keeps the 279c046 answer; rustc rejects it (E0391), so nothing runs
     assert!(!has("k_cycle", "Fs"), "a cyclic alias names no type:\n{v:#}");
+}
+
+/// SOUNDNESS R1487 / R1488 / R1489 — three `type`-alias shapes that were SILENT at one hop (EXECUTED,
+/// `rustagent-aliasres/fx2`: each cell writes a file while `deny Fs` and `deny Unknown` both exit 0 at 00a378c):
+///  * R1487 — an alias to a REFERENCE (`type A = &'static R;`, `&mut`, `&&`, a chain through one) was never recorded
+///    (non-nominal), so a value typed `A` named nothing in any position; the written `&'static R` charges.
+///  * R1488 — a `#[cfg]`-duplicated `type` alias read in a FIELD, a RETURN or a BY-VALUE PARAMETER's destructor: the
+///    decl-index re-expansion refused the joined arm set, while the `use … as` twin of it reached every position.
+///  * R1489 — a MIXED twin, `type T = Q` in one cfg arm of a module and `struct T` in the other: the struct's arm was lost
+///    with no alias hop at all.
+///
+/// Controls, which must not move: a pure reference alias, a reference alias's destructor (a borrow drops nothing — as a
+/// parameter, a field and a return), `.clone()` through `&A` (clones the reference), pure cfg arms, a plain alias, and the
+/// `use … as` cfg twin.
+#[test]
+fn r1487_r1488_r1489_type_alias_reference_cfg_twin_and_mixed_twin_reach_their_types() {
+    let imp = |t: &str, eff: &str| format!("\
+        pub struct {t} {{ pub x: u8 }}\n\
+        impl {t} {{ pub fn new() -> {t} {{ {t} {{ x: 1 }} }} pub fn write_it(&self) -> u8 {{ {eff} 1 }} }}\n\
+        impl core::fmt::Display for {t} {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ {eff} write!(f, \"d\") }} }}\n\
+        impl Clone for {t} {{ fn clone(&self) -> Self {{ {eff} {t} {{ x: self.x }} }} }}\n");
+    let fs = "let _ = std::fs::write(\"/tmp/r1487\", \"x\");";
+    let src = format!("{}{}\
+        pub struct D {{ pub x: u8 }}\n\
+        impl D {{ pub fn new() -> D {{ D {{ x: 1 }} }} }}\n\
+        impl Drop for D {{ fn drop(&mut self) {{ {fs} }} }}\n\
+        pub struct DQ {{ pub x: u8 }}\n\
+        impl DQ {{ pub fn new() -> DQ {{ DQ {{ x: 1 }} }} }}\n\
+        impl Drop for DQ {{ fn drop(&mut self) {{ }} }}\n\
+        pub type RA = &'static R;\n\
+        pub type RM = &'static mut R;\n\
+        pub type RC1 = RC0;\n pub type RC0 = &'static R;\n\
+        pub type RI = &'static RI0;\n pub type RI0 = R;\n\
+        pub type RP = &'static Q;\n\
+        pub type RD = &'static D;\n\
+        pub struct HR {{ pub r: RA }}\n\
+        pub struct HD {{ pub d: RD }}\n\
+        pub fn r_param(r: RA) -> u8 {{ r.write_it() }}\n\
+        pub fn r_mut(r: RM) -> u8 {{ r.write_it() }}\n\
+        pub fn r_chain(r: RC1) -> u8 {{ r.write_it() }}\n\
+        pub fn r_inner(r: RI) -> u8 {{ r.write_it() }}\n\
+        pub fn r_fmt(r: RA) -> String {{ format!(\"{{}}\", r) }}\n\
+        pub fn r_clone(r: RA) -> u8 {{ r.clone().x }}\n\
+        pub fn r_field(h: &HR) -> u8 {{ h.r.write_it() }}\n\
+        pub fn mkr() -> RA {{ Box::leak(Box::new(R::new())) }}\n\
+        pub fn r_ret() -> u8 {{ mkr().write_it() }}\n\
+        pub fn kr_pure(r: RP) -> u8 {{ r.write_it() }}\n\
+        pub fn kr_clone_ref(r: &RA) -> u8 {{ let _c = r.clone(); 0 }}\n\
+        pub fn kr_drop_param(_d: RD) {{}}\n\
+        pub fn kr_drop_field(h: HD) -> u8 {{ h.d.x }}\n\
+        pub fn mkd() -> RD {{ Box::leak(Box::new(D::new())) }}\n\
+        pub fn kr_drop_ret() -> u8 {{ let d = mkd(); d.x }}\n\
+        #[cfg(unix)] pub type C1 = R;\n\
+        #[cfg(not(unix))] pub type C1 = Q;\n\
+        #[cfg(unix)] pub type CD = D;\n\
+        #[cfg(not(unix))] pub type CD = DQ;\n\
+        #[cfg(unix)] pub type CP = Q;\n\
+        #[cfg(not(unix))] pub type CP = P;\n\
+        pub struct HC {{ pub r: C1 }}\n\
+        pub struct HP {{ pub r: CP }}\n\
+        pub fn c_field(h: &HC) -> u8 {{ h.r.write_it() }}\n\
+        pub fn mkc() -> C1 {{ R::new() }}\n\
+        pub fn c_ret() -> u8 {{ mkc().write_it() }}\n\
+        pub fn c_letret() -> u8 {{ let r = mkc(); r.write_it() }}\n\
+        pub fn c_drop_param(_d: CD) {{}}\n\
+        pub fn mkcd() -> CD {{ D::new() }}\n\
+        pub fn c_drop_ret() -> u8 {{ let _d = mkcd(); 0 }}\n\
+        pub fn kc_pure_field(h: &HP) -> u8 {{ h.r.write_it() }}\n\
+        pub type A1 = R;\n\
+        pub fn kc_plain(r: &A1) -> u8 {{ r.write_it() }}\n\
+        #[cfg(unix)] pub mod mm {{ use super::*; pub struct T {{ pub x: u8 }} impl T {{ pub fn new() -> T {{ T {{ x: 1 }} }} pub fn write_it(&self) -> u8 {{ {fs} 1 }} }} }}\n\
+        #[cfg(not(unix))] pub mod mm {{ pub type T = super::Q; }}\n\
+        pub type MV = MU;\n pub type MU = mm::T;\n\
+        pub fn x_direct(r: &mm::T) -> u8 {{ r.write_it() }}\n\
+        pub fn x_chain(r: &MV) -> u8 {{ r.write_it() }}\n\
+        pub fn x_ctor() -> u8 {{ mm::T::new().write_it() }}\n\
+        #[cfg(unix)] pub mod mp {{ pub struct T {{ pub x: u8 }} impl T {{ pub fn write_it(&self) -> u8 {{ 1 }} }} }}\n\
+        #[cfg(not(unix))] pub mod mp {{ pub type T = super::Q; }}\n\
+        pub fn kx_pure(r: &mp::T) -> u8 {{ r.write_it() }}\n\
+        #[cfg(unix)] pub struct RT {{ pub x: u8 }}\n\
+        #[cfg(unix)] impl RT {{ pub fn write_it(&self) -> u8 {{ {fs} 1 }} }}\n\
+        #[cfg(not(unix))] pub type RT = std::marker::PhantomData<u8>;\n\
+        pub struct HT {{ pub t: RT }}\n\
+        pub fn x_root_field(h: &HT) -> u8 {{ h.t.write_it() }}\n\
+        pub mod sy {{\n\
+            #[cfg(unix)] pub struct Fd {{ pub x: u8 }}\n\
+            #[cfg(unix)] impl Fd {{ pub fn rev(&self) -> super::R {{ super::R::new() }} }}\n\
+            #[cfg(not(unix))] pub use crate::Q as Fd;\n\
+        }}\n\
+        pub fn x_chain_ret(f: &sy::Fd) -> u8 {{ f.rev().write_it() }}\n\
+        #[cfg(unix)] pub type SS = R;\n\
+        #[cfg(not(unix))] pub type SS = &'static Q;\n\
+        pub struct HS {{ pub s: SS }}\n\
+        pub fn r_mixed_field(h: &HS) -> u8 {{ h.s.write_it() }}\n",
+        imp("R", fs), imp("Q", ""));
+    let src = format!("{src}{}", imp("P", ""));
+    let v = scan_src_to_json("r1487", &src);
+    let has = |f: &str, e: &str| veina_row_effs(&v, f).contains(&e.to_string());
+    for f in ["r_param", "r_mut", "r_chain", "r_inner", "r_fmt", "r_clone", "r_field", "r_ret", // R1487
+              "c_field", "c_ret", "c_letret", "c_drop_param", "c_drop_ret", // R1488
+              "x_direct", "x_chain", "x_ctor", "x_root_field", "x_chain_ret", "r_mixed_field", // R1489 (+ mixed ref twin)
+              "kc_plain"] {
+        assert!(has(f, "Fs"), "`{f}` reaches the effectful arm/pointee:\n{v:#}");
+    }
+    for f in ["kr_pure", "kr_clone_ref", "kr_drop_param", "kr_drop_field", "kr_drop_ret", "kc_pure_field", "kx_pure"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}`: no effect is reached — no charge, no hedge:\n{v:#}");
+    }
 }

@@ -282,10 +282,13 @@ pub(crate) fn scan_items(
                                 if let Some(v) = uses.get(&format!("crate::{sub}::{name}")).cloned() {
                                     subuses.insert(name.clone(), v);
                                 }
-                                // R978 — and the alias's type-only POINTEE key, read back the same way.
-                                let dk = format!("{name}{}", crate::lang::DEREF_ALIAS_SUF);
-                                if let Some(v) = uses.get(&format!("crate::{sub}::{dk}")).cloned() {
-                                    subuses.insert(dk, v);
+                                // R978 — and the alias's type-only POINTEE key, read back the same way (R1487: and a
+                                // reference alias's).
+                                for suf in [crate::lang::DEREF_ALIAS_SUF, crate::lang::REF_ALIAS_SUF] {
+                                    let dk = format!("{name}{suf}");
+                                    if let Some(v) = uses.get(&format!("crate::{sub}::{dk}")).cloned() {
+                                        subuses.insert(dk, v);
+                                    }
                                 }
                             }
                         }
@@ -2041,6 +2044,40 @@ pub(crate) fn collect_reexports(
             // `Closure::wrap_maybe_aborting::<true>`, executed: ABSENT). What DOES depend on the substitution
             // is refused: a target that IS one of the alias's own parameters (`type P<T> = T`), and the R978
             // pointee below when it is one (`type A<T> = Arc<T>`).
+            // SOUNDNESS R1487 — a `type` alias to a REFERENCE (`type A = &'static R;`, `&'a mut R`, `&'a &'a R`,
+            // `&'a Arc<R>`). Non-nominal, so the arm below never sees it and nothing was recorded: a value typed `A`
+            // named no type in any position (EXECUTED, silent at one hop). Its POINTEE is recorded under the type-only
+            // key `REF_ALIAS_SUF` and nothing else — see there. A pointee that is one of the alias's own parameters
+            // (`type P<'a, T> = &'a T`) names no type and is refused, as R1025 refuses it for a nominal alias.
+            syn::Item::Type(t) if !crate::lang::r1487_off() && crate::lang::ref_alias_pointee(&t.ty).is_some() => {
+                if !include_tests && is_cfg_test(&t.attrs) {
+                    continue;
+                }
+                let Some((inner, refs)) = crate::lang::ref_alias_pointee(&t.ty) else { continue };
+                let own_param = |p: &syn::Path| {
+                    p.get_ident().is_some_and(|i| i == "Self" || t.generics.type_params().any(|tp| tp.ident == *i))
+                };
+                let syn::Type::Path(ip) = inner else { continue };
+                if ip.qself.is_some() || own_param(&ip.path) {
+                    continue;
+                }
+                // `&'a Arc<T>` derefs to `T` for a method but `.clone()` clones the `Arc`: the pointee is the peeled
+                // leaf, the clone verdict is the written type's.
+                let peeled = refs >= 2 || crate::lang::clone_peeled_ty(inner, &|p| expand(&crate::lang::path_to_string_lc(p), uses));
+                let Some(mut pointee) = crate::lang::type_path(inner, uses) else { continue };
+                // R181 — a bare one-segment pointee this module declares is recorded crate-rooted (see the arm below).
+                if !pointee.contains("::")
+                    && !modpath.is_empty()
+                    && crate::lang::module_declares(uses, &pointee) == Some(true)
+                {
+                    pointee = format!("crate::{modpath}::{pointee}");
+                }
+                if std::env::var_os("CANDOR_R1487_INSTR").is_some() {
+                    eprintln!("R1487DECL\t{}\t{pointee}\t{peeled}", qualify(modpath, &t.ident.to_string())); // §E1 REACH
+                }
+                let v = if peeled { format!("{}{pointee}", crate::lang::REF_ALIAS_PEELED) } else { pointee };
+                record_alias(aliases, qualify(modpath, &format!("{}{}", t.ident, crate::lang::REF_ALIAS_SUF)), v);
+            }
             syn::Item::Type(t) if !is_non_nominal_type(&t.ty) => {
                 if !include_tests && is_cfg_test(&t.attrs) {
                     continue;
@@ -3513,8 +3550,16 @@ pub(crate) fn fninfo(
     // arm's `Drop` was never charged (EXECUTED `fx3/dropscope_param_ff`: `deny Fs` 0 over a file write). Each arm is
     // asked with the use map pinned to it — the same function, the same escape gate — and every marker it names is
     // added (a leaf already marked is deduplicated in `note_release_q`).
-    if std::env::var_os("CANDOR_R1474_OFF").is_none() && !use_alts.is_empty() {
-        let mut heads: Vec<String> = Vec::new();
+    // SOUNDNESS R1488 — and a name whose SEEDED alias value carries the arms (`#[cfg(unix)] type A1 = D; #[cfg(not(unix))]
+    // type A1 = DQ;` — a `type` alias is a module alias, never a `use`, so `use_alts` does not list it and the joined value
+    // in `uses` named no leaf at all: EXECUTED `fx2/drop_a1cfg_param`, the unix arm's `Drop` writes, `deny Fs` 0).
+    let r1488 = std::env::var_os("CANDOR_R1488_OFF").is_none();
+    let seeded_arms = |h: &str| -> Option<Vec<String>> {
+        let v = uses.get(h).filter(|v| r1488 && v.contains(ALIAS_ALT_SEP))?;
+        Some(v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()).map(String::from).collect())
+    };
+    if std::env::var_os("CANDOR_R1474_OFF").is_none() && (!use_alts.is_empty() || r1488) {
+        let mut heads: Vec<(String, Vec<String>)> = Vec::new();
         for input in &sig.inputs {
             let syn::FnArg::Typed(pt) = input else { continue };
             let mut t: &syn::Type = &pt.ty;
@@ -3522,15 +3567,23 @@ pub(crate) fn fninfo(
                 t = &r.elem;
             }
             if let syn::Type::Path(tp) = t {
-                if let Some(h) = tp.path.segments.first().map(|s| s.ident.to_string()) {
-                    if use_alts.get(&h).is_some_and(|a| a.len() >= 2) && !heads.contains(&h) {
-                        heads.push(h);
+                // The head for a `use` twin; for a seeded module alias the LONGEST written prefix it is keyed under
+                // (`sy::A1` over `#[cfg(unix)] mod sy { pub type A1 = D; }` and its twin).
+                let segs: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let hit = (1..=segs.len()).rev().find_map(|n| {
+                    let k = segs[..n].join("::");
+                    let arms = if n == 1 { use_alts.get(&k).filter(|a| a.len() >= 2).cloned() } else { None };
+                    arms.or_else(|| seeded_arms(&k)).filter(|a| a.len() >= 2).map(|a| (k, a))
+                });
+                if let Some((h, arms)) = hit {
+                    if !heads.iter().any(|(x, _)| *x == h) {
+                        heads.push((h, arms));
                     }
                 }
             }
         }
-        for h in heads {
-            for a in &use_alts[&h] {
+        for (h, arms) in heads {
+            for a in &arms {
                 let mut u2 = uses.clone();
                 u2.insert(h.clone(), a.clone());
                 for (leaf, spelled) in crate::lang::owned_drop_params(sig, self_ty, &u2, &escapes.names, block) {
@@ -4304,7 +4357,19 @@ fn field_type_args(
         }
     };
     // A same-item-list `type` alias (generic or not): substitute its parameters with the written arguments.
-    if p.path.segments.len() == 1 {
+    // SOUNDNESS R1489 — NOT when the same item list also declares a STRUCT/ENUM/UNION of that name: that is a mixed `#[cfg]`
+    // twin, and substituting the alias arm here typed the field by that arm alone (`fallback: Fallback<E>` over
+    // `#[cfg(..)] enum Fallback<E>` / `#[cfg(not(..))] type Fallback<E> = PhantomData<E>;`), so the nominal arm's methods
+    // were unreachable through the field (EXECUTED `rustagent-aliasres/sib/hy2`). The written name is kept and the
+    // crate-wide alias map gives it both arms (`cache::add_nominal_twin_arms`).
+    let nominal_twin = std::env::var_os("CANDOR_R1489_OFF").is_none()
+        && items.iter().any(|it| match it {
+            syn::Item::Struct(x) => x.ident == seg.ident,
+            syn::Item::Enum(x) => x.ident == seg.ident,
+            syn::Item::Union(x) => x.ident == seg.ident,
+            _ => false,
+        });
+    if p.path.segments.len() == 1 && !nominal_twin {
         let alias = items.iter().find_map(|it| match it {
             syn::Item::Type(ta) if ta.ident == seg.ident && (written.is_empty() == ta.generics.type_params().next().is_none()) => Some(ta),
             _ => None,
