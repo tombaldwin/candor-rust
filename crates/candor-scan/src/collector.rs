@@ -1312,27 +1312,49 @@ impl<'a> CallCollector<'a> {
             *alias_count.entry(t.ident.to_string()).or_default() += 1;
         }
         let mut alias_prev: Vec<(String, Option<String>)> = Vec::new();
-        for t in stmts.iter().filter_map(live_alias) {
-            if alias_count.get(&t.ident.to_string()) != Some(&1) {
-                continue;
+        // SOUNDNESS R1483 — a block alias naming ANOTHER block alias declared AFTER it (`type A1 = A0; type A0 = R;`)
+        // expanded to `A0`'s R106 sentinel and was skipped, so `A1` kept the sentinel and a value typed `A1` was
+        // untyped (EXECUTED: `rustagent-alias2/fx` `*_blk2r_*`, a write with `deny Fs` and `deny Unknown` both 0);
+        // the forward order worked only because `A0` was bound first. An item is visible throughout its block, so
+        // order is not meaning: repeat the pass until nothing new binds. Each pass binds at least one name or
+        // stops, so it ends within (number of aliases) passes; a CYCLE (rustc E0391, nothing compiles) never
+        // leaves the sentinel, which is the pre-existing answer.
+        let fixpoint = std::env::var_os("CANDOR_R1483_OFF").is_none();
+        let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pass = 0usize;
+        loop {
+            pass += 1;
+            let mut progressed = false;
+            for t in stmts.iter().filter_map(live_alias) {
+                if alias_count.get(&t.ident.to_string()) != Some(&1) || bound.contains(&t.ident.to_string()) {
+                    continue;
+                }
+                let syn::Type::Path(p) = &*t.ty else { continue };
+                if p.qself.is_some()
+                    || crate::lang::is_non_nominal_type(&t.ty)
+                    || p.path.get_ident().is_some_and(|i| i == "Self" || t.generics.type_params().any(|tp| tp.ident == *i))
+                {
+                    continue;
+                }
+                let target = crate::lang::expand(&crate::lang::path_to_string(&p.path), &self.uses);
+                if target.starts_with(crate::decls::ITEM_SENTINEL) {
+                    continue;
+                }
+                if std::env::var_os("CANDOR_R1143_INSTR").is_some() {
+                    eprintln!("R1143ALIAS\t{}\t{target}", t.ident); // §E1 REACH COUNTER
+                }
+                let n = t.ident.to_string();
+                let prev = self.uses.to_mut().insert(n.clone(), target);
+                alias_prev.push((n.clone(), prev));
+                if pass > 1 && std::env::var_os("CANDOR_R1483_INSTR").is_some() {
+                    eprintln!("R1483BLK\t{n}"); // §E1 REACH — bound only because of the fixpoint
+                }
+                bound.insert(n);
+                progressed = true;
             }
-            let syn::Type::Path(p) = &*t.ty else { continue };
-            if p.qself.is_some()
-                || crate::lang::is_non_nominal_type(&t.ty)
-                || p.path.get_ident().is_some_and(|i| i == "Self" || t.generics.type_params().any(|tp| tp.ident == *i))
-            {
-                continue;
+            if !progressed || !fixpoint {
+                break;
             }
-            let target = crate::lang::expand(&crate::lang::path_to_string(&p.path), &self.uses);
-            if target.starts_with(crate::decls::ITEM_SENTINEL) {
-                continue;
-            }
-            if std::env::var_os("CANDOR_R1143_INSTR").is_some() {
-                eprintln!("R1143ALIAS\t{}\t{target}", t.ident); // §E1 REACH COUNTER
-            }
-            let n = t.ident.to_string();
-            let prev = self.uses.to_mut().insert(n.clone(), target);
-            alias_prev.push((n, prev));
         }
         alias_prev
     }

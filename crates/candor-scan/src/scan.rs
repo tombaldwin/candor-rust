@@ -1522,6 +1522,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     for (_, _, fd) in &decls_per_file {
         merge_decls(&mut merged, fd);
     }
+    // SOUNDNESS R1483 — an alias CHAIN (`type A1 = A0; type A0 = R;`) recorded one hop per entry, so `A1` expanded
+    // to `A0` and named nothing. Chased to its end here, once the map is crate-wide; see `chase_alias_chains`.
+    let r1483 = std::env::var_os("CANDOR_R1483_OFF").is_none();
+    if r1483 {
+        chase_alias_chains(&mut merged.mod_aliases);
+    }
     // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
     // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in
     // isolation, so a field/return/variant type spelled through a module alias (`c: facade::Command`)
@@ -1549,6 +1555,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             merged = MergedDecls::default();
             for ((_, _, fd), ex) in decls_per_file.iter().zip(&expanded) {
                 merge_decls(&mut merged, ex.as_ref().unwrap_or(fd));
+            }
+            if r1483 {
+                chase_alias_chains(&mut merged.mod_aliases); // R1483 — the re-merge rebuilt the map from the files
             }
         }
     }

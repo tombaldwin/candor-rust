@@ -2239,6 +2239,12 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
 /// `Tzif` finds no `Tzif::parse32` — measured, jiff-0.2.28's `TzifOwned::parse` lost a real `Log`
 /// once `use super::TzifOwned` was anchored and became followable. The caller pushes this reading
 /// BESIDE the followed one; whichever names no unit resolves to nothing.
+/// SOUNDNESS R1483 — the kill switch for the relative use-target re-application in `expand_with` (attribution only).
+fn r1483_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("CANDOR_R1483_OFF").is_some())
+}
+
 pub(crate) fn expand_noalias(path: &str, uses: &HashMap<String, String>) -> String {
     expand_with(path, uses, true, false)
 }
@@ -2342,6 +2348,23 @@ fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow:
                     let s2: Vec<&str> = stripped.split("::").collect();
                     if let Some(q) = qualified_alias(&s2, true, uses).filter(|_| follow) {
                         return q;
+                    }
+                } else if follow && !r1483_off() {
+                    // SOUNDNESS R1483 — the same ONE re-application for a binding whose target is a RELATIVE
+                    // module-qualified alias: `use m::A1;` with `mod m { pub type A1 = super::R; }` bound `A1` to
+                    // `m::A1`, which was returned as-is, so a value typed `A1` named nothing (EXECUTED, silent even at
+                    // one hop). `m::A1` is exactly the relative key `seed_mod_aliases` binds for an ancestor of `m`,
+                    // so only an EXACT seeded key answers — never the glob fallback, never a one-segment name.
+                    let s2: Vec<&str> = joined.split("::").collect();
+                    if s2.len() >= 2 {
+                        for n in (2..=s2.len()).rev() {
+                            if let Some(full) = uses.get(&s2[..n].join("::")) {
+                                if std::env::var_os("CANDOR_R1483_INSTR").is_some() {
+                                    eprintln!("R1483USE\t{joined}\t{}", full.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+                                }
+                                return alias_join(full, &s2[n..]);
+                            }
+                        }
                     }
                 }
             }

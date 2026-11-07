@@ -21,6 +21,15 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   when the type was read from a field that another struct of the same name also declares, or when a macro hid part of
   the module. Corpus A/B against 0.41.3 (5,301 registry crates, standalone): no row gained or lost a concrete effect;
   numbers are in the commit message.
+- ⚠ **A value whose type is spelled through a chain of type aliases now reaches that type** (SOUNDNESS R1483). With
+  `type A1 = A0; type A0 = R;`, a value typed `A1` (a parameter, a `let` annotation, a field, a return type, `A1::new()`)
+  was untyped, so every call on it was dropped without disclosure: an inherent or trait method, `.clone()`, `{}`, `==`,
+  an operator, `for x in`, and the destructor of a by-value parameter. When `R`'s method wrote a file, `deny Fs` and
+  `deny Unknown` both passed. A one-hop alias was not affected. The whole chain is now followed, including chains that
+  cross modules, chains through `Box`/`Arc`/`Rc` aliases, and generic aliases. A `#[cfg]`-duplicated link in the chain
+  still gives the union of its arms. Two related cases are fixed too: a block-local alias that names an alias declared
+  after it in the same block, and an alias brought in with `use m::A1;` (silent even at one hop). A cyclic alias, which
+  rustc rejects, is left as before. A gate scoped to such a caller can turn red. Numbers are in the commit message.
 - ⚠ **A type named through a `#[cfg]`-duplicated `use` now charges every arm at an implicit trait call and at a
   destructor** (SOUNDNESS R1474). With `#[cfg(unix)] use a::R as A1;` beside `#[cfg(not(unix))] use b::Q as A1;`,
   `format!("{}", r)`, `{:?}`, `==`, `+`, `*r`, `r[i]`, `r.to_string()` and `for x in r` on an `A1` value reached only

@@ -18452,7 +18452,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev144/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev145/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -34226,4 +34226,75 @@ pub fn shadow_closure_conc(crypto: Option<(u64, &dyn PK)>, c: Option<(u64, &Conc
         assert!(!e.iter().any(|x| x == "Net"), "`{f}` never runs `Loud::enc` — the OUTER payload key answered: {e:?}\n{v:#}");
         assert!(!e.is_empty(), "`{f}` runs `Conc::enc`: it must charge or disclose, never read pure: {v:#}");
     }
+}
+
+/// SOUNDNESS R1483 — a value typed through a TYPE-ALIAS CHAIN. `type A1 = A0; type A0 = R;` was recorded one hop per entry,
+/// so `A1` expanded to `A0`, a name no `impl` has, and EVERY consumer of an `A1` value was dropped with no edge and no
+/// disclosure: an inherent method, `clone`, `{}`, `==`, unary `-`, `for x in`, a trait method, the by-value parameter's
+/// destructor (EXECUTED, `rustagent-alias2/fx`: 471 cells wrote a file while `deny Fs` and `deny Unknown` both exited 0).
+/// Also the two sibling routes the class map found: a block alias naming one declared AFTER it, and `use m::A1;` of a
+/// module's alias (silent even at one hop). Controls: a one-hop alias, a chain to a pure type, a `#[cfg]`-duplicated link
+/// (the union of its arms, R1474), and a cycle (rustc E0391), which must terminate and keep its pre-existing answer.
+#[test]
+fn r1483_a_value_typed_through_an_alias_chain_reaches_its_type() {
+    let imp = |t: &str, eff: &str| format!("\
+        pub struct {t} {{ pub x: u8 }}\n\
+        impl {t} {{ pub fn new() -> {t} {{ {t} {{ x: 1 }} }} pub fn write_it(&self) -> u8 {{ {eff} 1 }} }}\n\
+        impl core::fmt::Display for {t} {{ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {{ {eff} write!(f, \"d\") }} }}\n\
+        impl PartialEq for {t} {{ fn eq(&self, _o: &Self) -> bool {{ {eff} true }} }}\n\
+        impl Clone for {t} {{ fn clone(&self) -> Self {{ {eff} {t} {{ x: self.x }} }} }}\n");
+    let fs = "let _ = std::fs::write(\"/tmp/r1483\", \"x\");";
+    let net = "let _ = std::net::TcpStream::connect(\"127.0.0.1:9\");";
+    let src = format!("{}{}{}{}\
+        pub struct D {{ pub x: u8 }}\n\
+        impl Drop for D {{ fn drop(&mut self) {{ {fs} }} }}\n\
+        pub type A1 = A0;\n\
+        pub type A0 = R;\n\
+        pub type B1 = B2;\n pub type B2 = B3;\n pub type B3 = B4;\n pub type B4 = R;\n\
+        pub type DA = DB;\n pub type DB = D;\n\
+        pub type X1 = X0;\n pub type X0 = Box<R>;\n\
+        pub type Y1 = Box<Y0>;\n pub type Y0 = R;\n\
+        pub type P1 = P0;\n pub type P0 = P;\n\
+        pub type C1 = C0;\n\
+        #[cfg(unix)] pub type C0 = R;\n\
+        #[cfg(not(unix))] pub type C0 = N;\n\
+        pub type Z1 = Z2;\n pub type Z2 = Z1;\n\
+        pub type O1 = R;\n\
+        pub mod m {{ pub type M0 = super::R; pub type M1 = M0; pub type U1 = super::R; }}\n\
+        use m::U1;\n\
+        pub struct H {{ pub r: A1 }}\n\
+        pub fn e_param(r: A1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_ref(r: &A1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_long(r: &B1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_field(h: &H) -> u8 {{ h.r.write_it() }}\n\
+        pub fn mk() -> A1 {{ R::new() }}\n\
+        pub fn e_ret() -> u8 {{ mk().write_it() }}\n\
+        pub fn e_path() -> u8 {{ let r = A1::new(); r.write_it() }}\n\
+        pub fn e_fmt(r: &A1) -> String {{ format!(\"{{}}\", r) }}\n\
+        pub fn e_eq(r: &A1) -> bool {{ r == r }}\n\
+        pub fn e_clone(r: &A1) -> u8 {{ r.clone().x }}\n\
+        pub fn e_drop(_d: DA) {{}}\n\
+        pub fn e_box(r: X1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_box_in(r: Y1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_mod(r: &m::M1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_use(r: &U1) -> u8 {{ r.write_it() }}\n\
+        pub fn e_blk() -> u8 {{ type L1 = L0; type L0 = R; fn inner(r: L1) -> u8 {{ r.write_it() }} inner(R::new()) }}\n\
+        pub fn e_cfg(r: &C1) -> u8 {{ r.write_it() }}\n\
+        pub fn k_one(r: &O1) -> u8 {{ r.write_it() }}\n\
+        pub fn k_pure(r: &P1) -> u8 {{ r.write_it() }}\n\
+        pub fn k_pure_fmt(r: &P1) -> String {{ format!(\"{{}}\", r) }}\n\
+        pub fn k_cycle(r: &Z1) -> u8 {{ r.write_it() }}\n",
+        imp("R", fs), imp("N", net), imp("P", ""), imp("Q", ""));
+    let v = scan_src_to_json("r1483", &src);
+    let has = |f: &str, e: &str| veina_row_effs(&v, f).contains(&e.to_string());
+    for f in ["e_param", "e_ref", "e_long", "e_field", "e_ret", "e_path", "e_fmt", "e_eq", "e_clone", "e_drop", "e_box", "e_box_in",
+              "e_mod", "e_use", "e_blk", "e_cfg", "k_one"] {
+        assert!(has(f, "Fs"), "`{f}` reaches `R`'s (or `D`'s) write through the alias chain:\n{v:#}");
+    }
+    assert!(has("e_cfg", "Net"), "a `#[cfg]`-duplicated link in the chain is the union of its arms:\n{v:#}");
+    for f in ["k_pure", "k_pure_fmt"] {
+        assert!(veina_row_effs(&v, f).is_empty(), "`{f}`: a chain to a pure type — no charge, no hedge:\n{v:#}");
+    }
+    // the cycle terminates (the scan returned) and keeps the 279c046 answer; rustc rejects it (E0391), so nothing runs
+    assert!(!has("k_cycle", "Fs"), "a cyclic alias names no type:\n{v:#}");
 }
