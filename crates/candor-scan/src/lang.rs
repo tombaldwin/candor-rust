@@ -1064,6 +1064,61 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
     }
 }
 
+/// SOUNDNESS R1477 — whether a DECLARED type proves that `.clone()` on a value of it runs a POINTER's own `clone`, where the
+/// receiver typer (`type_path_b`) peels the pointer to its pointee: two or more references (`&&T` clones the `&T`), or —
+/// under at most one — an `Arc`/`Rc`/`Weak` (written, or through an alias), or a `Box`/`Pin`/lock guard of one or of a
+/// shared reference (they clone, or auto-deref, to what they hold). `Box<T>` and `Pin<Box<T>>` clone `T` and are NOT
+/// peeled. `expand` names a written path's target; a `#[cfg]`-duplicated one arrives `ALIAS_ALT_SEP`-joined and is peeled
+/// only if EVERY arm is. One authority for the collector's binders and Pass A's field record (`FieldBorrow::shared`).
+pub(crate) fn clone_peeled_ty(ty: &syn::Type, expand: &dyn Fn(&syn::Path) -> String) -> bool {
+    fn inner(t: &syn::Type, expand: &dyn Fn(&syn::Path) -> String, depth: u8) -> bool {
+        if depth > 4 {
+            return false;
+        }
+        let t = match t {
+            syn::Type::Paren(p) => &*p.elem,
+            syn::Type::Group(g) => &*g.elem,
+            other => other,
+        };
+        let syn::Type::Path(tp) = t else { return false };
+        if tp.qself.is_some() {
+            return false;
+        }
+        let Some(seg) = tp.path.segments.last() else { return false };
+        let arg = match &seg.arguments {
+            syn::PathArguments::AngleBracketed(ab) => ab.args.iter().find_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let full = expand(&tp.path);
+        full.split(crate::decls::ALIAS_ALT_SEP).all(|arm| match arm.rsplit("::").next().unwrap_or(arm) {
+            "Arc" | "Rc" | "Weak" => true,
+            "Box" | "Pin" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Ref" | "RefMut" => match arg {
+                Some(syn::Type::Reference(r)) => r.mutability.is_none(),
+                Some(a) => inner(a, expand, depth + 1),
+                None => false,
+            },
+            _ => false,
+        })
+    }
+    let mut refs = 0u8;
+    let mut t = ty;
+    loop {
+        match t {
+            syn::Type::Reference(r) => {
+                refs += 1;
+                t = &r.elem;
+            }
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            _ => break,
+        }
+    }
+    refs >= 2 || inner(t, expand, 0)
+}
+
 /// SOUNDNESS R978 — the suffix of the TYPE-ONLY key under which a `type A = Box<T>|Arc<T>|Rc<T>;` alias
 /// records its POINTEE `T`, beside the ordinary `A` -> wrapper entry. `\u{4}` cannot appear in a Rust path,
 /// so the key collides with no name; it rides the module-alias map (`seed_mod_aliases`,

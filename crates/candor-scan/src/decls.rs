@@ -1434,7 +1434,12 @@ fn mod_targets(
     dir: &Path,
     include_tests: bool,
 ) -> HashMap<String, Vec<String>> {
-    let mut m = HashMap::new();
+    // SOUNDNESS R1475 — a name declared by SEVERAL `mod` items (`#[cfg(unix)] #[path = "sys_unix.rs"] mod imp;` beside
+    // `#[cfg(not(unix))] mod imp;`) is the UNION of their targets, in source order. This used to `insert` per
+    // item, so the LAST `mod` item won: with the plain twin written last the redirect vanished, R986 recorded no
+    // redirected module, and `imp::go()` resolved to nothing with no disclosure (EXECUTED `fx1475/p_none_pf`: `deny Fs`
+    // and `deny Unknown` both 0 over a file write). A `#[cfg]` arm is analysed like every other (R1474: the union).
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
     for it in items {
         let syn::Item::Mod(md) = it else { continue };
         if !include_tests && is_cfg_test(&md.attrs) {
@@ -1451,7 +1456,12 @@ fn mod_targets(
         if targets.is_empty() {
             targets.push(if modpath.is_empty() { name.clone() } else { format!("{modpath}::{name}") });
         }
-        m.insert(name, targets);
+        let all = m.entry(name).or_default();
+        for t in targets {
+            if !all.contains(&t) {
+                all.push(t);
+            }
+        }
     }
     m
 }
@@ -1933,10 +1943,14 @@ pub(crate) fn collect_reexports(
     // through the module's own name (`crate::backend::c::timerfd_create`) can name no unit. The marker key
     // starts with `REDIRECT_MOD_MARK`, which no path segment can contain, so `expand` never matches it —
     // a resolution through these aliases was measured and REVERTED (96 effects lost in rustix 0.37.28).
+    // SOUNDNESS R1475 — the value is every ARM's module path (`ALIAS_ALT_SEP`-joined, the twin placed at its own name
+    // included), so scan.rs can resolve a call written through the module in each arm. It used to be the own name alone.
     for (name, targets) in &mods {
         let own = qualify(modpath, name);
         if targets.iter().any(|t| *t != own) {
-            record_alias(aliases, format!("{REDIRECT_MOD_MARK}{own}"), own.clone());
+            for t in targets {
+                record_alias(aliases, format!("{REDIRECT_MOD_MARK}{own}"), t.clone());
+            }
         }
     }
     let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
@@ -3402,7 +3416,7 @@ pub(crate) fn fninfo(
         macro_twins: elems.macro_twins,
         ambiguous_type_leaves: elems.ambiguous_type_leaves,
         veinb_off: std::cell::Cell::new(false),
-        veinb_typed: HashMap::new(), std_made_vars: Default::default(), shape_vars: HashMap::new(), clone_vars: Default::default(), err_of: HashMap::new(),
+        veinb_typed: HashMap::new(), std_made_vars: Default::default(), shape_vars: HashMap::new(), peeled_vars: Default::default(), err_of: HashMap::new(),
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -3468,6 +3482,18 @@ pub(crate) fn fninfo(
                     if let Some(e) = crate::lang::result_err_type(&pt.ty, uses, &generics) {
                         c.err_of.insert(n, e);
                     }
+                }
+            }
+        }
+    }
+    // SOUNDNESS R1477 — a parameter DECLARED as a shared pointer (`a: Arc<R>`, `a: &Rc<R>`, `a: A2` over `type A2 =
+    // Arc<R>`): seeded here and not only read off the signature at the call, because a body that re-binds the name
+    // (`let a = a.clone();`) leaves `assign_drop.params` and must still find the outer `a` peeled.
+    for input in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = input {
+            if let Some(n) = crate::lang::single_pat_ident(&pt.pat) {
+                if c.clone_peeled_decl(&pt.ty) {
+                    c.peeled_vars.insert(n);
                 }
             }
         }
@@ -4359,6 +4385,9 @@ fn field_borrow_of(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> crate::
     let fb = crate::model::FieldBorrow {
         leaf: crate::lang::type_path_b(ty, uses_ty).map(|(_, b)| b),
         elem: crate::lang::elem_type_b(ty, uses_ty).map(|(_, b)| b),
+        shared: Some(crate::lang::clone_peeled_ty(ty, &|p: &syn::Path| {
+            crate::lang::expand(&crate::lang::path_to_string_lc(p), uses_ty)
+        })),
     };
     // §E1 REACH COUNTER, on the CHANGED branch only: the whole-type test said BORROWED and at least one
     // index's own walk says OWNED — exactly the declarations whose answer this change moves.

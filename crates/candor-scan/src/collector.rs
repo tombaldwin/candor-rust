@@ -439,9 +439,12 @@ pub(crate) struct CallCollector<'a> {
     /// vec![x];`, `let a = [x, y];`, `let o = Some(x);`), with its type arguments, for `std_shape_of`. Cleared whenever
     /// the name is re-bound.
     pub(crate) shape_vars: HashMap<String, (String, Vec<Option<String>>)>,
-    /// CALL-TARGET ROUND 2 — `let` bindings whose initializer CONSTRUCTS a nominal type (`S`, `S { .. }`, `S(..)`,
-    /// `S::new(..)`), so `x.clone()` provably runs that type's own `clone` (`clone_receiver_unpeeled`).
-    pub(crate) clone_vars: std::collections::HashSet<String>,
+    /// SOUNDNESS R1477 — bindings PROVEN to hold a shared pointer (`Arc`/`Rc`/`Weak`) or a `&&T`, whose `x.clone()` runs the
+    /// pointer's own `clone` although the receiver typer peels the value to its pointee (`clone_receiver_peeled`): an
+    /// annotated `let`, a typed closure parameter or a function parameter so declared, a `let` constructed by the
+    /// pointer's own path (`Arc::new(..)`, `Rc::clone(&a)`) or copied from such a binding. Cleared when the name is re-bound
+    /// (a shadow is then NOT proven peeled, the over-charge direction).
+    pub(crate) peeled_vars: std::collections::HashSet<String>,
     /// SOUNDNESS R1196 — a binding's `Result` ERROR type (`lang::result_err_type`'s string; `model::RET_ERR_SEP`-joined
     /// when a call's declared return names several): `let r: Result<u8, Le> = ..`, `let r = mk()` over `mk() -> Result<_,
     /// Le>`, `let r = Err(Le(1))`, a `Result` parameter. The expression typer records `Result` unwrapped to the `Ok`
@@ -1505,7 +1508,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses.clone(),
             self.bound_names.clone(),
         );
-        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone(), self.shape_vars.clone(), self.clone_vars.clone());
+        let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone(), self.shape_vars.clone(), self.peeled_vars.clone());
         self.macro_expanding.insert(mname.to_string());
         self.visit_block(block);
         self.macro_expanding.remove(mname);
@@ -1525,7 +1528,7 @@ impl<'a> CallCollector<'a> {
             self.local_uses,
             self.bound_names,
         ) = snap;
-        (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars, self.shape_vars, self.clone_vars) = snap2;
+        (self.veinb_typed, self.local_use_seen, self.use_alts, self.std_made_vars, self.shape_vars, self.peeled_vars) = snap2;
     }
 
     /// SOUNDNESS R1168 — the leaf of `t` when a value typed `t` is itself a FUTURE of this crate, so awaiting it yields its
@@ -6162,7 +6165,33 @@ impl<'a> CallCollector<'a> {
 
     /// The std SHAPE a value is (`Vec`, `[;]`, `Option`, `()`, `Box`, a std collection by its leaf) and what the
     /// expression or the typer says fills each of its type arguments.
+    ///
+    /// SOUNDNESS R1477 — a DEREF of a smart pointer (`*a` over `a: Arc<R>`) is the POINTEE, not the pointer: the parameter
+    /// route below reads the declared type through `declared_param_ty`, which peels the `*`, so `(*a).clone()` was asked of
+    /// `Arc`'s pure `clone` and `R::clone` was never edged (EXECUTED `fx1477/c_deref_arc`: the clone wrote, `deny Fs` 0). A
+    /// deref of a reference keeps its shape (`(*v).sort()` over `v: &mut Vec<G>` is the `Vec`).
     fn std_shape_of(&self, e: &syn::Expr) -> Option<(String, Vec<Option<String>>)> {
+        let mut x = e;
+        let mut derefs = false;
+        loop {
+            match x {
+                syn::Expr::Paren(p) => x = &p.expr,
+                syn::Expr::Group(g) => x = &g.expr,
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                    derefs = true;
+                    x = &u.expr;
+                }
+                _ => break,
+            }
+        }
+        let sh = self.std_shape_of_inner(e)?;
+        if derefs && matches!(sh.0.as_str(), "Box" | "Arc" | "Rc" | "Pin" | "Weak") {
+            return None;
+        }
+        Some(sh)
+    }
+
+    fn std_shape_of_inner(&self, e: &syn::Expr) -> Option<(String, Vec<Option<String>>)> {
         if let Some(sh) = self.std_shape_literal(e) {
             return Some(sh);
         }
@@ -6904,19 +6933,83 @@ impl<'a> CallCollector<'a> {
         self.charge_std_hooks(&hooks, recv, &rest, ret, true, crate::std_bounds::iterator_chain_member(name), ctor, false);
     }
 
-    /// Whether `recv` is PROVABLY a value of the type whose leaf is `leaf` itself — not an `Arc`/`Rc`/`&Arc` the receiver
-    /// typer peeled to its pointee: a parameter DECLARED `T` / `&T` / `&mut T`, or a `let` whose initializer constructs
-    /// the type (`S`, `S { .. }`, `S(..)`, `S::new(..)` — `clone_vars`). Anything else is not asked.
-    fn clone_receiver_unpeeled(&self, recv: &syn::Expr, leaf: &str) -> bool {
-        let syn::Expr::Path(p) = peel_value(recv) else { return false };
-        let Some(id) = p.path.get_ident().map(|i| i.to_string()) else { return false };
-        if let Some(ty) = self.declared_param_ty(recv) {
-            return match crate::lang::peel_ty_refs(ty) {
-                syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|s| s.ident == leaf && s.arguments.is_none()),
-                _ => false,
-            };
+    /// SOUNDNESS R1477 — whether `recv` is PROVEN to be a shared pointer (or a `&&T`) whose own `clone` runs at `recv.clone()`,
+    /// where the receiver typer peeled it to the pointee `T`. Only a proof withholds `T::clone`; every receiver that is not
+    /// proven peeled gets it (the union, which is what a DERIVED `Clone` has always had at this site: `local_fn_on` is false
+    /// for a derive, so its implementor edge never asked this question).
+    ///
+    /// It replaced `clone_receiver_unpeeled`, which asked the OPPOSITE question — "is the receiver provably NOT peeled" —
+    /// and could prove it only for a parameter spelled with the type's own leaf or a `let` that constructs the type. Every
+    /// other receiver of a hand-written `Clone` was dropped with no edge and no disclosure: an annotated `let r: R = ..`,
+    /// a parameter typed through an alias (`r: A1`), a field, a call's return, a loop element, a typed closure parameter,
+    /// a `Box<R>` (EXECUTED, `rustagent-clone/fx1477`: `deny Fs` and `deny Unknown` both exit 0 over a `clone` that writes).
+    /// A proof of peeling is local and cheap (the binding's declared type, or the pointer's own constructor path); a proof
+    /// of NOT peeling needs the declared type of every route the typer walks, and those routes store peeled strings.
+    ///
+    /// What is NOT proven, and so is charged (the over-charge direction): an `Arc<R>` reached through a field, a return, an
+    /// element or an untyped binder, when `R`'s own `clone` has effects.
+    fn clone_receiver_peeled(&self, recv: &syn::Expr, depth: u8) -> bool {
+        if depth > 4 {
+            return false;
         }
-        !self.shape_vars.contains_key(&id) && self.clone_vars.contains(&id)
+        match recv {
+            syn::Expr::Paren(p) => self.clone_receiver_peeled(&p.expr, depth),
+            syn::Expr::Group(g) => self.clone_receiver_peeled(&g.expr, depth),
+            // `(&a).clone()` on an `Arc` is still the `Arc`'s; a DEREF (`(*a).clone()`) reaches the pointee and is not peeled.
+            syn::Expr::Reference(r) => self.clone_receiver_peeled(&r.expr, depth),
+            syn::Expr::Path(p) if p.qself.is_none() => {
+                let Some(id) = p.path.get_ident().map(|i| i.to_string()) else { return false };
+                if id == "self" {
+                    // `self: Arc<Self>` / `self: &Rc<Self>` — the receiver's declared type (`&self` is `&Self`, never peeled).
+                    return self.assign_drop.params.get("self").is_some_and(|t| self.clone_peeled_decl(t));
+                }
+                if let Some(ty) = self.declared_param_ty(recv) {
+                    return self.clone_peeled_decl(ty);
+                }
+                self.peeled_vars.contains(&id)
+            }
+            // `Arc::new(x).clone()`, `Rc::clone(&a).clone()` — the call's own TYPE segment.
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() >= 2 => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let head = segs[0].clone();
+                    let written = segs[..segs.len() - 1].join("::");
+                    let lead = if p.path.leading_colon.is_some() { "::" } else { "" };
+                    let full = crate::lang::expand(&format!("{lead}{written}"), &self.uses);
+                    let full = self.union_over_arms(&head, full, |u| Some(crate::lang::expand(&format!("{lead}{written}"), u)));
+                    full.split(crate::decls::ALIAS_ALT_SEP).all(|a| matches!(a.rsplit("::").next(), Some("Arc" | "Rc" | "Weak")))
+                }
+                _ => false,
+            },
+            // `self.inner.clone()` over a field DECLARED `Arc<Inner>` (`FieldBorrow::shared`; a twin owner's field is not asked).
+            syn::Expr::Field(f) => {
+                let Some(bt) = self.resolve_recv_type(&f.base) else { return false };
+                if self.field_ambiguous(&bt, &f.member) || bt.contains(crate::decls::ALIAS_ALT_SEP) {
+                    return false;
+                }
+                let key = match &f.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(i) => i.index.to_string(),
+                };
+                let leaf = bt.rsplit("::").next().unwrap_or(&bt);
+                self.assign_drop.field_borrows.and_then(|fb| fb.get(leaf)).and_then(|m| m.get(&key)).and_then(|b| b.shared) == Some(true)
+            }
+            // `let b = a.clone();` over a peeled `a` is the same pointer.
+            syn::Expr::MethodCall(m) if m.args.is_empty() && matches!(m.method.to_string().as_str(), "clone" | "to_owned") => {
+                self.clone_receiver_peeled(&m.receiver, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    /// SOUNDNESS R1477 — `lang::clone_peeled_ty` with this scope's `use` map, every `#[cfg]` arm of a duplicated name joined.
+    pub(crate) fn clone_peeled_decl(&self, ty: &syn::Type) -> bool {
+        crate::lang::clone_peeled_ty(ty, &|p: &syn::Path| {
+            let written = crate::lang::path_to_string_lc(p);
+            let head = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+            let full = crate::lang::expand(&written, &self.uses);
+            self.union_over_arms(&head, full, |u| Some(crate::lang::expand(&written, u)))
+        })
     }
 
     /// THE METHOD SITE: `recv.leaf(args)` asked of the table — as a method of the receiver's std shape (`v.contains(&x)`,
@@ -6939,9 +7032,17 @@ impl<'a> CallCollector<'a> {
             let head = t.split('<').next().unwrap_or(&t).to_string();
             let tl = head.rsplit("::").next().unwrap_or(&head).to_string();
             // `x.clone()` is the one REQUIRED member the typed-call route never forms (its receiver typing peels `Arc<T>` /
-            // `Rc<T>` to `T`, whose `clone` the pointer's own never runs). Formed here only where the STRICT typer — which
-            // does not peel — names the same type.
-            let clone_typed = leaf == "clone" && args.is_empty() && self.clone_receiver_unpeeled(&node.receiver, &tl);
+            // `Rc<T>` to `T`, whose `clone` the pointer's own never runs). Formed here unless the receiver is PROVEN to be
+            // such a pointer (SOUNDNESS R1477, `clone_receiver_peeled`).
+            let clone_typed = leaf == "clone"
+                && args.is_empty()
+                && {
+                    let t = !self.clone_receiver_peeled(&node.receiver, 0);
+                    if t && self.local_fn_on(&tl, leaf) && std::env::var_os("CANDOR_R1477_INSTR").is_some() {
+                        eprintln!("R1477CLONE\t{tl}"); // §E1 REACH COUNTER: a hand-written `clone` the old question asked
+                    }
+                    t
+                };
             let bounded_name = self.generic_bounds.contains_key(&head) || self.impl_generic_bounds.contains_key(&head);
             if (!self.std_payload(&head) || bounded_name) && (!self.local_fn_on(&tl, leaf) || clone_typed) {
                 hooks.extend(crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, leaf, args.len(), None));
@@ -9989,9 +10090,9 @@ impl<'a> CallCollector<'a> {
         // `for`/closure/`match`/`if let` shadow kept the outer parameter's payload positions.
         let p_tuple_tr: Vec<(String, Option<Vec<Vec<String>>>)> =
             Self::name_keys(name).into_iter().map(|k| { let v = self.tuple_trait_of.remove(&k); (k, v) }).collect();
-        // CALL-TARGET ROUND 2 — the std-shape and constructed-value facts of a `let` (`shape_vars`, `clone_vars`).
+        // CALL-TARGET ROUND 2 — the std-shape and constructed-value facts of a `let` (`shape_vars`, `peeled_vars`).
         let p_shape = self.shape_vars.remove(name);
-        let p_clone = self.clone_vars.remove(name);
+        let p_clone = self.peeled_vars.remove(name);
         // A free-fn alias: `name()` inside the body would call the OUTER alias's target and inherit its
         // whole transitive effect chain.
         let p_alias = self.fn_alias.remove(name);
@@ -10057,9 +10158,9 @@ impl<'a> CallCollector<'a> {
         }
         restore(&mut self.shape_vars, name, p_shape);
         if p_clone {
-            self.clone_vars.insert(name.to_string());
+            self.peeled_vars.insert(name.to_string());
         } else {
-            self.clone_vars.remove(name);
+            self.peeled_vars.remove(name);
         }
         r
     }
@@ -12989,8 +13090,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     saved_keys.push((k, prev));
                 }
                 let sh = self.shape_vars.remove(&name);
-                let cv = self.clone_vars.remove(&name);
+                let cv = self.peeled_vars.remove(&name);
                 saved_shape.push((name, sh, cv));
+            }
+            // SOUNDNESS R1477 — a TYPED closure parameter declared as a shared pointer (`|a: Arc<R>|`).
+            if let syn::Pat::Type(pt) = input {
+                if let Some(n) = single_pat_ident(&pt.pat).filter(|_| self.clone_peeled_decl(&pt.ty)) {
+                    self.peeled_vars.insert(n);
+                }
             }
         }
         // SOUNDNESS R1196 — a closure parameter shadows an enclosing binding's `Result` error type (`err_of`) for the
@@ -13098,7 +13205,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 Some(v) => { self.shape_vars.insert(name.clone(), v); }
                 None => { self.shape_vars.remove(&name); }
             }
-            if cv { self.clone_vars.insert(name); } else { self.clone_vars.remove(&name); }
+            if cv { self.peeled_vars.insert(name); } else { self.peeled_vars.remove(&name); }
         }
         for (name, prev) in saved_mono {
             match prev {
@@ -13197,34 +13304,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
                 _ => None,
             };
+            // SOUNDNESS R1477 — read BEFORE this statement's names are cleared, so `let a = a.clone();` asks the OUTER `a`.
+            let peeled = match (&node.pat, &node.init) {
+                (syn::Pat::Type(pt), _) => single_pat_ident(&pt.pat).filter(|_| self.clone_peeled_decl(&pt.ty)),
+                (syn::Pat::Ident(pi), Some(init)) if pi.subpat.is_none() => {
+                    self.clone_receiver_peeled(&init.expr, 0).then(|| pi.ident.to_string())
+                }
+                _ => None,
+            };
             for n in &bound_names {
                 self.shape_vars.remove(n);
-                self.clone_vars.remove(n);
+                self.peeled_vars.remove(n);
             }
             if let Some((n, sh)) = shape {
                 self.shape_vars.insert(n, sh);
             }
-            if let (syn::Pat::Ident(pi), Some(init)) = (&node.pat, &node.init) {
-                let ctor = match peel_value(&init.expr) {
-                    syn::Expr::Struct(_) => true,
-                    syn::Expr::Path(p) => p.path.segments.last().is_some_and(|s| s.ident.to_string().chars().next().is_some_and(char::is_uppercase)),
-                    syn::Expr::Call(c) => match &*c.func {
-                        syn::Expr::Path(p) => {
-                            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-                            let up = |x: &String| x.chars().next().is_some_and(char::is_uppercase);
-                            match segs.as_slice() {
-                                [.., t] if up(t) => !matches!(t.as_str(), "Some" | "Ok" | "Err"),
-                                [.., t, f] if up(t) && f == "new" => !matches!(t.as_str(), "Arc" | "Rc" | "Box" | "Weak"),
-                                _ => false,
-                            }
-                        }
-                        _ => false,
-                    },
-                    _ => false,
-                };
-                if ctor && pi.subpat.is_none() {
-                    self.clone_vars.insert(pi.ident.to_string());
-                }
+            if let Some(n) = peeled {
+                self.peeled_vars.insert(n);
             }
         }
         // SOUNDNESS R1130 — `let s: HashSet<G> = xs.into_iter().collect();`: the annotation is the collected-into

@@ -327,6 +327,11 @@ pub(crate) type FieldIndex = HashMap<String, HashMap<String, String>>;
 pub(crate) struct FieldBorrow {
     pub(crate) leaf: Option<bool>,
     pub(crate) elem: Option<bool>,
+    /// SOUNDNESS R1477 — the field is DECLARED a shared pointer (`Arc<T>`/`Rc<T>`/`Weak<T>`, `lang::clone_peeled_ty`), so
+    /// `x.f.clone()` runs the pointer's own `clone` although `fields` records the pointee. Merged like the other two: a
+    /// twin declaration that is NOT a pointer clears it (the over-charge direction).
+    #[serde(default)]
+    pub(crate) shared: Option<bool>,
 }
 
 impl FieldBorrow {
@@ -340,6 +345,7 @@ impl FieldBorrow {
         }
         self.leaf = m(self.leaf, o.leaf);
         self.elem = m(self.elem, o.elem);
+        self.shared = m(self.shared, o.shared);
     }
 }
 

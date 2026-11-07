@@ -1701,7 +1701,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 continue;
             }
             let t_leaf = t_body.rsplit("::").next().unwrap_or(t_body);
-            if a_leaf == t_leaf || a_leaf.starts_with(crate::decls::REDIRECT_MOD_MARK) {
+            if a_leaf == t_leaf || q.starts_with(crate::decls::REDIRECT_MOD_MARK) {
                 continue;
             }
             for pre in [crate::model::RET_IMPL_FN, crate::model::RET_IMPL, crate::model::RET_IMPL_SELF, crate::model::RET_IMPL_ELEM] {
@@ -2574,9 +2574,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .filter_map(|k| k.strip_prefix(crate::decls::REDIRECT_MOD_MARK).map(String::from))
         .collect();
     redirect_mods.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    // SOUNDNESS R1475 — each redirected module's ARMS: every module path one of its `mod` items is analysed under (a twin
+    // placed at the module's own name included). A call written through the module is resolved in each arm below.
+    let redirect_arms: HashMap<String, Vec<String>> = merged
+        .mod_aliases
+        .iter()
+        .filter_map(|(k, v)| {
+            let own = k.strip_prefix(crate::decls::REDIRECT_MOD_MARK)?;
+            Some((own.to_string(), v.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()).map(String::from).collect()))
+        })
+        .collect();
     let mut alias_tails: Vec<(String, String)> = Vec::new();
     for (q, t) in &merged.mod_aliases {
-        if t.contains(crate::decls::ALIAS_ALT_SEP) {
+        if t.contains(crate::decls::ALIAS_ALT_SEP) || q.starts_with(crate::decls::REDIRECT_MOD_MARK) {
             continue;
         }
         let a_leaf = q.rsplit("::").next().unwrap_or(q);
@@ -5530,18 +5540,60 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // the call — FFI through `c.rs`'s `pub(crate) use libc::*` — formed no edge and no disclosure.
             // Bounded to calls nothing above handled, under a module the crate itself redirects; name
             // resolution failed, which is §4's `ambiguous:` kind.
-            if !already_handled && !c.is_macro {
+            if !c.is_macro {
                 let body = c.path.strip_prefix("crate::").unwrap_or(&c.path);
                 if let Some(m) = redirect_mods.iter().find(|m| {
                     body.strip_prefix(m.as_str()).is_some_and(|r| r.starts_with("::"))
                 }) {
-                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                    unknown_why
-                        .entry(f.qual.clone())
-                        .or_default()
-                        .insert(format!("ambiguous:path-redirected module crate::{m}"));
-                    if crate::lang::reach_debug() {
-                        eprintln!("R986REDIR\t{}\t{}", f.qual, c.path);
+                    // ── SOUNDNESS R1475 — THE UNION OF THE MODULE'S ARMS ─────────────────────────────────────────────
+                    // The module is analysed in every arm (`redirect_arms`), so the call is resolved in every arm: an
+                    // arm whose module holds the item EXACTLY (`<arm>::<rest>` is a unit's qual) is edged, beside whatever
+                    // the written path resolved to. Before, a twin placed at the module's own name — a dead `imp.rs` or an
+                    // inline `mod imp {}` — answered alone: `imp::go()` resolved to the twin's pure body and the redirected
+                    // arm's write was never edged (EXECUTED `fx1475/p_file_*`, `p_inline_*`: `deny Fs` and `deny Unknown`
+                    // both 0). Where the call resolved to that twin ALONE — no redirected arm holds the item at its path (a
+                    // re-export, a glob, a macro) — the redirected arms are unread and the call is DISCLOSED as R986
+                    // discloses one that resolved nowhere. An arm missing an item that another redirected arm holds is the
+                    // ordinary `#[cfg]` split (a unix-only `advise`), not an unread arm, and is not hedged (measured on the
+                    // first corpus A/B: hedging every miss read 129 `ambiguous:` rows in syn's `FoldHelper::lift`, whose
+                    // impl is keyed by its self type, and memmap2's unix-only methods). `CANDOR_R1475_OFF=1` restores R986.
+                    let rest = &body[m.len() + 2..];
+                    let arms = redirect_arms.get(m).map(Vec::as_slice).unwrap_or(&[]);
+                    // A path ALREADY under an arm's placed module (`os::x86::bit::test`, written inside the `#[path =
+                    // "os/x86.rs"] mod os;` file the scanner places at `os::x86`) is not a call through the module's own
+                    // name: it names the arm it sits in. Not rewritten, not hedged here (measured on the first corpus
+                    // A/B: core_detect, every call inside its redirected `os` file read `ambiguous:` beside its own edge).
+                    let in_arm = arms.iter().any(|a| a != m && body.strip_prefix(a.as_str()).is_some_and(|r| r.starts_with("::")));
+                    let r1475 = std::env::var_os("CANDOR_R1475_OFF").is_none() && !in_arm;
+                    let (mut tried, mut hits) = (0usize, 0usize);
+                    for arm in arms.iter().filter(|a| *a != m && r1475) {
+                        tried += 1;
+                        let q = format!("{arm}::{rest}");
+                        let hit = tail2(&q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&q));
+                        if hit {
+                            hits += 1;
+                            if q != f.qual {
+                                calls.entry(f.qual.clone()).or_default().insert(q.clone());
+                            }
+                        }
+                        if std::env::var_os("CANDOR_R1475_INSTR").is_some() {
+                            eprintln!("R1475ARM\t{}\t{}\t{q}\t{}", f.qual, c.path, if hit { "edge" } else { "unread" }); // §E1
+                        }
+                    }
+                    let own_q = format!("{m}::{rest}");
+                    let twin_only = tried > 0
+                        && hits == 0
+                        && resolved_local
+                        && tail2(&own_q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&own_q));
+                    if !already_handled || twin_only {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert(format!("ambiguous:path-redirected module crate::{m}"));
+                        if crate::lang::reach_debug() {
+                            eprintln!("R986REDIR\t{}\t{}", f.qual, c.path);
+                        }
                     }
                 }
             }

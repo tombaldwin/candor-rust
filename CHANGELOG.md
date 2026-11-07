@@ -31,6 +31,21 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   arms share a type name, a formatting, comparison, operator or std-bound call is reported as `Unknown`
   (`ambiguous:same-name local defs`) rather than resolved; a destructor is resolved per arm.
   Numbers are in the commit message.
+- ⚠ **`x.clone()` on a type with a hand-written `Clone` impl now charges that impl's effects for every receiver not proven
+  to be a shared pointer** (SOUNDNESS R1477). Before, the call was charged only when the receiver was a parameter spelled
+  with the type's own name or a `let` that built the type. An annotated `let r: R = ..`, a parameter typed through an
+  alias (`r: A1`), a field, a call's return, a loop element, a typed closure parameter, a `Box<R>` and `(*arc).clone()`
+  were all dropped with no disclosure, so `deny Fs` and `deny Unknown` both passed over a `clone` that writes a file.
+  The receiver now goes without the charge only when it is proven to be an `Arc`, `Rc` or `Weak` (by its declared type,
+  an alias of one, a field declared as one, or a `let` built with `Arc::new(..)`/`Rc::clone(..)`) or a `&&T`. A derived
+  `Clone` was already charged this way. Residual: an `Arc<R>` returned by a call is not proven and is charged.
+- ⚠ **A call written through a module placed by `#[path]` or `#[cfg_attr(_, path = ..)]` now reaches every `#[cfg]` arm
+  of that module** (SOUNDNESS R1475). With `#[cfg(unix)] #[path = "sys_unix.rs"] mod imp;` beside
+  `#[cfg(not(unix))] mod imp;`, `imp::go()` was silent when the plain `mod imp` was written last, and when an `imp.rs`
+  or an inline `mod imp {}` existed it resolved to that twin alone. Each arm whose module holds the item at the written
+  path is now charged, alongside the twin. Where only the twin holds it (the placed arm re-exports the item), the call
+  is reported as `Unknown` (`ambiguous:path-redirected module`). A gate scoped to such a caller can turn red, including
+  on an arm the build does not compile. Numbers are in the commit message.
 
 ## [0.41.3] — 2026-11-06
 

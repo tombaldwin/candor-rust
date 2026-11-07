@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev144 (rustagent-clone): SOUNDNESS R1477 — Pass B's cached `calls` change: `x.clone()` on a hand-written `Clone` is
+    // edged unless the receiver is proven a shared pointer. SOUNDNESS R1475 — Pass A's `mod_aliases` redirect marker now
+    // carries every arm's module path (and `mod_targets` unions a name's `mod` items); a rev143 entry has the own name
+    // only, so the arm edges would be lost warm. Mandatory.
     // rev143 (rustagent-cfgalias): SOUNDNESS R1474 — Pass B's cached `calls` change: a `#[cfg]`-duplicated type's arms are
     // each edged at an implicit trait call (`{}`, `==`, `.to_string()`, `for`) and each arm's destructor is marked at a
     // construction, a by-value parameter and a callee's return. A rev142 entry replays the one-arm silence warm. Mandatory.
@@ -564,7 +568,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev143/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev144/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
