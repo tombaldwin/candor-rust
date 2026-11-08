@@ -23,8 +23,46 @@ python3 "$CG/generate.py" --registry "$REG"
 cp "$CG/covered.tsv" "$CG/open.tsv" "$OUT/fresh/"
 git checkout -- "$CG/covered.tsv" "$CG/open.tsv"   # the checked-in files are what the diff reads
 
-M=$(git log -1 --format=%H -- "$CG/open.tsv" "$CG/covered.tsv")
-ENGINE_PATHS=(crates/candor-scan crates/candor-classify crates/candor-report Cargo.lock "$CG/generate.py" "$CG/classify_check")
+# THE BASELINE ENGINE (SOUNDNESS R1507). It must be the engine that last REGENERATED the manifests, which
+# `git log -1 -- open.tsv covered.tsv` is NOT: a splice commit (rows hand-added to open.tsv, nothing
+# regenerated) moves it, and every engine change since the real regeneration is then labelled crates.io
+# drift. Two sources, in order:
+#   1. the `# engine-sha:` stamp generate.py writes into both manifests at regeneration. A splice leaves it
+#      alone. Used only when both manifests agree, the sha names a commit, and it is an ancestor of HEAD.
+#   2. otherwise (unstamped history, a dirty-tree generation, a rewritten history) the newest commit that
+#      touched the manifests and is NOT a splice. A splice = a commit whose only change to the two files is
+#      added lines in open.tsv; a regeneration rewrites covered.tsv or removes/changes open.tsv rows.
+# Either way the choice is printed with its source. A wrong baseline only mislabels growth (engine vs drift);
+# it can never turn a grown row into a pass, because the gate's verdict does not read the baseline.
+engine_paths() { python3 "$CG/generate.py" --print-engine-paths; }
+is_splice() {  # $1 = commit; true when its only change to the manifests is pure additions to open.tsv
+  local nums; nums=$(git diff --numstat "$1^" "$1" -- "$CG/open.tsv" "$CG/covered.tsv" 2>/dev/null) || return 1
+  git rev-parse --verify -q "$1^" >/dev/null || return 1   # a root commit is a regeneration
+  [ -n "$nums" ] || return 1
+  [ "$(printf '%s\n' "$nums" | awk 'NF && !($3 ~ /open\.tsv$/ && $2 == 0) {bad=1} END{print bad+0}')" = 0 ]
+}
+M=""; WHY=""
+SO=$(python3 "$CG/generate.py" --manifest-engine "$CG/open.tsv")
+SC=$(python3 "$CG/generate.py" --manifest-engine "$CG/covered.tsv")
+if [ -n "$SO" ] && [ "$SO" = "$SC" ]; then
+  if git cat-file -e "$SO^{commit}" 2>/dev/null && git merge-base --is-ancestor "$SO" HEAD 2>/dev/null; then
+    M=$SO; WHY="engine-sha stamp"
+  else
+    echo "refresh: stamped engine ${SO:0:12} is not an ancestor of HEAD (or not fetched) — falling back to the history walk"
+  fi
+elif [ -n "$SO$SC" ]; then
+  echo "refresh: the two manifests' engine stamps disagree (open='${SO:0:12}' covered='${SC:0:12}') — falling back to the history walk"
+fi
+if [ -z "$M" ]; then
+  while read -r c; do
+    if is_splice "$c"; then continue; fi
+    M=$c; WHY="newest non-splice manifest commit (no usable stamp)"; break
+  done < <(git log --format=%H -- "$CG/open.tsv" "$CG/covered.tsv")
+  [ -n "$M" ] || { echo "refresh: no regeneration commit found in history" >&2; exit 2; }
+fi
+echo "refresh: baseline engine ${M:0:12} (source: $WHY)"
+ENGINE_PATHS=()
+while read -r p; do ENGINE_PATHS+=("$p"); done < <(engine_paths)
 if git diff --quiet "$M" -- "${ENGINE_PATHS[@]}"; then
   echo "refresh: engine paths unchanged since the manifest's commit ${M:0:12} — the fresh run is the baseline"
   cp "$OUT/fresh/"*.tsv "$OUT/baseline/"

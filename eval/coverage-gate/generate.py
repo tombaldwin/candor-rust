@@ -845,6 +845,58 @@ def stamp_versions(path, resolved):
         fh.writelines(out)
 
 
+# R1507 — the ENGINE that generated a manifest, recorded as a comment (same channel as the version stamp).
+# refresh.sh needs "the engine that last REGENERATED these files"; `git log -1 -- open.tsv covered.tsv`
+# cannot say, because a splice commit (hand-added rows, no regeneration) moves it, and every engine change
+# since the real regeneration is then labelled crates.io drift. The stamp survives a splice untouched.
+ENGINE_HEADER = "# engine-sha:"
+ENGINE_PATHS = ["crates/candor-scan", "crates/candor-classify", "crates/candor-report", "Cargo.lock",
+                "eval/coverage-gate/generate.py", "eval/coverage-gate/classify_check"]
+
+
+def current_engine_stamp():
+    """HEAD's sha when the engine paths are clean against HEAD, else `unrecorded`: a dirty-tree
+    generation was NOT made by any commit, and a sha there would be a false claim the baseline run
+    would then trust. `unrecorded` makes refresh.sh fall back to its splice-skipping history walk."""
+    try:
+        root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=HERE, text=True).strip()
+        dirty = subprocess.check_output(["git", "status", "--porcelain", "--"] + ENGINE_PATHS,
+                                        cwd=root, text=True).strip()
+        if dirty:
+            return "unrecorded"
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    except (subprocess.CalledProcessError, OSError):
+        return "unrecorded"
+
+
+def stamp_engine(path, sha):
+    with open(path) as fh:
+        lines = [l for l in fh if not l.startswith(ENGINE_HEADER)]
+    out, placed = [], False
+    for l in lines:
+        out.append(l)
+        if not placed and l.startswith("#"):
+            out.append("%s %s\n" % (ENGINE_HEADER, sha))
+            placed = True
+    if not placed:
+        out.insert(0, "%s %s\n" % (ENGINE_HEADER, sha))
+    with open(path, "w") as fh:
+        fh.writelines(out)
+
+
+def manifest_engine(path):
+    """The stamped engine sha, or '' when absent (a manifest written before R1507) or `unrecorded`."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith(ENGINE_HEADER):
+                    v = line[len(ENGINE_HEADER):].strip()
+                    return "" if v == "unrecorded" else v
+    except OSError:
+        pass
+    return ""
+
+
 def manifest_versions(path):
     """crate -> resolved registry directory, from a manifest's R311 stamp. Empty for a manifest
     written before the stamp existed, which is NOT the same as 'no crates' — callers must treat an
@@ -1124,6 +1176,10 @@ def main():
     ap.add_argument("--baseline", nargs=2, default=None, metavar=("BASELINE_COVERED", "BASELINE_OPEN"),
                     help="with --diff-manifests: a fresh regeneration by the engine that WROTE the checked-in "
                          "manifests, over the same fetch, so growth splits into engine change vs drift")
+    ap.add_argument("--print-engine-paths", action="store_true",
+                    help="print the engine-relevant paths (one per line) and exit; refresh.sh's single source")
+    ap.add_argument("--manifest-engine", default=None, metavar="MANIFEST",
+                    help="print the engine sha stamped in MANIFEST (empty if none/unrecorded) and exit")
     ap.add_argument("--github-output", default=None,
                     help="with --diff-manifests, append regressed/oracle_dropped/grown counts to this "
                          "GITHUB_OUTPUT file")
@@ -1131,6 +1187,12 @@ def main():
 
     if args.selftest:
         selftest()
+        return
+    if args.print_engine_paths:
+        print("\n".join(ENGINE_PATHS))
+        return
+    if args.manifest_engine is not None:
+        print(manifest_engine(args.manifest_engine))
         return
 
     if args.print_fixture_toml:
@@ -1214,6 +1276,9 @@ def main():
     # only the first one is diagnosable.
     stamp_versions(covered_path, resolved_versions)
     stamp_versions(open_path, resolved_versions)
+    eng = current_engine_stamp()
+    stamp_engine(covered_path, eng)
+    stamp_engine(open_path, eng)
 
 
 if __name__ == "__main__":
