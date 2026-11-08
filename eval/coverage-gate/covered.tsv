@@ -79,7 +79,9 @@ bcrypt	bcrypt::non_truncating_hash	Rand	Rand	bcrypt::non_truncating_hash
 bcrypt	bcrypt::non_truncating_hash_bytes	Rand	Rand	bcrypt::non_truncating_hash_bytes
 bcrypt	bcrypt::non_truncating_hash_with_result	Rand	Rand	bcrypt::non_truncating_hash_with_result
 chrono	chrono::Local::now	Clock	Clock	chrono::offset::local::Local::now
+chrono	chrono::Local::today	Clock	Clock	chrono::offset::local::Local::today
 chrono	chrono::Utc::now	Clock	Clock	chrono::offset::utc::Utc::now
+chrono	chrono::Utc::today	Clock	Clock	chrono::offset::utc::Utc::today
 console	console::colors_enabled	Env,Unknown	Env	console::utils::colors_enabled
 console	console::colors_enabled_stderr	Env,Unknown	Env	console::utils::colors_enabled_stderr
 crossterm	crossterm::disable_raw_mode	Fs	Ipc	crossterm::terminal::disable_raw_mode
@@ -1104,6 +1106,7 @@ postgres	postgres::Client::batch_execute	Db,Unknown	Db	postgres::client::Client:
 postgres	postgres::Client::copy_in	Db,Unknown	Db	postgres::client::Client::copy_in
 postgres	postgres::Client::copy_out	Db,Unknown	Db	postgres::client::Client::copy_out
 postgres	postgres::Client::execute	Db,Unknown	Db	postgres::client::Client::execute
+postgres	postgres::Client::is_valid	Db,Unknown	Db	postgres::client::Client::is_valid
 postgres	postgres::Client::prepare	Db,Unknown	Db	postgres::client::Client::prepare
 postgres	postgres::Client::prepare_typed	Db,Unknown	Db	postgres::client::Client::prepare_typed
 postgres	postgres::Client::query	Db,Unknown	Db	postgres::client::Client::query
@@ -1137,6 +1140,7 @@ rand	rand::random_iter	Rand	Rand	rand::random_iter
 rand	rand::random_range	Rand	Rand	rand::random_range
 rand	rand::random_ratio	Rand	Rand	rand::random_ratio
 rand	rand::rng	Rand	Rand	rand::rngs::thread::rng
+rdkafka	rdkafka::BaseConsumer::fetch_group_list	Log	Net	rdkafka::consumer::base_consumer::BaseConsumer::fetch_group_list
 rdkafka	rdkafka::BaseConsumer::fetch_metadata	Log	Net	rdkafka::consumer::base_consumer::BaseConsumer::fetch_metadata
 rdkafka	rdkafka::BaseConsumer::poll	Clock,Log,Unknown	Net	rdkafka::consumer::base_consumer::BaseConsumer::poll
 rdkafka	rdkafka::BaseConsumer::seek	Log	Net	rdkafka::consumer::base_consumer::BaseConsumer::seek
@@ -1144,11 +1148,13 @@ rdkafka	rdkafka::BaseConsumer::store_offset	Log	Net	rdkafka::consumer::base_cons
 rdkafka	rdkafka::BaseConsumer::subscribe	Log	Net	rdkafka::consumer::base_consumer::BaseConsumer::subscribe
 rdkafka	rdkafka::BaseProducer::flush	Clock,Log,Unknown	Net	rdkafka::producer::base_producer::BaseProducer::flush
 rdkafka	rdkafka::BaseProducer::poll	Clock,Log,Unknown	Net	rdkafka::producer::base_producer::BaseProducer::poll
+rdkafka	rdkafka::Client::fetch_group_list	Log	Net	rdkafka::client::Client::fetch_group_list
 rdkafka	rdkafka::Client::fetch_metadata	Log	Net	rdkafka::client::Client::fetch_metadata
 rdkafka	rdkafka::FutureProducer::flush	Clock,Log,Unknown	Net	rdkafka::producer::future_producer::FutureProducer::flush
 rdkafka	rdkafka::FutureProducer::poll	Clock,Log,Unknown	Net	rdkafka::producer::future_producer::FutureProducer::poll
 rdkafka	rdkafka::FutureProducer::send	Clock,Log	Net	rdkafka::producer::future_producer::FutureProducer::send
 rdkafka	rdkafka::PartitionQueue::poll	Clock,Log,Unknown	Net	rdkafka::consumer::base_consumer::PartitionQueue::poll
+rdkafka	rdkafka::StreamConsumer::fetch_group_list	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::fetch_group_list
 rdkafka	rdkafka::StreamConsumer::fetch_metadata	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::fetch_metadata
 rdkafka	rdkafka::StreamConsumer::seek	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::seek
 rdkafka	rdkafka::StreamConsumer::store_offset	Log	Net	rdkafka::consumer::stream_consumer::StreamConsumer::store_offset
@@ -1417,6 +1423,7 @@ tempfile	tempfile::Builder::tempdir_in	Env,Rand,Unknown	Fs	tempfile::Builder::te
 tempfile	tempfile::Builder::tempfile	Env,Fs,Rand,Unknown	Fs	tempfile::Builder::tempfile
 tempfile	tempfile::Builder::tempfile_in	Env,Fs,Rand,Unknown	Fs	tempfile::Builder::tempfile_in
 tempfile	tempfile::NamedTempFile::close	Fs	Fs	tempfile::file::NamedTempFile::close
+tempfile	tempfile::NamedTempFile::into_file	Fs	Fs	tempfile::file::NamedTempFile::into_file
 tempfile	tempfile::NamedTempFile::new	Env,Fs,Rand,Unknown	Fs	tempfile::file::NamedTempFile::new
 tempfile	tempfile::NamedTempFile::new_in	Env,Fs,Rand,Unknown	Fs	tempfile::file::NamedTempFile::new_in
 tempfile	tempfile::NamedTempFile::persist	Fs,Unknown	Fs	tempfile::file::NamedTempFile::persist
@@ -1431,6 +1438,10 @@ tempfile	tempfile::TempDir::close	Fs	Fs	tempfile::dir::TempDir::close
 tempfile	tempfile::TempDir::keep	Fs	Fs	tempfile::dir::TempDir::keep
 tempfile	tempfile::TempDir::new	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::new
 tempfile	tempfile::TempDir::new_in	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::new_in
+tempfile	tempfile::TempDir::with_prefix	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::with_prefix
+tempfile	tempfile::TempDir::with_prefix_in	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::with_prefix_in
+tempfile	tempfile::TempDir::with_suffix	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::with_suffix
+tempfile	tempfile::TempDir::with_suffix_in	Env,Rand,Unknown	Fs	tempfile::dir::TempDir::with_suffix_in
 tempfile	tempfile::TempPath::close	Fs	Fs	tempfile::file::TempPath::close
 tempfile	tempfile::TempPath::keep	Fs,Unknown	Fs	tempfile::file::TempPath::keep
 tempfile	tempfile::TempPath::persist	Fs,Unknown	Fs	tempfile::file::TempPath::persist
@@ -1448,12 +1459,14 @@ tokio_native_tls	tokio_native_tls::TlsAcceptor::accept	Net	Net	tokio_native_tls:
 tokio_native_tls	tokio_native_tls::TlsConnector::connect	Net	Net	tokio_native_tls::TlsConnector::connect
 tokio_postgres	tokio_postgres::CancelToken::cancel_query	Ipc,Net,Unknown	Net	tokio_postgres::cancel_token::CancelToken::cancel_query
 tokio_postgres	tokio_postgres::Client::batch_execute	Log,Unknown	Db	tokio_postgres::client::Client::batch_execute
+tokio_postgres	tokio_postgres::Client::cancel_query	Ipc,Net,Unknown	Net	tokio_postgres::client::Client::cancel_query
 tokio_postgres	tokio_postgres::Client::copy_in	Log,Unknown	Db	tokio_postgres::client::Client::copy_in
 tokio_postgres	tokio_postgres::Client::copy_out	Log,Unknown	Db	tokio_postgres::client::Client::copy_out
 tokio_postgres	tokio_postgres::Client::prepare_typed	Log,Unknown	Db	tokio_postgres::client::Client::prepare_typed
 tokio_postgres	tokio_postgres::Client::query_raw	Log,Unknown	Db	tokio_postgres::client::Client::query_raw
 tokio_postgres	tokio_postgres::Client::simple_query	Log,Unknown	Db	tokio_postgres::client::Client::simple_query
 tokio_postgres	tokio_postgres::Config::connect	Ipc,Net,Rand,Unknown	Db	tokio_postgres::config::Config::connect
+tokio_postgres	tokio_postgres::Transaction::cancel_query	Ipc,Net,Unknown	Net	tokio_postgres::transaction::Transaction::cancel_query
 tokio_postgres	tokio_postgres::Transaction::copy_in	Log,Unknown	Db	tokio_postgres::transaction::Transaction::copy_in
 tokio_postgres	tokio_postgres::Transaction::copy_out	Log,Unknown	Db	tokio_postgres::transaction::Transaction::copy_out
 tokio_postgres	tokio_postgres::batch_execute	Log,Unknown	Db	tokio_postgres::simple_query::batch_execute
@@ -1474,6 +1487,7 @@ tracing	tracing::__macro_support::__tracing_log	Log	Log	tracing::__macro_support
 tracing_subscriber	tracing_subscriber::Builder::from_env	Env,Unknown	Env	tracing_subscriber::filter::env::builder::Builder::from_env
 tracing_subscriber	tracing_subscriber::Builder::from_env_lossy	Env,Unknown	Env	tracing_subscriber::filter::env::builder::Builder::from_env_lossy
 tracing_subscriber	tracing_subscriber::Builder::try_from_env	Env,Unknown	Env	tracing_subscriber::filter::env::builder::Builder::try_from_env
+tracing_subscriber	tracing_subscriber::fmt::fmt_layer::Layer::new	Env	Env	tracing_subscriber::fmt::fmt_layer::Layer::new
 tracing_subscriber	tracing_subscriber::fmt::try_init	Env	Log	tracing_subscriber::fmt::try_init
 tungstenite	tungstenite::WebSocket::close	Rand	Net	tungstenite::protocol::WebSocket::close
 tungstenite	tungstenite::WebSocket::flush	Rand	Net	tungstenite::protocol::WebSocket::flush

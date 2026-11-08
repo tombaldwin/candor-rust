@@ -1387,6 +1387,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::seek")
             || path.ends_with("::fetch_metadata")
             || path.ends_with("::fetch_watermarks")
+            // SOUNDNESS R1528 — `fetch_group_list` (`Client`, `BaseConsumer`, `StreamConsumer`, and the
+            // `Consumer` trait method; client.rs:509 is the one body, the others delegate) calls
+            // `rd_kafka_list_groups`, a blocking broker request like `fetch_metadata` above. EXECUTED
+            // 2026-11-08: against a local listener the call sent 41 bytes to the broker address. The
+            // self-scan oracle said only `Log` (a trace event) — the Net is what a `deny Net` gate needs.
+            || path.ends_with("::fetch_group_list")
             || path.ends_with("::flush")
         {
             return Some("Net");
@@ -1602,6 +1608,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 && path.ends_with("CancelToken::cancel_query")
             {
                 return Some("Net");
+            }
+            // SOUNDNESS R1528 — the SAME connection-opening cancel, reached through its two DEPRECATED
+            // forwarders. `Client::cancel_query` (tokio-postgres client.rs:740) is `self.cancel_token()
+            // .cancel_query(tls).await` and `Transaction::cancel_query` (transaction.rs:299) forwards to the
+            // client's: both end in `cancel_query.rs`, which calls `connect_socket` (a fresh TcpStream/
+            // UnixStream) and writes the CancelRequest packet. EXECUTED 2026-11-08 against a local socket
+            // that logged what arrived: `c.cancel_query(NoTls)` made a SECOND connection and sent a
+            // CancelRequest (code 80877102). Net, like `CancelToken::cancel_query` above. `postgres` has no
+            // `Client::cancel_query` (only `cancel_token`), so this is tokio_postgres only. The `_raw`
+            // variants write to a caller-supplied stream and are not claimed.
+            if crate_name == "tokio_postgres"
+                && (path.ends_with("::Client::cancel_query")
+                    || path.ends_with("::Transaction::cancel_query"))
+            {
+                return Some("Net");
+            }
+            // SOUNDNESS R1528 — `postgres::Client::is_valid` (postgres-0.19.14 client.rs:550) sends
+            // `simple_query("")` and awaits the reply under a timeout: a real round-trip on the connection.
+            // EXECUTED: the server saw a Query message. Db, as `simple_query` is in the verb list above.
+            // `postgres` only — tokio_postgres has no `is_valid`.
+            if crate_name == "postgres" && path.ends_with("::Client::is_valid") {
+                return Some("Db");
             }
             // rusqlite only: opening the database IS the connection establishment (`Connection::
             // open`/`open_in_memory`/`open_with_flags` — the embedded analog of `::connect`).
@@ -2278,6 +2306,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Fs");
     }
+    // SOUNDNESS R1528 — two more families the verb lists above did not reach, both EXECUTED 2026-11-08
+    // against tempfile 3.27.0 and read in source:
+    //
+    // `NamedTempFile::into_file` (file/mod.rs:894) moves the `File` out and DROPS the `TempPath`, whose
+    // `Drop` unlinks the path (its doc: "the underlying file will be removed from the filesystem"). The run
+    // printed `exists-before=true`, `exists-after-into_file=false`. A filesystem mutation with no `fs::`
+    // in sight, which is why it read pure. (`SpooledTempFile::into_file` is a different body and is not
+    // claimed; `TempDir::into_path` only flips a flag — verified FALSE by the independent reader.)
+    //
+    // `TempDir::with_prefix`/`with_prefix_in`/`with_suffix`/`with_suffix_in` (dir/mod.rs:269-350) are
+    // one-line wrappers over `Builder::tempdir`/`tempdir_in`, the same directory creation `TempDir::new`
+    // is already charged for. Fs (the creation), the bucket `TempDir::new` carries — the oracle's
+    // Env/Rand are the name generation and are not what the call is for.
+    if crate_name == "tempfile"
+        && (path == "tempfile::NamedTempFile::into_file"
+            || path == "tempfile::TempDir::with_prefix"
+            || path == "tempfile::TempDir::with_prefix_in"
+            || path == "tempfile::TempDir::with_suffix"
+            || path == "tempfile::TempDir::with_suffix_in")
+    {
+        return Some("Fs");
+    }
     // glob: walks the filesystem to expand a pattern (the returned iterator reads directories).
     // `Pattern::matches` is pure string matching — match only the directory-walking entry points.
     if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
@@ -2571,6 +2621,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // containing the substring "now". The `time` crate (distinct from `std::time`/`chrono`)
     // reads the clock via `now_utc`/`now_local` (and the deprecated `Instant::now`).
     if (crate_name == "chrono" || path.starts_with("std::time::")) && path.ends_with("::now") {
+        return Some("Clock");
+    }
+    // SOUNDNESS R1528 — chrono's deprecated `Utc::today()` / `Local::today()` are `Utc::now().date()` /
+    // `Local::now().date()` (offset/utc.rs:63, offset/local/mod.rs:133): the wall clock, spelled without the
+    // `now` the rule above matches. Exact receivers only — `today` is not claimed for any other chrono type.
+    // EXECUTED 2026-11-08: both return the current date. Their absence read PURE at every consumer.
+    if crate_name == "chrono" && (path.ends_with("Utc::today") || path.ends_with("Local::today")) {
         return Some("Clock");
     }
     if crate_name == "time"
@@ -2939,6 +2996,16 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "tracing_subscriber" {
         if path.ends_with("::init") || path.ends_with("::try_init") {
             return Some("Log");
+        }
+        // SOUNDNESS R1528 — `fmt::Layer::new()` is `Self::default()`, and `Default for Layer`
+        // (fmt/fmt_layer.rs:743) reads `env::var("NO_COLOR")` to decide ANSI. EXECUTED 2026-11-08: the
+        // same program emitted ANSI escapes with NO_COLOR unset and none with `NO_COLOR=1`, so the
+        // layer's behaviour depends on the environment at construction. Both module spellings are
+        // matched; `tracing_subscriber::Layer` at the crate root is the TRAIT, which has no `new`.
+        // NOT claimed here: `fmt::layer()` and `Layer::default()` reach the same read, but a rule
+        // for them contradicts the assertion below that `fmt::layer` is pure — filed for decision.
+        if path.ends_with("::fmt::Layer::new") || path.ends_with("::fmt_layer::Layer::new") {
+            return Some("Env");
         }
         if path.ends_with("::from_default_env") || path.ends_with("::try_from_default_env")
             || path.ends_with("::from_env") || path.ends_with("::from_env_lossy")
@@ -5968,5 +6035,39 @@ mod masks_locator_tests {
         }
         assert_eq!(classify("rustls", "rustls::KeyLogFile::log"), Some("Fs"));
         assert_eq!(classify("rustls", "rustls::NoKeyLog::log"), None);
+    }
+
+    /// SOUNDNESS R1528 — rules for rows EXECUTED/verified true, each with a same-crate pure neighbour.
+    #[test]
+    fn r1528_verified_rows_classify() {
+        // tempfile: `into_file` drops the TempPath (unlinks); the `with_*` dir constructors create.
+        assert_eq!(classify("tempfile", "tempfile::NamedTempFile::into_file"), Some("Fs"));
+        for v in ["with_prefix", "with_prefix_in", "with_suffix", "with_suffix_in"] {
+            assert_eq!(classify("tempfile", &format!("tempfile::TempDir::{v}")), Some("Fs"), "{v}");
+        }
+        assert_eq!(classify("tempfile", "tempfile::TempDir::into_path"), None, "flag flip only (R1528 FALSE)");
+        assert_eq!(classify("tempfile", "tempfile::NamedTempFile::path"), None);
+        assert_eq!(classify("tempfile", "tempfile::SpooledTempFile::into_file"), None, "different body, not claimed");
+        // chrono: the deprecated `today` is `now().date()`; no other `today` is claimed.
+        assert_eq!(classify("chrono", "chrono::Utc::today"), Some("Clock"));
+        assert_eq!(classify("chrono", "chrono::Local::today"), Some("Clock"));
+        assert_eq!(classify("chrono", "chrono::offset::utc::Utc::today"), Some("Clock"));
+        assert_eq!(classify("chrono", "chrono::NaiveDate::today"), None);
+        assert_eq!(classify("chrono", "chrono::DateTime::parse_from_rfc2822"), None, "oracle fabrication, R1420(a)");
+        // tokio_postgres cancel_query forwarders open a fresh connection; postgres is_valid is a round-trip.
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::cancel_query"), Some("Net"));
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Transaction::cancel_query"), Some("Net"));
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::is_closed"), None);
+        assert_eq!(classify("postgres", "postgres::Client::is_valid"), Some("Db"));
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::is_valid"), None);
+        // rdkafka: a broker request, every spelling.
+        for p in ["rdkafka::Client::fetch_group_list", "rdkafka::BaseConsumer::fetch_group_list",
+                  "rdkafka::StreamConsumer::fetch_group_list", "rdkafka::consumer::Consumer::fetch_group_list"] {
+            assert_eq!(classify("rdkafka", p), Some("Net"), "{p}");
+        }
+        // tracing_subscriber: `fmt::Layer::new` reads NO_COLOR; the root `Layer` trait has no `new`.
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::new"), Some("Env"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::new"), Some("Env"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::with_writer"), None);
     }
 }

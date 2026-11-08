@@ -159,11 +159,9 @@ chrono	chrono::Local::offset_from_local_date	Clock,Env,Fs,Unknown	src/offset/loc
 chrono	chrono::Local::offset_from_local_datetime	Clock,Env,Fs,Unknown	src/offset/local/mod.rs	chrono::offset::local::Local::offset_from_local_datetime
 chrono	chrono::Local::offset_from_utc_date	Clock,Env,Fs,Unknown	src/offset/local/mod.rs	chrono::offset::local::Local::offset_from_utc_date
 chrono	chrono::Local::offset_from_utc_datetime	Clock,Env,Fs,Unknown	src/offset/local/mod.rs	chrono::offset::local::Local::offset_from_utc_datetime
-chrono	chrono::Local::today	Clock	src/offset/local/mod.rs	chrono::offset::local::Local::today
 chrono	chrono::NaiveDateTime::and_local_timezone	Clock,Env,Fs,Unknown	src/naive/datetime/mod.rs	chrono::naive::datetime::NaiveDateTime::and_local_timezone
 chrono	chrono::Parsed::to_datetime	Clock,Env,Fs,Unknown	src/format/parsed.rs	chrono::format::parsed::Parsed::to_datetime
 chrono	chrono::Parsed::to_datetime_with_timezone	Clock,Env,Fs,Unknown	src/format/parsed.rs	chrono::format::parsed::Parsed::to_datetime_with_timezone
-chrono	chrono::Utc::today	Clock	src/offset/utc.rs	chrono::offset::utc::Utc::today
 console	console::is_dumb	Env	src/term.rs	console::term::is_dumb
 console	console::set_colors_enabled	Env,Unknown	src/utils.rs	console::utils::set_colors_enabled
 console	console::set_colors_enabled_stderr	Env,Unknown	src/utils.rs	console::utils::set_colors_enabled_stderr
@@ -399,7 +397,6 @@ mysql_async	mysql_async::test_ssl	Env	src/lib.rs	mysql_async::test_misc::test_ss
 native_tls_crate	native_tls_crate::TlsConnectorBuilder::build	Fs,Log,Unknown	src/lib.rs	native_tls_crate::TlsConnectorBuilder::build
 notify	notify::PollWatcher::with_initial_scan	Clock	src/poll.rs	notify::poll::PollWatcher::with_initial_scan
 portable_pty	portable_pty::CommandBuilder::new	Env,Log,Unknown	src/cmdbuilder.rs	portable_pty::cmdbuilder::CommandBuilder::new
-postgres	postgres::Client::is_valid	Db,Unknown	src/client.rs	postgres::client::Client::is_valid
 rand	rand::make_rng	Rand	src/lib.rs	rand::make_rng
 rand	rand::u8::fill_slice	Rand	src/rng.rs	rand::rng::u8::fill_slice
 rdkafka	rdkafka::AdminClient::alter_configs	Log	src/admin.rs	rdkafka::admin::AdminClient::alter_configs
@@ -414,7 +411,6 @@ rdkafka	rdkafka::AdminClient::from_config_and_context	Log	src/admin.rs	rdkafka::
 rdkafka	rdkafka::BaseConsumer::assignment	Log	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::assignment
 rdkafka	rdkafka::BaseConsumer::close_queue	Log	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::close_queue
 rdkafka	rdkafka::BaseConsumer::committed	Log	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::committed
-rdkafka	rdkafka::BaseConsumer::fetch_group_list	Log	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::fetch_group_list
 rdkafka	rdkafka::BaseConsumer::from_config	Clock,Log,Unknown	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::from_config
 rdkafka	rdkafka::BaseConsumer::from_config_and_context	Clock,Log,Unknown	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::from_config_and_context
 rdkafka	rdkafka::BaseConsumer::incremental_assign	Log	src/consumer/base_consumer.rs	rdkafka::consumer::base_consumer::BaseConsumer::incremental_assign
@@ -432,7 +428,6 @@ rdkafka	rdkafka::BaseProducer::init_transactions	Log	src/producer/base_producer.
 rdkafka	rdkafka::BaseProducer::send_offsets_to_transaction	Log	src/producer/base_producer.rs	rdkafka::producer::base_producer::BaseProducer::send_offsets_to_transaction
 rdkafka	rdkafka::BorrowedHeaders::detach	Log	src/message.rs	rdkafka::message::BorrowedHeaders::detach
 rdkafka	rdkafka::BorrowedMessage::detach	Log	src/message.rs	rdkafka::message::BorrowedMessage::detach
-rdkafka	rdkafka::Client::fetch_group_list	Log	src/client.rs	rdkafka::client::Client::fetch_group_list
 rdkafka	rdkafka::Client::new	Log	src/client.rs	rdkafka::client::Client::new
 rdkafka	rdkafka::ClientConfig::create	Clock,Log,Unknown	src/config.rs	rdkafka::config::ClientConfig::create
 rdkafka	rdkafka::ClientConfig::create_native_config	Log	src/config.rs	rdkafka::config::ClientConfig::create_native_config
@@ -453,7 +448,6 @@ rdkafka	rdkafka::OwnedHeaders::new	Log	src/message.rs	rdkafka::message::OwnedHea
 rdkafka	rdkafka::OwnedHeaders::new_with_capacity	Log	src/message.rs	rdkafka::message::OwnedHeaders::new_with_capacity
 rdkafka	rdkafka::StreamConsumer::assignment	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::assignment
 rdkafka	rdkafka::StreamConsumer::committed	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::committed
-rdkafka	rdkafka::StreamConsumer::fetch_group_list	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::fetch_group_list
 rdkafka	rdkafka::StreamConsumer::from_config	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::from_config
 rdkafka	rdkafka::StreamConsumer::from_config_and_context	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::from_config_and_context
 rdkafka	rdkafka::StreamConsumer::incremental_assign	Log	src/consumer/stream_consumer.rs	rdkafka::consumer::stream_consumer::StreamConsumer::incremental_assign
@@ -640,14 +634,9 @@ sqlx_core	sqlx_core::handshake	Fs	src/net/tls/tls_native_tls.rs	sqlx_core::net::
 sqlx_core	sqlx_core::handshake	Fs,Log,Net	src/net/tls/tls_rustls.rs	sqlx_core::net::tls::tls_rustls::handshake
 sqlx_core	sqlx_core::resolve_blocking	Fs	src/migrate/source.rs	sqlx_core::migrate::source::resolve_blocking
 sqlx_core	sqlx_core::resolve_blocking_with_config	Fs	src/migrate/source.rs	sqlx_core::migrate::source::resolve_blocking_with_config
-tempfile	tempfile::NamedTempFile::into_file	Fs	src/file/mod.rs	tempfile::file::NamedTempFile::into_file
 tempfile	tempfile::SpooledTempFile::into_file	Env,Fs,Unknown	src/spooled.rs	tempfile::spooled::SpooledTempFile::into_file
 tempfile	tempfile::SpooledTempFile::roll	Env,Fs,Unknown	src/spooled.rs	tempfile::spooled::SpooledTempFile::roll
 tempfile	tempfile::TempDir::into_path	Fs	src/dir/mod.rs	tempfile::dir::TempDir::into_path
-tempfile	tempfile::TempDir::with_prefix	Env,Rand,Unknown	src/dir/mod.rs	tempfile::dir::TempDir::with_prefix
-tempfile	tempfile::TempDir::with_prefix_in	Env,Rand,Unknown	src/dir/mod.rs	tempfile::dir::TempDir::with_prefix_in
-tempfile	tempfile::TempDir::with_suffix	Env,Rand,Unknown	src/dir/mod.rs	tempfile::dir::TempDir::with_suffix
-tempfile	tempfile::TempDir::with_suffix_in	Env,Rand,Unknown	src/dir/mod.rs	tempfile::dir::TempDir::with_suffix_in
 tempfile	tempfile::TempPath::from_path	Env	src/file/mod.rs	tempfile::file::TempPath::from_path
 tempfile	tempfile::TempPath::try_from_path	Env,Fs	src/file/mod.rs	tempfile::file::TempPath::try_from_path
 tempfile	tempfile::create	Env,Fs,Rand,Unknown	src/file/imp/unix.rs	tempfile::file::imp::unix::create
@@ -662,13 +651,11 @@ tempfile	tempfile::temp_dir	Env	src/env.rs	tempfile::env::temp_dir
 time	time::Instant::elapsed	Clock	src/instant.rs	time::instant::Instant::elapsed
 time	time::SignedDuration::time_fn	Clock,Unknown	src/signed_duration.rs	time::signed_duration::SignedDuration::time_fn
 time	time::UtcOffset::current_local_offset	Clock,Unknown	src/utc_offset.rs	time::utc_offset::UtcOffset::current_local_offset
-tokio_postgres	tokio_postgres::Client::cancel_query	Ipc,Net,Unknown	src/client.rs	tokio_postgres::client::Client::cancel_query
 tokio_postgres	tokio_postgres::Client::execute_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::execute_raw
 tokio_postgres	tokio_postgres::Client::query_typed_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::query_typed_raw
 tokio_postgres	tokio_postgres::Client::simple_query_raw	Log,Unknown	src/client.rs	tokio_postgres::client::Client::simple_query_raw
 tokio_postgres	tokio_postgres::Connection::poll_message	Log	src/connection.rs	tokio_postgres::connection::Connection::poll_message
 tokio_postgres	tokio_postgres::ToStatementType::into_statement	Log,Unknown	src/to_statement.rs	tokio_postgres::to_statement::private::ToStatementType::into_statement
-tokio_postgres	tokio_postgres::Transaction::cancel_query	Ipc,Net,Unknown	src/transaction.rs	tokio_postgres::transaction::Transaction::cancel_query
 tonic	tonic::Code::from_bytes	Log	src/status.rs	tonic::status::Code::from_bytes
 tonic	tonic::Endpoint::tls_config	Fs,Log	src/transport/channel/endpoint.rs	tonic::transport::channel::endpoint::Endpoint::tls_config
 tonic	tonic::Endpoint::tls_config_with_verifier	Fs,Log	src/transport/channel/endpoint.rs	tonic::transport::channel::endpoint::Endpoint::tls_config_with_verifier
@@ -693,7 +680,6 @@ tracing_subscriber	tracing_subscriber::Filtered::on_new_span	Clock,Unknown	src/f
 tracing_subscriber	tracing_subscriber::Format::format_event	Clock,Unknown	src/fmt/format/json.rs	tracing_subscriber::fmt::format::json::Format::format_event
 tracing_subscriber	tracing_subscriber::Format::format_event	Clock,Unknown	src/fmt/format/mod.rs	tracing_subscriber::fmt::format::Format::format_event
 tracing_subscriber	tracing_subscriber::Format::format_event	Clock,Unknown	src/fmt/format/pretty.rs	tracing_subscriber::fmt::format::pretty::Format::format_event
-tracing_subscriber	tracing_subscriber::Layer::new	Env	src/fmt/fmt_layer.rs	tracing_subscriber::fmt::fmt_layer::Layer::new
 tracing_subscriber	tracing_subscriber::Layer::on_close	Clock,Unknown	src/fmt/fmt_layer.rs	tracing_subscriber::fmt::fmt_layer::Layer::on_close
 tracing_subscriber	tracing_subscriber::Layer::on_enter	Clock,Unknown	src/fmt/fmt_layer.rs	tracing_subscriber::fmt::fmt_layer::Layer::on_enter
 tracing_subscriber	tracing_subscriber::Layer::on_event	Clock,Unknown	src/fmt/fmt_layer.rs	tracing_subscriber::fmt::fmt_layer::Layer::on_event
