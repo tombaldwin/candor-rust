@@ -742,6 +742,19 @@ def selftest():
         r4u = diff_manifests(c4_checked_cov, c4_fresh_cov, c4_checked_open, c4_fresh_open)
         check("case 4: without a baseline nothing is attributed (never labelled drift by default)",
               not r4u["baseline"] and "grown_drift" not in r4u, f"{r4u}")
+        # R1507: the engine stamp round-trips, replaces (never duplicates) itself, and `unrecorded` reads as absent
+        # so refresh.sh falls back to its history walk instead of trusting a sha no commit made.
+        sp = os.path.join(tmp2, "stamp.tsv")
+        with open(sp, "w") as fh:
+            fh.write("# header\nrow\n")
+        stamp_engine(sp, "a" * 40)
+        stamp_engine(sp, "b" * 40)
+        n_stamps = sum(1 for l in open(sp) if l.startswith(ENGINE_HEADER))
+        check("case 5 (R1507): engine stamp round-trips and is replaced, not duplicated",
+              manifest_engine(sp) == "b" * 40 and n_stamps == 1 and open(sp).read().endswith("row\n"),
+              open(sp).read())
+        stamp_engine(sp, "unrecorded")
+        check("case 5: an `unrecorded` stamp reads as absent", manifest_engine(sp) == "", manifest_engine(sp))
     finally:
         shutil.rmtree(tmp2, ignore_errors=True)
 
