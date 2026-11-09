@@ -13682,6 +13682,29 @@ pub fn ws_client(u: tungstenite::handshake::client::Request, s: std::net::TcpStr
     }
 
     #[test]
+    fn an_elasticsearch_transport_constructor_keeps_its_env_read_and_gains_the_trust_store_read() {
+        // SOUNDNESS R1528 (b11) — `classify` carries ONE effect, so the proxy-variable read (`Env`, every platform) would have
+        // dropped the openssl trust-store read the same constructor performs (EXECUTED on Linux under strace: openssl.cnf,
+        // cert.pem, certs/, ca-certificates.crt). BOTH are asserted: a second-effect mechanism that replaces is the evasion.
+        // The neighbours are the control: the connection pool constructor and the reseed (Clock) must not gain either.
+        let src = "\
+pub fn es_single(u: &str) { let _ = elasticsearch::http::transport::Transport::single_node(u); }\n\
+pub fn es_cloud(u: &str, c: elasticsearch::auth::Credentials) { let _ = elasticsearch::http::transport::Transport::cloud(u, c); }\n\
+pub fn es_build(b: elasticsearch::http::transport::TransportBuilder) { let _ = b.build(); }\n\
+pub fn es_reseed(p: &elasticsearch::http::transport::MultiNodeConnectionPool, c: Vec<elasticsearch::http::transport::Connection>) { p.reseed(c); }\n\
+pub fn es_pool(u: elasticsearch::http::Url) { let _ = elasticsearch::http::transport::SingleNodeConnectionPool::new(u); }\n";
+        let v = scan_fixture("b11estrust", src);
+        for f in ["es_single", "es_cloud"] {
+            let mut got = fixture_effects(&v, f);
+            got.sort();
+            assert_eq!(got, vec!["Env".to_string(), "Fs".to_string()],
+                       "{f} reads the proxy variables AND the trust store — the second effect must be ADDED:\n{v:#}");
+        }
+        assert_eq!(fixture_effects(&v, "es_reseed"), vec!["Clock".to_string()], "reseed reads the clock only:\n{v:#}");
+        assert!(fixture_effects(&v, "es_pool").is_empty(), "the pool constructor builds no client:\n{v:#}");
+    }
+
+    #[test]
     fn the_native_tls_identity_wrappers_are_charged_and_their_siblings_are_not() {
         // SOUNDNESS R337 — candor charges `native_tls::Identity::from_pkcs8`/`from_pkcs12` `Fs`
         // because on the security-framework backend they create a real `tempfile::TempDir` and write a

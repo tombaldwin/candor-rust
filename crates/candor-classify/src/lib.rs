@@ -845,6 +845,28 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("crossterm", "crossterm::terminal::SetTitle::write_ansi", "R1595:conditional"),
     ("crossterm", "crossterm::terminal::SetTitle::execute_winapi", "R1595:silent"),
     ("crossterm", "crossterm::ansi_support::supports_ansi", "R1595:silent"),
+    // The last nine rows of the R1528 backlog (b11, R1598), every one `conditional`, each with an EXECUTED arm on each side.
+    // deadpool-postgres 0.14.2 `Config::{get_pg_config, builder, create_pool}` read `USER` ONLY when neither the config's `user` nor
+    // the url's names one (EXECUTED 1 `getenv USER` with no user, 0 with `user` set, 0 with a url that carries one, 1 with a url that
+    // does not); they open no connection (the pool is lazy: 0 connections). A rule would charge every configured pool.
+    ("deadpool_postgres", "deadpool_postgres::config::Config::get_pg_config", "R1598:conditional"),
+    ("deadpool_postgres", "deadpool_postgres::config::Config::builder", "R1598:conditional"),
+    ("deadpool_postgres", "deadpool_postgres::config::Config::create_pool", "R1598:conditional"),
+    // grep-cli 0.1.12. `resolve_binary` and the default-command resolution inside `DecompressionMatcher::new` and
+    // `DecompressionMatcherBuilder::build` search `PATH` and `stat` each directory only under `cfg!(windows)` (EXECUTED on macOS: 0
+    // events for all three; `try_associate`/`associate`, which call the unconditional resolver, ARE charged `Env`). `build` was
+    // charged `Exec` by the `::build` suffix rule meant for `CommandReaderBuilder::build` and spawns nothing (EXECUTED 0
+    // fork/spawn/exec), so it is carved out of it and left here. `is_readable_stdin` is an `fstat` on stdin (EXECUTED: `isatty` and
+    // one `ioctl`, no read) plus `log::debug!` records that emit only under a debug-level logger.
+    ("grep_cli", "grep_cli::decompress::DecompressionMatcher::new", "R1598:conditional"),
+    ("grep_cli", "grep_cli::decompress::DecompressionMatcherBuilder::build", "R1598:conditional"),
+    ("grep_cli", "grep_cli::decompress::resolve_binary", "R1598:conditional"),
+    ("grep_cli", "grep_cli::is_readable_stdin", "R1598:conditional"),
+    // rand 0.10.3 `Fill::fill_slice` draws from the caller's `R` (EXECUTED: 0 entropy reads for a seeded `StdRng`, 1 for the thread
+    // RNG). tokio-postgres 0.7.18 `Connection::poll_message` drives the caller's stream `S` (EXECUTED: 65 bytes up / 92 down over TCP
+    // with a query in flight, 0 with nothing in flight, 0 over an in-memory `duplex` whose server never opens a socket).
+    ("rand", "rand::rng::u8::fill_slice", "R1598:conditional"),
+    ("tokio_postgres", "tokio_postgres::connection::Connection::poll_message", "R1598:conditional"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -965,6 +987,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // type they hang off — exempt them BEFORE the coarse prefix rules can fabricate Net/Fs/Ipc.
     if PURE_FD_TRANSFER.contains(&path.rsplit("::").next().unwrap_or(path)) {
         return None;
+    }
+    // SOUNDNESS R1528 (b11) — the last grandfathered rows. See `b11_r1528`; `Some(None)` is a proven-pure CARVE-OUT of a
+    // suffix rule further down (`DecompressionMatcherBuilder::build` is not the `::build` that spawns).
+    if let Some(verdict) = b11_r1528(crate_name, path) {
+        return verdict;
     }
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
         // Only request dispatch is network I/O; builder setters/accessors are pure.
@@ -4578,6 +4605,111 @@ fn tungstenite_r1528(path: &str) -> Option<&'static str> {
     }
 }
 
+/// SOUNDNESS R1528 (b11) — the last 51 grandfathered rows, at the versions the manifests were generated from. EXECUTED in
+/// a consumer fixture under a DYLD interposer (`getenv`, `setenv`, `open`, `stat`, `connect`, entropy, `clock_gettime`,
+/// `fork`/`spawn`) and, where a service is the point, against PostgreSQL 16 behind a counting TCP proxy; the two
+/// Linux-only questions (the openssl trust store) under `strace` in `rust:1-bookworm` (handoff `rust-r1528/b11/`).
+/// `CALIBRATED_CEILINGS` is NOT raised for console (0.16.6 vs 0.15.11), rand (0.10.3 vs 0.10.2) or rustls (0.23.45 vs
+/// 0.23.43): that needs the whole crate table re-verified at the new version.
+///
+/// Returns `Some(Some(effect))` for a rule, `Some(None)` for a proven-pure carve-out of a rule that fires later in
+/// `classify`, and `None` to fall through. ONE effect is all `classify` can carry, so where a row does two things the one
+/// charged is named and the other is a stated residual (R1599): `next_backoff` draws entropy AND reads the clock (Rand
+/// charged), `try_associate` reads `PATH` AND stats each directory (Env charged), `UtcOffset::current_local_offset` reads
+/// the clock AND the zone database (Clock charged), and the elasticsearch transport reads the proxy variables (Env) AND, on
+/// the openssl backend, the system trust store (Fs, carried by `reads_trust_store` as the second effect).
+///
+/// CHARGED `Clock`: `env_logger` `Formatter::timestamp{,_seconds,_millis,_micros,_nanos}` (each reads `SystemTime::now`) and
+/// `ConfigurableFormat::format` (EXECUTED: 1 read by default, 0 after `.timestamp(None)` — accepted over-charge);
+/// elasticsearch `MultiNodeConnectionPool::reseed`; backoff `ExponentialBackoff::{get_elapsed_time, reset, default}`,
+/// `ExponentialBackoffBuilder::build`, `SystemClock::now` (the clock is `C`, the default `SystemClock` reads it: a test
+/// clock is an accepted over-charge); time `Instant::elapsed`, `{Signed}Duration::time_fn`, `UtcOffset::current_local_offset`;
+/// notify `PollWatcher::with_initial_scan` (its poll thread reads the clock on every pass; no path is opened until
+/// `watch`); duct `Handle::{wait_timeout, wait_deadline}` (EXECUTED 7 reads in the wait loop; `wait` and `try_wait` read none).
+/// CHARGED `Env`: elasticsearch `Transport::{single_node, static_node_list, sniffing_node_list, cloud}` and
+/// `TransportBuilder::build` (reqwest's `ClientBuilder::build`: 9 `getenv`, the proxy variables, on every call; no request
+/// reaches the server); grep_cli `DecompressionMatcherBuilder::{associate, try_associate}` (`PATH`, for a relative program;
+/// an absolute path is an accepted over-charge); etcetera `{Apple, Xdg, Unix, Windows}::new` (`HOME`, every spelling);
+/// console `is_dumb` (`TERM`) and `{set_,}{true_,}colors_enabled{,_stderr}` (first call: `CLICOLOR_FORCE` or the terminal
+/// variables; a second call reads none — accepted); portable_pty `CommandBuilder::{new, from_argv, new_default_prog}` (the
+/// builder snapshots the whole process environment: EXECUTED, `FX_PROBE` is visible in the builder when set and absent when
+/// not; NO process is spawned, 0 `fork`/`posix_spawn`/`execve`, so `from_argv` and `new_default_prog` — which the `Exec`
+/// fall-through below had been charging — are carved out of it); dotenvy `Iter::load_override` (`setenv` per variable).
+/// CHARGED `Rand`: backoff `ExponentialBackoff::next_backoff`; rand `make_rng` (the lazily seeded thread RNG: 1 entropy read
+/// on a fresh thread, 0 on the second call — accepted); rustls `ClientConnection::{new, new_with_alpn}`,
+/// `UnbufferedClientConnection::{new, new_with_alpn}` and the QUIC twins (EXECUTED: 3 to 4 entropy reads each, the
+/// client random and the key share — the effect the rows' recorded `Fs` was NOT: the key log opens only for a
+/// `KeyLogFile`, and only after the server hello, EXECUTED 0 bytes in the file at `new`).
+/// CHARGED `Db`: tokio_postgres (and deadpool_postgres's `Client`/`Transaction`/`ClientWrapper`, EXECUTED) `Client`/`Transaction` `{execute_raw, execute_typed, query_typed_raw, query_typed_one,
+/// query_typed_opt, query_scalar, query_one_scalar, query_opt_scalar, simple_query_raw, check_connection, bind, bind_raw,
+/// query_portal, query_portal_raw, commit, rollback, savepoint}` — NONE was matched by the verb list (`PG_DB_VERBS`);
+/// EXECUTED against PostgreSQL 16 behind a counting proxy: every one sends bytes (idle control 0/0/0).
+/// CHARGED `Fs`: native_tls `TlsConnectorBuilder::build` (EXECUTED on Linux/openssl under `strace`: `openssl.cnf`,
+/// `cert.pem`, `certs/`, `ca-certificates.crt`; 0 events on macOS — platform-conditional, like the `TlsConnector::new`
+/// rule beside it).
+///
+/// NOT charged, and filed (R1598, `conditional`): `deadpool_postgres::Config::{get_pg_config, builder, create_pool}` read
+/// `USER` only when neither the config nor the url names one (EXECUTED 1 read vs 0); grep_cli `DecompressionMatcher::new`
+/// and `resolve_binary` read `PATH` only under `cfg!(windows)` (EXECUTED 0 events on macOS), `is_readable_stdin` is an
+/// `fstat` plus a `log::debug!` that emits only under a debug-level logger; tokio_postgres `Connection::poll_message` drives
+/// the caller's stream (EXECUTED 65 bytes up over TCP, 0 over an in-memory `duplex`, 0 with nothing in flight); rand
+/// `Fill::fill_slice` draws from the caller's `R` (EXECUTED 0 entropy for a seeded `StdRng`, 1 for the thread RNG).
+fn b11_r1528(crate_name: &str, path: &str) -> Option<Option<&'static str>> {
+    let rest = path.strip_prefix(crate_name)?.strip_prefix("::")?;
+    // free functions first: the module/type split below would read `term::is_dumb` as a type
+    match (crate_name, rest) {
+        ("console", "is_dumb" | "term::is_dumb") => return Some(Some("Env")),
+        ("console", "set_colors_enabled" | "utils::set_colors_enabled" | "set_colors_enabled_stderr"
+            | "utils::set_colors_enabled_stderr" | "set_true_colors_enabled" | "utils::set_true_colors_enabled"
+            | "set_true_colors_enabled_stderr" | "utils::set_true_colors_enabled_stderr" | "true_colors_enabled"
+            | "utils::true_colors_enabled" | "true_colors_enabled_stderr" | "utils::true_colors_enabled_stderr") => {
+            return Some(Some("Env"))
+        }
+        ("rand", "make_rng") => return Some(Some("Rand")),
+        _ => {}
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let ty = head.rsplit("::").next().unwrap_or(head);
+    let hit = |e: &'static str| Some(Some(e));
+    match (crate_name, ty, method) {
+        ("env_logger", "Formatter", "timestamp" | "timestamp_seconds" | "timestamp_millis" | "timestamp_micros" | "timestamp_nanos") => hit("Clock"),
+        ("env_logger", "ConfigurableFormat", "format") => hit("Clock"),
+        ("elasticsearch", "Transport", "single_node" | "static_node_list" | "sniffing_node_list" | "cloud") => hit("Env"),
+        ("elasticsearch", "TransportBuilder", "build") => hit("Env"),
+        ("elasticsearch", "MultiNodeConnectionPool", "reseed") => hit("Clock"),
+        ("tokio_postgres" | "deadpool_postgres", "Client" | "Transaction" | "ClientWrapper", "execute_raw" | "execute_typed"
+            | "query_typed_raw" | "query_typed_one" | "query_typed_opt" | "query_scalar" | "query_one_scalar"
+            | "query_opt_scalar" | "bind" | "bind_raw" | "query_portal" | "query_portal_raw" | "commit" | "rollback"
+            | "savepoint") => hit("Db"),
+        ("tokio_postgres" | "deadpool_postgres", "Client" | "ClientWrapper", "simple_query_raw" | "check_connection") => hit("Db"),
+        // deadpool's sealed `GenericClient` (implemented for its `Client` and `Transaction` only, both EXECUTED above)
+        ("deadpool_postgres", "GenericClient", "execute_raw") => hit("Db"),
+        // `ToStatementType` lives in tokio-postgres's private `to_statement::private` module and the method needs the
+        // crate-private `Arc<InnerClient>`, so no consumer can call it; it is `prepare::prepare` (a Parse round trip), and
+        // that is what is charged should a spelling ever reach it.
+        ("tokio_postgres", "ToStatementType", "into_statement") => hit("Db"),
+        // `DecompressionMatcherBuilder::build` is a glob-set compile plus `resolve_binary` (a no-op off Windows): it spawns
+        // nothing, and the `::build` suffix rule for `CommandReaderBuilder::build` was charging it `Exec`. EXECUTED 0 spawns.
+        ("grep_cli", "DecompressionMatcherBuilder", "build") => Some(None),
+        ("grep_cli", "DecompressionMatcherBuilder", "associate" | "try_associate") => hit("Env"),
+        ("backoff", "ExponentialBackoff", "get_elapsed_time" | "reset" | "default") => hit("Clock"),
+        ("backoff", "ExponentialBackoff", "next_backoff") => hit("Rand"),
+        ("backoff", "ExponentialBackoffBuilder", "build") => hit("Clock"),
+        ("backoff", "SystemClock", "now") => hit("Clock"),
+        ("rustls", "ClientConnection" | "UnbufferedClientConnection", "new" | "new_with_alpn") => hit("Rand"),
+        ("etcetera", "Apple" | "Xdg" | "Unix" | "Windows", "new") => hit("Env"),
+        ("time", "Instant", "elapsed") => hit("Clock"),
+        ("time", "SignedDuration" | "Duration", "time_fn") => hit("Clock"),
+        ("time", "UtcOffset", "current_local_offset") => hit("Clock"),
+        ("portable_pty", "CommandBuilder", "new" | "from_argv" | "new_default_prog") => hit("Env"),
+        ("notify", "PollWatcher", "with_initial_scan") => hit("Clock"),
+        ("native_tls_crate" | "native_tls", "TlsConnectorBuilder", "build") => hit("Fs"),
+        ("duct", "Handle", "wait_timeout" | "wait_deadline") => hit("Clock"),
+        ("dotenvy", "Iter", "load_override") => hit("Env"),
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R1528 (b10) — crossterm 0.29.0, ABOVE its 0.28.1 ceiling (`CALIBRATED_CEILINGS` is NOT raised): a `Cargo.lock`
 /// consumer got `invisible:[crossterm]` on every unmatched call and a lockless one nothing; a rule replaces that disclosure
 /// with the concrete effect. EXECUTED in a consumer fixture under a DYLD interposer (`getenv`, `open`, `isatty`, `ioctl`,
@@ -5716,6 +5848,19 @@ pub fn is_entropy_source_ident(seg: &str) -> bool {
 /// plain-WebSocket users; the scheme is often a string literal candor already captures in `str_arg`,
 /// which is the shape a future fix should use rather than a blanket charge.
 pub fn reads_trust_store(crate_name: &str, path: &str) -> bool {
+    // SOUNDNESS R1528 (b11) — elasticsearch builds a reqwest client with the DEFAULT `native-tls` feature, so on the
+    // openssl backend every transport constructor reads the system trust store: EXECUTED under `strace` in
+    // `rust:1-bookworm`, `Transport::single_node` opens `openssl.cnf`, `cert.pem`, `certs/` and `ca-certificates.crt` (0
+    // opens on macOS, where the Security framework answers). The primary effect charged by `b11_r1528` is the proxy-variable
+    // read (`Env`, every platform); this is the second. Charged although macOS and a `rustls-tls` build read no file: the
+    // default feature set on the platform ES clients run on does.
+    if crate_name == "elasticsearch" {
+        return path.ends_with("::Transport::single_node")
+            || path.ends_with("::Transport::static_node_list")
+            || path.ends_with("::Transport::sniffing_node_list")
+            || path.ends_with("::Transport::cloud")
+            || path.ends_with("::TransportBuilder::build");
+    }
     crate_name == "tungstenite"
         && (path.ends_with("::client_tls") || path.ends_with("::client_tls_with_config"))
 }
@@ -6746,10 +6891,11 @@ mod tests {
         assert_eq!(classify("terminal_colorsaurus", "terminal_colorsaurus::background_color"), Some("Ipc"));
         assert_eq!(classify("terminal_colorsaurus", "terminal_colorsaurus::color_palette"), Some("Ipc"));
 
-        // backoff — retry sleeps + reads the clock (Clock); config pure.
+        // backoff — retry sleeps + reads the clock (Clock); the setters are pure, but the CONSTRUCTORS are not: `default()` and
+        // `ExponentialBackoffBuilder::build` stamp `start_time: Instant::now()` (EXECUTED 2 / 1 clock reads, R1528 b11).
         assert_eq!(classify("backoff", "backoff::retry"), Some("Clock"));
         assert_eq!(classify("backoff", "backoff::retry_notify"), Some("Clock"));
-        assert_eq!(classify("backoff", "backoff::ExponentialBackoff::default"), None);
+        assert_eq!(classify("backoff", "backoff::ExponentialBackoff::default"), Some("Clock"));
 
         // lscolors — ONLY from_env reads the environment; from_string/style_for_path pure.
         assert_eq!(classify("lscolors", "lscolors::LsColors::from_env"), Some("Env"));
@@ -7104,7 +7250,7 @@ mod tests {
         assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::get_argv"), None); // getter
         assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::get_cwd"), None); // getter
         assert_eq!(classify("portable_pty", "portable_pty::PtySize::default"), None); // pure data type
-        assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::new"), None); // builder ctor
+        // `CommandBuilder::new` snapshots the process environment (b11, EXECUTED) — Env; see `r1528_b11_rows_classify`.
         assert_eq!(classify("async_process", "async_process::Command::spawn"), Some("Exec"));
         assert_eq!(classify("async_process", "async_process::Command::output"), Some("Exec"));
         assert_eq!(classify("async_process", "async_process::Stdio::piped"), None); // pure data type
@@ -7862,6 +8008,122 @@ mod masks_locator_tests {
         }
         assert_eq!(classify("rustls", "rustls::KeyLogFile::log"), Some("Fs"));
         assert_eq!(classify("rustls", "rustls::NoKeyLog::log"), None);
+    }
+
+    /// SOUNDNESS R1528 (b11) — the last 51 grandfathered rows: each rule beside a same-type pure neighbour (a rule that charged the
+    /// whole type would pass without them) and the two carve-outs that REMOVE a charge. Every positive is EXECUTED in the handoff
+    /// `rust-r1528/b11/`; the controls below are the idle windows of the same fixture.
+    #[test]
+    fn r1528_b11_rows_classify_with_pure_neighbours() {
+        let eff = |c: &str, p: &str| classify(c, p);
+        // env_logger: the five timestamp readers and the default format
+        for m in ["timestamp", "timestamp_seconds", "timestamp_millis", "timestamp_micros", "timestamp_nanos"] {
+            assert_eq!(eff("env_logger", &format!("env_logger::fmt::humantime::Formatter::{m}")), Some("Clock"));
+            assert_eq!(eff("env_logger", &format!("env_logger::fmt::Formatter::{m}")), Some("Clock"));
+        }
+        assert_eq!(eff("env_logger", "env_logger::fmt::ConfigurableFormat::format"), Some("Clock"));
+        assert_eq!(eff("env_logger", "env_logger::fmt::ConfigurableFormat::timestamp"), None); // the setter
+        assert_eq!(eff("env_logger", "env_logger::fmt::Formatter::style"), None);
+        // elasticsearch: the transport constructors (+ the trust store as the SECOND effect) and the pool reseed
+        for m in ["single_node", "static_node_list", "sniffing_node_list", "cloud"] {
+            let p = format!("elasticsearch::http::transport::Transport::{m}");
+            assert_eq!(eff("elasticsearch", &p), Some("Env"), "{p}");
+            assert!(reads_trust_store("elasticsearch", &p), "{p} must carry the trust-store read");
+        }
+        assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::TransportBuilder::build"), Some("Env"));
+        assert!(reads_trust_store("elasticsearch", "elasticsearch::http::transport::TransportBuilder::build"));
+        assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::MultiNodeConnectionPool::reseed"), Some("Clock"));
+        assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::TransportBuilder::auth"), None);
+        assert!(!reads_trust_store("elasticsearch", "elasticsearch::http::transport::TransportBuilder::auth"));
+        assert!(!reads_trust_store("elasticsearch", "elasticsearch::http::transport::Transport::send"));
+        assert!(!reads_trust_store("reqwest", "reqwest::ClientBuilder::build"), "reqwest is not claimed here");
+        // tokio_postgres / deadpool_postgres: the verbs `PG_DB_VERBS` never matched
+        for m in ["execute_raw", "execute_typed", "query_typed_raw", "query_typed_one", "query_typed_opt", "query_scalar",
+                  "query_one_scalar", "query_opt_scalar", "bind", "bind_raw", "query_portal", "query_portal_raw",
+                  "commit", "rollback", "savepoint"] {
+            for ty in ["Client", "Transaction"] {
+                assert_eq!(eff("tokio_postgres", &format!("tokio_postgres::{ty}::{m}")), Some("Db"), "{ty}::{m}");
+                assert_eq!(eff("deadpool_postgres", &format!("deadpool_postgres::{ty}::{m}")), Some("Db"), "dp {ty}::{m}");
+            }
+        }
+        for m in ["simple_query_raw", "check_connection"] {
+            assert_eq!(eff("tokio_postgres", &format!("tokio_postgres::client::Client::{m}")), Some("Db"));
+        }
+        assert_eq!(eff("deadpool_postgres", "deadpool_postgres::GenericClient::execute_raw"), Some("Db"));
+        assert_eq!(eff("tokio_postgres", "tokio_postgres::to_statement::private::ToStatementType::into_statement"), Some("Db"));
+        for p in ["tokio_postgres::Client::is_closed", "tokio_postgres::Client::cancel_token", "tokio_postgres::Client::clear_type_cache",
+                  "tokio_postgres::Transaction::client", "tokio_postgres::Connection::poll_message"] {
+            assert_eq!(eff("tokio_postgres", p), None, "{p} sends nothing (poll_message is filed R1598:conditional)");
+        }
+        assert_eq!(eff("deadpool_postgres", "deadpool_postgres::config::Config::get_pg_config"), None); // R1598:conditional
+        // grep_cli: associate reads PATH; the MATCHER builder's build spawns nothing, the READER builders' do
+        for m in ["associate", "try_associate"] {
+            assert_eq!(eff("grep_cli", &format!("grep_cli::decompress::DecompressionMatcherBuilder::{m}")), Some("Env"));
+        }
+        assert_eq!(eff("grep_cli", "grep_cli::decompress::DecompressionMatcherBuilder::build"), None, "EXECUTED 0 spawns");
+        assert_eq!(eff("grep_cli", "grep_cli::decompress::DecompressionReaderBuilder::build"), Some("Exec"));
+        assert_eq!(eff("grep_cli", "grep_cli::process::CommandReaderBuilder::build"), Some("Exec"));
+        assert_eq!(eff("grep_cli", "grep_cli::decompress::DecompressionMatcherBuilder::new"), None);
+        // backoff
+        for m in ["get_elapsed_time", "reset", "default"] {
+            assert_eq!(eff("backoff", &format!("backoff::exponential::ExponentialBackoff::{m}")), Some("Clock"), "{m}");
+        }
+        assert_eq!(eff("backoff", "backoff::exponential::ExponentialBackoff::next_backoff"), Some("Rand"));
+        assert_eq!(eff("backoff", "backoff::exponential::ExponentialBackoffBuilder::build"), Some("Clock"));
+        assert_eq!(eff("backoff", "backoff::exponential::ExponentialBackoffBuilder::new"), None);
+        assert_eq!(eff("backoff", "backoff::exponential::ExponentialBackoffBuilder::with_max_elapsed_time"), None);
+        assert_eq!(eff("backoff", "backoff::clock::SystemClock::now"), Some("Clock"));
+        // rustls: the client connection draws entropy; the server connection's constructor draws none
+        for p in ["rustls::client::client_conn::connection::ClientConnection::new", "rustls::ClientConnection::new_with_alpn",
+                  "rustls::client::client_conn::UnbufferedClientConnection::new", "rustls::client::UnbufferedClientConnection::new_with_alpn",
+                  "rustls::quic::connection::ClientConnection::new", "rustls::quic::connection::ClientConnection::new_with_alpn"] {
+            assert_eq!(eff("rustls", p), Some("Rand"), "{p}");
+        }
+        assert_eq!(eff("rustls", "rustls::ServerConnection::new"), None);
+        assert_eq!(eff("rustls", "rustls::ClientConfig::builder"), None);
+        assert_eq!(eff("rustls", "rustls::KeyLogFile::new"), Some("Fs"));
+        // etcetera
+        for p in ["etcetera::base_strategy::apple::Apple::new", "etcetera::base_strategy::xdg::Xdg::new", "etcetera::base_strategy::windows::Windows::new",
+                  "etcetera::app_strategy::unix::Unix::new", "etcetera::app_strategy::xdg::Xdg::new", "etcetera::app_strategy::apple::Apple::new"] {
+            assert_eq!(eff("etcetera", p), Some("Env"), "{p}");
+        }
+        assert_eq!(eff("etcetera", "etcetera::app_strategy::AppStrategyArgs::new"), None);
+        // time
+        assert_eq!(eff("time", "time::instant::Instant::elapsed"), Some("Clock"));
+        assert_eq!(eff("time", "time::signed_duration::SignedDuration::time_fn"), Some("Clock"));
+        assert_eq!(eff("time", "time::Duration::time_fn"), Some("Clock"));
+        assert_eq!(eff("time", "time::utc_offset::UtcOffset::current_local_offset"), Some("Clock"));
+        assert_eq!(eff("time", "time::Instant::checked_add"), None);
+        assert_eq!(eff("time", "time::UtcOffset::from_hms"), None);
+        // console (the free fns are spelled at the crate root and under `utils`/`term`)
+        for p in ["console::is_dumb", "console::term::is_dumb", "console::set_colors_enabled", "console::utils::set_colors_enabled_stderr",
+                  "console::set_true_colors_enabled", "console::true_colors_enabled_stderr", "console::colors_enabled"] {
+            assert_eq!(eff("console", p), Some("Env"), "{p}");
+        }
+        assert_eq!(eff("console", "console::style"), None);
+        assert_eq!(eff("console", "console::measure_text_width"), None);
+        // rand
+        assert_eq!(eff("rand", "rand::make_rng"), Some("Rand"));
+        assert_eq!(eff("rand", "rand::SeedableRng::seed_from_u64"), None);
+        assert_eq!(eff("rand", "rand::rng::u8::fill_slice"), None); // R1598:conditional
+        // portable_pty: the builder snapshots the environment and spawns nothing — `from_argv`/`new_default_prog` were `Exec`
+        for m in ["new", "from_argv", "new_default_prog"] {
+            assert_eq!(eff("portable_pty", &format!("portable_pty::cmdbuilder::CommandBuilder::{m}")), Some("Env"), "{m}");
+        }
+        assert_eq!(eff("portable_pty", "portable_pty::CommandBuilder::spawn_command"), Some("Exec"));
+        assert_eq!(eff("portable_pty", "portable_pty::CommandBuilder::arg"), None);
+        assert_eq!(eff("portable_pty", "portable_pty::CommandBuilder::get_shell"), Some("Fs"));
+        // notify / native_tls / duct / dotenvy
+        assert_eq!(eff("notify", "notify::poll::PollWatcher::with_initial_scan"), Some("Clock"));
+        assert_eq!(eff("notify", "notify::poll::PollWatcher::poll"), None);
+        assert_eq!(eff("native_tls_crate", "native_tls_crate::TlsConnectorBuilder::build"), Some("Fs"));
+        assert_eq!(eff("native_tls_crate", "native_tls_crate::TlsConnectorBuilder::min_protocol_version"), None);
+        assert_eq!(eff("duct", "duct::Handle::wait_timeout"), Some("Clock"));
+        assert_eq!(eff("duct", "duct::Handle::wait_deadline"), Some("Clock"));
+        assert_eq!(eff("duct", "duct::Handle::try_wait"), None);
+        assert_eq!(eff("duct", "duct::Handle::wait"), None);
+        assert_eq!(eff("dotenvy", "dotenvy::iter::Iter::load_override"), Some("Env"));
+        assert_eq!(eff("dotenvy", "dotenvy::iter::Iter::load"), Some("Env"));
     }
 
     /// SOUNDNESS R1528 (b10) — tempfile 3.27.0, tungstenite 0.30.0, crossterm 0.29.0, reqwest 0.13.5, mysql 28.0.3 and diesel
