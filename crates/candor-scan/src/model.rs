@@ -306,6 +306,16 @@ pub(crate) struct FnInfo {
     /// SOUNDNESS R1095 — method leaves called on a receiver no route typed (`CallCollector::untyped_methods`).
     #[serde(rename = "um", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) untyped_methods: Vec<String>,
+    /// SOUNDNESS R1420(a) — `CallCollector::self_disp`: which of `calls` a trait DEFAULT body formed
+    /// for `self.m()`, as `(index, m)`. Cached (`cache_schema` rev149).
+    #[serde(rename = "sdx", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) self_disp: Vec<(u32, String)>,
+    /// SOUNDNESS R1420(a) — a SYNTHETIC unit: the trait default `Some(qual)` INSTANTIATED for one
+    /// concrete implementor, built in `scan.rs` after Pass B and never cached. Kept out of the resolution indexes and out of
+    /// the report: a call on a receiver typed as that implementor is edged here instead of to the default's union, and the
+    /// published `calls`/sidecar spell the edge as the default it instantiates.
+    #[serde(skip)]
+    pub(crate) inst_of: Option<String>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.

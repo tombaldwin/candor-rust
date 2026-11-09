@@ -3596,7 +3596,7 @@ pub(crate) fn fninfo(
         in_pattern: false, scrut_args: None,
         // SOUNDNESS R1280 — a generic fn with a non-Rust ABI (see the collector field).
         foreign_abi_generic: sig.abi.as_ref().is_some_and(|a| a.name.as_ref().is_none_or(|n| n.value() != "Rust"))
-            && sig.generics.type_params().next().is_some(), untyped_methods: Default::default(),
+            && sig.generics.type_params().next().is_some(), untyped_methods: Default::default(), self_disp: Default::default(),
         // SOUNDNESS R1295 — see the collector field.
         io_wrapped: sig.inputs.iter().filter_map(|i| match i {
             syn::FnArg::Typed(pt) => {
@@ -3801,6 +3801,8 @@ pub(crate) fn fninfo(
         assoc: self_ty.is_some() || impl_generics.is_some(), // R1265 — an impl member or a trait default
         recv_rank: crate::model::recv_rank(sig),
         untyped_methods: c.untyped_methods.into_iter().collect(),
+        self_disp: c.self_disp,
+        inst_of: None,
     }
 }
 

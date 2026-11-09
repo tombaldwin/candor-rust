@@ -3072,6 +3072,118 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         fns.extend(add);
     }
+    // SOUNDNESS R1420(a) — A TRAIT DEFAULT CALLED ON A CONCRETE IMPLEMENTOR RUNS FOR THAT IMPLEMENTOR.
+    // `P.go()`, where `P` inherits `Tr::go` and the default's body is `self.act()`, was edged to the default's ONE unit, whose
+    // `self.act()` is a dispatch over EVERY implementor (R576(a)): the caller was charged a sibling `S::act`'s effect over a
+    // program that never performs it (EXECUTED, matrix `t_provided_{local,mod}_mixP` solo; chrono's
+    // `Parsed::to_datetime` → `FixedOffset.from_local_datetime(..)` charged `Local`'s Clock/Env/Fs, R1528). For each
+    // implementor that inherits a default whose body dispatches on `self`, an INSTANCE of the default is minted here: the
+    // default's own calls, except that of the edges its `self.m()` formed (`FnInfo::self_disp`) only the one naming THIS
+    // implementor stays. The inherited-default route below edges a call whose receiver is typed as that implementor to the
+    // instance instead of the default.
+    //
+    // NARROWING ONLY WHERE THE IMPLEMENTOR IS EXACT, else the default's union stands (over-charge, never a silence): the
+    // trait leaf is declared once; the implementor's leaf is a local type declared once (no same-leaf twin, R1246) with ONE
+    // block for this trait, whose written path no macro blinds; every member the default dispatches on `self` kept an edge
+    // naming the implementor (a `>12`/ambiguous dispatch formed none, so there is nothing to keep); the default unit is
+    // unique. Everything else on the default (direct effects, `Unknown`s, refusals, dispatch keys) is copied unchanged.
+    // Never published: the report spells the edge as the default it instantiates. `CANDOR_CT3A_OFF=1` disables it.
+    // SOUNDNESS R1420(a) — §E1 CENSUS: every unit qual two or more Pass-B bodies share (a merged unit), with each body's
+    // location, so the identity merge's reach is MEASURED (R1420 (b)(c), R1342, the `Box<dyn X>` face) rather than guessed.
+    if std::env::var_os("CANDOR_CT3_CENSUS").is_some() {
+        let mut by_q: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for f in fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias && !f.derive_synth && !f.mbe_prim_op) {
+            by_q.entry(f.qual.as_str()).or_default().push(f.loc.as_str());
+        }
+        for (q, ls) in by_q.iter().filter(|(_, ls)| ls.len() >= 2) {
+            eprintln!("CT3MERGE\t{q}\t{}", ls.join("\t"));
+        }
+    }
+    let mut default_inst: HashMap<(String, String), String> = HashMap::new();
+    if std::env::var_os("CANDOR_CT3A_OFF").is_none() {
+        let mut qcount: HashMap<&str, usize> = HashMap::new();
+        for f in &fns {
+            *qcount.entry(f.qual.as_str()).or_default() += 1;
+        }
+        // The implementor must be a NOMINAL type this crate DECLARES (a struct/enum/union in the per-file declared-type
+        // surface). A std or primitive self type (`impl Message for bool`) is excluded: its leaf is also how a MODULE of
+        // the same name is spelled (prost's macro-made `encoding::bool`, whose `bool::encode(..)` the typer reads as the
+        // primitive's inherited `Message::encode`), and there the default's union was the only thing standing over a
+        // callee this scan cannot see (EXECUTED on the census corpus: prost `types::bool::encode_raw` lost its `Unknown`).
+        let declared: HashSet<&str> = decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.ts.types.iter().map(|(q, _, _)| q.rsplit("::").next().unwrap_or(q)))
+            .collect();
+        let mut add: Vec<FnInfo> = Vec::new();
+        for (tr, impls) in trait_impls.iter() {
+            let tr_leaf = tr.rsplit("::").next().unwrap_or(tr);
+            if trait_decls.get(tr_leaf).is_none_or(|lt| lt.count != 1) {
+                continue;
+            }
+            let Some(dq) = crate::model::trait_decl_qual(&impl_owners, tr_leaf) else { continue };
+            let blocks_all = impl_owners.get(tr_leaf);
+            for def in fns.iter().filter(|f| !f.self_disp.is_empty() && f.inst_of.is_none()) {
+                let Some(d) = def.qual.strip_prefix(dq).and_then(|r| r.strip_prefix("::")) else { continue };
+                if d.contains("::") || qcount.get(def.qual.as_str()) != Some(&1) {
+                    continue;
+                }
+                let members: BTreeSet<&str> = def.self_disp.iter().map(|(_, m)| m.as_str()).collect();
+                for ty in impls {
+                    let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+                    if twin_type_leaves.contains(ty_leaf) || !local_types.contains(ty_leaf) || !declared.contains(ty_leaf) {
+                        continue;
+                    }
+                    let blocks: Vec<&crate::model::ImplOwner> =
+                        blocks_all.map(|v| v.iter().filter(|o| &o.ty == ty).collect()).unwrap_or_default();
+                    let [blk] = blocks.as_slice() else { continue };
+                    if blk.declares(d) {
+                        continue; // the implementor overrides `d`: its own unit runs, no default to instantiate
+                    }
+                    match wpath_blocks.get(&(tr_leaf.to_string(), ty_leaf.to_string())).map(Vec::as_slice) {
+                        Some([w]) if !w.2 => {}
+                        _ => continue,
+                    }
+                    let sd: HashMap<usize, &str> = def.self_disp.iter().map(|(i, m)| (*i as usize, m.as_str())).collect();
+                    // `self_disp` holds INDICES into `calls`, recorded by the collector and carried through the Pass-B cache
+                    // (`sdx`). They stay valid only while nothing reorders or dedups `calls` between the two — true today
+                    // (decls.rs rewrites paths in place; scan.rs never mutates a cached FnInfo's `calls`). A mis-pointed
+                    // index fails safe here (`kept_for != members`, no instance), but say so loudly in a debug build.
+                    debug_assert!(
+                        sd.iter().all(|(i, m)| def.calls.get(*i).is_some_and(|c| c.leaf == *m)),
+                        "CT3: `{}`'s self_disp points at a call that is not its `self.m()` (calls reordered after collection?)",
+                        def.qual
+                    );
+                    let mut kept_for: BTreeSet<&str> = BTreeSet::new();
+                    let mut calls_i: Vec<crate::model::Call> = Vec::new();
+                    for (i, c) in def.calls.iter().enumerate() {
+                        match sd.get(&i) {
+                            None => calls_i.push(c.clone()),
+                            Some(m) => {
+                                if c.path == format!("{ty}::{m}") && c.typed && c.method {
+                                    kept_for.insert(m);
+                                    calls_i.push(c.clone());
+                                }
+                            }
+                        }
+                    }
+                    if kept_for != members {
+                        continue;
+                    }
+                    let mut u = def.clone();
+                    u.qual = format!("{}\u{1f}inst\u{1f}{ty}", def.qual);
+                    u.calls = calls_i;
+                    u.self_disp = Vec::new();
+                    u.inst_of = Some(def.qual.clone());
+                    if crate::lang::reach_debug() {
+                        eprintln!("CT3INST\t{}\t{ty}", def.qual); // §E1 REACH COUNTER
+                    }
+                    default_inst.insert((ty_leaf.to_string(), def.qual.clone()), u.qual.clone());
+                    add.push(u);
+                }
+            }
+        }
+        fns.extend(add);
+    }
     // Per-fn DIRECT Unknown-origin reasons (the receipt's `unknownWhy`, spec §2). Coarse, like the lint's
     // per-trait tag: a callback we can't see through, an FFI/extern boundary, or a genuinely-unresolvable
     // bare call. Tracked so the disclosure names WHY, not just that an Unknown exists.
@@ -4392,7 +4504,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 } else {
                                     resolved_local = true;
                                 }
-                                calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
+                                // SOUNDNESS R1420(a) — the receiver is typed as `t_type`: its instance of the default, where
+                                // one was minted (above), instead of the default's union over every implementor. Not on a
+                                // refused tail (a same-leaf twin may be the receiver; no instance exists for one anyway).
+                                let target = default_inst
+                                    .get(&(t_type.clone(), hits[0].clone()))
+                                    .filter(|_| !refused_tail)
+                                    .unwrap_or(hits[0]);
+                                if target != hits[0] && crate::lang::reach_debug() {
+                                    eprintln!("CT3EDGE\t{}\t{}\t{target}\t{}", f.qual, c.path, f.loc); // §E1 REACH COUNTER (+ the caller's loc, for the edge audit)
+                                }
+                                calls.entry(f.qual.clone()).or_default().insert(target.clone());
                             }
                             // SOUNDNESS R1245 (the REFUSED half) — T's impl of a trait that declares `leaf` holds a
                             // macro item `mbe` could not expand (another crate's macro, an unreadable matcher), so
@@ -7125,7 +7247,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
-    let dispatch_acc = propagate_str(&dispatch_direct, &calls, &all);
+    // SOUNDNESS R1420(a) — A DEFAULT'S INSTANCE NARROWS EFFECTS, NEVER JOIN KEYS. The instance keeps the `dispatchesOn` keys
+    // its default's union reached: a key is what lets a chained consumer join an implementor this scan cannot see, and a key
+    // that arrived only through a sibling implementor may still be the one the true path needs where that path forms no
+    // edge of its own (EXECUTED on the census A/B: zerovec `ZeroMap2d::check_invariants` lost `VarULE::from_bytes_unchecked`,
+    // which its generic `self.keys0.zvl_is_ascending()` really reaches but never edges). So for this propagation only, each
+    // instance also points at the default it instantiates. Over-disclosure at a concrete caller, exactly as before.
+    let dispatch_acc = {
+        let mut calls_keys = calls.clone();
+        for f in fns.iter() {
+            if let Some(d) = &f.inst_of {
+                calls_keys.entry(f.qual.clone()).or_default().insert(d.clone());
+            }
+        }
+        propagate_str(&dispatch_direct, &calls_keys, &all)
+    };
     // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
     // call graph the same way the Unknown EFFECT does, so `deny E Unknown[reflect]` at a caller inheriting
     // Unknown from a reflect-caused callee still fires. Classify each fn's DIRECT unknown_why tokens to
@@ -7361,12 +7497,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
 
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // SOUNDNESS R1420(a) — a default's INSTANCE is not a unit of the report: it is spelled as the default it instantiates.
+    let inst_name: HashMap<&str, &str> =
+        fns.iter().filter_map(|f| f.inst_of.as_deref().map(|d| (f.qual.as_str(), d))).collect();
+    let pub_calls = |q: &str| -> Vec<String> {
+        let mut v: Vec<String> = calls
+            .get(q)
+            .map(|cs| cs.iter().map(|c| inst_name.get(c.as_str()).map_or(c.clone(), |d| d.to_string())).collect())
+            .unwrap_or_default();
+        v.sort();
+        v.dedup();
+        v
+    };
     for q in &all {
+        if inst_name.contains_key(q.as_str()) {
+            continue;
+        }
         // SPEC §2.2: the sidecar records EVERY analyzed function — including a LEAF with no local
         // callees, as an empty list. Omitting leaves made an uncalled FFI-only fn (nix `unistd::pipe`)
         // invisible to `whatif`/`callers` ("no function matching") even though it's in the report;
         // an always-present key also lets a consumer distinguish "no callers" from "no such function".
-        cg.insert(q.clone(), calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default());
+        cg.insert(q.clone(), pub_calls(q));
         let inf = inferred.get(q).cloned().unwrap_or_default();
         // Keep a pure fn if it has a BLIND reach — so the honesty disclosure survives on exactly the
         // `inferred: []` fns that need it (else `invisible` would be dropped with the pure entry).
@@ -7442,7 +7593,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             tables: tablesacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
-            calls: calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default(),
+            calls: pub_calls(q),
             // DIRECTLY-introduced Unknown origins (candor-spec §2 `unknownWhy`): an unresolved callback /
             // fn-pointer call, an FFI/extern boundary, or a genuinely-unresolvable bare call. Coarser than
             // the lint's per-trait tag — by design — but now names WHICH boundary, not just "callback".
@@ -8468,7 +8619,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // a bare-envelope consumer compute the pure count (count − |functions|); digest fingerprints the set for
     // same-engine re-scan agreement. Recorded toward the --gate-json verdict too (analyzed:{count}).
     let analyzed = {
-        let mut sorted = all.clone();
+        // SOUNDNESS R1420(a) — a default's instance is not a unit (`analyzed.count == |callgraph nodes|`).
+        let mut sorted: Vec<String> = all.iter().filter(|q| !inst_name.contains_key(q.as_str())).cloned().collect();
         sorted.sort();
         candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
     };

@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev149 (rustagent-ct3): SOUNDNESS R1420(a) — Pass B's cached `FnInfo` gains `self_disp` (the calls a trait default
+    // body formed for `self.m()`); a rev148 entry has none, so no default would be instantiated warm. Mandatory.
     // rev148 (rustagent-r1484): SOUNDNESS R1484 — `FileDecls` gains `mod_places` (every `mod` item's placed module paths);
     // a rev147 entry has none and would narrow nothing warm while the cold scan narrows. Mandatory.
     // rev147 (rustagent-r1494): SOUNDNESS R1494 — Pass A files a slice / array / tuple impl's `<genop>` summary under its
@@ -579,7 +581,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev148/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev149/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

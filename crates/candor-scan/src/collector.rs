@@ -616,6 +616,12 @@ pub(crate) struct CallCollector<'a> {
     /// concrete effect, the caller discloses `Unknown` (`dispatch:untyped receiver of `m` (..)`) instead of
     /// reading silent.
     pub(crate) untyped_methods: std::collections::BTreeSet<String>,
+    /// SOUNDNESS R1420(a) — the calls this body formed for `self.m()` inside a trait's DEFAULT body
+    /// (`trait_self`), as `(index into calls, m)`: the typed `Tr::m` push and the dispatch fan-out over every implementor.
+    /// `self` there is whichever implementor the caller holds, so those edges are a union; `scan.rs` builds, for an
+    /// implementor that inherits the default, an INSTANCE of it that keeps only the edges naming that implementor, and a
+    /// call on a concretely typed receiver reaches the instance instead of the union (`model::FnInfo::inst_of`).
+    pub(crate) self_disp: Vec<(u32, String)>,
     /// SOUNDNESS R1068 — a body that declares one struct name in TWO of its blocks: per block (keyed by the
     /// block's address in the AST this collector walks), the field indexes with THAT block's declaration in
     /// force. `visit_block` swaps `fields` / `field_elem` to the entry for the block it enters and restores
@@ -11221,6 +11227,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let self_disp_start = self.calls.len(); // SOUNDNESS R1420(a) — see `self_disp`
         self.note_container_release(node); // SOUNDNESS R1118
         let fd_site = fd_prov_site(); // F3 — this call site, for the provenance of every key it mints
         // REVIEW9 R-b — was this call's VALUE consumed by an enclosing key-minting call? Asked once per call (the entry is taken),
@@ -12280,6 +12287,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     eprintln!("VEINC_SELF\t{tr}::{leaf}");
                 }
                 self.dispatch_calls_for_trait_method(&tr, &leaf, str_arg_self);
+                // SOUNDNESS R1420(a) — every call this `self.m()` formed so far (the receiver and the arguments are
+                // walked below, after this point, so nothing of theirs is in the window) and that names `m`.
+                for (i, c) in self.calls.iter().enumerate().skip(self_disp_start) {
+                    if c.leaf == leaf && !c.is_macro {
+                        self.self_disp.push((i as u32, leaf.clone()));
+                    }
+                }
             }
         }
         // ITERATOR-ADAPTER CLOSURE: `xs.iter().for_each(|c| c.send())`, `.map(|c| ..)`, `.filter`, …
