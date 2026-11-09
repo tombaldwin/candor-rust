@@ -1020,6 +1020,59 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) peek_excluded: bool,
 }
 
+/// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector already records where an untyped
+/// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`: a factory `jetstream::new`, a method on a typed
+/// receiver `Context::get_key_value`, a builder chain `Stream::<chain>direct_get_builder.sequence`), and that marker was
+/// consumed only for a CHAINED dependency (the `typeSurface.returns` join, else `dispatch:untyped cross-package receiver`).
+/// Unchained it reached nothing: the κ ledger counted the crate only through the factory CALL, so a classifier-covered
+/// crate (calibrated, or no lockfile to exceed a ceiling) and a factory a rule already classifies left the method SILENT
+/// — `let js = async_nats::jetstream::new(c); js.query_account()` sends a request and read ABSENT. Here each hop's
+/// return type is read from the dependency's signature (`DepSigs::return_type`, every doubt `None`) and the marker becomes
+/// the typed call `<cr>::<module>::<Type>::<method>`. `None` leaves the marker exactly as it was.
+fn r1578_type(
+    c: &Call,
+    deps: &std::collections::HashSet<String>,
+    renames: &HashMap<String, String>,
+    deps_idx: &DepIndex,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+) -> Option<Call> {
+    if std::env::var_os("CANDOR_R1578_OFF").is_some() {
+        return None;
+    }
+    let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
+    let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
+    if cr.contains("::") || !deps.contains(cr) || deps_idx.crates.contains(cr_real) {
+        return None;
+    }
+    let (callee, method) = rest.rsplit_once("::")?;
+    let mut sigs = sigs.borrow_mut();
+    let (mut ty, steps): (String, Vec<&str>) = if let Some((base, chain)) = callee.split_once(&format!("::{CHAIN_GUESS_MARKER}")) {
+        (base.to_string(), chain.split('.').collect())
+    } else if callee.contains('<') {
+        return None; // a `<value>` / `<type>` / `<field>` provenance: no callee to read
+    } else {
+        let (owner, leaf) = callee.rsplit_once("::").unwrap_or(("", callee));
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
+        if crate::lang::is_type_ident(owner_leaf) {
+            (owner.to_string(), vec![leaf])
+        } else {
+            (sigs.return_type(dir, cr, cr_real, callee)?, Vec::new())
+        }
+    };
+    for st in steps {
+        if st.is_empty() || st.contains('<') {
+            return None;
+        }
+        ty = sigs.return_type(dir, cr, cr_real, &format!("{ty}::{st}"))?;
+    }
+    let path = format!("{cr}::{ty}::{method}");
+    if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+        eprintln!("R1578TYPED\t{}\t{path}", c.path); // §E1 REACH COUNTER, the CHANGED branch only
+    }
+    Some(Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() })
+}
+
 /// ⟨typeSurface.returns⟩ THE PRODUCER. `{crate}#{fn qual}` -> `{crate}#{type qual}`, both FULLY
 /// QUALIFIED, for the factory functions whose returned type has at least one non-pure member here.
 ///
@@ -1073,6 +1126,7 @@ fn build_type_surface(
         if !nonpure.contains(tp.as_str()) {
             if nonpure.iter().any(|q| q.rsplit("::").next() == tp.rsplit("::").next()) {
                 near_misses += 1; // same type LEAF, different module — the case that MUST not resolve
+                if std::env::var_os("CANDOR_TYPESURFACE_DEBUG").is_some() { eprintln!("TSNEAR\t{}\t{tp}", f.qual); }
             }
             continue;
         }
@@ -3194,6 +3248,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // join (`dispatch:<owner>.<member>` has a normative detail that re-deriving would destroy), so the set
     // can no longer be only compile-time literals.
     let mut unknown_why: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -3261,6 +3316,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .iter()
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
+            // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that
+            // dependency's own source signature, and the call then goes down the ordinary typed-external path below
+            // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
+            let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs);
+            let c = r1578_owned.as_ref().unwrap_or(c);
             // SOUNDNESS R334 — THE OS ENTROPY SOURCE PASSED AS AN ARGUMENT, decided at the TOP of this
             // loop and deliberately BEFORE every `continue` below.
             //
@@ -3923,6 +3983,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+                // SOUNDNESS R1578 §E1 CENSUS — every untyped-receiver marker that reaches here (an R1578-typed one never
+                // does), with whether its crate is chained and declared: the population the unchained floor would price.
+                if std::env::var_os("CANDOR_R1578_CENSUS").is_some() {
+                    eprintln!("R1578MARK\t{}\t{}\tchained={}\tdeclared={}", f.qual, c.path, deps_idx.crates.contains(cr_real), deps.contains(cr));
+                }
                 // SOUNDNESS R807 — THE PROBE THAT CAN SEE AN UNTYPED HANDLE. Diagnostic only; no
                 // behaviour. Every masking probe (`R379MASK`, `R460*`, `R417MASK`, `UNMASKED`) lives
                 // inside the CLASSIFIED arm below, so a call that was never classified emits none of

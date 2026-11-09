@@ -197,6 +197,11 @@ struct Cand<'a> {
     inputs: Vec<&'a syn::FnArg>,
     body: Option<&'a syn::Block>,
     site: Site,
+    /// SOUNDNESS R1578 — the written return type (`DepSigs::return_type`), the module the definition sits in (`None` when
+    /// the file's module cannot be derived) and whether it sits inside a body (reachable by no path)
+    output: &'a syn::ReturnType,
+    module: Option<String>,
+    nested: bool,
 }
 
 /// SOUNDNESS R1192 — what one `macro_rules!` body can define, read from its tokens: the fixed fn names (`fn name`), whether
@@ -427,6 +432,11 @@ struct SrcIndex {
     tainted: HashSet<String>,
     /// REVIEW7 D2 — `has_unseen_items`, computed once.
     unseen: std::cell::OnceCell<bool>,
+    /// SOUNDNESS R1578 — every nominal type declaration's leaf -> the module paths declaring it (`None` when the file's
+    /// module path cannot be derived), and whether any `#[path]` attribute makes the file -> module mapping unreliable
+    type_decls: HashMap<String, Vec<Option<String>>>,
+    path_attr: bool,
+    file_mods: Vec<Option<String>>,
 }
 
 /// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
@@ -881,6 +891,7 @@ impl SrcIndex {
 
     fn build(src: &Path) -> Option<SrcIndex> {
         let mut files = Vec::new();
+        let mut file_mods: Vec<Option<String>> = Vec::new();
         let mut unparsed = Vec::new();
         let walk = walkdir::WalkDir::new(src).into_iter().filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
@@ -890,7 +901,19 @@ impl SrcIndex {
             if e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rs") {
                 let Ok(text) = std::fs::read_to_string(e.path()) else { return None };
                 match syn::parse_file(&text) {
-                    Ok(f) => files.push(f),
+                    Ok(f) => {
+                        // SOUNDNESS R1578 — the module a file holds, from the conventional layout under `src/`
+                        file_mods.push(e.path().strip_prefix(src.join("src")).ok().map(|r| {
+                            let mut segs: Vec<String> = r.iter().map(|c| c.to_string_lossy().to_string()).collect();
+                            let last = segs.pop().unwrap_or_default();
+                            let stem = last.trim_end_matches(".rs").to_string();
+                            if !(segs.is_empty() && (stem == "lib" || stem == "main")) && stem != "mod" {
+                                segs.push(stem);
+                            }
+                            segs.join("::")
+                        }));
+                        files.push(f)
+                    }
                     Err(_) => {
                         let mut w = HashSet::new();
                         lit_words(&text, &mut w);
@@ -1073,7 +1096,49 @@ impl SrcIndex {
             aliases.entry(a.clone()).or_default().insert(b.clone());
             aliases.entry(b).or_default().insert(a);
         }
+        // SOUNDNESS R1578 — nominal type declarations by leaf, with the declaring module.
+        struct Decls<'m> { stack: Vec<String>, base: Option<&'m str>, out: HashMap<String, Vec<Option<String>>>, path_attr: bool }
+        impl Decls<'_> {
+            fn put(&mut self, i: &syn::Ident) {
+                let m = self.base.map(|b| {
+                    let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
+                    v.extend(self.stack.iter().map(String::as_str));
+                    v.join("::")
+                });
+                self.out.entry(i.to_string()).or_default().push(m);
+            }
+        }
+        impl<'ast> Visit<'ast> for Decls<'_> {
+            fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
+                if i.attrs.iter().any(|a| a.path().is_ident("path")) {
+                    self.path_attr = true;
+                }
+                if i.content.is_some() {
+                    self.stack.push(i.ident.to_string());
+                    syn::visit::visit_item_mod(self, i);
+                    self.stack.pop();
+                }
+            }
+            fn visit_item_struct(&mut self, i: &'ast syn::ItemStruct) { self.put(&i.ident); }
+            fn visit_item_enum(&mut self, i: &'ast syn::ItemEnum) { self.put(&i.ident); }
+            fn visit_item_union(&mut self, i: &'ast syn::ItemUnion) { self.put(&i.ident); }
+            // an alias names another type: its leaf never maps to one declaration (`type Result<T> = ..`)
+            fn visit_item_type(&mut self, i: &'ast syn::ItemType) { self.out.entry(i.ident.to_string()).or_default().push(None); }
+            fn visit_item_trait(&mut self, i: &'ast syn::ItemTrait) { self.put(&i.ident); }
+            fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {} // an item inside a body is reachable by no path
+            fn visit_impl_item_fn(&mut self, _: &'ast syn::ImplItemFn) {}
+            fn visit_trait_item_fn(&mut self, _: &'ast syn::TraitItemFn) {}
+        }
+        let mut decls = Decls { stack: Vec::new(), base: None, out: HashMap::new(), path_attr: false };
+        for (f, m) in files.iter().zip(file_mods.iter()) {
+            decls.base = m.as_deref();
+            decls.stack.clear();
+            decls.visit_file(f);
+        }
         Some(SrcIndex {
+            type_decls: decls.out,
+            path_attr: decls.path_attr,
+            file_mods,
             files,
             unparsed,
             proc_macro,
@@ -1118,6 +1183,9 @@ struct Want {
     /// SOUNDNESS R1200 — the MODULE segments the path walks before the type / leaf (`inner::f` → `inner`): one brought in
     /// from outside the crate (`pub use other::inner`, `pub extern crate other as inner`) holds definitions not here
     mods: Vec<String>,
+    /// SOUNDNESS R1578 — reading a RETURN type: a known local `macro_rules!` invocation is judged on its IDENT tokens
+    /// only (a literal cannot become an identifier there; its definition is judged on its own)
+    typing: bool,
 }
 
 /// SOUNDNESS R1200 — does this item list (a file, or an inline module's body) itself bind one of `names` in the namespace
@@ -1165,6 +1233,9 @@ struct Collect<'a, 'i> {
     /// SOUNDNESS R1200 — the first module-level invocation of a FOREIGN macro (`macro_is_known`): it may define a free fn
     /// of any name, its own tokens naming none of them (`mmac::make_free!()`)
     foreign: Option<String>,
+    /// SOUNDNESS R1578 — the module of the file being walked and the inline modules inside it
+    base: Option<String>,
+    modstack: Vec<String>,
 }
 
 impl<'a, 'i> Collect<'a, 'i> {
@@ -1172,7 +1243,12 @@ impl<'a, 'i> Collect<'a, 'i> {
         if sig.ident == self.want.leaf.as_str() {
             let mut scope = self.stack.clone();
             scope.push(&sig.generics);
-            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site });
+            let module = self.base.as_ref().map(|b| {
+                let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b.as_str()] };
+                v.extend(self.modstack.iter().map(String::as_str));
+                v.join("::")
+            });
+            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site, output: &sig.output, module, nested: self.body > 0 });
         }
     }
 
@@ -1187,8 +1263,24 @@ impl<'a, 'i> Collect<'a, 'i> {
     /// that impl's self type. A local `macro_rules!` is judged again at its definition.
     fn invocation(&mut self, mac: &syn::Macro, impl_self: Option<Option<&str>>) {
         let mut w = HashSet::new();
-        token_words(&mac.tokens, &mut w);
         let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let root = (mac.path.segments.len() > 1).then(|| mac.path.segments[0].ident.to_string());
+        if self.want.typing && macro_is_known(root.as_deref(), &name, &self.idx.macros, &self.idx.tainted) {
+            fn idents(ts: &proc_macro2::TokenStream, out: &mut HashSet<String>) {
+                for tt in ts.clone() {
+                    match tt {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            out.insert(i.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(g) => idents(&g.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            idents(&mac.tokens, &mut w);
+        } else {
+            token_words(&mac.tokens, &mut w);
+        }
         let mut f = FnNames::default();
         fn_names(&mac.tokens, &mut f);
         let tys = &self.want.tys;
@@ -1214,7 +1306,9 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
         match &m.content {
             Some((_, items)) => {
                 self.lists.push(items);
+                self.modstack.push(m.ident.to_string());
                 syn::visit::visit_item_mod(self, m);
+                self.modstack.pop();
                 self.lists.pop();
             }
             None => syn::visit::visit_item_mod(self, m),
@@ -1509,6 +1603,10 @@ pub(crate) struct DepSigs {
     tdecl: HashMap<(String, String, usize), Option<bool>>,
     /// R1351 — source trees over `TRAIT_SRC_CAP`, which `trait_declares` does not parse.
     too_big: HashMap<std::path::PathBuf, bool>,
+    /// SOUNDNESS R1578 — `return_type` answers, per (alias, callee).
+    rets: HashMap<(String, String), Option<String>>,
+    /// set while `return_type` asks `judged` (`Want::typing`)
+    typing: bool,
 }
 
 /// SOUNDNESS R1351 — the CLOSED method lists of the std traits a package trait commonly names as a supertrait, and their
@@ -1741,6 +1839,7 @@ impl DepSigs {
         };
         let segs: Vec<&str> = callee.split("::").collect();
         let leaf = segs.last().copied().unwrap_or(callee).to_string();
+        let typing = self.typing;
         let srcs = self.source_dirs(dir, alias, real);
         if srcs.is_empty() {
             return (None, "nosrc".into());
@@ -1755,7 +1854,7 @@ impl DepSigs {
                 idx.types.contains(*t) || t.chars().next().is_some_and(char::is_uppercase) || !idx.local_names.contains(*t)
             });
             let mods: Vec<String> = segs[..segs.len() - 1 - usize::from(ty_seg.is_some())].iter().map(|s| s.to_string()).collect();
-            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default(), mods };
+            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default(), mods, typing };
             for (text, w) in &idx.unparsed {
                 if w.contains(&want.leaf) || want.tys.iter().any(|t| w.contains(t)) || w.contains("macro_rules") || text.contains("::*") {
                     return (None, "parse".into());
@@ -1763,9 +1862,11 @@ impl DepSigs {
             }
             let mut c = Collect {
                 idx, want: &want, stack: Vec::new(), imp: Vec::new(), fns: Vec::new(), ctor: false, opaque: None,
-                lists: Vec::new(), body: 0, foreign: None,
+                lists: Vec::new(), body: 0, foreign: None, base: None, modstack: Vec::new(),
             };
-            for f in &idx.files {
+            for (i, f) in idx.files.iter().enumerate() {
+                c.base = idx.file_mods.get(i).cloned().flatten();
+                c.modstack.clear();
                 c.visit_file(f);
             }
             if let Some(why) = c.opaque {
@@ -1955,6 +2056,74 @@ impl DepSigs {
     /// parameter the body never mentions, a constructor); every doubt — an unknown bound, which may carry a conversion
     /// as a supertrait or an associated type, a receiver, `Self`, an unreadable source — is `None`. The same DENYLIST
     /// discipline as `allowed`, over the same candidates.
+    /// SOUNDNESS R1578 — the dependency TYPE a callee returns, read from its written signature in the dependency's own source:
+    /// `jetstream::new` -> `jetstream::context::Context`, `jetstream::stream::Stream::direct_get_builder` ->
+    /// `jetstream::stream::DirectGetBuilder`. A RESOLUTION source for a value the consumer's scan cannot type (an unchained
+    /// dependency's return), so every doubt is `None` and the caller keeps its disclosure:
+    ///   * the candidates are `judged`'s (per ITEM, with every opacity rule it applies), and EVERY candidate must name the
+    ///     same single nominal leaf — a union of two is a refusal, not a pick;
+    ///   * the leaf must be a plain path type (references peeled), `Self` read from the impl's own self type; a generic
+    ///     parameter, `impl Trait`, `dyn`, a tuple, a std wrapper (`Result`/`Option`/`Box`, which this does not unwrap) and
+    ///     any leaf the source does not itself declare are refusals;
+    ///   * the leaf must be declared exactly once in every source (an alias or a `use .. as` rename refuses), in a module
+    ///     the conventional `src/` layout names (any `#[path]` refuses), and every source must agree.
+    pub(crate) fn return_type(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
+        let key = (alias.to_string(), callee.to_string());
+        if let Some(v) = self.rets.get(&key) {
+            return v.clone();
+        }
+        let v = self.return_type_uncached(dir, alias, real, callee);
+        self.rets.insert(key, v.clone());
+        v
+    }
+
+    fn return_type_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
+        // A FREE fn is the one the consumer's PATH names: its module, never a same-named fn elsewhere (a `#[cfg(test)]`
+        // helper, a nested fn). A method's candidates are its type's, found by leaf as `judged` finds them.
+        let segs: Vec<&str> = callee.split("::").collect();
+        let owner_is_type = segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]);
+        let want_mod = (!owner_is_type).then(|| segs[..segs.len() - 1].join("::"));
+        self.typing = true;
+        let (v, why) = self.judged(dir, alias, real, callee, 0, |c: &Cand<'_>, p| {
+            if c.nested || (matches!(c.site, Site::Free) && want_mod.is_some() && c.module != want_mod) {
+                return Err(());
+            }
+            cand_returns(c, p)
+        });
+        self.typing = false;
+        let Some(set) = v else {
+            self.say("ret", alias, callee, 0, &why);
+            return None;
+        };
+        if set.len() != 1 {
+            self.say("ret", alias, callee, 0, &format!("union:{}", set.len()));
+            return None;
+        }
+        let leaf = set.into_iter().next()?;
+        let mut found: Option<String> = None;
+        for s in self.source_dirs(dir, alias, real) {
+            let idx = self.index(&s)?;
+            let one = match idx.type_decls.get(&leaf) {
+                Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(&leaf) => d[0].clone(),
+                _ => None,
+            };
+            let Some(m) = one else {
+                self.say("ret", alias, callee, 0, &format!("decl:{leaf}"));
+                return None;
+            };
+            let q = if m.is_empty() { leaf.clone() } else { format!("{m}::{leaf}") };
+            match &found {
+                Some(f) if *f != q => {
+                    self.say("ret", alias, callee, 0, "srcs-disagree");
+                    return None;
+                }
+                _ => found = Some(q),
+            }
+        }
+        self.say("ret", alias, callee, 0, &format!("read:{}", found.as_deref().unwrap_or("-")));
+        found
+    }
+
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
         let key = (alias.to_string(), callee.to_string(), pos);
         if let Some(v) = self.conv.get(&key) {
@@ -1965,6 +2134,42 @@ impl DepSigs {
         self.conv.insert(key, v.clone());
         v
     }
+}
+
+/// SOUNDNESS R1578 — the nominal leaf a candidate's written return type names (`DepSigs::return_type`). `Ok(None)` for every
+/// shape that is not one plain nominal path the source may declare.
+fn cand_returns(c: &Cand<'_>, _pos: usize) -> Result<Option<BTreeSet<String>>, ()> {
+    let syn::ReturnType::Type(_, ty) = c.output else { return Ok(None) };
+    let mut t: &syn::Type = ty;
+    loop {
+        t = match t {
+            syn::Type::Reference(r) => &r.elem,
+            syn::Type::Paren(p) => &p.elem,
+            syn::Type::Group(g) => &g.elem,
+            _ => break,
+        };
+    }
+    let syn::Type::Path(p) = t else { return Ok(None) };
+    if p.qself.is_some() {
+        return Ok(None);
+    }
+    let Some(last) = p.path.segments.last() else { return Ok(None) };
+    let leaf = last.ident.to_string();
+    let leaf = if leaf == "Self" {
+        if p.path.segments.len() != 1 {
+            return Ok(None); // `Self::Assoc`
+        }
+        match &c.site {
+            Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => t.clone(),
+            _ => return Ok(None),
+        }
+    } else {
+        leaf
+    };
+    if generic_params(&c.scope).contains(&leaf) {
+        return Ok(None);
+    }
+    Ok(Some(BTreeSet::from([leaf])))
 }
 
 /// SOUNDNESS R1186 — the conversion target a bound's type argument names: its outer nominal leaf, or `*` when it is
