@@ -385,6 +385,29 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     // here: it builds `Config::default()`, which reads `HTTP_PROXY`/`ALL_PROXY` — it carries an `Env` rule.)
     ("ureq", "ureq::Agent::new_with_config"),
     ("ureq", "ureq::Agent::with_parts"),
+    // SOUNDNESS R1528 — chrono 0.4.45, seven rows the self-scan charged `Clock,Env,Fs,Unknown`, which is the
+    // dispatch union over every `TimeZone` implementor reached through a generic bound, including `Local`. Each
+    // body was READ and none reaches a generic zone, the clock, the environment or a file:
+    //   * `DateTime::{parse_from_rfc3339, parse_from_rfc2822, parse_from_str, parse_and_remainder}` and
+    //     `Parsed::to_datetime` (datetime/mod.rs:1051-1160, format/parsed.rs:903) only parse text (`parse`,
+    //     `parse_rfc3339`, `Parsed::to_naive_datetime_with_offset` — no `env::`, `fs::`, `SystemTime` or `Local` in
+    //     format/parse.rs or format/parsed.rs) and build the result with the CONCRETE `FixedOffset`
+    //     (`FixedOffset::east_opt(..)` then `and_local_timezone(tz)` / `offset.from_local_datetime`, parse.rs:99-104,
+    //     parsed.rs:913): `FixedOffset`'s `TimeZone` impl is in-memory arithmetic. EXECUTED: all four return the same
+    //     result with `TZ` unset and `TZ=Asia/Tokyo`, offset +05:30 taken from the text.
+    //   * `DateTime::fixed_offset` is `with_timezone(&self.offset().fix())` and `DateTime::years_since` compares
+    //     calendar fields: both touch only the offset already stored in `self` (`Offset::fix`, whose implementors in
+    //     the family — `FixedOffset`, `Utc`, `Local`'s `FixedOffset`, `chrono_tz`'s `TzOffset` — are arithmetic) and
+    //     the target zone `FixedOffset`. EXECUTED: a `DateTime<Local>` converts with `fixed_offset` to the same instant
+    //     and offset whatever `TZ` says afterwards. The rows that DO depend on the zone (`with_timezone` and its
+    //     kin) are filed instead: R1557.
+    ("chrono", "chrono::DateTime::fixed_offset"),
+    ("chrono", "chrono::DateTime::years_since"),
+    ("chrono", "chrono::DateTime::parse_and_remainder"),
+    ("chrono", "chrono::DateTime::parse_from_rfc2822"),
+    ("chrono", "chrono::DateTime::parse_from_rfc3339"),
+    ("chrono", "chrono::DateTime::parse_from_str"),
+    ("chrono", "chrono::Parsed::to_datetime"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -468,6 +491,62 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("ureq", "ureq::post", "R1555:silent"),
     ("ureq", "ureq::put", "R1555:silent"),
     ("ureq", "ureq::trace", "R1555:silent"),
+    // chrono 0.4.45, R1557 (SOUNDNESS R1528, clock/env lane): the effect of each row below is the EFFECT OF THE
+    // `TimeZone` TYPE ARGUMENT, which `classify` cannot see. `with_timezone`, `checked_{add,sub}_months`,
+    // `duration_{round,round_up,trunc}` (via `Add<TimeDelta>`), `NaiveDateTime::and_local_timezone` and
+    // `Parsed::to_datetime_with_timezone` end in `tz.from_utc_datetime(..)`/`from_local_datetime(..)`, so with `Utc` or
+    // `FixedOffset` they are arithmetic and with `Local` they read `TZ`, `/etc/localtime` and the wall clock (the same
+    // reads the `Local::offset_from_*` rules charge). EXECUTED (fx_chrono `tz_env`/`cond`): `utc.with_timezone(&Local)`
+    // gave +01:00, +09:00, -04:00 for TZ unset/Asia/Tokyo/America/New_York; the same call with `&FixedOffset` ignored TZ.
+    // A rule would charge every `Utc` consumer (fabrication), so the consumer stays silent: a type-argument locator.
+    // tracing-subscriber 0.3.23, R1558: `Layer::on_{event,new_span,enter,exit,close}` over `Layered`, `Filtered`,
+    // `Option<L>` and `fmt::Layer`, `Context::event` and `Format::format_event` forward to the layer, subscriber,
+    // timer (`T: FormatTime`) or writer (`W: MakeWriter`) they wrap. EXECUTED (fx_ts `fwd`/`fmtevent`): a wrapper around
+    // `fmt::layer()` printed "<timestamp>  INFO ..: ..." to stdout (Log + Clock); the same wrapper's `Option<Counter>`
+    // printed nothing and read no clock; `Format<Full, ()>` (`without_time`) printed no timestamp. `Layer::on_event` is
+    // also the TRAIT method every layer shares (consumer path `tracing_subscriber::Layer::on_event`), so a rule on it
+    // would charge every pure layer.
+    // jiff 0.2.38, R1559: `*_with(db, ..)` use the caller's `TimeZoneDatabase`, and the disk read happens where that
+    // database was built (`from_env`/`from_dir`/`from_concatenated_path`/`tz::db()` carry `Fs` rules); EXECUTED, the
+    // same `to_time_zone_with` call succeeded over a `from_dir` database and failed over `bundled()` (no disk).
+    // `TimeZoneDatabase::bundled` reaches a `warn!` only under jiff's non-default `logging` feature AND an empty bundle.
+    ("chrono", "chrono::date::Date::with_timezone", "R1557:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_add_months", "R1557:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_sub_months", "R1557:conditional"),
+    ("chrono", "chrono::round::DateTime::duration_round", "R1557:conditional"),
+    ("chrono", "chrono::round::DateTime::duration_round_up", "R1557:conditional"),
+    ("chrono", "chrono::round::DateTime::duration_trunc", "R1557:conditional"),
+    ("chrono", "chrono::datetime::DateTime::with_timezone", "R1557:conditional"),
+    ("chrono", "chrono::naive::datetime::NaiveDateTime::and_local_timezone", "R1557:conditional"),
+    ("chrono", "chrono::format::parsed::Parsed::to_datetime_with_timezone", "R1557:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::context::Context::event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::filter::layer_filters::Filtered::on_close", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::filter::layer_filters::Filtered::on_enter", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::filter::layer_filters::Filtered::on_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::filter::layer_filters::Filtered::on_exit", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::filter::layer_filters::Filtered::on_new_span", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::format::json::Format::format_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::format::Format::format_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::format::pretty::Format::format_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::on_close", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::on_enter", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::on_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::on_exit", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::on_new_span", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::layered::Layered::on_close", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::layered::Layered::on_enter", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::layered::Layered::on_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::layered::Layered::on_exit", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::layered::Layered::on_new_span", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::Option::on_close", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::Option::on_enter", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::Option::on_event", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::Option::on_exit", "R1558:conditional"),
+    ("tracing_subscriber", "tracing_subscriber::layer::Option::on_new_span", "R1558:conditional"),
+    ("jiff", "jiff::fmt::strtime::BrokenDownTime::to_zoned_with", "R1559:conditional"),
+    ("jiff", "jiff::fmt::temporal::pieces::Pieces::to_time_zone_with", "R1559:conditional"),
+    ("jiff", "jiff::fmt::temporal::pieces::TimeZoneAnnotation::to_time_zone_with", "R1559:conditional"),
+    ("jiff", "jiff::tz::db::TimeZoneDatabase::bundled", "R1559:conditional"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -2838,6 +2917,27 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "chrono" && (path.ends_with("Utc::today") || path.ends_with("Local::today")) {
         return Some("Clock");
     }
+    // SOUNDNESS R1528 — chrono 0.4.45 `Local`'s four `TimeZone` offset lookups (offset/local/mod.rs:177-194 ->
+    // unix.rs `offset`): each goes through the per-thread `Cache`, whose `offset` calls `SystemTime::now()` on EVERY
+    // lookup to decide whether the cached zone is older than a second, and whose first use per thread (and every
+    // refresh) reads `TZ` and `/etc/localtime` (or the file `TZ` names). EXECUTED (fx_chrono): the offset follows `TZ`
+    // and an unset `TZ` follows the system file; a mid-run `TZ` change is NOT seen for the first second and IS seen
+    // after 1.2s, i.e. the wall clock gates the re-read. `Local::now` (above) is `Utc::now().with_timezone(&Local)`
+    // and carries the same single `Clock`, so these are charged the one effect the call makes unconditionally.
+    // KNOWN GAP, not a choice: `classify` carries ONE effect per path and the real set is Clock + Env + Fs (Env/Fs
+    // once per thread and per refresh), so `deny Env`/`deny Fs` over a consumer of these still passes — filed with
+    // the coordinator. Only the concrete `Local` receiver is claimed: the generic `TimeZone::offset_from_*` and
+    // `DateTime::with_timezone<Tz>` forwarders are the type argument's effect (R1557, `OPEN_ENTRY_VERDICTS`).
+    if crate_name == "chrono" {
+        if let Some((ty, m)) = type_method(path, "chrono", &["", "offset", "offset::local"]) {
+            if ty == "Local"
+                && matches!(m, "offset_from_utc_datetime" | "offset_from_local_datetime" | "offset_from_utc_date"
+                    | "offset_from_local_date")
+            {
+                return Some("Clock");
+            }
+        }
+    }
     if crate_name == "time"
         && (path.ends_with("::now_utc") || path.ends_with("::now_local") || path.ends_with("::now"))
     {
@@ -3146,6 +3246,44 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Fs");
         }
+        // SOUNDNESS R1528 — jiff 0.2.38 (above the 0.2.35 ceiling; the rules still apply to any version). Every row
+        // below was read in 0.2.38 and EXECUTED against a consumer fixture whose `TZDIR` names a directory holding
+        // ONE zone file `Fake/Zone` (a copy of Asia/Tokyo): the lookup succeeds with that file's offset when the
+        // directory exists and errors when it is empty or `TZDIR` is unset, so the answer comes from the disk.
+        //   * `tz::db()` (tz/db/mod.rs:31) is a `OnceLock` whose initialiser is `TimeZoneDatabase::from_env`: it
+        //     reads `TZDIR` and opens the zoneinfo directories. `from_env`, `from_dir(path)` (opens the directory,
+        //     `ZoneInfoNames::new`) and `from_concatenated_path(path)` (opens the file, `Names::new`) are the database
+        //     CONSTRUCTORS; executed, `from_dir`/`from_concatenated_path` return `Err` for a missing path.
+        //   * `Date::in_tz`, `DateTime::in_tz`, `Timestamp::in_tz`, `Zoned::in_tz` are `tz::db().get(name)` plus a
+        //     conversion (civil/date.rs:1114, civil/datetime.rs:1446, timestamp.rs:1263, zoned.rs:655).
+        //   * `DateTimeParser::{parse_zoned, parse_time_zone}`, `BrokenDownTime::to_zoned`, `Pieces::to_time_zone` and
+        //     `TimeZoneAnnotation::to_time_zone` are `<same>_with(crate::tz::db(), ..)`: the global database is an
+        //     ARGUMENT evaluated before the body branches, so it is initialised (TZDIR read, directory opened) even
+        //     for an offset-only annotation that never looks a name up. Fs is therefore unconditional on first use.
+        // Single effect, as the `TimeZone::get` rule above: the `TZDIR` Env read rides with the same call. NOT claimed:
+        // the three `_with(db)` variants (the effect is the caller-supplied database's, charged at the constructor
+        // above; a `bundled()` database makes the same call pure — EXECUTED) and `TimeZoneDatabase::bundled` (a
+        // `warn!` only with jiff's non-default `logging` feature AND an empty bundle) — filed as R1559.
+        if let Some((ty, m)) = type_method(
+            path,
+            "jiff",
+            &["", "civil", "civil::date", "civil::datetime", "timestamp", "zoned", "tz", "tz::db", "fmt", "fmt::strtime",
+              "fmt::temporal", "fmt::temporal::pieces", "fmt::temporal::mod"],
+        ) {
+            if matches!(
+                (ty, m),
+                ("Date" | "DateTime" | "Timestamp" | "Zoned", "in_tz")
+                    | ("TimeZoneDatabase", "from_env" | "from_dir" | "from_concatenated_path")
+                    | ("DateTimeParser", "parse_zoned" | "parse_time_zone")
+                    | ("BrokenDownTime", "to_zoned")
+                    | ("Pieces" | "TimeZoneAnnotation", "to_time_zone")
+            ) {
+                return Some("Fs");
+            }
+        }
+        if path == "jiff::db" || path == "jiff::tz::db" || path == "jiff::tz::db::db" {
+            return Some("Fs");
+        }
         return None;
     }
     // `env_logger` — installs the global logger and emits to stderr; reads `RUST_LOG`/`RUST_LOG_STYLE`.
@@ -3214,6 +3352,44 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // for them contradicts the assertion below that `fmt::layer` is pure — filed for decision.
         if path.ends_with("::fmt::Layer::new") || path.ends_with("::fmt_layer::Layer::new") {
             return Some("Env");
+        }
+        // SOUNDNESS R1528 — the rest of the `NO_COLOR` family. `Layer::new` is `Self::default()` and every one of
+        // `fmt::layer()` (fmt/mod.rs:337), `fmt::Layer::default()` (fmt_layer.rs:739), `fmt::fmt()` (mod.rs:324),
+        // `fmt::Subscriber::builder()` (:352) and `SubscriberBuilder::default()`/`Subscriber::default()` (:467/:362) reach
+        // the same `env::var("NO_COLOR")` through `Layer::default`. EXECUTED (fx_ts, `layer`/`builders`): each emitted
+        // ANSI escapes with `NO_COLOR` unset and none with `NO_COLOR=1`. This REVERSES the earlier "the builders are
+        // PURE" reading in the comment above and the `fmt::layer` assertion that went with it: that reading missed the
+        // `Default` dispatch. The setters (`with_target`, `with_writer`, ...) stay pure — they only move the value.
+        if path == "tracing_subscriber::fmt::layer" || path == "tracing_subscriber::fmt::fmt"
+            || path == "tracing_subscriber::fmt"
+            || path.ends_with("::fmt::Layer::default") || path.ends_with("::fmt_layer::Layer::default")
+            || path == "tracing_subscriber::FmtSubscriber::builder" || path.ends_with("::fmt::Subscriber::builder")
+            || path.ends_with("::fmt::Subscriber::default") || path.ends_with("::fmt::SubscriberBuilder::default")
+        {
+            return Some("Env");
+        }
+        // SOUNDNESS R1528 — the `FormatTime` implementors that READ THE CLOCK when formatting (fmt/time/mod.rs:136,
+        // time_crate.rs, chrono_crate.rs: `SystemTime::now()`, `OffsetDateTime::now_{utc,local}()`, `chrono::{Utc,
+        // Local}::now()`), and `Uptime`'s constructors, whose epoch is `Instant::now()` (mod.rs:85,122). EXECUTED (fx_ts,
+        // `times`): each formatter printed a different timestamp 1.1s apart; `uptime()` printed the time elapsed since the
+        // call. `Uptime::format_time` itself only subtracts (`epoch.elapsed()` — a clock read, but the unit is not a
+        // row) and `From<Instant>` and `time()` (a unit struct) read nothing: NOT claimed.
+        if let Some((ty, m)) = type_method(
+            path,
+            "tracing_subscriber",
+            &["", "fmt", "fmt::time", "fmt::time::time_crate", "fmt::time::chrono_crate", "time"],
+        ) {
+            if (m == "format_time"
+                && matches!(ty, "SystemTime" | "UtcTime" | "LocalTime" | "OffsetTime" | "ChronoLocal" | "ChronoUtc"))
+                || (ty == "Uptime" && m == "default")
+            {
+                return Some("Clock");
+            }
+        }
+        if path == "tracing_subscriber::uptime" || path == "tracing_subscriber::fmt::uptime"
+            || path == "tracing_subscriber::fmt::time::uptime"
+        {
+            return Some("Clock");
         }
         if path.ends_with("::from_default_env") || path.ends_with("::try_from_default_env")
             || path.ends_with("::from_env") || path.ends_with("::from_env_lossy")
@@ -5100,8 +5276,9 @@ mod tests {
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::SubscriberBuilder::init"), Some("Log"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::from_default_env"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::from_env"), Some("Env"));
-        // builders DESCRIBE a subscriber; they do not install one
-        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::layer"), None);
+        // the setters DESCRIBE a subscriber; they do not install one. (`fmt::layer`/`fmt::fmt` are NOT setters:
+        // they construct through `Layer::default`, which reads NO_COLOR — R1528, `r1528_clock_env_rows_classify`.)
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::layer"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::SubscriberBuilder::with_target"), None);
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::new"), None);
 
@@ -6283,6 +6460,64 @@ mod masks_locator_tests {
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::with_writer"), None);
+    }
+
+    /// SOUNDNESS R1528 — chrono 0.4.45, tracing-subscriber 0.3.23 and jiff 0.2.38 rows that carry a rule, each
+    /// EXECUTED against a consumer fixture (handoff `rust-r1528/clockenv`). Pure neighbours and the rows filed as
+    /// conditional (R1557/R1558/R1559) are pinned to `None` so a later "tidy-up" cannot over-charge them.
+    #[test]
+    fn r1528_clock_env_rows_classify() {
+        for p in ["Local::offset_from_utc_datetime", "offset::local::Local::offset_from_local_datetime",
+                  "Local::offset_from_utc_date", "offset::Local::offset_from_local_date"] {
+            assert_eq!(classify("chrono", &format!("chrono::{p}")), Some("Clock"), "{p}");
+        }
+        for p in ["TimeZone::offset_from_utc_datetime", "FixedOffset::offset_from_utc_datetime",
+                  "Utc::offset_from_utc_datetime", "DateTime::with_timezone", "Date::with_timezone",
+                  "DateTime::checked_add_months", "DateTime::checked_sub_months", "DateTime::duration_round",
+                  "DateTime::duration_round_up", "DateTime::duration_trunc", "NaiveDateTime::and_local_timezone",
+                  "Parsed::to_datetime_with_timezone", "DateTime::fixed_offset", "DateTime::years_since",
+                  "DateTime::parse_from_rfc3339", "DateTime::parse_from_rfc2822", "DateTime::parse_from_str",
+                  "DateTime::parse_and_remainder", "Parsed::to_datetime", "NaiveDate::today"] {
+            assert_eq!(classify("chrono", &format!("chrono::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::Local::offset_from_utc_datetime"), None);
+
+        for p in ["SystemTime::format_time", "fmt::time::SystemTime::format_time", "UtcTime::format_time",
+                  "fmt::time::time_crate::LocalTime::format_time", "OffsetTime::format_time",
+                  "ChronoLocal::format_time", "fmt::time::chrono_crate::ChronoUtc::format_time", "Uptime::default",
+                  "fmt::time::Uptime::default", "uptime", "fmt::time::uptime"] {
+            assert_eq!(classify("tracing_subscriber", &format!("tracing_subscriber::{p}")), Some("Clock"), "{p}");
+        }
+        for p in ["fmt::layer", "fmt::fmt", "fmt", "Layer::default", "fmt::Layer::default", "fmt::fmt_layer::Layer::default",
+                  "fmt::Subscriber::builder", "FmtSubscriber::builder", "fmt::Subscriber::default",
+                  "fmt::SubscriberBuilder::default"] {
+            let want = if p == "Layer::default" { None } else { Some("Env") };
+            assert_eq!(classify("tracing_subscriber", &format!("tracing_subscriber::{p}")), want, "{p}");
+        }
+        // forwarders (R1558) and pure neighbours stay unclaimed: `Layer::on_event` is ALSO the trait method every
+        // layer shares, so a rule on it would charge every pure layer.
+        for p in ["Layer::on_event", "Layer::on_new_span", "Layer::on_enter", "Layer::on_exit", "Layer::on_close",
+                  "Layered::on_event", "Filtered::on_event", "Option::on_event", "Context::event",
+                  "Format::format_event", "fmt::format::json::Format::format_event", "Uptime::format_time",
+                  "Uptime::from", "time", "fmt::time::time", "SubscriberBuilder::with_target",
+                  "fmt::SubscriberBuilder::with_writer"] {
+            assert_eq!(classify("tracing_subscriber", &format!("tracing_subscriber::{p}")), None, "{p}");
+        }
+
+        for p in ["Date::in_tz", "civil::DateTime::in_tz", "Timestamp::in_tz", "zoned::Zoned::in_tz",
+                  "TimeZoneDatabase::from_env", "tz::db::TimeZoneDatabase::from_dir",
+                  "TimeZoneDatabase::from_concatenated_path", "DateTimeParser::parse_zoned",
+                  "fmt::temporal::DateTimeParser::parse_time_zone", "BrokenDownTime::to_zoned",
+                  "fmt::strtime::BrokenDownTime::to_zoned", "Pieces::to_time_zone",
+                  "fmt::temporal::pieces::TimeZoneAnnotation::to_time_zone", "db", "tz::db", "tz::db::db"] {
+            assert_eq!(classify("jiff", &format!("jiff::{p}")), Some("Fs"), "{p}");
+        }
+        for p in ["BrokenDownTime::to_zoned_with", "Pieces::to_time_zone_with", "TimeZoneAnnotation::to_time_zone_with",
+                  "TimeZoneDatabase::bundled", "DateTimeParser::parse_zoned_with", "Date::to_zoned", "TimeZone::fixed",
+                  "Span::checked_add", "Timestamp::from_second"] {
+            assert_eq!(classify("jiff", &format!("jiff::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::Date::in_tz"), None);
     }
 
     /// SOUNDNESS R1528 — the ureq 3.4.2 rows that carry a rule: every one EXECUTED against a consumer fixture
