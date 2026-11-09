@@ -408,6 +408,23 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     ("chrono", "chrono::DateTime::parse_from_rfc3339"),
     ("chrono", "chrono::DateTime::parse_from_str"),
     ("chrono", "chrono::Parsed::to_datetime"),
+    // SOUNDNESS R1528 — mysql_async 0.37.1, `StatementLike::to_statement` on `Arc`/`Box`/`Cow`/`String`/`Vec`. Each
+    // body is `to_statement_move` (queryable/stmt.rs:43-68): it BUILDS a boxed `async move` block (parse the named
+    // params, look in the statement cache, `prepare_statement`) and wraps it in `ToStatementResult::Mediate`; nothing
+    // runs until that future is polled. A consumer CANNOT poll it: `ToStatementResult` lives in the private
+    // `queryable::stmt` module and is not re-exported, it has no methods and is not a `Future`, and the library itself
+    // never calls `to_statement` (grep: no other use in the crate; `exec`/`prep` go through `get_statement`). The trait
+    // is nameable only as the prelude's SUB-trait bound (`prelude::StatementLike: queryable::stmt::StatementLike`), so
+    // the call is reachable in a generic body and nowhere else. EXECUTED (fx_mysql, docker mysql:8 behind a counting
+    // proxy): `to_statement` through that bound with a `String`, a `&str` and a `Statement`, result held then dropped =
+    // 0 bytes up/down and Com_stmt_prepare +0, against `Conn::prep` beside it (13 up / 43 down, Com_stmt_prepare +1);
+    // compile errors E0599 (`resolve` not found on the returned enum) and E0603 (module `queryable` is private) for
+    // every attempt to drive it.
+    ("mysql_async", "mysql_async::Arc::to_statement"),
+    ("mysql_async", "mysql_async::Box::to_statement"),
+    ("mysql_async", "mysql_async::Cow::to_statement"),
+    ("mysql_async", "mysql_async::String::to_statement"),
+    ("mysql_async", "mysql_async::Vec::to_statement"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -637,6 +654,45 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::from_topic_map", "R1582:silent"),
     ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::new", "R1582:silent"),
     ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::with_capacity", "R1582:silent"),
+    // mongodb 3.9.1 and mysql_async 0.37.1, SOUNDNESS R1528 (dbs lane). 68 other rows of the two crates were given
+    // rules (`mongodb_r1528`, `mysql_async_r1528`), five were read and found pure (`REVIEWED_PURE_ENTRIES`).
+    // R1584: `conditional` on a setting the caller chooses. `AuthMechanism::validate_credential` (and
+    // `ConnectionString::parse`, which calls it) only reaches an output when the `aws-auth` feature is on AND the
+    // mechanism is MONGODB-AWS AND the URI carries credentials (client/auth.rs:195-210: `log_warning!`, which is
+    // `log::warn!` under the `log` feature and a debug-build `eprintln!` otherwise); with default features both are
+    // pure. `ParseConnectionString::execute` (`ClientOptions::parse(..).await`) does the SRV and TXT DNS lookups ONLY
+    // for a `mongodb+srv` scheme (client/options/parse.rs:33-35). EXECUTED: `mongodb://` parses in 0.5 ms and
+    // `mongodb+srv://nonexistent-cluster.invalid` fails with `DNS error: no records found for Query { name:
+    // "_mongodb._tcp.nonexistent-cluster.invalid.", query_type: SRV }`. Not charged `Net`: every `mongodb` consumer calls
+    // it, so a rule would fabricate `Net` for every plain URI.
+    ("mongodb", "mongodb::client::auth::AuthMechanism::validate_credential", "R1584:conditional"),
+    ("mongodb", "mongodb::client::options::ConnectionString::parse", "R1584:conditional"),
+    ("mongodb", "mongodb::client::options::parse::ParseConnectionString::execute", "R1584:conditional"),
+    // R1585: the client-side field-level encryption surface exists only under the `in-use-encryption` feature, which
+    // links libmongocrypt (`mongocrypt-sys` build.rs: `rustc-link-lib=dylib=mongocrypt`, no copy bundled; absent
+    // here), so none of these five could be EXECUTED. Read: `EncryptedClientBuilder::build` is
+    // `Client::with_options` plus `init_csfle` ("May perform DNS lookups and/or spawn mongocryptd", its own doc);
+    // `CreateDataKey::execute` / `Encrypt::execute` are the macro inputs whose creators `ClientEncryption::
+    // {create_data_key, encrypt}` run the same `run_ctx` state machine as the already-`Net` `decrypt`;
+    // `ClientEncryption::new` / `ClientEncryptionBuilder::build` look pure but call `Crypt::builder().build()` (an FFI
+    // object) and build a rayon pool sized by `num_cpus::get()` (cgroup reads on Linux). Filed `silent`, rule pending an
+    // executed fixture, rather than claimed pure from a read that stops at an FFI boundary.
+    ("mongodb", "mongodb::client::csfle::client_encryption::ClientEncryption::new", "R1585:silent"),
+    ("mongodb", "mongodb::client::csfle::client_encryption::ClientEncryptionBuilder::build", "R1585:silent"),
+    ("mongodb", "mongodb::client::csfle::client_encryption::create_data_key::CreateDataKey::execute", "R1585:silent"),
+    ("mongodb", "mongodb::client::csfle::client_encryption::encrypt::Encrypt::execute", "R1585:silent"),
+    ("mongodb", "mongodb::client::csfle::client_builder::EncryptedClientBuilder::build", "R1585:silent"),
+    // R1586: no spelling of the row can reach `classify`, so no rule can fire and a rule here would only hide the gap.
+    // `PathOrBuf::read` (opts/mod.rs:153) is `tokio::fs::read` of a `Path` variant. EXECUTED: the same call returns
+    // the file's bytes for an existing path and `No such file or directory (os error 2)` for a missing one. The type
+    // is not nameable (`mysql_async::PathOrBuf` does not resolve, E0425) and is reached only as a value out of
+    // `SslOpts::root_certs()`, whose return the scan does not type (the trace shows `SslOpts::root_certs`,
+    // `SslOpts::first`, and nothing for `read`), so every consumer is silent on a real file read.
+    ("mysql_async", "mysql_async::opts::PathOrBuf::read", "R1586:silent"),
+    // R1586, second half: `QueryResult::map` is a real `Db` (EXECUTED: 29.6 MB read) but the bare name is also what the
+    // scan attributes to every `.map(..)` chained off a `QueryResult` accessor (`r.columns().map(..)` is `Option::map`
+    // and traces as `mysql_async::QueryResult::map`), so a rule would fabricate `Db` on a pure idiom. Filed, not ruled.
+    ("mysql_async", "mysql_async::queryable::query_result::QueryResult::map", "R1586:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -2304,7 +2360,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // (nor, by construction, under ANY spelling — a consumer's call site is `.await`, not a
             // `.execute()` method call, so candor-scan would need to resolve the `IntoFuture` desugaring
             // itself to see this at all, a different, deeper question than a classify() rule can answer).
-            return None;
+            //
+            // SOUNDNESS R1528 (mongodb lane, 3.9.1): the effect is not unreachable, it is reached through the
+            // CREATOR the consumer does call (`coll.drop()`, `session.commit_transaction()`, ...) and charged
+            // there; see `mongodb_r1528`, which also recognises the macro-input spellings so the generator's rows
+            // are covered. The `in-use-encryption` rows stay unclaimed (R1585).
+            return mongodb_r1528(path);
         }
         // mysql / mysql_async: the `query`/`exec` families + `get_conn`/`ping` execute
         // immediately — no build-then-execute split like sqlx, so matching `::query` is safe
@@ -2355,7 +2416,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // `mod opts;` whose OTHER types (`Opts`, `OptsBuilder`, …) ARE individually `pub use`-
             // re-exported at the crate root (lib.rs:493) but `PathOrBuf` specifically is not, so it too
             // is unreachable — the same private-module shape as tempfile's `imp::` functions above.
-            return None;
+            // (R1528, 0.37.1: it IS reachable as a VALUE a public signature hands out, but no spelling of it can be
+            // typed by the scan, so no rule can fire: filed R1586.)
+            return mysql_async_r1528(path);
         }
         // sea_orm: an ORM whose execution is split from building (like sqlx). The query
         // BUILDERS (`Entity::find`, `Entity::insert`) are pure; execution happens at `.all`/
@@ -4310,6 +4373,153 @@ fn rdkafka_r1528(path: &str) -> Option<&'static str> {
         _ => false,
     };
     hit.then_some("Net")
+}
+
+/// SOUNDNESS R1528 — mongodb 3.9.1, EXECUTED against a real mongod (docker `mongo`, replica set, reached through a
+/// counting TCP proxy; the driver's own connection only, `heartbeatFrequencyMS` one hour so the idle window reads 0;
+/// the server's `serverStatus` opcounters / `transactions` read beside it; handoff `rust-r1528/dbs/`). The macro
+/// `#[action_impl]` turns every `impl Action for X { async fn execute }` into `IntoFuture::into_future` (and a sync
+/// `run`), so `X::execute` is a spelling NO consumer can write; what a consumer writes is the CREATOR
+/// (`coll.drop()`, `session.commit_transaction()`), whose return value it awaits. The existing rule above already
+/// charges the creators it lists (`find`, `count_documents`, ...). These are the creators it misses, charged `Db`,
+/// plus the `X::execute` / `X::batch` spellings the coverage generator guesses (a phantom spelling, recognised so the
+/// row is not a standing alarm; the effect it names is the creator's).
+///
+/// CHARGED `Db` (each moved the proxy's byte counters, with a quiet window beside it; the sync client's variants
+/// share the async body through `TOKIO_RUNTIME.block_on` and were run too):
+///   * `ClientSession::{commit_transaction, abort_transaction}`: 283 / 282 bytes up WHEN THE TRANSACTION HOLDS AN
+///     OPERATION (server `transactions.totalCommitted` / `totalAborted` +1); an EMPTY transaction sends nothing (0 up),
+///     so the charge is state-conditional, kept for the reason `rdkafka::seek` is.
+///   * `StartTransaction::{and_run, and_run2}` (reached as `ClientSession::and_run`): 675 bytes up with a callback
+///     that inserts, against 392 for the same insert in a manual transaction with no commit, so the difference is
+///     the `commitTransaction`; a callback that does nothing sends 0.
+///   * `Client::{bulk_write, shutdown}` (384 up; `endSessions` 351 up), `Database::{drop, run_cursor_command}`,
+///     `Collection::{drop, drop_index, drop_indexes, list_indexes, list_index_names}`.
+///   * `Collection::{create_search_index, create_search_indexes}`: the request goes out (284 up, 505 down) and a
+///     community mongod answers `SearchNotEnabled` (31082); on Atlas it succeeds. WEAKER: not run to success.
+///   * `ChangeStream::next_if_any`, `SessionChangeStream::{next, next_if_any}`: the FIRST call returns the initial
+///     batch with no I/O and every later call is a `getMore` (264 up, 292 to 845 down); state-conditional.
+///   * `GridFsBucket::delete` (677 up), `GridFsUploadStream::abort` (332 up).
+///
+/// CHARGED `Clock`: `oidc::Callback::{human, machine}` build a `Cache` whose `last_call_time` is `Instant::now()`
+/// (client/auth/oidc.rs:343). WEAKER: read, not observable from outside the process.
+///
+/// NOT claimed: `ClientSession::start_transaction` alone (EXECUTED 0 bytes), `ClientOptions::parse` and
+/// `ConnectionString::parse` (R1584), the `in-use-encryption` surface (R1585).
+fn mongodb_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("mongodb::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    // A consumer's spelling: the crate root, the `sync` re-export, or the declaring `action::..` module.
+    let consumer = module.is_empty() || module == "sync" || module.starts_with("action") || module.starts_with("sync::");
+    let hit = match (ty, method) {
+        ("ClientSession", "commit_transaction" | "abort_transaction" | "and_run" | "and_run2") => consumer,
+        ("Client", "shutdown" | "bulk_write") => consumer,
+        ("Database", "drop" | "run_cursor_command") => consumer,
+        ("Collection", "drop" | "drop_index" | "drop_indexes" | "list_indexes" | "list_index_names"
+            | "create_search_index" | "create_search_indexes") => consumer,
+        ("ChangeStream", "next_if_any") => {
+            matches!(module, "" | "sync" | "change_stream" | "sync::change_stream")
+        }
+        ("SessionChangeStream", "next" | "next_if_any") => {
+            matches!(module, "" | "sync" | "change_stream" | "change_stream::session" | "sync::change_stream")
+        }
+        ("GridFsBucket", "delete") | ("GridFsUploadStream", "abort") => {
+            matches!(module, "" | "sync" | "gridfs" | "sync::gridfs")
+        }
+        // The macro-input / action-type spellings (no consumer can write them; see above).
+        ("StartTransaction", "and_run" | "and_run2") => true,
+        ("AbortTransaction" | "CommitTransaction" | "BulkWrite" | "CountDocuments" | "CreateCollection"
+            | "CreateSearchIndex" | "DropCollection" | "DropDatabase" | "DropIndex" | "Find" | "FindOneAndDelete"
+            | "FindOneAndReplace" | "FindOneAndUpdate" | "ListCollections" | "ListDatabases" | "ListIndexes"
+            | "RunCommand" | "RunCursorCommand" | "Shutdown" | "Watch", "execute" | "batch") => true,
+        // `Delete` is also the collection delete action; only the GridFS one is a row here.
+        ("Delete", "execute") => module.contains("gridfs"),
+        ("Callback", "human" | "machine") => {
+            return matches!(module, "" | "options::oidc" | "client::auth::oidc").then_some("Clock");
+        }
+        _ => false,
+    };
+    hit.then_some("Db")
+}
+
+/// SOUNDNESS R1528 — mysql_async 0.37.1, EXECUTED against a real mysqld (docker `mysql:8.4`, binary log on, reached
+/// through a counting TCP proxy; the server's `Com_*` status beside it; handoff `rust-r1528/dbs/`). Matching is on the
+/// receiver TYPE NAME plus the method, because the method names are generic.
+///
+/// CHARGED `Db` (each moved the proxy's byte counters, or a server `Com_*` counter, with a quiet window beside it):
+///   * `Conn::{change_user, reset, disconnect, get_binlog_stream, close, start_transaction}`, `BinlogStream::close`,
+///     `Transaction::{close, commit, rollback}`, `Connection::close`: `close(stmt)` is `COM_STMT_CLOSE` (9 up, 0 down,
+///     `Com_stmt_close` +1); `commit` / `rollback` move `Com_commit` / `Com_rollback`; `Conn::start_transaction` is
+///     not a coverage-gate row (the generator's self-scan gave it no concrete effect) but is the same `BEGIN` round trip
+///     as the `Pool::start_transaction` row, so it is charged with it.
+///   * `Pool::{start_transaction, to_connection}`: a NEW connection (1 connection, 160 to 195 bytes up). The effect is
+///     in the future `to_connection()` returns and a consumer drives with `.resolve().await`; EXECUTED: the same call NOT
+///     resolved moves 0 bytes. Charged at the creator, the only attributed path, like `get_conn`.
+///   * `QueryResult::{next, collect, try_collect, *_and_drop, for_each, reduce, drop_result}`: socket reads of the
+///     result set. The proxy counts what the SERVER sends, which stalls on a full client buffer, so a 30 MB result held
+///     idle reads 0 and each of these then moved ~29.6 MB down; `next` x5000 moved 6.4 MB. `stream` / `stream_and_drop`
+///     moved 0 at creation and 5.2 MB when the returned stream was polled 5000 times: charged at the creator (WEAKER).
+///     Reached only where the receiver is TYPED (a parameter or annotation): a result held in an untyped `let` carries
+///     the `query_iter` / `exec_iter` that produced it, which is already `Db`.
+///   * `QueryWithParams::{run, batch, first, fetch, ignore, reduce, stream}`, `prelude::Query::{..}`,
+///     `prelude::BatchQuery::batch` and `Q::run` (the generator's spelling of `impl<Q: AsQuery> Query for Q`): the
+///     query goes out (13 to 81 bytes up, `Com_stmt_execute`). EXECUTED for `run`, `first` and `batch` on a typed
+///     `QueryWithParams` and for `run` / `fetch` / `ignore` through a `T: Query` bound; `reduce` and `stream`
+///     share the default-method body (`self.run(conn).await?...`): WEAKER, read. ONLY the typed and bound spellings
+///     reach this rule: `"SELECT 1".run(conn)` and `"..".with(p).run(conn)` carry no mysql_async path at all (the trace
+///     shows an unattributed `run`), EXECUTED to send the query and filed as R1586.
+///
+/// CHARGED `Env`: `test_misc::{get_opts, test_compression, test_ssl}` read `DATABASE_URL`, `COMPRESS`, `SSL`
+/// (lib.rs:621-678); a `doc(hidden)` public module.
+///
+/// NOT claimed, and why: `QueryResult::map` and the `map` of `QueryWithParams` / `Query` (R1586: the scan attributes
+/// EVERY `.map(..)` hanging off a typed root to that root's type, so a rule on the bare name charges `Db` to the pure
+/// `r.columns().map(..)`; MEASURED on `c_qr_cols_first`, the trace shows `mysql_async::QueryResult::map` for it, and
+/// the same trace shows `Conn::map`, `Pool::iter`, `Transaction::map` for the other accessors), `StatementLike::
+/// to_statement` (read and pure: `REVIEWED_PURE_ENTRIES`), `PathOrBuf::read` (R1586), `Pool::get_conn` /
+/// `Conn::new` / `Conn::from_url` (already `Db` above).
+fn mysql_async_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("mysql_async::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    if ty == "test_misc" && module.is_empty() {
+        return matches!(method, "get_opts" | "test_compression" | "test_ssl").then_some("Env");
+    }
+    let hit = match ty {
+        "Conn" => {
+            matches!(module, "" | "conn" | "conn::binlog_stream" | "queryable" | "queryable::transaction")
+                && matches!(method, "change_user" | "reset" | "disconnect" | "get_binlog_stream" | "close" | "start_transaction")
+        }
+        "BinlogStream" => matches!(module, "" | "conn::binlog_stream") && method == "close",
+        "Connection" => matches!(module, "" | "queryable") && method == "close",
+        "Transaction" => {
+            matches!(module, "" | "queryable" | "queryable::transaction") && matches!(method, "close" | "commit" | "rollback")
+        }
+        "Pool" => {
+            matches!(module, "" | "conn::pool" | "connection_like") && matches!(method, "start_transaction" | "to_connection")
+        }
+        "QueryResult" => {
+            matches!(module, "" | "queryable::query_result" | "queryable::query_result::result_set_stream")
+                && matches!(
+                    method,
+                    "next" | "collect" | "try_collect" | "collect_and_drop" | "try_collect_and_drop" | "for_each"
+                        | "for_each_and_drop" | "map_and_drop" | "reduce" | "reduce_and_drop" | "drop_result"
+                        | "stream" | "stream_and_drop"
+                )
+        }
+        "QueryWithParams" => {
+            matches!(module, "" | "query")
+                && matches!(method, "run" | "batch" | "first" | "fetch" | "ignore" | "reduce" | "stream")
+        }
+        "Query" => {
+            module == "prelude" && matches!(method, "run" | "first" | "fetch" | "ignore" | "reduce" | "stream")
+        }
+        "BatchQuery" => module == "prelude" && method == "batch",
+        "Q" => matches!(module, "" | "query") && method == "run",
+        _ => false,
+    };
+    hit.then_some("Db")
 }
 
 pub const PG_DB_VERBS: &[&str] = &[
@@ -7196,6 +7406,122 @@ mod masks_locator_tests {
         }
         assert_eq!(classify("mycrate", "mycrate::AdminClient::create_topics"), None);
         assert_eq!(classify("lapin", "lapin::ClientConfig::create"), None);
+    }
+
+    /// SOUNDNESS R1528 — the 36 mongodb 3.9.1 rows given rules, in the crate-root, `sync` and declaring-module
+    /// spellings, the creators a consumer really calls AND the macro-input spellings the generator guesses; the 8 rows
+    /// with a filed verdict (R1584, R1585) and their pure neighbours stay unclaimed.
+    #[test]
+    fn r1528_mongodb_rows_classify() {
+        let mut db: Vec<String> = vec![];
+        for m in ["", "sync::"] {
+            for (ty, v) in [
+                ("ClientSession", "commit_transaction"), ("ClientSession", "abort_transaction"), ("ClientSession", "and_run"),
+                ("ClientSession", "and_run2"), ("Client", "shutdown"), ("Client", "bulk_write"), ("Database", "drop"),
+                ("Database", "run_cursor_command"), ("Collection", "drop"), ("Collection", "drop_index"),
+                ("Collection", "drop_indexes"), ("Collection", "list_indexes"), ("Collection", "list_index_names"),
+                ("Collection", "create_search_index"), ("Collection", "create_search_indexes"),
+                ("ChangeStream", "next_if_any"), ("SessionChangeStream", "next"), ("SessionChangeStream", "next_if_any"),
+                ("GridFsBucket", "delete"), ("GridFsUploadStream", "abort"),
+            ] {
+                db.push(format!("{m}{ty}::{v}"));
+            }
+        }
+        for p in [
+            "change_stream::ChangeStream::next_if_any", "change_stream::session::SessionChangeStream::next",
+            "change_stream::session::SessionChangeStream::next_if_any", "sync::change_stream::ChangeStream::next_if_any",
+            "sync::change_stream::SessionChangeStream::next", "sync::change_stream::SessionChangeStream::next_if_any",
+            "action::shutdown::Client::shutdown", "gridfs::GridFsBucket::delete", "gridfs::GridFsUploadStream::abort",
+            // the macro-input spellings (generator rows)
+            "client::session::action::StartTransaction::and_run", "client::session::action::StartTransaction::and_run2",
+            "client::session::action::AbortTransaction::execute", "client::session::action::CommitTransaction::execute",
+            "client::action::shutdown::Shutdown::execute", "action::bulk_write::BulkWrite::execute",
+            "action::count::CountDocuments::execute", "db::action::create_collection::CreateCollection::execute",
+            "action::search_index::CreateSearchIndex::execute", "coll::action::drop::DropCollection::execute",
+            "action::drop::DropDatabase::execute", "action::drop_index::DropIndex::execute", "action::find::Find::execute",
+            "action::find::Find::batch", "action::find_and_modify::FindOneAndDelete::execute",
+            "action::find_and_modify::FindOneAndReplace::execute", "action::find_and_modify::FindOneAndUpdate::execute",
+            "action::list_collections::ListCollections::execute", "action::list_collections::ListCollections::batch",
+            "action::list_databases::ListDatabases::execute", "action::list_indexes::ListIndexes::execute",
+            "action::run_command::RunCommand::execute", "action::run_command::RunCursorCommand::execute",
+            "action::run_command::RunCursorCommand::batch", "action::watch::Watch::execute", "Find::execute",
+            "action::gridfs::delete::Delete::execute",
+        ] {
+            db.push(p.to_string());
+        }
+        for p in &db {
+            assert_eq!(classify("mongodb", &format!("mongodb::{p}")), Some("Db"), "{p}");
+        }
+        for p in ["Callback::human", "Callback::machine", "options::oidc::Callback::human", "client::auth::oidc::Callback::machine"] {
+            assert_eq!(classify("mongodb", &format!("mongodb::{p}")), Some("Clock"), "{p}");
+        }
+        // EXECUTED to move no byte (`start_transaction`), read and filed (R1584, R1585), or pure neighbours.
+        for p in [
+            "ClientSession::start_transaction", "ClientSession::end_session", "Collection::name", "Database::name",
+            "Collection::namespace", "options::ClientOptions::parse", "ClientOptions::parse", "options::ConnectionString::parse",
+            "ConnectionString::parse", "client::auth::AuthMechanism::validate_credential", "AuthMechanism::validate_credential",
+            "client::options::parse::ParseConnectionString::execute", "ClientEncryption::new",
+            "client::csfle::client_encryption::ClientEncryptionBuilder::build", "client::csfle::client_builder::EncryptedClientBuilder::build",
+            "client::csfle::client_encryption::create_data_key::CreateDataKey::execute", "client::csfle::client_encryption::encrypt::Encrypt::execute",
+            // wrong receiver / module for a name that IS claimed elsewhere
+            "Foo::commit_transaction", "Collection::commit_transaction", "other::Client::shutdown", "Delete::execute",
+            "action::delete::Delete::execute", "Callback::new", "other::Callback::human", "ChangeStream::next", "Cursor::next_if_any",
+        ] {
+            assert_eq!(classify("mongodb", &format!("mongodb::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::ClientSession::commit_transaction"), None);
+        assert_eq!(classify("mysql_async", "mysql_async::ClientSession::commit_transaction"), None);
+    }
+
+    /// SOUNDNESS R1528 — the mysql_async 0.37.1 rows given rules (31 of 38; 5 read pure, 2 filed R1586), in the
+    /// crate-root and declaring-module spellings, plus the typed / bound spellings of the `Query` family that a scan can
+    /// name. The `map` name stays unclaimed on purpose: the scan attributes every `.map` off a typed root to that root.
+    #[test]
+    fn r1528_mysql_async_rows_classify() {
+        let mut db: Vec<String> = vec![];
+        for (ty, ms, vs) in [
+            ("Conn", vec!["", "conn::", "conn::binlog_stream::", "queryable::"], vec!["change_user", "reset", "disconnect", "get_binlog_stream", "close", "start_transaction"]),
+            ("BinlogStream", vec!["", "conn::binlog_stream::"], vec!["close"]),
+            ("Connection", vec!["", "queryable::"], vec!["close"]),
+            ("Transaction", vec!["", "queryable::", "queryable::transaction::"], vec!["close", "commit", "rollback"]),
+            ("Pool", vec!["", "conn::pool::", "connection_like::"], vec!["start_transaction", "to_connection"]),
+            ("QueryResult", vec!["", "queryable::query_result::", "queryable::query_result::result_set_stream::"],
+             vec!["next", "collect", "try_collect", "collect_and_drop", "try_collect_and_drop", "for_each", "for_each_and_drop",
+                  "map_and_drop", "reduce", "reduce_and_drop", "drop_result", "stream", "stream_and_drop"]),
+            ("QueryWithParams", vec!["", "query::"], vec!["run", "batch", "first", "fetch", "ignore", "reduce", "stream"]),
+            ("Query", vec!["prelude::"], vec!["run", "first", "fetch", "ignore", "reduce", "stream"]),
+            ("BatchQuery", vec!["prelude::"], vec!["batch"]),
+            ("Q", vec!["", "query::"], vec!["run"]),
+        ] {
+            for m in &ms {
+                for v in &vs {
+                    db.push(format!("{m}{ty}::{v}"));
+                }
+            }
+        }
+        for p in &db {
+            assert_eq!(classify("mysql_async", &format!("mysql_async::{p}")), Some("Db"), "{p}");
+        }
+        for p in ["test_misc::get_opts", "test_misc::test_compression", "test_misc::test_ssl"] {
+            assert_eq!(classify("mysql_async", &format!("mysql_async::{p}")), Some("Env"), "{p}");
+        }
+        // existing rules untouched
+        assert_eq!(classify("mysql_async", "mysql_async::Conn::new"), Some("Db"));
+        assert_eq!(classify("mysql_async", "mysql_async::Pool::get_conn"), Some("Db"));
+        // filed (R1586), read pure (to_statement), or pure neighbours; wrong receiver for a claimed name
+        for p in [
+            "QueryResult::map", "queryable::query_result::QueryResult::map", "QueryWithParams::map", "prelude::Query::map",
+            "opts::PathOrBuf::read", "PathOrBuf::read", "Arc::to_statement", "String::to_statement", "Vec::to_statement",
+            "prelude::StatementLike::to_statement", "Conn::map", "Conn::opts", "Conn::tcp_port", "Pool::opts", "Pool::iter",
+            "Transaction::last_insert_id", "TxOpts::new", "TxOpts::with_readonly", "Opts::from_url", "Params::from",
+            "QueryResult::columns_ref", "QueryResult::columns", "QueryResult::affected_rows", "QueryResult::info",
+            "Foo::commit", "Pool::commit", "Conn::commit", "test_misc::other", "other::test_misc::get_opts",
+            "Query::map", "BatchQuery::run",
+        ] {
+            assert_eq!(classify("mysql_async", &format!("mysql_async::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mysql", "mysql::Conn::reset"), None);
+        assert_eq!(classify("mongodb", "mongodb::Conn::reset"), None);
     }
 
     /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with
