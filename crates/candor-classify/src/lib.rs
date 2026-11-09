@@ -425,6 +425,22 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     ("mysql_async", "mysql_async::Cow::to_statement"),
     ("mysql_async", "mysql_async::String::to_statement"),
     ("mysql_async", "mysql_async::Vec::to_statement"),
+    // SOUNDNESS R1528 — sqlx-core 0.9.0, `PoolConnection::{detach, leak}`. Both return the connection's inner
+    // `DB::Connection` after `take_live()` (pool/connection.rs:113-124); `detach` floats it and drops the size guard
+    // (`DecrementSizeGuard::drop`, pool/inner.rs:614: an atomic decrement and a semaphore release). The doc comment's
+    // "a task will be spawned to replace this connection" is NOT in the body. EXECUTED against postgres 16 behind a
+    // counting proxy: both calls moved 0 bytes and opened 0 connections, in the `sqlx` and `sqlx_core` spellings.
+    ("sqlx_core", "sqlx_core::pool::connection::PoolConnection::detach"),
+    ("sqlx_core", "sqlx_core::pool::connection::PoolConnection::leak"),
+    // SOUNDNESS R1528 — redis 1.7.1, `Client::build_with_tls` and `ClusterClientBuilder::build`. The first is
+    // `into_connection_info` plus `inner_build_with_tls` (tls.rs:32), which `retrieve_tls_certificates` parses from
+    // the PEM BYTES the caller put in `TlsCertificates` (`CertificateDer::pem_slice_iter`, in memory) and stores in a
+    // `Client { connection_info }`; the second assembles `ClusterParams` the same way and opens no socket
+    // (cluster_handling/client.rs:296). The generator's `Fs` came from the `pem` vocabulary, not a file read: neither
+    // body names `std::fs`, a path, or `rustls_native_certs`. EXECUTED: `build_with_tls("rediss://..")` moved 0
+    // commands and 0 connections on the server.
+    ("redis", "redis::client::Client::build_with_tls"),
+    ("redis", "redis::cluster_handling::client::ClusterClientBuilder::build"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -693,6 +709,54 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     // scan attributes to every `.map(..)` chained off a `QueryResult` accessor (`r.columns().map(..)` is `Option::map`
     // and traces as `mysql_async::QueryResult::map`), so a rule would fabricate `Db` on a pure idiom. Filed, not ruled.
     ("mysql_async", "mysql_async::queryable::query_result::QueryResult::map", "R1586:silent"),
+    // aws-config 1.12.0, R1588. `RegionProviderChain::region` and `Box<dyn ProvideRegion>::region` forward to whichever
+    // providers the chain holds: EXECUTED, `RegionProviderChain::default_provider().region()` read the AWS_* variables and
+    // both profile files and (no region configured) asked the IMDS mock, while `first_try(Region::new(..)).region()` and a
+    // boxed `Region` read nothing. A rule would charge the literal-only chain; the default chain's effect is the chain
+    // BUILDER's, which is not a row.
+    ("aws_config", "aws_config::meta::region::Box::region", "R1588:conditional"),
+    ("aws_config", "aws_config::meta::region::RegionProviderChain::region", "R1588:conditional"),
+    // R1588, second half: `profile::{credentials, token}::Builder::build` only CONSTRUCT a provider (credentials: a
+    // `tracing::debug_span!` and one `AWS_EXECUTION_ENV` read, EXECUTED; token: nothing). The profile files, IMDS and ECS
+    // are touched by the later `provide_credentials` / `provide_token`, which carries no rule. A `Log` or `Env` rule here
+    // would delete, above the 1.12.0 ceiling, the `invisible:[aws_config]` that is today's only disclosure of that I/O.
+    ("aws_config", "aws_config::profile::credentials::Builder::build", "R1588:silent"),
+    ("aws_config", "aws_config::profile::token::Builder::build", "R1588:silent"),
+    // sqlx-core 0.9.0, R1589. `connect_lazy{,_with}` open nothing, EXECUTED in five spellings (0 connections, 0 bytes in a
+    // held two-second window) EXCEPT `min_connections(1)` with `idle_timeout(None).max_lifetime(None)`, where the spawned
+    // maintenance task opened 1 connection and sent 411 bytes (pool/inner.rs:517-524). A rule would charge every lazy pool.
+    ("sqlx_core", "sqlx_core::pool::Pool::connect_lazy", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::pool::Pool::connect_lazy_with", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::pool::options::PoolOptions::connect_lazy", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::pool::options::PoolOptions::connect_lazy_with", "R1589:conditional"),
+    // R1589, second half: the `Box<S: Socket>` forwarders are the socket type's own effect (a TcpStream polls a real
+    // descriptor, a caller's in-memory socket does not). The consumer spelling is the trait path `Socket::poll_*`.
+    ("sqlx_core", "sqlx_core::net::socket::Box::poll_flush", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::net::socket::Box::poll_read_ready", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::net::socket::Box::poll_shutdown", "R1589:conditional"),
+    ("sqlx_core", "sqlx_core::net::socket::Box::poll_write_ready", "R1589:conditional"),
+    // R1589, third half: `MigrationSource::resolve` for `PathBuf` and `ResolveWith` reads the migrations directory
+    // (EXECUTED: 1 then 2 migrations as a file is added) but NO spelling reaches it: `p.resolve()` on a `std::path::PathBuf`
+    // receiver and on a `ResolveWith(..)` tuple-struct value (also as a typed parameter) produce no callee path at all.
+    // `Migrator::new` is the consumer-facing verb and is charged `Fs`.
+    ("sqlx_core", "sqlx_core::migrate::source::PathBuf::resolve", "R1589:silent"),
+    ("sqlx_core", "sqlx_core::migrate::source::ResolveWith::resolve", "R1589:silent"),
+    // redis 1.7.1, R1590. `MultiplexedConnection::{new, new_with_config}` write the handshake to the caller-supplied
+    // STREAM: EXECUTED 110 bytes through a TCP proxy to a real server, and the same 110 bytes into an in-memory `duplex`
+    // peer with no server at all. The effect is the stream type's.
+    ("redis", "redis::aio::multiplexed_connection::MultiplexedConnection::new", "R1590:conditional"),
+    ("redis", "redis::aio::multiplexed_connection::MultiplexedConnection::new_with_config", "R1590:conditional"),
+    // R1590, second half: `EntraIdCredentialsProvider::start` spawns a refresh loop over the caller's
+    // `Arc<dyn TokenCredential>` (entra_id.rs:387-432); what it does is that credential's. READ only: no Azure to run it
+    // against (weaker than the rows above).
+    ("redis", "redis::entra_id::EntraIdCredentialsProvider::start", "R1590:conditional"),
+    // R1590, third half: the three Sentinel `build`s draw a random replica index (`rand::rng().random_range`; EXECUTED, 1-2
+    // OS entropy reads on a fresh thread). A `Rand` rule was written and REMOVED: `let mut s = Sentinel::build(u)?;
+    // s.master_for(..)` (and `SentinelClient::build(..)?` then `get_connection()`) leaves `s` untyped, so with the rule the
+    // lock arm reported `['Rand']` and nothing for the `Db` that follows, where before it reported `invisible:[redis]`.
+    ("redis", "redis::sentinel::Sentinel::build", "R1590:silent"),
+    ("redis", "redis::sentinel::SentinelClient::build", "R1590:silent"),
+    ("redis", "redis::sentinel::SentinelClientBuilder::build", "R1590:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -835,7 +899,8 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if path.ends_with("::load") || path.ends_with("::load_defaults") || path.ends_with("::load_from_env") {
             return Some("Net");
         }
-        return None;
+        // SOUNDNESS R1528 — aws-config 1.12.0, the grandfathered rows that are not `.load()`. See `aws_config_r1528`.
+        return aws_config_r1528(path);
     }
     // git2 (libgit2 FFI): remote operations contact the network; everything else is local
     // to the .git directory. Match the remote verbs precisely — NOT bare `::clone`, which is
@@ -1984,6 +2049,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // Note: bare `::query` is deliberately omitted — it executes in postgres/rusqlite but
     // only *builds* in sqlx, so including it would false-positive sqlx's `query()` builder.
     if DB_CRATES.contains(&crate_name) {
+        // SOUNDNESS R1528 — sqlx-core 0.9.0's pool/migrate rows, reached by a `sqlx` facade consumer under the
+        // facade's own spelling (`sqlx::PgPool::begin_with`, `sqlx::pool::PoolConnection::close`). See `sqlx_r1528`.
+        if crate_name == "sqlx" {
+            if let Some(effect) = sqlx_r1528("sqlx", path) {
+                return Some(effect);
+            }
+        }
         // Postgres / SQLite-family clients: `query`/`batch_execute`/`prepare`/etc. ARE the
         // execution (round-trips to the server). sqlx is the outlier where bare `query()`
         // only BUILDS — it keeps the narrow set below. (Found by running on a real
@@ -2250,6 +2322,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             && (path.starts_with("redis::sentinel::") || path.contains("::Sentinel"))
         {
             let m = path.rsplit("::").next().unwrap_or(path);
+            // SOUNDNESS R1528 (redis 1.7.1): `build` is NOT pure either: `Sentinel::build_inner` seeds
+            // `replica_start_index` with `random_replica_index` -> `rand::rng().random_range(..)` (sentinel.rs:284,752),
+            // and `SentinelClient::build` / `SentinelClientBuilder::build` end in it (EXECUTED: 1-2 OS entropy reads on a
+            // fresh thread, 0 on an idle one). It is still NOT charged, and the reason is the measurement that stopped
+            // the rule: `let mut s = Sentinel::build(u)?; s.master_for(..)` has an untyped `s` (the `?` result), so a
+            // `Rand` rule on `build` REPLACED the lock arm's `invisible:[redis]` with `['Rand']` and the `Db` of
+            // `master_for` reached no rule (the scan reported `Rand` alone, on both `Sentinel::build` and
+            // `SentinelClient::build` followed by `get_connection`). That deletes the only disclosure of the real
+            // effect for a secondary one — not a resolution. Filed as R1590:silent.
             if m == "build" || m == "new" || m.starts_with("set_") {
                 return None;
             }
@@ -2273,6 +2354,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 {
                     return Some("Net");
                 }
+            }
+        }
+        // SOUNDNESS R1528 — redis 1.7.1, the grandfathered rows above the 1.6.0 ceiling. See `redis_r1528`.
+        if crate_name == "redis" {
+            if let Some(effect) = redis_r1528(path) {
+                return Some(effect);
             }
         }
         if crate_name == "redis"
@@ -3346,6 +3433,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if path.ends_with("::connect") || path.ends_with("::connect_with") {
             return Some("Net");
         }
+        // SOUNDNESS R1528 — sqlx-core 0.9.0, the pool / migrate / net / logger rows. See `sqlx_r1528`.
+        if let Some(effect) = sqlx_r1528("sqlx_core", path) {
+            return Some(effect);
+        }
         if path.ends_with("::fetch") || path.ends_with("::fetch_all") || path.ends_with("::fetch_one")
             || path.ends_with("::fetch_optional") || path.ends_with("::fetch_many")
             || path.ends_with("::execute") || path.ends_with("::execute_many")
@@ -4165,6 +4256,208 @@ fn type_method<'a>(path: &'a str, krate: &str, mods: &[&str]) -> Option<(&'a str
     let (head, method) = rest.rsplit_once("::")?;
     let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
     mods.contains(&module).then_some((ty, method))
+}
+
+/// SOUNDNESS R1528 — aws-config 1.12.0 (the version the rules were written against AND the resolved one: ceiling
+/// 1.12.0, so a `Cargo.lock` consumer and a lockless one both got NOTHING for these rows — in-ceiling exemption).
+/// Every body READ, and each EXECUTED in a consumer fixture under a DYLD interposer that logs every `getenv`, `open`
+/// and `connect` the process makes, beside a local IMDS / ECS mock that counts requests (handoff `rust-r1528/awsq/`).
+///
+/// CHARGED `Fs` — the profile-file readers. `ProviderConfig::profile()` loads `~/.aws/config` and `~/.aws/credentials`
+/// (EXECUTED: both opened, with `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE` / `AWS_PROFILE` read first) and the
+/// setting's own `AWS_*` variable is read beside it: `endpoint_url_provider{,_with_origin}`,
+/// `ignore_configured_endpoint_urls_provider`, `{request_checksum_calculation,response_checksum_validation}_provider`,
+/// `use_dual_stack_provider`, `use_fips_provider`, `app_name::Builder::app_name`, `ProfileFileRegionProvider::region`,
+/// and a sibling the generator never listed because its body has no `tracing` call: `retry_config::Builder::retry_config`
+/// (EXECUTED the same). `ProviderConfig`'s `env` / `fs` setters are `pub(crate)`, so no consumer can hand one a fake
+/// environment: the reads are always real.
+///
+/// CHARGED `Net` — the verbs that can reach IMDS or STS, the effect `.load()` already carries: the default region chain
+/// (`DefaultRegionChain::region`, `ProviderConfig::{load_default_region, with_default_region}`) asks IMDS when the
+/// environment and the profile give no region; `ImdsRegionProvider::region` always does; `default_provider::{credentials,
+/// token}::Builder::build` resolve that region chain first; `AssumeRoleProvider::{build, build_from_provider}` and
+/// `SsoTokenProvider::build` call `load_defaults(..)` unless an `SdkConfig` was supplied; `EcsCredentialsProvider::
+/// credentials` GETs the container-credentials URL. EXECUTED: with no region anywhere the mock IMDS counted a token PUT
+/// and a region GET for each of them (`assume build` 3 hits), and with a profile region none — so the `Net` is
+/// STATE-CONDITIONAL, kept for the reason `load` is (the default idiom with no configured region does reach it).
+/// Two over-charges follow and are accepted: a `.region(Region::new(..))` override (EXECUTED: 3 `AWS_*` reads, no file, no
+/// socket) and `AssumeRoleProvider::builder(..).configure(&sdk).build()` (EXECUTED: nothing) read pure.
+/// `credentials::default_provider` and `token::default_provider` (not rows; the same `Builder::build` behind a free fn)
+/// are charged with them.
+///
+/// ONE EFFECT IS ALL `classify` CAN CARRY (R1575 class): every `Fs` row also reads `AWS_*` (`Env`) and every `Net` row also
+/// reads the environment and the profile files (`Env`, `Fs`); only the one named is charged.
+///
+/// NOT charged, and filed (R1588): `RegionProviderChain::region` and `Box<dyn ProvideRegion>::region` forward to whichever
+/// providers the chain holds (`conditional`: EXECUTED `RegionProviderChain::default_provider()` reaches the env, the profile
+/// and IMDS and `first_try(Region::new(..))` reaches nothing), and `profile::{credentials, token}::Builder::build` only
+/// construct a provider whose I/O is its later `provide_credentials` / `provide_token` (`silent`: a rule there would charge
+/// the span `tracing::debug_span!` and one `AWS_EXECUTION_ENV` read and, above the ceiling, delete the `invisible` that is
+/// the only disclosure of that later I/O). The scan types `.build()` after `builder()` as the root type, so the paths
+/// below are the root-typed spellings as well as the declaring `Builder` ones.
+fn aws_config_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("aws_config::")?;
+    match rest {
+        "default_provider::endpoint_url::endpoint_url_provider"
+        | "default_provider::endpoint_url::endpoint_url_provider_with_origin"
+        | "default_provider::ignore_configured_endpoint_urls::ignore_configured_endpoint_urls_provider"
+        | "default_provider::checksums::request_checksum_calculation_provider"
+        | "default_provider::checksums::response_checksum_validation_provider"
+        | "default_provider::use_dual_stack::use_dual_stack_provider"
+        | "default_provider::use_fips::use_fips_provider" => return Some("Fs"),
+        "default_provider::credentials::default_provider" | "default_provider::token::default_provider" => {
+            return Some("Net")
+        }
+        _ => {}
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("default_provider::app_name", "Builder", "app_name")
+        | ("default_provider::retry_config", "Builder", "retry_config")
+        | ("profile::region", "ProfileFileRegionProvider", "region") => Some("Fs"),
+        ("default_provider::region", "DefaultRegionChain", "region")
+        | ("imds::region", "ImdsRegionProvider", "region")
+        | ("provider_config", "ProviderConfig", "load_default_region" | "with_default_region")
+        | ("default_provider::credentials", "DefaultCredentialsChain" | "Builder", "build")
+        | ("default_provider::token", "DefaultTokenChain" | "Builder", "build")
+        | ("sts" | "sts::assume_role", "AssumeRoleProvider" | "AssumeRoleProviderBuilder", "build" | "build_from_provider")
+        | ("sso::token", "SsoTokenProvider" | "Builder", "build")
+        | ("ecs", "EcsCredentialsProvider", "credentials") => Some("Net"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 — sqlx-core 0.9.0 (ceiling 0.9.0, resolved 0.9.0: in-ceiling, so both arms got nothing). EXECUTED
+/// against a real postgres 16 (docker) reached through a counting TCP proxy with idle windows beside it, plus a `log`
+/// logger and a `clock_gettime` interposer for the two logger rows (handoff `rust-r1528/awsq/`). A `sqlx` FACADE
+/// consumer spells these `sqlx::PgPool::begin_with` / `sqlx::pool::PoolConnection::close` — crate `sqlx`, not
+/// `sqlx_core`, so the `sqlx_core` rows are reached by a facade user only through this function's `sqlx` arm.
+///
+///   * `Db`: `Pool::begin_with` (35 bytes up, 49 down: acquire + `BEGIN`), `PoolConnection::return_to_pool` (5 up, 6
+///     down: the unconditional `ping` in `Floating::return_to_pool`, pool/connection.rs:275-309).
+///   * `Net`: `PoolConnection::close` (5 bytes up: the protocol `Terminate`, then the socket closes) and `net::connect_tcp`
+///     (1 connection: the consumer spelling is the `net::` re-export, which no rule matched; the file-path spelling
+///     `net::socket::connect_tcp` is recognised too).
+///   * `Fs`: `Migrator::new` over a path, `fs::ReadDir::next`, and `migrate::source::resolve_blocking{,_with_config}`
+///     (the file-path spelling of the two the `::migrate::resolve_blocking` rule already charges). EXECUTED: the result
+///     follows the directory (1 migration, then 2 after a file is added; an error on a missing path).
+///   * `Clock`: `logger::QueryLogger::new` (`Instant::now()`, EXECUTED 1 `clock_gettime` against 0 for an empty bracket).
+///   * `Log`: `QueryLogger::finish` (EXECUTED: 1 record on target `sqlx::query` at the default statement level; the
+///     record is gated on the active level, charged like `tracing::info!`).
+///
+/// READ PURE, `REVIEWED_PURE_ENTRIES`: `PoolConnection::{detach, leak}` return the inner connection and drop a size guard;
+/// the doc comment's "a task will be spawned to replace this connection" is not in the body (EXECUTED: 0 bytes, 0
+/// connections).
+///
+/// NOT charged, and filed (R1589): `Pool::connect_lazy{,_with}` / `PoolOptions::connect_lazy{,_with}` (`conditional`:
+/// EXECUTED 0 connections in 5 spellings, but 1 connection and 411 bytes up when `min_connections(1)` is set with both
+/// timeouts disabled and the pool is HELD, because the maintenance task is spawned), the four `Box<S: Socket>` `poll_*`
+/// forwarders (`conditional`: the socket type's own effect; the consumer spelling is the trait path `Socket::poll_*`),
+/// and `MigrationSource::resolve` for `PathBuf` / `ResolveWith` (`silent`: no spelling reaches them — `p.resolve()` on a
+/// `std::path::PathBuf` or on a `ResolveWith` tuple struct is untyped to the scan, EXECUTED to read the directory).
+fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix(krate)?.strip_prefix("::")?;
+    if krate == "sqlx_core" {
+        match rest {
+            "net::connect_tcp" | "net::socket::connect_tcp" => return Some("Net"),
+            "migrate::source::resolve_blocking" | "migrate::source::resolve_blocking_with_config" => {
+                return Some("Fs")
+            }
+            _ => {}
+        }
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    let pool = ty == "Pool" || (krate == "sqlx" && ty.ends_with("Pool"));
+    if pool && matches!(module, "" | "pool") && method == "begin_with" {
+        return Some("Db");
+    }
+    match (module, ty, method) {
+        ("" | "pool" | "pool::connection", "PoolConnection", "close") => Some("Net"),
+        ("" | "pool" | "pool::connection", "PoolConnection", "return_to_pool") => Some("Db"),
+        ("" | "migrate" | "migrate::migrator", "Migrator", "new") => Some("Fs"),
+        ("fs", "ReadDir", "next") if krate == "sqlx_core" => Some("Fs"),
+        ("logger", "QueryLogger", "new") if krate == "sqlx_core" => Some("Clock"),
+        ("logger", "QueryLogger", "finish") if krate == "sqlx_core" => Some("Log"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 — redis 1.7.1, ABOVE the 1.6.0 ceiling (`CALIBRATED_CEILINGS` is NOT raised: that needs the whole crate
+/// table re-verified at 1.7.1, which this lane did not do). A `Cargo.lock` consumer therefore already got
+/// `invisible:[redis]` on every unmatched redis call and a lockless one nothing; a rule here replaces that disclosure
+/// with the concrete effect. EXECUTED against a real redis 7 (docker, standalone and a 3-master cluster), the server's
+/// `total_commands_processed` / `total_connections_received` read around each call beside an idle control, a counting TCP
+/// proxy where the stream is caller-supplied, and an entropy interposer for the `Rand` rows (handoff `rust-r1528/awsq/`).
+///
+/// CHARGED `Db` (the redis rules' own class for a connection or a command): `Client::{is_open, check_connection}` (both
+/// OPEN A NEW CONNECTION: +1 connection, +2 and +3 commands — `is_open` is not a flag read on a `Client`),
+/// `Client::{get_async_pubsub, get_async_monitor}`, `Cmd::iter_async` (+1 `SCAN`), `aio::MultiplexedConnection::
+/// {send_packed_command, send_packed_commands}` (+1 command, 0 connections), the sync and async `ClusterConnection::
+/// route_command` and `ClusterPipeline::exec` (+1 command each), `MultiplexedConnection::connect_with_config` (+1
+/// connection, +2 commands) and `ClusterClient::get_pending_async_connection_with_config` (+13 commands and +3
+/// connections within two seconds of being HELD, never used: the pending connection is a background task).
+/// CHARGED `Rand`: `Replicas::choose_random` and `RandomReplicaStrategy::route_read` (`rand::rng()`; EXECUTED 1 OS
+/// entropy read on a fresh thread against 0 for an idle one; `route_read` is READ only — `ReadCandidates` has no public
+/// constructor, so a consumer reaches it only by delegating from its own `ReadRoutingStrategy`).
+///
+/// READ PURE, `REVIEWED_PURE_ENTRIES`: `Client::build_with_tls` and `ClusterClientBuilder::build` parse PEM bytes the caller
+/// SUPPLIED (`retrieve_tls_certificates`) and assemble a struct; EXECUTED `build_with_tls` made no server contact.
+///
+/// NOT charged, and filed (R1590): `Sentinel::build`, `SentinelClient::build` and `SentinelClientBuilder::build` (`silent`:
+/// they draw a random replica index, EXECUTED, but a `Rand` rule on the constructor deleted the lock arm's `invisible:[redis]`
+/// and left the `Db` of the `master_for` / `get_connection` that follows unreported: the receiver is untyped after the `?`),
+/// `MultiplexedConnection::{new, new_with_config}` (`conditional`: the handshake is
+/// written to the caller's stream — EXECUTED 110 bytes through a TCP proxy and the same 110 bytes into an in-memory
+/// `duplex` peer with no server), `EntraIdCredentialsProvider::start` (`conditional`: it spawns a loop over the
+/// caller-supplied `TokenCredential`; READ only, no Azure to run it against).
+///
+/// One effect is all `classify` can carry: connection openers also move bytes (`Net`) and the cluster verbs draw `Rand`.
+fn redis_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("redis::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    let cluster_mod = matches!(
+        module,
+        "cluster" | "cluster_async" | "cluster_handling::sync_connection" | "cluster_handling::async_connection"
+    );
+    let hit = match ty {
+        "Client" => {
+            matches!(module, "" | "client")
+                && matches!(method, "is_open" | "check_connection" | "get_async_pubsub" | "get_async_monitor")
+        }
+        "Cmd" => matches!(module, "" | "cmd") && method == "iter_async",
+        "MultiplexedConnection" => {
+            (matches!(module, "aio" | "aio::multiplexed_connection")
+                && matches!(method, "send_packed_command" | "send_packed_commands" | "connect_with_config"))
+                || (cluster_mod && method == "connect_with_config")
+        }
+        "ClusterConnection" => cluster_mod && method == "route_command",
+        "ClusterPipeline" => {
+            (cluster_mod || module == "cluster_handling::sync_connection::pipeline") && method == "exec"
+        }
+        "ClusterClient" => {
+            matches!(module, "cluster" | "cluster_handling::client")
+                && method == "get_pending_async_connection_with_config"
+        }
+        _ => false,
+    };
+    if hit {
+        return Some("Db");
+    }
+    let rand = match ty {
+        "RandomReplicaStrategy" => {
+            matches!(module, "cluster_read_routing" | "cluster_handling::read_routing::random_replica")
+                && method == "route_read"
+        }
+        "Replicas" => {
+            matches!(module, "cluster_read_routing" | "cluster_handling::read_routing::interface")
+                && method == "choose_random"
+        }
+        _ => false,
+    };
+    rand.then_some("Rand")
 }
 
 /// SOUNDNESS R1528 — the async-nats 0.50.0 broker surface the verb list in `classify` cannot see by name
@@ -7522,6 +7815,159 @@ mod masks_locator_tests {
         }
         assert_eq!(classify("mysql", "mysql::Conn::reset"), None);
         assert_eq!(classify("mongodb", "mongodb::Conn::reset"), None);
+    }
+
+    /// SOUNDNESS R1528 — the aws-config 1.12.0 rows given rules (19 of 23 plus three siblings the generator never
+    /// listed), in the declaring-module spelling and the root-typed spelling the scan produces for a chain. The
+    /// negatives are the point: the scan attributes every hop off a typed root to the root, so `.region(..)` on a
+    /// credentials builder arrives as `DefaultCredentialsChain::region`, and a bare `region` / `build` rule would
+    /// fabricate on setters and on pure builders.
+    #[test]
+    fn r1528_aws_config_rows_classify() {
+        for p in [
+            "default_provider::endpoint_url::endpoint_url_provider",
+            "default_provider::endpoint_url::endpoint_url_provider_with_origin",
+            "default_provider::ignore_configured_endpoint_urls::ignore_configured_endpoint_urls_provider",
+            "default_provider::checksums::request_checksum_calculation_provider",
+            "default_provider::checksums::response_checksum_validation_provider",
+            "default_provider::use_dual_stack::use_dual_stack_provider",
+            "default_provider::use_fips::use_fips_provider",
+            "default_provider::app_name::Builder::app_name",
+            "default_provider::retry_config::Builder::retry_config",
+            "profile::region::ProfileFileRegionProvider::region",
+        ] {
+            assert_eq!(classify("aws_config", &format!("aws_config::{p}")), Some("Fs"), "{p}");
+        }
+        for p in [
+            "default_provider::region::DefaultRegionChain::region",
+            "imds::region::ImdsRegionProvider::region",
+            "provider_config::ProviderConfig::load_default_region",
+            "provider_config::ProviderConfig::with_default_region",
+            "default_provider::credentials::DefaultCredentialsChain::build",
+            "default_provider::credentials::Builder::build",
+            "default_provider::credentials::default_provider",
+            "default_provider::token::DefaultTokenChain::build",
+            "default_provider::token::Builder::build",
+            "default_provider::token::default_provider",
+            "sts::AssumeRoleProvider::build",
+            "sts::AssumeRoleProvider::build_from_provider",
+            "sts::assume_role::AssumeRoleProviderBuilder::build",
+            "sts::assume_role::AssumeRoleProviderBuilder::build_from_provider",
+            "sso::token::SsoTokenProvider::build",
+            "sso::token::Builder::build",
+            "ecs::EcsCredentialsProvider::credentials",
+        ] {
+            assert_eq!(classify("aws_config", &format!("aws_config::{p}")), Some("Net"), "{p}");
+        }
+        // filed (R1588), setters the scan attributes to a root, pure builders, and the existing `.load()` rule
+        for p in [
+            "meta::region::Box::region", "meta::region::RegionProviderChain::region",
+            "profile::credentials::Builder::build", "profile::token::Builder::build",
+            "profile::ProfileFileCredentialsProvider::build", "profile::ProfileFileTokenProvider::build",
+            "default_provider::credentials::DefaultCredentialsChain::region",
+            "default_provider::token::DefaultTokenChain::region",
+            "sso::token::SsoTokenProvider::region", "sso::token::SsoTokenProvider::session_name",
+            "default_provider::region::DefaultRegionChain::build",
+            "default_provider::region::DefaultRegionChain::profile_name",
+            "default_provider::region::default_provider", "default_provider::timeout_config::Builder::timeout_config",
+            "provider_config::ProviderConfig::empty", "provider_config::ProviderConfig::with_region",
+            "sts::AssumeRoleProvider::configure", "sts::AssumeRoleProvider::builder",
+            "imds::region::ImdsRegionProvider::build", "ecs::EcsCredentialsProvider::build",
+            "default_provider::use_fips::other", "other::default_provider::credentials::DefaultCredentialsChain::build",
+        ] {
+            assert_eq!(classify("aws_config", &format!("aws_config::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("aws_config", "aws_config::loader::ConfigLoader::load"), Some("Net"));
+        assert_eq!(classify("mycrate", "mycrate::default_provider::use_fips::use_fips_provider"), None);
+    }
+
+    /// SOUNDNESS R1528 — the sqlx-core 0.9.0 rows given rules (10 of 22; 2 read pure, 8 conditional and 2 silent filed),
+    /// under the `sqlx_core` spelling and the `sqlx` facade spelling a facade consumer actually produces.
+    #[test]
+    fn r1528_sqlx_core_rows_classify() {
+        for (k, p, e) in [
+            ("sqlx_core", "pool::Pool::begin_with", "Db"), ("sqlx_core", "Pool::begin_with", "Db"),
+            ("sqlx", "PgPool::begin_with", "Db"), ("sqlx", "Pool::begin_with", "Db"), ("sqlx", "MySqlPool::begin_with", "Db"),
+            ("sqlx_core", "pool::PoolConnection::close", "Net"), ("sqlx", "pool::PoolConnection::close", "Net"),
+            ("sqlx_core", "pool::connection::PoolConnection::close", "Net"),
+            ("sqlx_core", "pool::PoolConnection::return_to_pool", "Db"), ("sqlx", "pool::PoolConnection::return_to_pool", "Db"),
+            ("sqlx_core", "net::connect_tcp", "Net"), ("sqlx_core", "net::socket::connect_tcp", "Net"),
+            ("sqlx_core", "migrate::Migrator::new", "Fs"), ("sqlx_core", "migrate::migrator::Migrator::new", "Fs"),
+            ("sqlx", "migrate::Migrator::new", "Fs"),
+            ("sqlx_core", "fs::ReadDir::next", "Fs"),
+            ("sqlx_core", "migrate::source::resolve_blocking", "Fs"),
+            ("sqlx_core", "migrate::source::resolve_blocking_with_config", "Fs"),
+            ("sqlx_core", "migrate::resolve_blocking", "Fs"),
+            ("sqlx_core", "logger::QueryLogger::new", "Clock"), ("sqlx_core", "logger::QueryLogger::finish", "Log"),
+        ] {
+            assert_eq!(classify(k, &format!("{k}::{p}")), Some(e), "{k}::{p}");
+        }
+        // read pure (detach, leak), filed (connect_lazy, Box poll_*, resolve) and pure neighbours stay unclaimed
+        for (k, p) in [
+            ("sqlx_core", "pool::PoolConnection::detach"), ("sqlx_core", "pool::PoolConnection::leak"),
+            ("sqlx", "pool::PoolConnection::detach"), ("sqlx", "pool::PoolConnection::leak"),
+            ("sqlx_core", "pool::Pool::connect_lazy"), ("sqlx_core", "pool::Pool::connect_lazy_with"),
+            ("sqlx_core", "pool::PoolOptions::connect_lazy"), ("sqlx_core", "pool::PoolOptions::connect_lazy_with"),
+            ("sqlx", "PgPool::connect_lazy"), ("sqlx", "postgres::PgPoolOptions::connect_lazy"),
+            ("sqlx_core", "net::socket::Box::poll_flush"), ("sqlx_core", "net::Socket::poll_read_ready"),
+            ("sqlx_core", "migrate::source::PathBuf::resolve"), ("sqlx_core", "migrate::source::ResolveWith::resolve"),
+            ("sqlx_core", "migrate::ResolveConfig::new"), ("sqlx_core", "logger::QueryLogger::sql"),
+            ("sqlx_core", "logger::QueryLogger::increment_rows_returned"),
+            ("sqlx_core", "pool::PoolOptions::max_connections"), ("sqlx_core", "pool::PoolConnection::close_on_drop"),
+            ("sqlx", "postgres::PgPoolOptions::new"), ("sqlx", "PgPool::size"), ("sqlx", "other::PgPool::begin_with"),
+            ("sqlx", "Connection::close"), ("sqlx", "Transaction::new"),
+        ] {
+            assert_eq!(classify(k, &format!("{k}::{p}")), None, "{k}::{p}");
+        }
+        // `net::connect_tcp` is the `sqlx_core` re-export; a facade spelling of the same name is not claimed
+        assert_eq!(classify("sqlx", "sqlx::net::connect_tcp"), None);
+        assert_eq!(classify("mycrate", "mycrate::pool::PoolConnection::close"), None);
+    }
+
+    /// SOUNDNESS R1528 — the redis 1.7.1 rows given rules (13 of 21; 2 read pure, 6 filed), in the crate-root, the
+    /// re-export and the declaring-module spellings. `Sentinel::build` was a deliberate `None` (R335: "parses URLs");
+    /// it draws a random replica index but a `Rand` rule there deleted the disclosure of the `Db` that follows (R1590:silent), so it stays unclaimed.
+    #[test]
+    fn r1528_redis_rows_classify() {
+        for (p, e) in [
+            ("Client::is_open", "Db"), ("client::Client::is_open", "Db"), ("Client::check_connection", "Db"),
+            ("Client::get_async_pubsub", "Db"), ("client::Client::get_async_monitor", "Db"),
+            ("Cmd::iter_async", "Db"), ("cmd::Cmd::iter_async", "Db"),
+            ("aio::MultiplexedConnection::send_packed_command", "Db"),
+            ("aio::MultiplexedConnection::send_packed_commands", "Db"),
+            ("aio::multiplexed_connection::MultiplexedConnection::send_packed_command", "Db"),
+            ("aio::MultiplexedConnection::connect_with_config", "Db"),
+            ("cluster_handling::async_connection::MultiplexedConnection::connect_with_config", "Db"),
+            ("cluster::ClusterConnection::route_command", "Db"), ("cluster_async::ClusterConnection::route_command", "Db"),
+            ("cluster_handling::sync_connection::ClusterConnection::route_command", "Db"),
+            ("cluster_handling::async_connection::ClusterConnection::route_command", "Db"),
+            ("cluster::ClusterPipeline::exec", "Db"), ("cluster_handling::sync_connection::pipeline::ClusterPipeline::exec", "Db"),
+            ("cluster::ClusterClient::get_pending_async_connection_with_config", "Db"),
+            ("cluster_handling::client::ClusterClient::get_pending_async_connection_with_config", "Db"),
+            ("cluster_read_routing::Replicas::choose_random", "Rand"),
+            ("cluster_handling::read_routing::interface::Replicas::choose_random", "Rand"),
+            ("cluster_read_routing::RandomReplicaStrategy::route_read", "Rand"),
+            ("cluster_handling::read_routing::random_replica::RandomReplicaStrategy::route_read", "Rand"),
+        ] {
+            assert_eq!(classify("redis", &format!("redis::{p}")), Some(e), "{p}");
+        }
+        // read pure (build_with_tls, cluster builder build), filed (new / new_with_config / entra start), neighbours;
+        // the receiver-name guards: `is_open` on a Connection, `route_command` on a non-cluster type
+        for p in [
+            "Client::build_with_tls", "client::Client::build_with_tls", "cluster::ClusterClient::build",
+            "cluster_handling::client::ClusterClientBuilder::build", "cluster::ClusterClientBuilder::retries",
+            "aio::MultiplexedConnection::new", "aio::MultiplexedConnection::new_with_config",
+            "aio::multiplexed_connection::MultiplexedConnection::new",
+            "entra_id::EntraIdCredentialsProvider::start", "Client::open", "Client::get_connection_info",
+            "Connection::is_open", "aio::MultiplexedConnection::is_open", "Other::route_command",
+            "cluster::ClusterClient::builder", "cluster_read_routing::Replicas::new", "cluster_read_routing::Replicas::iter",
+            "sentinel::Sentinel::new", "sentinel::SentinelClientBuilder::set_client_to_redis_db",
+            "sentinel::Sentinel::build", "sentinel::SentinelClient::build", "sentinel::SentinelClientBuilder::build",
+            "other::Client::is_open", "Cmd::arg", "Cmd::new",
+        ] {
+            assert_eq!(classify("redis", &format!("redis::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::Client::is_open"), None);
     }
 
     /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with
