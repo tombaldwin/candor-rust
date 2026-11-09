@@ -134,10 +134,10 @@ use std::collections::{BTreeSet, HashMap};
 
 /// The size of `grandfathered.tsv` when the ruling was implemented (the checked-in `open.tsv`, 776
 /// rows, minus the 64 R1528-step-2 found UNREACHABLE; 694 after the 18 reachable rusqlite rows got a classify
-/// rule, R1528; 619 after the 75 ureq 3.4.2 rows got a rule, a read or a verdict; 550 after the 69 chrono / tracing-subscriber / jiff rows did; 474 after the 76 sea_orm 2.0.4 rows did; 369 after the 105 async_nats 0.50.0 rows did; 300 after the 69 rdkafka 0.39.0 rows did; 218 after the 44 mongodb 3.9.1 and 38 mysql_async 0.37.1 rows did; 152 after the 23 aws_config 1.12.0, 22 sqlx_core 0.9.0 and 21 redis 1.7.1 rows did; 96 after the 17 lettre 0.11.23, 14 lapin 4.12.0, 13 tonic 0.14.6 and 12 isahc 2.0.1 rows did). It may go DOWN — lower this number when it
+/// rule, R1528; 619 after the 75 ureq 3.4.2 rows got a rule, a read or a verdict; 550 after the 69 chrono / tracing-subscriber / jiff rows did; 474 after the 76 sea_orm 2.0.4 rows did; 369 after the 105 async_nats 0.50.0 rows did; 300 after the 69 rdkafka 0.39.0 rows did; 218 after the 44 mongodb 3.9.1 and 38 mysql_async 0.37.1 rows did; 152 after the 23 aws_config 1.12.0, 22 sqlx_core 0.9.0 and 21 redis 1.7.1 rows did; 96 after the 17 lettre 0.11.23, 14 lapin 4.12.0, 13 tonic 0.14.6 and 12 isahc 2.0.1 rows did; 51 after the 11 crossterm 0.29.0, 8 mysql 28.0.3, 7 reqwest 0.13.5, 7 diesel 2.3.14, 6 tungstenite 0.30.0 and 6 tempfile 3.27.0 rows did). It may go DOWN — lower this number when it
 /// does, so the slack cannot be spent — and must never go up: a row added to the backlog is a verdict
 /// skipped. Raising it is visible in review, which is the point.
-const GRANDFATHERED_CEILING: usize = 96;
+const GRANDFATHERED_CEILING: usize = 51;
 
 /// (crate, entry) of every data row of an `open.tsv`-shaped manifest (crate first, entry last).
 fn manifest_keys(text: &str) -> Vec<(String, String)> {

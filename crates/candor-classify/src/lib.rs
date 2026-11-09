@@ -456,6 +456,16 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     // 21 bytes DOWN in the second case are the confirmation, read by the IO loop that `connect` started, charged there; the
     // `basic_publish` carries the `Net`).
     ("lapin", "lapin::channel::Channel::wait_for_confirms"),
+    // SOUNDNESS R1528 (b10) — mysql 28.0.3, `PooledConn::unwrap`: `self.conn.take().unwrap()`, it moves the `Conn` out of the pool wrapper
+    // (conn/pool/mod.rs:272). EXECUTED against MySQL 8 behind a counting proxy: 0 connections and 0 bytes in either direction. The
+    // `Fs` and `Unknown` the self-scan reports are the drop glue of the consumed wrapper, which holds no connection by then.
+    ("mysql", "mysql::conn::pool::PooledConn::unwrap"),
+    // SOUNDNESS R1528 (b10) — reqwest 0.13.5, `PoolClient::send_request` (the HTTP/3 pool client): it really does dispatch, but
+    // `mod async_impl;` is a bare private module (lib.rs:372) whose only re-exports are `Body, Client, ClientBuilder, Request,
+    // RequestBuilder, Response, Upgraded` and `multipart`, so no consumer can name `PoolClient` at all — the same shape as
+    // `mysql::Stream::connect_socket` above. The reachable HTTP/3 dispatch is `Client::{execute,send}`, already `Net`. (The comment
+    // above `reqwest::multipart::Part::file` already said this row was "removed from open.tsv rather than guessed"; it never was.)
+    ("reqwest", "reqwest::async_impl::h3_client::pool::PoolClient::send_request"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -817,6 +827,24 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("tonic", "tonic::transport::server::Router::serve_with_incoming_shutdown", "R1594:conditional"),
     ("tonic", "tonic::transport::server::Server::serve_with_incoming", "R1594:conditional"),
     ("tonic", "tonic::transport::server::Server::serve_with_incoming_shutdown", "R1594:conditional"),
+    // tempfile 3.27.0 and crossterm 0.29.0, R1595. `TempPath::{from_path, try_from_path}` call `std::env::current_dir()` only for a
+    // RELATIVE path (EXECUTED: 1 `getcwd` for `rel/x`, 0 for an absolute path and for the empty path) and open nothing.
+    // `Print::write_ansi` and `SetTitle::write_ansi` write the caller's `T: Display` into the caller's writer: EXECUTED 0 events for
+    // `&str`, and 1 `NO_COLOR` read for `Print(Colored::..)`, so the effect is the type argument's. `SetTitle::execute_winapi` (a
+    // console-title call) and `ansi_support::supports_ansi` (console VT mode, then `TERM` only when that fails) are `cfg(windows)`:
+    // real, READ only, no host to execute them on, so no rule.
+    ("tempfile", "tempfile::file::TempPath::from_path", "R1595:conditional"),
+    ("tempfile", "tempfile::file::TempPath::try_from_path", "R1595:conditional"),
+    // `TempDir::keep` and its deprecated `into_path` (R1595:overcharge, the scan oracle fabricates): the self-scan reads `Fs` because the
+    // consumed `self` drops at the end of the body and `TempDir`'s `Drop` removes the directory — but `keep` has just set
+    // `disable_cleanup`, so nothing is removed (EXECUTED: 0 `unlink`, 0 `mkdir`, 0 `open`, 0 `getenv` for both). Carved out of the `::keep`
+    // suffix rule for the same reason; that rule had charged `TempDir::keep` `Fs` since the sweep that wrote it.
+    ("tempfile", "tempfile::dir::TempDir::keep", "R1595:overcharge"),
+    ("tempfile", "tempfile::dir::TempDir::into_path", "R1595:overcharge"),
+    ("crossterm", "crossterm::style::Print::write_ansi", "R1595:conditional"),
+    ("crossterm", "crossterm::terminal::SetTitle::write_ansi", "R1595:conditional"),
+    ("crossterm", "crossterm::terminal::SetTitle::execute_winapi", "R1595:silent"),
+    ("crossterm", "crossterm::ansi_support::supports_ansi", "R1595:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -1378,9 +1406,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::json")
                 || path.ends_with("::bytes")
                 || path.ends_with("::chunk")
-                || path.ends_with("::bytes_stream"))
+                || path.ends_with("::bytes_stream")
+                // SOUNDNESS R1528 (b10) — `blocking::Response::copy_to(w)` is the blocking drain of the same body
+                // (EXECUTED: it blocked 1.5 s on a slow server and wrote the tail; a response built in memory: 0 ms).
+                || path.ends_with("::copy_to"))
         {
             return Some("Net");
+        }
+        if crate_name == "reqwest" {
+            if let Some(effect) = reqwest_r1528(path) {
+                return Some(effect);
+            }
         }
         if crate_name == "reqwest"
             && (path.ends_with("::Identity::from_pkcs12_der")
@@ -1707,6 +1743,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // from_connection_url` (`from_url`) — real TLS setup a consumer never spells `TlsParameters` to
     // reach. `FileTransport::read` (transport/file/mod.rs:216) calls `std::fs::read` directly.
     if crate_name == "lettre" {
+        // SOUNDNESS R1597 — a transport's `send` does the TRANSPORT's effect, not the SMTP one. See `lettre_send_r1597`.
+        if let Some(effect) = lettre_send_r1597(path) {
+            return Some(effect);
+        }
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
         }
@@ -1827,6 +1867,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // dial-it-yourself `connect` spelling. Same vein as `git2::Submodule::clone`/`ignore::Walk::new`: an
     // established effect's SIBLING entry point absent from the allowlist.
     if crate_name == "tungstenite" {
+        // SOUNDNESS R1528 (b10) — the grandfathered rows the verb list below never reached. See `tungstenite_r1528`.
+        if let Some(effect) = tungstenite_r1528(path) {
+            return Some(effect);
+        }
         if path.ends_with("::connect")
             || path.ends_with("::connect_with_config")
             || path.ends_with("::client")
@@ -2577,6 +2621,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // is unreachable — the same private-module shape as tempfile's `imp::` functions above.
             // (R1528, 0.37.1: it IS reachable as a VALUE a public signature hands out, but no spelling of it can be
             // typed by the scan, so no rule can fire: filed R1586.)
+            if crate_name == "mysql" {
+                if let Some(effect) = mysql_r1528(path) {
+                    return Some(effect);
+                }
+            }
             return mysql_async_r1528(path);
         }
         // sea_orm: an ORM whose execution is split from building (like sqlx). The query
@@ -2791,6 +2840,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // `ignore::Walk::new` above, one call away from `establish_test_transaction`/`establish_inner`,
         // which are diesel's own private plumbing and stay unmatched (no `::` in the allowed suffix keeps
         // this exact-verb, not a substring match).
+        // SOUNDNESS R1528 (b10) — diesel 2.3.14 (above its 2.3.13 ceiling). See `diesel_r1528`.
+        if crate_name == "diesel" {
+            if let Some(effect) = diesel_r1528(path) {
+                return Some(effect);
+            }
+        }
         const VERBS: [&str; 20] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::fetch_many", "::connect",
@@ -2955,6 +3010,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // tempfile: creating a temp file/dir touches the disk. Match the create/persist verbs (the
     // `Builder` setters — prefix/suffix/rand_bytes — stay pure). `persist`/`keep` rename/retain
     // the file on disk; `close` removes it.
+    // SOUNDNESS R1528 (b10) — `TempDir::keep` is carved OUT of the `::keep` suffix below. See `tempfile_r1528`.
+    if crate_name == "tempfile" {
+        if matches!(type_method(path, "tempfile", &["", "dir"]), Some(("TempDir", "keep"))) {
+            return None;
+        }
+        if let Some(effect) = tempfile_r1528(path) {
+            return Some(effect);
+        }
+    }
     if crate_name == "tempfile"
         && (path.ends_with("::tempfile")
             || path.ends_with("::tempfile_in")
@@ -3832,6 +3896,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // types (`Print`, `MoveTo`, `SetForegroundColor`), the style/event data types — carries none of these
     // tails and stays pure correctly.
     if crate_name == "crossterm" {
+        // SOUNDNESS R1528 (b10) — crossterm 0.29.0 (above its 0.28.1 ceiling). See `crossterm_r1528`.
+        if let Some(effect) = crossterm_r1528(path) {
+            return Some(effect);
+        }
         if path.ends_with("::execute") || path.ends_with("::queue")
             || path.ends_with("::event::read") || path.ends_with("::event::poll")
             || path.ends_with("::enable_raw_mode") || path.ends_with("::disable_raw_mode")
@@ -4418,6 +4486,223 @@ fn lettre_r1528(path: &str) -> Option<&'static str> {
         ) => Some("Rand"),
         ("" | "transport::file", "AsyncFileTransport", "read") => Some("Fs"),
         ("" | "executor", "Executor" | "Tokio1Executor" | "AsyncStd1Executor", "fs_read" | "fs_write") => Some("Fs"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1597 — lettre 0.11.23 `Transport::send` / `send_raw` on the transports that do not speak SMTP. The `::send`
+/// suffix rule charges `Net` for every transport, which is wrong in both directions for these types, EXECUTED in a consumer
+/// fixture beside an interposer (`open`, `connect`) and a stand-in `sendmail` script that logs each invocation (handoff
+/// `rust-r1528/b10/`):
+///   * `FileTransport` / `AsyncFileTransport` write `<dir>/<id>.eml` (EXECUTED: the `open(..., O_CREAT|O_WRONLY)` is logged,
+///     one file per send, sync and async, `send` and `send_raw`; 0 `connect`). Real effect `Fs`: `deny Fs` passed over code
+///     that writes an email to disk, and `deny Net` failed over it.
+///   * `SendmailTransport` / `AsyncSendmailTransport` spawn the configured `sendmail` command and pipe the message to it
+///     (EXECUTED: exactly one invocation of the stand-in per send, 0 `connect`). Real effect `Exec`.
+///
+/// `SmtpTransport` / `AsyncSmtpTransport` stay `Net` (EXECUTED: a `connect` to the SMTP port; the generic `Transport::send`
+/// on a type parameter keeps the suffix rule's `Net`, since SMTP is the idiom behind it). `StubTransport` is NOT touched:
+/// it does nothing (EXECUTED: 0 files, 0 connects, 0 processes) and still reads `Net`, an over-charge filed, not changed
+/// here. Keyed on module + type: `AsyncFileTransport<E>` reaches classify without its type argument.
+fn lettre_send_r1597(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("lettre::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    if !matches!(method, "send" | "send_raw") {
+        return None;
+    }
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty) {
+        ("" | "transport::file", "FileTransport" | "AsyncFileTransport") => Some("Fs"),
+        ("" | "transport::sendmail", "SendmailTransport" | "AsyncSendmailTransport") => Some("Exec"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — tempfile 3.27.0 (ceiling 3.27.0, resolved 3.27.0: in-ceiling, so a `Cargo.lock` consumer and a
+/// lockless one both got NOTHING for these rows). EXECUTED in a consumer fixture under a DYLD interposer that logs `getenv`,
+/// `open` (with O_CREAT), `unlink` and `getcwd` between a start and an end marker (handoff `rust-r1528/b10/`).
+///
+/// CHARGED `Fs`: `SpooledTempFile::{into_file, roll}` on an in-memory buffer create a real temporary file (EXECUTED: one
+/// `open(<TMPDIR>/.tmpXXXXXX, O_CREAT|O_WRONLY)` and one `unlink`, after a `TMPDIR` read) and write the buffer into it. The
+/// accepted over-charge is a receiver that already spilled past `max_size`: EXECUTED 0 events for both calls on a rolled one.
+/// The alternative is a silence on the common idiom (`write` a little, then `into_file`).
+/// CHARGED `Env`: `tempfile::env::temp_dir` reads `TMPDIR` (EXECUTED: `getenv TMPDIR`), unless `override_temp_dir` was called
+/// first (EXECUTED: 0 reads) — an accepted over-charge, the default idiom is the one that reads.
+///
+/// CARVED OUT of the `::keep` suffix rule: `TempDir::keep` (and its deprecated `into_path`) only flips `disable_cleanup` and
+/// moves the path out (dir/mod.rs:418, READ; EXECUTED: 0 `open`, 0 `unlink`, 0 `mkdir`, 0 `getenv` for both). `NamedTempFile::keep`
+/// and `TempPath::keep` are NOT carved out: they call `imp::keep`, which is a no-op on unix and a real file-attribute change
+/// on Windows, which this lane could not execute.
+///
+/// NOT charged, and filed (R1595): `TempPath::{from_path, try_from_path}` read the working directory only for a RELATIVE path
+/// (EXECUTED: 1 `getcwd` for `"rel/x"`, 0 for an absolute path and for the empty path); they touch no file.
+fn tempfile_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("tempfile::")?;
+    if matches!(rest, "temp_dir" | "env::temp_dir") {
+        return Some("Env");
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "spooled", "SpooledTempFile", "into_file" | "roll") => Some("Fs"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — tungstenite 0.30.0 (ceiling 0.30.0, resolved 0.30.0: in-ceiling, both arms got NOTHING for these
+/// rows). EXECUTED against a local hand-written WebSocket server (counting connections and received bytes) beside a DYLD
+/// interposer logging `setsockopt` and entropy reads, each between start and end markers (handoff `rust-r1528/b10/`).
+///
+/// CHARGED `Rand`: `handshake::client::generate_key` and the `IntoClientRequest` impls that call it, `Uri` and
+/// `ClientRequestBuilder` (the scan spells the typed `Uri` receiver `tungstenite::http::Uri::into_client_request`): EXECUTED
+/// 1 OS entropy read on a fresh thread for each, 0 for `Request::into_client_request`, which is a pass-through and stays
+/// pure (it would be charged by a `::into_client_request` suffix, so the rule keys on the type). The `&str`/`String`
+/// impls forward to `Uri`; a `&str` receiver is untyped for the scan and cannot be reached by any rule.
+/// CHARGED `Net`: `NoDelay::set_nodelay` on `MaybeTlsStream` and on a `TcpStream` (EXECUTED: `setsockopt(IPPROTO_TCP,
+/// TCP_NODELAY)` on the socket; no byte moves, the std rule already charges every `TcpStream` method `Net`), and
+/// `WebSocket::write_pending`, the deprecated alias of `flush` (EXECUTED: 0 bytes at the server with nothing buffered, 19
+/// bytes — a masked text frame — with one buffered; the existing `::flush` rule charges the same call `Net`).
+fn tungstenite_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("tungstenite::")?;
+    if matches!(rest, "handshake::client::generate_key" | "client::generate_key" | "generate_key") {
+        return Some("Rand");
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "http" | "client" | "http::uri", "Uri", "into_client_request") => Some("Rand"),
+        ("" | "client", "ClientRequestBuilder", "into_client_request") => Some("Rand"),
+        ("" | "stream", "MaybeTlsStream" | "TcpStream" | "NoDelay", "set_nodelay") => Some("Net"),
+        ("" | "protocol", "WebSocket", "write_pending") => Some("Net"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — crossterm 0.29.0, ABOVE its 0.28.1 ceiling (`CALIBRATED_CEILINGS` is NOT raised): a `Cargo.lock`
+/// consumer got `invisible:[crossterm]` on every unmatched call and a lockless one nothing; a rule replaces that disclosure
+/// with the concrete effect. EXECUTED in a consumer fixture under a DYLD interposer (`getenv`, `open`, `isatty`, `ioctl`,
+/// `tcgetattr`, `tcsetattr`) and, for the terminal calls, under a pseudo-terminal whose master answers the cursor query
+/// (handoff `rust-r1528/b10/`).
+///
+/// CHARGED `Env`: `Colored::{ansi_color_disabled, ansi_color_disabled_memoized, set_ansi_color_disabled}`,
+/// `style::force_color_output` (`NO_COLOR`; EXECUTED 1 `getenv NO_COLOR` each; the memoized and the setter read it ONCE per
+/// process — EXECUTED 0 reads on a second call, an accepted over-charge: the first call is the one every program makes) and
+/// `style::available_color_count` (`COLORTERM`, then `TERM`; EXECUTED, on every call).
+/// CHARGED `Ipc`: `cursor::position` (EXECUTED under a pty: `ESC [ 6 n` written to the terminal, raw mode toggled with
+/// 2 `tcsetattr`, the reply read; with no controlling terminal it opens `/dev/tty` and returns an error), and
+/// `event::EventStream::{new, next, poll_next}`: `next` is the read (EXECUTED: `block_on(stream.next())` returned the key typed
+/// on the pty); `new` is charged by this file's own constructor convention (the `reqwest` `bytes_stream` rule) because the
+/// terminal read hides behind a `Stream::next` a consumer often holds untyped — EXECUTED: `new` itself writes and reads
+/// nothing, it probes the tty (`isatty`/`ioctl`, or opens `/dev/tty` when stdin is not one, panicking when there is none)
+/// and spawns the poller thread. An accepted over-charge when the stream is never polled.
+///
+/// NOT charged, and filed (R1595): `Print::write_ansi` and `SetTitle::write_ansi` write the caller's `T: Display` into the
+/// caller's writer (EXECUTED: 0 events for `&str`, and 1 `NO_COLOR` read for `Print(Colored::..)`), so the effect is the type
+/// argument's; `SetTitle::execute_winapi` and `ansi_support::supports_ansi` are `cfg(windows)` and cannot be executed on
+/// this host (read only).
+fn crossterm_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("crossterm::")?;
+    match rest {
+        "style::available_color_count" | "available_color_count" | "style::force_color_output" | "force_color_output" => {
+            return Some("Env")
+        }
+        "cursor::position" | "position" | "cursor::sys::unix::position" | "cursor::sys::position" => return Some("Ipc"),
+        _ => {}
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        (
+            "" | "style" | "style::types" | "style::types::colored",
+            "Colored",
+            "ansi_color_disabled" | "ansi_color_disabled_memoized" | "set_ansi_color_disabled",
+        ) => Some("Env"),
+        ("" | "event" | "event::stream", "EventStream", "new" | "next" | "poll_next") => Some("Ipc"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — reqwest 0.13.5, ABOVE its 0.13.4 ceiling (`CALIBRATED_CEILINGS` is NOT raised). EXECUTED in a
+/// consumer fixture under a DYLD interposer (`getenv`, `open`) and a local HTTP server (handoff `rust-r1528/b10/`).
+///
+/// CHARGED `Env`: `ClientBuilder::build` (async and blocking) and `Client::new`/`Client::build` (the scan attributes a chain
+/// hop off `Client::builder()` to the root type, so `Client::builder().timeout(..).build()` reaches classify as
+/// `reqwest::Client::build`): EXECUTED `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase) read on EVERY call
+/// (a second build in the same process reads them again), 0 for `ClientBuilder::new()`; with `HTTP_PROXY` set the call still
+/// opens nothing but the platform's own configuration plumbing. The `Fs` the self-scan also saw depends on the TLS feature set
+/// (native roots): no file was opened by `build` on this macOS host with the default features, and Linux was not executed, so
+/// it is NOT charged. `NoProxy::from_env` reads `NO_PROXY` / `no_proxy` (EXECUTED).
+/// CHARGED `Fs`: `multipart::Form::file`, async and blocking (EXECUTED: `open(<path>)` is attempted, including for a missing path).
+fn reqwest_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("reqwest::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "async_impl::client" | "blocking" | "blocking::client", "ClientBuilder" | "Client", "build") => Some("Env"),
+        ("" | "blocking" | "blocking::client", "Client", "new") => Some("Env"),
+        ("" | "multipart" | "async_impl::multipart" | "blocking::multipart", "Form", "file") => Some("Fs"),
+        ("" | "proxy", "NoProxy", "from_env") => Some("Env"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — mysql 28.0.3, ABOVE its 28.0.0 ceiling (`CALIBRATED_CEILINGS` is NOT raised). EXECUTED against
+/// MySQL 8 (docker) behind a counting TCP proxy that the fixture resets and reads at its own start and end markers, beside
+/// an idle control (0 conns, 0 bytes) (handoff `rust-r1528/b10/`).
+///
+/// CHARGED `Db`: `Conn::reset` (5 bytes up / 11 down), `Conn::change_user` and `PooledConn::change_user` (110 / 65),
+/// `Pool::try_get_conn` (10 / 22 on an idle pool), `Pool::start_transaction` (40 / 33), `Conn::start_transaction` and
+/// `PooledConn::start_transaction` (35 / 22; never rows), `Conn::get_binlog_stream` and `PooledConn::get_binlog_stream`
+/// (feature `binlog`; COM_BINLOG_DUMP, 80 / 22), and `Pool::new`: EXECUTED 10 connections and 4,040 bytes with the default
+/// pool constraints (min 10). The accepted over-charge is `PoolConstraints::new(0, ..)`, with which `Pool::new` connects
+/// nothing (EXECUTED 0 / 0): the default is the idiom that connects.
+///
+/// READ PURE, `REVIEWED_PURE_ENTRIES`: `PooledConn::unwrap` (EXECUTED 0 conns, 0 bytes: it moves the `Conn` out).
+fn mysql_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("mysql::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "conn", "Conn", "reset" | "change_user" | "start_transaction" | "get_binlog_stream") => Some("Db"),
+        ("" | "conn::pool", "PooledConn", "change_user" | "start_transaction" | "get_binlog_stream") => Some("Db"),
+        ("" | "conn::pool", "Pool", "new" | "try_get_conn" | "start_transaction") => Some("Db"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 (b10) — diesel 2.3.14, ABOVE its 2.3.13 ceiling (`CALIBRATED_CEILINGS` is NOT raised). EXECUTED against a
+/// file-backed SQLite (bundled) and PostgreSQL 16 (docker), the ground truth read from the database itself (handoff
+/// `rust-r1528/b10/`).
+///
+/// CHARGED `Db`: `batch_execute` (EXECUTED: the table it creates exists afterwards, on SQLite), `SqliteConnection::
+/// {immediate_transaction, exclusive_transaction}` and `AnsiTransactionManager::begin_transaction_sql` (EXECUTED: a second
+/// connection's write fails with `database is locked` inside them and succeeds inside a deferred `transaction`),
+/// `SqliteConnection::serialize_database_to_buffer` (8,192 bytes of the database image) and `deserialize_readonly_database_
+/// from_buffer` (EXECUTED: the table of the buffer's database exists afterwards, the connection's own table does not), and
+/// `TransactionBuilder::run` (EXECUTED on PostgreSQL: `current_setting('transaction_read_only')` is `on` inside it), and the
+/// sibling `Connection::transaction` (below). The
+/// scan attributes `conn.build_transaction().read_only().run(..)` to the ROOT type, so the same rule keys on
+/// `PgConnection::run`, which has no such method of its own.
+fn diesel_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("diesel::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "sqlite" | "sqlite::connection" | "pg" | "pg::connection" | "connection", "SqliteConnection" | "PgConnection" | "SimpleConnection", "batch_execute") => Some("Db"),
+        (
+            "" | "sqlite" | "sqlite::connection",
+            "SqliteConnection",
+            "immediate_transaction" | "exclusive_transaction" | "serialize_database_to_buffer" | "deserialize_readonly_database_from_buffer",
+        ) => Some("Db"),
+        ("" | "connection" | "connection::transaction_manager", "AnsiTransactionManager", "begin_transaction_sql") => Some("Db"),
+        // `Connection::transaction`, a sibling the generator never listed (a provided trait method): EXECUTED on PostgreSQL, the
+        // closure ran inside an explicit transaction (`clock_timestamp() - now()` > 80 ms after a 100 ms sleep) and in the
+        // autocommit control it did not. SQLite takes the same `AnsiTransactionManager` path (READ).
+        ("" | "sqlite" | "sqlite::connection" | "pg" | "pg::connection" | "connection", "SqliteConnection" | "PgConnection" | "Connection", "transaction") => {
+            Some("Db")
+        }
+        ("" | "pg" | "pg::transaction", "TransactionBuilder", "run") => Some("Db"),
+        ("" | "pg" | "pg::connection", "PgConnection", "run") => Some("Db"),
         _ => None,
     }
 }
@@ -6528,7 +6813,9 @@ mod tests {
         // the PURE builder surface stays None (no URL, no dispatch).
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::header"), None);
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::json"), None);
-        assert_eq!(classify("reqwest", "reqwest::ClientBuilder::build"), None);
+        // R1528 (b10): `build` dispatches nothing (still not `Net`), but it reads the proxy variables on every call (EXECUTED:
+        // `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase), so it is `Env`, not "pure".
+        assert_eq!(classify("reqwest", "reqwest::ClientBuilder::build"), Some("Env"));
         // RAW POSIX SOCKETS — the lowest network tier, pinned as a regression guard (four-way close:
         // swift got a raw-socket regression this week from a bare-identifier collision; rust never had
         // the gap because it classifies path-QUALIFIED via the syscall-leaf table, but pin it so the
@@ -7577,6 +7864,109 @@ mod masks_locator_tests {
         assert_eq!(classify("rustls", "rustls::NoKeyLog::log"), None);
     }
 
+    /// SOUNDNESS R1528 (b10) — tempfile 3.27.0, tungstenite 0.30.0, crossterm 0.29.0, reqwest 0.13.5, mysql 28.0.3 and diesel
+    /// 2.3.14: every rule against a same-type pure neighbour, in the spelling the scan produces (a chain hop is attributed to
+    /// the root type) and in the declaring-module spelling.
+    #[test]
+    fn r1528_b10_rows_classify_with_pure_neighbours() {
+        // tempfile
+        for p in ["tempfile::SpooledTempFile::into_file", "tempfile::spooled::SpooledTempFile::roll"] {
+            assert_eq!(classify("tempfile", p), Some("Fs"), "{p}");
+        }
+        assert_eq!(classify("tempfile", "tempfile::env::temp_dir"), Some("Env"));
+        assert_eq!(classify("tempfile", "tempfile::temp_dir"), Some("Env"));
+        for p in ["tempfile::SpooledTempFile::new", "tempfile::SpooledTempFile::flush", "tempfile::TempDir::path",
+                  "tempfile::env::override_temp_dir", "tempfile::TempPath::from_path", "tempfile::TempPath::try_from_path"] {
+            assert_eq!(classify("tempfile", p), None, "{p}");
+        }
+        // tungstenite: the pass-through `Request` impl must stay pure (a `::into_client_request` suffix would charge it)
+        assert_eq!(classify("tungstenite", "tungstenite::handshake::client::generate_key"), Some("Rand"));
+        for p in ["tungstenite::http::Uri::into_client_request", "tungstenite::client::ClientRequestBuilder::into_client_request"] {
+            assert_eq!(classify("tungstenite", p), Some("Rand"), "{p}");
+        }
+        assert_eq!(classify("tungstenite", "tungstenite::http::Request::into_client_request"), None);
+        assert_eq!(classify("tungstenite", "tungstenite::client::ClientRequestBuilder::new"), None);
+        assert_eq!(classify("tungstenite", "tungstenite::client::ClientRequestBuilder::with_header"), None);
+        for p in ["tungstenite::stream::MaybeTlsStream::set_nodelay", "tungstenite::stream::NoDelay::set_nodelay",
+                  "tungstenite::WebSocket::write_pending", "tungstenite::protocol::WebSocket::write_pending"] {
+            assert_eq!(classify("tungstenite", p), Some("Net"), "{p}");
+        }
+        assert_eq!(classify("tungstenite", "tungstenite::Message::text"), None);
+        // crossterm
+        for p in ["crossterm::style::Colored::ansi_color_disabled", "crossterm::style::Colored::ansi_color_disabled_memoized",
+                  "crossterm::Colored::set_ansi_color_disabled", "crossterm::style::force_color_output",
+                  "crossterm::style::available_color_count"] {
+            assert_eq!(classify("crossterm", p), Some("Env"), "{p}");
+        }
+        for p in ["crossterm::cursor::position", "crossterm::cursor::sys::unix::position", "crossterm::event::EventStream::new",
+                  "crossterm::event::EventStream::next"] {
+            assert_eq!(classify("crossterm", p), Some("Ipc"), "{p}");
+        }
+        // the conditional rows and the pure neighbours stay unclaimed
+        for p in ["crossterm::style::Print::write_ansi", "crossterm::terminal::SetTitle::write_ansi",
+                  "crossterm::terminal::SetTitle::execute_winapi", "crossterm::ansi_support::supports_ansi",
+                  "crossterm::style::Colored::ForegroundColor", "crossterm::style::Print", "crossterm::style::Color::Red"] {
+            assert_eq!(classify("crossterm", p), None, "{p}");
+        }
+        // reqwest
+        for p in ["reqwest::ClientBuilder::build", "reqwest::blocking::ClientBuilder::build", "reqwest::Client::build",
+                  "reqwest::blocking::Client::build", "reqwest::Client::new", "reqwest::NoProxy::from_env"] {
+            assert_eq!(classify("reqwest", p), Some("Env"), "{p}");
+        }
+        for p in ["reqwest::multipart::Form::file", "reqwest::blocking::multipart::Form::file"] {
+            assert_eq!(classify("reqwest", p), Some("Fs"), "{p}");
+        }
+        assert_eq!(classify("reqwest", "reqwest::blocking::Response::copy_to"), Some("Net"));
+        for p in ["reqwest::ClientBuilder::new", "reqwest::Client::builder", "reqwest::multipart::Form::new",
+                  "reqwest::multipart::Form::text", "reqwest::NoProxy::from_string",
+                  "reqwest::async_impl::h3_client::pool::PoolClient::send_request"] {
+            assert_eq!(classify("reqwest", p), None, "{p}");
+        }
+        // mysql
+        for p in ["mysql::Conn::reset", "mysql::Conn::change_user", "mysql::PooledConn::change_user", "mysql::Pool::new",
+                  "mysql::Pool::try_get_conn", "mysql::Pool::start_transaction", "mysql::PooledConn::get_binlog_stream",
+                  "mysql::Conn::start_transaction", "mysql::PooledConn::start_transaction", "mysql::Conn::get_binlog_stream",
+                  "mysql::conn::pool::Pool::new"] {
+            assert_eq!(classify("mysql", p), Some("Db"), "{p}");
+        }
+        for p in ["mysql::PooledConn::unwrap", "mysql::Pool::opts", "mysql::PoolConstraints::new", "mysql::Opts::from_url",
+                  "mysql::TxOpts::default", "mysql::BinlogRequest::new"] {
+            assert_eq!(classify("mysql", p), None, "{p}");
+        }
+        // diesel
+        for p in ["diesel::sqlite::SqliteConnection::batch_execute", "diesel::SqliteConnection::immediate_transaction",
+                  "diesel::sqlite::SqliteConnection::exclusive_transaction", "diesel::connection::AnsiTransactionManager::begin_transaction_sql",
+                  "diesel::sqlite::SqliteConnection::serialize_database_to_buffer",
+                  "diesel::sqlite::SqliteConnection::deserialize_readonly_database_from_buffer", "diesel::pg::TransactionBuilder::run",
+                  "diesel::pg::PgConnection::run", "diesel::pg::PgConnection::transaction", "diesel::sqlite::SqliteConnection::transaction"] {
+            assert_eq!(classify("diesel", p), Some("Db"), "{p}");
+        }
+        for p in ["diesel::pg::PgConnection::build_transaction", "diesel::connection::AnsiTransactionManager::new",
+                  "diesel::sqlite::SqliteConnection::set_instrumentation"] {
+            assert_eq!(classify("diesel", p), None, "{p}");
+        }
+    }
+
+    /// SOUNDNESS R1597 — lettre `send`/`send_raw` charge the TRANSPORT's effect. SMTP and the generic trait path stay `Net`.
+    #[test]
+    fn r1597_lettre_send_charges_the_transports_own_effect() {
+        for p in ["lettre::FileTransport::send", "lettre::FileTransport::send_raw", "lettre::AsyncFileTransport::send",
+                  "lettre::AsyncFileTransport::send_raw", "lettre::transport::file::FileTransport::send",
+                  "lettre::transport::file::AsyncFileTransport::send"] {
+            assert_eq!(classify("lettre", p), Some("Fs"), "{p}");
+        }
+        for p in ["lettre::SendmailTransport::send", "lettre::AsyncSendmailTransport::send",
+                  "lettre::transport::sendmail::SendmailTransport::send_raw"] {
+            assert_eq!(classify("lettre", p), Some("Exec"), "{p}");
+        }
+        for p in ["lettre::SmtpTransport::send", "lettre::AsyncSmtpTransport::send", "lettre::transport::smtp::SmtpTransport::send_raw",
+                  "lettre::Transport::send", "lettre::AsyncTransport::send", "lettre::transport::stub::StubTransport::send"] {
+            assert_eq!(classify("lettre", p), Some("Net"), "{p}");
+        }
+        // the sibling the file transport already had: `read` is `Fs` (unchanged)
+        assert_eq!(classify("lettre", "lettre::FileTransport::read"), Some("Fs"));
+    }
+
     /// SOUNDNESS R1528 — rules for rows EXECUTED/verified true, each with a same-crate pure neighbour.
     #[test]
     fn r1528_verified_rows_classify() {
@@ -7586,8 +7976,13 @@ mod masks_locator_tests {
             assert_eq!(classify("tempfile", &format!("tempfile::TempDir::{v}")), Some("Fs"), "{v}");
         }
         assert_eq!(classify("tempfile", "tempfile::TempDir::into_path"), None, "flag flip only (R1528 FALSE)");
+        // R1528 (b10): `TempDir::keep` is the same flag flip, EXECUTED 0 events; it was charged `Fs` by the `::keep` suffix rule.
+        assert_eq!(classify("tempfile", "tempfile::TempDir::keep"), None, "flag flip only, carved out of ::keep");
+        assert_eq!(classify("tempfile", "tempfile::NamedTempFile::keep"), Some("Fs"), "NamedTempFile::keep is not carved out");
+        assert_eq!(classify("tempfile", "tempfile::TempPath::keep"), Some("Fs"), "TempPath::keep is not carved out");
         assert_eq!(classify("tempfile", "tempfile::NamedTempFile::path"), None);
-        assert_eq!(classify("tempfile", "tempfile::SpooledTempFile::into_file"), None, "different body, not claimed");
+        // R1528 (b10): `SpooledTempFile::into_file` creates a temp file for an in-memory buffer (EXECUTED), so it IS claimed now.
+        assert_eq!(classify("tempfile", "tempfile::SpooledTempFile::into_file"), Some("Fs"));
         // chrono: the deprecated `today` is `now().date()`; no other `today` is claimed.
         assert_eq!(classify("chrono", "chrono::Utc::today"), Some("Clock"));
         assert_eq!(classify("chrono", "chrono::Local::today"), Some("Clock"));
@@ -8057,7 +8452,9 @@ mod masks_locator_tests {
         ] {
             assert_eq!(classify("mysql_async", &format!("mysql_async::{p}")), None, "{p}");
         }
-        assert_eq!(classify("mysql", "mysql::Conn::reset"), None);
+        // R1528 (b10): this asserted `None` as a name-collision control; EXECUTED against MySQL 8, `Conn::reset` sends
+        // COM_RESET_CONNECTION (5 bytes up / 11 down), so the mysql one is `Db`. The mongodb one below is not claimed.
+        assert_eq!(classify("mysql", "mysql::Conn::reset"), Some("Db"));
         assert_eq!(classify("mongodb", "mongodb::Conn::reset"), None);
     }
 
