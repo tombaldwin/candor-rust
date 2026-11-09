@@ -577,6 +577,20 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::close_by_ref", "R1571:silent"),
     ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::ping", "R1571:silent"),
     ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::transaction", "R1571:silent"),
+    // async-nats 0.50.0, R1576 (SOUNDNESS R1528, async_nats lane): `jetstream::{new, with_domain, with_prefix}` and
+    // `ContextBuilder::build` share one body that opens NO connection (EXECUTED against a nats-server: zero messages,
+    // zero bytes, zero subscriptions) and ends in `spawn_acker`, whose task logs `debug!("Acker task exited")` when the
+    // `Context` is dropped (EXECUTED with a tracing layer). So the rows' own effect is a `Log` and a rule would be
+    // true. It is not added: the engine does not type `let js = jetstream::new(c)` (a dependency's free fn has no
+    // `ReturnIndex` entry), so every `js.<verb>()` after it (`query_account`, `get_stream`, `get_key_value`...) reaches
+    // no classify path and its `Net` is unreported. MEASURED both arms on `let js = jetstream::new(c);
+    // js.query_account().await`: no rule, `invisible:[async_nats]` (lock) / absent (lockless); with a `Log` rule,
+    // `['Log']` alone and the `invisible` disclosure GONE, `deny Net` exit 0 either way. A rule would delete the one
+    // accidental disclosure of a `Net` it cannot supply. The annotated spelling `let js: Context = ...` does classify.
+    ("async_nats", "async_nats::jetstream::new", "R1576:silent"),
+    ("async_nats", "async_nats::jetstream::with_domain", "R1576:silent"),
+    ("async_nats", "async_nats::jetstream::with_prefix", "R1576:silent"),
+    ("async_nats", "async_nats::jetstream::context::ContextBuilder::build", "R1576:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -1420,6 +1434,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         if path == "async_nats::ServerAddr::socket_addrs" {
             return Some("Net");
+        }
+        // SOUNDNESS R1528 — async-nats 0.50.0, the 105 grandfathered rows (above the 0.35.1 ceiling: a Cargo.lock
+        // consumer got `invisible:[async_nats]`, a lockless one nothing). Every body was READ and EXECUTED against a
+        // real nats-server with JetStream (docker `nats:latest -js`, monitoring port `/varz` read around each call;
+        // handoff `rust-r1528/nats/`). See `async_nats_r1528`.
+        if let Some(effect) = async_nats_r1528(path) {
+            return Some(effect);
         }
         return None;
     }
@@ -4032,6 +4053,131 @@ fn type_method<'a>(path: &'a str, krate: &str, mods: &[&str]) -> Option<(&'a str
     let (head, method) = rest.rsplit_once("::")?;
     let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
     mods.contains(&module).then_some((ty, method))
+}
+
+/// SOUNDNESS R1528 — the async-nats 0.50.0 broker surface the verb list in `classify` cannot see by name
+/// (`get_stream`, `put`, `info`, `keys`, `messages`, `add`, `double_ack`...). The `async_nats` arm already charges
+/// every `::publish*`/`::request*`/`::subscribe`/`::flush`/`::connect` suffix; these are the verbs that list misses.
+///
+/// Matching is on the RECEIVER TYPE NAME plus the method, because the method names are generic (`get`, `put`,
+/// `info`, `list`, `delete`) and a bare suffix would fabricate. The module is taken from the consumer's own spelling
+/// (`async_nats::jetstream::Context`, `...::kv::Store`, `...::consumer::PullConsumer`; TRACED: the scan hands
+/// `classify` exactly the path the consumer wrote, including the `PullConsumer` alias and the receiver type a
+/// builder CHAIN inherits, so `stream.direct_get_builder().sequence(1).send()` arrives as `Stream::send` and
+/// `consumer.fetch().max_messages(2).messages()` as `PullConsumer::messages`).
+///
+/// EXECUTED against nats-server with JetStream, one fixture function per row, the server's received messages /
+/// bytes / subscription count read before and after (`/varz`): every entry below moved at least one of the three
+/// (`Net`), and the pure constructors did not move any (`jetstream::{new,with_domain,with_prefix}`,
+/// `ContextBuilder::build`, `Client::new_inbox`, `datetime::now`). The cases worth stating:
+///   * `Context::get_stream_no_info` does NOT touch the broker (EXECUTED: zero messages, zero bytes, zero
+///     subscriptions; it builds an empty `Stream` handle) and is NOT claimed.
+///   * `Store::status`, `Service::{info,stats,reset}`, `Context::wait_for_acks` and the builder constructors
+///     (`Consumer::{stream,fetch,batch}`, `Stream::{info_builder,direct_get_builder,raw_message_builder}`,
+///     `Service::{group,endpoint_builder}`) read cached/local state and are NOT claimed.
+///   * `Consumer::messages` (pull, push, ordered), `Service::endpoint`, `Group::endpoint`, `EndpointBuilder::add`,
+///     `ServiceBuilder::start` and `ServiceExt::add_service` are a `SUB` to the broker (EXECUTED: the server's
+///     subscription count rose by one or more while the handle was held), not a message; `Net` is the existing
+///     family's answer for `::subscribe` and these are that call one hop down.
+///   * `jetstream::new`, `with_domain`, `with_prefix` and `ContextBuilder::build` (they share one body) open no
+///     connection and are DELIBERATELY NOT RULES (R1576). Their own effect is a `Log` when the `Context` is dropped
+///     (EXECUTED with a tracing layer: `spawn_acker`'s `debug!("Acker task exited")`), but the engine does not type
+///     `let js = jetstream::new(c)` (a dependency's free fn has no entry in the `ReturnIndex`), so every
+///     `js.<verb>()` after it reaches no classify path. MEASURED both arms: with a `Log` rule the function
+///     `let js = jetstream::new(c); js.query_account().await` goes from `invisible:[async_nats]` to `['Log']` alone,
+///     so the rule would delete the only disclosure of a `Net` it cannot see.
+///   * `Client::new_inbox` is a `nuid::next()` draw (EXECUTED: two calls never agree) and `datetime::now` is
+///     `OffsetDateTime::now_utc()` (EXECUTED: it advances).
+///
+/// One effect is all `classify` can carry: these calls also draw an inbox nonce (`Rand`) and most emit two to four
+/// `debug!` events (`Log`, EXECUTED through a span-scoped tracing layer); neither is charged (R1575).
+fn async_nats_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("async_nats::")?;
+    if rest == "datetime::now" {
+        return Some("Clock");
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    let js = |m: &str| module == "jetstream" || module == m;
+    let hit = match ty {
+        "Context" => {
+            js("jetstream::context")
+                && matches!(
+                    method,
+                    "query_account" | "create_stream" | "get_stream" | "get_or_create_stream" | "delete_stream"
+                        | "update_stream" | "create_or_update_stream" | "stream_by_subject" | "send_publish"
+                        | "send_request" | "get_key_value" | "create_key_value" | "update_key_value"
+                        | "create_or_update_key_value" | "delete_key_value" | "get_consumer_from_stream"
+                        | "delete_consumer_from_stream" | "create_consumer_on_stream" | "update_consumer_on_stream"
+                        | "create_consumer_strict_on_stream" | "create_object_store" | "get_object_store"
+                        | "delete_object_store"
+                )
+        }
+        // `send` / `fetch` are the DirectGetBuilder / RawMessageBuilder / StreamInfoBuilder terminals, which a
+        // builder chain (or a bound builder) reports under the `Stream` receiver it started from.
+        "Stream" | "DirectGetBuilder" | "RawMessageBuilder" | "StreamInfoBuilder" => {
+            js("jetstream::stream")
+                && matches!(
+                    method,
+                    "info" | "get_info" | "info_with_subjects" | "consumer_info" | "create_consumer"
+                        | "create_consumer_strict" | "update_consumer" | "get_consumer" | "get_or_create_consumer"
+                        | "delete_consumer" | "pause_consumer" | "resume_consumer" | "reset_consumer"
+                        | "delete_message" | "purge_subject" | "direct_get" | "direct_get_first_for_subject"
+                        | "direct_get_last_for_subject" | "direct_get_next_for_subject" | "get_raw_message"
+                        | "get_first_raw_message_by_subject" | "get_next_raw_message_by_subject"
+                        | "get_last_raw_message_by_subject" | "send" | "fetch"
+                )
+        }
+        "Store" => {
+            module == "jetstream::kv"
+                && matches!(
+                    method,
+                    "create" | "create_with_ttl" | "put" | "entry" | "entry_for_revision" | "get" | "update"
+                        | "delete" | "delete_expect_revision" | "purge" | "purge_with_ttl"
+                        | "purge_expect_revision" | "purge_expect_revision_with_ttl" | "history" | "keys"
+                        | "watch" | "watch_many" | "watch_from_revision" | "watch_with_history"
+                        | "watch_many_with_history" | "watch_all" | "watch_all_from_revision"
+                )
+        }
+        "ObjectStore" => {
+            module == "jetstream::object_store"
+                && matches!(
+                    method,
+                    "get" | "delete" | "info" | "put" | "watch" | "watch_with_history" | "list" | "seal"
+                        | "update_metadata" | "add_link" | "add_bucket_link"
+                )
+        }
+        // `Consumer<pull::Config>` and its aliases; `info`/`get_info`/`reset` ask the broker, `messages` subscribes
+        // (pull: inbox + a pull request, push: the deliver subject). `stream`/`fetch`/`batch` only build a request.
+        "Consumer" | "PullConsumer" | "PushConsumer" | "OrderedPullConsumer" | "OrderedPushConsumer" => {
+            matches!(module, "jetstream::consumer" | "jetstream::consumer::pull" | "jetstream::consumer::push")
+                && matches!(method, "info" | "get_info" | "reset" | "messages")
+        }
+        "StreamBuilder" | "FetchBuilder" | "BatchBuilder" => {
+            module == "jetstream::consumer::pull" && method == "messages"
+        }
+        "Message" | "Acker" => {
+            js("jetstream::message") && matches!(method, "ack" | "ack_with" | "double_ack" | "double_ack_with")
+        }
+        // `ServiceExt::add_service` and `ServiceBuilder::start` (a builder chain reports `Client::start`),
+        // `Service::endpoint`, `Group::endpoint`, `EndpointBuilder::add` (a chain reports `Service::add`).
+        "Client" if matches!(module, "" | "client" | "service") => {
+            return match method {
+                "add_service" | "start" | "send_request" => Some("Net"),
+                "new_inbox" => Some("Rand"),
+                _ => None,
+            };
+        }
+        "ServiceBuilder" => module == "service" && method == "start",
+        "Service" | "Group" | "EndpointBuilder" => {
+            module == "service" && matches!(method, "endpoint" | "add")
+        }
+        _ => false,
+    };
+    if !hit {
+        return None;
+    }
+    Some("Net")
 }
 
 pub const PG_DB_VERBS: &[&str] = &[
@@ -6754,6 +6900,113 @@ mod masks_locator_tests {
         // Another crate's same-named methods are not ureq's.
         assert_eq!(classify("mycrate", "mycrate::Agent::run"), None);
         assert_eq!(classify("reqwest", "reqwest::Config::builder"), None);
+    }
+
+    /// SOUNDNESS R1528 — the async-nats 0.50.0 rows that carry a rule: each EXECUTED against a nats-server with
+    /// JetStream (server message / byte / subscription counters around one call), under the spellings a consumer
+    /// writes (the declaring module, the `jetstream` re-export, the `PullConsumer` alias, and the receiver a builder
+    /// chain inherits).
+    #[test]
+    fn r1528_async_nats_rows_classify() {
+        for (p, eff) in [
+            ("jetstream::Context::create_stream", "Net"), ("jetstream::context::Context::get_stream", "Net"),
+            ("jetstream::Context::get_or_create_stream", "Net"), ("jetstream::Context::delete_stream", "Net"),
+            ("jetstream::Context::update_stream", "Net"), ("jetstream::Context::create_or_update_stream", "Net"),
+            ("jetstream::Context::query_account", "Net"), ("jetstream::Context::send_publish", "Net"),
+            ("jetstream::Context::send_request", "Net"), ("jetstream::Context::stream_by_subject", "Net"),
+            ("jetstream::Context::create_key_value", "Net"), ("jetstream::Context::get_key_value", "Net"),
+            ("jetstream::Context::update_key_value", "Net"), ("jetstream::Context::delete_key_value", "Net"),
+            ("jetstream::Context::create_or_update_key_value", "Net"),
+            ("jetstream::Context::create_object_store", "Net"), ("jetstream::Context::get_object_store", "Net"),
+            ("jetstream::Context::delete_object_store", "Net"),
+            ("jetstream::Context::create_consumer_on_stream", "Net"),
+            ("jetstream::Context::create_consumer_strict_on_stream", "Net"),
+            ("jetstream::Context::update_consumer_on_stream", "Net"),
+            ("jetstream::Context::get_consumer_from_stream", "Net"),
+            ("jetstream::Context::delete_consumer_from_stream", "Net"),
+            ("jetstream::stream::Stream::info", "Net"), ("jetstream::stream::Stream::get_info", "Net"),
+            ("jetstream::stream::Stream::info_with_subjects", "Net"),
+            ("jetstream::stream::Stream::consumer_info", "Net"), ("jetstream::stream::Stream::create_consumer", "Net"),
+            ("jetstream::stream::Stream::create_consumer_strict", "Net"),
+            ("jetstream::stream::Stream::update_consumer", "Net"), ("jetstream::stream::Stream::get_consumer", "Net"),
+            ("jetstream::stream::Stream::get_or_create_consumer", "Net"),
+            ("jetstream::stream::Stream::delete_consumer", "Net"), ("jetstream::stream::Stream::pause_consumer", "Net"),
+            ("jetstream::stream::Stream::resume_consumer", "Net"), ("jetstream::stream::Stream::reset_consumer", "Net"),
+            ("jetstream::stream::Stream::delete_message", "Net"), ("jetstream::stream::Stream::purge_subject", "Net"),
+            ("jetstream::stream::Stream::direct_get", "Net"),
+            ("jetstream::stream::Stream::direct_get_first_for_subject", "Net"),
+            ("jetstream::stream::Stream::direct_get_last_for_subject", "Net"),
+            ("jetstream::stream::Stream::direct_get_next_for_subject", "Net"),
+            ("jetstream::stream::Stream::get_raw_message", "Net"),
+            ("jetstream::stream::Stream::get_first_raw_message_by_subject", "Net"),
+            ("jetstream::stream::Stream::get_next_raw_message_by_subject", "Net"),
+            ("jetstream::stream::Stream::get_last_raw_message_by_subject", "Net"),
+            ("jetstream::stream::Stream::send", "Net"), ("jetstream::stream::Stream::fetch", "Net"),
+            ("jetstream::stream::DirectGetBuilder::send", "Net"), ("jetstream::stream::RawMessageBuilder::send", "Net"),
+            ("jetstream::stream::StreamInfoBuilder::fetch", "Net"),
+            ("jetstream::kv::Store::create", "Net"), ("jetstream::kv::Store::create_with_ttl", "Net"),
+            ("jetstream::kv::Store::put", "Net"), ("jetstream::kv::Store::get", "Net"),
+            ("jetstream::kv::Store::entry", "Net"), ("jetstream::kv::Store::entry_for_revision", "Net"),
+            ("jetstream::kv::Store::update", "Net"), ("jetstream::kv::Store::delete", "Net"),
+            ("jetstream::kv::Store::delete_expect_revision", "Net"), ("jetstream::kv::Store::purge", "Net"),
+            ("jetstream::kv::Store::purge_with_ttl", "Net"), ("jetstream::kv::Store::purge_expect_revision", "Net"),
+            ("jetstream::kv::Store::purge_expect_revision_with_ttl", "Net"),
+            ("jetstream::kv::Store::history", "Net"), ("jetstream::kv::Store::keys", "Net"),
+            ("jetstream::kv::Store::watch", "Net"), ("jetstream::kv::Store::watch_many", "Net"),
+            ("jetstream::kv::Store::watch_from_revision", "Net"), ("jetstream::kv::Store::watch_with_history", "Net"),
+            ("jetstream::kv::Store::watch_many_with_history", "Net"), ("jetstream::kv::Store::watch_all", "Net"),
+            ("jetstream::kv::Store::watch_all_from_revision", "Net"),
+            ("jetstream::object_store::ObjectStore::get", "Net"), ("jetstream::object_store::ObjectStore::put", "Net"),
+            ("jetstream::object_store::ObjectStore::info", "Net"), ("jetstream::object_store::ObjectStore::list", "Net"),
+            ("jetstream::object_store::ObjectStore::watch", "Net"),
+            ("jetstream::object_store::ObjectStore::watch_with_history", "Net"),
+            ("jetstream::object_store::ObjectStore::delete", "Net"), ("jetstream::object_store::ObjectStore::seal", "Net"),
+            ("jetstream::object_store::ObjectStore::update_metadata", "Net"),
+            ("jetstream::object_store::ObjectStore::add_link", "Net"),
+            ("jetstream::object_store::ObjectStore::add_bucket_link", "Net"),
+            ("jetstream::consumer::Consumer::info", "Net"), ("jetstream::consumer::Consumer::get_info", "Net"),
+            ("jetstream::consumer::Consumer::reset", "Net"), ("jetstream::consumer::PullConsumer::messages", "Net"),
+            ("jetstream::consumer::PushConsumer::messages", "Net"),
+            ("jetstream::consumer::OrderedPullConsumer::messages", "Net"),
+            ("jetstream::consumer::OrderedPushConsumer::messages", "Net"),
+            ("jetstream::consumer::pull::Consumer::messages", "Net"),
+            ("jetstream::consumer::push::Consumer::messages", "Net"),
+            ("jetstream::consumer::pull::StreamBuilder::messages", "Net"),
+            ("jetstream::consumer::pull::FetchBuilder::messages", "Net"),
+            ("jetstream::consumer::pull::BatchBuilder::messages", "Net"),
+            ("jetstream::Message::double_ack", "Net"), ("jetstream::message::Message::double_ack_with", "Net"),
+            ("jetstream::message::Acker::double_ack", "Net"), ("jetstream::message::Acker::double_ack_with", "Net"),
+            ("jetstream::Message::ack", "Net"), ("jetstream::Message::ack_with", "Net"),
+            ("jetstream::message::Acker::ack", "Net"), ("jetstream::message::Acker::ack_with", "Net"),
+            ("Client::add_service", "Net"), ("service::Client::add_service", "Net"), ("Client::start", "Net"),
+            ("Client::send_request", "Net"), ("client::Client::send_request", "Net"),
+            ("service::ServiceBuilder::start", "Net"), ("service::Service::endpoint", "Net"),
+            ("service::Group::endpoint", "Net"), ("service::EndpointBuilder::add", "Net"),
+            ("service::Service::add", "Net"),
+            ("Client::new_inbox", "Rand"), ("client::Client::new_inbox", "Rand"), ("datetime::now", "Clock"),
+        ] {
+            assert_eq!(classify("async_nats", &format!("async_nats::{p}")), Some(eff), "{p}");
+        }
+        // NOT claimed. The four R1576 rows (a `Log` rule would delete their only disclosure, see
+        // OPEN_ENTRY_VERDICTS); calls EXECUTED to touch no broker (`get_stream_no_info` builds an empty handle);
+        // cached/local reads and builder constructors; the wrong module for a type of the same name.
+        for p in ["jetstream::new", "jetstream::with_domain", "jetstream::with_prefix",
+                  "jetstream::context::ContextBuilder::build", "jetstream::ContextBuilder::new",
+                  "jetstream::Context::get_stream_no_info", "jetstream::Context::wait_for_acks",
+                  "jetstream::Context::set_timeout", "jetstream::kv::Store::status",
+                  "jetstream::stream::Stream::cached_info", "jetstream::stream::Stream::info_builder",
+                  "jetstream::stream::Stream::direct_get_builder", "jetstream::stream::Stream::raw_message_builder",
+                  "jetstream::consumer::PullConsumer::stream", "jetstream::consumer::PullConsumer::fetch",
+                  "jetstream::consumer::PullConsumer::batch", "jetstream::consumer::Consumer::cached_info",
+                  "service::Service::info", "service::Service::stats", "service::Service::reset",
+                  "service::Service::group", "service::Service::endpoint_builder", "Client::timeout",
+                  "Client::max_payload", "jetstream::consumer::pull::Stream::info", "other::Stream::info",
+                  "jetstream::object_store::Object::info", "jetstream::stream::Stream::name"] {
+            assert_eq!(classify("async_nats", &format!("async_nats::{p}")), None, "{p}");
+        }
+        // Another crate's same-named methods are not async-nats's.
+        assert_eq!(classify("mycrate", "mycrate::jetstream::Context::create_stream"), None);
+        assert_eq!(classify("redis", "redis::kv::Store::put"), None);
     }
 
     /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with
