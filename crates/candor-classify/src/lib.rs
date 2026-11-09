@@ -277,8 +277,13 @@ pub fn calibration_exceeded(crate_name: &str, resolved: &str) -> bool {
             return a > b;
         }
     }
-    // Equal numerically: a pre-release/build suffix means it is not the reviewed artifact.
-    resolved != *ceiling
+    // Equal numerically (trailing zero components are padding: `0.39` == `0.39.0`). A pre-release/build
+    // suffix means it is not the reviewed artifact, so the SUFFIXES must agree — comparing the whole strings
+    // read the two-component ceiling `("rusqlite", "0.39")` as exceeded by the very release it was reviewed
+    // against (`0.39.0`) and withheld the exemption (SOUNDNESS R1528; pinned by a test until the reachable
+    // rusqlite rows had rules).
+    let suffix = |v: &str| -> String { v.find(['+', '-']).map(|i| v[i..].to_string()).unwrap_or_default() };
+    suffix(resolved) != suffix(ceiling)
 }
 
 

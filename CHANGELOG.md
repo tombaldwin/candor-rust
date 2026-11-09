@@ -20,7 +20,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `Db`; the two that take SQL text join the verb table the masking guard reads. Executed against a consumer fixture (file
   database, WAL files, an extension that writes a marker): `deny Db <fn>` goes 0 to 1 on all 18 and on UFCS spellings, pure
   neighbours stay 0. The 18 rows leave `open.tsv` and `grandfathered.tsv` (ceiling 712 to 694). The `0.39` vs `0.39.0`
-  comparator is unchanged; its tripwire test now asserts no rusqlite row is open.
+  comparator is unchanged here; see the next entry.
+- **The calibration ceiling comparator reads trailing zero components as padding** (SOUNDNESS R1528). A two-component ceiling
+  (`("rusqlite", "0.39")`) read the release it was reviewed against (`0.39.0`) as beyond review, so the exemption was withheld
+  and every unmatched rusqlite call carried `invisible:[rusqlite]`. Numerically equal versions now compare on their
+  pre-release/build suffix only. The only registry version whose answer changes is rusqlite 0.39.0, and `open.tsv` holds no
+  rusqlite row, so no consumer is newly told nothing about an unruled call. The tripwire test now pins the corrected answers.
 
 - ⚠ **A method call on a std-typed receiver reaches the trait impl this crate, or a chained dependency, writes for that std
   type** (SOUNDNESS R1540, a cardinal sin closed by resolution). With `impl MyLoad for AtomicUsize { fn my_load(&self) {

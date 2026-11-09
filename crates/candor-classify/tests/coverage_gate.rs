@@ -254,40 +254,42 @@ fn the_verdict_check_fails_on_a_seeded_unverdicted_row() {
     assert!(named.iter().any(|p| p.contains("not in open.tsv")), "a stale verdict must be refused: {named:?}");
 }
 
-/// SOUNDNESS R1528 — THE `"0.39"` vs `"0.39.0"` QUIRK IS KNOWN, AND FIXING IT IS A DISCLOSURE REMOVAL.
+/// SOUNDNESS R1528 — THE `"0.39"` vs `"0.39.0"` COMPARATOR, FIXED NOW THAT THE ROWS HAVE RULES.
 ///
-/// `calibration_exceeded` falls through to `resolved != ceiling` when the numeric parts tie, so the
-/// two-component ceiling `("rusqlite", "0.39")` reads the very release it was reviewed against
-/// (`0.39.0`) as BEYOND review. In the engine that is the over-disclosure direction: an unmatched
-/// rusqlite call rejoins the coverage ledger and the consumer carries `invisible: [rusqlite]`.
-///
-/// The obvious one-line fix (compare the suffixes, so `0.39` == `0.39.0`) re-grants the calibration
-/// exemption to rusqlite 0.39.0 — and `eval/coverage-gate/open.tsv` holds 18 consumer-reachable
-/// rusqlite rows with no rule (`Connection::query_row_and_then`, `Statement::exists`,
-/// `Wal::checkpoint`, `Connection::prepare_with_flags`, …), several of which plainly step a
-/// statement. Every one of them would go from "disclosed, invisible" to "told nothing": the R1528
-/// silence, made larger by a correctness fix. So the fix waits on verdicts for those rows (rules
-/// first, then the comparator), and this test is the tripwire that makes whoever lands the
-/// comparator fix read why. When the rusqlite rows are resolved, invert the assertion.
+/// `calibration_exceeded` used to fall through to `resolved != ceiling` when the numeric parts tie, so the
+/// two-component ceiling `("rusqlite", "0.39")` read the very release it was reviewed against (`0.39.0`) as
+/// BEYOND review: an unmatched rusqlite call rejoined the coverage ledger and the consumer carried
+/// `invisible: [rusqlite]`. That over-disclosure was the only thing disclosing the 18 reachable rusqlite rows
+/// that had no rule; fixing it first would have re-granted the exemption over them (a consumer calling
+/// `query_row_and_then` dropped out of `functions[]`). The rows now classify `Db`, `open.tsv` holds none, and
+/// trailing zero components are padding. A pre-release/build suffix still means "not the reviewed artifact".
+/// This pins the corrected answers (it FAILS on the old comparator: `0.39.0` read as exceeded) and the
+/// precondition that made the fix safe.
 #[test]
-fn two_component_ceiling_quirk_is_pinned_until_rusqlite_rows_have_verdicts() {
-    assert!(
-        candor_classify::calibration_exceeded("rusqlite", "0.39.0"),
-        "the 0.39 vs 0.39.0 comparator was changed: that re-grants the calibration exemption to \
-         rusqlite 0.39.0 while open.tsv still lists unresolved, consumer-reachable rusqlite rows — \
-         a disclosure REMOVAL (SOUNDNESS R1528). Resolve those rows first, then invert this test."
-    );
+fn ceiling_comparator_treats_trailing_zeros_as_padding_and_open_rusqlite_stays_empty() {
+    use candor_classify::calibration_exceeded as ex;
+    // The defect itself: the reviewed release, spelled with the padding cargo always writes.
+    assert!(!ex("rusqlite", "0.39.0"), "0.39.0 is the release the two-component ceiling 0.39 was reviewed against");
+    assert!(!ex("rusqlite", "0.39"));
+    // Everything that really is beyond review still is.
+    assert!(ex("rusqlite", "0.39.1"));
+    assert!(ex("rusqlite", "0.40.0"));
+    assert!(ex("rusqlite", "0.39.0-rc.1"), "a pre-release is not the reviewed artifact");
+    assert!(ex("rusqlite", "0.39.0+build.7"));
+    assert!(!ex("rusqlite", "0.38.9"));
+    // Three-component ceilings answer as before, including a ceiling that is itself a pre-release.
+    assert!(!ex("tempfile", "3.27.0") && ex("tempfile", "3.27.1") && ex("tempfile", "3.28.0"));
+    assert!(!ex("elasticsearch", "8.19.0-alpha.1"));
+    assert!(ex("elasticsearch", "8.19.0"), "the release is not the alpha that was reviewed");
+    assert!(ex("elasticsearch", "8.19.0-alpha.2"));
+    assert!(!ex("not_a_calibrated_crate", "9.9.9"));
+    // The precondition: the exemption is only safe over a crate whose reachable rows all have a rule or a
+    // verdict. A rusqlite row that regrows into `open.tsv` must be resolved BEFORE it reaches a consumer.
     let open = include_str!("../../../eval/coverage-gate/open.tsv");
-    // R1528 (rusqlite lane): the 18 reachable rusqlite rows now carry classify rules, so `open.tsv` holds NONE
-    // and the PRECONDITION for fixing the comparator is met. The comparator is deliberately NOT changed in
-    // this commit (a separate decision); this assertion now guards the other direction — a rusqlite row that
-    // regrows into `open.tsv` while the quirk stands is a disclosure removal waiting for the comparator fix.
-    // When the comparator is fixed (numeric tie + identical suffix = not exceeded), invert the assertion
-    // above and move this one to a plain "no unresolved rusqlite row" check.
     let rusqlite_open = open.lines().filter(|l| l.starts_with("rusqlite\t")).count();
     assert_eq!(
         rusqlite_open, 0,
-        "a rusqlite row is back in open.tsv: the comparator precondition (every reachable rusqlite row has a \
-         rule or verdict) no longer holds — resolve it before the comparator is fixed (SOUNDNESS R1528)"
+        "a rusqlite row is back in open.tsv while rusqlite 0.39.0 holds the calibration exemption: the \
+         consumer is told nothing about it (SOUNDNESS R1528). Give it a rule or a verdict."
     );
 }
