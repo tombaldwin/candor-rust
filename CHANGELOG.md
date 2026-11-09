@@ -11,6 +11,28 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A trait default called on a concrete implementor is charged what it runs for that implementor** (SOUNDNESS R1420(a),
+  a resolution; unit identity, R1537, is unchanged and still open). With `trait Tr { fn act(&self); fn go(&self) {
+  self.act() } }`, `P.go()` was charged every implementor's `act`, because the default's `self.act()` is a dispatch over all
+  of them. When the receiver is typed as a type this crate declares, with one block for the trait and no same-leaf twin,
+  the call now reaches an instance of the default for that type, which runs only that type's members. chrono's
+  `Parsed::to_datetime` (through `FixedOffset.from_local_datetime(..)`) no longer reads `Local`'s Clock/Env/Fs. A std or
+  primitive implementor keeps the union (prost's macro-made `encoding::bool` module is read as the primitive), and so do
+  a twin, a default reached through `Self::m(..)`, and any default called on a `dyn` or generic receiver.
+  - **Effects narrow; `dispatchesOn` keys do not.** An instance keeps every key its default's union reached, so a
+    concretely typed caller publishes the same keys as before. A key that came only through a sibling implementor can
+    still be the one a chained consumer needs where the true path forms no edge (zerovec `ZeroMap2d::check_invariants`).
+  - **Known over-approximation.** Instances are not published. A narrowed caller's `calls` and its sidecar entry name the
+    default, so `candor-query callers`/`whatif` over a sibling implementor's member still list that caller. The caller's
+    own row, and `path`, read the narrowed answer.
+  - Measured over the 1,625-crate census against the previous engine (unchained): 30 rows change and 13 lose
+    something. 5 chrono rows lose Clock/Env/Fs and keep `Unknown`. 3 rows lose an `Unknown` that came only from the union,
+    and each body was read pure: image `SubImage::{view,sub_image}` and object `MachOFile::has_debug_symbols`.
+    typed-builder-macro `Mutator::parse` also loses a union-only `Unknown`; its body was read pure. sea-orm 2.0.2/2.0.3
+    `RestrictedConnection::{execute,query_one}` lose `Db`. They keep `Unknown`, whose reason sits on the real site:
+    `DatabaseConnection::execute_raw` has `dispatch:untyped receiver of execute` (SOUNDNESS R1539). So `deny Db` goes
+    1→0 there, and `deny Db Unknown` still holds. No row gains anything, and every removal was checked against the source
+    by an independent seeded checker. `CANDOR_CT3A_OFF=1` turns it off. Cache rev149.
 - **A call from inside a `#[path]`-redirected module's own-name file no longer reports `Unknown` for the other arms**
   (SOUNDNESS R1500). With `#[cfg_attr(windows, path = "winsock_c.rs")] mod c;`, rustix's `c.rs` defines `preadv` and
   calls its own `readwrite_pv64::preadv64` through `crate::backend::c`. The call resolved to `c.rs`, but because the
