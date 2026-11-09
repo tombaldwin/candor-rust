@@ -11,6 +11,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A consumer calling one of 18 public rusqlite 0.39 functions was told nothing** (SOUNDNESS R1528, a silent under-report
+  closed by resolution). `Connection::{query_row_and_then, prepare_with_flags, close, cache_flush, serialize, deserialize,
+  deserialize_bytes, deserialize_read_exact, load_extension, load_extension_enable, load_extension_disable}`,
+  `Statement::exists`, `LoadExtensionGuard::new`, `Wal::{checkpoint, checkpoint_v2}` and
+  `auto_extension::{register,cancel,reset}_auto_extension` each end in a `sqlite3_*` call the classifier already charges `Db`,
+  but a consumer never names that call, so `deny Db` exited 0 over code that really touches the database. Each now classifies
+  `Db`; the two that take SQL text join the verb table the masking guard reads. Executed against a consumer fixture (file
+  database, WAL files, an extension that writes a marker): `deny Db <fn>` goes 0 to 1 on all 18 and on UFCS spellings, pure
+  neighbours stay 0. The 18 rows leave `open.tsv` and `grandfathered.tsv` (ceiling 712 to 694). The `0.39` vs `0.39.0`
+  comparator is unchanged; its tripwire test now asserts no rusqlite row is open.
+
 - ⚠ **A method call on a std-typed receiver reaches the trait impl this crate, or a chained dependency, writes for that std
   type** (SOUNDNESS R1540, a cardinal sin closed by resolution). With `impl MyLoad for AtomicUsize { fn my_load(&self) {
   /* writes */ } }`, `let a = AtomicUsize::new(3); a.my_load()` (and an annotated `let`, a `&AtomicUsize` parameter) gave

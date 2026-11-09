@@ -1803,6 +1803,54 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                     }
                 }
             }
+            // SOUNDNESS R1528 — the 17 reachable `eval/coverage-gate/open.tsv` rusqlite rows that this
+            // block's `return None` left silent at every consumer (the 18th, `query_row_and_then`, is a
+            // `PG_DB_VERBS` member now: it takes SQL text at argument 0, so the masking guard must read it
+            // too). Each body READ in rusqlite-0.39.0 and each ends in a `sqlite3_*` leaf that the FFI table
+            // below ALREADY charges `Db` (its R166 membership criterion: database content, or the
+            // process-global extension registry); a consumer never names that leaf, which is the whole
+            // silence. All EXECUTED 2026-11-09 against a consumer fixture (see the handoff REPORT):
+            //   * `Connection::close` -> `sqlite3_close` (lib.rs:803; inner_connection.rs:157): a WAL database's
+            //     `-wal`/`-shm` files were gone after it. `cache_flush` -> `sqlite3_db_cacheflush`
+            //     (inner_connection.rs:320): the file grew mid-transaction only after it.
+            //   * `Statement::exists` -> `Rows::next` -> `sqlite3_step` (statement.rs:349).
+            //   * `Connection::serialize`/`deserialize`/`deserialize_bytes`/`deserialize_read_exact` ->
+            //     `sqlite3_serialize`/`sqlite3_deserialize` (serialize.rs): the in-memory image read out / a
+            //     database swapped in. (`deserialize_read_exact` also reads the CALLER's reader, which is
+            //     that reader's own effect, not claimed here.)
+            //   * `Connection::load_extension` -> `sqlite3_load_extension` (inner_connection.rs:193): the
+            //     extension's init ran. `load_extension_enable`/`_disable` and `LoadExtensionGuard::new`
+            //     (which is `load_extension_enable`) -> `sqlite3_enable_load_extension`: SQL `load_extension()`
+            //     was refused before and worked after.
+            //   * `Wal::checkpoint`/`checkpoint_v2` (hooks/mod.rs:481,485) -> `sqlite3_wal_checkpoint[_v2]`.
+            //   * `register_/cancel_/reset_auto_extension` (auto_extension.rs:50-62) -> the PROCESS-GLOBAL
+            //     registry: a later `Connection::open` ran the registered routine.
+            // NOT claimed (accessors/pure neighbours that stay None): `is_autocommit`, `changes`,
+            // `last_insert_rowid`, `is_readonly`, `Wal::name`, `init_auto_extension` (its own rule above).
+            if let Some((ty, m)) = type_method(path, "rusqlite", &["", "serialize", "hooks", "statement",
+                "load_extension_guard"])
+            {
+                let hit = match ty {
+                    "Connection" => matches!(m, "close" | "cache_flush" | "serialize" | "deserialize"
+                        | "deserialize_bytes" | "deserialize_read_exact" | "load_extension"
+                        | "load_extension_enable" | "load_extension_disable"),
+                    "Statement" => m == "exists",
+                    "LoadExtensionGuard" => m == "new",
+                    "Wal" => matches!(m, "checkpoint" | "checkpoint_v2"),
+                    _ => false,
+                };
+                if hit {
+                    return Some("Db");
+                }
+            }
+            if matches!(
+                path,
+                "rusqlite::register_auto_extension" | "rusqlite::auto_extension::register_auto_extension"
+                    | "rusqlite::cancel_auto_extension" | "rusqlite::auto_extension::cancel_auto_extension"
+                    | "rusqlite::reset_auto_extension" | "rusqlite::auto_extension::reset_auto_extension"
+            ) {
+                return Some("Db");
+            }
             return None;
         }
         // redis: the way redis is ACTUALLY used is the high-level `Commands`/`AsyncCommands`
@@ -3569,6 +3617,12 @@ pub const PG_DB_VERBS: &[&str] = &[
                 "::query_row", "::query_map", "::query_and_then", "::execute_batch",
                 "::prepare_cached", "::query_typed",
                 "::prepare_typed_cached",
+                // SOUNDNESS R1528 — rusqlite 0.39 `Connection::query_row_and_then(sql, params, f)` (lib.rs:741)
+                // is `prepare(sql)` + `query` + `get_expected_row`, and `prepare_with_flags(sql, flags)`
+                // (lib.rs:783) is `InnerConnection::prepare` -> `sqlite3_prepare_v3`: the same one-statement
+                // round-trips as `query_row`/`prepare` above, with the SQL text at argument 0, so they join
+                // the table the masking guard reads. No other table crate has either name.
+                "::query_row_and_then", "::prepare_with_flags",
 ];
 
 /// The members of `PG_DB_VERBS` that take NO SQL text, each checked against its signature:
@@ -6095,5 +6149,37 @@ mod masks_locator_tests {
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::with_writer"), None);
+    }
+
+    /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with
+    /// same-type pure neighbours left unclaimed. Both the crate-root and the declaring-module spelling.
+    #[test]
+    fn r1528_rusqlite_reachable_rows_classify() {
+        for p in ["Connection::close", "Connection::cache_flush", "Connection::serialize", "Connection::deserialize",
+                  "Connection::deserialize_bytes", "Connection::deserialize_read_exact",
+                  "Connection::load_extension", "Connection::load_extension_enable",
+                  "Connection::load_extension_disable", "Connection::query_row_and_then",
+                  "Connection::prepare_with_flags", "Statement::exists", "LoadExtensionGuard::new",
+                  "Wal::checkpoint", "Wal::checkpoint_v2", "serialize::Connection::serialize",
+                  "statement::Statement::exists", "hooks::Wal::checkpoint_v2",
+                  "load_extension_guard::LoadExtensionGuard::new",
+                  "register_auto_extension", "cancel_auto_extension", "reset_auto_extension",
+                  "auto_extension::register_auto_extension", "auto_extension::cancel_auto_extension",
+                  "auto_extension::reset_auto_extension"] {
+            assert_eq!(classify("rusqlite", &format!("rusqlite::{p}")), Some("Db"), "{p}");
+        }
+        // The two SQL-text verbs are table members, so the masking guard reads them (SQL at argument 0).
+        for v in ["query_row_and_then", "prepare_with_flags"] {
+            assert!(masks_locator("Db", "rusqlite", &format!("rusqlite::Connection::{v}"), v, true), "{v}");
+        }
+        // Same-type neighbours that touch no database stay unclaimed.
+        for p in ["Connection::is_autocommit", "Connection::changes", "Connection::last_insert_rowid",
+                  "Connection::is_busy", "Connection::is_readonly", "Connection::path", "Statement::column_count",
+                  "Wal::name", "LoadExtensionGuard::drop", "Connection::handle"] {
+            assert_eq!(classify("rusqlite", &format!("rusqlite::{p}")), None, "{p}");
+        }
+        // Another crate's same-named method is not rusqlite's.
+        assert_eq!(classify("mycrate", "mycrate::Connection::close"), None);
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Connection::close"), None);
     }
 }

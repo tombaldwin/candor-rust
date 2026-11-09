@@ -133,10 +133,11 @@ use candor_classify::{CALIBRATED_CRATES, OPEN_ENTRY_VERDICTS};
 use std::collections::{BTreeSet, HashMap};
 
 /// The size of `grandfathered.tsv` when the ruling was implemented (the checked-in `open.tsv`, 776
-/// rows, minus the 64 R1528-step-2 found UNREACHABLE). It may go DOWN — lower this number when it
+/// rows, minus the 64 R1528-step-2 found UNREACHABLE; 694 after the 18 reachable rusqlite rows got a classify
+/// rule, R1528). It may go DOWN — lower this number when it
 /// does, so the slack cannot be spent — and must never go up: a row added to the backlog is a verdict
 /// skipped. Raising it is visible in review, which is the point.
-const GRANDFATHERED_CEILING: usize = 712;
+const GRANDFATHERED_CEILING: usize = 694;
 
 /// (crate, entry) of every data row of an `open.tsv`-shaped manifest (crate first, entry last).
 fn manifest_keys(text: &str) -> Vec<(String, String)> {
@@ -277,10 +278,16 @@ fn two_component_ceiling_quirk_is_pinned_until_rusqlite_rows_have_verdicts() {
          a disclosure REMOVAL (SOUNDNESS R1528). Resolve those rows first, then invert this test."
     );
     let open = include_str!("../../../eval/coverage-gate/open.tsv");
+    // R1528 (rusqlite lane): the 18 reachable rusqlite rows now carry classify rules, so `open.tsv` holds NONE
+    // and the PRECONDITION for fixing the comparator is met. The comparator is deliberately NOT changed in
+    // this commit (a separate decision); this assertion now guards the other direction — a rusqlite row that
+    // regrows into `open.tsv` while the quirk stands is a disclosure removal waiting for the comparator fix.
+    // When the comparator is fixed (numeric tie + identical suffix = not exceeded), invert the assertion
+    // above and move this one to a plain "no unresolved rusqlite row" check.
     let rusqlite_open = open.lines().filter(|l| l.starts_with("rusqlite\t")).count();
-    assert!(
-        rusqlite_open > 0,
-        "no rusqlite rows left in open.tsv — the reason this quirk is held is gone: fix the \
-         comparator (numeric tie + identical suffix = not exceeded) and invert this test"
+    assert_eq!(
+        rusqlite_open, 0,
+        "a rusqlite row is back in open.tsv: the comparator precondition (every reachable rusqlite row has a \
+         rule or verdict) no longer holds — resolve it before the comparator is fixed (SOUNDNESS R1528)"
     );
 }
