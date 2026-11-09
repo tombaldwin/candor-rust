@@ -441,6 +441,21 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     // commands and 0 connections on the server.
     ("redis", "redis::client::Client::build_with_tls"),
     ("redis", "redis::cluster_handling::client::ClusterClientBuilder::build"),
+    // SOUNDNESS R1528 — lettre 0.11.23, `SmtpTransport::unencrypted_localhost` and `AsyncSmtpTransport::unencrypted_localhost`.
+    // Both are `builder_dangerous("localhost").build()` with NO argument, so the connection pool is always the default
+    // (`PoolConfig::min_idle` 0): the maintenance thread (sync) / task (async) loops over `count..0` and has nothing to
+    // connect (pool/sync_impl.rs:60-83, async_impl.rs:55). EXECUTED, the transport HELD 1.5 s: no `connect` logged, 0
+    // connections through the counting proxy, sync and async. The self-scan's `Net` is the loop body's `client.connection()`
+    // that `min_idle` can never reach from these two entries. (`SmtpTransportBuilder::build` is NOT pure: a caller's
+    // `pool_config(.min_idle(1))` makes it connect, EXECUTED, R1592.)
+    ("lettre", "lettre::transport::smtp::transport::SmtpTransport::unencrypted_localhost"),
+    ("lettre", "lettre::transport::smtp::async_transport::AsyncSmtpTransport::unencrypted_localhost"),
+    // SOUNDNESS R1528 — lapin 4.12.0, `Channel::wait_for_confirms`. It drains the returned-messages queue and awaits the last
+    // pending publisher confirm, a promise the connection's IO loop thread resolves (channel.rs:324-332); it writes no frame.
+    // EXECUTED against RabbitMQ behind a counting proxy: 0 bytes UP both with nothing pending and with a publish pending (the
+    // 21 bytes DOWN in the second case are the confirmation, read by the IO loop that `connect` started, charged there; the
+    // `basic_publish` carries the `Net`).
+    ("lapin", "lapin::channel::Channel::wait_for_confirms"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -757,6 +772,51 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("redis", "redis::sentinel::Sentinel::build", "R1590:silent"),
     ("redis", "redis::sentinel::SentinelClient::build", "R1590:silent"),
     ("redis", "redis::sentinel::SentinelClientBuilder::build", "R1590:silent"),
+    // isahc 2.0.1, R1592. `CookieJar::{get_by_name, get_for_uri, set}` read the clock (`Cookie::is_expired`, cookies/cookie.rs:273)
+    // only for a cookie that carries an `expiration`: EXECUTED 1 `clock_gettime` between start and end markers with an
+    // expiring cookie, 0 with an empty jar and 0 with a session cookie, for all three. A `Clock` rule would charge two of the
+    // three shapes of jar the caller can hold. `Response::text` blocks on the response BODY: EXECUTED returning the tail the
+    // server sent 1.5 s after the headers (sync and async), and reading nothing from a response built in memory; the request
+    // that produced the response is charged where it is sent.
+    ("isahc", "isahc::cookies::jar::CookieJar::get_by_name", "R1592:conditional"),
+    ("isahc", "isahc::cookies::jar::CookieJar::get_for_uri", "R1592:conditional"),
+    ("isahc", "isahc::cookies::jar::CookieJar::set", "R1592:conditional"),
+    ("isahc", "isahc::response::Response::text", "R1592:conditional"),
+    // lettre 0.11.23, R1592. `SmtpTransportBuilder::build` and `AsyncSmtpTransportBuilder::build` spawn the pool's maintenance
+    // thread / task, which connects only when the caller asked for `PoolConfig::min_idle(n > 0)`: EXECUTED 0 connections and 0
+    // bytes by default, and 1 connection with 23 bytes up (the EHLO) with `min_idle(1)`, sync and async. `Auth::new_from_response`
+    // emits two `debug!` records (the encoded and the decoded SASL challenge) only when lettre's `tracing` feature is on, which
+    // is off by default: EXECUTED with the feature and a subscriber, 2 records.
+    ("lettre", "lettre::transport::smtp::transport::SmtpTransportBuilder::build", "R1592:conditional"),
+    ("lettre", "lettre::transport::smtp::async_transport::AsyncSmtpTransportBuilder::build", "R1592:conditional"),
+    ("lettre", "lettre::transport::smtp::commands::Auth::new_from_response", "R1592:conditional"),
+    // lapin 4.12.0, R1593. `Connection::connector` runs a CALLER-SUPPLIED connect closure: EXECUTED 1 connection with a closure that
+    // dials the broker, 0 bytes with one that returns an error. `Connection::run` is `drop(self)` then a join on the IO loop:
+    // EXECUTED 0 bytes while another handle (a channel) is alive, but 21 up / 12 down when `self` is the LAST handle, because the
+    // drop closes the connection. `Consumer::set_delegate` runs the caller's delegate on every queued delivery (EXECUTED: it
+    // ran, twice) and moves no byte of its own.
+    ("lapin", "lapin::connection::Connection::connector", "R1593:conditional"),
+    ("lapin", "lapin::connection::Connection::run", "R1593:conditional"),
+    ("lapin", "lapin::consumer::Consumer::set_delegate", "R1593:conditional"),
+    // tonic 0.14.6, R1594. `serve_with_incoming{,_shutdown}` (Server and Router) serve whatever stream they are handed: EXECUTED
+    // over a `TcpIncoming` a client connected and got a reply, and over an in-memory `duplex` stream the request was served with no
+    // `bind`, `listen` or `connect` logged. `Endpoint::tls_config{,_with_verifier}` read `SSL_CERT_FILE` / `SSL_CERT_DIR` and open the
+    // root store only for `ClientTlsConfig::with_native_roots()` (EXECUTED: the bundle was opened with it and not with
+    // `with_webpki_roots()` or a bare config), and read `SSLKEYLOGFILE` and open that file for `use_key_log()` (EXECUTED through
+    // `tls_config_with_verifier`; native roots with a verifier is an error before any read). `Code::from_bytes` and
+    // `Status::from_header_map` log only on malformed input (EXECUTED: 0 records for `"0"` / a valid header map, 1 `trace!` and
+    // 1 `warn!` for the malformed ones). `Streaming::{message, trailers}` read the body they were given: EXECUTED `message` returned
+    // a status the server pushed 1.75 s later and `trailers` was still waiting on a live stream after 1.2 s.
+    ("tonic", "tonic::codec::decode::Streaming::message", "R1594:conditional"),
+    ("tonic", "tonic::codec::decode::Streaming::trailers", "R1594:conditional"),
+    ("tonic", "tonic::status::Code::from_bytes", "R1594:conditional"),
+    ("tonic", "tonic::status::Status::from_header_map", "R1594:conditional"),
+    ("tonic", "tonic::transport::channel::endpoint::Endpoint::tls_config", "R1594:conditional"),
+    ("tonic", "tonic::transport::channel::endpoint::Endpoint::tls_config_with_verifier", "R1594:conditional"),
+    ("tonic", "tonic::transport::server::Router::serve_with_incoming", "R1594:conditional"),
+    ("tonic", "tonic::transport::server::Router::serve_with_incoming_shutdown", "R1594:conditional"),
+    ("tonic", "tonic::transport::server::Server::serve_with_incoming", "R1594:conditional"),
+    ("tonic", "tonic::transport::server::Server::serve_with_incoming_shutdown", "R1594:conditional"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -1201,6 +1261,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
     // were silently classified network-free because reqwest wasn't recognized.)
     if crate_name == "reqwest" || crate_name == "isahc" {
+        // SOUNDNESS R1528 — isahc 2.0.1, the grandfathered rows that are not the `::send`/`::get` family. See `isahc_r1528`.
+        if crate_name == "isahc" {
+            if let Some(effect) = isahc_r1528(path) {
+                return Some(effect);
+            }
+        }
         // The dispatch (`::send`/`::execute`) is the I/O. PLUS the one-shot CONVENIENCE functions
         // `reqwest::get` / `reqwest::blocking::get` / `isahc::get`, which send immediately — they're
         // an EXACT match (not `Client::get`, the builder) to avoid false-positiving the builder path.
@@ -1623,7 +1689,8 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Net");
         }
-        return None;
+        // SOUNDNESS R1528 — lapin 4.12.0 (above its 4.10.0 ceiling). See `lapin_r1528`.
+        return lapin_r1528(path);
     }
     // SMTP email — lettre's `Transport::send` is the network dispatch; Message building is
     // pure. (Found hardening on a lettre consumer: `mailer.send(&email)` classified pure.)
@@ -1642,6 +1709,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "lettre" {
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
+        }
+        // SOUNDNESS R1528 — lettre 0.11.23, the message-building, DKIM and file rows. See `lettre_r1528`.
+        if let Some(effect) = lettre_r1528(path) {
+            return Some(effect);
         }
         // THE COVERAGE-GATE REFRESH (2026-10-08), read against lettre-0.11.23 source: the SMTP client
         // connection layer, which `send` above reaches but a consumer driving the protocol by hand never
@@ -1826,7 +1897,8 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Net");
         }
-        return None;
+        // SOUNDNESS R1528 — tonic 0.14.6 (above its 0.12.3 ceiling). See `tonic_r1528`.
+        return tonic_r1528(path);
     }
     // Kafka — rdkafka (FFI to librdkafka). Producer send + consumer poll/recv/subscribe/
     // commit are network round-trips to the brokers. (API-calibrated + unit-tested; a real
@@ -4258,6 +4330,173 @@ fn type_method<'a>(path: &'a str, krate: &str, mods: &[&str]) -> Option<(&'a str
     mods.contains(&module).then_some((ty, method))
 }
 
+/// SOUNDNESS R1528 — isahc 2.0.1 (ceiling 2.0.1, resolved 2.0.1: in-ceiling, so a `Cargo.lock` consumer and a lockless
+/// one both got NOTHING for these rows). EXECUTED in a consumer fixture against a local HTTP server that counts requests,
+/// beside an interposer logging `connect`, `getenv` and `clock_gettime` between a start and an end marker (handoff
+/// `rust-r1528/mq/`).
+///
+/// CHARGED `Net`: `HttpClient::{get,head,post,put,delete,send}_async` and `Request::send_async` (the `RequestExt` method)
+/// each put ONE request on the wire (EXECUTED: the server counted exactly one request and the process connected to it for
+/// every one of the seven; the sync twins already classify through `::get`/`::send`). The existing rule only named the
+/// FREE functions `isahc::get_async` / `isahc::send_async`; the comment beside it spoke of `HttpClient::shared()`, which
+/// is `pub(crate)` and cannot be called at all, so the method spelling was never reachable by a rule.
+/// CHARGED `Env`: `TrustStore::native` reads `SSL_CERT_FILE` (EXECUTED: the `getenv` is logged inside the window and the
+/// control logs none). It is a `LazyLock`, so the read happens on the FIRST call in a process only: a second call in the
+/// same process reads nothing. That over-charge is accepted, because the first call is the one every program makes and
+/// the alternative is a silence on it.
+///
+/// NOT charged, and filed (R1592): `CookieJar::{get_by_name, get_for_uri, set}` read the clock (`SystemTime::now`)
+/// only when the stored cookie carries an `expiration` (`Cookie::is_expired`): EXECUTED 1 `clock_gettime` with an
+/// expiring cookie and 0 with an empty jar and with a session cookie, for all three. A `Clock` rule would charge two of the
+/// three shapes of jar. `Response::text` blocks on the response body: EXECUTED returning the tail the server sent 1.5 s
+/// after the headers, and reading nothing from a response built in memory.
+fn isahc_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("isahc::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "client", "HttpClient", "get_async" | "head_async" | "post_async" | "put_async" | "delete_async" | "send_async")
+        | ("" | "request", "Request", "send_async") => Some("Net"),
+        ("" | "tls" | "tls::trust", "TrustStore", "native") => Some("Env"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 — lettre 0.11.23 (ceiling 0.11.23, resolved 0.11.23: in-ceiling, both arms got nothing). EXECUTED in a
+/// consumer fixture under an interposer (`getenv`, `open`, `connect`, `clock_gettime`, entropy between a start and an end
+/// marker) beside an SMTP sink (docker `axllent/mailpit` behind a counting TCP proxy), handoff `rust-r1528/mq/`.
+///
+/// The scan attributes every chain hop off `Message::builder()` / `MultiPart::builder()` to the ROOT type
+/// (`Message::builder().from(..).to(..).body(..)` reaches classify as `lettre::message::Message::body`), so each rule below
+/// is keyed on BOTH spellings, `MessageBuilder::<m>` (a typed receiver, the grandfathered rows) and `Message::<m>` (the
+/// chain). `Message` has no method of those names, so the second spelling cannot fabricate.
+///
+/// CHARGED `Clock`: `Date::now`, `MessageBuilder::date_now`, `Message::sign` and `dkim::dkim_sign` read `SystemTime::now`
+/// (EXECUTED 1 `clock_gettime` each, 0 for the control), and so do `body`, `singlepart` and `multipart` whenever the builder
+/// holds no `Date` header (`build` inserts `date_now()`, mod.rs:418): EXECUTED 1 read, and 0 once `.date(ts)` was set. The
+/// over-charge on `.date(ts).body(..)` is accepted: the common idiom sets no date.
+/// CHARGED `Rand`: `MultiPartBuilder::kind` (and its constructors `MultiPart::{mixed, alternative, related, signed,
+/// encrypted, alternative_plain_html}`, which are `builder().kind(..)` and were never rows: the generator's self-scan does
+/// not resolve that call) draw a boundary with `fastrand` (EXECUTED: two processes printed different 40-character
+/// boundaries; `mixed` and `kind` executed, the other constructors read), and `MessageBuilder::message_id` does when
+/// given `None` (EXECUTED: two processes printed different ids, and `Some("<x@y>")` printed the same id twice, so
+/// `message_id(Some(..))` is an accepted over-charge). `fastrand` seeds from the time and the thread id, not from OS
+/// entropy (0 entropy reads): the evidence is non-determinism across processes, which is weaker than an entropy interposer.
+/// CHARGED `Fs`: `AsyncFileTransport::read` (EXECUTED: the open of `<dir>/<id>.eml` is logged) and the executor's
+/// `fs_read` / `fs_write` (`Executor`, `Tokio1Executor`, `AsyncStd1Executor`; EXECUTED for `Tokio1Executor`: the read
+/// and the write opened and created their files; the async-std twin is READ only).
+///
+/// READ PURE, `REVIEWED_PURE_ENTRIES`: `SmtpTransport::unencrypted_localhost` and `AsyncSmtpTransport::
+/// unencrypted_localhost` take no argument, so the pool is always the default (`min_idle` 0): the maintenance thread / task
+/// has nothing to connect (EXECUTED held 1.5 s: no `connect`, 0 connections through the proxy, sync and async).
+///
+/// NOT charged, and filed (R1592): `SmtpTransportBuilder::build` and `AsyncSmtpTransportBuilder::build` connect from the
+/// background pool only when the caller asked for `PoolConfig::min_idle(n > 0)` (EXECUTED: 0 connections by default, 1
+/// connection and 23 bytes up with `min_idle(1)`, sync and async). `Auth::new_from_response` emits two `debug!` records
+/// only under lettre's `tracing` feature, which is off by default (EXECUTED with the feature: two records; the feature is
+/// the caller's choice, so a `Log` rule would charge every default build).
+///
+/// One effect is all `classify` can carry: `message_id(None)` also reads the host name, and `body` on a dateless builder
+/// also formats the headers; only the effect named is charged (R1575).
+fn lettre_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("lettre::")?;
+    if matches!(rest, "message::dkim::dkim_sign" | "message::dkim_sign" | "dkim_sign") {
+        return Some("Clock");
+    }
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "message", "MessageBuilder" | "Message", "body" | "singlepart" | "multipart" | "date_now") => Some("Clock"),
+        ("" | "message", "Message", "sign") => Some("Clock"),
+        ("" | "message::header" | "message::header::date", "Date", "now") => Some("Clock"),
+        ("" | "message", "MessageBuilder" | "Message", "message_id") => Some("Rand"),
+        ("" | "message" | "message::mimebody", "MultiPartBuilder" | "MultiPart", "kind") => Some("Rand"),
+        (
+            "" | "message" | "message::mimebody",
+            "MultiPart",
+            "mixed" | "alternative" | "related" | "signed" | "encrypted" | "alternative_plain_html",
+        ) => Some("Rand"),
+        ("" | "transport::file", "AsyncFileTransport", "read") => Some("Fs"),
+        ("" | "executor", "Executor" | "Tokio1Executor" | "AsyncStd1Executor", "fs_read" | "fs_write") => Some("Fs"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 — lapin 4.12.0, ABOVE its 4.10.0 ceiling (`CALIBRATED_CEILINGS` is NOT raised: that needs the whole
+/// crate table re-verified at 4.12). A `Cargo.lock` consumer therefore already got `invisible:[lapin]` on every unmatched
+/// lapin call and a lockless one nothing; a rule here replaces that disclosure with the concrete effect. EXECUTED against a
+/// real RabbitMQ 3 (docker, behind a counting TCP proxy that the fixture reads at its own start and end markers, so the
+/// delta is exact) beside an idle control (handoff `rust-r1528/mq/`).
+///
+/// CHARGED `Net`: every connection opener the existing `::connect` rule did not reach, `Connection::{connect_uri,
+/// connect_uri_with_runtime, connect_uri_with_config}` and the `AMQPUri` / `Connect` `connect_with_config`, plus the two
+/// siblings that were never rows, `Connection::{connect_with_config, connect_with_runtime}` (EXECUTED: each opened exactly
+/// 1 connection and moved 373 bytes up / 567 down); `Connection::update_secret` (19 up / 12 down); the generated
+/// `Channel::{access_request, channel_flow}` that the `::basic_` / `::queue_` / `::exchange_` family never covered (19 / 13
+/// bytes up); and `Acker::{ack, nack, reject}` (21 bytes up: the `basic.ack` / `basic.nack` / `basic.reject` frame).
+///
+/// READ PURE, `REVIEWED_PURE_ENTRIES`: `Channel::wait_for_confirms` sends nothing (EXECUTED: 0 bytes up with nothing pending
+/// and with a publish pending; the 21 bytes DOWN in the second case are the confirmation, read by the IO loop thread that
+/// `connect` started, and `basic_publish` carries the `Net`).
+///
+/// NOT charged, and filed (R1593): `Connection::connector` runs a CALLER-SUPPLIED connect closure (EXECUTED: 1
+/// connection with a closure that dials, 0 bytes with one that returns an error), `Connection::run` (EXECUTED: 0 bytes up
+/// while another handle is alive, but 21 up / 12 down when it holds the LAST handle: `drop(self)` closes the connection)
+/// and `Consumer::set_delegate` (EXECUTED: it runs the caller's delegate on every queued delivery, 0 bytes of its own).
+fn lapin_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("lapin::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        (
+            "" | "connection",
+            "Connection",
+            "connect_uri" | "connect_uri_with_runtime" | "connect_uri_with_config" | "connect_with_config"
+            | "connect_with_runtime" | "update_secret",
+        ) => Some("Net"),
+        ("" | "connection" | "uri", "AMQPUri" | "Connect", "connect_with_config") => Some("Net"),
+        ("" | "channel" | "generated::channel", "Channel", "access_request" | "channel_flow") => Some("Net"),
+        ("" | "acker", "Acker", "ack" | "nack" | "reject") => Some("Net"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1528 — tonic 0.14.6, ABOVE its 0.12.3 ceiling (`CALIBRATED_CEILINGS` is NOT raised: that needs the whole
+/// crate table re-verified at 0.14). A `Cargo.lock` consumer already got `invisible:[tonic]` on every unmatched tonic
+/// call and a lockless one nothing. EXECUTED in a consumer fixture under a `bind` / `listen` / `connect` / `getenv` / `open`
+/// interposer, with a probe that dials the port before and after the call (handoff `rust-r1528/mq/`).
+///
+/// THE LOAD-BEARING FINDING: the quickstart `Server::builder().add_service(svc).serve(addr).await` reaches classify as
+/// `tonic::transport::Server::serve` — the scan attributes `.add_service(..)` and the chain after it to the ROOT type
+/// `Server`, not to `Router` — so the existing `Router::serve` rule never fired for it, and the rows that name `Server::
+/// serve` are the common idiom, not an obscure one. EXECUTED: `serve` and `serve_with_shutdown` bound and listened on
+/// the port (the probe could not connect before and could after), in the builder spelling and the quickstart chain.
+///
+/// CHARGED `Net`: `Server::{serve, serve_with_shutdown}` (and so the quickstart chain) and `TcpIncoming::bind` (EXECUTED:
+/// `bind` + `listen` logged; 0.14.6 has no `TcpIncoming::new`, which is what the older rule named).
+///
+/// NOT charged, and filed (R1594): `serve_with_incoming{,_shutdown}` on `Server` and `Router` serve whatever stream they are
+/// handed (EXECUTED: over a `TcpIncoming` a client connected and got a reply; over an in-memory `duplex` stream the request was
+/// served with no `bind`, `listen` or `connect` at all); `Endpoint::tls_config{,_with_verifier}` read `SSL_CERT_FILE` /
+/// `SSL_CERT_DIR` and the root store only for `ClientTlsConfig::with_native_roots()` (EXECUTED: opens of the bundle with
+/// it, none with `with_webpki_roots()` or a bare config), and for `use_key_log()` read `SSLKEYLOGFILE` and open the file
+/// (EXECUTED, `tls_config_with_verifier`; native roots plus a verifier is an error before any read); `Code::from_bytes`
+/// and `Status::from_header_map` log (`trace!` / `warn!`) only on malformed input (EXECUTED: 0 records valid, 1 invalid);
+/// `Streaming::{message, trailers}` read the body they were given (EXECUTED: `message` returned a status the server pushed
+/// 1.75 s later; `trailers` did not return within 1.2 s on a live stream).
+fn tonic_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("tonic::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    match (module, ty, method) {
+        ("" | "transport" | "transport::server" | "server", "Server", "serve" | "serve_with_shutdown") => Some("Net"),
+        ("" | "transport" | "transport::server" | "transport::server::incoming" | "server::incoming", "TcpIncoming", "bind") => {
+            Some("Net")
+        }
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R1528 — aws-config 1.12.0 (the version the rules were written against AND the resolved one: ceiling
 /// 1.12.0, so a `Cargo.lock` consumer and a lockless one both got NOTHING for these rows — in-ceiling exemption).
 /// Every body READ, and each EXECUTED in a consumer fixture under a DYLD interposer that logs every `getenv`, `open`
@@ -6504,10 +6743,15 @@ mod tests {
             Some("Net")
         );
         assert_eq!(classify("tonic", "tonic::TcpIncoming::new"), Some("Net"));
-        // NO FABRICATION control: `Server<L>::serve_with_shutdown` (mod.rs:530) is a DIFFERENT,
-        // `pub(crate)` method on a different type — not reachable by any consumer, and this fix does not
-        // fabricate an effect for it by widening past the `Router::` FQN.
-        assert_eq!(classify("tonic", "tonic::transport::server::Server::serve_with_shutdown"), None);
+        // THIS CONTROL WAS STALE, SOUNDNESS R1528 (R1594's lane). It asserted `None` on the premise that `Server<L>::
+        // serve_with_shutdown` (mod.rs:530 at 0.12.x) is a DIFFERENT, `pub(crate)` method that no consumer can reach, so a rule
+        // there would fabricate. Two things made that wrong: tonic 0.14.6 made `Server::{serve, serve_with_shutdown}` PUBLIC
+        // (mod.rs:663,678; EXECUTED: both bind and listen), and — independent of version — the scan attributes every chain hop
+        // after `Server::builder()` to the ROOT type, so the quickstart `Server::builder().add_service(svc).serve_with_shutdown(
+        // addr, f)` reaches classify as `Server::serve_with_shutdown` although at runtime it is `Router`'s. The `None` therefore
+        // asserted that the quickstart is silent. It is a real listener either way, so the spelling is charged (`tonic_r1528`).
+        assert_eq!(classify("tonic", "tonic::transport::server::Server::serve_with_shutdown"), Some("Net"));
+        assert_eq!(classify("tonic", "tonic::transport::Server::serve_with_shutdown"), Some("Net"));
         // THE FIX: `Repository::clone`/`clone_recurse` and `RepoBuilder::clone` ARE libgit2's real
         // network clone — a corpus round found `git2::Repository::clone(url, path)` reporting ZERO
         // effects and passing `deny Net` at exit 0, because the bare `::clone` denylist meant to keep
@@ -8000,5 +8244,125 @@ mod masks_locator_tests {
         // Another crate's same-named method is not rusqlite's.
         assert_eq!(classify("mycrate", "mycrate::Connection::close"), None);
         assert_eq!(classify("tokio_postgres", "tokio_postgres::Connection::close"), None);
+    }
+
+    /// SOUNDNESS R1528 (isahc 2.0.1) — the HTTP client method spellings and `TrustStore::native`, in the root-typed
+    /// spelling the scan produces and the declaring-module one the manifest row names. The negatives are the cookie jar and
+    /// `Response::text` (filed R1592, conditional) and the same names on another crate.
+    #[test]
+    fn r1528_isahc_rows_classify() {
+        for m in ["get_async", "head_async", "post_async", "put_async", "delete_async", "send_async"] {
+            assert_eq!(classify("isahc", &format!("isahc::HttpClient::{m}")), Some("Net"), "{m}");
+            assert_eq!(classify("isahc", &format!("isahc::client::HttpClient::{m}")), Some("Net"), "{m}");
+        }
+        assert_eq!(classify("isahc", "isahc::Request::send_async"), Some("Net"));
+        assert_eq!(classify("isahc", "isahc::request::Request::send_async"), Some("Net"));
+        assert_eq!(classify("isahc", "isahc::tls::TrustStore::native"), Some("Env"));
+        assert_eq!(classify("isahc", "isahc::tls::trust::TrustStore::native"), Some("Env"));
+        for p in ["cookies::CookieJar::get_by_name", "cookies::CookieJar::get_for_uri", "cookies::CookieJar::set",
+                  "cookies::jar::CookieJar::set", "Response::text", "response::Response::text", "HttpClient::builder",
+                  "TrustStore::webpki_roots", "TrustStore::from_file", "tls::TrustStore::from_file"] {
+            assert_eq!(classify("isahc", &format!("isahc::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::HttpClient::get_async"), None);
+    }
+
+    /// SOUNDNESS R1528 (lettre 0.11.23) — both the `MessageBuilder` (typed receiver) and the root `Message` (chain)
+    /// spellings, since the scan attributes `Message::builder().from(..).body(..)` to `Message::body`.
+    #[test]
+    fn r1528_lettre_rows_classify() {
+        for t in ["MessageBuilder", "Message"] {
+            for m in ["body", "singlepart", "multipart", "date_now"] {
+                assert_eq!(classify("lettre", &format!("lettre::message::{t}::{m}")), Some("Clock"), "{t}::{m}");
+            }
+            assert_eq!(classify("lettre", &format!("lettre::message::{t}::message_id")), Some("Rand"), "{t}");
+        }
+        for p in ["message::Message::sign", "message::header::Date::now", "message::header::date::Date::now",
+                  "message::dkim::dkim_sign"] {
+            assert_eq!(classify("lettre", &format!("lettre::{p}")), Some("Clock"), "{p}");
+        }
+        for p in ["message::MultiPartBuilder::kind", "message::MultiPart::kind", "message::mimebody::MultiPartBuilder::kind",
+                  "message::MultiPart::mixed", "message::MultiPart::alternative", "message::MultiPart::related",
+                  "message::MultiPart::signed", "message::MultiPart::encrypted", "message::MultiPart::alternative_plain_html"] {
+            assert_eq!(classify("lettre", &format!("lettre::{p}")), Some("Rand"), "{p}");
+        }
+        for p in ["AsyncFileTransport::read", "transport::file::AsyncFileTransport::read", "Executor::fs_read",
+                  "Executor::fs_write", "Tokio1Executor::fs_read", "executor::Tokio1Executor::fs_write",
+                  "AsyncStd1Executor::fs_read"] {
+            assert_eq!(classify("lettre", &format!("lettre::{p}")), Some("Fs"), "{p}");
+        }
+        // Filed R1592 / read pure: no rule. And the pure siblings of the Clock / Rand rows stay unclaimed.
+        for p in ["transport::smtp::SmtpTransportBuilder::build", "transport::smtp::AsyncSmtpTransportBuilder::build",
+                  "transport::smtp::transport::SmtpTransport::unencrypted_localhost",
+                  "transport::smtp::async_transport::AsyncSmtpTransport::unencrypted_localhost",
+                  "transport::smtp::commands::Auth::new_from_response", "message::Message::builder",
+                  "message::Message::to", "message::Message::subject", "message::MessageBuilder::subject",
+                  "message::MessageBuilder::date", "message::Message::date", "message::MultiPart::builder",
+                  "message::MultiPart::singlepart", "message::MultiPartBuilder::boundary", "message::Message::formatted",
+                  "message::header::Date::new", "message::SinglePart::plain"] {
+            assert_eq!(classify("lettre", &format!("lettre::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::message::Message::body"), None);
+    }
+
+    /// SOUNDNESS R1528 (lapin 4.12.0) — the connection openers, `update_secret`, the two generated channel verbs and the
+    /// acker. `connector`, `run`, `set_delegate` (filed R1593, conditional) and `wait_for_confirms` (read pure) stay
+    /// unclaimed, as do same-named methods on other types (`Channel::reject`, `Connection::ack`).
+    #[test]
+    fn r1528_lapin_rows_classify() {
+        for m in ["connect_uri", "connect_uri_with_runtime", "connect_uri_with_config", "connect_with_config",
+                  "connect_with_runtime", "update_secret"] {
+            assert_eq!(classify("lapin", &format!("lapin::Connection::{m}")), Some("Net"), "{m}");
+            assert_eq!(classify("lapin", &format!("lapin::connection::Connection::{m}")), Some("Net"), "{m}");
+        }
+        for p in ["AMQPUri::connect_with_config", "uri::AMQPUri::connect_with_config",
+                  "connection::AMQPUri::connect_with_config", "Connect::connect_with_config"] {
+            assert_eq!(classify("lapin", &format!("lapin::{p}")), Some("Net"), "{p}");
+        }
+        for m in ["access_request", "channel_flow"] {
+            assert_eq!(classify("lapin", &format!("lapin::Channel::{m}")), Some("Net"), "{m}");
+            assert_eq!(classify("lapin", &format!("lapin::generated::channel::Channel::{m}")), Some("Net"), "{m}");
+        }
+        for m in ["ack", "nack", "reject"] {
+            assert_eq!(classify("lapin", &format!("lapin::Acker::{m}")), Some("Net"), "{m}");
+            assert_eq!(classify("lapin", &format!("lapin::acker::Acker::{m}")), Some("Net"), "{m}");
+        }
+        for p in ["Connection::connector", "connection::Connection::connector", "Connection::run",
+                  "connection::Connection::run", "Consumer::set_delegate", "consumer::Consumer::set_delegate",
+                  "Channel::wait_for_confirms", "channel::Channel::wait_for_confirms", "Channel::reject",
+                  "Connection::ack", "Connection::status", "Channel::status", "Acker::poisoned", "Acker::usable",
+                  "ConnectionProperties::default", "runtime::default_runtime"] {
+            assert_eq!(classify("lapin", &format!("lapin::{p}")), None, "{p}");
+        }
+        // The existing `::connect` rule is untouched.
+        assert_eq!(classify("lapin", "lapin::Connection::connect"), Some("Net"));
+        assert_eq!(classify("mycrate", "mycrate::Acker::ack"), None);
+    }
+
+    /// SOUNDNESS R1528 (tonic 0.14.6) — `Server::serve{,_with_shutdown}` IS the quickstart (`Server::builder().add_service(..)
+    /// .serve(addr)` reaches classify as `Server::serve`, the scan attributing every chain hop to the root type) and
+    /// `TcpIncoming::bind`. The filed R1594 rows (`serve_with_incoming*`, `tls_config*`, `Streaming`, `Code`, `Status`) stay
+    /// unclaimed.
+    #[test]
+    fn r1528_tonic_rows_classify() {
+        for p in ["Server::serve", "Server::serve_with_shutdown", "transport::Server::serve", "transport::Server::serve_with_shutdown",
+                  "transport::server::Server::serve", "transport::server::Server::serve_with_shutdown",
+                  "TcpIncoming::bind", "transport::server::TcpIncoming::bind", "transport::server::incoming::TcpIncoming::bind"] {
+            assert_eq!(classify("tonic", &format!("tonic::{p}")), Some("Net"), "{p}");
+        }
+        for p in ["transport::Server::serve_with_incoming", "transport::Server::serve_with_incoming_shutdown",
+                  "transport::server::Server::serve_with_incoming", "transport::server::Router::serve_with_incoming",
+                  "transport::server::Router::serve_with_incoming_shutdown",
+                  "transport::Endpoint::tls_config", "transport::Endpoint::tls_config_with_verifier",
+                  "transport::ClientTlsConfig::with_native_roots", "transport::ClientTlsConfig::use_key_log",
+                  "Code::from_bytes", "Status::from_header_map", "Streaming::message", "Streaming::trailers",
+                  "transport::Server::builder", "transport::Server::add_service", "transport::Server::tcp_nodelay",
+                  "transport::server::TcpIncoming::with_nodelay"] {
+            assert_eq!(classify("tonic", &format!("tonic::{p}")), None, "{p}");
+        }
+        // Rules that predate this row stay: the Router spelling, the connect family and the old constructor.
+        assert_eq!(classify("tonic", "tonic::transport::server::Router::serve"), Some("Net"));
+        assert_eq!(classify("tonic", "tonic::transport::Endpoint::connect"), Some("Net"));
+        assert_eq!(classify("mycrate", "mycrate::Server::serve"), None);
     }
 }
