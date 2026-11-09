@@ -201,28 +201,68 @@ fn hole4_a_same_leaf_local_type_never_answers_for_the_dependencys_type() {
 /// ROUND 3 — `?`, `unwrap`/`expect` and `.await` are recorded in the provenance and read against the signature: a `Result`
 /// / `Option` the dependency DECLARES is peeled by exactly one `?`/`unwrap`, an `async fn`'s value by `.await`. A peel the
 /// signature does not license (a method called on the unpeeled `Result`, a future never awaited) types nothing.
-/// NOT covered, and pre-existing in both arms: a factory followed DIRECTLY by `.unwrap()` / `.expect()`
-/// (`let js = dep::maybe(c).unwrap()`) records no provenance at all, so no marker is emitted to type.
+/// Round 4: a factory followed DIRECTLY by `.unwrap()` / `.expect()` (`let js = dep::maybe(c).unwrap()`) now records
+/// provenance (SOUNDNESS R1587), and an ASSOCIATED fn factory (`Context::open(c)`) is read like a free fn.
 #[test]
 fn round3_peels_are_read_against_the_signature() {
     let root = tmpdir("peel");
     nats_src(&root.join("async-nats"), "0.50.0",
         "pub fn fallible(c: u8) -> Result<Context, ()> { Ok(Context::make(c)) }\n\
+         impl context::Context { pub fn open(c: u8) -> Self { Context::make(c) } }\n\
          pub fn maybe(c: u8) -> Option<Context> { Some(Context::make(c)) }\n\
          pub async fn open_ctx(c: u8) -> Result<Context, ()> { Ok(Context::make(c)) }\n");
     let app = consumer(&root, "peelapp", true, false,
         "use async_nats::jetstream;\n\
          pub async fn p_try(c: u8) -> Result<u8, ()> { let js = jetstream::fallible(c)?; Ok(js.query_account().await) }\n\
          pub async fn p_unwrap_chain(s: &jetstream::stream::Stream) -> u64 { let b = s.direct_get_builder().sequence(1); b.send().await }\n\
+         pub async fn p_unwrap(c: u8) -> u8 { let js = jetstream::maybe(c).unwrap(); js.query_account().await }\n\
+         pub async fn p_expect_inline(c: u8) -> u8 { jetstream::fallible(c).expect(\"x\").query_account().await }\n\
+         pub async fn p_assoc(c: u8) -> u8 { let js = jetstream::context::Context::open(c); js.query_account().await }\n\
          pub async fn p_await_try(c: u8) -> Result<u8, ()> { let js = jetstream::open_ctx(c).await?; Ok(js.query_account().await) }\n\
          pub fn n_unpeeled(c: u8) -> bool { let r = jetstream::fallible(c); r.is_ok() }\n\
          pub async fn n_no_await(c: u8) -> bool { let f = jetstream::open_ctx(c); drop(f); true }\n");
     let (rows, _) = scan(&app, &root.join("cargo-home"));
-    for f in ["p_try", "p_await_try", "p_unwrap_chain"] {
+    for f in ["p_try", "p_await_try", "p_unwrap_chain", "p_unwrap", "p_expect_inline", "p_assoc"] {
         assert!(net(&rows, f), "`{f}`: the peeled value must type to the dependency's Context: {:?}", rows.get(f));
     }
     for f in ["n_unpeeled", "n_no_await"] {
         assert!(!net(&rows, f), "`{f}` was charged: {:?}", rows.get(f));
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SOUNDNESS R1587 — the CHAINED arm is unchanged. The `.unwrap()` on the factory's value is itself an `<untyped>` marker
+/// (`maybe::unwrap`), whose chained `returns` lookup misses, so the chained caller already DISCLOSES; the new peeled
+/// provenance adds a second marker that discloses the same reason. Pinned: the chained report is byte-identical with and
+/// without R1587, while the unchained lock-pinned arm now types the call (`round3_peels_are_read_against_the_signature`).
+#[test]
+fn r1587_the_chained_arm_already_discloses_and_is_unchanged() {
+    let root = tmpdir("r1587ch");
+    nats_src(&root.join("async-nats"), "0.50.0", "pub fn maybe(c: u8) -> Option<Context> { Some(Context::make(c)) }\n");
+    let dep_out = root.join("depreports");
+    let st = Command::new(bin()).arg(root.join("async-nats").to_string_lossy().as_ref()).arg("--out")
+        .arg(dep_out.join("r").to_string_lossy().as_ref()).env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG")
+        .env_remove("CANDOR_POLICY").output().expect("scan dep");
+    assert!(st.status.code().is_some_and(|c| c == 0 || c == 1), "{}", String::from_utf8_lossy(&st.stderr));
+    let app = consumer(&root, "chapp", true, false,
+        "pub async fn f_peel(c: u8) -> u8 { let js = async_nats::jetstream::maybe(c).unwrap(); js.query_account().await }\n\
+         pub async fn f_inline(c: u8) -> u8 { async_nats::jetstream::maybe(c).expect(\"x\").query_account().await }\n");
+    let run = |off: bool| -> Vec<u8> {
+        let mut cmd = Command::new(bin());
+        cmd.arg(app.to_string_lossy().as_ref()).arg("--json").env("CANDOR_DEPS", &dep_out)
+            .env("CARGO_HOME", root.join("cargo-home")).env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY")
+            .env_remove("CANDOR_R1587_OFF");
+        if off {
+            cmd.env("CANDOR_R1587_OFF", "1");
+        }
+        cmd.output().unwrap().stdout
+    };
+    let on = run(false);
+    let v: serde_json::Value = serde_json::from_slice(&on).unwrap();
+    for f in ["f_peel", "f_inline"] {
+        let r = v["functions"].as_array().unwrap().iter().find(|x| x["fn"] == f).unwrap_or_else(|| panic!("{f} ABSENT chained: {v:#}"));
+        assert!(r["unknownWhy"].as_array().is_some_and(|w| w.iter().any(|x| x == "dispatch:untyped cross-package receiver")), "{r:#}");
+    }
+    assert_eq!(on, run(true), "the chained report must be byte-identical with and without R1587");
     let _ = std::fs::remove_dir_all(&root);
 }

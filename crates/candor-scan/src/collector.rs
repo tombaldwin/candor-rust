@@ -4337,6 +4337,37 @@ impl<'a> CallCollector<'a> {
         Some(out)
     }
 
+    /// SOUNDNESS R1587 — `<factory path>::<peeled>` when `expr` is a dependency factory call followed ONLY by
+    /// `unwrap`/`expect` (and `?`/`.await`) — at least one `unwrap`/`expect` — the shape that recorded no provenance.
+    fn r1587_peeled_factory(&self, expr: &syn::Expr) -> Option<String> {
+        if std::env::var_os("CANDOR_R1587_OFF").is_some() {
+            return None;
+        }
+        let mut cur = expr;
+        let mut peeled = false;
+        loop {
+            match cur {
+                syn::Expr::Paren(p) => cur = &p.expr,
+                syn::Expr::Group(g) => cur = &g.expr,
+                syn::Expr::Try(t) => cur = &t.expr,
+                syn::Expr::Await(a) => cur = &a.base,
+                syn::Expr::MethodCall(m) if (m.method == "unwrap" || m.method == "expect") && m.turbofish.is_none() => {
+                    peeled = true;
+                    cur = &m.receiver;
+                }
+                syn::Expr::Call(c) if peeled => {
+                    let syn::Expr::Path(p) = &*c.func else { return None };
+                    let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
+                    if !full.contains("::") || full.starts_with("::") || self.type_of(cur).is_some() {
+                        return None;
+                    }
+                    return Some(format!("{full}::{}", crate::lazy::PEELED_SEG));
+                }
+                _ => return None,
+            }
+        }
+    }
+
     fn dep_method_provenance(&self, expr: &syn::Expr) -> Option<String> {
         let syn::Expr::MethodCall(m) = peel_recv(expr) else { return None };
         let mut steps = vec![m.method.to_string()];
@@ -11638,6 +11669,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     _ => None,
                 },
+                // SOUNDNESS R1587 — `dep::f(c).unwrap().m()`: the peeled factory value as the receiver.
+                syn::Expr::MethodCall(_) => self
+                    .r1587_peeled_factory(&node.receiver)
+                    .map(|full| r1578_join(&full, self.r1578_prov(&node.receiver).as_deref())),
                 _ => None,
             },
         }
@@ -14494,6 +14529,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                                 let pv = self.with_pre_bindings(&pre_bindings, |s| s.r1578_prov(&init.expr));
                                 self.dep_bound_vars.insert(id.ident.to_string(), r1578_join(&prov, pv.as_deref()));
+                            } else if let Some(full) =
+                                self.with_pre_bindings(&pre_bindings, |s| s.r1587_peeled_factory(&init.expr))
+                            {
+                                // SOUNDNESS R1587 — `let js = dep::f(c).unwrap();`: the factory's value, PEELED. It recorded
+                                // nothing, so `js.m()` formed no marker in EITHER arm and the caller read ABSENT.
+                                let pv = self.with_pre_bindings(&pre_bindings, |s| s.r1578_prov(&init.expr));
+                                self.dep_bound_vars.insert(id.ident.to_string(), r1578_join(&full, pv.as_deref()));
                             } else if self.with_pre_bindings(&pre_bindings, |s| s.is_provably_str(&init.expr)) {
                                 // SOUNDNESS R963 — A PROVABLY-STRING VALUE TYPES ITS NAME. `let address =
                                 // format!("{h}:80"); address.to_socket_addrs()` left `address` untyped, so the

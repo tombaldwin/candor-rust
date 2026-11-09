@@ -2241,7 +2241,8 @@ impl DepSigs {
 
     /// SOUNDNESS R1578 — what a dependency callee RETURNS, read from its written signature in the lock-pinned source
     /// (`lock_source`, or nothing). `method` `None`: the callee is a FREE fn, `callee` its path after the crate (only the
-    /// free fns of the module that path names). `method` `Some((m, form))`: the INHERENT method `m` of the type `callee`
+    /// free fns of the module that path names) — or, when the segment before the leaf is a type, an ASSOCIATED fn
+    /// (`Type::f`, round 4: an inherent item with no receiver; a path call has no method probe). `method` `Some((m, form))`: the INHERENT method `m` of the type `callee`
     /// names, called on a receiver of `form` (`o` owned, `r` `&`, `m` `&mut`) — typed only where Rust's method probe
     /// provably reaches that inherent before any trait method in scope at the consumer (R1200): an inherent wins at the
     /// FIRST probe step only if its receiver is exactly the receiver expression's type, so `o` needs `self`, `r` needs
@@ -2271,14 +2272,16 @@ impl DepSigs {
             self.say("ret", alias, callee, 0, "nolock");
             return None;
         };
+        // `need`: `None` a free fn; `Some(3)` an ASSOCIATED fn (`Type::f(..)`, no receiver — a path call has no method
+        // probe: the type's inherent item is the one it names); `Some(0..=2)` a method on a receiver of that form.
         let (path, want_mod, need): (String, Option<String>, Option<u8>) = match method {
             None => {
                 let segs: Vec<&str> = callee.split("::").collect();
                 if segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]) {
-                    self.say("ret", alias, callee, 0, "method-as-fn");
-                    return None;
+                    (callee.to_string(), None, Some(3))
+                } else {
+                    (callee.to_string(), Some(segs[..segs.len() - 1].join("::")), None)
                 }
-                (callee.to_string(), Some(segs[..segs.len() - 1].join("::")), None)
             }
             Some((m, form)) => {
                 let need = match form {
@@ -2306,11 +2309,13 @@ impl DepSigs {
                     }
                 }
                 Some(k) => {
-                    // only the type's INHERENT methods, and only with the receiver the probe reaches first
+                    // only the type's INHERENT items: for a method, only with the receiver the probe reaches first; for an
+                    // associated fn, only one that takes no receiver
                     if !matches!(c.site, Site::Inherent(Some(_))) {
                         return Err(());
                     }
-                    if c.recv != Some(k) {
+                    let want = if k == 3 { None } else { Some(k) };
+                    if c.recv != want {
                         return Ok(None);
                     }
                 }
