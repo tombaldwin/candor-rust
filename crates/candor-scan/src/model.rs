@@ -102,6 +102,13 @@ pub(crate) struct Call {
     /// only to take the claimant whose qual EQUALS it (`scan::exact_ty_target`). `None` everywhere else.
     #[serde(rename = "xq", default, skip_serializing_if = "Option::is_none")]
     pub(crate) exact_ty: Option<String>,
+    /// SOUNDNESS R1578 (round 3) — on an `<untyped>` receiver marker ONLY: the value's full provenance as the source wrote
+    /// it, `<base>|<step>|..`, where `<base>` is `F:<factory path>` (a dependency free fn's call) or `T:<type>:<form>`
+    /// (a receiver the consumer typed; form `o` owned, `r` `&`, `m` `&mut`, `?` unknown), and each step, innermost first,
+    /// is `m:<method>`, `u` (`unwrap`/`expect`), `?` (a `?`) or `a` (an `.await`). The marker's PATH is unchanged — every
+    /// chained consumer reads exactly what it read before — and only `scan::r1578_type` reads this. `None` everywhere else.
+    #[serde(rename = "pv", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prov: Option<String>,
 }
 
 /// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,

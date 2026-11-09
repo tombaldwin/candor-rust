@@ -405,20 +405,26 @@
         };
         // A SUFFIX-matched rule (reqwest's Net classification keys on the receiver type + a terminal
         // verb) through a renamed dependency.
-        let aliased = build(
-            "htclient = { version = \"0.11\", package = \"reqwest\" }",
-            "pub fn fetch(u: &str) -> String { htclient::blocking::get(u).unwrap().text().unwrap() }\n",
-        );
-        assert_eq!(effs(fn_entry(&aliased, "fetch")), vec!["Net".to_string()],
-            "a renamed reqwest call must classify Net exactly like the unaliased call — got:\n{aliased:#}");
-        assert!(fn_entry(&aliased, "fetch").get("invisible").is_none(),
-            "a correctly-classified renamed call must not ALSO carry the uncalibrated-floor `invisible` \
-             qualifier — that's reserved for calls classify() genuinely can't resolve:\n{aliased:#}");
-        // The identical call, unaliased — proves the rename is the only variable and the two must agree.
-        let unaliased = build(
-            "reqwest = { version = \"0.11\" }",
-            "pub fn fetch(u: &str) -> String { reqwest::blocking::get(u).unwrap().text().unwrap() }\n",
-        );
+        // `fetch_only` makes ONE call, the classified one; `fetch` adds `.text()` on its untyped value. With the R1580 floor
+        // OFF (the default since round 6) neither carries a floor qualifier, and the renamed and unaliased reports agree
+        // byte for byte — which needs SOUNDNESS R1591's fix (coverage keyed on the REAL package). The floor's half — the
+        // unkeyed `.text()` IS disclosed under `CANDOR_R1580=1`, in both spellings — is pinned in
+        // `tests/r1578_holes.rs::r1580_optin_discloses_the_unkeyed_call_in_both_spellings`.
+        let src = |c: &str| format!(
+            "pub fn fetch_only(u: &str) -> usize {{ let _ = {c}::blocking::get(u).unwrap(); 0 }}\n\
+             pub fn fetch(u: &str) -> String {{ {c}::blocking::get(u).unwrap().text().unwrap() }}\n");
+        let aliased = build("htclient = { version = \"0.11\", package = \"reqwest\" }", &src("htclient"));
+        let unaliased = build("reqwest = { version = \"0.11\" }", &src("reqwest"));
+        for (arm, v) in [("aliased", &aliased), ("unaliased", &unaliased)] {
+            for f in ["fetch_only", "fetch"] {
+                let e = fn_entry(v, f);
+                assert_eq!(effs(e), vec!["Net".to_string()],
+                    "{arm}: a renamed reqwest call must classify Net exactly like the unaliased call — got:\n{v:#}");
+                assert!(e.get("invisible").is_none(),
+                    "{arm}: a correctly-classified renamed call must not ALSO carry the uncalibrated-floor `invisible` \
+                     qualifier — that's reserved for calls classify() genuinely can't resolve:\n{v:#}");
+            }
+        }
         assert_eq!(aliased["functions"], unaliased["functions"],
             "renamed and unaliased reports must be byte-identical in their effect fields:\naliased:\
              {aliased:#}\nunaliased:{unaliased:#}");
@@ -18483,7 +18489,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev150/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev152/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

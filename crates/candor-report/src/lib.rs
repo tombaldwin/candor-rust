@@ -527,6 +527,11 @@ pub struct Report {
     /// let `interfaceUnion` ride gated).
     #[serde(rename = "typeSurface", default, skip_serializing_if = "Option::is_none")]
     pub type_surface: Option<TypeSurface>,
+    /// ⟨proposed: dependencySources⟩ SOUNDNESS R1578 — the dependency SOURCES this scan read to type a value its own code
+    /// could not (an unchained dependency's return), so a charge that depends on them can be reproduced. Omitted when
+    /// none was read: a report that read nothing is byte-identical to a pre-rung one.
+    #[serde(rename = "dependencySources", default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_sources: Vec<DependencySource>,
     /// ⟨0.27⟩ SPEC §2.1 `resolves` — the OPTIONAL per-function refinement surfaces this producer actually
     /// computes. Without it the absence of such a field is overloaded between "does not compute this" and
     /// "computed and could not determine it", and a consumer cannot read the omission at all.
@@ -584,6 +589,18 @@ pub struct Report {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ScannedUnder {
     pub deny: Vec<String>,
+}
+
+/// ⟨proposed: dependencySources⟩ One dependency source a scan read to type a value (SOUNDNESS R1578). Every element is a
+/// source the project's own lockfile PINNED and that was present on disk: `package` and `version` as the lock names them,
+/// `origin` `"registry"` (the lock's registry source, read from the local registry cache) or `"path"` (a path dependency),
+/// and `typed` — how many call sites in this report were typed through it (>= 1: a source read and never used is not listed).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DependencySource {
+    pub package: String,
+    pub version: String,
+    pub origin: String,
+    pub typed: u32,
 }
 
 /// ⟨proposed⟩ candor-spec/DEP-RECEIVER-TYPING-DESIGN.md, half 2.
@@ -911,6 +928,26 @@ pub fn to_packaged_report_json_typed(
     scanned_under: Option<&ScannedUnder>,
     net_partners: Option<&NetPartners>,
 ) -> serde_json::Result<String> {
+    to_packaged_report_json_typed_src(candor, package, functions, coverage, unanalyzed, analyzed, type_surface, excluded,
+        out_of_scope, scanned_under, net_partners, &[])
+}
+
+/// As [`to_packaged_report_json_typed`], additionally carrying `dependencySources` (omitted when empty).
+#[allow(clippy::too_many_arguments)]
+pub fn to_packaged_report_json_typed_src(
+    candor: &ReportMeta,
+    package: &str,
+    functions: &[ReportEntry],
+    coverage: Option<&Coverage>,
+    unanalyzed: &[UnanalyzedUnit],
+    analyzed: Option<&Analyzed>,
+    type_surface: Option<&TypeSurface>,
+    excluded: &[ExcludedClass],
+    out_of_scope: Option<&[OutOfScopeFinding]>,
+    scanned_under: Option<&ScannedUnder>,
+    net_partners: Option<&NetPartners>,
+    dependency_sources: &[DependencySource],
+) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
         candor: &'a ReportMeta,
@@ -924,6 +961,8 @@ pub fn to_packaged_report_json_typed(
         unanalyzed: &'a [UnanalyzedUnit],
         #[serde(rename = "typeSurface", skip_serializing_if = "Option::is_none")]
         type_surface: Option<&'a TypeSurface>,
+        #[serde(rename = "dependencySources", skip_serializing_if = "<[_]>::is_empty")]
+        dependency_sources: &'a [DependencySource],
         /// ⟨0.27⟩ SPEC §2.1 — the optional refinement surfaces this producer computes. Listed because
         /// candor-scan resolves `fs` read/write kinds; without the declaration a consumer cannot tell
         /// an omitted `fs` ("reached, kind undetermined") from an engine that never computes kinds.
@@ -957,7 +996,7 @@ pub fn to_packaged_report_json_typed(
     let resolves = if type_surface.is_some() { RESOLVES_TYPED } else { RESOLVES };
     serde_json::to_string_pretty(&Out {
         candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, scanned_under,
-        net_partners, type_surface: ts, resolves, functions,
+        net_partners, type_surface: ts, dependency_sources, resolves, functions,
     })
 }
 
@@ -2279,7 +2318,7 @@ mod tests {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
             coverage: None,
             unanalyzed: vec![],
-            type_surface: None,
+            type_surface: None, dependency_sources: Vec::new(),
             resolves: vec![],
             excluded: vec![],
             out_of_scope: None,

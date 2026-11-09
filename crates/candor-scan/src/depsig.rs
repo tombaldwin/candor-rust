@@ -197,6 +197,14 @@ struct Cand<'a> {
     inputs: Vec<&'a syn::FnArg>,
     body: Option<&'a syn::Block>,
     site: Site,
+    /// SOUNDNESS R1578 — the written return type (`DepSigs::return_type`), the module the definition sits in (`None` when
+    /// the file's module cannot be derived) and whether it sits inside a body (reachable by no path)
+    output: &'a syn::ReturnType,
+    module: Option<String>,
+    nested: bool,
+    /// the receiver: `None` none, `Some(0)` `self`, `Some(1)` `&self`, `Some(2)` `&mut self`; and whether the fn is `async`
+    recv: Option<u8>,
+    is_async: bool,
 }
 
 /// SOUNDNESS R1192 — what one `macro_rules!` body can define, read from its tokens: the fixed fn names (`fn name`), whether
@@ -427,6 +435,15 @@ struct SrcIndex {
     tainted: HashSet<String>,
     /// REVIEW7 D2 — `has_unseen_items`, computed once.
     unseen: std::cell::OnceCell<bool>,
+    /// SOUNDNESS R1578 — every nominal type declaration's leaf -> the module paths declaring it (`None` when the file's
+    /// module path cannot be derived), and whether any `#[path]` attribute makes the file -> module mapping unreliable
+    type_decls: HashMap<String, Vec<Option<String>>>,
+    path_attr: bool,
+    file_mods: Vec<Option<String>>,
+    /// SOUNDNESS R1578 (round 2) — per module, the leaves a `use` binds from outside the crate, and the modules an external
+    /// `use` glob fills: a written return `Client` there may be ANOTHER crate's `Client`
+    ext_use: HashMap<Option<String>, HashMap<String, String>>,
+    ext_glob: HashSet<Option<String>>,
 }
 
 /// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
@@ -881,6 +898,7 @@ impl SrcIndex {
 
     fn build(src: &Path) -> Option<SrcIndex> {
         let mut files = Vec::new();
+        let mut file_mods: Vec<Option<String>> = Vec::new();
         let mut unparsed = Vec::new();
         let walk = walkdir::WalkDir::new(src).into_iter().filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
@@ -890,7 +908,19 @@ impl SrcIndex {
             if e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rs") {
                 let Ok(text) = std::fs::read_to_string(e.path()) else { return None };
                 match syn::parse_file(&text) {
-                    Ok(f) => files.push(f),
+                    Ok(f) => {
+                        // SOUNDNESS R1578 — the module a file holds, from the conventional layout under `src/`
+                        file_mods.push(e.path().strip_prefix(src.join("src")).ok().map(|r| {
+                            let mut segs: Vec<String> = r.iter().map(|c| c.to_string_lossy().to_string()).collect();
+                            let last = segs.pop().unwrap_or_default();
+                            let stem = last.trim_end_matches(".rs").to_string();
+                            if !(segs.is_empty() && (stem == "lib" || stem == "main")) && stem != "mod" {
+                                segs.push(stem);
+                            }
+                            segs.join("::")
+                        }));
+                        files.push(f)
+                    }
                     Err(_) => {
                         let mut w = HashSet::new();
                         lit_words(&text, &mut w);
@@ -1073,7 +1103,108 @@ impl SrcIndex {
             aliases.entry(a.clone()).or_default().insert(b.clone());
             aliases.entry(b).or_default().insert(a);
         }
+        // SOUNDNESS R1578 — nominal type declarations by leaf, with the declaring module.
+        struct Decls<'m> {
+            stack: Vec<String>,
+            base: Option<&'m str>,
+            out: HashMap<String, Vec<Option<String>>>,
+            path_attr: bool,
+            /// per module (`None` = not derivable): the leaves a `use` binds from OUTSIDE the crate, and whether a `use`
+            /// glob from outside the crate fills it
+            ext_use: HashMap<Option<String>, HashMap<String, String>>,
+            ext_glob: HashSet<Option<String>>,
+            external: &'m dyn Fn(&str) -> bool,
+        }
+        impl Decls<'_> {
+            fn module(&self) -> Option<String> {
+                self.base.map(|b| {
+                    let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
+                    v.extend(self.stack.iter().map(String::as_str));
+                    v.join("::")
+                })
+            }
+            fn uses(&mut self, t: &syn::UseTree, root: Option<&str>) {
+                match t {
+                    syn::UseTree::Path(p) => {
+                        let r = root.map(str::to_string).unwrap_or_else(|| p.ident.to_string());
+                        self.uses(&p.tree, Some(&r));
+                    }
+                    syn::UseTree::Name(n) => {
+                        if root.is_some_and(|r| (self.external)(r)) {
+                            self.ext_use.entry(self.module()).or_default().insert(n.ident.to_string(), root.unwrap_or_default().to_string());
+                        }
+                    }
+                    syn::UseTree::Rename(r) => {
+                        if root.is_some_and(|x| (self.external)(x)) {
+                            self.ext_use.entry(self.module()).or_default().insert(r.rename.to_string(), root.unwrap_or_default().to_string());
+                        }
+                    }
+                    syn::UseTree::Glob(_) => {
+                        // a std glob (`use std::io::prelude::*`) brings std names only — `place` reads those as std
+                        if root.is_some_and(|r| (self.external)(r) && !matches!(r, "std" | "core" | "alloc")) {
+                            self.ext_glob.insert(self.module());
+                        }
+                    }
+                    syn::UseTree::Group(g) => g.items.iter().for_each(|i| self.uses(i, root)),
+                }
+            }
+            fn put(&mut self, i: &syn::Ident) {
+                let m = self.base.map(|b| {
+                    let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
+                    v.extend(self.stack.iter().map(String::as_str));
+                    v.join("::")
+                });
+                self.out.entry(i.to_string()).or_default().push(m);
+            }
+        }
+        impl<'ast> Visit<'ast> for Decls<'_> {
+            fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
+                if i.attrs.iter().any(|a| a.path().is_ident("path")) {
+                    self.path_attr = true;
+                }
+                if i.content.is_some() {
+                    self.stack.push(i.ident.to_string());
+                    syn::visit::visit_item_mod(self, i);
+                    self.stack.pop();
+                }
+            }
+            fn visit_item_struct(&mut self, i: &'ast syn::ItemStruct) { self.put(&i.ident); }
+            fn visit_item_enum(&mut self, i: &'ast syn::ItemEnum) { self.put(&i.ident); }
+            fn visit_item_union(&mut self, i: &'ast syn::ItemUnion) { self.put(&i.ident); }
+            // an alias names another type: its leaf never maps to one declaration (`type Result<T> = ..`)
+            fn visit_item_type(&mut self, i: &'ast syn::ItemType) { self.out.entry(i.ident.to_string()).or_default().push(None); }
+            fn visit_item_trait(&mut self, i: &'ast syn::ItemTrait) { self.put(&i.ident); }
+            fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {} // an item inside a body is reachable by no path
+            fn visit_impl_item_fn(&mut self, _: &'ast syn::ImplItemFn) {}
+            fn visit_trait_item_fn(&mut self, _: &'ast syn::TraitItemFn) {}
+            fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+                self.uses(&u.tree, None);
+            }
+        }
+        let names = &facts.names;
+        let roots = &extern_roots;
+        let external = |r: &str| -> bool {
+            match r {
+                "crate" | "self" | "super" | "Self" => false,
+                r => roots.contains(r) || !names.contains(r),
+            }
+        };
+        let mut decls = Decls {
+            stack: Vec::new(), base: None, out: HashMap::new(), path_attr: false, ext_use: HashMap::new(),
+            ext_glob: HashSet::new(), external: &external,
+        };
+        for (f, m) in files.iter().zip(file_mods.iter()) {
+            decls.base = m.as_deref();
+            decls.stack.clear();
+            decls.visit_file(f);
+        }
+        let (type_decls, path_attr, ext_use, ext_glob) = (decls.out, decls.path_attr, decls.ext_use, decls.ext_glob);
         Some(SrcIndex {
+            type_decls,
+            path_attr,
+            ext_use,
+            ext_glob,
+            file_mods,
             files,
             unparsed,
             proc_macro,
@@ -1118,6 +1249,9 @@ struct Want {
     /// SOUNDNESS R1200 — the MODULE segments the path walks before the type / leaf (`inner::f` → `inner`): one brought in
     /// from outside the crate (`pub use other::inner`, `pub extern crate other as inner`) holds definitions not here
     mods: Vec<String>,
+    /// SOUNDNESS R1578 — reading a RETURN type: a known local `macro_rules!` invocation is judged on its IDENT tokens
+    /// only (a literal cannot become an identifier there; its definition is judged on its own)
+    typing: bool,
 }
 
 /// SOUNDNESS R1200 — does this item list (a file, or an inline module's body) itself bind one of `names` in the namespace
@@ -1165,6 +1299,9 @@ struct Collect<'a, 'i> {
     /// SOUNDNESS R1200 — the first module-level invocation of a FOREIGN macro (`macro_is_known`): it may define a free fn
     /// of any name, its own tokens naming none of them (`mmac::make_free!()`)
     foreign: Option<String>,
+    /// SOUNDNESS R1578 — the module of the file being walked and the inline modules inside it
+    base: Option<String>,
+    modstack: Vec<String>,
 }
 
 impl<'a, 'i> Collect<'a, 'i> {
@@ -1172,7 +1309,19 @@ impl<'a, 'i> Collect<'a, 'i> {
         if sig.ident == self.want.leaf.as_str() {
             let mut scope = self.stack.clone();
             scope.push(&sig.generics);
-            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site });
+            let module = self.base.as_ref().map(|b| {
+                let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b.as_str()] };
+                v.extend(self.modstack.iter().map(String::as_str));
+                v.join("::")
+            });
+            let recv = sig.receiver().map(|r| match (&r.reference, r.mutability.is_some(), &*r.ty) {
+                (Some(_), true, _) => 2,
+                (Some(_), false, _) => 1,
+                (None, _, syn::Type::Path(p)) if p.path.is_ident("Self") => 0,
+                (None, _, syn::Type::Reference(t)) => if t.mutability.is_some() { 2 } else { 1 },
+                _ => 9, // `self: Box<Self>` / `Pin<&mut Self>` …: no probe rule here
+            });
+            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site, output: &sig.output, module, nested: self.body > 0, recv, is_async: sig.asyncness.is_some() });
         }
     }
 
@@ -1187,8 +1336,24 @@ impl<'a, 'i> Collect<'a, 'i> {
     /// that impl's self type. A local `macro_rules!` is judged again at its definition.
     fn invocation(&mut self, mac: &syn::Macro, impl_self: Option<Option<&str>>) {
         let mut w = HashSet::new();
-        token_words(&mac.tokens, &mut w);
         let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let root = (mac.path.segments.len() > 1).then(|| mac.path.segments[0].ident.to_string());
+        if self.want.typing && macro_is_known(root.as_deref(), &name, &self.idx.macros, &self.idx.tainted) {
+            fn idents(ts: &proc_macro2::TokenStream, out: &mut HashSet<String>) {
+                for tt in ts.clone() {
+                    match tt {
+                        proc_macro2::TokenTree::Ident(i) => {
+                            out.insert(i.to_string());
+                        }
+                        proc_macro2::TokenTree::Group(g) => idents(&g.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            idents(&mac.tokens, &mut w);
+        } else {
+            token_words(&mac.tokens, &mut w);
+        }
         let mut f = FnNames::default();
         fn_names(&mac.tokens, &mut f);
         let tys = &self.want.tys;
@@ -1214,7 +1379,9 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
         match &m.content {
             Some((_, items)) => {
                 self.lists.push(items);
+                self.modstack.push(m.ident.to_string());
                 syn::visit::visit_item_mod(self, m);
+                self.modstack.pop();
                 self.lists.pop();
             }
             None => syn::visit::visit_item_mod(self, m),
@@ -1509,6 +1676,31 @@ pub(crate) struct DepSigs {
     tdecl: HashMap<(String, String, usize), Option<bool>>,
     /// R1351 — source trees over `TRAIT_SRC_CAP`, which `trait_declares` does not parse.
     too_big: HashMap<std::path::PathBuf, bool>,
+    /// SOUNDNESS R1578 — `return_type` answers, per (alias, callee).
+    rets: HashMap<(String, String), Option<DepRet>>,
+    /// set while `return_type` asks `judged` (`Want::typing`)
+    typing: bool,
+    /// SOUNDNESS R1578 (round 2, the owner's ruling) — while typing, the ONE source `judged` reads: the version the project's
+    /// Cargo.lock pins, present on disk (`lock_source`), never the semver union `source_dirs` falls back to
+    typing_dirs: Option<Vec<std::path::PathBuf>>,
+    /// per alias: the lock-pinned source (or `None` when there is none to read) — see `lock_source`
+    locked: HashMap<String, Option<DepSource>>,
+    /// the lock-pinned sources this scan READ to type a value, by package, with how many call sites each typed — the
+    /// report's `dependencySources`
+    pub(crate) consulted: std::collections::BTreeMap<String, DepSource>,
+}
+
+/// SOUNDNESS R1578 — one dependency source the scan read to type a value (the report's `dependencySources` element).
+#[derive(Clone, Debug)]
+pub(crate) struct DepSource {
+    pub(crate) package: String,
+    pub(crate) version: String,
+    /// `registry` (the lock's `registry+` source, read from `$CARGO_HOME/registry/src`) or `path` (a lock entry with no
+    /// `source`, read at the manifest's `path`)
+    pub(crate) origin: &'static str,
+    pub(crate) dir: std::path::PathBuf,
+    /// call sites this source typed
+    pub(crate) typed: u32,
 }
 
 /// SOUNDNESS R1351 — the CLOSED method lists of the std traits a package trait commonly names as a supertrait, and their
@@ -1741,7 +1933,11 @@ impl DepSigs {
         };
         let segs: Vec<&str> = callee.split("::").collect();
         let leaf = segs.last().copied().unwrap_or(callee).to_string();
-        let srcs = self.source_dirs(dir, alias, real);
+        let typing = self.typing;
+        let srcs = match &self.typing_dirs {
+            Some(d) => d.clone(),
+            None => self.source_dirs(dir, alias, real),
+        };
         if srcs.is_empty() {
             return (None, "nosrc".into());
         }
@@ -1755,7 +1951,7 @@ impl DepSigs {
                 idx.types.contains(*t) || t.chars().next().is_some_and(char::is_uppercase) || !idx.local_names.contains(*t)
             });
             let mods: Vec<String> = segs[..segs.len() - 1 - usize::from(ty_seg.is_some())].iter().map(|s| s.to_string()).collect();
-            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default(), mods };
+            let want = Want { leaf: leaf.clone(), tys: ty_seg.map(|t| idx.type_names(t)).unwrap_or_default(), mods, typing };
             for (text, w) in &idx.unparsed {
                 if w.contains(&want.leaf) || want.tys.iter().any(|t| w.contains(t)) || w.contains("macro_rules") || text.contains("::*") {
                     return (None, "parse".into());
@@ -1763,9 +1959,11 @@ impl DepSigs {
             }
             let mut c = Collect {
                 idx, want: &want, stack: Vec::new(), imp: Vec::new(), fns: Vec::new(), ctor: false, opaque: None,
-                lists: Vec::new(), body: 0, foreign: None,
+                lists: Vec::new(), body: 0, foreign: None, base: None, modstack: Vec::new(),
             };
-            for f in &idx.files {
+            for (i, f) in idx.files.iter().enumerate() {
+                c.base = idx.file_mods.get(i).cloned().flatten();
+                c.modstack.clear();
                 c.visit_file(f);
             }
             if let Some(why) = c.opaque {
@@ -1955,6 +2153,250 @@ impl DepSigs {
     /// parameter the body never mentions, a constructor); every doubt — an unknown bound, which may carry a conversion
     /// as a supertrait or an associated type, a receiver, `Self`, an unreadable source — is `None`. The same DENYLIST
     /// discipline as `allowed`, over the same candidates.
+    /// SOUNDNESS R1578 (round 2, owner's ruling 2026-11-09) — the dependency's source this scan may READ to type a value: the
+    /// version the project's own Cargo.lock (or its workspace root's) pins for `real`, and only when that source is on disk —
+    /// a `registry+` entry at `$CARGO_HOME/registry/src/<index>/<name>-<version>`, or a lock entry with no `source` (a path
+    /// dependency) at the manifest's `path`. No lock, two locked versions of the package, a `git+` source, or a pinned
+    /// version that is not checked out: `None`, and the value stays untyped exactly as before R1578. Never the semver union
+    /// `source_dirs` falls back to for narrowing: a charge must not depend on which other versions a machine happens to hold.
+    fn lock_source(&mut self, dir: &str, alias: &str, real: &str) -> Option<DepSource> {
+        if let Some(v) = self.locked.get(alias) {
+            return v.clone();
+        }
+        let norm = |s: &str| s.replace('-', "_");
+        let root = crate::deps::find_workspace_root(Path::new(dir));
+        let mut found: Option<DepSource> = None;
+        let mut lock_dirs = vec![Path::new(dir).to_path_buf()];
+        lock_dirs.extend(root.clone());
+        'l: for ld in lock_dirs {
+            let Ok(lock) = std::fs::read_to_string(ld.join("Cargo.lock")) else { continue };
+            let mut entries: Vec<(String, String, Option<String>)> = Vec::new();
+            let mut cur: Option<(String, String, Option<String>)> = None;
+            for line in lock.lines().map(str::trim) {
+                if line.starts_with('[') {
+                    entries.extend(cur.take());
+                    if line == "[[package]]" {
+                        cur = Some((String::new(), String::new(), None));
+                    }
+                } else if let Some(c) = cur.as_mut() {
+                    if let Some(v) = line.strip_prefix("name = ") {
+                        c.0 = v.trim_matches('"').to_string();
+                    } else if let Some(v) = line.strip_prefix("version = ") {
+                        c.1 = v.trim_matches('"').to_string();
+                    } else if let Some(v) = line.strip_prefix("source = ") {
+                        c.2 = Some(v.trim_matches('"').to_string());
+                    }
+                }
+            }
+            entries.extend(cur.take());
+            let mine: Vec<&(String, String, Option<String>)> = entries.iter().filter(|e| norm(&e.0) == real).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            if mine.len() != 1 {
+                break 'l; // two locked versions: which one this alias names is the manifest's to say, not ours to guess
+            }
+            let (name, version, source) = mine[0].clone();
+            found = match source.as_deref() {
+                Some(src) if src.starts_with("registry+") => crate::deps::dirs_cargo_registry_src()
+                    .iter()
+                    .map(|r| r.join(format!("{name}-{version}")))
+                    .find(|p| p.join("Cargo.toml").is_file())
+                    .map(|d| DepSource { package: name.clone(), version: version.clone(), origin: "registry", dir: d, typed: 0 }),
+                Some(_) => None, // git / other sources: not read
+                None => {
+                    // a path dependency: the manifest's `path`, whose own manifest must name the locked version
+                    let mut out = None;
+                    let mut manifests = vec![Path::new(dir).to_path_buf()];
+                    manifests.extend(root.clone());
+                    'm: for m in &manifests {
+                        let Ok(text) = std::fs::read_to_string(m.join("Cargo.toml")) else { continue };
+                        let Ok(doc) = text.parse::<toml::Table>() else { continue };
+                        for table in crate::deps::manifest_dependency_tables(&doc) {
+                            for (k, v) in table {
+                                if norm(k) != alias {
+                                    continue;
+                                }
+                                if let Some(p) = v.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+                                    let d = m.join(p);
+                                    let ver = std::fs::read_to_string(d.join("Cargo.toml")).ok()
+                                        .and_then(|t| t.parse::<toml::Table>().ok())
+                                        .and_then(|t| t.get("package")?.get("version")?.as_str().map(str::to_string));
+                                    if ver.as_deref() == Some(version.as_str()) {
+                                        out = Some(DepSource { package: name.clone(), version: version.clone(), origin: "path", dir: d, typed: 0 });
+                                    }
+                                    break 'm;
+                                }
+                            }
+                        }
+                    }
+                    out
+                }
+            };
+            break;
+        }
+        self.locked.insert(alias.to_string(), found.clone());
+        found
+    }
+
+    /// SOUNDNESS R1578 — what a dependency callee RETURNS, read from its written signature in the lock-pinned source
+    /// (`lock_source`, or nothing). `method` `None`: the callee is a FREE fn, `callee` its path after the crate (only the
+    /// free fns of the module that path names) — or, when the segment before the leaf is a type, an ASSOCIATED fn
+    /// (`Type::f`, round 4: an inherent item with no receiver; a path call has no method probe). `method` `Some((m, form))`: the INHERENT method `m` of the type `callee`
+    /// names, called on a receiver of `form` (`o` owned, `r` `&`, `m` `&mut`) — typed only where Rust's method probe
+    /// provably reaches that inherent before any trait method in scope at the consumer (R1200): an inherent wins at the
+    /// FIRST probe step only if its receiver is exactly the receiver expression's type, so `o` needs `self`, `r` needs
+    /// `&self`, `m` needs `&mut self`; any other pairing — or an unknown form — is a refusal.
+    ///
+    /// Every candidate must agree (`async`-ness, wrappers, type); the type is placed by `place` below. Every doubt is
+    /// `None` and the caller keeps today's behaviour.
+    pub(crate) fn ret_of(&mut self, dir: &str, alias: &str, real: &str, callee: &str, method: Option<(&str, char)>) -> Option<DepRet> {
+        let key = (alias.to_string(), format!("{callee}\u{3}{method:?}"));
+        if let Some(v) = self.rets.get(&key) {
+            return v.clone();
+        }
+        let v = self.ret_uncached(dir, alias, real, callee, method);
+        self.rets.insert(key, v.clone());
+        v
+    }
+
+    /// SOUNDNESS R1580 (round 5) — every type of the lock-pinned source that defines a method named `m` (in an inherent or a
+    /// trait `impl`), as `<module>::<Type>` quals; `Some(empty)` when the source defines no such method. `None` — "any type
+    /// may" — with no lock-pinned source, a file that does not parse, a macro whose tokens or body name `m` (it may define
+    /// one this reading cannot see), an `impl` whose self type is not a plain declared type, or a type it cannot place.
+    pub(crate) fn method_owners(&mut self, dir: &str, alias: &str, real: &str, m: &str) -> Option<Vec<String>> {
+        let src = self.lock_source(dir, alias, real)?;
+        let idx = self.index(&src.dir)?;
+        if !idx.unparsed.is_empty() || idx.macro_words.contains(m) || idx.macros.values().any(|f| f.fixed.contains(m) || f.metavar || f.computed) {
+            return None;
+        }
+        struct V<'a> { m: &'a str, leaves: Vec<Option<String>> }
+        impl<'ast> Visit<'ast> for V<'_> {
+            fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+                if i.items.iter().any(|it| matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == self.m)) {
+                    self.leaves.push(match &*i.self_ty {
+                        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
+                        _ => None,
+                    });
+                }
+                syn::visit::visit_item_impl(self, i);
+            }
+        }
+        let mut v = V { m, leaves: Vec::new() };
+        for f in &idx.files {
+            v.visit_file(f);
+        }
+        let mut out = Vec::new();
+        for l in v.leaves {
+            let l = l?;
+            let decl = idx.type_decls.get(&l)?;
+            if decl.len() != 1 || idx.path_attr {
+                return None;
+            }
+            let md = decl[0].clone()?;
+            out.push(if md.is_empty() { l } else { format!("{md}::{l}") });
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
+    /// Count one call site typed through `alias`'s source (`dependencySources[].typed`).
+    pub(crate) fn note_typed(&mut self, alias: &str) {
+        if let Some(Some(src)) = self.locked.get(alias) {
+            self.consulted.entry(src.package.clone()).or_insert_with(|| src.clone()).typed += 1;
+        }
+    }
+
+    fn ret_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str, method: Option<(&str, char)>) -> Option<DepRet> {
+        let Some(src) = self.lock_source(dir, alias, real) else {
+            self.say("ret", alias, callee, 0, "nolock");
+            return None;
+        };
+        // `need`: `None` a free fn; `Some(3)` an ASSOCIATED fn (`Type::f(..)`, no receiver — a path call has no method
+        // probe: the type's inherent item is the one it names); `Some(0..=2)` a method on a receiver of that form.
+        let (path, want_mod, need): (String, Option<String>, Option<u8>) = match method {
+            None => {
+                let segs: Vec<&str> = callee.split("::").collect();
+                if segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]) {
+                    (callee.to_string(), None, Some(3))
+                } else {
+                    (callee.to_string(), Some(segs[..segs.len() - 1].join("::")), None)
+                }
+            }
+            Some((m, form)) => {
+                let need = match form {
+                    'o' => 0,
+                    'r' => 1,
+                    'm' => 2,
+                    _ => {
+                        self.say("ret", alias, callee, 0, "form?");
+                        return None;
+                    }
+                };
+                (format!("{callee}::{m}"), None, Some(need))
+            }
+        };
+        self.typing = true;
+        self.typing_dirs = Some(vec![src.dir.clone()]);
+        let (v, why) = self.judged(dir, alias, real, &path, 0, |c: &Cand<'_>, p| {
+            if c.nested {
+                return Err(());
+            }
+            match need {
+                None => {
+                    if !matches!(c.site, Site::Free) || c.module != want_mod {
+                        return Err(());
+                    }
+                }
+                Some(k) => {
+                    // only the type's INHERENT items: for a method, only with the receiver the probe reaches first; for an
+                    // associated fn, only one that takes no receiver
+                    if !matches!(c.site, Site::Inherent(Some(_))) {
+                        return Err(());
+                    }
+                    let want = if k == 3 { None } else { Some(k) };
+                    if c.recv != want {
+                        return Ok(None);
+                    }
+                }
+            }
+            cand_returns(c, p)
+        });
+        self.typing = false;
+        self.typing_dirs = None;
+        let Some(set) = v else {
+            self.say("ret", alias, &path, 0, &why);
+            return None;
+        };
+        let parsed: Vec<Vec<&str>> = set.iter().map(|e| e.split('\u{1}').collect()).collect();
+        if parsed.iter().any(|p| p.len() != 4) {
+            return None;
+        }
+        // agreement on async-ness, wrappers and the written leaf
+        let sig: BTreeSet<(&str, &str, &str)> =
+            parsed.iter().map(|p| (p[0], p[2], p[3].rsplit("::").next().unwrap_or(p[3]))).collect();
+        if sig.len() != 1 {
+            self.say("ret", alias, &path, 0, &format!("union:{}", sig.len()));
+            return None;
+        }
+        let idx = self.index(&src.dir)?;
+        let mut placed: Option<RetTy> = None;
+        for p in &parsed {
+            let segs: Vec<&str> = p[3].split("::").collect();
+            let t = place(idx, p[1], &segs)?;
+            match &placed {
+                Some(x) if *x != t => return None,
+                _ => placed = Some(t),
+            }
+        }
+        let ty = placed?;
+        let (a, w, _) = sig.into_iter().next()?;
+        let r = DepRet { is_async: a == "a", wraps: w.chars().collect(), ty };
+        self.say("ret", alias, &path, 0, &format!("read:{r:?}"));
+        Some(r)
+    }
+
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
         let key = (alias.to_string(), callee.to_string(), pos);
         if let Some(v) = self.conv.get(&key) {
@@ -1965,6 +2407,112 @@ impl DepSigs {
         self.conv.insert(key, v.clone());
         v
     }
+}
+
+/// SOUNDNESS R1578 — `<a|->\u{1}<module>\u{1}<wrappers>\u{1}<written path>` for a candidate whose return is one plain OWNED
+/// nominal path, possibly inside `Result<..>` / `Option<..>` (the wrappers outermost first, `R` / `O`); `Self` is read as the
+/// impl's self type. `Ok(None)` for every other shape — a reference included, since a borrowed value is not the owned
+/// receiver a later step would assume, and a generic parameter, `impl`, `dyn`, a tuple.
+fn cand_returns(c: &Cand<'_>, _pos: usize) -> Result<Option<BTreeSet<String>>, ()> {
+    let syn::ReturnType::Type(_, ty) = c.output else { return Ok(None) };
+    let Some(m) = &c.module else { return Ok(None) };
+    let mut t: &syn::Type = ty;
+    let mut wraps = String::new();
+    let segs = loop {
+        match t {
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
+                let last = p.path.segments.last().ok_or(())?;
+                let leaf = last.ident.to_string();
+                if (leaf == "Result" || leaf == "Option") && wraps.len() < 4 {
+                    if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
+                            wraps.push(if leaf == "Result" { 'R' } else { 'O' });
+                            t = inner;
+                            continue;
+                        }
+                    }
+                    return Ok(None);
+                }
+                let mut v: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if v.last().is_some_and(|l| l == "Self") {
+                    if v.len() != 1 {
+                        return Ok(None); // `Self::Assoc`
+                    }
+                    match &c.site {
+                        Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => v = vec![t.clone()],
+                        _ => return Ok(None),
+                    }
+                }
+                break v;
+            }
+            _ => return Ok(None),
+        }
+    };
+    let leaf = segs.last().cloned().unwrap_or_default();
+    if generic_params(&c.scope).contains(&leaf) {
+        return Ok(None);
+    }
+    let a = if c.is_async { "a" } else { "-" };
+    Ok(Some(BTreeSet::from([format!("{a}\u{1}{m}\u{1}{wraps}\u{1}{}", segs.join("::"))])))
+}
+
+/// SOUNDNESS R1578 — what a dependency callee returns (`DepSigs::ret_of`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DepRet {
+    /// an `async fn`: the call is a future, and only `.await` yields the rest
+    pub(crate) is_async: bool,
+    /// `Result` / `Option` wrappers, outermost first (`R` / `O`)
+    pub(crate) wraps: Vec<char>,
+    pub(crate) ty: RetTy,
+}
+
+/// SOUNDNESS R1578 — the placed type: one the dependency declares (its crate-relative qual), or a std type (its leaf).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RetTy {
+    Dep(String),
+    Std(String),
+}
+
+/// SOUNDNESS R1578 — where a written return path, in module `module` of the dependency `idx`, names its type:
+///   * rooted at `std` / `core` / `alloc` -> `Std`; rooted at any other crate -> refused;
+///   * rooted inside the crate (`crate`/`self`/`super`/a local module) -> the leaf must be declared exactly once;
+///   * one segment: a `use` of that leaf from std/core/alloc in that module -> `Std`; from another crate, or a module an
+///     external glob fills -> refused; declared exactly once in the crate -> `Dep`; a std PRELUDE type -> `Std`;
+///   * a declaration must sit in a module the `src/` layout names, with no `#[path]` and no alias of the leaf.
+fn place(idx: &SrcIndex, module: &str, segs: &[&str]) -> Option<RetTy> {
+    let leaf = *segs.last()?;
+    let std_root = |r: &str| matches!(r, "std" | "core" | "alloc");
+    let declared = || -> Option<RetTy> {
+        match idx.type_decls.get(leaf) {
+            Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(leaf) => {
+                let m = d[0].clone()?;
+                Some(RetTy::Dep(if m.is_empty() { leaf.to_string() } else { format!("{m}::{leaf}") }))
+            }
+            _ => None,
+        }
+    };
+    if segs.len() >= 2 {
+        if std_root(segs[0]) {
+            return Some(RetTy::Std(leaf.to_string()));
+        }
+        if !matches!(segs[0], "crate" | "self" | "super") && idx.external_root(segs[0]) {
+            return None;
+        }
+        return declared();
+    }
+    let m = Some(module.to_string());
+    if let Some(root) = idx.ext_use.get(&m).and_then(|u| u.get(leaf)) {
+        return std_root(root).then(|| RetTy::Std(leaf.to_string()));
+    }
+    if idx.ext_glob.contains(&m) {
+        return None;
+    }
+    if idx.type_decls.contains_key(leaf) {
+        return declared();
+    }
+    matches!(leaf, "String" | "Vec" | "Box" | "Option" | "Result").then(|| RetTy::Std(leaf.to_string()))
 }
 
 /// SOUNDNESS R1186 — the conversion target a bound's type argument names: its outer nominal leaf, or `*` when it is

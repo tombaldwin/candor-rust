@@ -32,6 +32,11 @@ pub(crate) const CONSTRUCT_MARKER: &str = "<construct>";
 /// nothing — it exists so the engine DISCLOSES that it never formed a key, rather than to carry an
 /// effect across. See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md (half 1).
 pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
+/// SOUNDNESS R1587 — a provenance segment: the value is a dependency FACTORY's return peeled by `unwrap`/`expect`
+/// (`let js = dep::f(c).unwrap()`), so the callee path names no function whose return the value IS. A chained `returns`
+/// lookup on it misses by construction and the consumer discloses; only `scan::r1578_resolve` reads the peel, from
+/// `Call::prov`.
+pub(crate) const PEELED_SEG: &str = "<peeled>";
 
 /// SOUNDNESS R1136 — `cr::<extmethod>::leaf`: a method call on a std-typed receiver that no std method and no
 /// crate definition answers (`collector::note_dep_ext_method`), so it is an extension-trait method of a
