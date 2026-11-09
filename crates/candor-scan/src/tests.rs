@@ -405,30 +405,29 @@
         };
         // A SUFFIX-matched rule (reqwest's Net classification keys on the receiver type + a terminal
         // verb) through a renamed dependency.
-        // `fetch_only` makes ONE call, the classified one; `fetch` adds `.text()` on its untyped value. SOUNDNESS R1580
-        // (round 5): the two halves are pinned separately — the classified call draws no floor qualifier, and the
-        // unkeyed `.text()` (no lockfile, so R1578 cannot type the `Response`) IS disclosed.
+        // `fetch_only` makes ONE call, the classified one; `fetch` adds `.text()` on its untyped value. With the R1580 floor
+        // OFF (the default since round 6) neither carries a floor qualifier, and the renamed and unaliased reports agree
+        // byte for byte — which needs SOUNDNESS R1591's fix (coverage keyed on the REAL package). The floor's half — the
+        // unkeyed `.text()` IS disclosed under `CANDOR_R1580=1`, in both spellings — is pinned in
+        // `tests/r1578_holes.rs::r1580_optin_discloses_the_unkeyed_call_in_both_spellings`.
         let src = |c: &str| format!(
             "pub fn fetch_only(u: &str) -> usize {{ let _ = {c}::blocking::get(u).unwrap(); 0 }}\n\
              pub fn fetch(u: &str) -> String {{ {c}::blocking::get(u).unwrap().text().unwrap() }}\n");
         let aliased = build("htclient = { version = \"0.11\", package = \"reqwest\" }", &src("htclient"));
         let unaliased = build("reqwest = { version = \"0.11\" }", &src("reqwest"));
         for (arm, v) in [("aliased", &aliased), ("unaliased", &unaliased)] {
-            let only = fn_entry(v, "fetch_only");
-            assert_eq!(effs(only), vec!["Net".to_string()],
-                "{arm}: a renamed reqwest call must classify Net exactly like the unaliased call — got:\n{v:#}");
-            assert!(only.get("invisible").is_none() && !only["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"),
-                "{arm}: a correctly-classified call must not ALSO carry a floor qualifier — that is reserved for calls \
-                 classify() genuinely can't resolve:\n{v:#}");
-            // …and the call it genuinely can't resolve IS disclosed: `invisible` where the κ ledger counts the crate as
-            // uncovered, `Unknown` where it is covered (the alias spelling is the former: SOUNDNESS R1591's keying).
-            let both = fn_entry(v, "fetch");
-            assert!(effs(both).contains(&"Net".to_string()), "{arm}: {v:#}");
-            assert!(both.get("invisible").is_some() || both["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"),
-                "{arm}: the unkeyed `.text()` must be disclosed:\n{v:#}");
+            for f in ["fetch_only", "fetch"] {
+                let e = fn_entry(v, f);
+                assert_eq!(effs(e), vec!["Net".to_string()],
+                    "{arm}: a renamed reqwest call must classify Net exactly like the unaliased call — got:\n{v:#}");
+                assert!(e.get("invisible").is_none(),
+                    "{arm}: a correctly-classified renamed call must not ALSO carry the uncalibrated-floor `invisible` \
+                     qualifier — that's reserved for calls classify() genuinely can't resolve:\n{v:#}");
+            }
         }
-        assert_eq!(fn_entry(&aliased, "fetch_only"), fn_entry(&unaliased, "fetch_only"),
-            "renamed and unaliased must agree on the classified call:\naliased:{aliased:#}\nunaliased:{unaliased:#}");
+        assert_eq!(aliased["functions"], unaliased["functions"],
+            "renamed and unaliased reports must be byte-identical in their effect fields:\naliased:\
+             {aliased:#}\nunaliased:{unaliased:#}");
         // A FULL-EXACT-PATH rule (`git2`'s `path == "git2::Repository::clone"`, chosen specifically because
         // it cannot be satisfied by crate_name alone — it also requires the PATH's own leading segment to
         // read the real name, proving the fix rewrites the path, not just the crate_name argument).

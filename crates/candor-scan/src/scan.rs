@@ -1020,6 +1020,10 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) peek_excluded: bool,
 }
 
+/// SOUNDNESS R1591 — the calibration-list identifiers that are an EXTERN ALIAS, not a package name, with the package
+/// each stands for. The κ exemption is asked of the real package; an alias entry exempts only a rename to its package.
+const R1591_CALIBRATED_ALIASES: &[(&str, &str)] = &[("native_tls_crate", "native_tls")];
+
 /// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector records where an untyped
 /// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`, and since round 3 the full provenance in
 /// `Call::prov`), and that marker was consumed only for a CHAINED dependency. Unchained it reached nothing: the κ ledger
@@ -3378,20 +3382,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 lock_versions.get(real).map(String::as_str).unwrap_or("?")
             );
         }
-        let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
-            && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str())
+        // SOUNDNESS R1591 — every exemption below is asked of the REAL package (`real`, after `dep_renames`), never of the
+        // alias the source spells. Keyed on the alias, `reqwest = { package = "zz-uncalibrated-http" }` was exempted as if
+        // reviewed and an unruled `reqwest::f()` into the uncalibrated package read ABSENT — while the identical call
+        // spelled under its real name disclosed `invisible`. The classifier itself is already asked under `real`; the
+        // exemption now agrees with it, so `htclient = { package = "reqwest" }` reads covered exactly as `reqwest` does.
+        //
+        // ONE list entry is itself a rename identifier rather than a package: `native_tls_crate` — the extern alias
+        // reqwest and tungstenite give `native-tls`, under which the rules are written (classify lib.rs:79/:1342). Its
+        // exemption holds when the rename resolves to the package it stands for, and for no other package.
+        let calibrated = |n: &str| candor_classify::CALIBRATED_CRATES.contains(&n);
+        let alias_for_real = cr.as_str() != real
+            && calibrated(cr.as_str())
+            && R1591_CALIBRATED_ALIASES.iter().any(|(a, p)| *a == cr.as_str() && *p == real);
+        let fully_calibrated = (calibrated(real) || alias_for_real)
+            && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&real)
             && !beyond_review
             && !impostor;
         !covered
             && !fully_calibrated
-            && !(candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str()) && !impostor)
-            && !(candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p)) && !impostor)
+            && !(candor_classify::PATH_CALIBRATED_CRATES.contains(&real) && !impostor)
+            && !(candor_classify::CALIBRATED_PREFIXES.iter().any(|p| real.starts_with(p)) && !impostor)
             // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
             // answer rather than a gap. A separate list from the calibrated ones because those must
             // carry a live rule (`calibrated_crates_are_live`) and a pure crate has none — see the
             // evidence requirement on `REVIEWED_PURE_CRATES`. Same impostor carve-out: a reviewed-
             // pure verdict is about the real crate too.
-            && !(candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str()) && !impostor)
+            && !(candor_classify::REVIEWED_PURE_CRATES.contains(&real) && !impostor)
     };
     let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
     for f in &fns {
@@ -4199,8 +4216,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if std_call && std::env::var_os("CANDOR_R1578_INSTR").is_some() {
                     eprintln!("R1580STD\t{}\t{}", f.qual, c.path); // §E1 — a floor SUPPRESSED as std's own call
                 }
+                // OPT-IN (round 6): on the 1,510-crate corpus a 40-site sample of this floor read S 0 / R 4 / F 36 — its
+                // reach there is almost all false uncertainty — so it runs only under `CANDOR_R1580=1`. SOUNDNESS R1580
+                // stays OPEN; the default behaviour is the pre-floor one.
                 if !new_prov && !std_call && deps.contains(cr) && !deps_idx.crates.contains(cr_real)
-                    && std::env::var_os("CANDOR_R1580_OFF").is_none()
+                    && std::env::var_os("CANDOR_R1580").is_some_and(|v| v == "1")
                 {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());

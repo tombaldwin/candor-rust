@@ -266,3 +266,64 @@ fn r1587_the_chained_arm_already_discloses_and_is_unchanged() {
     assert_eq!(on, run(true), "the chained report must be byte-identical with and without R1587");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A one-crate app with `deps` as its `[dependencies]` body and `src` as its lib, scanned unchained with an empty
+/// `CARGO_HOME`; `optin` sets `CANDOR_R1580=1`.
+fn app_scan(root: &Path, name: &str, deps: &str, src: &str, optin: bool) -> serde_json::Value {
+    let d = root.join(name);
+    write(&d.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\n{deps}\n"));
+    write(&d.join("src/lib.rs"), src);
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref()).arg("--json").env("CARGO_HOME", root.join("cargo-home"))
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1580");
+    if optin {
+        cmd.env("CANDOR_R1580", "1");
+    }
+    serde_json::from_slice(&cmd.output().expect("scan").stdout).expect("report json")
+}
+
+fn row<'a>(v: &'a serde_json::Value, f: &str) -> Option<&'a serde_json::Value> {
+    v["functions"].as_array().unwrap().iter().find(|x| x["fn"] == f)
+}
+
+/// SOUNDNESS R1591 — the κ ledger's coverage exemption is asked of the REAL package, never only of the alias. A registry
+/// dependency renamed TO a calibrated crate's name (`reqwest = { package = "zz-uncalibrated-http" }`) was exempted as if
+/// reviewed and its unruled call read ABSENT, while the real-name spelling disclosed `invisible`. The reverse rename
+/// (`htclient = { package = "reqwest" }`) now reads covered exactly as `reqwest` itself does — the classifier's own claim.
+#[test]
+fn r1591_coverage_is_keyed_on_the_real_package_not_the_alias() {
+    let root = tmpdir("r1591");
+    let alias = app_scan(&root, "alias", "reqwest = { version = \"1\", package = \"zz-uncalibrated-http\" }",
+        "pub fn f() -> u8 { reqwest::fetch_thing() }\n", false);
+    let real = app_scan(&root, "real", "zz-uncalibrated-http = \"1\"", "pub fn f() -> u8 { zz_uncalibrated_http::fetch_thing() }\n", false);
+    let revalias = app_scan(&root, "revalias", "htclient = { version = \"0.11\", package = \"reqwest\" }",
+        "pub fn f() -> u8 { htclient::some_unruled_fn() }\n", false);
+    let realrq = app_scan(&root, "realrq", "reqwest = \"0.11\"", "pub fn f() -> u8 { reqwest::some_unruled_fn() }\n", false);
+    let inv = |v: &serde_json::Value| row(v, "f").and_then(|r| r["invisible"].as_array().map(|a| a.len())).unwrap_or(0);
+    assert_eq!(inv(&alias), 1, "the alias of an UNcalibrated package must disclose like its real name: {alias:#}");
+    assert_eq!(inv(&real), 1, "{real:#}");
+    assert!(row(&realrq, "f").is_none(), "a calibrated crate's unruled call stays covered: {realrq:#}");
+    assert!(row(&revalias, "f").is_none(), "a renamed calibrated crate reads covered like its real name: {revalias:#}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SOUNDNESS R1580 (opt-in) — the floor's half of `renamed_dependency_calls_classify_under_the_real_package_name`: with
+/// `CANDOR_R1580=1` the unkeyed `.text()` on the untyped `get(u).unwrap()` IS disclosed, identically in both spellings
+/// (R1591 makes the alias read covered, so both get the covered crate's `Unknown`); by default it is not.
+#[test]
+fn r1580_optin_discloses_the_unkeyed_call_in_both_spellings() {
+    let root = tmpdir("r1580optin");
+    let src = |c: &str| format!("pub fn fetch(u: &str) -> String {{ {c}::blocking::get(u).unwrap().text().unwrap() }}\n");
+    for optin in [true, false] {
+        let a = app_scan(&root, "al", "htclient = { version = \"0.11\", package = \"reqwest\" }", &src("htclient"), optin);
+        let u = app_scan(&root, "un", "reqwest = { version = \"0.11\" }", &src("reqwest"), optin);
+        for (arm, v) in [("aliased", &a), ("unaliased", &u)] {
+            let r = row(v, "fetch").unwrap_or_else(|| panic!("{arm}: fetch ABSENT: {v:#}"));
+            let unk = r["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown");
+            assert_eq!(unk, optin, "{arm} (opt-in {optin}): {r:#}");
+        }
+        let key = |v: &serde_json::Value| row(v, "fetch").map(|r| (r["inferred"].clone(), r["invisible"].clone(), r["unknownWhy"].clone()));
+        assert_eq!(key(&a), key(&u), "the two spellings must agree (opt-in {optin})");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

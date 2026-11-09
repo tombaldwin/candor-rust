@@ -174,7 +174,7 @@ fn a_same_named_free_fn_in_another_module_is_never_the_one_the_path_names() {
 /// disclose `Unknown` (`dispatch:untyped cross-package receiver`). The callee name exists in no real `async-nats`, so no
 /// registry checkout this machine holds can type it: the floor is reached whatever `~/.cargo/registry` contains. A `path`
 /// dependency wearing the classified name is NOT covered (an impostor), so there the ledger speaks (`invisible`) and no
-/// `Unknown` is added beside it. `CANDOR_R1580_OFF=1` restores the published silence (ABSENT).
+/// `Unknown` is added beside it. The floor is OPT-IN (`CANDOR_R1580=1`, round 6); the default is the published silence (ABSENT), pinned below.
 /// `fn -> (inferred, invisible, unknownWhy)`.
 type Row3 = (Vec<String>, Vec<String>, Vec<String>);
 
@@ -186,10 +186,10 @@ fn an_untypable_dependency_value_discloses_in_the_unchained_arm() {
                pub async fn f_floor(c: u8) -> u8 { let js = jetstream::r1580_no_such_factory(c); js.query_account().await }\n";
     let rows = |dir: &Path, off: bool| -> std::collections::HashMap<String, Row3> {
         let mut cmd = Command::new(bin());
-        cmd.arg(dir.to_string_lossy().as_ref()).arg("--json").env_remove("CANDOR_DEPS").env_remove("CANDOR_R1580_OFF")
+        cmd.arg(dir.to_string_lossy().as_ref()).arg("--json").env_remove("CANDOR_DEPS").env_remove("CANDOR_R1580")
             .env_remove("CANDOR_R1578_OFF").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY");
-        if off {
-            cmd.env("CANDOR_R1580_OFF", "1");
+        if !off {
+            cmd.env("CANDOR_R1580", "1");
         }
         let out = cmd.output().expect("run candor-scan");
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("report json");
@@ -208,7 +208,7 @@ fn an_untypable_dependency_value_discloses_in_the_unchained_arm() {
     let r = on.get("f_floor").unwrap_or_else(|| panic!("f_floor ABSENT — the floor did not fire: {on:?}"));
     assert!(r.0.iter().any(|e| e == "Unknown") && r.2.iter().any(|w| w == "dispatch:untyped cross-package receiver"), "{r:?}");
     let off = rows(&reg, true);
-    assert!(!off.contains_key("f_floor"), "OFF must restore the published silence: {:?}", off.get("f_floor"));
+    assert!(!off.contains_key("f_floor"), "the DEFAULT (no opt-in) must be the published silence: {:?}", off.get("f_floor"));
     // A `path` dependency wearing the name: not covered, so the ledger discloses and no `Unknown` is added beside it.
     let app = consumer(&root, "floor_path", false);
     std::fs::write(app.join("src/lib.rs"), src).unwrap();
