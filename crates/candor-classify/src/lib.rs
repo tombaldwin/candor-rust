@@ -591,6 +591,52 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("async_nats", "async_nats::jetstream::with_domain", "R1576:silent"),
     ("async_nats", "async_nats::jetstream::with_prefix", "R1576:silent"),
     ("async_nats", "async_nats::jetstream::context::ContextBuilder::build", "R1576:silent"),
+    // rdkafka 0.39.0, SOUNDNESS R1528 (rdkafka lane). Every row below was EXECUTED against a real Kafka broker
+    // (docker `apache/kafka` behind a counting TCP proxy) and the 45 other grandfathered rows were given rules
+    // (`rdkafka_r1528`).
+    // R1581: `FutureProducerContext::{log, error, stats, stats_raw}` forward to the WRAPPED context
+    // (producer/future_producer.rs:157-171), so the effect is the type argument's. EXECUTED with
+    // `DefaultClientContext`: the `log` callback re-emits librdkafka's records through the `log` crate (hundreds of
+    // `Log` events across a `FutureProducer`'s life); a caller-supplied context that records nothing has none.
+    // R1582: the rows whose ONLY effect is the `trace!("Destroying {}: {:?}", ..)` / `trace!("Destroyed ..")` pair
+    // that `NativePtr::drop` (util.rs:331-335) emits when a librdkafka handle is dropped. EXECUTED with a Trace-level
+    // `log` logger: two `rdkafka`-target records per dropped `TopicPartitionList`, `OwnedHeaders`, `OwnedMessage`
+    // detach and so on, and ZERO bytes through the broker proxy on a quiet client for every one of them
+    // (`assignment`, `subscription`, `position`, `incremental_unassign` and `begin_transaction` are local state;
+    // `TopicPartitionList::{new, with_capacity, from_topic_map}`, `OwnedHeaders::{new, new_with_capacity}`,
+    // `{Borrowed,}Headers::detach`, `BorrowedMessage::detach` and `ClientConfig::create_native_config` build or copy
+    // a value). The `Log` is real, Trace-level, and lands at the DROP, wherever the value dies — a per-constructor
+    // rule cannot say that, and charging only these rows would leave every other handle type (`BorrowedMessage`,
+    // `Metadata`, `NativeClientConfig`, the `Err` path of `RDKafkaError`) silent on the same trace. So it is filed,
+    // not ruled: a consumer's `deny Log` is not told. Severity floor: Trace level, no I/O.
+    // R1583: `BaseConsumer::close_queue` only ENQUEUES the termination (EXECUTED on a live group member: 0 bytes up
+    // from the call, 76 down; the LeaveGroup and heartbeat go out during the `poll` that serves the queue, 120 bytes
+    // up in the next three seconds). The wire effect belongs to the serving `poll` (already `Net`) or to the
+    // consumer's drop, not to this call.
+    ("rdkafka", "rdkafka::consumer::base_consumer::BaseConsumer::assignment", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::base_consumer::BaseConsumer::close_queue", "R1583:conditional"),
+    ("rdkafka", "rdkafka::consumer::base_consumer::BaseConsumer::incremental_unassign", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::base_consumer::BaseConsumer::position", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::base_consumer::BaseConsumer::subscription", "R1582:silent"),
+    ("rdkafka", "rdkafka::producer::base_producer::BaseProducer::begin_transaction", "R1582:silent"),
+    ("rdkafka", "rdkafka::message::BorrowedHeaders::detach", "R1582:silent"),
+    ("rdkafka", "rdkafka::message::BorrowedMessage::detach", "R1582:silent"),
+    ("rdkafka", "rdkafka::config::ClientConfig::create_native_config", "R1582:silent"),
+    ("rdkafka", "rdkafka::producer::future_producer::FutureProducer::begin_transaction", "R1582:silent"),
+    ("rdkafka", "rdkafka::producer::future_producer::FutureProducerContext::error", "R1581:conditional"),
+    ("rdkafka", "rdkafka::producer::future_producer::FutureProducerContext::log", "R1581:conditional"),
+    ("rdkafka", "rdkafka::producer::future_producer::FutureProducerContext::stats", "R1581:conditional"),
+    ("rdkafka", "rdkafka::producer::future_producer::FutureProducerContext::stats_raw", "R1581:conditional"),
+    ("rdkafka", "rdkafka::message::OwnedHeaders::new", "R1582:silent"),
+    ("rdkafka", "rdkafka::message::OwnedHeaders::new_with_capacity", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::stream_consumer::StreamConsumer::assignment", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::stream_consumer::StreamConsumer::incremental_unassign", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::stream_consumer::StreamConsumer::position", "R1582:silent"),
+    ("rdkafka", "rdkafka::consumer::stream_consumer::StreamConsumer::subscription", "R1582:silent"),
+    ("rdkafka", "rdkafka::producer::base_producer::ThreadedProducer::begin_transaction", "R1582:silent"),
+    ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::from_topic_map", "R1582:silent"),
+    ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::new", "R1582:silent"),
+    ("rdkafka", "rdkafka::topic_partition_list::TopicPartitionList::with_capacity", "R1582:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -1687,7 +1733,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Net");
         }
-        return None;
+        // SOUNDNESS R1528 — rdkafka 0.39.0, the grandfathered rows above the 0.39.0 ceiling are not the point here
+        // (the ceiling IS 0.39.0); these are the broker-touching verbs the suffix list cannot see. See
+        // `rdkafka_r1528`.
+        return rdkafka_r1528(path);
     }
     // cap-std: capability-oriented std. I/O goes *through* a held capability handle
     // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
@@ -4178,6 +4227,89 @@ fn async_nats_r1528(path: &str) -> Option<&'static str> {
         return None;
     }
     Some("Net")
+}
+
+/// SOUNDNESS R1528 — rdkafka 0.39.0, EXECUTED against a real Kafka broker (docker `apache/kafka`, advertised through
+/// a counting TCP proxy: connections / bytes up / bytes down read around ONE call, an idle window of 0 read before it
+/// on the same live client; handoff `rust-r1528/kafka/`). The suffix list in `classify` names `send`/`poll`/`flush`/
+/// `subscribe`/`commit`/`fetch_*`; these are the verbs that list misses. Matching is on the receiver TYPE NAME plus
+/// the method, with the module taken from the consumer's own spelling (crate root, the re-exporting module, or the
+/// declaring module), because the method names are generic.
+///
+/// CHARGED `Net` (each moved the proxy's byte counters; every one of them with a quiet window beside it):
+///   * every constructor that builds a librdkafka client (`ClientConfig::{create, create_with_context}`,
+///     `Client::new`, and `from_config` / `from_config_and_context` of `AdminClient`, `BaseConsumer`,
+///     `StreamConsumer`, `BaseProducer`, `ThreadedProducer`, `FutureProducer`): `rd_kafka_new` starts the broker
+///     threads, which dial the bootstrap address on their own. EXECUTED: 1 to 4 connections and 67 to 372 bytes up
+///     inside five seconds with NO further call, on 17 of 18 constructors in each of two runs (the 18th reads 0 once
+///     and 2 on the repeat, a race with the previous client's teardown); a control pointed at a dead address moved
+///     nothing through the proxy. `MockCluster::new` binds a loopback listener (EXECUTED: its bootstrap address
+///     accepts a TCP connection), the same `Net` as a `TcpListener::bind`.
+///   * `AdminClient::{create_topics, delete_topics, create_partitions, delete_groups, delete_records,
+///     describe_configs, alter_configs}`: one admin request each (37 to 186 bytes up, 26 to 2,168 down).
+///   * `{Base,Stream}Consumer::{committed, offsets_for_timestamp}` (an OffsetFetch / ListOffsets round trip, EXECUTED
+///     with an assigned partition: 47 to 56 bytes up), `incremental_assign` (EXECUTED 391 to 587 bytes up: the
+///     partition's leader is looked up and the fetcher starts) and `seek_partitions` (EXECUTED 51 bytes up when the
+///     target is a logical offset on a live group partition, 0 on a manual one). Conditional on the state the caller
+///     is in, exactly like the existing `::seek` rule beside it, and charged for the same reason: a `Net` that is
+///     sometimes absent is an over-approximation, a silent one is not.
+///   * `{Base,Threaded,Future}Producer::{init_transactions, commit_transaction, abort_transaction,
+///     send_offsets_to_transaction}`: the transaction coordinator round trips.
+///
+/// CHARGED `Clock`: `Timestamp::now` and `util::current_time_millis` (EXECUTED: two reads five milliseconds apart
+/// differ).
+///
+/// NOT claimed, and why (each EXECUTED to move no byte on a quiet client): `assignment`, `subscription`, `position`
+/// (local state), `incremental_unassign`, `begin_transaction` (a local state change). The Rust bodies of `TopicPartitionList::{new,
+/// with_capacity, from_topic_map}`, `OwnedHeaders::{new, new_with_capacity}`, `{Borrowed,}Headers::detach`,
+/// `BorrowedMessage::detach` and `ClientConfig::create_native_config` do no I/O: their only effect is the `trace!`
+/// that `NativePtr::drop` emits (R1582, `OPEN_ENTRY_VERDICTS`).
+///
+/// One effect is all `classify` can carry: every constructor also emits `trace!`/`debug!` events (`Log`, EXECUTED
+/// through a Trace-level `log` logger: 1 to 46 records per call) and the transaction verbs a `flush` (`Clock`); neither
+/// is charged (the one-effect limit R1575 records for the same shape).
+fn rdkafka_r1528(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("rdkafka::")?;
+    let (head, method) = rest.rsplit_once("::")?;
+    let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
+    let from_config = matches!(method, "from_config" | "from_config_and_context");
+    let txn = matches!(method, "init_transactions" | "commit_transaction" | "abort_transaction" | "send_offsets_to_transaction");
+    let consumer_net = matches!(method, "committed" | "offsets_for_timestamp" | "incremental_assign" | "seek_partitions");
+    let hit = match ty {
+        "ClientConfig" => matches!(module, "" | "config") && matches!(method, "create" | "create_with_context"),
+        "Client" => matches!(module, "" | "client") && method == "new",
+        "MockCluster" => matches!(module, "" | "mocking") && method == "new",
+        "AdminClient" => {
+            matches!(module, "" | "admin")
+                && (from_config
+                    || matches!(
+                        method,
+                        "create_topics" | "delete_topics" | "create_partitions" | "delete_groups" | "delete_records"
+                            | "describe_configs" | "alter_configs"
+                    ))
+        }
+        "BaseConsumer" => {
+            matches!(module, "" | "consumer" | "consumer::base_consumer") && (from_config || consumer_net)
+        }
+        "StreamConsumer" => {
+            matches!(module, "" | "consumer" | "consumer::stream_consumer") && (from_config || consumer_net)
+        }
+        "BaseProducer" | "ThreadedProducer" => {
+            matches!(module, "" | "producer" | "producer::base_producer") && (from_config || txn)
+        }
+        "FutureProducer" => {
+            matches!(module, "" | "producer" | "producer::future_producer") && (from_config || txn)
+        }
+        "Timestamp" => {
+            return (matches!(module, "" | "message") && method == "now").then_some("Clock");
+        }
+        // `util::current_time_millis` (a free fn: `head` is its module, the "type" is the module name).
+        "util" => {
+            return (module.is_empty() && method == "current_time_millis").then_some("Clock");
+        }
+        _ => false,
+    };
+    hit.then_some("Net")
 }
 
 pub const PG_DB_VERBS: &[&str] = &[
@@ -7007,6 +7139,63 @@ mod masks_locator_tests {
         // Another crate's same-named methods are not async-nats's.
         assert_eq!(classify("mycrate", "mycrate::jetstream::Context::create_stream"), None);
         assert_eq!(classify("redis", "redis::kv::Store::put"), None);
+    }
+
+    /// SOUNDNESS R1528 — the 45 rdkafka 0.39.0 rows given rules, every one EXECUTED against a real Kafka broker
+    /// (counting proxy bytes / loopback listener / two clock reads), in the crate-root, re-exporting-module and
+    /// declaring-module spellings; the 24 rows with a filed verdict and their pure neighbours stay unclaimed.
+    #[test]
+    fn r1528_rdkafka_rows_classify() {
+        let mut net: Vec<String> = vec![
+            "ClientConfig::create".into(), "config::ClientConfig::create".into(), "ClientConfig::create_with_context".into(),
+            "config::ClientConfig::create_with_context".into(), "Client::new".into(), "client::Client::new".into(),
+            "MockCluster::new".into(), "mocking::MockCluster::new".into(),
+        ];
+        for v in ["create_topics", "delete_topics", "create_partitions", "delete_groups", "delete_records",
+                  "describe_configs", "alter_configs", "from_config", "from_config_and_context"] {
+            net.push(format!("AdminClient::{v}"));
+            net.push(format!("admin::AdminClient::{v}"));
+        }
+        for (ty, module) in [("BaseConsumer", "consumer::base_consumer"), ("StreamConsumer", "consumer::stream_consumer")] {
+            for v in ["from_config", "from_config_and_context", "committed", "offsets_for_timestamp",
+                      "incremental_assign", "seek_partitions"] {
+                net.push(format!("{ty}::{v}"));
+                net.push(format!("consumer::{ty}::{v}"));
+                net.push(format!("{module}::{ty}::{v}"));
+            }
+        }
+        for (ty, module) in [("BaseProducer", "producer::base_producer"), ("ThreadedProducer", "producer::base_producer"),
+                             ("FutureProducer", "producer::future_producer")] {
+            for v in ["from_config", "from_config_and_context", "init_transactions", "commit_transaction",
+                      "abort_transaction", "send_offsets_to_transaction"] {
+                net.push(format!("{ty}::{v}"));
+                net.push(format!("producer::{ty}::{v}"));
+                net.push(format!("{module}::{ty}::{v}"));
+            }
+        }
+        for p in &net {
+            assert_eq!(classify("rdkafka", &format!("rdkafka::{p}")), Some("Net"), "{p}");
+        }
+        for p in ["Timestamp::now", "message::Timestamp::now", "util::current_time_millis"] {
+            assert_eq!(classify("rdkafka", &format!("rdkafka::{p}")), Some("Clock"), "{p}");
+        }
+        // EXECUTED to move no byte on a quiet client (local state / value builders), or filed (R1581/R1582/R1583).
+        for p in ["BaseConsumer::assignment", "BaseConsumer::subscription", "BaseConsumer::position",
+                  "BaseConsumer::incremental_unassign", "StreamConsumer::assignment", "StreamConsumer::position",
+                  "BaseProducer::begin_transaction", "ThreadedProducer::begin_transaction",
+                  "FutureProducer::begin_transaction", "BaseConsumer::close_queue",
+                  "ClientConfig::create_native_config", "TopicPartitionList::new", "TopicPartitionList::with_capacity",
+                  "TopicPartitionList::from_topic_map", "OwnedHeaders::new", "OwnedHeaders::new_with_capacity",
+                  "BorrowedHeaders::detach", "BorrowedMessage::detach", "FutureProducerContext::log",
+                  "FutureProducerContext::error", "FutureProducerContext::stats", "FutureProducerContext::stats_raw",
+                  // the wrong module / receiver for a name that IS claimed elsewhere
+                  "other::AdminClient::create_topics", "Consumer::committed", "consumer::BaseProducer::committed",
+                  "producer::BaseConsumer::init_transactions", "Foo::from_config", "Timestamp::new",
+                  "other::util::current_time_millis"] {
+            assert_eq!(classify("rdkafka", &format!("rdkafka::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::AdminClient::create_topics"), None);
+        assert_eq!(classify("lapin", "lapin::ClientConfig::create"), None);
     }
 
     /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with
