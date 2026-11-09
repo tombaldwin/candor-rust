@@ -1345,6 +1345,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // url is its SECOND arg — the scanner's first-string-literal capture still gets it when the
         // method is a literal string, and misses it (honest under-report) when the method is an
         // expression. The pure builder surface (`::header`, `::json`, `::body`, `::query`, …) stays None.
+        // SOUNDNESS R1604 — the URL-naming suffix rule below also fires on `get` hops that read an in-memory header map.
+        // See `http_header_get_r1604`.
+        if http_header_get_r1604(path) {
+            return None;
+        }
         if path.ends_with("::get")
             || path.ends_with("::post")
             || path.ends_with("::put")
@@ -1774,6 +1779,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if let Some(effect) = lettre_send_r1597(path) {
             return Some(effect);
         }
+        // SOUNDNESS R1604 — `StubTransport` records the message in memory. See `lettre_stub_send_r1604`.
+        if lettre_stub_send_r1604(path) {
+            return None;
+        }
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
         }
@@ -1916,6 +1925,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::read_message")
             || path.ends_with("::write_message")
         {
+            // SOUNDNESS R1604 — `WebSocket<S>` / `WebSocketContext` I/O does whatever `S` does, and classify never sees `S` (the
+            // scan strips type arguments). Over a `Cursor` it performs no syscall (EXECUTED); over a `TcpStream` or the
+            // `MaybeTlsStream` that `connect` returns it writes the socket (EXECUTED). Kept `Net` for every `S`: an over-charge on
+            // an in-memory stream instead of a silence on a socket.
             return Some("Net");
         }
         return None;
@@ -2670,6 +2683,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             if path.contains("sea_query") {
                 return None;
             }
+            // SOUNDNESS R1605 — the crate-root spellings of the same builders (`sea_orm::Condition::all`,
+            // `sea_orm::entity::prelude::Expr::{all,count}`, `sea_orm::ExprTrait::count`) still match the verbs below and are
+            // charged `Db` for pure work (EXECUTED: 0 statements). They are NOT excluded yet: with an entity declared in the
+            // consumer crate, `Entity::find().filter(Condition::all()..).all(db)` reaches no other rule (the derive-generated
+            // `Entity` leaves `.all(db)` untyped), so that charge is the only `Db` on code that runs a SELECT (EXECUTED).
             if path.ends_with("::all")
                 || path.ends_with("::one")
                 || path.ends_with("::count")
@@ -4517,6 +4535,50 @@ fn lettre_r1528(path: &str) -> Option<&'static str> {
     }
 }
 
+/// SOUNDNESS R1604 — a `get` that reads a header map, charged `Net` by the URL-naming `::get` suffix rule. The scan attributes
+/// a method chain to its ROOT type, so `resp.headers().get("x")` reaches classify as `reqwest::Response::get`, and a typed
+/// `HeaderMap` receiver as `reqwest::header::HeaderMap::get`. None of these types has a `get` of its own in reqwest 0.11, 0.12
+/// or 0.13 (READ: the only `get`s are `Client::get`, `blocking::Client::get`, the wasm client and the two free fns), so the
+/// hop is always `http::HeaderMap::get` or `http::Extensions::get`, an in-memory lookup. EXECUTED over a local HTTP server
+/// with a connect/send/recv interposer (handoff `rust-fab/`): 0 socket calls for the typed map, the response and request
+/// header chains and the blocking response; every twin (`Client::get(..).send()`, `head(..).send()`, blocking, `reqwest::get`)
+/// connects and is unchanged. A hop that does read the body (`resp.json().await?.get(..)`) is charged at `json`, not here.
+///
+/// isahc: its `Response` is `http::Response`, whose header chain is the same lookup (EXECUTED 0 socket calls). `isahc::Request::
+/// {get,post,..}` is deliberately NOT here: in the crate's own idiom `Request::post(uri).body(b)?.send()?` the `.send()` hop is
+/// untyped and reaches no rule, so the URL-naming constructor is the only `Net` on code that really sends (EXECUTED: connect
+/// and a request at the server). Removing it would make `deny Net` pass over that code.
+fn http_header_get_r1604(path: &str) -> bool {
+    matches!(
+        path,
+        "reqwest::header::HeaderMap::get"
+            | "reqwest::Response::get"
+            | "reqwest::blocking::Response::get"
+            | "reqwest::Request::get"
+            | "reqwest::blocking::Request::get"
+            | "isahc::Response::get"
+            | "isahc::http::Response::get"
+            | "isahc::http::response::Response::get"
+            | "isahc::http::HeaderMap::get"
+            | "isahc::http::header::HeaderMap::get"
+    )
+}
+
+/// SOUNDNESS R1604 — lettre 0.11.23 `StubTransport` / `AsyncStubTransport` `send` / `send_raw` push the message onto an in-memory
+/// `Mutex<Vec<..>>` and return the configured result (READ: transport/stub/mod.rs:156,171; the trait's provided `send` formats
+/// the message into a `Vec`). EXECUTED: 0 connects, 0 file creates, 0 processes, the stub's log grows by one. The `::send` suffix
+/// rule charged it `Net`. Keyed on module + type; the SMTP transports and the generic `Transport::send` keep `Net` (EXECUTED: a
+/// connect and one delivered message at a local SMTP responder), File and Sendmail keep `Fs` / `Exec` (R1597).
+fn lettre_stub_send_r1604(path: &str) -> bool {
+    matches!(
+        path,
+        "lettre::transport::stub::StubTransport::send"
+            | "lettre::transport::stub::StubTransport::send_raw"
+            | "lettre::transport::stub::AsyncStubTransport::send"
+            | "lettre::transport::stub::AsyncStubTransport::send_raw"
+    )
+}
+
 /// SOUNDNESS R1597 — lettre 0.11.23 `Transport::send` / `send_raw` on the transports that do not speak SMTP. The `::send`
 /// suffix rule charges `Net` for every transport, which is wrong in both directions for these types, EXECUTED in a consumer
 /// fixture beside an interposer (`open`, `connect`) and a stand-in `sendmail` script that logs each invocation (handoff
@@ -4528,9 +4590,8 @@ fn lettre_r1528(path: &str) -> Option<&'static str> {
 ///     (EXECUTED: exactly one invocation of the stand-in per send, 0 `connect`). Real effect `Exec`.
 ///
 /// `SmtpTransport` / `AsyncSmtpTransport` stay `Net` (EXECUTED: a `connect` to the SMTP port; the generic `Transport::send`
-/// on a type parameter keeps the suffix rule's `Net`, since SMTP is the idiom behind it). `StubTransport` is NOT touched:
-/// it does nothing (EXECUTED: 0 files, 0 connects, 0 processes) and still reads `Net`, an over-charge filed, not changed
-/// here. Keyed on module + type: `AsyncFileTransport<E>` reaches classify without its type argument.
+/// on a type parameter keeps the suffix rule's `Net`, since SMTP is the idiom behind it). `StubTransport` does nothing
+/// (EXECUTED: 0 files, 0 connects, 0 processes) and is carved out separately (R1604, `lettre_stub_send_r1604`). Keyed on module + type: `AsyncFileTransport<E>` reaches classify without its type argument.
 fn lettre_send_r1597(path: &str) -> Option<&'static str> {
     let rest = path.strip_prefix("lettre::")?;
     let (head, method) = rest.rsplit_once("::")?;
@@ -8222,7 +8283,7 @@ mod masks_locator_tests {
             assert_eq!(classify("lettre", p), Some("Exec"), "{p}");
         }
         for p in ["lettre::SmtpTransport::send", "lettre::AsyncSmtpTransport::send", "lettre::transport::smtp::SmtpTransport::send_raw",
-                  "lettre::Transport::send", "lettre::AsyncTransport::send", "lettre::transport::stub::StubTransport::send"] {
+                  "lettre::Transport::send", "lettre::AsyncTransport::send"] {
             assert_eq!(classify("lettre", p), Some("Net"), "{p}");
         }
         // the sibling the file transport already had: `read` is `Fs` (unchanged)
