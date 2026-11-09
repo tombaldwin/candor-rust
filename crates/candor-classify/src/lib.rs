@@ -374,6 +374,17 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     ("rusqlite", "rusqlite::Context::get_connection"),
     ("dialoguer", "dialoguer::Paging::render_prompt"),
     ("mysql", "mysql::Stream::connect_socket"),
+    // SOUNDNESS R1528 — ureq 3.4.2. Both only ASSEMBLE an agent from parts the caller already holds: a boxed
+    // connector (`boxed_connector`, a one-field wrapper that forwards `connect` and is never invoked here), a
+    // resolver, and a `ConnectionPool::new` whose `Pool::new` copies three numbers out of the `Config`
+    // (agent.rs:112-150, pool.rs:21-27/225-232), plus `SharedCookieJar::new` (an empty in-memory
+    // `cookie_store`). No call opens a socket, reads the environment, touches a file or reads a clock: EXECUTED,
+    // an agent built from a config whose proxy is a live 127.0.0.1 listener made ZERO connections. Self-scan's
+    // `Fs,Net,Unknown` is the dispatch union over every `Connector` implementor reached through the
+    // `Box<dyn Connector>` field, which is never called in these bodies. (`Agent::new_with_defaults` is NOT
+    // here: it builds `Config::default()`, which reads `HTTP_PROXY`/`ALL_PROXY` — it carries an `Env` rule.)
+    ("ureq", "ureq::Agent::new_with_config"),
+    ("ureq", "ureq::Agent::with_parts"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -400,7 +411,64 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
 /// `generate.py --diff-manifests` (a grown row without a verdict fails the job; one with a verdict does
 /// not). A verdict is DATA the gate checks, not prose: a malformed kind, an unknown crate or a verdict
 /// for a row that is not in `open.tsv` fails the push-time test.
-pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[];
+/// ureq 3.4.2 (SOUNDNESS R1528, ureq lane). R1553: every `ConfigBuilder<S>` setter and `RequestScope::config`
+/// reach `Env` only through `RequestBuilder::request_level_config` (request.rs:405-413), which builds
+/// `Config::default()` — and so reads `HTTP_PROXY`/`ALL_PROXY` — only when the builder already holds a URL
+/// error; `AgentScope`, `HttpCrateScope` and `RequestExtScope` setters are pure, and the chain's own start
+/// (`ureq::get`, `Config::builder`, `Agent::new_with_defaults`) already carries the unconditional read.
+/// R1554: `Either`/`Box<dyn Transport>`/`ChainedConnector` forward to the transport or connectors they wrap,
+/// so the effect is the type argument's: EXECUTED `Net` over a TCP transport, and a caller-supplied in-memory
+/// transport has none. R1555: the nine free verbs only build a request; the unreported effect is the `Env`
+/// read in `Config::default` (Net is charged by candor-scan's scan-only builder-entry table, by design).
+pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
+    ("ureq", "ureq::unversioned::transport::Box::await_input", "R1554:conditional"),
+    ("ureq", "ureq::unversioned::transport::Box::is_open", "R1554:conditional"),
+    ("ureq", "ureq::unversioned::transport::Box::transmit_output", "R1554:conditional"),
+    ("ureq", "ureq::unversioned::transport::chain::ChainedConnector::connect", "R1554:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::accept", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::accept_encoding", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::allow_non_standard_methods", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::http_status_as_error", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::https_only", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::input_buffer_size", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::ip_family", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_idle_age", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_idle_connections", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_idle_connections_per_host", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_redirects", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_redirects_will_error", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::max_response_header_size", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::middleware", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::no_delay", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::output_buffer_size", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::proxy", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::redirect_auth_headers", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::save_redirect_history", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_await_100", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_connect", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_global", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_per_call", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_recv_body", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_recv_response", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_resolve", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_send_body", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_send_request", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::tls_config", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::user_agent", "R1553:conditional"),
+    ("ureq", "ureq::unversioned::transport::chain::Either::await_input", "R1554:conditional"),
+    ("ureq", "ureq::unversioned::transport::chain::Either::is_open", "R1554:conditional"),
+    ("ureq", "ureq::unversioned::transport::chain::Either::transmit_output", "R1554:conditional"),
+    ("ureq", "ureq::config::typestate::RequestScope::config", "R1553:conditional"),
+    ("ureq", "ureq::connect", "R1555:silent"),
+    ("ureq", "ureq::delete", "R1555:silent"),
+    ("ureq", "ureq::get", "R1555:silent"),
+    ("ureq", "ureq::head", "R1555:silent"),
+    ("ureq", "ureq::options", "R1555:silent"),
+    ("ureq", "ureq::patch", "R1555:silent"),
+    ("ureq", "ureq::post", "R1555:silent"),
+    ("ureq", "ureq::put", "R1555:silent"),
+    ("ureq", "ureq::trace", "R1555:silent"),
+];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
 /// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
@@ -1006,6 +1074,67 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "ureq::RustlsConnector::connect")
     {
         return Some("Net");
+    }
+    // SOUNDNESS R1528 — ureq 3.4.2 (the version `open.tsv` was generated from; 3.x REWROTE the surface the
+    // 2.12.1 rules above were written against). Every body READ in ureq-3.4.2 and every row EXECUTED against a
+    // consumer fixture whose server is a 127.0.0.1 listener (the handoff REPORT). The partition:
+    //   * Net — the dispatch TERMINALS (`Agent::run` -> `run_via_middleware` -> `MiddlewareNext::handle` ->
+    //     `run::run` -> the pool's connector; `WithAgent::run`, `ConfigBuilder<RequestExtScope>::run`,
+    //     `RequestBuilder::send_empty` = `send`, free `ureq::run`), the resolver (`DefaultResolver::resolve`
+    //     = `to_socket_addrs`), and the connectors/transports that open or drive a socket
+    //     (`TcpConnector`/`DefaultConnector`/`ConnectProxyConnector`/`SocksConnector`/`NativeTlsConnector::
+    //     connect`, `TcpTransport::{transmit_output,await_input,is_open}`). A connector is charged although it
+    //     skips itself when its config does not apply (no proxy, chained transport already present): the rule
+    //     is "may", exactly as `RustlsConnector::connect` above.
+    //   * The free verbs `ureq::{get,post,put,delete,head,patch,options,trace,connect}` are request BUILDERS,
+    //     kept pure here by design (the deep engine charges the terminal `.call()`; candor-scan's
+    //     `scan_builder_entry_effect` table over-approximates the entry, and now also `options`/`trace`/
+    //     `connect`, which were silent siblings). Their real effect is the `Config::default` env read: R1555.
+    //   * Env — `Config::default` -> `Proxy::try_from_env` (`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY`), reached from
+    //     `Config::builder`, `Agent::config_builder`, `Agent::new_with_defaults` and `Proxy::try_from_env`
+    //     itself. EXECUTED: the agent's `config().proxy()` is `Some` only when `HTTP_PROXY` is set.
+    //   * Fs / Rand / Clock — `multipart::{Form::file,Part::file}` open the path (`File::open`), `Form::new`
+    //     draws its boundary from `getrandom::fill`, `send_body::File::as_body` is `metadata()` on the
+    //     caller's file, `transport::time::Instant::now` is `std::time::Instant::now`.
+    // NOT claimed, and why (each filed or reviewed in the handoff REPORT): `ConfigBuilder::<setter>` and
+    // `RequestScope::config` read the environment ONLY through `RequestBuilder::request_level_config` when the
+    // builder already holds a URL error (request.rs:405-413) — conditional (R1553); `Either`/`Box<dyn
+    // Transport>` forward to whatever transport they wrap and `ChainedConnector::connect` to whatever two
+    // connectors it chains — the effect is the type argument's (R1554); `Agent::new_with_config`/`with_parts`
+    // only box a connector and build a pool (REVIEWED_PURE_ENTRIES).
+    if crate_name == "ureq" {
+        // The free verbs `ureq::{get,post,...}` are deliberately NOT here: they only build a request (and read
+        // the env, see R1555); candor-scan's `scan_builder_entry_effect` table over-approximates them as Net
+        // for the syntactic scanner and a test pins them pure in THIS classifier for the deep engine.
+        if path == "ureq::run" {
+            return Some("Net");
+        }
+        if let Some((ty, m)) = type_method(
+            path,
+            "ureq",
+            &["", "agent", "request", "request_ext", "config", "config::typestate", "middleware", "proxy",
+              "unversioned::transport", "unversioned::transport::tcp", "unversioned::transport::connect",
+              "unversioned::transport::socks", "unversioned::transport::time", "unversioned::resolver",
+              "unversioned::multipart", "multipart", "tls::native_tls", "tls", "send_body"],
+        ) {
+            let hit = match (ty, m) {
+                ("Agent", "run") | ("WithAgent", "run") | ("ConfigBuilder", "run")
+                | ("RequestBuilder", "send_empty") | ("MiddlewareNext", "handle")
+                | ("DefaultResolver", "resolve") => Some("Net"),
+                ("TcpConnector" | "DefaultConnector" | "ConnectProxyConnector" | "SocksConnector"
+                    | "NativeTlsConnector", "connect") => Some("Net"),
+                ("TcpTransport", "transmit_output" | "await_input" | "is_open") => Some("Net"),
+                ("Config", "builder" | "default") | ("Agent", "config_builder" | "new_with_defaults")
+                | ("Proxy", "try_from_env") => Some("Env"),
+                ("Form", "file") | ("Part", "file") | ("File", "as_body") => Some("Fs"),
+                ("Form", "new") => Some("Rand"),
+                ("Instant", "now") => Some("Clock"),
+                _ => None,
+            };
+            if hit.is_some() {
+                return hit;
+            }
+        }
     }
     // NOT modelled (both removed from open.tsv, not guessed):
     //   `ureq::Arc::connect` — the ratchet's generator strips generic arguments from an impl header, so
@@ -6154,6 +6283,46 @@ mod masks_locator_tests {
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::fmt_layer::Layer::new"), Some("Env"));
         assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::Layer::with_writer"), None);
+    }
+
+    /// SOUNDNESS R1528 — the ureq 3.4.2 rows that carry a rule: every one EXECUTED against a consumer fixture
+    /// (127.0.0.1 listener / env / file / RNG observations), both the crate-root and declaring-module spellings.
+    #[test]
+    fn r1528_ureq3_rows_classify() {
+        for (p, eff) in [
+            ("Agent::run", "Net"), ("agent::Agent::run", "Net"), ("WithAgent::run", "Net"),
+            ("request_ext::WithAgent::run", "Net"), ("ConfigBuilder::run", "Net"),
+            ("RequestBuilder::send_empty", "Net"), ("request::RequestBuilder::send_empty", "Net"),
+            ("MiddlewareNext::handle", "Net"), ("middleware::MiddlewareNext::handle", "Net"),
+            ("run", "Net"),
+            ("DefaultResolver::resolve", "Net"), ("unversioned::resolver::DefaultResolver::resolve", "Net"),
+            ("TcpConnector::connect", "Net"), ("unversioned::transport::TcpConnector::connect", "Net"),
+            ("DefaultConnector::connect", "Net"), ("ConnectProxyConnector::connect", "Net"),
+            ("SocksConnector::connect", "Net"), ("NativeTlsConnector::connect", "Net"),
+            ("tls::native_tls::NativeTlsConnector::connect", "Net"),
+            ("TcpTransport::transmit_output", "Net"), ("TcpTransport::await_input", "Net"),
+            ("unversioned::transport::tcp::TcpTransport::is_open", "Net"),
+            ("Config::builder", "Env"), ("config::Config::builder", "Env"), ("Config::default", "Env"),
+            ("Agent::config_builder", "Env"), ("Agent::new_with_defaults", "Env"), ("Proxy::try_from_env", "Env"),
+            ("proxy::Proxy::try_from_env", "Env"),
+            ("Form::file", "Fs"), ("Part::file", "Fs"), ("unversioned::multipart::Part::file", "Fs"),
+            ("File::as_body", "Fs"), ("Form::new", "Rand"), ("multipart::Form::new", "Rand"),
+            ("Instant::now", "Clock"), ("unversioned::transport::time::Instant::now", "Clock"),
+        ] {
+            assert_eq!(classify("ureq", &format!("ureq::{p}")), Some(eff), "{p}");
+        }
+        // Rows deliberately NOT given an effect: the conditional setters, the type-argument forwarders
+        // (R1553/R1554), the free verbs (R1555) and the two pure assemblers (`REVIEWED_PURE_ENTRIES`). Pure neighbours stay pure.
+        for p in ["get", "post", "put", "delete", "head", "patch", "options", "trace", "connect",
+                  "ConfigBuilder::timeout_global", "ConfigBuilder::user_agent", "RequestScope::config",
+                  "Either::await_input", "Box::transmit_output", "ChainedConnector::connect",
+                  "Agent::new_with_config", "Agent::with_parts", "Agent::config", "Config::https_only",
+                  "Part::text", "Part::file_name", "Proxy::new", "Instant::duration_since"] {
+            assert_eq!(classify("ureq", &format!("ureq::{p}")), None, "{p}");
+        }
+        // Another crate's same-named methods are not ureq's.
+        assert_eq!(classify("mycrate", "mycrate::Agent::run"), None);
+        assert_eq!(classify("reqwest", "reqwest::Config::builder"), None);
     }
 
     /// SOUNDNESS R1528 — the 18 reachable rusqlite rows, every one EXECUTED against a consumer fixture, with

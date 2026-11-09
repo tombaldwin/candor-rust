@@ -29,6 +29,10 @@ pub(crate) fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'stati
         ("ureq::delete", "Net"),
         ("ureq::head", "Net"),
         ("ureq::patch", "Net"),
+        // SOUNDNESS R1528 — ureq 3.x's remaining free verbs; the three were silent siblings (executed).
+        ("ureq::options", "Net"),
+        ("ureq::trace", "Net"),
+        ("ureq::connect", "Net"),
         ("ureq::request", "Net"),
         // sqlx — `query*()` build; `.execute()/.fetch_*()` round-trip (found 2026-06-17, recall corpus).
         ("sqlx::query", "Db"),

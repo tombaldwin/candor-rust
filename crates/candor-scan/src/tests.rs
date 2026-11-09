@@ -16497,6 +16497,9 @@ trait G {
         assert_eq!(scan_builder_entry_effect("duct", "duct::sh"), Some("Exec"));
         assert_eq!(scan_builder_entry_effect("ureq", "ureq::get"), Some("Net"));
         assert_eq!(scan_builder_entry_effect("ureq", "ureq::post"), Some("Net"));
+        for v in ["options", "trace", "connect"] {
+            assert_eq!(scan_builder_entry_effect("ureq", &format!("ureq::{v}")), Some("Net"), "{v}");
+        }
         assert_eq!(scan_builder_entry_effect("sqlx", "sqlx::query"), Some("Db"));
         assert_eq!(scan_builder_entry_effect("diesel", "diesel::sql_query"), Some("Db"));
         // terminal verbs stay classify()'s job; an unrelated path is None:
