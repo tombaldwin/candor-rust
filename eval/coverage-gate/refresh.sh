@@ -20,8 +20,8 @@ CG=eval/coverage-gate
 mkdir -p "$OUT/fresh" "$OUT/baseline"
 
 python3 "$CG/generate.py" --registry "$REG"
-cp "$CG/covered.tsv" "$CG/open.tsv" "$OUT/fresh/"
-git checkout -- "$CG/covered.tsv" "$CG/open.tsv"   # the checked-in files are what the diff reads
+cp "$CG/covered.tsv" "$CG/open.tsv" "$CG/unreachable.tsv" "$OUT/fresh/"
+git checkout -- "$CG/covered.tsv" "$CG/open.tsv" "$CG/unreachable.tsv"   # the checked-in files are what the diff reads
 
 # THE BASELINE ENGINE (SOUNDNESS R1507). It must be the engine that last REGENERATED the manifests, which
 # `git log -1 -- open.tsv covered.tsv` is NOT: a splice commit (rows hand-added to open.tsv, nothing
@@ -75,7 +75,10 @@ else
   cp "$BASE/wt/$CG/covered.tsv" "$BASE/wt/$CG/open.tsv" "$OUT/baseline/"
 fi
 
+# SOUNDNESS R1528: the verdict gate reads OPEN_ENTRY_VERDICTS from THIS tree's candor-classify and
+# grandfathered.tsv from THIS tree — the verdicts that clear a grown row are the ones committed at HEAD.
 args=(--diff-manifests "$CG/covered.tsv" "$OUT/fresh/covered.tsv" "$CG/open.tsv" "$OUT/fresh/open.tsv"
-      --baseline "$OUT/baseline/covered.tsv" "$OUT/baseline/open.tsv")
+      --baseline "$OUT/baseline/covered.tsv" "$OUT/baseline/open.tsv"
+      --unreachable "$CG/unreachable.tsv" "$OUT/fresh/unreachable.tsv")
 [ -n "$GHO" ] && args+=(--github-output "$GHO")
 python3 "$CG/generate.py" "${args[@]}"

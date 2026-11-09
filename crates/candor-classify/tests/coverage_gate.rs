@@ -43,9 +43,11 @@
 //! `classify()` ALREADY recognizes today, so the only way this test fails is a REGRESSION (a rule
 //! narrowed, retargeted to a different effect, or removed). The RATCHET of entries self-scan found
 //! effectful that no rule (or `REVIEWED_PURE_ENTRIES`) recognizes yet lives in `eval/coverage-gate/
-//! open.tsv` — NOT asserted here (asserting it would just make every future `cargo test` fail on a
-//! pre-existing backlog); it is enforced separately, as a "may shrink, must never grow" ratchet, by the
-//! weekly `coverage-gate-refresh` workflow re-running the generator against fresh crates.io sources.
+//! open.tsv` — its EFFECTS are not asserted here (that would make every `cargo test` fail on a
+//! pre-existing backlog); growth is caught by the weekly `coverage-gate-refresh` workflow re-running the
+//! generator against fresh crates.io sources. What IS asserted here, since SOUNDNESS R1528 step 3, is
+//! that every open.tsv row is either pre-ruling backlog (`grandfathered.tsv`) or carries a recorded
+//! verdict (`OPEN_ENTRY_VERDICTS`) — see the second half of this file.
 //!
 //! `REVIEWED_PURE_ENTRIES` (crates/candor-classify/src/lib.rs, beside `REVIEWED_PURE_CRATES`) is the
 //! escape hatch for an `open.tsv` row a human has since read and found genuinely pure: add it there
@@ -111,5 +113,174 @@ fn calibrated_crates_completeness_gate() {
          it, not a guess) at generation time, and classify() agreed on a SPECIFIC effect for it then:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// SOUNDNESS R1528 step 3 — EVERY `open.tsv` ROW CARRIES A VERDICT, OR IS PRE-RULING BACKLOG.
+//
+// The doc comment above says the ratchet is "NOT asserted here" and is enforced weekly. That was the
+// gap: the weekly job fails on a grown row, and the red was cleared by SPLICING the row into
+// `open.tsv` — 108 rows since 10-08, with no rule, no read and no filed row — after which nothing
+// anywhere distinguished a triaged row from a copied one. Tom's ruling (2026-11-08): a newly grown
+// row clears the red only with a recorded verdict. The rows already in `open.tsv` at the ruling are
+// `grandfathered.tsv`, tracked as a population by R1528 and allowed only to shrink; every OTHER row
+// must be in `OPEN_ENTRY_VERDICTS` (a filed row) — a rule or a `REVIEWED_PURE_ENTRIES` read take the
+// row out of `open.tsv` on regeneration, so they need no record here.
+// ---------------------------------------------------------------------------------------------------
+
+use candor_classify::{CALIBRATED_CRATES, OPEN_ENTRY_VERDICTS};
+use std::collections::{BTreeSet, HashMap};
+
+/// The size of `grandfathered.tsv` when the ruling was implemented (the checked-in `open.tsv`, 776
+/// rows, minus the 64 R1528-step-2 found UNREACHABLE). It may go DOWN — lower this number when it
+/// does, so the slack cannot be spent — and must never go up: a row added to the backlog is a verdict
+/// skipped. Raising it is visible in review, which is the point.
+const GRANDFATHERED_CEILING: usize = 712;
+
+/// (crate, entry) of every data row of an `open.tsv`-shaped manifest (crate first, entry last).
+fn manifest_keys(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let cols: Vec<&str> = l.split('\t').collect();
+            assert!(cols.len() >= 2, "malformed manifest row: {l:?}");
+            (cols[0].to_string(), cols[cols.len() - 1].to_string())
+        })
+        .collect()
+}
+
+/// The verdict-register check, as a pure function of its three inputs so the test below can prove it
+/// FAILS on a seeded grown row (the vacuity rule: a check never shown to fail is not evidence).
+fn verdict_problems(
+    open: &[(String, String)],
+    grandfathered: &[(String, String)],
+    verdicts: &[(&str, &str, &str)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let open_set: BTreeSet<&(String, String)> = open.iter().collect();
+    let gf: BTreeSet<(&str, &str)> = grandfathered.iter().map(|(c, e)| (c.as_str(), e.as_str())).collect();
+    let mut seen: HashMap<(&str, &str), &str> = HashMap::new();
+    for &(krate, entry, verdict) in verdicts {
+        if seen.insert((krate, entry), verdict).is_some() {
+            problems.push(format!("duplicate verdict for {krate}\t{entry}"));
+        }
+        if !CALIBRATED_CRATES.contains(&krate) {
+            problems.push(format!("verdict names {krate:?}, which is not a CALIBRATED_CRATES entry"));
+        }
+        let well_formed = verdict
+            .split_once(':')
+            .is_some_and(|(row, kind)| {
+                row.len() > 1
+                    && row.starts_with('R')
+                    && row[1..].chars().all(|c| c.is_ascii_digit())
+                    && matches!(kind, "silent" | "overcharge" | "conditional")
+            });
+        if !well_formed {
+            problems.push(format!(
+                "{krate}\t{entry}: verdict {verdict:?} is not `R<id>:silent|overcharge|conditional`"
+            ));
+        }
+        if !open_set.contains(&(krate.to_string(), entry.to_string())) {
+            problems.push(format!(
+                "{krate}\t{entry}: has a verdict but is not in open.tsv — drop the stale verdict (a rule or a \
+                 REVIEWED_PURE_ENTRIES read already took the row out)"
+            ));
+        }
+    }
+    for (krate, entry) in grandfathered {
+        if !open_set.contains(&(krate.clone(), entry.clone())) {
+            problems.push(format!(
+                "{krate}\t{entry}: is in grandfathered.tsv but no longer in open.tsv — remove it from \
+                 grandfathered.tsv (and lower GRANDFATHERED_CEILING), or a later regrowth would clear unread"
+            ));
+        }
+    }
+    for (krate, entry) in open {
+        if !gf.contains(&(krate.as_str(), entry.as_str())) && !seen.contains_key(&(krate.as_str(), entry.as_str())) {
+            problems.push(format!(
+                "{krate}\t{entry}: is in open.tsv with NO VERDICT. A row added since the ruling needs one of: \
+                 a classify() rule (the row then moves to covered.tsv), a REVIEWED_PURE_ENTRIES read, or a \
+                 filed SOUNDNESS row recorded in OPEN_ENTRY_VERDICTS as `R<id>:silent|overcharge|conditional`. \
+                 Splicing the row in is not a verdict."
+            ));
+        }
+    }
+    problems
+}
+
+#[test]
+fn every_open_row_has_a_verdict_or_is_pre_ruling_backlog() {
+    let open = manifest_keys(include_str!("../../../eval/coverage-gate/open.tsv"));
+    let grandfathered = manifest_keys(include_str!("../../../eval/coverage-gate/grandfathered.tsv"));
+    assert!(open.len() > 300, "open.tsv loaded {} rows — truncated or the include_str! path moved", open.len());
+    assert!(
+        grandfathered.len() <= GRANDFATHERED_CEILING,
+        "grandfathered.tsv has {} rows, above its ceiling {GRANDFATHERED_CEILING}: the pre-ruling backlog may \
+         only shrink. A new row needs a verdict (see OPEN_ENTRY_VERDICTS), not a backlog slot.",
+        grandfathered.len()
+    );
+    let problems = verdict_problems(&open, &grandfathered, OPEN_ENTRY_VERDICTS);
+    assert!(problems.is_empty(), "coverage-gate verdict register:\n  {}", problems.join("\n  "));
+}
+
+/// THE CHECK CAN FAIL — seeded, in both directions, on the real manifests. A row spliced into open.tsv
+/// with no verdict must be named; the same row with a well-formed verdict must clear; a malformed or
+/// stale verdict must be named. Without this, a register that loaded nothing would pass.
+#[test]
+fn the_verdict_check_fails_on_a_seeded_unverdicted_row() {
+    let mut open = manifest_keys(include_str!("../../../eval/coverage-gate/open.tsv"));
+    let grandfathered = manifest_keys(include_str!("../../../eval/coverage-gate/grandfathered.tsv"));
+    let seeded = ("chrono".to_string(), "chrono::seeded::Grown::row".to_string());
+    open.push(seeded.clone());
+    let red = verdict_problems(&open, &grandfathered, OPEN_ENTRY_VERDICTS);
+    assert!(
+        red.iter().any(|p| p.contains("chrono::seeded::Grown::row") && p.contains("NO VERDICT")),
+        "a spliced row with no verdict was NOT reported: {red:?}"
+    );
+    let with: Vec<(&str, &str, &str)> = OPEN_ENTRY_VERDICTS
+        .iter()
+        .copied()
+        .chain([("chrono", "chrono::seeded::Grown::row", "R1528:silent")])
+        .collect();
+    assert!(verdict_problems(&open, &grandfathered, &with).is_empty(), "a verdicted row must clear");
+    let bad: Vec<(&str, &str, &str)> = vec![
+        ("chrono", "chrono::seeded::Grown::row", "looked at it, fine"),
+        ("chrono", "chrono::not::in::open", "R1528:silent"),
+    ];
+    let named = verdict_problems(&open, &grandfathered, &bad);
+    assert!(named.iter().any(|p| p.contains("is not `R<id>")), "a prose verdict must be refused: {named:?}");
+    assert!(named.iter().any(|p| p.contains("not in open.tsv")), "a stale verdict must be refused: {named:?}");
+}
+
+/// SOUNDNESS R1528 — THE `"0.39"` vs `"0.39.0"` QUIRK IS KNOWN, AND FIXING IT IS A DISCLOSURE REMOVAL.
+///
+/// `calibration_exceeded` falls through to `resolved != ceiling` when the numeric parts tie, so the
+/// two-component ceiling `("rusqlite", "0.39")` reads the very release it was reviewed against
+/// (`0.39.0`) as BEYOND review. In the engine that is the over-disclosure direction: an unmatched
+/// rusqlite call rejoins the coverage ledger and the consumer carries `invisible: [rusqlite]`.
+///
+/// The obvious one-line fix (compare the suffixes, so `0.39` == `0.39.0`) re-grants the calibration
+/// exemption to rusqlite 0.39.0 — and `eval/coverage-gate/open.tsv` holds 18 consumer-reachable
+/// rusqlite rows with no rule (`Connection::query_row_and_then`, `Statement::exists`,
+/// `Wal::checkpoint`, `Connection::prepare_with_flags`, …), several of which plainly step a
+/// statement. Every one of them would go from "disclosed, invisible" to "told nothing": the R1528
+/// silence, made larger by a correctness fix. So the fix waits on verdicts for those rows (rules
+/// first, then the comparator), and this test is the tripwire that makes whoever lands the
+/// comparator fix read why. When the rusqlite rows are resolved, invert the assertion.
+#[test]
+fn two_component_ceiling_quirk_is_pinned_until_rusqlite_rows_have_verdicts() {
+    assert!(
+        candor_classify::calibration_exceeded("rusqlite", "0.39.0"),
+        "the 0.39 vs 0.39.0 comparator was changed: that re-grants the calibration exemption to \
+         rusqlite 0.39.0 while open.tsv still lists unresolved, consumer-reachable rusqlite rows — \
+         a disclosure REMOVAL (SOUNDNESS R1528). Resolve those rows first, then invert this test."
+    );
+    let open = include_str!("../../../eval/coverage-gate/open.tsv");
+    let rusqlite_open = open.lines().filter(|l| l.starts_with("rusqlite\t")).count();
+    assert!(
+        rusqlite_open > 0,
+        "no rusqlite rows left in open.tsv — the reason this quirk is held is gone: fix the \
+         comparator (numeric tie + identical suffix = not exceeded) and invert this test"
     );
 }

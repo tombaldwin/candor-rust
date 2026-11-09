@@ -41,8 +41,11 @@ THE PIPELINE, per calibrated crate:
      `candor_classify::classify`, so this script never re-derives its rules).
   5. `classify_check` writes covered.tsv (every candidate classify() DOES recognize — the HARD,
      regression-proof list `crates/candor-classify/tests/coverage_gate.rs` asserts every push) and
-     open.tsv (the RATCHET — everything self-scan found effectful that no rule recognizes yet). Both
-     carry an `entry` column: the candidate's IDENTITY, which is what the refresh workflow diffs on.
+     open.tsv (the RATCHET — everything self-scan found effectful that no rule recognizes yet AND a
+     consumer can name; SOUNDNESS R1528 step 2 routes the rest to unreachable.tsv — see `Reachability`).
+     All three carry an `entry` column: the candidate's IDENTITY, which is what the refresh workflow
+     diffs on. A row may enter open.tsv only with a verdict in `candor_classify::OPEN_ENTRY_VERDICTS`
+     or as pre-ruling backlog in grandfathered.tsv (R1528 step 3; checked on push and weekly).
      `consumer_path` is a GUESS, picked by a different rule in each file (covered: the first guess
      classify() resolves; open: the shortest), so one candidate has two possible spellings and crossing
      between the lists rewrites the string with no change in what is covered — which the drift diff,
@@ -449,6 +452,318 @@ def restricted_types(concat_src):
 # commit, not the guessed path, is what the refresh workflow now diffs on.
 
 
+# --- SOUNDNESS R1528 step 2: CONSUMER REACHABILITY ---------------------------------------------------
+# A row in open.tsv claims "a consumer can call this and is told nothing". Phase 1's independent reader
+# found 7 of 39 sampled rows UNREACHABLE — the item sits in a module no consumer can name (lettre's
+# `mod net;`, tempfile's `mod imp;` / `mod util;`, sqlx-core's `mod tls_rustls;`, tungstenite's
+# `mod mask;`) and nothing re-exports it. Those rows inflate the silent population and, worse, make a
+# grown row's verdict cost a body read that cannot matter.
+#
+# The 2026-08-28 attempt (`restricted_top_modules`, see the TRIED AND REJECTED note above) failed in the
+# OTHER direction: "private module => unreachable" ignores `mod internal; pub use internal::Thing;`, and
+# dropped ~338 genuinely reachable rows. So this is not a module-privacy test, it is a small RESOLVER:
+# which modules are nameable from outside, and which (module, name) items are re-exported into a
+# nameable place, followed to a fixpoint through `pub use` chains, globs, `#[path]` renames and `self`.
+#
+# EVERY APPROXIMATION HERE FAILS TOWARD "REACHABLE" — i.e. toward keeping the row, which is the
+# direction the ratchet already lives in. A false "unreachable" would hide a live silence from the
+# register; a false "reachable" only keeps a row a reader then marks. Concretely: an unresolvable
+# `pub use` path (an extern crate), a type with no in-crate definition, a type MENTIONED in any public
+# signature / associated type / pub field (the "unnameable but obtainable" shape: a private-module type a
+# public fn returns is callable), and `mod` / `pub use` text inside macro bodies (`cfg_if!`) all count as
+# reachable. Only the classify()-unresolved rows are affected: a covered row stays covered whatever this
+# says, so the HARD gate (`coverage_gate.rs`) does not shrink — the exact failure that sank the 08-28 try.
+MOD_DECL_RE = re.compile(r'(pub(?:\s*\([^)]*\))?\s+)?\bmod\s+(\w+)\s*([;{])')
+PUB_USE_RE = re.compile(r'(?<![\w)])pub\s+use\s+([^;]+);')
+PATH_ATTR_RE = re.compile(r'\bpath\s*=\s*"([^"]+)"')
+ITEM_DECL_RE = re.compile(r'\b(pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum|union|trait|type)\s+(\w+)')
+ASSOC_TYPE_RE = re.compile(r'\btype\s+\w+(?:<[^=;]*>)?\s*=\s*([^;]+);')
+PUB_FIELD_RE = re.compile(r'\bpub\s+\w+\s*:\s*([^,}]+)')
+PUB_TUPLE_FIELD_RE = re.compile(r'[(,]\s*pub\s+([^,)]+)')
+PUB_BODY_DECL_RE = re.compile(r'\bpub\s+(?:enum|trait)\s+\w+[^{;]*\{')
+FN_TRAIT_ARGS_RE = re.compile(r'\bFn(?:Mut|Once)?\s*\(')
+WORD_RE = re.compile(r'[A-Za-z_]\w*')
+
+
+def obtainable_words(head):
+    """The words in a public fn signature through which a CONSUMER can come to HOLD a value: the
+    return type, and the arguments of a callback it is handed (`impl FnOnce(&mut Hidden)`). A plain
+    parameter type is not one — a consumer cannot construct an unnameable type to pass in (lettre's
+    `SmtpConnection::set_stream(NetworkStream)` is the measured instance)."""
+    words = set()
+    if '->' in head:
+        words.update(WORD_RE.findall(head.split('->', 1)[1]))
+    for m in FN_TRAIT_ARGS_RE.finditer(head):
+        close = head.find(')', m.end())
+        words.update(WORD_RE.findall(head[m.end():close if close != -1 else len(head)]))
+    return words
+
+
+def parse_use_tree(text):
+    """`a::b::{C, d::E as F, g::*, self}` -> [(segments, leaf, alias)], leaf `*` for a glob."""
+    toks = re.findall(r'::|[{}*,]|\w+', text)
+    out, pos = [], 0
+
+    def tree(prefix):
+        nonlocal pos
+        segs = list(prefix)
+        while pos < len(toks):
+            t = toks[pos]
+            if t == '{':
+                pos += 1
+                while pos < len(toks) and toks[pos] != '}':
+                    if toks[pos] == ',':
+                        pos += 1
+                        continue
+                    before = pos
+                    tree(segs)
+                    if pos == before:
+                        pos += 1
+                pos += 1
+                return
+            if t == '*':
+                pos += 1
+                out.append((segs, '*', None))
+                return
+            if t == '::':
+                pos += 1
+                continue
+            if t in (',', '}'):
+                return
+            pos += 1
+            if pos < len(toks) and toks[pos] == '::':
+                segs = segs + [t]
+                continue
+            alias = None
+            if pos + 1 < len(toks) and toks[pos] == 'as':
+                alias = toks[pos + 1]
+                pos += 2
+            if t == 'self':
+                if segs:
+                    out.append((segs[:-1], segs[-1], alias))
+            else:
+                out.append((segs, t, alias))
+            return
+
+    while pos < len(toks):
+        if toks[pos] == ',':
+            pos += 1
+            continue
+        before = pos
+        tree([])
+        if pos == before:
+            pos += 1
+    return out
+
+
+def _fn_body_spans(s):
+    """(open, close) of every fn body in `s` — a `mod`/`pub use` inside one is not a module item."""
+    spans = []
+    for m in FN_HEAD_RE.finditer(s):
+        i, n, depth = m.end(), len(s), 0
+        while i < n:
+            c = s[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            elif depth <= 0 and c in '{;':
+                break
+            i += 1
+        if i < n and s[i] == '{':
+            close = find_matching_brace(s, i)
+            if close != -1:
+                spans.append((i, close))
+    return spans
+
+
+def fn_head_at(s, start):
+    """The signature text of the fn whose `fn` keyword match starts at `start`: up to its body or `;`."""
+    i, n, depth = start, len(s), 0
+    while i < n:
+        c = s[i]
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif depth <= 0 and c in '{;' and i > start:
+            break
+        i += 1
+    return s[start:i]
+
+
+class Reachability:
+    """Which (module, name) items of one crate a consumer can name. See the block comment above."""
+
+    def __init__(self, texts, srcdir):
+        self.decls = {}    # module -> [(name, bare_pub, [target modules])]
+        self.uses = {}     # module -> [(segs, leaf, alias)]
+        self.types = {}    # type name -> [(module, bare_pub)]
+        self.mods = set()
+        self.mentioned = set()  # words in assoc-type / pub-field text (unconditional: over-approximate)
+        for f, s in texts.items():
+            fk = module_path_for(f, srcdir)
+            self.mods.add(fk)
+            spans = inline_mod_spans(s)
+            bodies = _fn_body_spans(s)
+
+            def owner(pos, fk=fk, spans=spans, bodies=bodies):
+                if any(a < pos < b for a, b in bodies):
+                    return None
+                names = [sp[0] for sp in sorted((sp for sp in spans if sp[1] < pos < sp[2]),
+                                                key=lambda sp: sp[1])]
+                return "::".join(p for p in ([fk] if fk else []) + names)
+
+            for m in MOD_DECL_RE.finditer(s):
+                mk = owner(m.start(2))
+                if mk is None:
+                    continue
+                bare = (m.group(1) or "").strip() == "pub"
+                name, kind = m.group(2), m.group(3)
+                child_default = f"{mk}::{name}" if mk else name
+                targets = []
+                if kind == ';':
+                    stmt_lo = max(s.rfind(';', 0, m.start()), s.rfind('}', 0, m.start()),
+                                  s.rfind('{', 0, m.start()))
+                    for p in PATH_ATTR_RE.findall(s[stmt_lo + 1:m.start()]):
+                        tf = os.path.normpath(os.path.join(os.path.dirname(f), p))
+                        targets.append(module_path_for(tf, srcdir))
+                if not targets:
+                    targets = [child_default]
+                self.mods.update(targets)
+                self.decls.setdefault(mk, []).append((name, bare, targets))
+            for m in PUB_USE_RE.finditer(s):
+                mk = owner(m.start())
+                if mk is None:
+                    continue
+                self.uses.setdefault(mk, []).extend(parse_use_tree(m.group(1)))
+            for m in ITEM_DECL_RE.finditer(s):
+                mk = owner(m.start())
+                if mk is None:
+                    continue
+                self.types.setdefault(m.group(2), []).append(
+                    (mk, (m.group(1) or "").strip() == "pub"))
+            for rx in (ASSOC_TYPE_RE, PUB_FIELD_RE, PUB_TUPLE_FIELD_RE):
+                for m in rx.finditer(s):
+                    self.mentioned.update(WORD_RE.findall(m.group(1)))
+            # A pub enum's variant fields are public, and a pub trait's method signatures hand values
+            # to a consumer's impl: every word in either body counts (over-approximate, keeps rows).
+            for m in PUB_BODY_DECL_RE.finditer(s):
+                close = find_matching_brace(s, m.end() - 1)
+                if close != -1:
+                    self.mentioned.update(WORD_RE.findall(s[m.end():close]))
+        self.visible = {""}
+        self.items = set()
+        self._fixpoint()
+
+    @staticmethod
+    def _parent(mk):
+        return mk.rsplit("::", 1)[0] if "::" in mk else ""
+
+    def _child(self, mk, name):
+        out = [t for (n, _pub, ts) in self.decls.get(mk, []) if n == name for t in ts]
+        if not out:
+            k = f"{mk}::{name}" if mk else name
+            if k in self.mods:
+                out = [k]
+        return out
+
+    def _resolve(self, mk, segs):
+        """The module(s) a use-path prefix names, or None when it leaves the crate (unresolvable)."""
+        if not segs:
+            return {mk}
+        first, rest = segs[0], segs[1:]
+        if first == "crate":
+            cur = {""}
+        elif first == "self":
+            cur = {mk}
+        elif first == "super":
+            cur = {self._parent(mk)}
+        else:
+            kids = self._child(mk, first) or self._child("", first)
+            if not kids:
+                return None
+            cur = set(kids)
+        for sg in rest:
+            if sg == "self":
+                continue
+            if sg == "super":
+                cur = {self._parent(x) for x in cur}
+                continue
+            nxt = set()
+            for x in cur:
+                nxt.update(self._child(x, sg))
+            if not nxt:
+                return None
+            cur = nxt
+        return cur
+
+    def _fixpoint(self):
+        changed = True
+        while changed:
+            changed = False
+            before = (len(self.visible), len(self.items))
+            for mk in list(self.visible):
+                for (_n, pub, ts) in self.decls.get(mk, []):
+                    if pub:
+                        self.visible.update(ts)
+            for mk, uses in self.uses.items():
+                vis = mk in self.visible
+                exported = {n for (m, n) in self.items if m == mk}
+                for segs, leaf, alias in uses:
+                    if not vis and leaf != '*' and (alias or leaf) not in exported:
+                        continue
+                    xs = self._resolve(mk, segs)
+                    if xs is None:
+                        continue
+                    if leaf == '*':
+                        if vis:
+                            self.visible.update(xs)
+                        else:
+                            for x in xs:
+                                self.items.update((x, n) for n in exported)
+                        continue
+                    kids = [k for x in xs for k in self._child(x, leaf)]
+                    if kids:
+                        self.visible.update(kids)
+                    self.items.update((x, leaf) for x in xs)
+            for (x, n) in list(self.items):
+                self.visible.update(self._child(x, n))
+            changed = (len(self.visible), len(self.items)) != before
+
+    def item_reachable(self, mk, name):
+        return mk in self.visible or (mk, name) in self.items
+
+    def type_reachable(self, name, extra_mentions=()):
+        defs = self.types.get(name)
+        if not defs:
+            return True  # no in-crate definition we can see: cannot prove unreachable
+        if name in self.mentioned or name in extra_mentions:
+            return True
+        return any(pub and self.item_reachable(mk, name) for mk, pub in defs)
+
+
+def mark_reachability(reach, public_entries):
+    """Set `reachable` on each candidate, iterating because a reachable fn's SIGNATURE can make a
+    private-module type obtainable (and so its methods callable) — to a fixpoint."""
+    mentions = set()
+    state = {}
+    changed = True
+    while changed:
+        changed = False
+        for i, (mp, ty, fn, _f, head) in enumerate(public_entries):
+            if state.get(i):
+                continue
+            ok = reach.type_reachable(ty, mentions) if ty else reach.item_reachable(mp, fn)
+            if ok:
+                state[i] = True
+                new = obtainable_words(head) - mentions
+                if new:
+                    mentions |= new
+                    changed = True
+    return [bool(state.get(i)) for i in range(len(public_entries))]
+
+
 def process_crate(registry_src, crate_name):
     d = find_crate_dir(registry_src, crate_name)
     if d is None:
@@ -468,7 +783,7 @@ def process_crate(registry_src, crate_name):
     pub_traits = set(TRAIT_DECL_RE.findall(concat))
     restricted = restricted_types(concat)
 
-    public_entries = []  # (module_path, type_name_or_None, fn_name, file)
+    public_entries = []  # (module_path, type_name_or_None, fn_name, file, signature_text)
     for f, s in texts.items():
         file_mp = module_path_for(f, srcdir)
         spans = inline_mod_spans(s)
@@ -486,7 +801,7 @@ def process_crate(registry_src, crate_name):
         for start, pub_kw, is_async, fn_name in find_fns(s):
             mp = module_at(start)
             if mp is not None and is_bare_pub(pub_kw):
-                public_entries.append((mp, None, fn_name, f))
+                public_entries.append((mp, None, fn_name, f, fn_head_at(s, start)))
         for m in IMPL_RE.finditer(s):
             mp = module_at(m.start())
             if mp is None:
@@ -514,10 +829,12 @@ def process_crate(registry_src, crate_name):
             for start, pub_kw, is_async, fn_name in find_fns(body):
                 d2 = body[:start].count('{') - body[:start].count('}')
                 if d2 == 0 and (is_bare_pub(pub_kw) or not require_pub_kw):
-                    public_entries.append((mp, ty_name, fn_name, f))
+                    public_entries.append((mp, ty_name, fn_name, f, fn_head_at(body, start)))
 
+    reach = Reachability(texts, srcdir)
+    reachable = mark_reachability(reach, public_entries)
     out = []
-    for mp, ty, fn, f in public_entries:
+    for (mp, ty, fn, f, _head), ok in zip(public_entries, reachable):
         guesses = set()
         if ty:
             if mp:
@@ -528,7 +845,7 @@ def process_crate(registry_src, crate_name):
                 guesses.add(f"{crate_name}::{mp}::{fn}")
             guesses.add(f"{crate_name}::{fn}")
         out.append({"crate": crate_name, "module": mp, "type": ty, "fn": fn,
-                     "file": os.path.relpath(f, d), "guesses": sorted(guesses)})
+                     "file": os.path.relpath(f, d), "guesses": sorted(guesses), "reachable": ok})
     return d, out
 
 
@@ -636,6 +953,58 @@ def selftest():
               f"{g_load} / {g_sym}")
         check("the module-qualified guess is the candidate identity",
               "fixture::os::unix::fs::symlink" in g_sym, f"{g_sym}")
+
+        # --- SOUNDNESS R1528 step 2: consumer REACHABILITY, both directions ---------------------------
+        # Each shape below is a measured instance: lettre's private `mod net;` (NetworkStream, named only
+        # as a PARAMETER of a public fn), tempfile's `mod imp;` + cfg_attr-path `mod platform;` +
+        # `pub use self::platform::*` inside the private module, tungstenite's `mod mask;`; and on the
+        # keep side the idiom that sank the 2026-08-28 try (`mod internal; pub use internal::Thing;`),
+        # a glob re-export, a `cfg_if!`-wrapped private module re-exported by glob, and a private-module
+        # type a public fn RETURNS (unnameable, but a consumer holds one and can call its methods).
+        rc = os.path.join(tmp, "reach-1.0.0")
+        rsrc = os.path.join(rc, "src")
+        os.makedirs(os.path.join(rsrc, "file", "imp"))
+        os.makedirs(os.path.join(rsrc, "glob"))
+        open(os.path.join(rsrc, "lib.rs"), "w").write(
+            "mod internal;\npub use internal::Thing;\n"
+            "mod net;\nmod mask;\nmod file;\nmod glob;\npub use glob::*;\n"
+            "cfg_if::cfg_if! { if #[cfg(unix)] { mod sys; pub use sys::*; } }\n"
+            "mod hidden;\n"
+            "pub struct Conn;\n"
+            "impl Conn {\n"
+            "    pub fn set_stream(&mut self, s: net::NetworkStream) {}\n"
+            "    pub fn handle(&self) -> hidden::Handle { hidden::Handle }\n"
+            "}\n"
+            "pub fn tempfile() -> u8 { file::imp::reopen() }\n")
+        open(os.path.join(rsrc, "internal.rs"), "w").write(
+            "pub struct Thing;\nimpl Thing { pub fn go(&self) {} }\npub struct Inner;\nimpl Inner { pub fn no(&self) {} }\n")
+        open(os.path.join(rsrc, "net.rs"), "w").write(
+            "pub struct NetworkStream;\nimpl NetworkStream { pub fn connect() -> NetworkStream { NetworkStream } }\n")
+        open(os.path.join(rsrc, "mask.rs"), "w").write("pub fn generate_mask() -> u8 { 0 }\n")
+        open(os.path.join(rsrc, "file", "mod.rs"), "w").write("mod imp;\n")
+        open(os.path.join(rsrc, "file", "imp", "mod.rs"), "w").write(
+            '#[cfg_attr(unix, path = "unix.rs")]\n#[cfg_attr(windows, path = "windows.rs")]\nmod platform;\n'
+            "pub use self::platform::*;\n")
+        open(os.path.join(rsrc, "file", "imp", "unix.rs"), "w").write("pub fn reopen() -> u8 { 0 }\n")
+        open(os.path.join(rsrc, "glob", "mod.rs"), "w").write("pub fn globbed() {}\n")
+        open(os.path.join(rsrc, "sys.rs"), "w").write("pub fn from_cfg_if() {}\n")
+        open(os.path.join(rsrc, "hidden.rs"), "w").write(
+            "pub struct Handle;\nimpl Handle { pub fn flush(&self) {} }\n")
+        _, rents = process_crate(tmp, "reach")
+        rby = {(e["module"], e["type"], e["fn"]): e["reachable"] for e in rents}
+        for key, want, why in [
+            (("internal", "Thing", "go"), True, "`mod internal; pub use internal::Thing;` keeps Thing"),
+            (("internal", "Inner", "no"), False, "a sibling NOT re-exported out of the private module is unreachable"),
+            (("net", "NetworkStream", "connect"), False, "a type named only as a PARAMETER is not obtainable"),
+            (("mask", None, "generate_mask"), False, "a free fn in a private module, never re-exported"),
+            (("file::imp::unix", None, "reopen"), False, "a cfg_attr-path module glob-re-exported only inside a "
+                                                          "PRIVATE module stays unreachable"),
+            (("glob", None, "globbed"), True, "`pub use glob::*` from the root reaches it"),
+            (("sys", None, "from_cfg_if"), True, "a `cfg_if!`-wrapped private module re-exported by glob"),
+            (("hidden", "Handle", "flush"), True, "a private-module type a public fn RETURNS is obtainable"),
+            (("", "Conn", "set_stream"), True, "a root type's method"),
+        ]:
+            check(f"reachability: {why}", rby.get(key) is want, f"{key} -> {rby.get(key)!r}; all: {sorted(rby.items(), key=str)}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -718,7 +1087,9 @@ def selftest():
         r3 = diff_manifests(c3_cov, c3_cov, c3_open, c3_open)
         check("case 3 (clean run): nothing regressed, nothing oracle-dropped, nothing grown",
               not r3["regressed"] and not r3["oracle_dropped"] and not r3["grown"], f"{r3}")
-        exit3 = diff_manifests_cli(c3_cov, c3_cov, c3_open, c3_open, out=devnull)
+        c3_gf = {("acme", "acme::mod2::Baz::qux")}  # pre-ruling backlog: needs no verdict
+        exit3 = diff_manifests_cli(c3_cov, c3_cov, c3_open, c3_open, out=devnull, verdicts={},
+                                   grandfathered=c3_gf)
         check("case 3: diff_manifests_cli exits 0 — a clean run must PASS", exit3 == 0, f"exit={exit3}")
 
         # Case 4: ENGINE CHANGE vs DRIFT. Two grown rows; the baseline (manifest's engine on the same
@@ -742,6 +1113,37 @@ def selftest():
         r4u = diff_manifests(c4_checked_cov, c4_fresh_cov, c4_checked_open, c4_fresh_open)
         check("case 4: without a baseline nothing is attributed (never labelled drift by default)",
               not r4u["baseline"] and "grown_drift" not in r4u, f"{r4u}")
+        # Case 6 (SOUNDNESS R1528 step 3): THE VERDICT GATE CAN FAIL, and clears only on a verdict.
+        c6_open = write("c6_open.tsv", [open_hdr, "acme\tacme::Old::row\tFs\tsrc/o.rs\tacme::o::Old::row"])
+        c6_fresh = write("c6_fresh.tsv", [open_hdr, "acme\tacme::Old::row\tFs\tsrc/o.rs\tacme::o::Old::row",
+                                           "acme\tacme::New::row\tNet\tsrc/n.rs\tacme::n::New::row"])
+        gf6 = {("acme", "acme::o::Old::row")}
+        new6 = ("acme", "acme::n::New::row")
+        e_none = diff_manifests_cli(c3_cov, c3_cov, c6_open, c6_fresh, out=devnull, verdicts={}, grandfathered=gf6)
+        r6 = diff_manifests(c3_cov, c3_cov, c6_open, c6_fresh, verdicts={}, grandfathered=gf6)
+        check("case 6: a grown row with NO verdict fails the job and is named",
+              e_none == 1 and [k for k, *_ in r6["grown_unverdicted"]] == [new6], f"exit={e_none} {r6['grown_unverdicted']}")
+        e_ok = diff_manifests_cli(c3_cov, c3_cov, c6_open, c6_fresh, out=devnull,
+                                  verdicts={new6: "R1528:silent"}, grandfathered=gf6)
+        check("case 6: the SAME grown row with a recorded verdict clears (exit 0)", e_ok == 0, f"exit={e_ok}")
+        e_prose = diff_manifests_cli(c3_cov, c3_cov, c6_open, c6_fresh, out=devnull,
+                                     verdicts={new6: "read it, looks fine"}, grandfathered=gf6)
+        check("case 6: a PROSE verdict is not a verdict (exit 1)", e_prose == 1, f"exit={e_prose}")
+        e_splice = diff_manifests_cli(c3_cov, c3_cov, c6_fresh, c6_fresh, out=devnull, verdicts={},
+                                      grandfathered=gf6)
+        r6s = diff_manifests(c3_cov, c3_cov, c6_fresh, c6_fresh, verdicts={}, grandfathered=gf6)
+        check("case 6: SPLICING the row into the checked-in open.tsv does not clear it (unregistered, exit 1)",
+              e_splice == 1 and [k for k, *_ in r6s["unregistered"]] == [new6], f"exit={e_splice}")
+        vsrc = os.path.join(tmp2, "lib.rs")
+        with open(vsrc, "w") as fh:
+            fh.write('pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[\n'
+                     '    ("acme", "acme::n::New::row", "R1528:silent"),\n'
+                     '    // ("acme", "acme::commented::out", "R1:silent"),\n];\n')
+        check("case 6: read_open_verdicts parses entries and ignores a commented-out one",
+              read_open_verdicts(vsrc) == {new6: "R1528:silent"}, f"{read_open_verdicts(vsrc)}")
+        real_v = read_open_verdicts()
+        check("case 6: the real OPEN_ENTRY_VERDICTS parses, every entry well-formed",
+              isinstance(real_v, dict) and all(verdict_is_well_formed(v) for v in real_v.values()), f"{real_v}")
         # R1507: the engine stamp round-trips, replaces (never duplicates) itself, and `unrecorded` reads as absent
         # so refresh.sh falls back to its history walk instead of trusting a sha no commit made.
         sp = os.path.join(tmp2, "stamp.tsv")
@@ -962,8 +1364,39 @@ def _require_entry_column(path, rows):
         )
 
 
+GRANDFATHERED_PATH = os.path.join(HERE, "grandfathered.tsv")
+VERDICT_KINDS = ("silent", "overcharge", "conditional")
+
+
+def read_open_verdicts(src_path=CLASSIFY_SRC):
+    """`candor_classify::OPEN_ENTRY_VERDICTS` as {(crate, entry): verdict}, read from the source the way
+    `calibrated_crates_from_source` reads CALIBRATED_CRATES — one copy of the truth. Raises when the
+    const is missing: a verdict gate that silently loaded nothing would clear nothing and look red for
+    the wrong reason, or (worse, if the logic ever inverts) clear everything."""
+    src = open(src_path).read()
+    m = re.search(r'pub const OPEN_ENTRY_VERDICTS:\s*&\[\(&str, &str, &str\)\]\s*=\s*&\[(.*?)\];', src, re.DOTALL)
+    if not m:
+        raise SystemExit("could not find OPEN_ENTRY_VERDICTS in " + src_path)
+    body = strip_comments(m.group(1))
+    return {(c, e): v for c, e, v in re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', body)}
+
+
+def read_grandfathered(path=GRANDFATHERED_PATH):
+    """The pre-ruling backlog's (crate, entry) keys. Absent file = empty set (every row then needs a
+    verdict), never 'everything is grandfathered'."""
+    if not os.path.exists(path):
+        return set()
+    return {(r[0], r[-1]) for r in read_tsv_rows(path) if len(r) >= 2}
+
+
+def verdict_is_well_formed(v):
+    row, _, kind = v.partition(":")
+    return len(row) > 1 and row[0] == "R" and row[1:].isdigit() and kind in VERDICT_KINDS
+
+
 def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
-                   baseline_covered_path=None, baseline_open_path=None):
+                   baseline_covered_path=None, baseline_open_path=None, verdicts=None, grandfathered=None,
+                   checked_unreachable_path=None, fresh_unreachable_path=None):
     """Compare a fresh regeneration against the checked-in manifests and return a dict with three
     DISTINCT findings, per the R214 comment block above:
 
@@ -1020,9 +1453,36 @@ def diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, 
     grown_raw = set(fresh_open) - set(checked_open)
     grown = sorted((k, None, fresh_open[k]) for k in grown_raw if k not in checked_cov)
 
+    # SOUNDNESS R1528 step 3 — THE VERDICT GATE (Tom, 2026-11-08: a grown row clears the red ONLY
+    # with a recorded verdict). `grown` stays the full list and keeps its engine/drift split; what
+    # FAILS is the part of it with no verdict. A grown row with a well-formed `OPEN_ENTRY_VERDICTS`
+    # entry is cleared (the lane splices it into open.tsv beside the verdict). A rule or a
+    # REVIEWED_PURE_ENTRIES read never reaches `grown` at all — the fresh run already put the row in
+    # covered.tsv or dropped it — so this is the only verdict that has to be looked up here.
+    # `unregistered` is the same rule applied to the CHECKED-IN open.tsv: a row that is neither
+    # pre-ruling backlog nor verdicted got in by a splice. The push-time test refuses that too; it is
+    # repeated here so the weekly verdict does not depend on that test having run.
+    if verdicts is None:
+        verdicts = read_open_verdicts()
+    if grandfathered is None:
+        grandfathered = read_grandfathered()
+    good = {k for k, v in verdicts.items() if verdict_is_well_formed(v)}
+    grown_verdicted = [g for g in grown if g[0] in good]
+    grown_unverdicted = [g for g in grown if g[0] not in good]
+    unregistered = sorted((k, checked_open[k], None) for k in checked_open
+                          if k not in grandfathered and k not in good)
+    newly_unreachable = []
+    if checked_unreachable_path and fresh_unreachable_path:
+        checked_un = _manifest_key_map(read_tsv_rows(checked_unreachable_path)) \
+            if os.path.exists(checked_unreachable_path) else {}
+        fresh_un = _manifest_key_map(read_tsv_rows(fresh_unreachable_path))
+        newly_unreachable = sorted((k, checked_open.get(k), fresh_un[k]) for k in set(fresh_un) - set(checked_un))
+
     result = {
         "regressed": regressed, "oracle_dropped": oracle_dropped, "grown": grown,
         "crate_covered_totals": crate_covered_totals, "baseline": False,
+        "grown_verdicted": grown_verdicted, "grown_unverdicted": grown_unverdicted,
+        "unregistered": unregistered, "verdicts": verdicts, "newly_unreachable": newly_unreachable,
     }
     if baseline_open_path and baseline_covered_path:
         base_open_rows = read_tsv_rows(baseline_open_path)
@@ -1104,6 +1564,30 @@ def format_diff_report(result):
             lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
 
     lines.append("")
+    verdicts = result.get("verdicts", {})
+    lines.append(f"--- GROWN WITHOUT A VERDICT ({len(result['grown_unverdicted'])}) — FAILS (SOUNDNESS R1528, "
+                 "Tom 2026-11-08) ---")
+    lines.append("Each needs ONE of: a classify() rule; a REVIEWED_PURE_ENTRIES read; or a filed SOUNDNESS row "
+                 "recorded in candor_classify::OPEN_ENTRY_VERDICTS as `R<id>:silent|overcharge|conditional`. "
+                 "Copying the row into open.tsv is not a verdict, and the push-time test refuses it.")
+    for k, _, new in result["grown_unverdicted"]:
+        lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}")
+    lines.append(f"--- GROWN WITH A VERDICT ({len(result['grown_verdicted'])}) — cleared; splice into open.tsv ---")
+    for k, _, new in result["grown_verdicted"]:
+        lines.append(f"  {_fmt_key(k)}  verdict={verdicts.get(k)}  effects={new[2]!r}")
+    lines.append(f"--- UNREGISTERED checked-in open.tsv rows: no verdict, not pre-ruling backlog "
+                 f"({len(result['unregistered'])}) — FAILS ---")
+    for k, old, _ in result["unregistered"]:
+        lines.append(f"  {_fmt_key(k)}  effects={old[2]!r}")
+    if result.get("newly_unreachable"):
+        lines.append(f"--- NEWLY UNREACHABLE ({len(result['newly_unreachable'])}) — reported, not failing: no "
+                     "consumer can name these (generate.py `Reachability`). A wrong verdict here hides a row; "
+                     "spot-check any that a public caller does not already carry ---")
+        for k, old, new in result["newly_unreachable"]:
+            lines.append(f"  {_fmt_key(k)}  effects={new[2]!r}  file={new[3]}"
+                         + ("  (was in open.tsv)" if old else ""))
+
+    lines.append("")
     if regressed or oracle_dropped:
         lines.append(PLATFORM_CAVEAT)
     return "\n".join(lines)
@@ -1111,13 +1595,16 @@ def format_diff_report(result):
 
 def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
                         github_output_path=None, out=sys.stdout, baseline_covered_path=None,
-                        baseline_open_path=None):
+                        baseline_open_path=None, verdicts=None, grandfathered=None,
+                        checked_unreachable_path=None, fresh_unreachable_path=None):
     """Run `diff_manifests`, print the report to `out`, write GitHub Actions step outputs if
     `github_output_path` is given, and return the process exit code the caller should use: 1 if
     `regressed` or `grown` is non-empty (the two FAILING findings), 0 otherwise. `oracle_dropped` is
     never, by itself, part of the exit-code decision — see the R214 comment block for why."""
     result = diff_manifests(checked_covered_path, fresh_covered_path, checked_open_path, fresh_open_path,
-                            baseline_covered_path, baseline_open_path)
+                            baseline_covered_path, baseline_open_path, verdicts=verdicts,
+                            grandfathered=grandfathered, checked_unreachable_path=checked_unreachable_path,
+                            fresh_unreachable_path=fresh_unreachable_path)
     print(format_diff_report(result), file=out)
 
     # SOUNDNESS R311 — report a CRATE VERSION CHANGE before the row counts, because it EXPLAINS them.
@@ -1157,15 +1644,26 @@ def diff_manifests_cli(checked_covered_path, fresh_covered_path, checked_open_pa
             fh.write(f"grown_drift={len(result.get('grown_drift', []))}\n")
             fh.write(f"regressed_engine={len(result.get('regressed_engine', []))}\n")
             fh.write(f"regressed_drift={len(result.get('regressed_drift', []))}\n")
+            fh.write(f"grown_unverdicted={len(result['grown_unverdicted'])}\n")
+            fh.write(f"grown_verdicted={len(result['grown_verdicted'])}\n")
+            fh.write(f"unregistered={len(result['unregistered'])}\n")
+            fh.write(f"newly_unreachable={len(result['newly_unreachable'])}\n")
 
-    if result["regressed"] or result["grown"]:
+    # R1528 step 3: a grown row with a verdict no longer fails; one without still does, and so does a
+    # checked-in row that got into open.tsv with neither a verdict nor a backlog slot.
+    if result["regressed"] or result["grown_unverdicted"] or result["unregistered"]:
         print(f"::error::coverage-gate drift: {len(result['regressed'])} regressed "
               f"(classify() lost a rule), {len(result['oracle_dropped'])} oracle-dropped (self-scan "
               f"stopped nominating, reported not failed), {len(result['grown'])} newly-uncovered"
               + (f" ({len(result['grown_engine'])} engine change, {len(result['grown_drift'])} crates.io "
                  f"drift)" if result["baseline"] else " (not attributed)")
+              + f" of which {len(result['grown_unverdicted'])} have NO VERDICT, "
+              f"{len(result['unregistered'])} checked-in row(s) unregistered"
               + " — see job log above", file=out)
         return 1
+    if result["grown_verdicted"]:
+        print(f"::notice::coverage-gate: {len(result['grown_verdicted'])} grown row(s) carry a recorded verdict "
+              f"and do not fail the job — splice them into open.tsv.", file=out)
     if result["oracle_dropped"]:
         print(f"::warning::coverage-gate: {len(result['oracle_dropped'])} entries dropped out of both "
               f"manifests (self-scan's candidate oracle got more precise, or a crate's self-scan "
@@ -1186,6 +1684,9 @@ def main():
                     metavar=("CHECKED_COVERED", "FRESH_COVERED", "CHECKED_OPEN", "FRESH_OPEN"),
                     help="diff a fresh regeneration against the checked-in manifests (SOUNDNESS R214) "
                          "and exit with the job's verdict; see diff_manifests()'s docstring")
+    ap.add_argument("--unreachable", nargs=2, default=None, metavar=("CHECKED_UNREACHABLE", "FRESH_UNREACHABLE"),
+                    help="with --diff-manifests: the checked-in and fresh unreachable.tsv (SOUNDNESS R1528), so "
+                         "newly-unreachable rows are reported")
     ap.add_argument("--baseline", nargs=2, default=None, metavar=("BASELINE_COVERED", "BASELINE_OPEN"),
                     help="with --diff-manifests: a fresh regeneration by the engine that WROTE the checked-in "
                          "manifests, over the same fetch, so growth splits into engine change vs drift")
@@ -1214,8 +1715,10 @@ def main():
 
     if args.diff_manifests:
         b = args.baseline or (None, None)
+        u = args.unreachable or (None, None)
         code = diff_manifests_cli(*args.diff_manifests, github_output_path=args.github_output,
-                                  baseline_covered_path=b[0], baseline_open_path=b[1])
+                                  baseline_covered_path=b[0], baseline_open_path=b[1],
+                                  checked_unreachable_path=u[0], fresh_unreachable_path=u[1])
         sys.exit(code)
 
     registry_src = args.registry
@@ -1278,20 +1781,21 @@ def main():
 
     covered_path = os.path.join(HERE, "covered.tsv")
     open_path = os.path.join(HERE, "open.tsv")
+    unreachable_path = os.path.join(HERE, "unreachable.tsv")
     subprocess.run(
         ["cargo", "run", "--quiet", "--release", "--manifest-path", CLASSIFY_CHECK_MANIFEST,
-         "--", entries_path, covered_path, open_path],
+         "--", entries_path, covered_path, open_path, unreachable_path],
         check=True,
     )
     # R311 — stamp the resolved versions into both manifests, as a comment so no data row moves and the
     # join key is untouched. `diff_manifests` reads it back and reports a version change as its own
     # labelled alarm, because "sea-orm went 1.x -> 2.x" and "43 entries appeared" are the same event and
     # only the first one is diagnosable.
-    stamp_versions(covered_path, resolved_versions)
-    stamp_versions(open_path, resolved_versions)
+    for p in (covered_path, open_path, unreachable_path):
+        stamp_versions(p, resolved_versions)
     eng = current_engine_stamp()
-    stamp_engine(covered_path, eng)
-    stamp_engine(open_path, eng)
+    for p in (covered_path, open_path, unreachable_path):
+        stamp_engine(p, eng)
 
 
 if __name__ == "__main__":

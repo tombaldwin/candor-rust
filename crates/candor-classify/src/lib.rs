@@ -371,6 +371,32 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     ("mysql", "mysql::Stream::connect_socket"),
 ];
 
+/// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
+/// IDENTITY (`(crate, entry)`, the manifest's last column — not the guessed consumer path, which a rule
+/// change can rewrite).
+///
+/// Every `open.tsv` row is an effectful public function of a calibrated crate that `classify()` names
+/// no effect for — and, within the crate's ceiling, the coverage ledger exempts the call, so a consumer
+/// is told nothing (R1528, EXECUTED). Until 2026-11-08 a row that GREW in the weekly refresh left the red
+/// by being copied into `open.tsv`: 108 rows that way since the 10-08 regeneration, with no rule, no
+/// read and no filed row. **Tom's ruling (2026-11-08): a newly grown row clears the red ONLY with a
+/// recorded verdict, paid for by the engine lane that caused it.** The three verdicts are:
+///   1. a `classify()` rule — the row then leaves `open.tsv` for `covered.tsv` on regeneration;
+///   2. read-and-pure — an entry in `REVIEWED_PURE_ENTRIES` above, at that list's evidence bar;
+///   3. a FILED SOUNDNESS row — an entry HERE: `(crate, entry, "R<id>:<kind>")`, where `<kind>` is
+///      `silent` (a real effect a consumer is not told about; rule pending), `overcharge` (the self-scan
+///      oracle fabricates the effect — a scanner row, R1420(a)'s class), or `conditional` (the effect
+///      depends on a type argument or a configuration the caller chooses; the row says which).
+///
+/// The rows that were already in `open.tsv` when the ruling was made are the pre-ruling backlog,
+/// tracked as a population by R1528 itself and listed in `eval/coverage-gate/grandfathered.tsv`, which
+/// may only shrink. Enforced twice, on purpose: `tests/coverage_gate.rs` on every push (a row in
+/// `open.tsv` that is neither grandfathered nor here fails — closing the splice route), and the weekly
+/// `generate.py --diff-manifests` (a grown row without a verdict fails the job; one with a verdict does
+/// not). A verdict is DATA the gate checks, not prose: a malformed kind, an unknown crate or a verdict
+/// for a row that is not in `open.tsv` fails the push-time test.
+pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[];
+
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
 /// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
 /// dead. Exported as ONE source of truth because the nightly lint crate (`src/lib.rs`) runs the SAME

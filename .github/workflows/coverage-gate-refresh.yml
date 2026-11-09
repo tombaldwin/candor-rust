@@ -12,6 +12,12 @@
 # resolves, fails the job and opens a tracking issue with the concrete diff, the same "report a NEW
 # finding" contract realworld-oracle.yml already uses.
 #
+# SOUNDNESS R1528 step 3 (Tom, 2026-11-08): a newly grown row fails the job UNLESS it carries a recorded
+# verdict — a classify() rule, a REVIEWED_PURE_ENTRIES read, or a filed SOUNDNESS row in
+# `candor_classify::OPEN_ENTRY_VERDICTS`. Splicing the row into open.tsv is not one; the push-time
+# `crates/candor-classify/tests/coverage_gate.rs` refuses an open.tsv row that is neither verdicted nor in
+# `eval/coverage-gate/grandfathered.tsv` (the pre-ruling backlog, which may only shrink).
+#
 # SOUNDNESS R214: a checked-in covered.tsv row the fresh run no longer sees covered is TWO different
 # events, not one — classify() losing a rule (real regression, must fail) vs. the self-scan candidate
 # oracle itself no longer nominating the entry because its effect set went empty or non-CORE (e.g. a
@@ -120,6 +126,9 @@ jobs:
             echo "- **regressed** (classify() no longer resolves this entry, and self-scan STILL nominates it — a real coverage loss): ${{ steps.diff.outputs.regressed }}"
             echo "- **newly uncovered** (a public entry point no rule recognizes): ${{ steps.diff.outputs.grown }} — of which **engine change** (our scanner/classify moved since the manifest; the manifest's own engine does not see them on this same fetch): ${{ steps.diff.outputs.grown_engine }}, **crates.io drift** (the manifest's own engine sees them too): ${{ steps.diff.outputs.grown_drift }}"
             echo "- regressed split: engine ${{ steps.diff.outputs.regressed_engine }}, drift ${{ steps.diff.outputs.regressed_drift }}"
+            echo "- **grown WITHOUT a verdict** (these fail the job — SOUNDNESS R1528, Tom 2026-11-08): ${{ steps.diff.outputs.grown_unverdicted }}; grown with a recorded verdict (cleared): ${{ steps.diff.outputs.grown_verdicted }}"
+            echo "- **unregistered** checked-in open.tsv rows (neither a verdict nor pre-ruling backlog — a splice): ${{ steps.diff.outputs.unregistered }}"
+            echo "- newly unreachable (reported, not failing): ${{ steps.diff.outputs.newly_unreachable }}"
             echo ""
             echo "Not counted above and NOT why this issue was filed (SOUNDNESS R214) — reported here only"
             echo "for visibility, since it was also a \`::warning::\` in the job log: ${{ steps.diff.outputs.oracle_dropped }} entries where the self-scan candidate oracle itself stopped nominating the row (its inferred effect set went empty or narrowed to a non-CORE effect — e.g. a drop-glue over-charge correctly withdrawn from the scanner, the async_nats/e9cdd23 instance this distinction was written for). If that count is large, or concentrated entirely in one crate, check the earlier 'self-scan FAILED' log lines before assuming it is benign — it can also mean that crate's self-scan errored out this run."
@@ -133,7 +142,7 @@ jobs:
             echo ""
             echo "See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) log for the exact rows, and the uploaded \`coverage-gate-fresh-manifests\` artifact for the full fresh output."
             echo ""
-            echo "Regenerate locally (\`python3 eval/coverage-gate/generate.py --print-fixture-toml | ...\`, see that file's USAGE) and either add a classify.rs rule, list a genuinely-pure entry in REVIEWED_PURE_ENTRIES, or fold the new row into open.tsv after triage."
+            echo "Regenerate locally (\`python3 eval/coverage-gate/generate.py --print-fixture-toml | ...\`, see that file's USAGE). Each grown row needs a VERDICT, paid for by the engine lane that caused it: a classify() rule, a REVIEWED_PURE_ENTRIES read, or a filed SOUNDNESS row recorded in \`candor_classify::OPEN_ENTRY_VERDICTS\` as \`R<id>:silent|overcharge|conditional\` — then splice the row into open.tsv. Copying the row into open.tsv alone is not a verdict; the push-time \`coverage_gate.rs\` test refuses it."
           } > /tmp/issue-body.md
           gh issue create \
             --title "coverage-gate: the CALIBRATED_CRATES differential moved (engine ${{ steps.diff.outputs.grown_engine }} / drift ${{ steps.diff.outputs.grown_drift }})" \
