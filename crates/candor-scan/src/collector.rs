@@ -2537,6 +2537,218 @@ impl<'a> CallCollector<'a> {
         out
     }
 
+    /// The dependencies this module imports a TRAIT-SHAPED name from — a glob, an `as _` import, or a capitalised
+    /// name: every crate whose trait could be what answers a method call no std method and no crate definition
+    /// answers (R1136), or that could own an `impl <its trait> for <std type>` (R1540).
+    fn trait_import_crates(&self) -> std::collections::BTreeSet<String> {
+        let mut crates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut note = |v: &str| {
+            let root = v.split("::").next().unwrap_or(v);
+            if !root.is_empty() && !matches!(root, "crate" | "self" | "super" | "std" | "core" | "alloc") && !root.contains('<') {
+                crates.insert(root.to_string());
+            }
+        };
+        if let Some(g) = self.uses.get(crate::lang::GLOB_KEY) {
+            for v in g.split('\u{1}') {
+                note(v);
+            }
+        }
+        for (k, v) in self.uses.iter() {
+            let trait_shaped = k == "_" || k.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+            if trait_shaped && v.contains("::") && !k.starts_with('*') {
+                note(v);
+            }
+        }
+        if let Some(alts) = self.use_alts.get("_") {
+            for v in alts {
+                note(v);
+            }
+        }
+        crates
+    }
+
+    /// SOUNDNESS R1540 — A METHOD CALL ON A STD-TYPED RECEIVER REACHES A TRAIT IMPL FOR THAT STD TYPE. `impl MyLoad
+    /// for AtomicUsize { fn my_load(&self) { /* writes */ } }` is charged on its own row (`AtomicUsize::my_load`), but
+    /// `let a = AtomicUsize::new(3); a.my_load()` (an annotated `let`, a `&AtomicUsize` parameter) formed no edge and no
+    /// disclosure: the receiver types as `std::sync::atomic::AtomicUsize`, the typed arm of `visit_expr_method_call`
+    /// skips every std/core/alloc receiver (std's coarse prefix rules mis-fire on its data types), and where it does
+    /// not skip (`Path`, the I/O handles) `scan.rs`'s `resolvable` refuses a std-headed path. Only the bare-leaf twin
+    /// remained, which resolves nothing, so the caller read ABSENT over the write (EXECUTED,
+    /// `~/candor-handoff/rust-r1540`). A prelude/primitive receiver (`String`, `u32`, `Option`) was unaffected: its
+    /// typed path has no std head and resolves through `tail2` already.
+    ///
+    /// IN THE CRATE: the impl's unit is filed under the std type's LEAF (`AtomicUsize::my_load`), so where the crate
+    /// defines `leaf` on that leaf (`local_fn_on`) the call is formed under that key, which `resolvable` admits. The
+    /// orphan rule makes such an impl one of the crate's own traits. Two refusals keep it from fabricating:
+    ///   * where std ALSO has a method of that name and arity (`std_methods`, generated over rust-src), std's
+    ///     inherent method wins method resolution over a trait impl at the same autoderef step, and that table
+    ///     does not say WHICH std type has it — so no edge is formed and the site is recorded for an `ambiguous:`
+    ///     disclosure instead (`STD_RECV_AMBIG_MARKER`, judged after the fixpoint: `Unknown` only where a candidate
+    ///     carries a concrete effect the caller lacks). Never a charge: `a.load(o)` beside `impl MyTr for
+    ///     AtomicUsize { fn load(..) }` runs std's `load`;
+    ///   * `clone` is never typed (the existing rule in the typed arm).
+    ///
+    /// Three disclosures ride beside it (each a candidate, never an edge): a crate impl on a smart pointer reached through a
+    /// receiver typed as the pointee, a crate `Vec` impl reached through an untyped `vec![..]` binding, and a macro-made impl
+    /// (`macro:`, where `fn <method>` is in unexpanded macro text).
+    ///
+    /// CHAINED: the impl may live in a dependency whose trait the module imports (the orphan rule puts `impl
+    /// dep::Tr for AtomicUsize` in `dep`), and the dependency's report files it under the same leaf key. R1136
+    /// recorded only a κ ledger entry for that dependency, which a chained, covered report then dropped — so the
+    /// consumer read PURE where the report it chained had the row. `STD_RECV_JOIN_MARKER` asks `dep#Leaf::leaf`.
+    /// `CANDOR_R1540_OFF=1` turns every route here off (an attribution switch; the published behaviour is the off arm).
+    fn std_recv_impl_calls(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        if leaf == "clone" || std::env::var_os("CANDOR_R1540_OFF").is_some() {
+            return;
+        }
+        let argc = node.args.len();
+        let Some(t) = self.resolve_recv_type_for(&node.receiver, leaf) else {
+            // AN UNTYPED COLLECTION BINDING. `let v = vec![1u8]; v.m()` records the element (`elem_of`) and no type, and
+            // the R1095 floor stands aside for an `elem_of` binding (it is `nonpath_recv_calls`'s, which answers only
+            // the crate's `[T]`/array impls) — so over `impl Tr for Vec<u8>` the call was ABSENT (EXECUTED). The binding
+            // may be a `Vec` or an array, so the crate's `Vec` units are a CANDIDATE (`ambiguous:`), never an edge.
+            if let syn::Expr::Path(p) = peel_recv(&node.receiver) {
+                if let Some(n) = p.path.get_ident().map(|i| i.to_string()) {
+                    if self.elem_of.contains_key(&n) && self.local_fn_on("Vec", leaf) && !self.fields.contains_key("Vec") {
+                        if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                            eprintln!("R1540ELEM\tVec::{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
+                            path: format!("{STD_RECV_AMBIG_MARKER}::Vec::{leaf}"),
+                            leaf: leaf.to_string(), str_arg: None, typed: false, method: false, is_macro: false,
+                            path_lits_partial: false, path_lit2: None });
+                    }
+                }
+            }
+            return;
+        };
+        let std_named = crate::std_methods::is_std_method(leaf, argc);
+        let mut leaves: Vec<String> = Vec::new();
+        let mut join_leaves: Vec<String> = Vec::new();
+        for arm in t.split(crate::decls::ALIAS_ALT_SEP) {
+            let arm = arm.split('<').next().unwrap_or(arm);
+            let root = arm.split("::").next().unwrap_or("");
+            let tl = arm.rsplit("::").next().unwrap_or(arm);
+            if tl.is_empty() || tl.starts_with('<') {
+                continue;
+            }
+            let std_rooted = arm.contains("::") && matches!(root, "std" | "core" | "alloc");
+            // The chained join asks for every receiver R1136 calls std-typed (a prelude or primitive type too: its
+            // typed call names no dependency, so nothing joined the dependency's impl for it either).
+            let std_typed = std_rooted
+                || (!arm.contains("::")
+                    && (crate::model::PRIMITIVE_LEAVES.contains(&arm) || arm == "str"
+                        || (matches!(arm, "String" | "Vec" | "Option" | "Result" | "Box") && !self.uses.contains_key(arm))));
+            // THE DEREF STEP of a std owner over a std borrowed type (`PathBuf` -> `Path`, `OsString` -> `OsStr`, `CString` ->
+            // `CStr`): the owner's own impl wins, and only where the crate has none is the target's asked (R1056's rule for
+            // `Vec` -> `[T]`, `String` -> `str`, which `nonpath_recv_calls` already answers).
+            let deref_to = match tl {
+                "PathBuf" => Some("Path"),
+                "OsString" => Some("OsStr"),
+                "CString" => Some("CStr"),
+                _ => None,
+            };
+            let own = if std_rooted && !self.local_fn_on(tl, leaf) { deref_to.unwrap_or(tl) } else { tl };
+            if std_rooted && self.local_fn_on(own, leaf) && !leaves.iter().any(|l| l == own) {
+                // A crate type DECLARED under the std type's leaf (tokio's own `time::Instant` beside `std::time::Instant`)
+                // files its units under the same key, so the key no longer names the std type's impl alone: a method std
+                // has is std's (nothing formed), and one it lacks is a candidate, not an edge (`ambiguous:`).
+                if self.returns.contains_key(&crate::model::nominal_key(own)) {
+                    if !std_named {
+                        self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
+                            path: format!("{STD_RECV_AMBIG_MARKER}::{own}::{leaf}"),
+                            leaf: leaf.to_string(), str_arg: None, typed: false, method: false, is_macro: false,
+                            path_lits_partial: false, path_lit2: None });
+                    }
+                } else {
+                    leaves.push(own.to_string());
+                }
+            }
+            if let Some(d) = deref_to.filter(|_| std_typed) {
+                if !join_leaves.iter().any(|l| l == d) {
+                    join_leaves.push(d.to_string());
+                }
+            }
+            if std_typed && !join_leaves.iter().any(|l| l == tl) {
+                join_leaves.push(tl.to_string());
+            }
+        }
+        // A std-rooted receiver no crate unit answers, with a method std does not have: only a trait impl can answer it,
+        // and a macro-made one leaves no unit (`STD_RECV_MACRO_MARKER`, judged against the crate's macro text).
+        // A std type that DEREFS to another (`Arc<T>`, a guard, `Cow`) answers a method it lacks with its target's, which
+        // this typer did not name, so its absence is no evidence of a hidden impl and it is not asked; nor is a leaf the
+        // crate declares a type under (R452 (b) owns that receiver).
+        if !std_named && leaves.is_empty() {
+            for arm in t.split(crate::decls::ALIAS_ALT_SEP) {
+                let arm = arm.split('<').next().unwrap_or(arm);
+                if arm.contains("::") && matches!(arm.split("::").next(), Some("std" | "core" | "alloc")) {
+                    let tl = arm.rsplit("::").next().unwrap_or(arm);
+                    if matches!(tl, "Box" | "Arc" | "Rc" | "Pin" | "Cow" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard"
+                        | "Ref" | "RefMut" | "ManuallyDrop" | "LazyLock" | "LazyCell" | "AssertUnwindSafe" | "PathBuf" | "OsString"
+                        | "String" | "Vec" | "CString")
+                        || self.returns.contains_key(&crate::model::nominal_key(tl))
+                    {
+                        continue;
+                    }
+                    self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
+                        path: format!("{STD_RECV_MACRO_MARKER}::{tl}::{leaf}"),
+                        leaf: leaf.to_string(), str_arg: None, typed: false, method: false, is_macro: false,
+                        path_lits_partial: false, path_lit2: None });
+                    break;
+                }
+            }
+        }
+        // THE SMART-POINTER PEEL. `type_path` answers a `Box<T>`/`Arc<T>`/`Rc<T>`/`Pin<P>` receiver as its pointee, which is
+        // right for the pointee's methods and wrong for the crate's own `impl Tr for Arc<u8>`: method lookup tries the
+        // pointer's own type FIRST, so `x.m()` with `x: &Arc<u8>` runs that impl, and the typed call `u8::m` named nothing
+        // (EXECUTED). Whether the receiver really was the pointer is gone by here, so where the crate defines `leaf` on
+        // a pointer type and not on the answered type, the pointer's units are a CANDIDATE, judged like the std-named
+        // case (`ambiguous:`, a concrete effect only) — never an edge.
+        let t_leaf = t.split(crate::decls::ALIAS_ALT_SEP).next().unwrap_or(&t);
+        let t_leaf = t_leaf.split('<').next().unwrap_or(t_leaf).rsplit("::").next().unwrap_or(t_leaf).to_string();
+        if !matches!(t_leaf.as_str(), "Box" | "Arc" | "Rc" | "Pin") && !self.local_fn_on(&t_leaf, leaf) {
+            for w in ["Box", "Arc", "Rc", "Pin"] {
+                if self.local_fn_on(w, leaf) && !self.fields.contains_key(w) {
+                    if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                        eprintln!("R1540PEEL\t{w}::{leaf}\t{t_leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
+                        path: format!("{STD_RECV_AMBIG_MARKER}::{w}::{leaf}"),
+                        leaf: leaf.to_string(), str_arg: None, typed: false, method: false, is_macro: false,
+                        path_lits_partial: false, path_lit2: None });
+                }
+            }
+        }
+        for tl in &leaves {
+            if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                eprintln!("R1540LOCAL\t{tl}::{leaf}\tstd_named={std_named}"); // §E1 REACH COUNTER
+            }
+            let path = if std_named { format!("{STD_RECV_AMBIG_MARKER}::{tl}::{leaf}") } else { format!("{tl}::{leaf}") };
+            self.calls.push(Call { exact_ty: None, recv_form: 0, dot: true, argc: argc.min(255) as u8, entropy_arg: false, path,
+                leaf: leaf.to_string(), str_arg: None, typed: !std_named, method: !std_named, is_macro: false,
+                path_lits_partial: false, path_lit2: None });
+        }
+        // The chained join only for a member std does not have by name and arity. A std-named one is std's wherever the
+        // receiver's type has it, and asking it at every std-typed call (`v.len()`, `s.push(..)`) under every trait import
+        // was ~197k markers over the registry corpus for no join; the dependency's std-named impl on a std type it lacks
+        // is the stated residual.
+        if join_leaves.is_empty() || std_named {
+            return;
+        }
+        let crates = self.trait_import_crates();
+        for cr in &crates {
+            for tl in &join_leaves {
+                if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                    eprintln!("R1540JOINSITE\t{cr}\t{tl}::{leaf}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
+                }
+                self.calls.push(Call { exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
+                    path: format!("{cr}::{STD_RECV_JOIN_MARKER}::{tl}::{leaf}"),
+                    leaf: leaf.to_string(), str_arg: None, typed: false, method: false, is_macro: false,
+                    path_lits_partial: false, path_lit2: None });
+            }
+        }
+    }
+
     /// SOUNDNESS R1136 — a DEPENDENCY EXTENSION-TRAIT method on a std-typed receiver. `d.extend()` over a `u8`
     /// with `use num_conv::prelude::*` in scope runs `num_conv`'s body, and nothing said so: the qualified
     /// spelling (`num_conv::Extend::extend(d)`) carried `invisible: ["num_conv"]`, the method spelling carried
@@ -2585,30 +2797,7 @@ impl<'a> CallCollector<'a> {
         {
             return;
         }
-        let mut crates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut note = |v: &str| {
-            let root = v.split("::").next().unwrap_or(v);
-            if !root.is_empty() && !matches!(root, "crate" | "self" | "super" | "std" | "core" | "alloc") && !root.contains('<') {
-                crates.insert(root.to_string());
-            }
-        };
-        if let Some(g) = self.uses.get(crate::lang::GLOB_KEY) {
-            for v in g.split('\u{1}') {
-                note(v);
-            }
-        }
-        for (k, v) in self.uses.iter() {
-            let trait_shaped = k == "_" || k.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-            if trait_shaped && v.contains("::") && !k.starts_with('*') {
-                note(v);
-            }
-        }
-        if let Some(alts) = self.use_alts.get("_") {
-            for v in alts {
-                note(v);
-            }
-        }
-        for cr in crates {
+        for cr in self.trait_import_crates() {
             if std::env::var_os("CANDOR_R1136_INSTR").is_some() {
                 eprintln!("R1136EXT\t{cr}\t{t}\t.{leaf}/{}", node.args.len()); // §E1 REACH COUNTER, on the ADDED branch only
             }
@@ -2628,7 +2817,18 @@ impl<'a> CallCollector<'a> {
         {
             return;
         }
-        if self.calls[c0..].iter().any(|c| c.typed || c.path != leaf || !c.method) {
+        // SOUNDNESS R1540 — a `std::<untyped>::…` factory marker (`let d = Duration::from_secs(1); d.m()`: the factory's
+        // path is multi-segment, so `visit_expr_method_call` records dependency provenance for it) is NOT evidence the
+        // receiver was typed: the call loop drops it (std is no dependency), and reading it as a call this site formed
+        // stood the floor aside, so `d.m()` over a crate's effectful `impl Tr for Duration` read ABSENT (EXECUTED).
+        let r1540 = std::env::var_os("CANDOR_R1540_OFF").is_none();
+        // Only for a method std itself does not define: a std-named one (`try_into`, `is_empty`) on a std factory's value is
+        // std's own, and asking the floor about it hedged on every crate method of that name (measured on tokio).
+        let std_untyped = |c: &Call| {
+            r1540 && c.path.contains(UNTYPED_RECV_MARKER) && matches!(c.path.split("::").next(), Some("std" | "core" | "alloc"))
+                && !crate::std_methods::is_std_method_name(leaf)
+        };
+        if self.calls[c0..].iter().any(|c| !std_untyped(c) && (c.typed || c.path != leaf || !c.method)) {
             return;
         }
         // A trait BOUND alone does not count as typed: a bound that answered for `leaf` formed a call or a
@@ -11570,6 +11770,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         self.infer_vec_elem_from_push(node, &leaf);
         self.nonpath_recv_calls(node, &leaf);
+        self.std_recv_impl_calls(node, &leaf);
         // SOUNDNESS R1267/R1279/R1281 — a receiver typed by a container's generic parameter NAME: `Dispatch` takes the
         // dispatch branch below (`scoped_generic_recv`); `Hedge` (a binding carrying `GENERIC_PAYLOAD_MARK`, or a field
         // whose instantiation nothing shows) discloses and forms no typed path. See `payload_decision`.

@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A method call on a std-typed receiver reaches the trait impl this crate, or a chained dependency, writes for that std
+  type** (SOUNDNESS R1540, a cardinal sin closed by resolution). With `impl MyLoad for AtomicUsize { fn my_load(&self) {
+  /* writes */ } }`, `let a = AtomicUsize::new(3); a.my_load()` (and an annotated `let`, a `&AtomicUsize` parameter) gave
+  the caller no edge and no `Unknown`, so `deny Fs` passed over a program that writes. The same held for every receiver
+  typed as a `std::`/`core::`/`alloc::` path (`Path`, `PathBuf`, `Duration`, `Instant`, `HashMap`, `Mutex`, `Cell`,
+  `Ipv4Addr`, `Ordering`, `NonZeroU32`, …), and for a chained dependency's `impl dep::Tr for AtomicUsize`. The call now
+  forms the impl's `Leaf::method` key in the crate, and joins `dep#Leaf::method` from a chained report. A `PathBuf` /
+  `OsString` / `CString` receiver reaches the crate's `Path` / `OsStr` / `CStr` impl when it has none of its own.
+  - **Disclosed, not charged:** a member whose name and arity std also has (`load`, `get`) — std's inherent method wins
+    where that type has it, and the std-method table does not say which type does — is `ambiguous:` where the crate's
+    impl carries an effect; so is a crate impl on `Box`/`Arc`/`Rc`/`Pin` reached through a receiver typed as the pointee,
+    and on `Vec` through an untyped `vec![..]` binding. A macro-made impl on a std type discloses `macro:`. A std
+    factory's value (`Duration::from_secs(1)`) no longer stands the untyped-receiver floor (R1095) aside.
+  - **Residuals, stated:** a dependency member with a std name on a std type that lacks it is not joined; a macro-made
+    trait impl in a dependency is absent from that dependency's own report.
+  - Corpus A/B over 1,510 registry crates against the previous engine (unchained): ADDED 34, REMOVED 0, CHANGED 128;
+    13 rows gain a concrete effect, 65 rows newly carry `Unknown` (0.010% of 635,586 analysed units); no effect and no
+    `Unknown` is lost. `CANDOR_R1540_OFF=1` restores the previous behaviour. Cache schema rev150.
+
 - ⚠ **A trait default called on a concrete implementor is charged what it runs for that implementor** (SOUNDNESS R1420(a),
   a resolution; unit identity, R1537, is unchanged and still open). With `trait Tr { fn act(&self); fn go(&self) {
   self.act() } }`, `P.go()` was charged every implementor's `act`, because the default's `self.act()` is a dispatch over all

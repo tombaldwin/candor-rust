@@ -2955,6 +2955,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut veina_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1157 — (caller, `prim::method`, macro-made candidate impl units), judged after the fixpoint.
     let mut primop_contested: Vec<(String, String, Vec<String>)> = Vec::new();
+    // SOUNDNESS R1540 — (caller, `StdLeaf::method`, crate impl units): a std-typed receiver's method whose name std also
+    // has, beside a crate impl of that name for that std type (`STD_RECV_AMBIG_MARKER`). Judged after the fixpoint.
+    let mut stdrecv_contested: Vec<(String, String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1165 — (caller, dependency as spelled, its real name, local type leaf, argument position, callee rest): a
     // local value with a std-trait impl handed to a CHAINED dependency (`WITNESS_MARKER`). Judged after the fixpoint.
     let mut witness_sites: Vec<(String, String, String, String, usize, String)> = Vec::new();
@@ -3657,6 +3660,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // there). Nothing else: no effect, no `Unknown`.
             // SOUNDNESS R1157 — a primitive operator only a macro-made impl answers (`PRIM_OP_MARKER`): its candidates are
             // judged after the fixpoint (`primop_contested`), never linked.
+            // SOUNDNESS R1540 — a std-typed receiver's method that std ALSO has by name and arity, beside a crate impl of
+            // that name for that std type (`STD_RECV_AMBIG_MARKER`): which one runs is not decidable here, so the
+            // candidates are judged after the fixpoint (`stdrecv_contested`), never linked.
+            // SOUNDNESS R1540 — a std-typed receiver's method no std method and no crate unit answers, where unexpanded
+            // macro text writes `fn <method>`: R452 (b)'s disclosure, for a receiver that arm cannot see.
+            if let Some(t2) = c.path.strip_prefix(&format!("{STD_RECV_MACRO_MARKER}::")) {
+                if !by_tail2.contains_key(t2) && merged.macro_hidden_fns.contains(&c.leaf) {
+                    if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                        eprintln!("R1540MACRO\t{}\t{t2}", f.qual); // §E1 REACH COUNTER
+                    }
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why.entry(f.qual.clone()).or_default().insert("macro:module items hidden by an unexpanded macro".to_string());
+                }
+                continue;
+            }
+            if let Some(t2) = c.path.strip_prefix(&format!("{STD_RECV_AMBIG_MARKER}::")) {
+                if let Some(v) = by_tail2.get(t2) {
+                    let cl: Vec<String> = v.iter().filter(|q| *q != &f.qual).cloned().collect();
+                    if !cl.is_empty() {
+                        stdrecv_contested.push((f.qual.clone(), t2.to_string(), cl));
+                    }
+                }
+                continue;
+            }
             if let Some(t2) = c.path.strip_prefix(&format!("{PRIM_OP_MARKER}::")) {
                 if let Some(v) = by_primop.get(t2) {
                     let cl: Vec<String> = v.iter().filter(|q| *q != &f.qual).cloned().collect();
@@ -3714,6 +3741,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                             unknown_via_dep: &mut unknown_via_dep,
                         });
+                    }
+                }
+                continue;
+            }
+            // SOUNDNESS R1540 — a std-typed receiver's method a chained dependency's impl FOR THAT STD TYPE may answer
+            // (`STD_RECV_JOIN_MARKER`, `cr::<stdrecvjoin>::Leaf::method`, formed only for a method std does not have by
+            // name and arity): the orphan rule puts `impl cr::Tr for AtomicUsize` in `cr`, whose report files it under
+            // `cr#AtomicUsize::method`, and only a trait's impl can answer such a call. A hit is joined. A miss where a
+            // chained trait carrying the member is in scope is R887's disclosure (that row's typed-call arm never sees a
+            // std-headed receiver, which forms no typed call) — unless that trait's union row for the member is published
+            // PURE: every implementor its producer read is then pure, the receiver's impl among them (a covered report's
+            // miss is its purity claim). An unchained `cr` adds nothing here: R1136's ledger entry already speaks for it.
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{STD_RECV_JOIN_MARKER}::")) {
+                if deps_idx.crates.contains(cr_real) {
+                    if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{rest}")) {
+                        if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                            eprintln!("R1540JOIN\t{}\t{cr_real}#{rest}", f.qual); // §E1 REACH COUNTER
+                        }
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
+                        });
+                    } else {
+                        let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
+                        let pure_union = |tr: &str| {
+                            deps_idx.by_key.get(&format!("{tr}::{}", c.leaf)).is_some_and(|u| u.effects.is_empty() && u.invisible.is_empty())
+                        };
+                        if let Some(tr) = crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &local_trait_quals, &c.leaf)
+                            .filter(|tr| !pure_union(tr))
+                        {
+                            let tleaf = tr.split_once('#').map_or(tr.as_str(), |(_, q)| q).rsplit("::").next().unwrap_or("").to_string();
+                            if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                                eprintln!("R1540SCOPE\t{}\t{cr_real}#{rest}\t{tr}", f.qual); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tleaf}.{}", c.leaf));
+                        }
                     }
                 }
                 continue;
@@ -6972,6 +7038,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if std::env::var_os("CANDOR_R1186_INSTR").is_some() {
                         eprintln!("R1186HEDGE\t{caller}\t{tr}.{m}\t{src}\t{tgt}\t{fresh}"); // §E1 REACH COUNTER
                     }
+                }
+            }
+        }
+        // SOUNDNESS R1540 — a std-typed receiver's method that std also has, beside a crate impl of that name for that std
+        // type: std's inherent method wins where that type has one, the crate's impl runs where it does not, and the
+        // std-method table does not say which type has it. Where a candidate carries a CONCRETE effect the caller lacks,
+        // the caller discloses `ambiguous:` (two definitions, no way to say which runs). The R1095 rule: an
+        // `Unknown`-only candidate is not hedged on.
+        for (caller, label, cands) in &stdrecv_contested {
+            let empty = BTreeSet::new();
+            let have = inferred.get(caller).unwrap_or(&empty);
+            let impure = cands.iter().any(|u| {
+                inferred.get(u).is_some_and(|e| e.iter().any(|x| *x != "Unknown" && !have.contains(x)))
+            });
+            if !impure {
+                continue;
+            }
+            let fresh = direct.entry(caller.clone()).or_default().insert("Unknown");
+            let fresh_why = unknown_why
+                .entry(caller.clone())
+                .or_default()
+                .insert(format!("ambiguous:std method or crate impl on a std receiver ({})", label.replace('.', "_")));
+            if fresh || fresh_why {
+                hedged = true;
+                if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                    eprintln!("R1540HEDGE\t{caller}\t{label}"); // §E1 REACH COUNTER
                 }
             }
         }

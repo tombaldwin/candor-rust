@@ -52,6 +52,25 @@ pub(crate) const GLOB_CAND_MARKER: &str = "<globcand>";
 /// post-fixpoint disclosure; it forms no edge.
 pub(crate) const PRIM_OP_MARKER: &str = "<primop>";
 
+/// SOUNDNESS R1540 — `<stdrecv>::<TypeLeaf>::<method>`: a method call on a receiver typed as a std/core/alloc type,
+/// whose name a std method of that arity ALSO has, where this crate implements one of its own traits for that std
+/// type with a member of that name (`collector::std_recv_impl_calls`). Which one runs — std's inherent/trait method
+/// or the crate's impl — is not decidable here (no per-type table of std's inherent surface), so the call loop
+/// records the site for the post-fixpoint `ambiguous:` disclosure and forms no edge.
+pub(crate) const STD_RECV_AMBIG_MARKER: &str = "<stdrecv>";
+
+/// SOUNDNESS R1540 — `cr::<stdrecvjoin>::<TypeLeaf>::<method>`: the same call where the impl may live in the
+/// dependency `cr` (a trait-shaped import of `cr` is in scope, as for `EXT_METHOD_MARKER`). Consumed only by the
+/// call loop: chained, the dependency's own `TypeLeaf::method` entry is joined (the orphan rule puts `impl
+/// cr::Trait for <std type>` in `cr`); anything else adds nothing here.
+pub(crate) const STD_RECV_JOIN_MARKER: &str = "<stdrecvjoin>";
+
+/// SOUNDNESS R1540 — `<stdrecvmac>::<TypeLeaf>::<method>`: a std-typed receiver's method that neither std (by name and
+/// arity) nor any crate unit answers. A `macro_rules!`-generated trait impl is never expanded (`mbe::Ctx::splice`), so
+/// where `fn <method>` appears inside unexpanded macro text the call loop discloses `macro:` (R452 (b)'s evidence;
+/// a std type is never in `macro_hidden_types`, so that arm cannot see this receiver).
+pub(crate) const STD_RECV_MACRO_MARKER: &str = "<stdrecvmac>";
+
 /// SOUNDNESS R1164 — `cr::<oprhs>::<Self>::<method>` (also `&<Self>::<method>` and `<prim>::<mbe>::<method>`): an
 /// operator whose RIGHT operand is a value of the dependency `cr`'s type while the LEFT operand is not (a primitive,
 /// `str`, a std or third-crate type, or a value no route typed). Such an impl (`impl Add<cr::D> for u32`) can only
