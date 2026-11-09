@@ -1021,14 +1021,20 @@ pub(crate) struct ScanOpts<'a> {
 }
 
 /// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector already records where an untyped
-/// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`: a factory `jetstream::new`, a method on a typed
-/// receiver `Context::get_key_value`, a builder chain `Stream::<chain>direct_get_builder.sequence`), and that marker was
-/// consumed only for a CHAINED dependency (the `typeSurface.returns` join, else `dispatch:untyped cross-package receiver`).
-/// Unchained it reached nothing: the κ ledger counted the crate only through the factory CALL, so a classifier-covered
-/// crate (calibrated, or no lockfile to exceed a ceiling) and a factory a rule already classifies left the method SILENT
-/// — `let js = async_nats::jetstream::new(c); js.query_account()` sends a request and read ABSENT. Here each hop's
-/// return type is read from the dependency's signature (`DepSigs::return_type`, every doubt `None`) and the marker becomes
-/// the typed call `<cr>::<module>::<Type>::<method>`. `None` leaves the marker exactly as it was.
+/// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`), and that marker was consumed only for a CHAINED
+/// dependency (the `typeSurface.returns` join, else `dispatch:untyped cross-package receiver`). Unchained it reached nothing:
+/// the κ ledger counted the crate only through the factory CALL, so a classifier-covered crate (calibrated, or no lockfile
+/// to exceed a ceiling) and a factory a rule already classifies left the method SILENT — `let js =
+/// async_nats::jetstream::new(c); js.query_account()` sends a request and read ABSENT.
+///
+/// Here a FACTORY provenance (a free fn of the dependency) is typed from the factory's written return in the source the
+/// project's Cargo.lock pins (`DepSigs::return_type`, every doubt `None`; the owner's ruling of 2026-11-09: no lock, an
+/// absent source, a semver guess — nothing typed), and the marker becomes the typed call `<cr>::<module>::<Type>::<method>`.
+/// NOT typed: a METHOD provenance (`Type::m`, a `<chain>`): which method a call reaches depends on its receiver's
+/// reference-ness (R1200's probe — a by-value method of a trait in scope at the consumer beats a `&self` inherent), and the
+/// marker does not carry it; and a `<value>`/`<type>`/`<field>` provenance. `None` leaves the marker exactly as it was.
+/// The second element is whether the consumer DECLARES a nominal type of the same leaf: such a call must not take the local
+/// route, whose `tail2` key cannot tell the two `Context`s apart (round 2, hole 4).
 fn r1578_type(
     c: &Call,
     deps: &std::collections::HashSet<String>,
@@ -1036,7 +1042,8 @@ fn r1578_type(
     deps_idx: &DepIndex,
     dir: &str,
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
-) -> Option<Call> {
+    returns: &ReturnIndex,
+) -> Option<(Call, bool)> {
     if std::env::var_os("CANDOR_R1578_OFF").is_some() {
         return None;
     }
@@ -1046,31 +1053,19 @@ fn r1578_type(
         return None;
     }
     let (callee, method) = rest.rsplit_once("::")?;
-    let mut sigs = sigs.borrow_mut();
-    let (mut ty, steps): (String, Vec<&str>) = if let Some((base, chain)) = callee.split_once(&format!("::{CHAIN_GUESS_MARKER}")) {
-        (base.to_string(), chain.split('.').collect())
-    } else if callee.contains('<') {
-        return None; // a `<value>` / `<type>` / `<field>` provenance: no callee to read
-    } else {
-        let (owner, leaf) = callee.rsplit_once("::").unwrap_or(("", callee));
-        let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
-        if crate::lang::is_type_ident(owner_leaf) {
-            (owner.to_string(), vec![leaf])
-        } else {
-            (sigs.return_type(dir, cr, cr_real, callee)?, Vec::new())
-        }
-    };
-    for st in steps {
-        if st.is_empty() || st.contains('<') {
-            return None;
-        }
-        ty = sigs.return_type(dir, cr, cr_real, &format!("{ty}::{st}"))?;
+    if callee.contains('<') {
+        return None; // a `<chain>` / `<value>` / `<type>` / `<field>` provenance
     }
+    let mut sigs = sigs.borrow_mut();
+    let ty = sigs.return_type(dir, cr, cr_real, callee)?;
+    sigs.note_typed(cr);
+    let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+    let twin = returns.contains_key(&crate::model::nominal_key(leaf));
     let path = format!("{cr}::{ty}::{method}");
     if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
-        eprintln!("R1578TYPED\t{}\t{path}", c.path); // §E1 REACH COUNTER, the CHANGED branch only
+        eprintln!("R1578TYPED\t{}\t{path}\ttwin={twin}", c.path); // §E1 REACH COUNTER, the CHANGED branch only
     }
-    Some(Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() })
+    Some((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, twin))
 }
 
 /// ⟨typeSurface.returns⟩ THE PRODUCER. `{crate}#{fn qual}` -> `{crate}#{type qual}`, both FULLY
@@ -3319,8 +3314,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that
             // dependency's own source signature, and the call then goes down the ordinary typed-external path below
             // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
-            let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs);
-            let c = r1578_owned.as_ref().unwrap_or(c);
+            let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns);
+            let r1578_twin = r1578_owned.as_ref().is_some_and(|(_, t)| *t);
+            let c = r1578_owned.as_ref().map(|(c, _)| c).unwrap_or(c);
             // SOUNDNESS R334 — THE OS ENTROPY SOURCE PASSED AS AN ARGUMENT, decided at the TOP of this
             // loop and deliberately BEFORE every `continue` below.
             //
@@ -4392,6 +4388,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             } else {
                 !matches!(cr, "std" | "core" | "alloc")
             };
+            // SOUNDNESS R1578 (round 2, hole 4) — a dependency type typed from its source whose leaf the consumer ALSO declares
+            // never takes the local route: `tail2` (`Context::query_account`) cannot tell the two apart, and edging the call
+            // to the consumer's own `Context` charged that twin's effects to a caller that never runs it (executed on 5e45a4c,
+            // `tests/r1578_holes.rs`). The classifier and κ ledger still answer it below. A local impl ON the dependency's
+            // type (no local declaration of the leaf — rav1e's `impl .. for bitstream_io::BitWriter`) keeps its edge.
+            let resolvable = resolvable && !r1578_twin;
             // A `Type::assoc()` whose `Type` is a NON-NOMINAL alias (`type Inner = [u8; N]`) names a type
             // with no local impl — its assoc fn is std/core's, NOT a same-named local STRUCT's. Skip the
             // local link so the array alias's `Inner::default()` doesn't inherit `struct Inner`'s
@@ -9244,10 +9246,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // disclosure over-claims in the direction that matters: it says an ambient declaration moved this
     // run's classification when the gate judged nothing that used it.
     crate::gate::record_gate_net_partners(net_partners_record.as_ref());
-    let body = candor_report::to_packaged_report_json_typed(
+    // SOUNDNESS R1578 — the dependency sources read to type a value (the owner's ruling: what may add a charge is recorded).
+    let dependency_sources: Vec<candor_report::DependencySource> = r1578_sigs
+        .borrow()
+        .consulted
+        .values()
+        .filter(|d| d.typed > 0)
+        .map(|d| candor_report::DependencySource {
+            package: d.package.clone(), version: d.version.clone(), origin: d.origin.to_string(), typed: d.typed,
+        })
+        .collect();
+    let body = candor_report::to_packaged_report_json_typed_src(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
         Some(&type_surface), &excluded_classes, out_of_scope.as_deref(), scanned_under.as_ref(),
-        net_partners_record.as_ref())
+        net_partners_record.as_ref(), &dependency_sources)
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave

@@ -437,6 +437,10 @@ struct SrcIndex {
     type_decls: HashMap<String, Vec<Option<String>>>,
     path_attr: bool,
     file_mods: Vec<Option<String>>,
+    /// SOUNDNESS R1578 (round 2) — per module, the leaves a `use` binds from outside the crate, and the modules an external
+    /// `use` glob fills: a written return `Client` there may be ANOTHER crate's `Client`
+    ext_use: HashMap<Option<String>, HashSet<String>>,
+    ext_glob: HashSet<Option<String>>,
 }
 
 /// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
@@ -1097,8 +1101,49 @@ impl SrcIndex {
             aliases.entry(b).or_default().insert(a);
         }
         // SOUNDNESS R1578 — nominal type declarations by leaf, with the declaring module.
-        struct Decls<'m> { stack: Vec<String>, base: Option<&'m str>, out: HashMap<String, Vec<Option<String>>>, path_attr: bool }
+        struct Decls<'m> {
+            stack: Vec<String>,
+            base: Option<&'m str>,
+            out: HashMap<String, Vec<Option<String>>>,
+            path_attr: bool,
+            /// per module (`None` = not derivable): the leaves a `use` binds from OUTSIDE the crate, and whether a `use`
+            /// glob from outside the crate fills it
+            ext_use: HashMap<Option<String>, HashSet<String>>,
+            ext_glob: HashSet<Option<String>>,
+            external: &'m dyn Fn(&str) -> bool,
+        }
         impl Decls<'_> {
+            fn module(&self) -> Option<String> {
+                self.base.map(|b| {
+                    let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
+                    v.extend(self.stack.iter().map(String::as_str));
+                    v.join("::")
+                })
+            }
+            fn uses(&mut self, t: &syn::UseTree, root: Option<&str>) {
+                match t {
+                    syn::UseTree::Path(p) => {
+                        let r = root.map(str::to_string).unwrap_or_else(|| p.ident.to_string());
+                        self.uses(&p.tree, Some(&r));
+                    }
+                    syn::UseTree::Name(n) => {
+                        if root.is_some_and(|r| (self.external)(r)) {
+                            self.ext_use.entry(self.module()).or_default().insert(n.ident.to_string());
+                        }
+                    }
+                    syn::UseTree::Rename(r) => {
+                        if root.is_some_and(|x| (self.external)(x)) {
+                            self.ext_use.entry(self.module()).or_default().insert(r.rename.to_string());
+                        }
+                    }
+                    syn::UseTree::Glob(_) => {
+                        if root.is_some_and(|r| (self.external)(r)) {
+                            self.ext_glob.insert(self.module());
+                        }
+                    }
+                    syn::UseTree::Group(g) => g.items.iter().for_each(|i| self.uses(i, root)),
+                }
+            }
             fn put(&mut self, i: &syn::Ident) {
                 let m = self.base.map(|b| {
                     let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
@@ -1128,16 +1173,33 @@ impl SrcIndex {
             fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {} // an item inside a body is reachable by no path
             fn visit_impl_item_fn(&mut self, _: &'ast syn::ImplItemFn) {}
             fn visit_trait_item_fn(&mut self, _: &'ast syn::TraitItemFn) {}
+            fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+                self.uses(&u.tree, None);
+            }
         }
-        let mut decls = Decls { stack: Vec::new(), base: None, out: HashMap::new(), path_attr: false };
+        let names = &facts.names;
+        let roots = &extern_roots;
+        let external = |r: &str| -> bool {
+            match r {
+                "crate" | "self" | "super" | "Self" => false,
+                r => roots.contains(r) || !names.contains(r),
+            }
+        };
+        let mut decls = Decls {
+            stack: Vec::new(), base: None, out: HashMap::new(), path_attr: false, ext_use: HashMap::new(),
+            ext_glob: HashSet::new(), external: &external,
+        };
         for (f, m) in files.iter().zip(file_mods.iter()) {
             decls.base = m.as_deref();
             decls.stack.clear();
             decls.visit_file(f);
         }
+        let (type_decls, path_attr, ext_use, ext_glob) = (decls.out, decls.path_attr, decls.ext_use, decls.ext_glob);
         Some(SrcIndex {
-            type_decls: decls.out,
-            path_attr: decls.path_attr,
+            type_decls,
+            path_attr,
+            ext_use,
+            ext_glob,
             file_mods,
             files,
             unparsed,
@@ -1607,6 +1669,27 @@ pub(crate) struct DepSigs {
     rets: HashMap<(String, String), Option<String>>,
     /// set while `return_type` asks `judged` (`Want::typing`)
     typing: bool,
+    /// SOUNDNESS R1578 (round 2, the owner's ruling) — while typing, the ONE source `judged` reads: the version the project's
+    /// Cargo.lock pins, present on disk (`lock_source`), never the semver union `source_dirs` falls back to
+    typing_dirs: Option<Vec<std::path::PathBuf>>,
+    /// per alias: the lock-pinned source (or `None` when there is none to read) — see `lock_source`
+    locked: HashMap<String, Option<DepSource>>,
+    /// the lock-pinned sources this scan READ to type a value, by package, with how many call sites each typed — the
+    /// report's `dependencySources`
+    pub(crate) consulted: std::collections::BTreeMap<String, DepSource>,
+}
+
+/// SOUNDNESS R1578 — one dependency source the scan read to type a value (the report's `dependencySources` element).
+#[derive(Clone, Debug)]
+pub(crate) struct DepSource {
+    pub(crate) package: String,
+    pub(crate) version: String,
+    /// `registry` (the lock's `registry+` source, read from `$CARGO_HOME/registry/src`) or `path` (a lock entry with no
+    /// `source`, read at the manifest's `path`)
+    pub(crate) origin: &'static str,
+    pub(crate) dir: std::path::PathBuf,
+    /// call sites this source typed
+    pub(crate) typed: u32,
 }
 
 /// SOUNDNESS R1351 — the CLOSED method lists of the std traits a package trait commonly names as a supertrait, and their
@@ -1840,7 +1923,10 @@ impl DepSigs {
         let segs: Vec<&str> = callee.split("::").collect();
         let leaf = segs.last().copied().unwrap_or(callee).to_string();
         let typing = self.typing;
-        let srcs = self.source_dirs(dir, alias, real);
+        let srcs = match &self.typing_dirs {
+            Some(d) => d.clone(),
+            None => self.source_dirs(dir, alias, real),
+        };
         if srcs.is_empty() {
             return (None, "nosrc".into());
         }
@@ -2056,17 +2142,106 @@ impl DepSigs {
     /// parameter the body never mentions, a constructor); every doubt — an unknown bound, which may carry a conversion
     /// as a supertrait or an associated type, a receiver, `Self`, an unreadable source — is `None`. The same DENYLIST
     /// discipline as `allowed`, over the same candidates.
-    /// SOUNDNESS R1578 — the dependency TYPE a callee returns, read from its written signature in the dependency's own source:
-    /// `jetstream::new` -> `jetstream::context::Context`, `jetstream::stream::Stream::direct_get_builder` ->
-    /// `jetstream::stream::DirectGetBuilder`. A RESOLUTION source for a value the consumer's scan cannot type (an unchained
-    /// dependency's return), so every doubt is `None` and the caller keeps its disclosure:
-    ///   * the candidates are `judged`'s (per ITEM, with every opacity rule it applies), and EVERY candidate must name the
-    ///     same single nominal leaf — a union of two is a refusal, not a pick;
-    ///   * the leaf must be a plain path type (references peeled), `Self` read from the impl's own self type; a generic
-    ///     parameter, `impl Trait`, `dyn`, a tuple, a std wrapper (`Result`/`Option`/`Box`, which this does not unwrap) and
-    ///     any leaf the source does not itself declare are refusals;
-    ///   * the leaf must be declared exactly once in every source (an alias or a `use .. as` rename refuses), in a module
-    ///     the conventional `src/` layout names (any `#[path]` refuses), and every source must agree.
+    /// SOUNDNESS R1578 (round 2, owner's ruling 2026-11-09) — the dependency's source this scan may READ to type a value: the
+    /// version the project's own Cargo.lock (or its workspace root's) pins for `real`, and only when that source is on disk —
+    /// a `registry+` entry at `$CARGO_HOME/registry/src/<index>/<name>-<version>`, or a lock entry with no `source` (a path
+    /// dependency) at the manifest's `path`. No lock, two locked versions of the package, a `git+` source, or a pinned
+    /// version that is not checked out: `None`, and the value stays untyped exactly as before R1578. Never the semver union
+    /// `source_dirs` falls back to for narrowing: a charge must not depend on which other versions a machine happens to hold.
+    fn lock_source(&mut self, dir: &str, alias: &str, real: &str) -> Option<DepSource> {
+        if let Some(v) = self.locked.get(alias) {
+            return v.clone();
+        }
+        let norm = |s: &str| s.replace('-', "_");
+        let root = crate::deps::find_workspace_root(Path::new(dir));
+        let mut found: Option<DepSource> = None;
+        let mut lock_dirs = vec![Path::new(dir).to_path_buf()];
+        lock_dirs.extend(root.clone());
+        'l: for ld in lock_dirs {
+            let Ok(lock) = std::fs::read_to_string(ld.join("Cargo.lock")) else { continue };
+            let mut entries: Vec<(String, String, Option<String>)> = Vec::new();
+            let mut cur: Option<(String, String, Option<String>)> = None;
+            for line in lock.lines().map(str::trim) {
+                if line.starts_with('[') {
+                    entries.extend(cur.take());
+                    if line == "[[package]]" {
+                        cur = Some((String::new(), String::new(), None));
+                    }
+                } else if let Some(c) = cur.as_mut() {
+                    if let Some(v) = line.strip_prefix("name = ") {
+                        c.0 = v.trim_matches('"').to_string();
+                    } else if let Some(v) = line.strip_prefix("version = ") {
+                        c.1 = v.trim_matches('"').to_string();
+                    } else if let Some(v) = line.strip_prefix("source = ") {
+                        c.2 = Some(v.trim_matches('"').to_string());
+                    }
+                }
+            }
+            entries.extend(cur.take());
+            let mine: Vec<&(String, String, Option<String>)> = entries.iter().filter(|e| norm(&e.0) == real).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            if mine.len() != 1 {
+                break 'l; // two locked versions: which one this alias names is the manifest's to say, not ours to guess
+            }
+            let (name, version, source) = mine[0].clone();
+            found = match source.as_deref() {
+                Some(src) if src.starts_with("registry+") => crate::deps::dirs_cargo_registry_src()
+                    .iter()
+                    .map(|r| r.join(format!("{name}-{version}")))
+                    .find(|p| p.join("Cargo.toml").is_file())
+                    .map(|d| DepSource { package: name.clone(), version: version.clone(), origin: "registry", dir: d, typed: 0 }),
+                Some(_) => None, // git / other sources: not read
+                None => {
+                    // a path dependency: the manifest's `path`, whose own manifest must name the locked version
+                    let mut out = None;
+                    let mut manifests = vec![Path::new(dir).to_path_buf()];
+                    manifests.extend(root.clone());
+                    'm: for m in &manifests {
+                        let Ok(text) = std::fs::read_to_string(m.join("Cargo.toml")) else { continue };
+                        let Ok(doc) = text.parse::<toml::Table>() else { continue };
+                        for table in crate::deps::manifest_dependency_tables(&doc) {
+                            for (k, v) in table {
+                                if norm(k) != alias {
+                                    continue;
+                                }
+                                if let Some(p) = v.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+                                    let d = m.join(p);
+                                    let ver = std::fs::read_to_string(d.join("Cargo.toml")).ok()
+                                        .and_then(|t| t.parse::<toml::Table>().ok())
+                                        .and_then(|t| t.get("package")?.get("version")?.as_str().map(str::to_string));
+                                    if ver.as_deref() == Some(version.as_str()) {
+                                        out = Some(DepSource { package: name.clone(), version: version.clone(), origin: "path", dir: d, typed: 0 });
+                                    }
+                                    break 'm;
+                                }
+                            }
+                        }
+                    }
+                    out
+                }
+            };
+            break;
+        }
+        self.locked.insert(alias.to_string(), found.clone());
+        found
+    }
+
+    /// SOUNDNESS R1578 — the dependency TYPE a FREE fn returns, read from its written signature in the lock-pinned source:
+    /// `jetstream::new` -> `jetstream::context::Context`. A RESOLUTION source for a value the consumer's scan cannot type, so
+    /// every doubt is `None` and the caller keeps today's behaviour:
+    ///   * the source is `lock_source`'s, or nothing;
+    ///   * the candidates are `judged`'s (per ITEM, every opacity rule), restricted to the free fns of the module the path
+    ///     names; every one must name the same single nominal leaf;
+    ///   * the return is a plain OWNED path type (`Self` from the impl); a reference, a generic parameter, `impl`/`dyn`, a
+    ///     tuple, a std wrapper and any leaf the source does not itself declare refuse;
+    ///   * the written PATH must stay inside the crate: a multi-segment path rooted outside it (`other::Client`) refuses, and
+    ///     so does a single-segment one in a module that imports that leaf from outside, or that an external glob fills;
+    ///   * the leaf is declared exactly once, in a module the `src/` layout names (an alias or `#[path]` refuses).
+    ///
+    /// METHOD steps are not typed here: which method a call reaches depends on the receiver's reference-ness (R1200's
+    /// method probe), which the provenance does not carry — see `scan::r1578_type`.
     pub(crate) fn return_type(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
         let key = (alias.to_string(), callee.to_string());
         if let Some(v) = self.rets.get(&key) {
@@ -2077,51 +2252,74 @@ impl DepSigs {
         v
     }
 
+    /// Count one call site typed through `alias`'s source (`dependencySources[].typed`).
+    pub(crate) fn note_typed(&mut self, alias: &str) {
+        if let Some(Some(src)) = self.locked.get(alias) {
+            self.consulted.entry(src.package.clone()).or_insert_with(|| src.clone()).typed += 1;
+        }
+    }
+
     fn return_type_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
-        // A FREE fn is the one the consumer's PATH names: its module, never a same-named fn elsewhere (a `#[cfg(test)]`
-        // helper, a nested fn). A method's candidates are its type's, found by leaf as `judged` finds them.
         let segs: Vec<&str> = callee.split("::").collect();
-        let owner_is_type = segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]);
-        let want_mod = (!owner_is_type).then(|| segs[..segs.len() - 1].join("::"));
+        if segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]) {
+            self.say("ret", alias, callee, 0, "method");
+            return None;
+        }
+        let Some(src) = self.lock_source(dir, alias, real) else {
+            self.say("ret", alias, callee, 0, "nolock");
+            return None;
+        };
+        let want_mod = Some(segs[..segs.len() - 1].join("::"));
         self.typing = true;
+        self.typing_dirs = Some(vec![src.dir.clone()]);
         let (v, why) = self.judged(dir, alias, real, callee, 0, |c: &Cand<'_>, p| {
-            if c.nested || (matches!(c.site, Site::Free) && want_mod.is_some() && c.module != want_mod) {
+            if c.nested || !matches!(c.site, Site::Free) || c.module != want_mod {
                 return Err(());
             }
             cand_returns(c, p)
         });
         self.typing = false;
+        self.typing_dirs = None;
         let Some(set) = v else {
             self.say("ret", alias, callee, 0, &why);
             return None;
         };
-        if set.len() != 1 {
-            self.say("ret", alias, callee, 0, &format!("union:{}", set.len()));
+        // each element is `<module>\u{1}<written path>`
+        let parsed: Vec<(String, Vec<String>)> = set
+            .iter()
+            .filter_map(|e| e.split_once('\u{1}'))
+            .map(|(m, p)| (m.to_string(), p.split("::").map(str::to_string).collect()))
+            .collect();
+        let leaves: BTreeSet<&String> = parsed.iter().filter_map(|(_, p)| p.last()).collect();
+        if parsed.len() != set.len() || leaves.len() != 1 {
+            self.say("ret", alias, callee, 0, &format!("union:{}", leaves.len()));
             return None;
         }
-        let leaf = set.into_iter().next()?;
-        let mut found: Option<String> = None;
-        for s in self.source_dirs(dir, alias, real) {
-            let idx = self.index(&s)?;
-            let one = match idx.type_decls.get(&leaf) {
-                Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(&leaf) => d[0].clone(),
-                _ => None,
+        let leaf = (*leaves.iter().next()?).clone();
+        let idx = self.index(&src.dir)?;
+        for (m, p) in &parsed {
+            let inside = if p.len() >= 2 {
+                matches!(p[0].as_str(), "crate" | "self" | "super") || !idx.external_root(&p[0])
+            } else {
+                let m = Some(m.clone());
+                !idx.ext_use.get(&m).is_some_and(|u| u.contains(&leaf)) && !idx.ext_glob.contains(&m)
             };
-            let Some(m) = one else {
-                self.say("ret", alias, callee, 0, &format!("decl:{leaf}"));
+            if !inside {
+                self.say("ret", alias, callee, 0, &format!("foreign:{}", p.join("::")));
                 return None;
-            };
-            let q = if m.is_empty() { leaf.clone() } else { format!("{m}::{leaf}") };
-            match &found {
-                Some(f) if *f != q => {
-                    self.say("ret", alias, callee, 0, "srcs-disagree");
-                    return None;
-                }
-                _ => found = Some(q),
             }
         }
-        self.say("ret", alias, callee, 0, &format!("read:{}", found.as_deref().unwrap_or("-")));
-        found
+        let one = match idx.type_decls.get(&leaf) {
+            Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(&leaf) => d[0].clone(),
+            _ => None,
+        };
+        let Some(m) = one else {
+            self.say("ret", alias, callee, 0, &format!("decl:{leaf}"));
+            return None;
+        };
+        let q = if m.is_empty() { leaf.clone() } else { format!("{m}::{leaf}") };
+        self.say("ret", alias, callee, 0, &format!("read:{q}"));
+        Some(q)
     }
 
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
@@ -2136,40 +2334,39 @@ impl DepSigs {
     }
 }
 
-/// SOUNDNESS R1578 — the nominal leaf a candidate's written return type names (`DepSigs::return_type`). `Ok(None)` for every
-/// shape that is not one plain nominal path the source may declare.
+/// SOUNDNESS R1578 — `<module>\u{1}<written return path>` for a candidate whose return is one plain OWNED nominal path the
+/// source may declare (`Self` read as the impl's self type); `Ok(None)` for every other shape — a reference included, since a
+/// borrowed value is not the owned receiver a later step would assume.
 fn cand_returns(c: &Cand<'_>, _pos: usize) -> Result<Option<BTreeSet<String>>, ()> {
     let syn::ReturnType::Type(_, ty) = c.output else { return Ok(None) };
     let mut t: &syn::Type = ty;
     loop {
         t = match t {
-            syn::Type::Reference(r) => &r.elem,
             syn::Type::Paren(p) => &p.elem,
             syn::Type::Group(g) => &g.elem,
             _ => break,
         };
     }
     let syn::Type::Path(p) = t else { return Ok(None) };
-    if p.qself.is_some() {
+    if p.qself.is_some() || p.path.leading_colon.is_some() {
         return Ok(None);
     }
-    let Some(last) = p.path.segments.last() else { return Ok(None) };
-    let leaf = last.ident.to_string();
-    let leaf = if leaf == "Self" {
-        if p.path.segments.len() != 1 {
+    let mut segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    if segs.last().is_some_and(|l| l == "Self") {
+        if segs.len() != 1 {
             return Ok(None); // `Self::Assoc`
         }
         match &c.site {
-            Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => t.clone(),
+            Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => segs = vec![t.clone()],
             _ => return Ok(None),
         }
-    } else {
-        leaf
-    };
+    }
+    let leaf = segs.last().cloned().unwrap_or_default();
     if generic_params(&c.scope).contains(&leaf) {
         return Ok(None);
     }
-    Ok(Some(BTreeSet::from([leaf])))
+    let Some(m) = &c.module else { return Ok(None) };
+    Ok(Some(BTreeSet::from([format!("{m}\u{1}{}", segs.join("::"))])))
 }
 
 /// SOUNDNESS R1186 — the conversion target a bound's type argument names: its outer nominal leaf, or `*` when it is

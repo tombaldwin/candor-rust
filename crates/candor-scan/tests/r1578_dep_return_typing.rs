@@ -112,15 +112,23 @@ fn net(rows: &std::collections::HashMap<String, (Vec<String>, Vec<String>)>, f: 
     rows.get(f).is_some_and(|r| r.0.iter().any(|e| e == "Net"))
 }
 
-const CHARGED: &[&str] = &["e_new_let", "e_full_path", "e_inline", "e_with_domain", "e_builder_bound"];
+const CHARGED: &[&str] = &["e_new_let", "e_full_path", "e_inline", "e_with_domain"];
 
 #[test]
-fn an_unchained_dependency_return_types_the_receiver_in_both_arms() {
+fn an_unchained_dependency_return_types_the_receiver_when_the_lock_pins_a_present_source() {
     let root = tmpdir("arms");
     dep(&root);
-    for (name, lock) in [("app_lock", true), ("app_nolock", false)] {
+    // Round 2, the owner's ruling: WITHOUT a lockfile nothing is typed — every case reads as it did before R1578.
+    let lockless = scan(&consumer(&root, "app_nolock", false), false);
+    for f in CHARGED {
+        assert!(!net(&lockless, f), "app_nolock: `{f}` was typed without a lock pinning the source: {:?}", lockless.get(*f));
+    }
+    for (name, lock) in [("app_lock", true)] {
         let app = consumer(&root, name, lock);
         let on = scan(&app, false);
+        // A METHOD step (`s.direct_get_builder()` on a parameter) is not typed: the receiver's reference-ness decides
+        // whether a by-value trait method beats the `&self` inherent (R1200), and the provenance does not carry it.
+        assert!(!net(&on, "e_builder_bound"), "{name}: a method step was typed: {:?}", on.get("e_builder_bound"));
         for f in CHARGED {
             assert!(net(&on, f), "{name}: `{f}` must be charged Net through the dependency's declared return; row {:?}", on.get(*f));
         }
