@@ -13887,7 +13887,10 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
 
     #[test]
     fn calibration_exemption_stops_at_the_reviewed_version() {
-        let body = "pub fn run(x: &sea_orm::DatabaseExecutor) -> u32 { let _ = x.transaction_async(); 0 }";
+        // `is_transaction` (executor.rs:243) is a pure `matches!` and carries no rule. This fixture used
+        // `transaction_async` until R1528 gave it one (a matched call is charged at any version), so the call
+        // under test must be one that stays UNMATCHED.
+        let body = "pub fn run(x: &sea_orm::DatabaseExecutor) -> u32 { let _ = x.is_transaction(); 0 }";
         let at = scan_fixture_lock("calceil_at", body, "sea-orm", "1.1.20");
         let above = scan_fixture_lock("calceil_above", body, "sea-orm", "2.0.2");
         assert!(!fixture_present(&at, "run"),

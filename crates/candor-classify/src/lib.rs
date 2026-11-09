@@ -547,6 +547,36 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     ("jiff", "jiff::fmt::temporal::pieces::Pieces::to_time_zone_with", "R1559:conditional"),
     ("jiff", "jiff::fmt::temporal::pieces::TimeZoneAnnotation::to_time_zone_with", "R1559:conditional"),
     ("jiff", "jiff::tz::db::TimeZoneDatabase::bundled", "R1559:conditional"),
+    // sea-orm 2.0.4, R1570 (SOUNDNESS R1528, sea_orm lane): the six `LoaderTrait` methods on `Vec<M>` perform a real
+    // SELECT per call (query/loader.rs:337-430 forward to the `&[M]` impl, which runs `select(..).all(db)`; EXECUTED:
+    // `load_one`, `load_many`, `load_self`, `load_self_many`, `load_self_via`, `load_self_via_rev` each issued a
+    // `sea_orm.query_all` and returned the related rows), but a consumer's `models.load_many(Entity, db)` has a std
+    // `Vec` receiver and a method that lives in an UNSCANNED dependency, so no path reaches `classify` at all (a
+    // debug trace of every `sea_orm` path the scan asked about holds no `Vec::load_*`), and R1540's std-receiver
+    // edge needs the method's definition in the scan or in a chained report. Measured both arms: `deny Db`,
+    // `deny Log`, `deny Unknown` all exit 0 over a function whose only call is `ms.load_many(..)`; the lockless arm
+    // drops the function from `functions[]`. No rule can fix it (there is no path to match), so the row stays open.
+    // R1571: the six `RusqliteSharedConnection` rows are not reachable by name. In the crates.io `sea-orm` 2.0.4 the
+    // `rusqlite` feature is an empty stub (`rusqlite = []`, no `sea-query-rusqlite` dependency: enabling it fails to
+    // compile, EXECUTED), and in `sea-orm-sync` 2.0.4 (lib name `sea_orm`) the module is `pub(crate)`, so the type can
+    // only be obtained through `match &db.inner { DatabaseConnectionType::RusqliteSharedConnection(c) => c.ping() }`.
+    // EXECUTED there: `begin` held the connection (a second `acquire` timed out at the 400 ms deadline), `ping` ran
+    // SELECT 1, `close`/`close_by_ref` took the open file descriptors on the database from 4 to 0 and made later calls
+    // fail with `Connection closed`. The variant-payload binding has no type, so no path reaches `classify`: all six
+    // functions read pure with NO row and NO `invisible` in both arms (the lock lists `sea-orm-sync`, which the
+    // ceiling table does not match), so a classify rule would be dead code claiming coverage.
+    ("sea_orm", "sea_orm::query::loader::Vec::load_many", "R1570:silent"),
+    ("sea_orm", "sea_orm::query::loader::Vec::load_one", "R1570:silent"),
+    ("sea_orm", "sea_orm::query::loader::Vec::load_self", "R1570:silent"),
+    ("sea_orm", "sea_orm::query::loader::Vec::load_self_many", "R1570:silent"),
+    ("sea_orm", "sea_orm::query::loader::Vec::load_self_via", "R1570:silent"),
+    ("sea_orm", "sea_orm::query::loader::Vec::load_self_via_rev", "R1570:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::acquire", "R1571:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::begin", "R1571:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::close", "R1571:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::close_by_ref", "R1571:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::ping", "R1571:silent"),
+    ("sea_orm", "sea_orm::driver::rusqlite::RusqliteSharedConnection::transaction", "R1571:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -2356,6 +2386,100 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::exec_with_returning_many")
             {
                 return Some("Db");
+            }
+            // SOUNDNESS R1528 — sea-orm 2.0.4, the 76 grandfathered rows (above the 1.1.20 ceiling). Every body was READ
+            // and EXECUTED against a consumer fixture on a file-backed sqlite database (handoff `rust-r1528/seaorm/`).
+            //
+            // Terminal verbs on a TYPED receiver. `require_one` is `one(db)` plus a not-found error
+            // (executor/select.rs:591,681,817,887,1143) and `stream_partial_model` is `into_partial_model().stream(db)`
+            // (select.rs:620-846, select/{three,four}.rs): the same round trip as the `::one`/`::stream` suffixes above,
+            // under verbs that list missed. EXECUTED: each returned the row / issued the statement (`sea_orm.query_one`
+            // span and a `sqlx::query` event). Neither name exists outside the select family, so the suffix is safe.
+            if path.ends_with("::require_one") || path.ends_with("::stream_partial_model") {
+                return Some("Db");
+            }
+            // The transaction family and the `_raw` statement verbs, FQN-exact for the reason the block above gives
+            // (the mock and proxy connections share every verb name, and `RestrictedConnection::execute_raw` /
+            // `query_*_raw` are PURE refusals that return `DbErr::RbacError` without touching the connection,
+            // restricted_connection.rs:54-81 — a bare `::execute_raw` suffix would fabricate Db on them; EXECUTED, the
+            // `RestrictedConnection::execute_raw` control returns the RBAC error and issues no statement).
+            //   * `DatabaseConnection`: `begin_with_options` (db_connection.rs:430), `transaction_async` /
+            //     `transaction_with_config_async` (:657/:671, `begin()` + callback + COMMIT/ROLLBACK). EXECUTED: each
+            //     issued `BEGIN`/`COMMIT` (`sea_orm.begin`/`sea_orm.commit` spans, tracing-spans feature) and
+            //     `begin_with_options(Immediate)` held a write lock a second process could not take. The `_raw` verbs
+            //     (`execute_raw`/`query_one_raw`/`query_all_raw`/`stream_raw`, :162-326) are not rows — their self-scan set
+            //     is `Unknown` alone (R1539) — but read pure at a consumer exactly as the rows did, so they carry the same
+            //     rule (EXECUTED: `execute_raw` wrote a row).
+            //   * `DatabaseExecutor` (executor.rs:51-258) and `DatabaseTransaction` (transaction.rs:417-770): every method
+            //     forwards to the connection/transaction it wraps on EVERY arm of its `match`, so none is conditional;
+            //     `DatabaseTransaction::begin*` start a nested SAVEPOINT, `stream_raw` issues the query when polled.
+            //   * `RestrictedConnection` / `RestrictedTransaction` (restricted_connection.rs:150-450): `begin*` and
+            //     `transaction*` call `self.conn.begin*()` before any permission check, `commit`/`rollback` call the
+            //     wrapped transaction's. EXECUTED against an RBAC-enabled sqlite file: BEGIN/COMMIT/ROLLBACK spans, a
+            //     write lock held across `begin_with_options(Immediate)`.
+            if let Some((ty, m)) = type_method(path, "sea_orm", &[""]) {
+                if matches!(
+                    (ty, m),
+                    ("DatabaseConnection", "begin_with_options" | "transaction_async" | "transaction_with_config_async"
+                        | "execute_raw" | "query_one_raw" | "query_all_raw" | "stream_raw")
+                        | ("DatabaseExecutor", "begin" | "begin_with_config" | "begin_with_options" | "execute_raw"
+                            | "query_one_raw" | "query_all_raw" | "transaction" | "transaction_async"
+                            | "transaction_with_config" | "transaction_with_config_async")
+                        | ("DatabaseTransaction", "begin" | "begin_with_config" | "begin_with_options" | "execute_raw"
+                            | "query_one_raw" | "query_all_raw" | "stream_raw" | "transaction" | "transaction_async"
+                            | "transaction_with_config" | "transaction_with_config_async")
+                        | ("RestrictedConnection", "begin" | "begin_with_config" | "begin_with_options" | "transaction"
+                            | "transaction_async" | "transaction_with_config" | "transaction_with_config_async")
+                        | ("RestrictedTransaction", "begin" | "begin_with_config" | "begin_with_options" | "commit"
+                            | "rollback" | "transaction" | "transaction_async" | "transaction_with_config"
+                            | "transaction_with_config_async")
+                ) {
+                    return Some("Db");
+                }
+            }
+            // `rbac` is a `pub mod` and is NOT re-exported at the crate root, so a consumer's path is
+            // `sea_orm::rbac::RbacContext::m` (the row's root-level spelling is only the generator's guess, and no
+            // consumer can write it). Each `RbacContext` method opens a transaction on `db` before it
+            // touches its maps (`db.begin()` / `begin_with_config`, rbac/context.rs:43-300) and `create_tables` runs one
+            // CREATE TABLE per RBAC table (rbac/schema.rs:11-27). EXECUTED on a fresh sqlite file: `create_tables` made
+            // the 7 `sea_orm_*` tables, `add_tables`/`add_crud_permissions`/`add_roles`/`add_role_permissions`/
+            // `remove_role_permissions`/`add_user_override`/`add_role_hierarchy`/`assign_user_role` each changed their
+            // table's row count (2, 4, 2, 2 then 1, 1, 1, 1) inside a BEGIN/COMMIT, and `load` ran three SELECTs.
+            // `RbacContext::get_role` (a HashMap lookup) is NOT claimed.
+            if let Some((ty, m)) = type_method(path, "sea_orm", &["rbac", "rbac::context"]) {
+                if ty == "RbacContext"
+                    && matches!(m, "load" | "add_tables" | "add_crud_permissions" | "add_roles" | "add_role_permissions"
+                        | "remove_role_permissions" | "add_user_override" | "add_role_hierarchy" | "assign_user_role")
+                {
+                    return Some("Db");
+                }
+            }
+            if path == "sea_orm::rbac::schema::create_tables" {
+                return Some("Db");
+            }
+            // `SchemaBuilder::apply` (schema/builder.rs:76) runs `CREATE TABLE` for every registered entity and `sync`
+            // (:88, needs `schema-sync`) discovers the live schema with a dozen `query_all`s and then migrates it.
+            // EXECUTED: `apply` created table `post`; `sync` issued 40+ `sea_orm.query_all` statements. `register` /
+            // `Schema::new` only build values and are NOT claimed (control fns stay 0).
+            if let Some((ty, m)) = type_method(path, "sea_orm", &["", "schema", "schema::builder"]) {
+                if ty == "SchemaBuilder" && matches!(m, "apply" | "sync") {
+                    return Some("Db");
+                }
+            }
+            // `get_schema_registry` and `EntityRegistry::build_schema` (entity/registry.rs) iterate the `inventory` of
+            // derive-registered entities and emit one `debug!` per entity (`Registering entities with prefix`,
+            // `Registered <path>`); the registered `schema_info` callbacks are macro-generated value constructors. No
+            // statement is issued. EXECUTED: a tracing layer saw one event per registered entity from target
+            // `sea_orm::entity::registry` (36 for the `tests_cfg` prefix), no `sea_orm.*` span. `Log` is the one effect.
+            if let Some((ty, m)) = type_method(path, "sea_orm", &["", "entity", "entity::registry"]) {
+                if (ty, m) == ("EntityRegistry", "build_schema") {
+                    return Some("Log");
+                }
+            }
+            if let Some((ty, m)) = type_method(path, "sea_orm", &[""]) {
+                if matches!((ty, m), ("DatabaseConnection" | "DatabaseExecutor", "get_schema_registry")) {
+                    return Some("Log");
+                }
             }
             return None;
         }
@@ -6518,6 +6642,78 @@ mod masks_locator_tests {
             assert_eq!(classify("jiff", &format!("jiff::{p}")), None, "{p}");
         }
         assert_eq!(classify("mycrate", "mycrate::Date::in_tz"), None);
+    }
+
+    /// SOUNDNESS R1528 — the sea-orm 2.0.4 rows that carry a rule, each EXECUTED against a consumer fixture on a
+    /// file-backed sqlite database (handoff `rust-r1528/seaorm`). The pure neighbours, the `RusqliteSharedConnection`
+    /// and `Vec::load_*` rows (filed as R1570/R1571: no path ever reaches `classify`) and the mock/proxy lookalikes are
+    /// pinned to `None` so a later "tidy-up" cannot turn them into fabrications or dead coverage.
+    #[test]
+    fn r1528_sea_orm_rows_classify() {
+        let db = |ty: &str, ms: &[&str]| -> Vec<(String, &'static str)> {
+            ms.iter().map(|m| (format!("sea_orm::{ty}::{m}"), "Db")).collect()
+        };
+        let mut want: Vec<(String, &'static str)> = Vec::new();
+        want.extend(db("DatabaseConnection", &["begin_with_options", "transaction_async", "transaction_with_config_async",
+            "execute_raw", "query_one_raw", "query_all_raw", "stream_raw"]));
+        want.extend(db("DatabaseExecutor", &["begin", "begin_with_config", "begin_with_options", "execute_raw",
+            "query_one_raw", "query_all_raw", "transaction", "transaction_async", "transaction_with_config",
+            "transaction_with_config_async"]));
+        want.extend(db("DatabaseTransaction", &["begin", "begin_with_config", "begin_with_options", "execute_raw",
+            "query_one_raw", "query_all_raw", "stream_raw", "transaction", "transaction_async",
+            "transaction_with_config", "transaction_with_config_async"]));
+        want.extend(db("RestrictedConnection", &["begin", "begin_with_config", "begin_with_options", "transaction",
+            "transaction_async", "transaction_with_config", "transaction_with_config_async"]));
+        want.extend(db("RestrictedTransaction", &["begin", "begin_with_config", "begin_with_options", "commit",
+            "rollback", "transaction", "transaction_async", "transaction_with_config",
+            "transaction_with_config_async"]));
+        for m in ["load", "add_tables", "add_crud_permissions", "add_roles", "add_role_permissions",
+                  "remove_role_permissions", "add_user_override", "add_role_hierarchy", "assign_user_role"] {
+            want.push((format!("sea_orm::rbac::RbacContext::{m}"), "Db"));
+            want.push((format!("sea_orm::rbac::context::RbacContext::{m}"), "Db"));
+        }
+        want.push(("sea_orm::rbac::schema::create_tables".into(), "Db"));
+        for m in ["apply", "sync"] {
+            want.push((format!("sea_orm::SchemaBuilder::{m}"), "Db"));
+            want.push((format!("sea_orm::schema::builder::SchemaBuilder::{m}"), "Db"));
+        }
+        for ty in ["Select", "SelectTwo", "SelectTwoRequired", "Selector", "SelectorRaw"] {
+            want.push((format!("sea_orm::{ty}::require_one"), "Db"));
+        }
+        for ty in ["Select", "SelectTwo", "SelectTwoRequired", "SelectThree", "SelectFour"] {
+            want.push((format!("sea_orm::{ty}::stream_partial_model"), "Db"));
+        }
+        for p in ["sea_orm::DatabaseConnection::get_schema_registry", "sea_orm::DatabaseExecutor::get_schema_registry",
+                  "sea_orm::EntityRegistry::build_schema", "sea_orm::entity::registry::EntityRegistry::build_schema"] {
+            want.push((p.into(), "Log"));
+        }
+        for (p, eff) in &want {
+            assert_eq!(classify("sea_orm", p), Some(*eff), "{p}");
+        }
+        // pure neighbours and lookalikes
+        for p in [
+            // RBAC refusals return an error without touching the connection (restricted_connection.rs:54-81)
+            "RestrictedConnection::execute_raw", "RestrictedConnection::query_one_raw",
+            "RestrictedConnection::query_all_raw", "RestrictedTransaction::execute_raw",
+            // value builders / lookups
+            "rbac::RbacContext::get_role", "SchemaBuilder::register", "Schema::new", "Schema::builder",
+            "DatabaseConnection::get_database_backend", "DatabaseConnection::get_schema_builder",
+            "DatabaseExecutor::is_transaction", "DatabaseExecutor::get_schema_builder",
+            "RestrictedConnection::user_id", "RestrictedConnection::user_can", "RestrictedTransaction::user_can_run",
+            // mock and proxy backends perform no real I/O and share every verb name
+            "MockDatabaseConnection::begin_with_options", "MockDatabaseConnection::transaction_async",
+            "ProxyDatabaseConnection::execute_raw", "ProxyDatabaseConnection::query_all_raw",
+            // R1570/R1571: no consumer path reaches classify, so no rule (a rule would be dead coverage)
+            "Vec::load_many", "Vec::load_one", "Vec::load_self", "Vec::load_self_many", "Vec::load_self_via",
+            "Vec::load_self_via_rev", "RusqliteSharedConnection::acquire", "RusqliteSharedConnection::begin",
+            "RusqliteSharedConnection::close", "RusqliteSharedConnection::close_by_ref",
+            "RusqliteSharedConnection::ping", "RusqliteSharedConnection::transaction",
+            "driver::rusqlite::RusqliteSharedConnection::ping",
+        ] {
+            assert_eq!(classify("sea_orm", &format!("sea_orm::{p}")), None, "{p}");
+        }
+        assert_eq!(classify("mycrate", "mycrate::DatabaseTransaction::execute_raw"), None);
+        assert_eq!(classify("mycrate", "mycrate::rbac::RbacContext::load"), None);
     }
 
     /// SOUNDNESS R1528 — the ureq 3.4.2 rows that carry a rule: every one EXECUTED against a consumer fixture
