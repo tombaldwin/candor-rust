@@ -113,8 +113,9 @@ fn hole1_a_foreign_return_is_never_typed_as_the_dependencys_same_leaf_type() {
 /// HOLE 2 — R1200's method-probe refusal was bypassed for METHOD steps. A by-value method of a trait in scope at the
 /// consumer (`ext::Ext`, blanket over every `T`) beats the dependency's `&self` inherent `direct_get_builder` on an OWNED
 /// receiver, so `b` is `ext::Other`, not `DirectGetBuilder`, and charging `DirectGetBuilder::send`'s `Net` fabricates.
-/// Which method the probe reaches depends on the receiver's reference-ness, which the provenance marker does not carry, so
-/// a METHOD step is not typed at all; a FACTORY (free fn) step — no probe — still is (the control).
+/// Round 3: the provenance carries the receiver's form, and a method step is typed only where the probe provably reaches
+/// the inherent (owned + `self`, `&` + `&self`, `&mut` + `&mut self`). Here the receiver is OWNED and the inherent takes
+/// `&self`, so the step must still refuse; the `&Stream` twin (`f_ref`) is decidable and types.
 #[test]
 fn hole2_a_method_step_is_typed_only_where_the_inherent_provably_wins_the_probe() {
     let root = tmpdir("h2");
@@ -126,10 +127,12 @@ fn hole2_a_method_step_is_typed_only_where_the_inherent_provably_wins_the_probe(
     let app = consumer(&root, "h2app", true, true,
         "use ext::Ext;\nuse async_nats::jetstream::stream::Stream;\n\
          pub async fn f_probe(s: Stream) -> u64 { let b = s.direct_get_builder(); b.send().await }\n\
-         pub async fn f_factory(c: u8) -> u8 { let js = async_nats::jetstream::new(c); js.query_account().await }\n");
+         pub async fn f_factory(c: u8) -> u8 { let js = async_nats::jetstream::new(c); js.query_account().await }\n\
+         pub async fn f_ref(s: &Stream) -> u64 { let b = s.direct_get_builder().sequence(1); b.send().await }\n");
     let (rows, _) = scan(&app, &root.join("cargo-home"));
     assert!(!net(&rows, "f_probe"), "a `&self` inherent was assumed to win the method probe: {:?}", rows.get("f_probe"));
     assert!(net(&rows, "f_factory"), "a factory step must still type: {:?}", rows.get("f_factory"));
+    assert!(net(&rows, "f_ref"), "`&Stream` + `&self`, then owned + `self`: decidable, must type: {:?}", rows.get("f_ref"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -192,5 +195,34 @@ fn hole4_a_same_leaf_local_type_never_answers_for_the_dependencys_type() {
     assert!(f.get("calls").is_none_or(|c| !c.as_array().unwrap().iter().any(|x| x == "Context::query_account")),
         "the dependency's Context was edged to the consumer's own same-leaf type (fabricating its Fs): {f:#}");
     assert!(!rows.get("f_twin").unwrap().0.iter().any(|e| e == "Fs"), "the local twin's Fs was charged: {f:#}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// ROUND 3 — `?`, `unwrap`/`expect` and `.await` are recorded in the provenance and read against the signature: a `Result`
+/// / `Option` the dependency DECLARES is peeled by exactly one `?`/`unwrap`, an `async fn`'s value by `.await`. A peel the
+/// signature does not license (a method called on the unpeeled `Result`, a future never awaited) types nothing.
+/// NOT covered, and pre-existing in both arms: a factory followed DIRECTLY by `.unwrap()` / `.expect()`
+/// (`let js = dep::maybe(c).unwrap()`) records no provenance at all, so no marker is emitted to type.
+#[test]
+fn round3_peels_are_read_against_the_signature() {
+    let root = tmpdir("peel");
+    nats_src(&root.join("async-nats"), "0.50.0",
+        "pub fn fallible(c: u8) -> Result<Context, ()> { Ok(Context::make(c)) }\n\
+         pub fn maybe(c: u8) -> Option<Context> { Some(Context::make(c)) }\n\
+         pub async fn open_ctx(c: u8) -> Result<Context, ()> { Ok(Context::make(c)) }\n");
+    let app = consumer(&root, "peelapp", true, false,
+        "use async_nats::jetstream;\n\
+         pub async fn p_try(c: u8) -> Result<u8, ()> { let js = jetstream::fallible(c)?; Ok(js.query_account().await) }\n\
+         pub async fn p_unwrap_chain(s: &jetstream::stream::Stream) -> u64 { let b = s.direct_get_builder().sequence(1); b.send().await }\n\
+         pub async fn p_await_try(c: u8) -> Result<u8, ()> { let js = jetstream::open_ctx(c).await?; Ok(js.query_account().await) }\n\
+         pub fn n_unpeeled(c: u8) -> bool { let r = jetstream::fallible(c); r.is_ok() }\n\
+         pub async fn n_no_await(c: u8) -> bool { let f = jetstream::open_ctx(c); drop(f); true }\n");
+    let (rows, _) = scan(&app, &root.join("cargo-home"));
+    for f in ["p_try", "p_await_try", "p_unwrap_chain"] {
+        assert!(net(&rows, f), "`{f}`: the peeled value must type to the dependency's Context: {:?}", rows.get(f));
+    }
+    for f in ["n_unpeeled", "n_no_await"] {
+        assert!(!net(&rows, f), "`{f}` was charged: {:?}", rows.get(f));
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

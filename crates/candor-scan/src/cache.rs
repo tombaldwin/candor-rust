@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev151 (rustagent-vein): SOUNDNESS R1578 round 3 — Pass B's cached `calls` change: an `<untyped>` marker carries the value's
+    // full provenance in `Call::prov`; a rev150 entry has none, so a warm scan would type nothing a cold scan types. Mandatory.
     // rev150 (rustagent-r1540): SOUNDNESS R1540 — Pass B's cached `calls` change: a std-typed receiver's method forms the
     // crate impl's `Leaf::m` call, the `<stdrecv>`/`<stdrecvmac>`/`<stdrecvjoin>` markers, and the R1095 floor no longer
     // stands aside for a std factory's `<untyped>` marker. A rev149 entry would replay the silence warm. Mandatory.
@@ -584,7 +586,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev150/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev151/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

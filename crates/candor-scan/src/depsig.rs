@@ -202,6 +202,9 @@ struct Cand<'a> {
     output: &'a syn::ReturnType,
     module: Option<String>,
     nested: bool,
+    /// the receiver: `None` none, `Some(0)` `self`, `Some(1)` `&self`, `Some(2)` `&mut self`; and whether the fn is `async`
+    recv: Option<u8>,
+    is_async: bool,
 }
 
 /// SOUNDNESS R1192 — what one `macro_rules!` body can define, read from its tokens: the fixed fn names (`fn name`), whether
@@ -439,7 +442,7 @@ struct SrcIndex {
     file_mods: Vec<Option<String>>,
     /// SOUNDNESS R1578 (round 2) — per module, the leaves a `use` binds from outside the crate, and the modules an external
     /// `use` glob fills: a written return `Client` there may be ANOTHER crate's `Client`
-    ext_use: HashMap<Option<String>, HashSet<String>>,
+    ext_use: HashMap<Option<String>, HashMap<String, String>>,
     ext_glob: HashSet<Option<String>>,
 }
 
@@ -1108,7 +1111,7 @@ impl SrcIndex {
             path_attr: bool,
             /// per module (`None` = not derivable): the leaves a `use` binds from OUTSIDE the crate, and whether a `use`
             /// glob from outside the crate fills it
-            ext_use: HashMap<Option<String>, HashSet<String>>,
+            ext_use: HashMap<Option<String>, HashMap<String, String>>,
             ext_glob: HashSet<Option<String>>,
             external: &'m dyn Fn(&str) -> bool,
         }
@@ -1128,16 +1131,17 @@ impl SrcIndex {
                     }
                     syn::UseTree::Name(n) => {
                         if root.is_some_and(|r| (self.external)(r)) {
-                            self.ext_use.entry(self.module()).or_default().insert(n.ident.to_string());
+                            self.ext_use.entry(self.module()).or_default().insert(n.ident.to_string(), root.unwrap_or_default().to_string());
                         }
                     }
                     syn::UseTree::Rename(r) => {
                         if root.is_some_and(|x| (self.external)(x)) {
-                            self.ext_use.entry(self.module()).or_default().insert(r.rename.to_string());
+                            self.ext_use.entry(self.module()).or_default().insert(r.rename.to_string(), root.unwrap_or_default().to_string());
                         }
                     }
                     syn::UseTree::Glob(_) => {
-                        if root.is_some_and(|r| (self.external)(r)) {
+                        // a std glob (`use std::io::prelude::*`) brings std names only — `place` reads those as std
+                        if root.is_some_and(|r| (self.external)(r) && !matches!(r, "std" | "core" | "alloc")) {
                             self.ext_glob.insert(self.module());
                         }
                     }
@@ -1310,7 +1314,14 @@ impl<'a, 'i> Collect<'a, 'i> {
                 v.extend(self.modstack.iter().map(String::as_str));
                 v.join("::")
             });
-            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site, output: &sig.output, module, nested: self.body > 0 });
+            let recv = sig.receiver().map(|r| match (&r.reference, r.mutability.is_some(), &*r.ty) {
+                (Some(_), true, _) => 2,
+                (Some(_), false, _) => 1,
+                (None, _, syn::Type::Path(p)) if p.path.is_ident("Self") => 0,
+                (None, _, syn::Type::Reference(t)) => if t.mutability.is_some() { 2 } else { 1 },
+                _ => 9, // `self: Box<Self>` / `Pin<&mut Self>` …: no probe rule here
+            });
+            self.fns.push(Cand { scope, inputs: sig.inputs.iter().collect(), body, site, output: &sig.output, module, nested: self.body > 0, recv, is_async: sig.asyncness.is_some() });
         }
     }
 
@@ -1666,7 +1677,7 @@ pub(crate) struct DepSigs {
     /// R1351 — source trees over `TRAIT_SRC_CAP`, which `trait_declares` does not parse.
     too_big: HashMap<std::path::PathBuf, bool>,
     /// SOUNDNESS R1578 — `return_type` answers, per (alias, callee).
-    rets: HashMap<(String, String), Option<String>>,
+    rets: HashMap<(String, String), Option<DepRet>>,
     /// set while `return_type` asks `judged` (`Want::typing`)
     typing: bool,
     /// SOUNDNESS R1578 (round 2, the owner's ruling) — while typing, the ONE source `judged` reads: the version the project's
@@ -2228,26 +2239,22 @@ impl DepSigs {
         found
     }
 
-    /// SOUNDNESS R1578 — the dependency TYPE a FREE fn returns, read from its written signature in the lock-pinned source:
-    /// `jetstream::new` -> `jetstream::context::Context`. A RESOLUTION source for a value the consumer's scan cannot type, so
-    /// every doubt is `None` and the caller keeps today's behaviour:
-    ///   * the source is `lock_source`'s, or nothing;
-    ///   * the candidates are `judged`'s (per ITEM, every opacity rule), restricted to the free fns of the module the path
-    ///     names; every one must name the same single nominal leaf;
-    ///   * the return is a plain OWNED path type (`Self` from the impl); a reference, a generic parameter, `impl`/`dyn`, a
-    ///     tuple, a std wrapper and any leaf the source does not itself declare refuse;
-    ///   * the written PATH must stay inside the crate: a multi-segment path rooted outside it (`other::Client`) refuses, and
-    ///     so does a single-segment one in a module that imports that leaf from outside, or that an external glob fills;
-    ///   * the leaf is declared exactly once, in a module the `src/` layout names (an alias or `#[path]` refuses).
+    /// SOUNDNESS R1578 — what a dependency callee RETURNS, read from its written signature in the lock-pinned source
+    /// (`lock_source`, or nothing). `method` `None`: the callee is a FREE fn, `callee` its path after the crate (only the
+    /// free fns of the module that path names). `method` `Some((m, form))`: the INHERENT method `m` of the type `callee`
+    /// names, called on a receiver of `form` (`o` owned, `r` `&`, `m` `&mut`) — typed only where Rust's method probe
+    /// provably reaches that inherent before any trait method in scope at the consumer (R1200): an inherent wins at the
+    /// FIRST probe step only if its receiver is exactly the receiver expression's type, so `o` needs `self`, `r` needs
+    /// `&self`, `m` needs `&mut self`; any other pairing — or an unknown form — is a refusal.
     ///
-    /// METHOD steps are not typed here: which method a call reaches depends on the receiver's reference-ness (R1200's
-    /// method probe), which the provenance does not carry — see `scan::r1578_type`.
-    pub(crate) fn return_type(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
-        let key = (alias.to_string(), callee.to_string());
+    /// Every candidate must agree (`async`-ness, wrappers, type); the type is placed by `place` below. Every doubt is
+    /// `None` and the caller keeps today's behaviour.
+    pub(crate) fn ret_of(&mut self, dir: &str, alias: &str, real: &str, callee: &str, method: Option<(&str, char)>) -> Option<DepRet> {
+        let key = (alias.to_string(), format!("{callee}\u{3}{method:?}"));
         if let Some(v) = self.rets.get(&key) {
             return v.clone();
         }
-        let v = self.return_type_uncached(dir, alias, real, callee);
+        let v = self.ret_uncached(dir, alias, real, callee, method);
         self.rets.insert(key, v.clone());
         v
     }
@@ -2259,67 +2266,89 @@ impl DepSigs {
         }
     }
 
-    fn return_type_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str) -> Option<String> {
-        let segs: Vec<&str> = callee.split("::").collect();
-        if segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]) {
-            self.say("ret", alias, callee, 0, "method");
-            return None;
-        }
+    fn ret_uncached(&mut self, dir: &str, alias: &str, real: &str, callee: &str, method: Option<(&str, char)>) -> Option<DepRet> {
         let Some(src) = self.lock_source(dir, alias, real) else {
             self.say("ret", alias, callee, 0, "nolock");
             return None;
         };
-        let want_mod = Some(segs[..segs.len() - 1].join("::"));
+        let (path, want_mod, need): (String, Option<String>, Option<u8>) = match method {
+            None => {
+                let segs: Vec<&str> = callee.split("::").collect();
+                if segs.len() >= 2 && crate::lang::is_type_ident(segs[segs.len() - 2]) {
+                    self.say("ret", alias, callee, 0, "method-as-fn");
+                    return None;
+                }
+                (callee.to_string(), Some(segs[..segs.len() - 1].join("::")), None)
+            }
+            Some((m, form)) => {
+                let need = match form {
+                    'o' => 0,
+                    'r' => 1,
+                    'm' => 2,
+                    _ => {
+                        self.say("ret", alias, callee, 0, "form?");
+                        return None;
+                    }
+                };
+                (format!("{callee}::{m}"), None, Some(need))
+            }
+        };
         self.typing = true;
         self.typing_dirs = Some(vec![src.dir.clone()]);
-        let (v, why) = self.judged(dir, alias, real, callee, 0, |c: &Cand<'_>, p| {
-            if c.nested || !matches!(c.site, Site::Free) || c.module != want_mod {
+        let (v, why) = self.judged(dir, alias, real, &path, 0, |c: &Cand<'_>, p| {
+            if c.nested {
                 return Err(());
+            }
+            match need {
+                None => {
+                    if !matches!(c.site, Site::Free) || c.module != want_mod {
+                        return Err(());
+                    }
+                }
+                Some(k) => {
+                    // only the type's INHERENT methods, and only with the receiver the probe reaches first
+                    if !matches!(c.site, Site::Inherent(Some(_))) {
+                        return Err(());
+                    }
+                    if c.recv != Some(k) {
+                        return Ok(None);
+                    }
+                }
             }
             cand_returns(c, p)
         });
         self.typing = false;
         self.typing_dirs = None;
         let Some(set) = v else {
-            self.say("ret", alias, callee, 0, &why);
+            self.say("ret", alias, &path, 0, &why);
             return None;
         };
-        // each element is `<module>\u{1}<written path>`
-        let parsed: Vec<(String, Vec<String>)> = set
-            .iter()
-            .filter_map(|e| e.split_once('\u{1}'))
-            .map(|(m, p)| (m.to_string(), p.split("::").map(str::to_string).collect()))
-            .collect();
-        let leaves: BTreeSet<&String> = parsed.iter().filter_map(|(_, p)| p.last()).collect();
-        if parsed.len() != set.len() || leaves.len() != 1 {
-            self.say("ret", alias, callee, 0, &format!("union:{}", leaves.len()));
+        let parsed: Vec<Vec<&str>> = set.iter().map(|e| e.split('\u{1}').collect()).collect();
+        if parsed.iter().any(|p| p.len() != 4) {
             return None;
         }
-        let leaf = (*leaves.iter().next()?).clone();
+        // agreement on async-ness, wrappers and the written leaf
+        let sig: BTreeSet<(&str, &str, &str)> =
+            parsed.iter().map(|p| (p[0], p[2], p[3].rsplit("::").next().unwrap_or(p[3]))).collect();
+        if sig.len() != 1 {
+            self.say("ret", alias, &path, 0, &format!("union:{}", sig.len()));
+            return None;
+        }
         let idx = self.index(&src.dir)?;
-        for (m, p) in &parsed {
-            let inside = if p.len() >= 2 {
-                matches!(p[0].as_str(), "crate" | "self" | "super") || !idx.external_root(&p[0])
-            } else {
-                let m = Some(m.clone());
-                !idx.ext_use.get(&m).is_some_and(|u| u.contains(&leaf)) && !idx.ext_glob.contains(&m)
-            };
-            if !inside {
-                self.say("ret", alias, callee, 0, &format!("foreign:{}", p.join("::")));
-                return None;
+        let mut placed: Option<RetTy> = None;
+        for p in &parsed {
+            let segs: Vec<&str> = p[3].split("::").collect();
+            let t = place(idx, p[1], &segs)?;
+            match &placed {
+                Some(x) if *x != t => return None,
+                _ => placed = Some(t),
             }
         }
-        let one = match idx.type_decls.get(&leaf) {
-            Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(&leaf) => d[0].clone(),
-            _ => None,
-        };
-        let Some(m) = one else {
-            self.say("ret", alias, callee, 0, &format!("decl:{leaf}"));
-            return None;
-        };
-        let q = if m.is_empty() { leaf.clone() } else { format!("{m}::{leaf}") };
-        self.say("ret", alias, callee, 0, &format!("read:{q}"));
-        Some(q)
+        let ty = placed?;
+        let (a, w, _) = sig.into_iter().next()?;
+        let r = DepRet { is_async: a == "a", wraps: w.chars().collect(), ty };
+        self.say("ret", alias, &path, 0, &format!("read:{r:?}"));
+        Some(r)
     }
 
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
@@ -2334,39 +2363,110 @@ impl DepSigs {
     }
 }
 
-/// SOUNDNESS R1578 — `<module>\u{1}<written return path>` for a candidate whose return is one plain OWNED nominal path the
-/// source may declare (`Self` read as the impl's self type); `Ok(None)` for every other shape — a reference included, since a
-/// borrowed value is not the owned receiver a later step would assume.
+/// SOUNDNESS R1578 — `<a|->\u{1}<module>\u{1}<wrappers>\u{1}<written path>` for a candidate whose return is one plain OWNED
+/// nominal path, possibly inside `Result<..>` / `Option<..>` (the wrappers outermost first, `R` / `O`); `Self` is read as the
+/// impl's self type. `Ok(None)` for every other shape — a reference included, since a borrowed value is not the owned
+/// receiver a later step would assume, and a generic parameter, `impl`, `dyn`, a tuple.
 fn cand_returns(c: &Cand<'_>, _pos: usize) -> Result<Option<BTreeSet<String>>, ()> {
     let syn::ReturnType::Type(_, ty) = c.output else { return Ok(None) };
+    let Some(m) = &c.module else { return Ok(None) };
     let mut t: &syn::Type = ty;
-    loop {
-        t = match t {
-            syn::Type::Paren(p) => &p.elem,
-            syn::Type::Group(g) => &g.elem,
-            _ => break,
-        };
-    }
-    let syn::Type::Path(p) = t else { return Ok(None) };
-    if p.qself.is_some() || p.path.leading_colon.is_some() {
-        return Ok(None);
-    }
-    let mut segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-    if segs.last().is_some_and(|l| l == "Self") {
-        if segs.len() != 1 {
-            return Ok(None); // `Self::Assoc`
-        }
-        match &c.site {
-            Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => segs = vec![t.clone()],
+    let mut wraps = String::new();
+    let segs = loop {
+        match t {
+            syn::Type::Paren(p) => t = &p.elem,
+            syn::Type::Group(g) => t = &g.elem,
+            syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
+                let last = p.path.segments.last().ok_or(())?;
+                let leaf = last.ident.to_string();
+                if (leaf == "Result" || leaf == "Option") && wraps.len() < 4 {
+                    if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
+                            wraps.push(if leaf == "Result" { 'R' } else { 'O' });
+                            t = inner;
+                            continue;
+                        }
+                    }
+                    return Ok(None);
+                }
+                let mut v: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if v.last().is_some_and(|l| l == "Self") {
+                    if v.len() != 1 {
+                        return Ok(None); // `Self::Assoc`
+                    }
+                    match &c.site {
+                        Site::Inherent(Some(t)) | Site::TraitImpl(_, Some(t)) => v = vec![t.clone()],
+                        _ => return Ok(None),
+                    }
+                }
+                break v;
+            }
             _ => return Ok(None),
         }
-    }
+    };
     let leaf = segs.last().cloned().unwrap_or_default();
     if generic_params(&c.scope).contains(&leaf) {
         return Ok(None);
     }
-    let Some(m) = &c.module else { return Ok(None) };
-    Ok(Some(BTreeSet::from([format!("{m}\u{1}{}", segs.join("::"))])))
+    let a = if c.is_async { "a" } else { "-" };
+    Ok(Some(BTreeSet::from([format!("{a}\u{1}{m}\u{1}{wraps}\u{1}{}", segs.join("::"))])))
+}
+
+/// SOUNDNESS R1578 — what a dependency callee returns (`DepSigs::ret_of`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DepRet {
+    /// an `async fn`: the call is a future, and only `.await` yields the rest
+    pub(crate) is_async: bool,
+    /// `Result` / `Option` wrappers, outermost first (`R` / `O`)
+    pub(crate) wraps: Vec<char>,
+    pub(crate) ty: RetTy,
+}
+
+/// SOUNDNESS R1578 — the placed type: one the dependency declares (its crate-relative qual), or a std type (its leaf).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RetTy {
+    Dep(String),
+    Std(String),
+}
+
+/// SOUNDNESS R1578 — where a written return path, in module `module` of the dependency `idx`, names its type:
+///   * rooted at `std` / `core` / `alloc` -> `Std`; rooted at any other crate -> refused;
+///   * rooted inside the crate (`crate`/`self`/`super`/a local module) -> the leaf must be declared exactly once;
+///   * one segment: a `use` of that leaf from std/core/alloc in that module -> `Std`; from another crate, or a module an
+///     external glob fills -> refused; declared exactly once in the crate -> `Dep`; a std PRELUDE type -> `Std`;
+///   * a declaration must sit in a module the `src/` layout names, with no `#[path]` and no alias of the leaf.
+fn place(idx: &SrcIndex, module: &str, segs: &[&str]) -> Option<RetTy> {
+    let leaf = *segs.last()?;
+    let std_root = |r: &str| matches!(r, "std" | "core" | "alloc");
+    let declared = || -> Option<RetTy> {
+        match idx.type_decls.get(leaf) {
+            Some(d) if d.len() == 1 && !idx.path_attr && !idx.aliases.contains_key(leaf) => {
+                let m = d[0].clone()?;
+                Some(RetTy::Dep(if m.is_empty() { leaf.to_string() } else { format!("{m}::{leaf}") }))
+            }
+            _ => None,
+        }
+    };
+    if segs.len() >= 2 {
+        if std_root(segs[0]) {
+            return Some(RetTy::Std(leaf.to_string()));
+        }
+        if !matches!(segs[0], "crate" | "self" | "super") && idx.external_root(segs[0]) {
+            return None;
+        }
+        return declared();
+    }
+    let m = Some(module.to_string());
+    if let Some(root) = idx.ext_use.get(&m).and_then(|u| u.get(leaf)) {
+        return std_root(root).then(|| RetTy::Std(leaf.to_string()));
+    }
+    if idx.ext_glob.contains(&m) {
+        return None;
+    }
+    if idx.type_decls.contains_key(leaf) {
+        return declared();
+    }
+    matches!(leaf, "String" | "Vec" | "Box" | "Option" | "Result").then(|| RetTy::Std(leaf.to_string()))
 }
 
 /// SOUNDNESS R1186 — the conversion target a bound's type argument names: its outer nominal leaf, or `*` when it is

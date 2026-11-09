@@ -1020,21 +1020,20 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) peek_excluded: bool,
 }
 
-/// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector already records where an untyped
-/// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`), and that marker was consumed only for a CHAINED
-/// dependency (the `typeSurface.returns` join, else `dispatch:untyped cross-package receiver`). Unchained it reached nothing:
-/// the κ ledger counted the crate only through the factory CALL, so a classifier-covered crate (calibrated, or no lockfile
-/// to exceed a ceiling) and a factory a rule already classifies left the method SILENT — `let js =
-/// async_nats::jetstream::new(c); js.query_account()` sends a request and read ABSENT.
+/// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector records where an untyped
+/// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`, and since round 3 the full provenance in
+/// `Call::prov`), and that marker was consumed only for a CHAINED dependency. Unchained it reached nothing: the κ ledger
+/// counted the crate only through the factory CALL, so a classifier-covered crate (calibrated, or no lockfile to exceed a
+/// ceiling) and a factory a rule already classifies left the method SILENT — `let js = async_nats::jetstream::new(c);
+/// js.query_account()` sends a request and read ABSENT.
 ///
-/// Here a FACTORY provenance (a free fn of the dependency) is typed from the factory's written return in the source the
-/// project's Cargo.lock pins (`DepSigs::return_type`, every doubt `None`; the owner's ruling of 2026-11-09: no lock, an
-/// absent source, a semver guess — nothing typed), and the marker becomes the typed call `<cr>::<module>::<Type>::<method>`.
-/// NOT typed: a METHOD provenance (`Type::m`, a `<chain>`): which method a call reaches depends on its receiver's
-/// reference-ness (R1200's probe — a by-value method of a trait in scope at the consumer beats a `&self` inherent), and the
-/// marker does not carry it; and a `<value>`/`<type>`/`<field>` provenance. `None` leaves the marker exactly as it was.
-/// The second element is whether the consumer DECLARES a nominal type of the same leaf: such a call must not take the local
-/// route, whose `tail2` key cannot tell the two `Context`s apart (round 2, hole 4).
+/// `r1578_resolve` walks the provenance through the source the project's Cargo.lock pins (`DepSigs::ret_of`; the owner's
+/// ruling of 2026-11-09: no lock, an absent source, a semver guess — nothing typed): a factory's return; `?` / `unwrap` /
+/// `expect` peel a `Result`/`Option` the signature declares; `.await` resolves an `async fn`; a METHOD step only where
+/// R1200's probe provably reaches the dependency's INHERENT method (owned receiver + `self`, `&` + `&self`, `&mut` +
+/// `&mut self`, the receiver's form read from its declared type). The marker then becomes the typed call
+/// `<cr>::<module>::<Type>::<method>`. The second element is whether the consumer DECLARES a nominal type of the same leaf
+/// (such a call must not take the local route, round 2 hole 4).
 fn r1578_type(
     c: &Call,
     deps: &std::collections::HashSet<String>,
@@ -1044,6 +1043,39 @@ fn r1578_type(
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
     returns: &ReturnIndex,
 ) -> Option<(Call, bool)> {
+    let (cr, method, ty) = match r1578_resolve(c, deps, renames, deps_idx, dir, sigs)? {
+        R1578::Typed { cr, method, ty } => (cr, method, ty),
+        R1578::Std => return None,
+    };
+    sigs.borrow_mut().note_typed(&cr);
+    let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+    let twin = returns.contains_key(&crate::model::nominal_key(leaf));
+    let path = format!("{cr}::{ty}::{method}");
+    if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+        eprintln!("R1578TYPED\t{}\t{path}\ttwin={twin}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
+    }
+    Some((Call { path, leaf: method, typed: true, method: true, dot: true, ..c.clone() }, twin))
+}
+
+/// SOUNDNESS R1578 — where an `<untyped>` marker's receiver provably lands.
+pub(crate) enum R1578 {
+    /// a type the dependency declares (crate-relative qual)
+    Typed { cr: String, method: String, ty: String },
+    /// a std type, or a `Result`/`Option` still wrapping the value: the call is std's if std has the method
+    Std,
+}
+
+/// SOUNDNESS R1578 — resolve an `<untyped>` marker for an UNCHAINED declared dependency through its provenance (see
+/// `r1578_type`). `None`: the receiver could not be placed.
+pub(crate) fn r1578_resolve(
+    c: &Call,
+    deps: &std::collections::HashSet<String>,
+    renames: &HashMap<String, String>,
+    deps_idx: &DepIndex,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+) -> Option<R1578> {
+    use crate::depsig::RetTy;
     if std::env::var_os("CANDOR_R1578_OFF").is_some() {
         return None;
     }
@@ -1052,20 +1084,44 @@ fn r1578_type(
     if cr.contains("::") || !deps.contains(cr) || deps_idx.crates.contains(cr_real) {
         return None;
     }
-    let (callee, method) = rest.rsplit_once("::")?;
-    if callee.contains('<') {
-        return None; // a `<chain>` / `<value>` / `<type>` / `<field>` provenance
-    }
+    let method = rest.rsplit_once("::")?.1.to_string();
+    let prov = c.prov.as_deref()?;
+    let mut parts = prov.split('|');
+    let base = parts.next()?;
+    let strip = |p: &str| -> Option<String> {
+        let (root, rest) = p.split_once("::")?;
+        (root == cr).then(|| rest.to_string())
+    };
     let mut sigs = sigs.borrow_mut();
-    let ty = sigs.return_type(dir, cr, cr_real, callee)?;
-    sigs.note_typed(cr);
-    let leaf = ty.rsplit("::").next().unwrap_or(&ty);
-    let twin = returns.contains_key(&crate::model::nominal_key(leaf));
-    let path = format!("{cr}::{ty}::{method}");
-    if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
-        eprintln!("R1578TYPED\t{}\t{path}\ttwin={twin}", c.path); // §E1 REACH COUNTER, the CHANGED branch only
+    // the state: async-ness, wrappers (outermost first), the placed type, and the receiver's form for a method step
+    let (mut is_async, mut wraps, mut ty, mut form): (bool, Vec<char>, RetTy, char) = if let Some(f) = base.strip_prefix("F:") {
+        let r = sigs.ret_of(dir, cr, cr_real, &strip(f)?, None)?;
+        (r.is_async, r.wraps, r.ty, 'o')
+    } else {
+        let (t, f) = base.strip_prefix("T:")?.rsplit_once(':')?;
+        (false, Vec::new(), RetTy::Dep(strip(t)?), f.chars().next()?)
+    };
+    for st in parts {
+        match st {
+            "a" if is_async => is_async = false,
+            "?" | "u" if !is_async && !wraps.is_empty() => {
+                wraps.remove(0);
+            }
+            m if m.starts_with("m:") && !is_async && wraps.is_empty() => {
+                let RetTy::Dep(q) = &ty else { return None };
+                let r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], form)))?;
+                (is_async, wraps, ty, form) = (r.is_async, r.wraps, r.ty, 'o');
+            }
+            _ => return None,
+        }
     }
-    Some((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, twin))
+    if is_async {
+        return None;
+    }
+    match ty {
+        RetTy::Dep(q) if wraps.is_empty() => Some(R1578::Typed { cr: cr.to_string(), method, ty: q }),
+        _ => Some(R1578::Std),
+    }
 }
 
 /// ⟨typeSurface.returns⟩ THE PRODUCER. `{crate}#{fn qual}` -> `{crate}#{type qual}`, both FULLY
