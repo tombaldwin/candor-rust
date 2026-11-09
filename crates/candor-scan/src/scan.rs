@@ -3299,6 +3299,100 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // join (`dispatch:<owner>.<member>` has a normative detail that re-deriving would destroy), so the set
     // can no longer be only compile-time literals.
     let mut unknown_why: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let non_registry_names: std::collections::HashSet<String> =
+        non_registry_lock_names(dir).into_iter().chain(non_registry_manifest_names(dir)).collect();
+    let lock_versions = {
+        // SOUNDNESS R329 — MAX over {member lock, workspace root lock}, not an else-branch. My first
+        // version preferred the member's own lock whenever it was non-empty, so a stale or partial
+        // member lock SHADOWED the root's and silently restored the exemption — and cargo ignores
+        // member lockfiles entirely, so the root's is the only real one. Note the sibling three lines
+        // above: `non_registry_names` deliberately UNIONS its lock and manifest evidence. Two adjacent
+        // lookups of one question, and mine had drifted to the weaker rule.
+        let mut v = deps::registry_lock_versions(dir);
+        if let Some(root) = deps::find_workspace_root(std::path::Path::new(dir)) {
+            for (k, rv) in deps::registry_lock_versions(&root.to_string_lossy()) {
+                let take = match v.get(&k) {
+                    Some(prev) => candor_classify::calibration_exceeded_raw(&rv, prev),
+                    None => true,
+                };
+                if take {
+                    v.insert(k, rv);
+                }
+            }
+        }
+        v
+    };
+    // The κ ledger's coverage question, ONE authority: does a call into `cr` that no rule matched DISCLOSE (`invisible`) —
+    // `true` — or is the crate covered (chained, calibrated within its ceiling, reviewed pure) so its silence is read as an
+    // answer? Asked by the ledger filter below and by SOUNDNESS R1578's floor at the untyped-receiver marker.
+    let kappa_blind = |cr: &String| -> bool {
+        let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
+        // COVERED = a report exists for this crate AND the staleness gate did not refuse it AND the
+        // report did not declare itself incomplete AND it judged at least one unit. The second,
+        // third and fourth conjuncts are the three fixes; spelled as a named local so clippy's
+        // boolean simplification can't rewrite the claims into one unreadable disjunction.
+        let covered = deps_idx.crates.contains(real)
+            && !deps_idx.untrusted.contains(real)
+            && !deps_idx.incomplete_pkgs.contains(real)
+            && !deps_idx.judged_nothing_pkgs.contains(real);
+        // A name Cargo.lock confirms is NOT the real registry crate loses every one of the three
+        // CALIBRATED_* exemptions below outright — it is a different artifact wearing a reviewed
+        // name, not the thing that was reviewed. Checked on `real` (Cargo.lock records the actual
+        // package identity, not a caller-chosen manifest alias).
+        let impostor = non_registry_names.contains(real);
+        // `CALIBRATED_CRATES` normally exempts a crate outright — "classify has rules here" is read
+        // as "an unmatched call was reviewed and found pure". `CALIBRATED_BUT_PARTIAL_CRATES` (R59,
+        // SOUNDNESS.md) carves the FFI-thin syscall crates OUT of that exemption: `libc`/`nix`/
+        // `rustix`'s generic fd verbs (`read`/`write`/`close`/...) are deliberately UNCLASSIFIED
+        // (an ambiguous fd could be Fs/Net/Ipc — see candor-classify's table), so "no rule matched"
+        // there is an honest gap, not a reviewed verdict — it must still reach the ledger and
+        // disclose `invisible`, exactly like a call into an uncalibrated dependency.
+        // R311 — a resolved version ABOVE the reviewed ceiling is downgraded to the same
+        // treatment as `CALIBRATED_BUT_PARTIAL_CRATES`: matched calls keep their rules, unmatched
+        // calls rejoin the ledger and disclose rather than reading as reviewed-pure.
+        // SOUNDNESS R322 — TWO KEY SPACES, ONE FACT, and I reintroduced R312's exact shape inside
+        // R311's own fix on the same day. The exemption below is keyed on `cr` (the syntactic first
+        // segment a consumer writes); this lookup was keyed only on `real` (the resolved package
+        // name after `dep_renames`). `CALIBRATED_CEILINGS` is populated from CALIBRATED_CRATES
+        // IDENTIFIERS, so `("native_tls_crate", "0.2.18")` sat under a key `real` can never hold and
+        // that ceiling could never fire — while `cr` = `native_tls_crate` still took the exemption.
+        // Both keys are consulted, and EITHER saying "beyond review" is enough: the disagreement
+        // between the two spaces is precisely what must not be allowed to grant silence.
+        // The VERSION and the CEILING live in different key spaces and must be CROSSED, not
+        // matched pairwise: under a `package =` alias the lock records the resolved name
+        // (`native_tls`) while `CALIBRATED_CEILINGS` is keyed on the identifier
+        // (`native_tls_crate`). Checking each key against itself finds a version with no ceiling
+        // and a ceiling with no version, and concludes "not beyond review" — silently.
+        let ver = lock_versions
+            .get(real)
+            .or_else(|| lock_versions.get(cr.as_str()));
+        let beyond_review = ver.is_some_and(|v| {
+            candor_classify::calibration_exceeded(real, v)
+                || candor_classify::calibration_exceeded(cr.as_str(), v)
+        });
+        if beyond_review && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            // INSTRUMENTED: an unchanged corpus row is not evidence the branch ran.
+            eprintln!(
+                "R311CEILING {} resolved {} exceeds its reviewed ceiling",
+                real,
+                lock_versions.get(real).map(String::as_str).unwrap_or("?")
+            );
+        }
+        let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
+            && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str())
+            && !beyond_review
+            && !impostor;
+        !covered
+            && !fully_calibrated
+            && !(candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str()) && !impostor)
+            && !(candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p)) && !impostor)
+            // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
+            // answer rather than a gap. A separate list from the calibrated ones because those must
+            // carry a live rule (`calibrated_crates_are_live`) and a pure crate has none — see the
+            // evidence requirement on `REVIEWED_PURE_CRATES`. Same impostor carve-out: a reviewed-
+            // pure verdict is about the real crate too.
+            && !(candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str()) && !impostor)
+    };
     let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
@@ -4086,6 +4180,55 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if new_prov && deps.contains(cr) {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                // SOUNDNESS R1580 — …AND THE FACTORY, METHOD AND CHAIN PROVENANCE TOO, WHEN THE DEPENDENCY IS UNCHAINED. The note
+                // above leaned on the factory CALL's own ledger entry ("the ledger below already counts the crate for it"), and
+                // that entry exists only while the call goes unmatched by a rule in a crate the ledger keeps: a classified factory
+                // (`async_nats::connect`, a `Log` rule on `jetstream::new`) drops it, and a CLASSIFIER-COVERED crate (calibrated
+                // within its ceiling, or no lockfile to exceed one) never records it. Then the method on the value reached
+                // nothing and the caller read ABSENT over an executed request. Reaching here means SOUNDNESS R1578 could not type
+                // the receiver from the dependency's source either, so no key was formed: the ledger counts the crate where it
+                // discloses, and where the crate is covered — the ledger's silence an answer only about keys it was asked —
+                // the caller discloses `Unknown` with the chained arm's reason. Never a charge.
+                // ROUND 3 PRICING — a receiver R1578 placed on a STD type (or a still-wrapping `Result`/`Option`) calling a
+                // method std has is std's call: no dependency body runs, so no floor.
+                // ROUND 4 NARROWING — a method name std itself has is not floored at all (std's method, or a Result/Option
+                // adapter on the value): the floor names only a method std does NOT have, i.e. a dependency's.
+                let std_call = !new_prov && deps.contains(cr) && !deps_idx.crates.contains(cr_real)
+                    && crate::std_methods::is_std_method_name(&c.leaf);
+                if std_call && std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                    eprintln!("R1580STD\t{}\t{}", f.qual, c.path); // §E1 — a floor SUPPRESSED as std's own call
+                }
+                if !new_prov && !std_call && deps.contains(cr) && !deps_idx.crates.contains(cr_real)
+                    && std::env::var_os("CANDOR_R1580_OFF").is_none()
+                {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                    // ROUND 5 CUT — the floor's `Unknown` speaks for a COVERED crate, where the classifier is the authority on
+                    // what a formed key would mean. When the lock-pinned source shows every type that defines this method,
+                    // ask the classifier of each: if none has an effect rule, a formed key would read pure whichever type the
+                    // value is, so there is nothing to disclose. A method the source does not define (a third crate's trait
+                    // method), or a source this reading cannot see whole, keeps the floor.
+                    let classifier_pure = || -> bool {
+                        let owners = r1578_sigs.borrow_mut().method_owners(dir, cr, cr_real, &c.leaf);
+                        if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                            eprintln!("R1580OWNERS\t{}\t{}\t{:?}", f.qual, c.path, owners.as_ref().map(|o| o.len())); // §E1
+                        }
+                        owners.is_some_and(|o| !o.is_empty()
+                            && o.iter().all(|q| candor_classify::classify(cr_real, &format!("{cr_real}::{q}::{}", c.leaf)).is_none()))
+                    };
+                    let cut = std::env::var_os("CANDOR_R1580_CUT_OFF").is_none() && classifier_pure();
+                    if cut && std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                        eprintln!("R1580CUT\t{}\t{}", f.qual, c.path); // §E1 — the floor withheld: every owner classifies pure
+                    }
+                    if !kappa_blind(&cr.to_string()) && !cut {
+                        let fresh = direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why.entry(f.qual.clone()).or_default()
+                            .insert("dispatch:untyped cross-package receiver".to_string());
+                        if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                            eprintln!("R1580FLOOR\t{}\t{}\tfresh={fresh}\t{}", f.qual, c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
+                        }
+                    }
                 }
                 if deps_idx.crates.contains(cr_real) {
                     // SOUNDNESS R856/R857 §E1 REACH COUNTER, on the new provenance only: a receiver that
@@ -7587,8 +7730,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // declares its own `path =`/`git =` right there — see `non_registry_manifest_names`'s doc for the
     // shape this covers and the narrower residual (a `[patch]` table, or `.cargo/config.toml` source
     // replacement) it does not.
-    let non_registry_names: std::collections::HashSet<String> =
-        non_registry_lock_names(dir).into_iter().chain(non_registry_manifest_names(dir)).collect();
+    // (`non_registry_names` is computed above the call loop — SOUNDNESS R1578's floor asks the same coverage question there.)
     // SOUNDNESS R311 — which VERSION of each registry dependency is actually present. The calibration
     // exemption below converts "no rule matched" into "reviewed, and pure"; that is evidence about
     // source someone READ, so it must not be granted to a release published after the reading. No
@@ -7600,97 +7742,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // previous comment stated the lockless case as an accepted residual, which is the
     // documented-limitation-is-not-measured shape: it read as considered, and that is what stopped it
     // being fixed. Failing to find a version keeps today's exemption, so this can only ADD containment.
-    let lock_versions = {
-        // SOUNDNESS R329 — MAX over {member lock, workspace root lock}, not an else-branch. My first
-        // version preferred the member's own lock whenever it was non-empty, so a stale or partial
-        // member lock SHADOWED the root's and silently restored the exemption — and cargo ignores
-        // member lockfiles entirely, so the root's is the only real one. Note the sibling three lines
-        // above: `non_registry_names` deliberately UNIONS its lock and manifest evidence. Two adjacent
-        // lookups of one question, and mine had drifted to the weaker rule.
-        let mut v = deps::registry_lock_versions(dir);
-        if let Some(root) = deps::find_workspace_root(std::path::Path::new(dir)) {
-            for (k, rv) in deps::registry_lock_versions(&root.to_string_lossy()) {
-                let take = match v.get(&k) {
-                    Some(prev) => candor_classify::calibration_exceeded_raw(&rv, prev),
-                    None => true,
-                };
-                if take {
-                    v.insert(k, rv);
-                }
-            }
-        }
-        v
-    };
+    // (`lock_versions` is computed above the call loop — SOUNDNESS R1578's floor asks the same coverage question there.)
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
-        .filter(|(cr, _)| {
-            let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
-            // COVERED = a report exists for this crate AND the staleness gate did not refuse it AND the
-            // report did not declare itself incomplete AND it judged at least one unit. The second,
-            // third and fourth conjuncts are the three fixes; spelled as a named local so clippy's
-            // boolean simplification can't rewrite the claims into one unreadable disjunction.
-            let covered = deps_idx.crates.contains(real)
-                && !deps_idx.untrusted.contains(real)
-                && !deps_idx.incomplete_pkgs.contains(real)
-                && !deps_idx.judged_nothing_pkgs.contains(real);
-            // A name Cargo.lock confirms is NOT the real registry crate loses every one of the three
-            // CALIBRATED_* exemptions below outright — it is a different artifact wearing a reviewed
-            // name, not the thing that was reviewed. Checked on `real` (Cargo.lock records the actual
-            // package identity, not a caller-chosen manifest alias).
-            let impostor = non_registry_names.contains(real);
-            // `CALIBRATED_CRATES` normally exempts a crate outright — "classify has rules here" is read
-            // as "an unmatched call was reviewed and found pure". `CALIBRATED_BUT_PARTIAL_CRATES` (R59,
-            // SOUNDNESS.md) carves the FFI-thin syscall crates OUT of that exemption: `libc`/`nix`/
-            // `rustix`'s generic fd verbs (`read`/`write`/`close`/...) are deliberately UNCLASSIFIED
-            // (an ambiguous fd could be Fs/Net/Ipc — see candor-classify's table), so "no rule matched"
-            // there is an honest gap, not a reviewed verdict — it must still reach the ledger and
-            // disclose `invisible`, exactly like a call into an uncalibrated dependency.
-            // R311 — a resolved version ABOVE the reviewed ceiling is downgraded to the same
-            // treatment as `CALIBRATED_BUT_PARTIAL_CRATES`: matched calls keep their rules, unmatched
-            // calls rejoin the ledger and disclose rather than reading as reviewed-pure.
-            // SOUNDNESS R322 — TWO KEY SPACES, ONE FACT, and I reintroduced R312's exact shape inside
-            // R311's own fix on the same day. The exemption below is keyed on `cr` (the syntactic first
-            // segment a consumer writes); this lookup was keyed only on `real` (the resolved package
-            // name after `dep_renames`). `CALIBRATED_CEILINGS` is populated from CALIBRATED_CRATES
-            // IDENTIFIERS, so `("native_tls_crate", "0.2.18")` sat under a key `real` can never hold and
-            // that ceiling could never fire — while `cr` = `native_tls_crate` still took the exemption.
-            // Both keys are consulted, and EITHER saying "beyond review" is enough: the disagreement
-            // between the two spaces is precisely what must not be allowed to grant silence.
-            // The VERSION and the CEILING live in different key spaces and must be CROSSED, not
-            // matched pairwise: under a `package =` alias the lock records the resolved name
-            // (`native_tls`) while `CALIBRATED_CEILINGS` is keyed on the identifier
-            // (`native_tls_crate`). Checking each key against itself finds a version with no ceiling
-            // and a ceiling with no version, and concludes "not beyond review" — silently.
-            let ver = lock_versions
-                .get(real)
-                .or_else(|| lock_versions.get(cr.as_str()));
-            let beyond_review = ver.is_some_and(|v| {
-                candor_classify::calibration_exceeded(real, v)
-                    || candor_classify::calibration_exceeded(cr.as_str(), v)
-            });
-            if beyond_review && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-                // INSTRUMENTED: an unchanged corpus row is not evidence the branch ran.
-                eprintln!(
-                    "R311CEILING {} resolved {} exceeds its reviewed ceiling",
-                    real,
-                    lock_versions.get(real).map(String::as_str).unwrap_or("?")
-                );
-            }
-            let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
-                && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str())
-                && !beyond_review
-                && !impostor;
-            !covered
-                && !fully_calibrated
-                && !(candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str()) && !impostor)
-                && !(candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p)) && !impostor)
-                // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
-                // answer rather than a gap. A separate list from the calibrated ones because those must
-                // carry a live rule (`calibrated_crates_are_live`) and a pure crate has none — see the
-                // evidence requirement on `REVIEWED_PURE_CRATES`. Same impostor carve-out: a reviewed-
-                // pure verdict is about the real crate too.
-                && !(candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str()) && !impostor)
-        })
+        .filter(|(cr, _)| kappa_blind(cr))
         .map(|(cr, n)| (cr.clone(), *n))
         .collect();
     coverage_ledger.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));

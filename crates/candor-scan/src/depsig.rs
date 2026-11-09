@@ -2260,6 +2260,47 @@ impl DepSigs {
         v
     }
 
+    /// SOUNDNESS R1580 (round 5) — every type of the lock-pinned source that defines a method named `m` (in an inherent or a
+    /// trait `impl`), as `<module>::<Type>` quals; `Some(empty)` when the source defines no such method. `None` — "any type
+    /// may" — with no lock-pinned source, a file that does not parse, a macro whose tokens or body name `m` (it may define
+    /// one this reading cannot see), an `impl` whose self type is not a plain declared type, or a type it cannot place.
+    pub(crate) fn method_owners(&mut self, dir: &str, alias: &str, real: &str, m: &str) -> Option<Vec<String>> {
+        let src = self.lock_source(dir, alias, real)?;
+        let idx = self.index(&src.dir)?;
+        if !idx.unparsed.is_empty() || idx.macro_words.contains(m) || idx.macros.values().any(|f| f.fixed.contains(m) || f.metavar || f.computed) {
+            return None;
+        }
+        struct V<'a> { m: &'a str, leaves: Vec<Option<String>> }
+        impl<'ast> Visit<'ast> for V<'_> {
+            fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+                if i.items.iter().any(|it| matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == self.m)) {
+                    self.leaves.push(match &*i.self_ty {
+                        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
+                        _ => None,
+                    });
+                }
+                syn::visit::visit_item_impl(self, i);
+            }
+        }
+        let mut v = V { m, leaves: Vec::new() };
+        for f in &idx.files {
+            v.visit_file(f);
+        }
+        let mut out = Vec::new();
+        for l in v.leaves {
+            let l = l?;
+            let decl = idx.type_decls.get(&l)?;
+            if decl.len() != 1 || idx.path_attr {
+                return None;
+            }
+            let md = decl[0].clone()?;
+            out.push(if md.is_empty() { l } else { format!("{md}::{l}") });
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
     /// Count one call site typed through `alias`'s source (`dependencySources[].typed`).
     pub(crate) fn note_typed(&mut self, alias: &str) {
         if let Some(Some(src)) = self.locked.get(alias) {
