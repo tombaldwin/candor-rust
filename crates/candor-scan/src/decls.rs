@@ -4795,6 +4795,69 @@ pub(crate) fn block_local_field_index(
     (block_fields, block_field_elem)
 }
 
+/// SOUNDNESS R474 — record a `#[macro_use] extern crate log` (see `model::MACRO_USE_LOG_PREFIX`).
+///
+/// THE DEFECT. `#[macro_use] extern crate log;` binds `trace!`..`error!` as BARE names, and a bare macro has no
+/// `::`, so `visit_macro` formed no edge: tokio-reactor 0.1.12 `registration::Inner::poll_ready` logs through a
+/// bare `debug!` (registration.rs:91) and read Log-silent on every arm, while the `use log::debug;` and
+/// `log::debug!` spellings of the same call charge Log. Rustc accepts the attribute only at the crate root
+/// (E0468), so any file reaching here with one is the root; it is also read inside a root `cfg_if!` arm, where
+/// getrandom 0.1 writes it.
+///
+/// The cfg predicates are recorded, not evaluated: a cached Pass A fact cannot depend on the feature set.
+fn record_macro_use_log(items: &[syn::Item], include_tests: bool, out: &mut std::collections::BTreeSet<String>) {
+    fn one(e: &syn::ItemExternCrate, include_tests: bool, out: &mut std::collections::BTreeSet<String>) {
+        if e.ident != "log" || (!include_tests && is_cfg_test(&e.attrs)) {
+            return;
+        }
+        let Some(mu) = e.attrs.iter().find(|a| a.path().is_ident("macro_use")) else { return };
+        let names = match &mu.meta {
+            syn::Meta::List(l) => l
+                .tokens
+                .to_string()
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => "*".to_string(),
+        };
+        let cfgs: Vec<String> = e
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .filter_map(|a| match &a.meta {
+                syn::Meta::List(l) => Some(l.tokens.to_string()),
+                _ => None,
+            })
+            .collect();
+        out.insert(format!("{}{names}\u{3}{}", crate::model::MACRO_USE_LOG_PREFIX, cfgs.join("\u{3}")));
+    }
+    for it in items {
+        match it {
+            syn::Item::ExternCrate(e) => one(e, include_tests, out),
+            // `cfg_if! { if #[cfg(feature = "log")] { #[macro_use] extern crate log; } else { .. } }` — every arm is
+            // read, and an arm's own cfg is not recorded: an arm this scan cannot place counts as present.
+            syn::Item::Macro(m)
+                if m.ident.is_none() && m.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if") =>
+            {
+                if let Ok(arms) =
+                    syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone()))
+                {
+                    for b in &arms.0 {
+                        for st in &b.stmts {
+                            if let syn::Stmt::Item(syn::Item::ExternCrate(e)) = st {
+                                one(e, include_tests, out);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Pre-pass: index struct field types (`App -> { http: reqwest::Client }`) AND function return types
 /// (`create_pool -> sqlx::Pool`), expanded via each module's `use` map. Recurses into modules like
 /// `scan_items`. Field index keyed by struct leaf; return map keyed by fn leaf (ambiguous names dropped
@@ -4873,6 +4936,7 @@ pub(crate) fn collect_decls(
         m
     });
     let uses_ty: &HashMap<String, String> = uses_ty_owned.as_ref().unwrap_or(&*uses);
+    record_macro_use_log(items, include_tests, macro_twins);
     // SOUNDNESS R1128 — an operator impl a MACRO generates (`forward_all_binop_to_ref_ref!(impl Rem for BigInt,
     // rem)`, num-bigint) has no `impl` item this pass can read its `Rhs` from, so a refusal keyed on the
     // visible impls alone would refuse the edge a macro-made `Rem<BigInt>` justifies. Any item-position macro

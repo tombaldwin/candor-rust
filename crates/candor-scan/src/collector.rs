@@ -4470,6 +4470,41 @@ impl<'a> CallCollector<'a> {
         self.returns.get(&crate::model::unit_variant_key(leaf, variant)).is_some_and(|v| v == "1")
     }
 
+    /// SOUNDNESS R474 — `log::<leaf>` when a bare invocation `<leaf>!` is bound by the crate root's `#[macro_use]
+    /// extern crate log` (`decls::record_macro_use_log`): `leaf` is a name `log` exports, the import's list names it
+    /// (bare `#[macro_use]` names all), and its own `#[cfg]` is not known-false under the crate's feature picture —
+    /// the rule every other cfg-gated item obeys (`lang::is_cfg_inactive`; an undeclared feature, rand 0.6.5's
+    /// optional `log`, is UNKNOWN and keeps it). A macro this BODY declares under the name shadows the import
+    /// textually and is left to R142's expansion, as does an ungated crate-level one in textual scope. Kill switch `CANDOR_R474_OFF`; reach `CANDOR_R474_INSTR`.
+    fn macro_use_log_path(&self, leaf: &str) -> Option<String> {
+        if !crate::model::LOG_MACRO_NAMES.contains(&leaf) || self.body_macros.contains_key(leaf) {
+            return None;
+        }
+        // An UNGATED crate-local definition of the name in TEXTUAL scope at this item (R1156's record) shadows the
+        // `#[macro_use]` prelude, which is rustc's rule: EXECUTED, `both_debug_zq` (`#[macro_use] extern crate log;`
+        // then `macro_rules! debug { ($($x:tt)*) => () }`) logs nothing. A `#[cfg]`-gated definition is never
+        // recorded there, so the rand / getrandom / handlebars / quickcheck fallbacks keep the edge.
+        if self.uses.contains_key(&format!("{}{leaf}", crate::model::SCOPE_MACRO_PREFIX)) {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R474_OFF").is_some() {
+            return None;
+        }
+        let bound = self.macro_twins.iter().filter_map(|k| k.strip_prefix(crate::model::MACRO_USE_LOG_PREFIX)).any(|rest| {
+            let (names, cfgs) = rest.split_once('\u{3}').unwrap_or((rest, ""));
+            if names != "*" && !names.split(',').any(|n| n == leaf) {
+                return false;
+            }
+            let src: String = cfgs.split('\u{3}').filter(|c| !c.is_empty()).map(|c| format!("#[cfg({c})]")).collect();
+            // An unparseable predicate cannot be proven false, so it keeps the import.
+            let attrs = syn::parse::Parser::parse_str(syn::Attribute::parse_outer, &src).unwrap_or_default();
+            !crate::lang::is_cfg_inactive(&attrs)
+        });
+        if bound && std::env::var_os("CANDOR_R474_INSTR").is_some() {
+            eprintln!("R474MACUSE\t{leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+        bound.then(|| format!("log::{leaf}"))
+    }
     /// SOUNDNESS R862 — is this resolved type path rooted at a MANIFEST dependency (`ratescore::Node`)?
     /// Read from the dependency list Pass B seeds (`lang::DEPS_KEY`); a map without it answers `false`,
     /// which is today's behaviour. A local module spelled like a dependency is anchored to `crate::` by
@@ -16144,6 +16179,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
                             path_lits_partial: false, path_lit2: None,
                         });
+        } else if let Some(lp) = self.macro_use_log_path(&mleaf) {
+            // SOUNDNESS R474 — a BARE `debug!` bound by the crate root's `#[macro_use] extern crate log` is
+            // `log::debug!`: the same edge the `use log::debug;` spelling forms, so the classifier answers it the
+            // same way. Formed BESIDE a crate-local `macro_rules!` of the name (expanded above), not instead of it:
+            // every registry crate that has both writes them as cfg-exclusive arms (rand 0.6.5
+            // `#[cfg(feature = "log")] #[macro_use] extern crate log;` / `#[cfg(not(feature = "log"))] macro_rules!
+            // debug { ($($x:tt)*) => () }`), and the arm the build takes is not known here unless the feature
+            // picture proves the import compiled out.
+            self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: lp, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
+                            path_lits_partial: false, path_lit2: None,
+                        });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
@@ -17497,7 +17543,7 @@ fn flatten_repetitions(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream
     out.into_iter().collect()
 }
 
-struct CfgIfArms(Vec<syn::Block>);
+pub(crate) struct CfgIfArms(pub(crate) Vec<syn::Block>);
 
 impl syn::parse::Parse for CfgIfArms {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {

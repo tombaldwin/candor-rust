@@ -5516,6 +5516,30 @@
       ]
     },
     {
+      "fn": "collector::CallCollector::<'a>::macro_use_log_path",
+      "loc": "crates/candor-scan/src/collector.rs:4479:5: 4479:63",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "f57156ad4d383fca7f60394f7a404bd4",
+      "calls": [
+        "lang::is_cfg_inactive"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
       "fn": "collector::CallCollector::<'a>::mark_unresolved",
       "loc": "crates/candor-scan/src/collector.rs:9849:5: 9849:47",
       "inferred": [

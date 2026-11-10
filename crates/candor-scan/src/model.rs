@@ -751,6 +751,14 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
 /// SOUNDNESS R1144 (v052 audit) — prefix of a `macro_twins` entry naming a `macro_rules!` name defined more than once
 /// with different templates anywhere (ungated too). `\u{2}` cannot begin a Rust identifier.
 pub(crate) const MACRO_REDEF_PREFIX: &str = "\u{2}redef:";
+/// SOUNDNESS R474 — prefix of a `macro_twins` entry recording a `#[macro_use] extern crate log` at the crate root:
+/// `\u{2}macuse:log:<names>\u{3}<cfg>`, where `<names>` is `*` (bare `#[macro_use]`) or the comma-joined list of a
+/// `#[macro_use(a, b)]`, and `<cfg>` is the `\u{3}`-joined token text of the item's own `#[cfg(..)]` predicates. Pass A
+/// records the predicates unevaluated (a cached Pass A fact must not depend on the feature set); Pass B evaluates them.
+pub(crate) const MACRO_USE_LOG_PREFIX: &str = "\u{2}macuse:log:";
+/// SOUNDNESS R474 — the macros the `log` facade exports (0.3 and 0.4). Only these names are bound by its
+/// `#[macro_use]`; any other bare macro name is somebody else's.
+pub(crate) const LOG_MACRO_NAMES: &[&str] = &["trace", "debug", "info", "warn", "error", "log", "log_enabled"];
 /// SOUNDNESS R1156 — the `uses` key under which `decls::scan_items` records, in TEXTUAL order, the `macro_rules!`
 /// definition of a name in scope at the current item (`\u{2}scopemac:<name>` -> the definition's tokens). It is
 /// the module scope and order `local_macros` (one entry per name per crate) does not hold, so a name defined twice
