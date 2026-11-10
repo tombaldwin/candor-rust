@@ -2160,6 +2160,13 @@ impl DepSigs {
     /// dependency) at the manifest's `path`. No lock, two locked versions of the package, a `git+` source, or a pinned
     /// version that is not checked out: `None`, and the value stays untyped exactly as before R1578. Never the semver union
     /// `source_dirs` falls back to for narrowing: a charge must not depend on which other versions a machine happens to hold.
+    ///
+    /// SOUNDNESS R1603 — the checkout must be the one the LOCK names. Cargo leaves no `.cargo-checksum.json` in a registry
+    /// checkout (that file is `cargo vendor`'s), but it keeps the downloaded `.crate` at
+    /// `registry/cache/<index>/<name>-<version>.crate`, whose SHA-256 is the lock's `checksum`; `registry_checkout` accepts only
+    /// the `registry/src/<index>/` whose cache twin hashes to the lock's value. A same-name, same-version checkout from another
+    /// registry (different bytes, so a different checksum), a lock entry with no checksum, or a `.crate` that is absent: `None`,
+    /// the pre-⟨0.42⟩ answer.
     fn lock_source(&mut self, dir: &str, alias: &str, real: &str) -> Option<DepSource> {
         if let Some(v) = self.locked.get(alias) {
             return v.clone();
@@ -2171,13 +2178,13 @@ impl DepSigs {
         lock_dirs.extend(root.clone());
         'l: for ld in lock_dirs {
             let Ok(lock) = std::fs::read_to_string(ld.join("Cargo.lock")) else { continue };
-            let mut entries: Vec<(String, String, Option<String>)> = Vec::new();
-            let mut cur: Option<(String, String, Option<String>)> = None;
+            let mut entries: Vec<LockEntry> = Vec::new();
+            let mut cur: Option<LockEntry> = None;
             for line in lock.lines().map(str::trim) {
                 if line.starts_with('[') {
                     entries.extend(cur.take());
                     if line == "[[package]]" {
-                        cur = Some((String::new(), String::new(), None));
+                        cur = Some(LockEntry::default());
                     }
                 } else if let Some(c) = cur.as_mut() {
                     if let Some(v) = line.strip_prefix("name = ") {
@@ -2186,23 +2193,22 @@ impl DepSigs {
                         c.1 = v.trim_matches('"').to_string();
                     } else if let Some(v) = line.strip_prefix("source = ") {
                         c.2 = Some(v.trim_matches('"').to_string());
+                    } else if let Some(v) = line.strip_prefix("checksum = ") {
+                        c.3 = Some(v.trim_matches('"').to_string());
                     }
                 }
             }
             entries.extend(cur.take());
-            let mine: Vec<&(String, String, Option<String>)> = entries.iter().filter(|e| norm(&e.0) == real).collect();
+            let mine: Vec<&LockEntry> = entries.iter().filter(|e| norm(&e.0) == real).collect();
             if mine.is_empty() {
                 continue;
             }
             if mine.len() != 1 {
                 break 'l; // two locked versions: which one this alias names is the manifest's to say, not ours to guess
             }
-            let (name, version, source) = mine[0].clone();
+            let (name, version, source, checksum) = mine[0].clone();
             found = match source.as_deref() {
-                Some(src) if src.starts_with("registry+") => crate::deps::dirs_cargo_registry_src()
-                    .iter()
-                    .map(|r| r.join(format!("{name}-{version}")))
-                    .find(|p| p.join("Cargo.toml").is_file())
+                Some(src) if src.starts_with("registry+") => registry_checkout(&name, &version, checksum.as_deref())
                     .map(|d| DepSource { package: name.clone(), version: version.clone(), origin: "registry", dir: d, typed: 0 }),
                 Some(_) => None, // git / other sources: not read
                 None => {
@@ -3178,4 +3184,91 @@ fn cand_converts(c: &Cand<'_>, pos: usize) -> Result<Option<BTreeSet<(String, St
         }
     }
     Ok(Some(out))
+}
+
+/// One `[[package]]` of a Cargo.lock: name, version, `source`, `checksum`.
+type LockEntry = (String, String, Option<String>, Option<String>);
+
+/// SOUNDNESS R1603 — the registry checkout of `name-version` whose downloaded `.crate` (cargo's `registry/cache/<index>/`)
+/// hashes to the lock's `checksum`, as `registry/src/<same index>/<name>-<version>`. `None` for a missing or malformed
+/// checksum, no matching `.crate`, or no extracted checkout beside it. Checksum equality, not the index directory's name, is
+/// the test: the directory name is a hash of the registry URL cargo does not expose, and identical bytes are identical source
+/// wherever a mirror put them. A checkout edited after extraction is not detected (cargo records nothing to compare it to).
+fn registry_checkout(name: &str, version: &str, checksum: Option<&str>) -> Option<std::path::PathBuf> {
+    let want = checksum.filter(|c| c.len() == 64 && c.bytes().all(|b| b.is_ascii_hexdigit()))?.to_ascii_lowercase();
+    let home = std::env::var("CARGO_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".cargo"));
+    let mut idxs: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("registry").join("cache")).ok()?.flatten().map(|e| e.path()).collect();
+    idxs.sort();
+    for idx in idxs {
+        let Ok(bytes) = std::fs::read(idx.join(format!("{name}-{version}.crate"))) else { continue };
+        if sha256_hex(&bytes) != want {
+            continue;
+        }
+        let src = home.join("registry").join("src").join(idx.file_name()?).join(format!("{name}-{version}"));
+        if src.join("Cargo.toml").is_file() {
+            return Some(src);
+        }
+    }
+    None
+}
+
+/// SHA-256 (FIPS 180-4), lower-case hex. Local so the scanner takes no hashing dependency for one comparison.
+fn sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+        0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+        0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for (i, b) in chunk.chunks(4).enumerate() {
+            w[i] = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut v = h;
+        for i in 0..64 {
+            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+            let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+            let t2 = s0.wrapping_add(maj);
+            v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+        }
+        for i in 0..8 {
+            h[i] = h[i].wrapping_add(v[i]);
+        }
+    }
+    h.iter().map(|x| format!("{x:08x}")).collect()
+}
+
+#[cfg(test)]
+mod r1603_sha256 {
+    #[test]
+    fn known_vectors() {
+        assert_eq!(super::sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(super::sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // two blocks (the padding crosses a block boundary)
+        assert_eq!(
+            super::sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
 }

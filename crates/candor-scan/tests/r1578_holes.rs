@@ -146,6 +146,8 @@ fn hole3_only_a_lock_pinned_present_source_may_type() {
     let home = root.join("cargo-home");
     let reg = home.join("registry/src/index.crates.io-0000000000000000");
     nats_src(&reg.join("async-nats-0.49.0"), "0.49.0", "");
+    // SOUNDNESS R1603: the lock's checksum must match the `.crate` cargo kept beside the checkout.
+    write(&home.join("registry/cache/index.crates.io-0000000000000000/async-nats-0.49.0.crate"), "abc");
     let src = "pub async fn f(c: u8) -> u8 { let js = async_nats::jetstream::new(c); js.query_account().await }\n";
     let mk = |name: &str, lock_ver: Option<&str>| -> PathBuf {
         let d = root.join(name);
@@ -154,7 +156,8 @@ fn hole3_only_a_lock_pinned_present_source_may_type() {
         if let Some(v) = lock_ver {
             write(&d.join("Cargo.lock"), &format!(
                 "version = 4\n\n[[package]]\nname = \"async-nats\"\nversion = \"{v}\"\n\
-                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"{ABC}\"\n\n\
                  [[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n"));
         }
         write(&d.join("src/lib.rs"), src);
@@ -326,4 +329,83 @@ fn r1580_optin_discloses_the_unkeyed_call_in_both_spellings() {
         assert_eq!(key(&a), key(&u), "the two spellings must agree (opt-in {optin})");
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SHA-256("abc"): the bytes a fixture `.crate` holds, so the lock's `checksum` is a known constant.
+const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const NOT_ABC: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+/// SOUNDNESS R1603 — the lock-pinned registry source is read only from the checkout the LOCK names: the `registry/src/<index>/`
+/// whose `registry/cache/<index>/<name>-<version>.crate` hashes to the lock's `checksum`. Cargo keeps no checksum file in the
+/// checkout itself. (a) match -> typed and recorded; (b) the same name and version checked out only under another index (no
+/// matching `.crate`) -> not typed, no field; (c) checksum differs -> not typed; (d) a lock entry with no checksum, and
+/// (e) a checkout whose `.crate` is gone -> not typed (cannot be checked, so as if absent).
+#[test]
+fn r1603_registry_source_must_match_the_locks_checksum() {
+    let mut fails: Vec<String> = Vec::new();
+    macro_rules! chk {
+        ($c:expr, $($m:tt)+) => { if !$c { fails.push(format!($($m)+)); } };
+    }
+    let src = "pub async fn f(c: u8) -> u8 { let js = async_nats::jetstream::new(c); js.query_account().await }\n";
+    let lock_for = |name: &str, checksum: Option<&str>| {
+        let ck = checksum.map(|c| format!("checksum = \"{c}\"\n")).unwrap_or_default();
+        format!("version = 4\n\n[[package]]\nname = \"async-nats\"\nversion = \"0.49.0\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n{ck}\n\
+                 [[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n")
+    };
+    let run = |tag: &str, setup: &dyn Fn(&Path), checksum: Option<&str>| {
+        let root = tmpdir(tag);
+        let home = root.join("cargo-home");
+        setup(&home);
+        let d = root.join("app");
+        write(&d.join("Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nasync-nats = \"0.49\"\n");
+        write(&d.join("Cargo.lock"), &lock_for("app", checksum));
+        write(&d.join("src/lib.rs"), src);
+        let r = scan(&d, &home);
+        let _ = std::fs::remove_dir_all(&root);
+        r
+    };
+    let crates_io = "index.crates.io-0000000000000000";
+    let other = "my-registry-1111111111111111";
+    let checkout = |home: &Path, idx: &str| nats_src(&home.join("registry/src").join(idx).join("async-nats-0.49.0"), "0.49.0", "");
+    let krate = |home: &Path, idx: &str, bytes: &str| write(&home.join("registry/cache").join(idx).join("async-nats-0.49.0.crate"), bytes);
+
+    // (a) the lock's registry checkout, its `.crate` hashing to the lock's checksum
+    let (rows, v) = run("a", &|h| { checkout(h, crates_io); krate(h, crates_io, "abc"); }, Some(ABC));
+    chk!(net(&rows, "f"), "(a) the matching checkout must type: {:?}", rows.get("f"));
+    chk!(v["dependencySources"][0]["package"] == "async-nats", "(a) {v:#}");
+    chk!(v["dependencySources"][0]["origin"] == "registry", "(a) {v:#}");
+
+    // (a') the lock's registry is not crates.io: still typed, from whichever index holds the matching `.crate`
+    let (rows, v) = run("a2", &|h| { checkout(h, other); krate(h, other, "abc"); }, Some(ABC));
+    chk!(net(&rows, "f") && v.get("dependencySources").is_some(), "(a') {:?}\n{v:#}", rows.get("f"));
+
+    // (b) same name and version, but only under a DIFFERENT index whose `.crate` is another registry's bytes
+    let (rows, v) = run("b", &|h| { checkout(h, other); krate(h, other, "not the same crate"); }, Some(ABC));
+    chk!(!net(&rows, "f"), "(b) read another registry's checkout: {:?}", rows.get("f"));
+    chk!(v.get("dependencySources").is_none(), "(b) nothing read, nothing recorded:\n{v:#}");
+
+    // (b') the genuine checkout AND a lookalike under another index: the genuine one is read, the lookalike never is
+    let lookalike = "extern crate-less";
+    let (rows, _v) = run("b2", &|h| {
+        checkout(h, crates_io); krate(h, crates_io, "abc");
+        // the lookalike's `query_account` is pure and its factory is a different type
+        let d = h.join("registry/src").join(other).join("async-nats-0.49.0");
+        nats_src(&d, "0.49.0", "");
+        write(&d.join("src/jetstream/context.rs"), "pub struct Context(u8);\nimpl Context { pub(crate) fn make(c: u8) -> Self { Context(c) } }\n");
+        krate(h, other, lookalike);
+    }, Some(ABC));
+    chk!(net(&rows, "f"), "(b') the genuine checkout must still type: {:?}", rows.get("f"));
+
+    // (c) the lock's checksum differs from the `.crate` beside the only checkout
+    let (rows, v) = run("c", &|h| { checkout(h, crates_io); krate(h, crates_io, "abc"); }, Some(NOT_ABC));
+    chk!(!net(&rows, "f"), "(c) checksum mismatch typed anyway: {:?}", rows.get("f"));
+    chk!(v.get("dependencySources").is_none(), "(c) {v:#}");
+
+    // (d) no checksum in the lock, (e) no `.crate` to check against: cannot be verified, so as if absent
+    let (rows, v) = run("d", &|h| { checkout(h, crates_io); krate(h, crates_io, "abc"); }, None);
+    chk!(!net(&rows, "f") && v.get("dependencySources").is_none(), "(d) {:?}\n{v:#}", rows.get("f"));
+    let (rows, v) = run("e", &|h| checkout(h, crates_io), Some(ABC));
+    chk!(!net(&rows, "f") && v.get("dependencySources").is_none(), "(e) {:?}\n{v:#}", rows.get("f"));
+    assert!(fails.is_empty(), "{} fixture(s) failed:\n{}", fails.len(), fails.join("\n"));
 }
