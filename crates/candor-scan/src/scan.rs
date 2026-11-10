@@ -5685,7 +5685,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // one, and the path names it (a re-export of anything else would be a name the producer does not define,
                 // which stays as before); several, and which one the path re-exports is not decidable from the report, so
                 // the call discloses rather than picking (`ambiguous:`). A free-fn path call only. `CANDOR_R1637_OFF=1`.
-                if hit.is_none() && !c.method && rel.contains("::") && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
+                // A free fn reached through a MODULE: the segment before the leaf is a module name (lower-case by Rust's
+                // naming rule), never a type — `Pz::eq`, `Dp::bitor_assign` are an operator's or an associated fn's path, whose
+                // pure unit is simply absent from `functions[]` (executed controls `z_pz`, `cc_deppure`).
+                let through_module = rel.rsplit("::").nth(1).and_then(|m| m.chars().next()).is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+                if hit.is_none() && !c.method && !c.is_macro && through_module && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
                     let all: Vec<&String> = deps_idx.members.get(&c.leaf).into_iter().flatten()
                         .filter(|(k, _)| k == cr_real).map(|(_, o)| o).collect();
                     // `members` is read off `functions[]`, which lists only units that HAVE effects: a pure unit of the same
