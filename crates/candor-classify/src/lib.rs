@@ -5156,7 +5156,7 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
     let (head, method) = rest.rsplit_once("::")?;
     let (module, ty) = head.rsplit_once("::").unwrap_or(("", head));
     let pool = ty == "Pool" || (krate == "sqlx" && ty.ends_with("Pool"));
-    if pool && matches!(module, "" | "pool") && method == "begin_with" {
+    if pool && matches!(module, "" | "pool" | "postgres" | "mysql" | "sqlite" | "any") && method == "begin_with" {
         return Some("Db");
     }
     // SOUNDNESS R1618 — `connect_with` is the sqlx facade's OTHER connection-opening verb. The facade's `VERBS` list names
@@ -5172,6 +5172,12 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Db");
     }
+    // SOUNDNESS R1623 — sqlx 0.9.0 Postgres/SQLite/pool entries that read pure or silent. See `sqlx_r1623`.
+    if krate == "sqlx" {
+        if let Some(effect) = sqlx_r1623(module, ty, method) {
+            return Some(effect);
+        }
+    }
     match (module, ty, method) {
         ("" | "pool" | "pool::connection", "PoolConnection", "close") => Some("Net"),
         ("" | "pool" | "pool::connection", "PoolConnection", "return_to_pool") => Some("Db"),
@@ -5179,6 +5185,35 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
         ("fs", "ReadDir", "next") if krate == "sqlx_core" => Some("Fs"),
         ("logger", "QueryLogger", "new") if krate == "sqlx_core" => Some("Clock"),
         ("logger", "QueryLogger", "finish") if krate == "sqlx_core" => Some("Log"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1623 — the sqlx 0.9.0 entries R1618 left (its residual (c)), EXECUTED on macOS (DYLD interposer) against
+/// postgres:16 (TLS on, SCRAM), mysql:8 and real sqlite files, plus the postgres server's `log_statement=all` for the one
+/// round-trip the interposer cannot see (handoff `rust-r1623/`). Primary effects only; the second effects are `ALSO_EFFECTS`.
+///
+///   * `Env` (PRIMARY): `PgConnectOptions::{new, new_without_pgpass, default, from_str, from_url}` read the twelve `PG*`
+///     variables (14 with `.pgpass`: `HOME`/`PGPASSFILE`), and so does `PgPool::connect_lazy(url)` /
+///     `PgPoolOptions::connect_lazy(url)`, whose URL is parsed with no connect. EXECUTED: 12 `getenv` + 3 `stat` on every one,
+///     0 connections for the lazy pair. All were ABSENT, so a `deny Env` over code that builds Postgres options passed.
+///     `connect_lazy_with(opts)` parses nothing and stays pure, as do the option setters (`host`, `port`, `ssl_mode`, ...).
+///   * `Db`: `Pool::try_begin` (EXECUTED against `log_statement=all`: a warm pool's `try_begin` sent `BEGIN`; the cold pool's
+///     returns `None` with no I/O, which is the stated over-charge) and `PgListener::connect_with(&pool)` (a COLD pool connects:
+///     1 connect, 6 `getentropy`; a warm pool does not). `try_acquire` stays pure (EXECUTED: 0 events cold and warm).
+///
+/// The facade spells a driver type under the root (`sqlx::PgPool`) or its driver module (`sqlx::postgres::PgPool`); both are
+/// accepted. A generic `sqlx::Pool<DB>` is not claimed: the driver, and so the effect, is not in the path.
+fn sqlx_r1623(module: &str, ty: &str, method: &str) -> Option<&'static str> {
+    if !matches!(module, "" | "postgres" | "mysql" | "sqlite" | "any" | "pool") {
+        return None;
+    }
+    let pg_mod = matches!(module, "" | "postgres");
+    match (ty, method) {
+        ("PgConnectOptions", "new" | "new_without_pgpass" | "default" | "from_str" | "from_url") if pg_mod => Some("Env"),
+        ("PgPool" | "PgPoolOptions", "connect_lazy") if pg_mod => Some("Env"),
+        ("PgListener", "connect_with") if pg_mod => Some("Db"),
+        (t, "try_begin") if t == "Pool" || t.ends_with("Pool") => Some("Db"),
         _ => None,
     }
 }
@@ -6429,6 +6464,200 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         row: "R1617",
         evidence: "EXECUTED (fresh thread): the free functions tempfile()/tempfile_in()/tempdir()/tempdir_in(), 1 clock read on the \
                    first name generated per thread.",
+    },
+
+    // SOUNDNESS R1623 — sqlx 0.9.0 POSTGRES, MYSQL-ACQUIRE and SQLITE second effects (R1618's residual (c)). EXECUTED on macOS (DYLD
+    // interposer) against postgres:16 with TLS on and SCRAM, mysql:8 and real sqlite files; handoff `rust-r1623/`.
+    //   Postgres connect (any of the 8 spellings, with options already built): 1 connect (TCP, or AF_UNIX for a socket host) +
+    //   1-6 `getentropy` (1 with `sslmode=disable`: the SCRAM nonce only; 5-6 with TLS). A URL SPELLING (`connect(url)`,
+    //   `connect_lazy(url)`, `.parse()`) also parses the URL, and the parse reads the twelve `PG*` variables and `stat`s the three
+    //   candidate unix-socket directories, plus opens `~/.pgpass` when the URL has no password (14 `getenv`, 1 `open`).
+    //   Acquire-class (`acquire`, `begin`, `begin_with`) on a COLD pool is the same connect; on a WARM pool (an idle connection)
+    //   it performs NONE of these (EXECUTED: 0 connect, 0 entropy, 0 stat). That is the stated over-charge, as for deadpool's `Pool::get`.
+    //   SQLite connect: opens the database file read-write (`open(db, +creat)` under `mode=rwc`, plus `stat`/`lstat` of its path),
+    //   opens `/dev/urandom` (SQLite seeds its PRNG on first use in the process: Rand), and reads `SQLITE_TMPDIR`/`TMPDIR`/`RUST_MIN_STACK`
+    //   (the last is std's thread-spawn read). `sqlite::memory:` opens only `/dev/urandom` and reads the three variables: the file
+    //   open is the URL-conditional over-charge. Not charged: `Clock` (the SCRAM key derivation yields to the runtime between
+    //   iterations, so tokio reads the clock ~2,500 times; it is scheduler plumbing, uncharged as for R1618), sslrootcert/ssl-ca `Fs`
+    //   (URL-conditional, R1618 residual (b)), and the per-query `stat` of `-journal`/`-wal` on SQLite (`Query::execute` is driver-agnostic).
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgConnection", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPool", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPoolOptions", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgListener", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgConnectOptions", &["connect"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPool", &["acquire", "begin", "begin_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    // The `*PoolOptions` acquire rows below name a type that has no `acquire`: `let p = PgPoolOptions::new().connect_lazy(u)
+    // .unwrap(); p.acquire()` is typed by the builder walk as its ROOT (`PgPoolOptions`), not the `PgPool` it returns, so the
+    // call forms `PgPoolOptions::acquire` (R1608 family: the chain root is the guess). Without them that spelling reads `Db` only.
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPoolOptions", &["acquire", "begin", "begin_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, TLS+SCRAM, interposer): 1 connect (AF_UNIX for a socket host) + 1-6 getentropy per call with options already built; a warm pool's acquire/begin: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlPool", &["acquire", "begin", "begin_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (mysql:8, interposer): a cold pool's acquire/begin = 1 connect + 5 getentropy; a warm pool's acquire: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlPoolOptions", &["acquire", "begin", "begin_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (mysql:8, interposer): a cold pool's acquire/begin = 1 connect + 5 getentropy; a warm pool's acquire: 0 of both.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgConnection", &["connect"]),
+        effects: &["Env", "Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): a URL spelling parses the URL = 12 PG* getenv + 3 stat of the unix-socket candidate dirs (+ HOME/PGPASSFILE and an open of ~/.pgpass when the URL has no password). connect_with(&opts) parses nothing.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPool", &["connect"]),
+        effects: &["Env", "Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): a URL spelling parses the URL = 12 PG* getenv + 3 stat of the unix-socket candidate dirs (+ HOME/PGPASSFILE and an open of ~/.pgpass when the URL has no password). connect_with(&opts) parses nothing.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPoolOptions", &["connect"]),
+        effects: &["Env", "Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): a URL spelling parses the URL = 12 PG* getenv + 3 stat of the unix-socket candidate dirs (+ HOME/PGPASSFILE and an open of ~/.pgpass when the URL has no password). connect_with(&opts) parses nothing.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgListener", &["connect"]),
+        effects: &["Env", "Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): a URL spelling parses the URL = 12 PG* getenv + 3 stat of the unix-socket candidate dirs (+ HOME/PGPASSFILE and an open of ~/.pgpass when the URL has no password). connect_with(&opts) parses nothing.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPool", &["connect_lazy"]),
+        effects: &["Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): connect_lazy(url) = 12 PG* getenv [Env primary] + 3 stat, 0 connections.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgPoolOptions", &["connect_lazy"]),
+        effects: &["Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): connect_lazy(url) = 12 PG* getenv [Env primary] + 3 stat, 0 connections.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("PgConnectOptions", &["new", "new_without_pgpass", "default", "from_str", "from_url"]),
+        effects: &["Fs"],
+        fs_kind: &["read"],
+        row: "R1623",
+        evidence: "EXECUTED (postgres:16, interposer): 12 PG* getenv [Env primary] + 3 stat of the unix-socket candidate dirs; new()/default() also open ~/.pgpass (14 getenv) when no password is set.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqliteConnection", &["connect", "connect_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite via sqlx 0.9.0, interposer): connect opens the db file read-write (+creat under mode=rwc) with stat/lstat of its path, opens /dev/urandom (first sqlite use in the process), reads SQLITE_TMPDIR/TMPDIR/RUST_MIN_STACK. sqlite::memory: opens only /dev/urandom. Fs direction depends on mode=: unknown.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqlitePool", &["connect", "connect_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite via sqlx 0.9.0, interposer): connect opens the db file read-write (+creat under mode=rwc) with stat/lstat of its path, opens /dev/urandom (first sqlite use in the process), reads SQLITE_TMPDIR/TMPDIR/RUST_MIN_STACK. sqlite::memory: opens only /dev/urandom. Fs direction depends on mode=: unknown.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqlitePoolOptions", &["connect", "connect_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite via sqlx 0.9.0, interposer): connect opens the db file read-write (+creat under mode=rwc) with stat/lstat of its path, opens /dev/urandom (first sqlite use in the process), reads SQLITE_TMPDIR/TMPDIR/RUST_MIN_STACK. sqlite::memory: opens only /dev/urandom. Fs direction depends on mode=: unknown.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqliteConnectOptions", &["connect", "connect_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite via sqlx 0.9.0, interposer): connect opens the db file read-write (+creat under mode=rwc) with stat/lstat of its path, opens /dev/urandom (first sqlite use in the process), reads SQLITE_TMPDIR/TMPDIR/RUST_MIN_STACK. sqlite::memory: opens only /dev/urandom. Fs direction depends on mode=: unknown.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqlitePool", &["acquire", "begin", "begin_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite, interposer): a cold pool's acquire/begin = the connect above; a warm pool's: 0 events.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("SqlitePoolOptions", &["acquire", "begin", "begin_with"]),
+        effects: &["Env", "Fs", "Rand"],
+        fs_kind: &[],
+        row: "R1623",
+        evidence: "EXECUTED (sqlite, interposer): a cold pool's acquire/begin = the connect above; a warm pool's: 0 events.",
     },
 ];
 
@@ -9464,7 +9693,9 @@ mod masks_locator_tests {
             ("sqlx", "pool::PoolConnection::detach"), ("sqlx", "pool::PoolConnection::leak"),
             ("sqlx_core", "pool::Pool::connect_lazy"), ("sqlx_core", "pool::Pool::connect_lazy_with"),
             ("sqlx_core", "pool::PoolOptions::connect_lazy"), ("sqlx_core", "pool::PoolOptions::connect_lazy_with"),
-            ("sqlx", "PgPool::connect_lazy"), ("sqlx", "postgres::PgPoolOptions::connect_lazy"),
+            // R1623: `PgPool::connect_lazy(url)` / `PgPoolOptions::connect_lazy(url)` are NOT pure: they parse the URL (12 PG* getenv,
+            // EXECUTED), charged Env + Fs; the 0 CONNECTIONS of R1589 stands. `MySqlPool::connect_lazy` parses nothing: pure.
+            ("sqlx", "MySqlPool::connect_lazy"), ("sqlx", "sqlite::SqlitePool::connect_lazy"),
             ("sqlx_core", "net::socket::Box::poll_flush"), ("sqlx_core", "net::Socket::poll_read_ready"),
             ("sqlx_core", "migrate::source::PathBuf::resolve"), ("sqlx_core", "migrate::source::ResolveWith::resolve"),
             ("sqlx_core", "migrate::ResolveConfig::new"), ("sqlx_core", "logger::QueryLogger::sql"),

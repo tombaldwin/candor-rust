@@ -7475,7 +7475,12 @@ impl<'a> CallCollector<'a> {
             // (`Read`/`Write`/`BufRead`/`Seek`: its rules key on those verbs — quinn, tokio, console); a comparison, hash,
             // clone, format or iteration member is the dependency's report's to answer, and its NAME is no evidence of an
             // effect (`console::Term::finish`, licensed through `Hasher` on a `.write(..)`, is not a terminal call).
-            let io_member = matches!(trait_leaf, "Read" | "Write" | "BufRead" | "Seek");
+            // SOUNDNESS R1623 — `FromStr::from_str` is the one non-stream member whose NAME is evidence: `s.parse::<T>()` calls
+            // exactly `T::from_str`, the member the written type is asked for (no hasher-`finish` guess in between). sqlx's
+            // `PgConnectOptions::from_str` reads the twelve `PG*` variables and `stat`s the socket directories (EXECUTED); the
+            // join-only edge asked nothing of the classifier, so `url.parse::<PgConnectOptions>()` read ABSENT in both arms.
+            let io_member = matches!(trait_leaf, "Read" | "Write" | "BufRead" | "Seek")
+                || (trait_leaf == "FromStr" && member == "from_str" && std::env::var_os("CANDOR_R1623_OFF").is_none());
             let path = if candor_classify::is_syscall_crate(segs[0]) || !io_member {
                 format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member)
             } else {

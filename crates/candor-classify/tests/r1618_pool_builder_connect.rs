@@ -73,10 +73,14 @@ fn sqlx_mysql_connect_spellings_all_carry_db_net_ipc_rand_and_lazy_and_options_d
     assert!(classify("sqlx", "sqlx::MySqlPool::connect_lazy").is_none());
     // A look-alike `connect_with` on a type that is not a connection / pool / pool options is not claimed.
     assert!(classify("sqlx", "sqlx::MySqlRow::connect_with").is_none());
-    // The sqlx rows are MySQL's: Postgres and sqlite were not executed and carry no second effect.
-    for p in ["sqlx::PgConnection::connect", "sqlx::PgPool::connect", "sqlx::SqliteConnection::connect"] {
-        assert_eq!(classify_all("sqlx", p), Some(vec!["Db"]), "{p}: not executed, not claimed");
+    // The rows above are MySQL's. Postgres and sqlite were executed by R1623 (`r1623_sqlx_pg_sqlite.rs`) and carry their OWN
+    // second effects: a MySQL row must never leak onto a driver it was not measured on (sqlite has no Net/Ipc).
+    for p in ["sqlx::PgConnection::connect", "sqlx::PgPool::connect"] {
+        let v = classify_all("sqlx", p).unwrap();
+        assert!(v.contains(&"Net") && v.contains(&"Env"), "{p}: {v:?}");
     }
+    let sq = classify_all("sqlx", "sqlx::SqliteConnection::connect").unwrap();
+    assert!(!sq.contains(&"Net") && !sq.contains(&"Ipc"), "{sq:?}");
     // The ssl-ca Fs is URL-conditional and is NOT a table row: no Fs on any spelling.
     for p in ["sqlx::MySqlConnection::connect", "sqlx::MySqlPool::connect_with"] {
         assert!(!classify_all("sqlx", p).unwrap().contains(&"Fs"), "{p}");

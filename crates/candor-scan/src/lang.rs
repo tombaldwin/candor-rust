@@ -1911,11 +1911,19 @@ pub(crate) fn tuple_trait_leaves(
 /// is withheld correctly and the `send_to` was never classified at all.) `connect` sat here already,
 /// so the asymmetry was one name. std, tokio, mio, async-std and smol all spell a UDP socket's and a
 /// listener's constructor `bind`, returning `Self` (or `Result<Self>`, or a future of it).
+///
+/// SOUNDNESS R1623 — `connect_with`, `connect_lazy` and `connect_lazy_with` WERE ABSENT, AND `connect` WAS THE ONLY SPELLING OF A
+/// POOL'S CONSTRUCTOR THIS LIST HAD. `let p = PgPool::connect_lazy(url).unwrap(); p.acquire().await` left `p` untyped, so the
+/// `acquire` never became `PgPool::acquire` and a call that really opens a Postgres session (EXECUTED: 1 connect, 6 `getentropy`)
+/// read ABSENT in both arms, while `PgPoolOptions::new().connect_lazy(url).unwrap()` (typed by the builder walk) and
+/// `PgPool::connect(url).await.unwrap()` (this list) charged. The three names are sqlx's own (`Pool`/`PoolOptions`/`Connection`
+/// all return `Self` or `Result<Self>`), and `connect` sat here already, so the asymmetry was one name each, as for R807's `bind`.
 pub(crate) fn is_ctor(name: &str) -> bool {
     matches!(
         name,
         "new" | "default" | "builder" | "with_capacity" | "connect" | "open" | "init" | "from"
             | "from_path" | "from_str" | "with_config" | "create" | "bind"
+            | "connect_with" | "connect_lazy" | "connect_lazy_with"
     )
 }
 
