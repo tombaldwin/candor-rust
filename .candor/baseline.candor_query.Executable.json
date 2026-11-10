@@ -1,0 +1,2452 @@
+{
+  "candor": {
+    "version": "20273d5",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.41"
+  },
+  "package": "candor_query",
+  "analyzed": {
+    "count": 234,
+    "digest": "d1620a18e1bf610d"
+  },
+  "resolves": [
+    "fs",
+    "incomplete"
+  ],
+  "excluded": [],
+  "functions": [
+    {
+      "fn": "accepts::cmd_accepts",
+      "loc": "crates/candor-query/src/accepts.rs:312:1: 312:50",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf841a4487930a3eda6",
+      "calls": [
+        "accepts::no_report_message",
+        "accepts::report_discoverable",
+        "gate::gate_core",
+        "gate::resolve_policy_path",
+        "grammar::resolve_locator"
+      ],
+      "unknownWhy": [
+        "dispatch:Write.flush",
+        "dispatch:Write.write_all"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "accepts::no_report_message",
+      "loc": "crates/candor-query/src/accepts.rs:280:1: 280:58",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8fa76a5ae4e505993",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "accepts::report_discoverable",
+      "loc": "crates/candor-query/src/accepts.rs:268:1: 268:33",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf826ac3d018d6d0255",
+      "calls": [
+        "grammar::discover_report_prefix",
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "audit::cmd_audit",
+      "loc": "crates/candor-query/src/audit.rs:32:1: 32:48",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8df39566164232ce8",
+      "calls": [
+        "load::encountered_set",
+        "load::load_calibrated"
+      ],
+      "invisible": [
+        "candor_report",
+        "regex",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::callers_note",
+      "loc": "crates/candor-query/src/callers.rs:110:1: 110:43",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf897fd1b04643787f6",
+      "calls": [
+        "completeness::ReportCompleteness::print_note"
+      ]
+    },
+    {
+      "fn": "callers::callers_via_callgraph",
+      "loc": "crates/candor-query/src/callers.rs:327:1: 327:148",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf80f214b8d770ca154",
+      "calls": [
+        "callers::callers_note",
+        "matching::best_tier"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "callers::callers_via_callgraph_frontier",
+      "loc": "crates/candor-query/src/callers.rs:128:1: 136:9",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf84ff9790eed8f070d",
+      "calls": [
+        "callers::callers_note",
+        "matching::best_tier"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "callers::cmd_callers",
+      "loc": "crates/candor-query/src/callers.rs:41:1: 41:50",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8b760fea2c0dbec84",
+      "calls": [
+        "callers::callers_via_callgraph",
+        "callers::callers_via_callgraph_frontier",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "load::load_entries_loud",
+        "load::load_hierarchy"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_impact",
+      "loc": "crates/candor-query/src/callers.rs:437:1: 437:49",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8dc9a05b4d9a98673",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_path",
+      "loc": "crates/candor-query/src/callers.rs:585:1: 585:47",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8a06567dbc5557168",
+      "calls": [
+        "callers::path_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_reachable",
+      "loc": "crates/candor-query/src/callers.rs:731:1: 731:52",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8816124df3ca143d3",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::path_note",
+      "loc": "crates/candor-query/src/callers.rs:568:1: 568:40",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf80e9c0814d7083588",
+      "calls": [
+        "completeness::ReportCompleteness::print_note"
+      ]
+    },
+    {
+      "fn": "completeness::ReportCompleteness::eprint_note",
+      "loc": "crates/candor-query/src/completeness.rs:674:5: 674:64",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf804843099f082c098",
+      "calls": [
+        "completeness::ReportCompleteness::write_note"
+      ]
+    },
+    {
+      "fn": "completeness::ReportCompleteness::print_note",
+      "loc": "crates/candor-query/src/completeness.rs:667:5: 667:63",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf85876448684806592",
+      "calls": [
+        "completeness::ReportCompleteness::write_note"
+      ]
+    },
+    {
+      "fn": "completeness::ReportCompleteness::write_json",
+      "loc": "crates/candor-query/src/completeness.rs:579:5: 579:65",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf863dbac244989419b",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "completeness::ReportCompleteness::write_note",
+      "loc": "crates/candor-query/src/completeness.rs:689:5: 689:103",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf829bd71ea2193cc90",
+      "unknownWhy": [
+        "dispatch:Write.write_fmt"
+      ]
+    },
+    {
+      "fn": "completeness::arm_unasked_rules",
+      "loc": "crates/candor-query/src/completeness.rs:314:1: 317:24",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf83cd2d7daea9db0fe",
+      "invisible": [
+        "candor_classify",
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "completeness::report_completeness",
+      "loc": "crates/candor-query/src/completeness.rs:923:1: 923:70",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8a3b62b3e5358a303",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "containment::cmd_blindspots",
+      "loc": "crates/candor-query/src/containment.rs:92:1: 92:53",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf83b0b5f5b3132a931",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "containment::cmd_blindspots::_::<impl show::_::_serde::Serialize for containment::cmd_blindspots::Out>::serialize",
+      "loc": "crates/candor-query/src/containment.rs:228:18: 228:27",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8cb606cd932e48be8",
+      "invisible": [
+        "serde",
+        "serde_core"
+      ]
+    },
+    {
+      "fn": "containment::cmd_containment",
+      "loc": "crates/candor-query/src/containment.rs:266:1: 266:54",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8af6ef7c4ada9b655",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "diff::load_fninfo_loud",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "grammar::resolve_locator"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "containment::parse_class_filter",
+      "loc": "crates/candor-query/src/containment.rs:25:1: 27:85",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf859759b25b5b51a9b",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "diff::_::<impl show::_::_serde::Serialize for diff::DiffJson<'a>>::serialize",
+      "loc": "crates/candor-query/src/diff.rs:77:10: 77:19",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8db52039274ee9671",
+      "invisible": [
+        "serde",
+        "serde_core"
+      ]
+    },
+    {
+      "fn": "diff::attach_coverage",
+      "loc": "crates/candor-query/src/diff.rs:534:1: 538:2",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf89c8399fac5054083",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "diff::attach_manifest",
+      "loc": "crates/candor-query/src/diff.rs:570:1: 570:77",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf868901761fe6f1368",
+      "calls": [
+        "completeness::report_completeness"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::cmd_diff",
+      "loc": "crates/candor-query/src/diff.rs:118:1: 118:47",
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf89c02ac1f8728a675",
+      "calls": [
+        "completeness::report_completeness",
+        "diff::diff_note",
+        "diff::load_fninfo_loud",
+        "grammar::resolve_locator"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::cmd_gains",
+      "loc": "crates/candor-query/src/diff.rs:628:1: 628:48",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf868a16d3926e65c69",
+      "calls": [
+        "diff::attach_manifest",
+        "diff::load_fninfo_loud",
+        "grammar::resolve_locator",
+        "load::load_callgraph_flagged",
+        "load::load_coverage",
+        "load::report_build_version"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::cmd_receipt",
+      "loc": "crates/candor-query/src/diff.rs:445:1: 445:50",
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf805fc20890bce41fa",
+      "calls": [
+        "completeness::ReportCompleteness::eprint_note",
+        "completeness::report_completeness",
+        "load::encountered_set",
+        "load::load_calibrated",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::diff_note",
+      "loc": "crates/candor-query/src/diff.rs:105:1: 105:73",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8a2ecf46b7cb9ec4e",
+      "calls": [
+        "completeness::ReportCompleteness::print_note"
+      ]
+    },
+    {
+      "fn": "diff::load_fninfo_flagged",
+      "loc": "crates/candor-query/src/diff.rs:28:1: 28:73",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf88bd8caaa259b9c1e",
+      "calls": [
+        "load::load_entries_inner"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::load_fninfo_loud",
+      "loc": "crates/candor-query/src/diff.rs:52:1: 52:99",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf87ca5020bfe13f741",
+      "calls": [
+        "diff::load_fninfo_flagged",
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::RemedyPlan::<'_>::to_json",
+      "loc": "crates/candor-query/src/fix.rs:113:5: 113:43",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf86d181a72a558545c",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "fix::cmd_fix",
+      "loc": "crates/candor-query/src/fix.rs:350:1: 350:46",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf85fe1a7e2e63f0f62",
+      "calls": [
+        "completeness::ReportCompleteness::eprint_note",
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "fix::load_rules",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries",
+        "matching::best_tier",
+        "policy::emit_zero_rule_caveat"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::cmd_fix_gate",
+      "loc": "crates/candor-query/src/fix.rs:555:1: 555:51",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8ed8f721be5d38756",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "fix::load_rules",
+        "gate::review_accepts",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud",
+        "policy::emit_zero_rule_caveat"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::compute_remedy",
+      "loc": "crates/candor-query/src/fix.rs:184:1: 191:20",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8759cb8b9e5899b90",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "fix::denied_layer",
+      "loc": "crates/candor-query/src/fix.rs:18:1: 18:108",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8de6b677a4388dfbf",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "fix::denied_layer_evidenced",
+      "loc": "crates/candor-query/src/fix.rs:56:1: 61:20",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8f7e7b60a11bce5a1",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "fix::load_rules",
+      "loc": "crates/candor-query/src/fix.rs:290:1: 290:107",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8f5dffbea185d09a1",
+      "calls": [
+        "policy::load_policy_as_the_gate_does"
+      ],
+      "invisible": [
+        "candor_classify"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::unevaluated_json",
+      "loc": "crates/candor-query/src/fix.rs:330:1: 330:88",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf84d05322f457f62f9",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "gate::CoreMode::<'_>::stop",
+      "loc": "crates/candor-query/src/gate.rs:1780:5: 1780:86",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8c2c7170f6c694037",
+      "calls": [
+        "gate::refuse_disclosing"
+      ],
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::cmd_gate",
+      "loc": "crates/candor-query/src/gate.rs:1132:1: 1132:47",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8e40f3b384fb32575",
+      "calls": [
+        "gate::distinct_gate_sinks",
+        "gate::gate_core",
+        "gate::gate_report_input_files",
+        "gate::is_candor_config",
+        "gate::refuse",
+        "gate::refuse_disclosing",
+        "gate::refuse_via_registered_sink",
+        "gate::resolve_policy_path",
+        "gate::same_artifact",
+        "gate::write_verdict",
+        "grammar::resolve_locator",
+        "unverified::hole_upgrades"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::distinct_gate_sinks",
+      "loc": "crates/candor-query/src/gate.rs:1117:1: 1117:54",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8ee3b05079b74fe0a",
+      "calls": [
+        "gate::same_artifact"
+      ],
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::gate_core",
+      "loc": "crates/candor-query/src/gate.rs:1801:1: 1806:32",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8fa021b6e0e807477",
+      "calls": [
+        "gate::CoreMode::<'_>::stop",
+        "gate::load_gate_report",
+        "grammar::discover_report_prefix"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::gate_report_input_files",
+      "loc": "crates/candor-query/src/gate.rs:418:1: 418:69",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8eb2da44c7ae5230f",
+      "calls": [
+        "grammar::discover_report_prefix",
+        "grammar::resolve_locator",
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::is_candor_config",
+      "loc": "crates/candor-query/src/gate.rs:1076:1: 1076:37",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8dda01a15e907fc7f",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::load_gate_report",
+      "loc": "crates/candor-query/src/gate.rs:109:1: 109:86",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf86c4d3842d17612db",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::refuse",
+      "loc": "crates/candor-query/src/gate.rs:1001:1: 1001:73",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8076e70201c0c4146",
+      "calls": [
+        "gate::refuse_disclosing"
+      ],
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::refuse_disclosing",
+      "loc": "crates/candor-query/src/gate.rs:1008:1: 1013:9",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf823efda3fc0635a65",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::refuse_via_registered_sink",
+      "loc": "crates/candor-query/src/gate.rs:1127:1: 1127:49",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8e1fb8b2fb74d6a0b",
+      "calls": [
+        "gate::refuse"
+      ],
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::report_signature",
+      "loc": "crates/candor-query/src/gate.rs:582:1: 582:75",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf890c7f296150d000f",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::resolve_policy_path",
+      "loc": "crates/candor-query/src/gate.rs:2274:1: 2274:74",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf852c845aade515557",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::review_accepts",
+      "loc": "crates/candor-query/src/gate.rs:528:1: 532:59",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8cf9b508d35ac3813",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::run_units",
+      "loc": "crates/candor-query/src/gate.rs:494:1: 494:72",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf89bfd4ef661fc7b00",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::same_artifact",
+      "loc": "crates/candor-query/src/gate.rs:1071:1: 1071:54",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8732ff7f3796f2317",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "gate::settle_accepts",
+      "loc": "crates/candor-query/src/gate.rs:504:1: 509:38",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8537924c98dd6fd6e",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::unanswerable_pairs",
+      "loc": "crates/candor-query/src/gate.rs:904:1: 907:23",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8d0465f575d47b5ed",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::unanswerable_scoped_filters",
+      "loc": "crates/candor-query/src/gate.rs:798:1: 801:37",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8265f7c0d743b04d8",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::write_verdict",
+      "loc": "crates/candor-query/src/gate.rs:2185:1: 2206:10",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf86d3b76f2ee699fe5",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "grammar::discover_report_prefix",
+      "loc": "crates/candor-query/src/grammar.rs:60:1: 60:57",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf832f71b2dd9139846",
+      "calls": [
+        "grammar::resolve_locator"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "grammar::parse",
+      "loc": "crates/candor-query/src/grammar.rs:136:1: 136:60",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf88b38c60353ab81c2",
+      "calls": [
+        "grammar::resolve_locator"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "grammar::report_or_discover",
+      "loc": "crates/candor-query/src/grammar.rs:313:1: 313:62",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8edc1145f4ec3864f",
+      "calls": [
+        "grammar::discover_report_prefix"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "grammar::resolve_locator",
+      "loc": "crates/candor-query/src/grammar.rs:46:1: 46:51",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8390ad81ea6875c23",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::encountered_set",
+      "loc": "crates/candor-query/src/load.rs:153:1: 153:64",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8a8b770f850ed1462",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "load::glob_encountered"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::glob_encountered",
+      "loc": "crates/candor-query/src/load.rs:124:1: 124:61",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf80be8c052b316530f",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::glob_reports",
+      "loc": "crates/candor-query/src/load.rs:11:1: 11:57",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf884a1d94da1f1defe",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "load::load_calibrated",
+      "loc": "crates/candor-query/src/load.rs:167:1: 167:114",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8e3b39531151d69fa",
+      "fs": [
+        "read"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_callgraph",
+      "loc": "crates/candor-query/src/load.rs:259:1: 259:76",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8f21e21416a596381",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "load::load_callgraph_flagged"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_callgraph_flagged",
+      "loc": "crates/candor-query/src/load.rs:269:1: 269:92",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8c74a5174e07e7281",
+      "fs": [
+        "read"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_coverage",
+      "loc": "crates/candor-query/src/load.rs:357:1: 357:77",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf81d71e272d6b5bed7",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries",
+      "loc": "crates/candor-query/src/load.rs:20:1: 20:61",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf821ef3432d05890a1",
+      "calls": [
+        "load::load_entries_inner"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries_inner",
+      "loc": "crates/candor-query/src/load.rs:28:1: 28:75",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf85d3d0ac1fd8dc86e",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries_loud",
+      "loc": "crates/candor-query/src/load.rs:95:1: 95:79",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf88f165782143df826",
+      "calls": [
+        "load::glob_reports",
+        "load::load_entries_inner"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_hierarchy",
+      "loc": "crates/candor-query/src/load.rs:183:1: 183:76",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8848030d716f57c2b",
+      "fs": [
+        "read"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::report_backend",
+      "loc": "crates/candor-query/src/load.rs:321:1: 321:59",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf83592d7ee1e4aafb3",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "load::report_build_version",
+      "loc": "crates/candor-query/src/load.rs:338:1: 338:59",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf81b299f6a7c0729cb",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "main",
+      "loc": "crates/candor-query/src/main.rs:59:1: 59:10",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "entryPoint": true,
+      "hash": "8be192a8d345fdf897a444e095af8d2d",
+      "calls": [
+        "accepts::cmd_accepts",
+        "audit::cmd_audit",
+        "callers::cmd_callers",
+        "callers::cmd_impact",
+        "callers::cmd_path",
+        "callers::cmd_reachable",
+        "containment::cmd_blindspots",
+        "containment::cmd_containment",
+        "diff::cmd_diff",
+        "diff::cmd_gains",
+        "diff::cmd_receipt",
+        "fix::cmd_fix",
+        "fix::cmd_fix_gate",
+        "gate::cmd_gate",
+        "policy::cmd_gate_verdict",
+        "policy::cmd_parsepolicy",
+        "policy::cmd_rewire",
+        "policy::cmd_whatif",
+        "show::cmd_map",
+        "show::cmd_show",
+        "show::cmd_where",
+        "state::cmd_engine_version",
+        "state::cmd_locate",
+        "state::cmd_merge_hook",
+        "state::cmd_reports",
+        "state::cmd_state",
+        "state::cmd_units",
+        "tour::cmd_tour",
+        "unverified::cmd_unverified"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "regex",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "matching::best_tier",
+      "loc": "crates/candor-query/src/matching.rs:47:1: 47:81",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf805ad6ab79e8ed871",
+      "unknownWhy": [
+        "callback:generic iterable driven by max"
+      ]
+    },
+    {
+      "fn": "policy::cmd_gate_verdict",
+      "loc": "crates/candor-query/src/policy.rs:618:1: 618:55",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8821929f3a8b67ee5",
+      "calls": [
+        "grammar::resolve_locator",
+        "load::load_coverage"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_parsepolicy",
+      "loc": "crates/candor-query/src/policy.rs:138:1: 138:54",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8975b0c08048ef6cd",
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_rewire",
+      "loc": "crates/candor-query/src/policy.rs:539:1: 539:49",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf88689d4f5e1aceb2b",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "load::load_callgraph"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_whatif",
+      "loc": "crates/candor-query/src/policy.rs:250:1: 250:49",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8c58e670ba43347d9",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "matching::best_tier",
+        "policy::emit_zero_rule_caveat",
+        "policy::load_policy_as_the_gate_does"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::emit_zero_rule_caveat",
+      "loc": "crates/candor-query/src/policy.rs:86:1: 91:2",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8dd825d586269fe9a",
+      "calls": [
+        "completeness::ReportCompleteness::print_note"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "policy::load_policy_as_the_gate_does",
+      "loc": "crates/candor-query/src/policy.rs:30:1: 33:56",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf80ab85e1b8784ff36",
+      "invisible": [
+        "candor_classify"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::narrowing_condition",
+      "loc": "crates/candor-query/src/policy.rs:500:1: 500:99",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8eedb15930579728c",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "show::_::<impl show::_::_serde::Serialize for show::MapHedgedJson>::serialize",
+      "loc": "crates/candor-query/src/show.rs:295:10: 295:19",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf84e34917ad2c9f26b",
+      "invisible": [
+        "serde",
+        "serde_core"
+      ]
+    },
+    {
+      "fn": "show::_::<impl show::_::_serde::Serialize for show::ShowHedgedJson>::serialize",
+      "loc": "crates/candor-query/src/show.rs:33:10: 33:19",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8cc77d9d3641c3a75",
+      "invisible": [
+        "serde",
+        "serde_core"
+      ]
+    },
+    {
+      "fn": "show::_::<impl show::_::_serde::Serialize for show::WhereJson>::serialize",
+      "loc": "crates/candor-query/src/show.rs:177:10: 177:19",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf89a0f6eefdeef8d73",
+      "invisible": [
+        "serde",
+        "serde_core"
+      ]
+    },
+    {
+      "fn": "show::cmd_map",
+      "loc": "crates/candor-query/src/show.rs:302:1: 302:46",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf80ae3e0d21e0cb86d",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "show::cmd_show",
+      "loc": "crates/candor-query/src/show.rs:44:1: 44:47",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8dfda8d8fe5f9c57d",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud",
+        "matching::best_tier"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "show::cmd_where",
+      "loc": "crates/candor-query/src/show.rs:189:1: 189:48",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf81b208620bb743931",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::canonical",
+      "loc": "crates/candor-query/src/state.rs:279:1: 279:32",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf895a88dba866b8670",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::clear_other_reports",
+      "loc": "crates/candor-query/src/state.rs:44:1: 44:69",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8b2c0e0f7eefe961c",
+      "fs": [
+        "read",
+        "write"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_engine_version",
+      "loc": "crates/candor-query/src/state.rs:167:1: 167:57",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8b881ddacd1f6dd53",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_locate",
+      "loc": "crates/candor-query/src/state.rs:149:1: 149:49",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf86979bc8bbef726d9",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::locate_newest"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_merge_hook",
+      "loc": "crates/candor-query/src/state.rs:192:1: 192:53",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8786b306cf63c58a4",
+      "fs": [
+        "read",
+        "write"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_reports",
+      "loc": "crates/candor-query/src/state.rs:70:1: 70:50",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf862fa6088e0170609",
+      "calls": [
+        "load::report_backend",
+        "state::clear_other_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_state",
+      "loc": "crates/candor-query/src/state.rs:14:1: 14:48",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8604f306ff70ecc57",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::collect_rs"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_units",
+      "loc": "crates/candor-query/src/state.rs:350:1: 350:48",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8ace90cd16c474149",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::expected_units",
+        "state::missing_units"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::collect_rs",
+      "loc": "crates/candor-query/src/state.rs:255:1: 255:61",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf86f075e6bdeea6f5b",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::collect_rs"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::expected_units",
+      "loc": "crates/candor-query/src/state.rs:290:1: 290:95",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8aad5d052cc906894",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::canonical"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::locate_newest",
+      "loc": "crates/candor-query/src/state.rs:123:1: 123:76",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8e807e8cfd7d54bdb",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::missing_units",
+      "loc": "crates/candor-query/src/state.rs:335:1: 335:93",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8a05ab8adadf2fc0c",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "state::canonical"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "tour::cmd_tour",
+      "loc": "crates/candor-query/src/tour.rs:53:1: 53:47",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf89a3e9dde15003d0f",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "load::load_entries_loud",
+        "tour::report_package"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "tour::report_package",
+      "loc": "crates/candor-query/src/tour.rs:14:1: 14:50",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf84c3a357a896d38e3",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "unverified::cmd_unverified",
+      "loc": "crates/candor-query/src/unverified.rs:89:1: 89:53",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf8ea400b232eeb4674",
+      "calls": [
+        "completeness::ReportCompleteness::print_note",
+        "completeness::report_completeness",
+        "gate::review_accepts",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud",
+        "policy::emit_zero_rule_caveat",
+        "policy::load_policy_as_the_gate_does",
+        "unverified::hole_set"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "unverified::hole_set",
+      "loc": "crates/candor-query/src/unverified.rs:51:1: 55:44",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf866ecc82e4406a7ec",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "unverified::hole_upgrades",
+      "loc": "crates/candor-query/src/unverified.rs:78:1: 82:27",
+      "inferred": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "8be192a8d345fdf850862a8ca4dab60a",
+      "calls": [
+        "unverified::hole_set"
+      ],
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "unverified::unevaluated_json",
+      "loc": "crates/candor-query/src/unverified.rs:441:1: 441:88",
+      "inferred": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "hash": "8be192a8d345fdf8c970d0c50480fab7",
+      "invisible": [
+        "serde_json"
+      ]
+    }
+  ]
+}
