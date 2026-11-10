@@ -6323,6 +6323,8 @@ pub(crate) fn collect_macro_modules(
 /// SOUNDNESS R1636 — the prefix under which `collect_macro_hidden_decls` files a type name an item-position invocation's
 /// own text DECLARES (beside the plain R452 name). Angle-bracketed, so no type leaf can equal it.
 pub(crate) const MACRO_DECL_TYPE: &str = "<macrodecl>";
+/// SOUNDNESS R1636 — the same, for a `type` ALIAS that text declares.
+pub(crate) const MACRO_DECL_ALIAS: &str = "<macroalias>";
 
 pub(crate) fn collect_macro_hidden_decls(
     items: &[syn::Item],
@@ -6376,7 +6378,12 @@ pub(crate) fn collect_macro_hidden_decls(
                                 syn::Item::Struct(x) => x.ident.to_string(),
                                 syn::Item::Enum(x) => x.ident.to_string(),
                                 syn::Item::Union(x) => x.ident.to_string(),
-                                syn::Item::Type(x) => x.ident.to_string(),
+                                syn::Item::Type(x) => {
+                                    // A type ALIAS: every member reached through it is the hidden target's, so no
+                                    // method-name evidence is needed for it (`scan.rs`, R452 (b)).
+                                    types.insert(format!("{MACRO_DECL_ALIAS}{}", x.ident));
+                                    x.ident.to_string()
+                                }
                                 _ => continue,
                             };
                             // Both the R452 name and a `MACRO_DECL_TYPE`-marked one: the marked fact says the TYPE ITSELF

@@ -6801,11 +6801,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R501MARK\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
                     } else if claimants == 0
-                        && ((merged.macro_hidden_types.contains(&ty) && merged.macro_hidden_fns.contains(&c.leaf))
-                            // SOUNDNESS R1636 — the receiver's TYPE is declared only inside unexpanded macro text (tokio 1.18's
-                            // `cfg_time! { type TimeDriver = .. }`, 1.45's `cfg_io_driver! { enum IoStack { .. } }`): no
-                            // declaration of it was read anywhere, so the absence of `Type::method` says nothing about the program
-                            // whatever the macro text names. Not a struct candor read (`fields` holds every one it saw).
+                        && (merged.macro_hidden_fns.contains(&c.leaf)
+                            // An ALIAS declared only in macro text names a hidden target: whatever the member, it is that
+                            // target's (tokio 1.18's `cfg_time! { type TimeDriver = Either<..> }`, `self.inner.park()`).
+                            || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_ALIAS))
+                                && !merged.fields.contains_key(&ty)
+                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
+                        && (merged.macro_hidden_types.contains(&ty)
+                            // SOUNDNESS R1636 — …or the receiver's TYPE is declared only inside unexpanded macro text (tokio
+                            // 1.45's `cfg_io_driver! { enum IoStack { .. } }`, 1.18's `cfg_time! { type TimeDriver = .. }`): no
+                            // declaration of it was read anywhere. The TYPE evidence is the new half; the METHOD-NAME half
+                            // stays R452's (`fn <leaf>` written in unexpanded macro text): measured, the type half alone hedged
+                            // 2,871 rows across the corpus, syn's `ast_struct!` types dominating, where the member is a derive's or
+                            // a readable trait impl's. Not a struct candor read (`fields` holds every one it saw).
                             || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_TYPE))
                                 && !merged.fields.contains_key(&ty)
                                 && std::env::var_os("CANDOR_R1636_OFF").is_none()))
