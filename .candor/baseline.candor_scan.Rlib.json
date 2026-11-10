@@ -1,0 +1,18 @@
+{
+  "candor": {
+    "version": "20273d5",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.41"
+  },
+  "package": "candor_scan",
+  "analyzed": {
+    "count": 0,
+    "digest": "cbf29ce484222325"
+  },
+  "resolves": [
+    "fs",
+    "incomplete"
+  ],
+  "excluded": [],
+  "functions": []
+}

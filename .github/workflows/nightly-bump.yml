@@ -116,8 +116,8 @@ jobs:
         if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         run: |
           LIB="$(ls "$PWD"/target/debug/libcandor@*.so | head -1)"
-          CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
-          CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1 | grep -q "AS-EFF-005" \
+          CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LIB" --workspace >/dev/null 2>&1 || true
+          CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" --workspace 2>&1 | grep -q "AS-EFF-005" \
             && { echo "::error::self-guard still trips after re-baseline — investigate"; exit 1; } || true
 
       - name: Integration + receipt tests

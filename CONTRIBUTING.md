@@ -13,7 +13,7 @@ cargo build --workspace                  # the lint + the tooling crates (candor
                                          # automatically by rustup. `--workspace` because candor-query
                                          # is a member, not a dependency of the lint.
 cargo test --workspace                   # classifier unit tests + a load smoke-test + the tooling crates
-cargo clippy --all-targets -- -D warnings # the WHOLE workspace, on the pinned nightly (which carries
+cargo clippy --workspace --all-targets -- -D warnings # the WHOLE workspace, on the pinned nightly (which carries
                                          # clippy — see rust-toolchain). This is the one to run: it is
                                          # the only command that lints the rustc_private dylint lib and
                                          # `build.rs`, neither of which the stable gate below can see.

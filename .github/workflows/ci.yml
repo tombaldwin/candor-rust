@@ -200,10 +200,13 @@ jobs:
       # The other half of the lint surface: the rustc_private dylint lib and the root `build.rs`, neither
       # of which the stable leg can see (stable clippy can't compile rustc_private, and build.rs belongs
       # to the root package the -p list excludes). Runs on the PINNED nightly, which now carries the
-      # clippy component (rust-toolchain) so the bare command resolves. A nightly bump that adds a lint
+      # clippy component (rust-toolchain) so the bare command resolves. `--workspace` is REQUIRED: this
+      # root is a package that also declares a workspace, so a bare `cargo clippy` lints only the root
+      # package and its path deps (candor-classify, candor-report) — candor-scan and candor-query were
+      # never linted by the pinned nightly (SOUNDNESS R1632: a seeded `len_zero` in candor-scan exited 0). A nightly bump that adds a lint
       # surfaces here — that is the point of gating it rather than qualifying every "clippy clean" claim.
       - name: Clippy (pinned nightly, whole workspace, -D warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test (unit + smoke)
         run: cargo test --workspace
@@ -314,6 +317,13 @@ jobs:
       # Dogfood: candor guards its OWN effect surface against regressions.
       # If candor starts performing a new effect, this fails until .candor/baseline
       # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
+      #
+      # `--workspace` is REQUIRED (SOUNDNESS R1633). This root is a package that also declares a workspace, so a
+      # bare `cargo dylint` analyses only the root's dependency closure (the lint, candor-classify, candor-report):
+      # a seeded `std::fs::read` in a new candor-scan fn produced no AS-EFF-005, and candor-scan / candor-query had
+      # no baseline at all. Every unit the workspace builds now has a `.candor/baseline.<crate>.<kind>.json`, and a
+      # unit WITHOUT one prints "could not be loaded", which the check below turns red — so a new workspace member
+      # fails here until its baseline is added deliberately (splice its entry; do not bulk-refresh the others).
       - name: Self-guard
         run: |
           LIB=$(ls "$PWD"/target/debug/libcandor@*.so)
@@ -321,7 +331,7 @@ jobs:
           # otherwise the lint's actual output (incl. the AS-EFF-005 detail) is never printed and the
           # step fails opaquely before the grep. Always echo the output + the exit code, THEN classify.
           rc=0
-          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1) || rc=$?
+          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" --workspace 2>&1) || rc=$?
           echo "$out"
           echo "── cargo dylint exit code: $rc ──"
           if echo "$out" | grep -q "AS-EFF-005"; then
