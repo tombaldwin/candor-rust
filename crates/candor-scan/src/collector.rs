@@ -4313,6 +4313,28 @@ impl<'a> CallCollector<'a> {
                 _ => break,
             }
         }
+        // SOUNDNESS R1641/R1643 — `self.as_file()` in `impl Read for &NamedTempFile<File>`: the receiver is `self`, whose
+        // written arguments are the impl's own (`decls::IMPL_ARGS_KEY`, positions as `impl_retgen_key` counts them). Only a
+        // CONCRETE argument answers — an argument that is one of this scope's own type parameters (`impl<F: Read> Read for
+        // NamedTempFile<F>`) is left to the walk below exactly as before — and only a std I/O handle, which no crate
+        // `impl_fn_key` can name (the gate R452 put on every other corrected receiver is kept for those).
+        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+            if let syn::Expr::Path(p) = r {
+                if p.path.is_ident("self") {
+                    let arg = self.uses.get(crate::decls::IMPL_ARGS_KEY).and_then(|a| a.split(',').nth(pos).map(str::to_string));
+                    if let Some(a) = arg.filter(|a| a != "_" && !self.generic_bounds.contains_key(a.as_str())) {
+                        let full = crate::lang::expand(&a, &self.uses);
+                        if let Some(h) = std_io_handle(&full) {
+                            if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                                eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\tself<{a}>\t{h}"); // §E1 REACH COUNTER
+                            }
+                            return Some(h);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
         let syn::Expr::Field(f) = r else { return None };
         let owner = self.resolve_recv_type(&f.base)?;
         if self.field_ambiguous(&owner, &f.member) || self.is_dependency_type(&owner) {
@@ -4369,6 +4391,22 @@ impl<'a> CallCollector<'a> {
         // here: it would withdraw a concrete charge at the old site and replace it with `Unknown` at the
         // new one, so it can REMOVE rows, which this commit's A/B (REMOVED 0) says nothing about. Price
         // it on its own corpus run before touching this line.
+        // SOUNDNESS R1643 — A DECLARED std I/O HANDLE RETURN (`fn as_file_mut(&mut self) -> &mut File`) IS ANSWERED BY THE
+        // STD HANDLE RULES, NOT BY A CRATE `impl_fn_key`. The second gate below asks whether the crate declares
+        // `File::read`, which it never does, so `self.as_file_mut().read(b)` fell back to the base (`NamedTempFile::read`,
+        // a key nothing answers) and read PURE over a file read (EXECUTED rustagent-r1641/fx/tf: `t1`/`t3`/`t5` ABSENT on
+        // published 0.41.3 and 65889f2 while the field spelling `self.file.read(b)` and `let f: &mut File = ..; f.read(b)`
+        // read `Fs`; tempfile's `impl Read for NamedTempFile`). A std handle is not a crate type, so the ambiguity this
+        // gate guards against (three local `Selector::deregister` claimants) cannot arise for it. `CANDOR_R1643_OFF=1`.
+        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+            let full = crate::lang::expand(ret, &self.uses);
+            if let Some(h) = std_io_handle(&full).or_else(|| std_io_handle(ret)) {
+                if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                    eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\t{h}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                return Some(h);
+            }
+        }
         let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
         self.returns
             .contains_key(&crate::model::impl_fn_key(ret_leaf, outer))

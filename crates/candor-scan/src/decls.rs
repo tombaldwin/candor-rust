@@ -186,7 +186,15 @@ pub(crate) fn scan_items(
                 }
                 // SOUNDNESS R897 — the self type's generic arguments IN ORDER, lifetimes included,
                 // because the struct's parameter positions (`TF_GEN_FIELD`) count them too.
-                if let syn::Type::Path(tp) = &*im.self_ty {
+                // SOUNDNESS R1641 — and for `impl Tr for &'a Name<A, ..>` the REFERENT's arguments: R1641 types that impl's
+                // `self` as `Name`, and tempfile's `impl Read for &NamedTempFile<File> { self.as_file().read(b) }` needs
+                // `as_file() -> &F` answered with `File` (`impl_generic_return`), or the call falls back to the by-value
+                // `NamedTempFile::read` and the row reads pure.
+                let args_self_ty: &syn::Type = match &*im.self_ty {
+                    syn::Type::Reference(r) if std::env::var_os("CANDOR_R1641_OFF").is_none() => &r.elem,
+                    t => t,
+                };
+                if let syn::Type::Path(tp) = args_self_ty {
                     if let Some(syn::PathArguments::AngleBracketed(ab)) = tp.path.segments.last().map(|s| &s.arguments) {
                         let args: Vec<String> = ab.args.iter().map(|a| match a {
                             syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => {
@@ -3044,6 +3052,47 @@ pub(crate) fn fninfo(
                 eprintln!("R1169SELF\t{}\t{w}", self_ty.unwrap_or("")); // §E1 REACH COUNTER, on the ADDED branch only
             }
             vars.insert("self".to_string(), w);
+        }
+    }
+    // SOUNDNESS R1641 — `self` in a NON-operator trait impl on a REFERENCE to a nominal type (`impl<'a, R: Read + Seek>
+    // ReadRef<'a> for &'a ReadCache<R>`, object's `read_cache.rs`) had no type: `impl_type_name` answers only a path
+    // self type, so the impl is keyed at the module level (R1034, deliberately unchanged here) and `self_ty` is `None`.
+    // Every call through `self` in the body then formed no edge and no disclosure — `cache.read.seek(..)` over
+    // `R: Read + Seek` read `[]`, so `StringTable::get`, which CHA does edge to this unit, read pure (EXECUTED,
+    // rustagent-r1641/fx/rr: V1 and the concrete `RefCell<File>` V10 seek and read a real file, both ABSENT; the same
+    // body under a by-value self type (V4) or as an inherent method (V5) reads `dispatch:Seek.seek`). R1131 already types
+    // an OPERATOR impl's `self` as the referent; this does the same for every other trait, by the authority a parameter
+    // `this: &'a ReadCache<R>` is typed by (`type_path`). Only the TYPING moves: the unit's key, `Self`, `self_ty`'s other
+    // readers (drop params, return keys) are untouched. A referent that is the impl's own type parameter (R1208/R1292's
+    // forwarder), a primitive and any referent that is not a crate-local struct are excluded, and so is an impl R1034 keys `&Name` (a free-fn collision): its `self` is typed by
+    // that key, which `self.m()` needs to reach the impl's own sibling units (quick-xml's `&Deserializer`; a first cut that
+    // retyped it REMOVED those rows with their `invisible: [serde]`). `CANDOR_R1641_OFF=1` restores the untyped `self`.
+    if std::env::var_os("CANDOR_R1641_OFF").is_none() && !vars.contains_key("self") {
+        if let Some(syn::Type::Reference(r)) = impl_self {
+            if let syn::Type::Path(p) = crate::lang::peel_ty_refs(&r.elem) {
+                let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let own = p.path.segments.len() == 1
+                    && impl_generics.is_some_and(|g| g.type_params().any(|t| t.ident == leaf));
+                if p.qself.is_none() && !own && !crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str()) && leaf != "str" {
+                    // A CRATE-LOCAL struct only. A std or dependency referent (`impl MigrationSource for &'s Path {
+                    // self.to_owned().resolve() }`, sqlx-core) is the method-probe question this crate's index cannot
+                    // answer — typing `self` as `Path` dropped the `untyped receiver` hedge that named the right local
+                    // candidate (`PathBuf::resolve`, which reads the filesystem) and the row went ABSENT (first-cut A/B).
+                    let w = crate::lang::type_path(&r.elem, sig_uses).filter(|w| {
+                        let root = w.split("::").next().unwrap_or("");
+                        let foreign = w.contains("::")
+                            && (matches!(root, "std" | "core" | "alloc")
+                                || sig_uses.get(crate::lang::DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root)));
+                        fields.contains_key(leaf.as_str()) && !foreign
+                    });
+                    if let Some(w) = w {
+                        if std::env::var_os("CANDOR_R1641_INSTR").is_some() {
+                            eprintln!("R1641REFSELF\t{qual}\t{w}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        vars.insert("self".to_string(), w);
+                    }
+                }
+            }
         }
     }
     // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;

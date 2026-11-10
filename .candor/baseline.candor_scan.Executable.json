@@ -5192,6 +5192,25 @@
       ]
     },
     {
+      "fn": "collector::CallCollector::<'a>::impl_declared_return",
+      "loc": "crates/candor-scan/src/collector.rs:4365:5: 4365:90",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "3cffdf450d3e84cf96860eecb6f82a0c",
+      "calls": [
+        "lang::expand"
+      ]
+    },
+    {
       "fn": "collector::CallCollector::<'a>::impl_generic_return",
       "loc": "crates/candor-scan/src/collector.rs:4302:5: 4302:107",
       "inferred": [
