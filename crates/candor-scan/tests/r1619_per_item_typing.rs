@@ -35,8 +35,8 @@ fn deps(root: &Path) {
     write(&d.join("Cargo.toml"), "[package]\nname = \"tokio-postgres\"\nversion = \"0.7.18\"\nedition = \"2021\"\n[dependencies]\npostgres-types = \"0.2\"\npin-project-lite = \"0.2\"\nforeign = \"1\"\n");
     write(
         &d.join("src/lib.rs"),
-        "mod client;\nmod transaction_builder;\nmod hazard;\npub mod types;\n\
-         pub use crate::client::Client;\npub use crate::transaction_builder::TransactionBuilder;\npub use crate::hazard::Odd;\n",
+        "mod client;\nmod transaction_builder;\nmod hazard;\nmod aliased;\npub mod types;\n\
+         pub use crate::client::Client;\npub use crate::transaction_builder::TransactionBuilder;\npub use crate::hazard::Odd;\npub use crate::aliased::Holder;\n",
     );
     write(&d.join("src/types.rs"), "pub use postgres_types::*;\n");
     write(
@@ -65,6 +65,13 @@ fn deps(root: &Path) {
          impl<T> Odd<T> {\n #[cfg(feature = \"x\")]\n pub fn cfgd(&self) -> crate::transaction_builder::TransactionBuilder<'static> { loop {} }\n \
          pub fn hidden(&self) -> TransactionBuilder<'static> { loop {} }\n}\n\
          impl Odd<u8> {\n pub fn inst(&self) -> crate::transaction_builder::TransactionBuilder<'static> { loop {} }\n}\n",
+    );
+    // An alias OF an alias (`type Req = Tb;` over `pub type Tb = crate::..::TransactionBuilder`): typed as the nominal it
+    // names, never as the private alias's own path (measured on aws-smithy-runtime-api `InterceptorContext::take_request`).
+    write(
+        &d.join("src/aliased.rs"),
+        "type Req = Tb;\npub type Tb = crate::transaction_builder::TransactionBuilder<'static>;\npub struct Holder;\n\
+         impl Holder {\n pub fn take(&self) -> Option<Req> { None }\n}\n",
     );
     // deadpool-postgres: `Pool` is made by a foreign macro at the root, so `create_pool`'s `Result<Pool, _>` names a type only
     // its PATH can give; `deadpool_postgres::Pool::get` is what the classifier keys.
@@ -102,6 +109,7 @@ fn consumer(root: &Path) -> PathBuf {
          pub async fn s_tx_let_step(c: &mut tokio_postgres::Client) { let b = c.build_transaction().read_only(true); let _ = b.start().await; }\n\
          pub async fn s_pool_q(cfg: &deadpool_postgres::Config) -> Result<(), E> { let pool = cfg.create_pool(None)?; let _ = pool.get().await; Ok(()) }\n\
          pub async fn s_pool_ok(cfg: &deadpool_postgres::Config) -> Option<()> { let pool = cfg.create_pool(None).ok()?; let _ = pool.get().await; Some(()) }\n\
+         pub async fn s_alias_chain(h: &tokio_postgres::Holder) -> Option<()> { let b = h.take()?; let _ = b.start().await; Some(()) }\n\
          pub fn t_tx_ro(c: &mut tokio_postgres::Client) { let b = c.build_transaction(); let _b = b.read_only(true); }\n\
          pub fn t_pool_status(cfg: &deadpool_postgres::Config) -> Option<()> { let pool = cfg.create_pool(None).ok()?; let _ = pool.status(); Some(()) }\n\
          pub async fn h_cfgd(o: &tokio_postgres::Odd<u8>) { let b = o.cfgd(); let _ = b.start().await; }\n\
@@ -133,7 +141,7 @@ fn db(rows: &std::collections::HashMap<String, Vec<String>>, f: &str) -> bool {
     rows.get(f).is_some_and(|r| r.iter().any(|e| e == "Db"))
 }
 
-const CHARGED: &[&str] = &["s_tx_let", "s_tx_let_step", "s_pool_q", "s_pool_ok"];
+const CHARGED: &[&str] = &["s_tx_let", "s_tx_let_step", "s_pool_q", "s_pool_ok", "s_alias_chain"];
 
 #[test]
 fn a_let_bound_dependency_value_is_typed_per_item_through_a_crate_judged_refuses() {

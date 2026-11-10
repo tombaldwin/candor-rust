@@ -896,10 +896,17 @@ impl DepSigs {
                 // the crate (`type Pool = deadpool::managed::Pool<..>`); anything else is not typed
                 Res::Alias(q, am, target) => {
                     let target = target.ok_or("alias?")?;
-                    match mt.ty(idx, &am, &target) {
-                        Some(Res::Decl(d, _)) => RetTy::Dep(d),
-                        Some(Res::Std(l)) => RetTy::Std(l),
-                        _ => RetTy::Dep(q),
+                    if let Some((dm, l, _)) = mt.nominal(idx, &am, &target, 0) {
+                        // through every alias to the nominal (an alias of an alias: `type Request = HttpRequest` over
+                        // `pub type HttpRequest = crate::http::Request`, measured on aws-smithy-runtime-api)
+                        RetTy::Dep(if dm.is_empty() { l } else { format!("{dm}::{l}") })
+                    } else {
+                        match mt.ty(idx, &am, &target) {
+                            Some(Res::Std(l)) => RetTy::Std(l),
+                            // a target that leaves the crate: the alias's PATH is the consumer's spelling of it
+                            None if target.first().is_some_and(|r| !matches!(r.as_str(), "crate" | "self" | "super") && idx.external_root(r)) => RetTy::Dep(q),
+                            _ => return Err("alias-chain".into()),
+                        }
                     }
                 }
             }
