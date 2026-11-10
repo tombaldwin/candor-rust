@@ -5673,7 +5673,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 } else {
                     Some(format!("{cr_real}#{rel}"))
                 };
-                let hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
+                let mut hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
+                // SOUNDNESS R1637 — A PATH THROUGH A SUBMODULE RE-EXPORT. `rustix::io::write` is defined at
+                // `io::read_write::write` and re-exported by `pub use read_write::*;` in `io`; the producer keys its unit by
+                // leaf, tail2 (`read_write::write`) and qual, so the consumer's `rustix#io::write` matched nothing and a
+                // COVERED owner's miss reads as purity: polling 3.3.1/3.4.0's `poll::Poller::notify` (whose `Notify::notify`
+                // writes the wake-up pipe) read `[Log]` chained, and the minimal `pd::io::w()` over `mod io { mod rw { pub fn
+                // w() { fs::read(..) } } pub use rw::w; }` read PURE chained against `invisible:[pd]` unchained (EXECUTED
+                // fixture `fx/pc`, `deny Fs` 0, published 0.41.3 the same). A crate-root re-export only ever worked because
+                // its tail2 IS the leaf key. On the miss: the producer's units of that LEAF (`DepIndex::members`) — exactly
+                // one, and the path names it (a re-export of anything else would be a name the producer does not define,
+                // which stays as before); several, and which one the path re-exports is not decidable from the report, so
+                // the call discloses rather than picking (`ambiguous:`). A free-fn path call only. `CANDOR_R1637_OFF=1`.
+                if hit.is_none() && !c.method && rel.contains("::") && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
+                    let all: Vec<&String> = deps_idx.members.get(&c.leaf).into_iter().flatten()
+                        .filter(|(k, _)| k == cr_real).map(|(_, o)| o).collect();
+                    // `members` is read off `functions[]`, which lists only units that HAVE effects: a pure unit of the same
+                    // leaf is invisible here, so "exactly one owner" is not "the only definition". The join is taken only for
+                    // the one effectful unit BENEATH the written module (`io::read_write` for `io::write`), where a `pub use`
+                    // re-exports from far more often than from elsewhere; any other miss with an effectful unit of that leaf
+                    // in the producer DISCLOSES, never picks (`pd::jo::w()` over a pure `jo::rw::w` beside an effectful
+                    // `io::rw::w` would otherwise be charged the sibling's `Fs`). No effectful unit of the leaf: the miss stays
+                    // as it was, which is the right answer when the re-exported unit is itself pure.
+                    let module = rel.rsplit_once("::").map_or("", |x| x.0);
+                    let under: Vec<&String> = all.iter().copied()
+                        .filter(|o| o.as_str() == module || o.starts_with(&format!("{module}::"))).collect();
+                    if std::env::var_os("CANDOR_R1637_INSTR").is_some() && !all.is_empty() {
+                        eprintln!("R1637REEXP\t{}\t{jpath}\t{}\t{}", f.qual, under.len(), all.len()); // §E1 REACH COUNTER
+                    }
+                    match (under.as_slice(), all.is_empty()) {
+                        ([one], _) => hit = deps_idx.by_key.get(&format!("{cr_real}#{one}::{}", c.leaf)),
+                        (_, true) => {}
+                        _ => {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert(format!("ambiguous:same-name units in {cr_real} under a re-exported path"));
+                        }
+                    }
+                }
                 if let Some(de) = hit {
                     dep_join_hit = covered_owner; // R1349 — a contributor is not a resolution of the call
                     // SOUNDNESS R501 — WHAT THE JOIN ACTUALLY ANSWERED, kept because the disclosure gate

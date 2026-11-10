@@ -5455,6 +5455,19 @@ pub(crate) fn collect_decls(
                             } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                 entry.insert(i.to_string(), ty);
                             }
+                            // SOUNDNESS R1638 — the position's written type ARGUMENTS, under the struct's QUALIFIED path
+                            // only (`QualIndexes::field_args`; the leaf-keyed R979 fact stays named-field-only), so a proven
+                            // owner's `self.0` over `struct TlsStream<S>(ssl::SslStream<S>)` can say what it was instantiated with.
+                            if !had_trait_leaves {
+                                if let Some((_, args)) = field_type_args(&f.ty, uses_ty, items) {
+                                    QUAL_FIELDS.with(|c| {
+                                        if let Some(q) = c.borrow_mut().as_mut() {
+                                            let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &s.ident.to_string());
+                                            q.file_args(&qual, &i.to_string(), &args);
+                                        }
+                                    });
+                                }
+                            }
                             // SOUNDNESS R238 — the TUPLE-struct position of the named-field rule above;
                             // `struct Tup(fn(&i32) -> bool)` and `t.0` handed to an invoking adapter is
                             // the same program as `h.cb`. Keyed by POSITION, exactly as `fields` and

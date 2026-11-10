@@ -961,6 +961,17 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut macro_hidden_fn = std::collections::HashSet::new();
     crate::lang::collect_macro_hidden_decls(
         items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn);
+    // SOUNDNESS R1630 — a generic `Deref` wrapper declared where candor could not read all its items (tokio's `PollEvented`,
+    // whose `poll_write` / `poll_read_ready` live in `cfg_io_driver! { impl<E: Source> PollEvented<E> { .. } }`) may declare
+    // the very method a call names, so auto-derefing to its target would skip the wrapper's own member: Rust picks
+    // `PollEvented::poll_write`, the collector would have formed `mio::..::Sender::poll_write`. Its deref-parameter fact is
+    // withdrawn to `RET_GENERIC_NONE` (a second file's value then conflicts, which also withdraws), leaving R452 (b) to disclose.
+    for t in &macro_hidden_ty {
+        let k = crate::model::deref_param_key(t);
+        if rets.contains_key(&k) {
+            rets.insert(k, Some(crate::model::RET_GENERIC_NONE.to_string()));
+        }
+    }
     // ⟨0.39⟩ obligation 2 — the FOREIGN abstractions this file implements, keyed under the OWNING crate.
     // Walked here (not inside `collect_decls`) for the same reason the re-export walk is: it needs the
     // file's assembled `use` map, which is what `collect_decls` has just finished producing.

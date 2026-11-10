@@ -4961,6 +4961,15 @@ impl<'a> CallCollector<'a> {
                     return None;
                 }
                 legacy.get(leaf)?.get(key)?;
+                // SOUNDNESS R1624 (twin element) — the owner's own ELEMENT is one of its type PARAMETERS (`m: RefCell<HashMap<K, C>>` in
+                // `struct ClusterConnection<C>`): that names no type, so it is not a concrete answer — and the leaf entry is a
+                // twin's, so it must not answer either. The bound route answers it (`qual_trait_field_in`). Measured: redis
+                // 1.7.1's sync `ClusterConnection::{is_open, check_connection, set_*_timeout}` formed `C::is_open` and went
+                // ABSENT (EXECUTED twin fixture `fx/ge2`: `a::W::ge_map` `deny Fs` 1 -> 0 under R1624 alone).
+                if elem && qi.names_param(&qual, v) && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                    instr("param", v);
+                    return Some(None);
+                }
                 instr("type", v);
                 Some(Some(v.clone()))
             }
@@ -5002,6 +5011,32 @@ impl<'a> CallCollector<'a> {
                 Some(v.clone())
             }
             None => {
+                // SOUNDNESS R1624 (twin element) — an element typed by the owner's own parameter: its bounds HERE, mapped by position
+                // (`payload_decision`), as the leaf-keyed index's R476 join would have filed them for a non-twin.
+                if elem && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                    if let Some(p) = qi.field_elem.get(&qual).and_then(|m| m.get(key)).filter(|v| qi.names_param(&qual, v)) {
+                        // By the owner's OWN parameter list (`qi.params`): the leaf-keyed `type_params_key` fact
+                        // `payload_decision` reads is withdrawn when a same-leaf twin declares different parameters.
+                        let t = crate::lang::strip_wrapped(p).to_string();
+                        let pos = qi.params.get(&qual).and_then(|ps| ps.iter().position(|x| *x == t));
+                        if let (Some(pos), Some((ev_leaf, args))) = (pos, self.scrut_evidence(base_expr)) {
+                            if ev_leaf == leaf {
+                                if let Some(arg) = args.get(pos) {
+                                    let mut b: Vec<String> = Vec::new();
+                                    for l in self.generic_bounds.get(arg).into_iter().chain(self.impl_generic_bounds.get(arg)).flatten() {
+                                        if !b.contains(l) {
+                                            b.push(l.clone());
+                                        }
+                                    }
+                                    if !b.is_empty() {
+                                        instr("param-bounds", &b.join(","));
+                                        return Some(b);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let concrete = qi.fields.get(&qual).and_then(|m| m.get(key)).is_some_and(|v| {
                     v != crate::cache::QUAL_TOMB && crate::lang::dyn_alias_leaves_str(v).is_none() && !qi.names_param(&qual, v)
                 });
@@ -10558,6 +10593,53 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1638 — `fmt::Debug::fmt(&self.0, f)` in `impl<S: fmt::Debug> fmt::Debug for TlsStream<S>` over `struct
+    /// TlsStream<S>(ssl::SslStream<S>)` (native-tls's `imp::openssl`). The receiver is a DEPENDENCY type instantiated with
+    /// this scope's own bounded parameter `S`, and the member is one of a std trait that bounds `S` here: the dependency's
+    /// impl of it is generic over `S` (it can only reach `S`'s `fmt` through that bound), so what it does is the CALLER's
+    /// instantiation's — a question no producer report answers, and the chained join read the producer's parametric row as
+    /// pure and dropped the call. Disclosed as the same dispatch the receiver spelling `self.0.fmt(f)` over a field typed
+    /// `S` gets (`dispatch:<Trait>.<member>`). Only a FIELD receiver of a proven owner whose written arguments show the
+    /// parameter (`owner_field_args`), mapped by position through `payload_decision`. Kill switch `CANDOR_R1638_OFF`.
+    /// `tr` is the WRITTEN trait of the UFCS spelling; `None` for the receiver spelling `self.0.fmt(f)`, where the
+    /// member must be one a std bound of the parameter REQUIRES (`std_bounds::std_required_member`).
+    fn hedge_dep_param_wrapper(&mut self, tr: Option<&str>, m: &str, recv: &syn::Expr) {
+        if std::env::var_os("CANDOR_R1638_OFF").is_some() || tr.is_some_and(|t| !crate::std_bounds::is_std_trait_leaf(t)) {
+            return;
+        }
+        let syn::Expr::Field(fe) = peel_recv(recv) else { return };
+        let Some(rt) = self.resolve_recv_type(recv) else { return };
+        if !self.is_dependency_type(&rt) {
+            return;
+        }
+        let Some(owner) = self.resolve_recv_type(&fe.base) else { return };
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key) else { return };
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
+        let ev = self.scrut_evidence(&fe.base);
+        for t in args.split('\u{1}') {
+            if t.contains("::") || matches!(t, "_" | "'" | "") {
+                continue;
+            }
+            if let PayloadTy::Dispatch(b) = self.payload_decision(Some(&owner_leaf), t, ev.as_ref()) {
+                let hit = b.iter().find(|l| match tr {
+                    Some(tr) => *l == tr,
+                    None => crate::std_bounds::is_std_trait_leaf(l) && crate::std_bounds::std_required_member(l, m),
+                });
+                if let Some(l) = hit.cloned() {
+                    if std::env::var_os("CANDOR_R1638_INSTR").is_some() {
+                        eprintln!("R1638WRAP\t{owner_leaf}.{key}\t{rt}<{t}>\t{l}.{m}"); // §E1 REACH COUNTER
+                    }
+                    self.mark_unresolved(format!("dispatch:{l}.{m}"));
+                    return;
+                }
+            }
+        }
+    }
+
     fn route_trait_member_path(
         &mut self,
         p: &syn::ExprPath,
@@ -12441,6 +12523,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.route_trait_member_path(p, &path, &leaf, &node.args, str_arg.clone());
                         self.route_handle_args(&path, &node.args);
                         self.hedge_io_ufcs(&path, &node.args);
+                        // SOUNDNESS R1638 — `Trait::m(&self.0, ..)` on a dependency wrapper over this scope's parameter.
+                        if let (Some(first), Some((tr, m))) = (node.args.first(), path.rsplit_once("::").and_then(|(h, m)| {
+                            h.rsplit("::").next().map(|t| (t.to_string(), m.to_string()))
+                        })) {
+                            self.hedge_dep_param_wrapper(Some(&tr), &m, first);
+                        }
                         // SOUNDNESS R330 — the arity travels with the call. See `Call::argc`: this is
                         // the ExprCall spelling, so `node.args` INCLUDES the receiver for a UFCS
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the
@@ -12536,6 +12624,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         self.self_io_receiver(&node.receiver, &leaf);
         self.self_param_bound_dispatch(&node.receiver, &leaf);
+        self.hedge_dep_param_wrapper(None, &leaf, &node.receiver); // SOUNDNESS R1638
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
             self.dispatch_sites.len(), self.foreign_dispatch_sites.len());
