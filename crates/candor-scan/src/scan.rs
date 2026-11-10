@@ -8284,6 +8284,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1420(a) — a default's INSTANCE is not a unit of the report: it is spelled as the default it instantiates.
     let inst_name: HashMap<&str, &str> =
         fns.iter().filter_map(|f| f.inst_of.as_deref().map(|d| (f.qual.as_str(), d))).collect();
+    // SOUNDNESS R1650 — §3.1 ROUTE EQUALITY: `scan --policy` must gate exactly the units the report WRITES. `all` still holds
+    // the instances (they are analysed, and a caller's effects flow through them), but a policy, a baseline ratchet and the
+    // unverified-holes note are evaluated over `all_pub`: an instance is no unit of the report, so a violation row naming
+    // one carried a hash no report contains and made `gate --report` disagree with the scan that wrote it. Dropping it loses
+    // nothing: the instance keeps a SUBSET of its default's edges (`calls_i` is filtered from `def.calls`) and its name only
+    // extends the default's last segment, so every effect rule that fires on the instance also fires on the default (executed:
+    // soundness/ fixtures `r1650_*`). The debug assertion below states that subset so a change that breaks it fails loudly.
+    let all_pub: Vec<String> = all.iter().filter(|q| !inst_name.contains_key(q.as_str())).cloned().collect();
+    debug_assert!(
+        fns.iter().filter_map(|f| f.inst_of.as_deref().map(|d| (f.qual.as_str(), d))).all(|(i, d)| {
+            let (a, b) = (inferred.get(i), inferred.get(d));
+            a.is_none_or(|a| b.is_some_and(|b| a.is_subset(b)))
+        }),
+        "R1650: a default-instance unit performs an effect its default does not — dropping it from the gate would under-report"
+    );
     let pub_calls = |q: &str| -> Vec<String> {
         let mut v: Vec<String> = calls
             .get(q)
@@ -10084,7 +10099,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // NOTE: the incomplete-analysis refusal is INSIDE the `Checked` arm below, not here. It used to
         // sit at this point — before `check_baseline` ran at all — and that ordering dropped real
         // findings. See the comment on the refusal for the measurement.
-        match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet(), crate::gate::baseline_from_config()) {
+        match check_baseline(bv, dir, &crate_name, &all_pub, &inferred, crate::gate::unknown_ratchet(), crate::gate::baseline_from_config()) {
             BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
             BaselineOutcome::Invalid => {
                 // diagnostic already printed by check_baseline
@@ -10405,10 +10420,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
-        let mut outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, unknown_aliases, &net_partners);
+        let mut outcome = policy_violations(&text, &crate_name, &all_pub, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, unknown_aliases, &net_partners);
         // ⟨0.41⟩ SPEC §6.2 `accept`: settle THIS member's rows provisionally (its own exit decisions below read `v`),
         // recording what `finalize_accept` needs to settle the whole run. A no-op without an entry.
-        crate::gate::settle_member(&paccepts, &crate_name, &all, &mut outcome, run);
+        crate::gate::settle_member(&paccepts, &crate_name, &all_pub, &mut outcome, run);
         // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
         // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES,
         // so a function calling into a dep has an EMPTY adjacency and the crossing is invisible to them.
@@ -10641,10 +10656,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // ⟨0.24⟩ The SAME two accumulators the gate matched on, and the SAME alias vocabulary it
         // resolved through — the disclosure names the holes the gate declined to clear, so anything it
         // reads differently is a second gate wearing the first one's name.
-        let hole_nets = crate::gate::net_class_map(&all, &inferred, &hostsacc, &incompleteacc, &net_partners);
+        let hole_nets = crate::gate::net_class_map(&all_pub, &inferred, &hostsacc, &incompleteacc, &net_partners);
         let holes = crate::gate::unverified_holes(
             &text,
-            &all,
+            &all_pub,
             &inferred,
             &reason_class_acc,
             &hole_nets,
