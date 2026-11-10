@@ -9659,7 +9659,10 @@ impl<'a> CallCollector<'a> {
             return None;
         }
         if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
-            eprintln!("R1630DEREF\t{owner_leaf}.{key}\t{wl}->{arg}\t.{leaf}"); // §E1 REACH COUNTER
+            // The owner's module-qualified path where R1624 proves it (else its leaf), so an independent checker can find
+            // the declaration the argument was read from.
+            let oq = self.owner_qual(&fe.base, &owner).map_or_else(|| owner_leaf.to_string(), |(_, q)| q);
+            eprintln!("R1630DEREF\t{oq}.{key}\t{wl}->{arg}\t.{leaf}"); // §E1 REACH COUNTER
         }
         Some(arg.to_string())
     }
