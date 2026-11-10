@@ -6315,11 +6315,17 @@ pub(crate) fn collect_macro_modules(
 /// `index_type_impls!`) and bitflags' `Flag::bits`. Both conditions NARROW a sound over-approximation on
 /// a named fact, which is the denylist direction; neither is an allowlist of shapes permitted to hedge.
 ///
-/// THE BOUNDARY, STATED. Only a type whose DECLARATION candor could read is here — a `struct` declared
-/// *inside* the macro body (mio's own `IoSourceState`) is invisible to this walk exactly as its impls
-/// are, and stays an under-report. And the module set is this FILE's, so a type declared in a readable
+/// THE BOUNDARY, STATED. A type whose DECLARATION candor could read is here, and (SOUNDNESS R1636) so is
+/// a type an item-position invocation's own text declares (`struct`/`enum`/`union`/`type <Name>` inside
+/// `cfg_io_driver! { .. }`); a type a `macro_rules!` BODY declares through a metavariable is not. The module set is this FILE's, so a type declared in a readable
 /// module whose `impl` lives in a macro-hidden module elsewhere is not covered either. Both are misses,
 /// both are stated; neither is a guess.
+/// SOUNDNESS R1636 — the prefix under which `collect_macro_hidden_decls` files a type name an item-position invocation's
+/// own text DECLARES (beside the plain R452 name). Angle-bracketed, so no type leaf can equal it.
+pub(crate) const MACRO_DECL_TYPE: &str = "<macrodecl>";
+/// SOUNDNESS R1636 — the same, for a `type` ALIAS that text declares.
+pub(crate) const MACRO_DECL_ALIAS: &str = "<macroalias>";
+
 pub(crate) fn collect_macro_hidden_decls(
     items: &[syn::Item],
     modpath: &str,
@@ -6355,6 +6361,38 @@ pub(crate) fn collect_macro_hidden_decls(
             if include_tests || !is_cfg_test(&m.attrs) {
                 let toks = m.mac.tokens.to_string();
                 let mut prev_fn = false;
+                // SOUNDNESS R1636 — and, for an item-position INVOCATION (not a `macro_rules!` body, whose `struct $name`
+                // names a metavariable), the TYPE names its text declares: tokio's `cfg_io_driver! { pub(crate) enum IoStack
+                // { .. } impl IoStack { fn park(..) } }` beside `cfg_not_io_driver! { pub(crate) struct IoStack(ParkThread); .. }`.
+                // A cross-file cfg macro is never expanded (`mbe::expand_items`), so `IoStack` has no declaration candor
+                // read anywhere, `collect_decls` saw no module item to file it under, and `self.park.park(h)` on a field
+                // typed `IoStack` (tokio's `runtime::time::Driver::park_internal`) formed `IoStack::park` with no claimant and
+                // read PURE over the I/O driver's park. Filing the type here is R452 (b)'s evidence for exactly that shape:
+                // a type this crate declares where candor could not read it, and a `fn` name the same kind of text writes.
+                // Read off the PARSED item list, never off the token text (a doc comment's "the struct is" would file
+                // `is`); an invocation whose arguments are not an item list contributes no type.
+                if m.ident.is_none() && std::env::var_os("CANDOR_R1636_OFF").is_none() {
+                    if let Ok(f) = syn::parse2::<syn::File>(m.mac.tokens.clone()) {
+                        for gi in &f.items {
+                            let n = match gi {
+                                syn::Item::Struct(x) => x.ident.to_string(),
+                                syn::Item::Enum(x) => x.ident.to_string(),
+                                syn::Item::Union(x) => x.ident.to_string(),
+                                syn::Item::Type(x) => {
+                                    // A type ALIAS: every member reached through it is the hidden target's, so no
+                                    // method-name evidence is needed for it (`scan.rs`, R452 (b)).
+                                    types.insert(format!("{MACRO_DECL_ALIAS}{}", x.ident));
+                                    x.ident.to_string()
+                                }
+                                _ => continue,
+                            };
+                            // Both the R452 name and a `MACRO_DECL_TYPE`-marked one: the marked fact says the TYPE ITSELF
+                            // was declared where candor could not read it (see `scan.rs`, R452 (b)).
+                            types.insert(format!("{MACRO_DECL_TYPE}{n}"));
+                            types.insert(n);
+                        }
+                    }
+                }
                 for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
                     if prev_fn && !t.is_empty() {
                         fns.insert(t.to_string());
@@ -12946,6 +12984,14 @@ pub(crate) fn collect_nonpath_receivers(
                 if im.generics.type_params().any(|p| p.ident == seg.ident) {
                     continue; // `impl<T> Tr for &T` — a forwarder, not a receiver
                 }
+                // SOUNDNESS R1649 — the impl's TRAIT leaf, a fourth field: where the referent's own tail is already claimed
+                // by another impl (`impl AnyBackend for Conn` beside `impl Exec for &mut Conn`), which one a method call
+                // runs is decided by which trait is in scope at the call, and Pass B needs the trait to ask.
+                let tr_leaf = im
+                    .trait_
+                    .as_ref()
+                    .and_then(|(_, tr, _)| impl_trait_leaf(tr, uses).or_else(|| tr.segments.last().map(|s| s.ident.to_string())))
+                    .unwrap_or_default();
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(f) = ii {
                         if !include_tests && is_cfg_test(&f.attrs) {
@@ -12953,7 +12999,10 @@ pub(crate) fn collect_nonpath_receivers(
                         }
                         let m = f.sig.ident.to_string();
                         let shared = if shared_count(&m) > 1 { "1" } else { "0" };
-                        out.insert(format!("{referent}::{m}\u{1f}{}\u{1f}{shared}", crate::decls::qualify(modpath, &m)));
+                        out.insert(format!(
+                            "{referent}::{m}\u{1f}{}\u{1f}{shared}\u{1f}{tr_leaf}",
+                            crate::decls::qualify(modpath, &m)
+                        ));
                     }
                 }
             }

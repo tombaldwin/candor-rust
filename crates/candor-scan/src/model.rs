@@ -674,6 +674,13 @@ pub(crate) fn field_trait_qual_key(struct_leaf: &str, field: &str, leaf: &str) -
     format!("<fieldtq>{struct_leaf}\u{1f}{field}\u{1f}{leaf}")
 }
 
+/// SOUNDNESS R1630 — `impl<T> Deref for W<T> { type Target = T }`: the POSITION of `Target`'s parameter in the impl's
+/// written self-type arguments (`RET_GENERIC_NONE` for any other target), so `w.m()` on a field `w: W<X>` can auto-deref
+/// to `X::m`. Angle-bracketed: no identifier reaches it.
+pub(crate) fn deref_param_key(type_leaf: &str) -> String {
+    format!("<derefparam>{type_leaf}")
+}
+
 pub(crate) fn field_args_key(struct_leaf: &str, field: &str) -> String {
     format!("<fieldargs>{struct_leaf}\u{1f}{field}")
 }
@@ -744,6 +751,14 @@ pub(crate) fn param_opaque_key(fn_leaf: &str) -> String {
 /// SOUNDNESS R1144 (v052 audit) — prefix of a `macro_twins` entry naming a `macro_rules!` name defined more than once
 /// with different templates anywhere (ungated too). `\u{2}` cannot begin a Rust identifier.
 pub(crate) const MACRO_REDEF_PREFIX: &str = "\u{2}redef:";
+/// SOUNDNESS R474 — prefix of a `macro_twins` entry recording a `#[macro_use] extern crate log` at the crate root:
+/// `\u{2}macuse:log:<names>\u{3}<cfg>`, where `<names>` is `*` (bare `#[macro_use]`) or the comma-joined list of a
+/// `#[macro_use(a, b)]`, and `<cfg>` is the `\u{3}`-joined token text of the item's own `#[cfg(..)]` predicates. Pass A
+/// records the predicates unevaluated (a cached Pass A fact must not depend on the feature set); Pass B evaluates them.
+pub(crate) const MACRO_USE_LOG_PREFIX: &str = "\u{2}macuse:log:";
+/// SOUNDNESS R474 — the macros the `log` facade exports (0.3 and 0.4). Only these names are bound by its
+/// `#[macro_use]`; any other bare macro name is somebody else's.
+pub(crate) const LOG_MACRO_NAMES: &[&str] = &["trace", "debug", "info", "warn", "error", "log", "log_enabled"];
 /// SOUNDNESS R1156 — the `uses` key under which `decls::scan_items` records, in TEXTUAL order, the `macro_rules!`
 /// definition of a name in scope at the current item (`\u{2}scopemac:<name>` -> the definition's tokens). It is
 /// the module scope and order `local_macros` (one entry per name per crate) does not hold, so a name defined twice
@@ -1644,6 +1659,9 @@ pub(crate) struct ElemIndexes<'a> {
     pub(crate) drop_types: Option<&'a HashSet<String>>,
     /// SOUNDNESS R1116 — type leaves declared at two or more quals (any fields). `None` in tests.
     pub(crate) twin_type_leaves: Option<&'a HashSet<String>>,
+    /// SOUNDNESS R1624 — `merged.qual` (`cache::QualIndexes`): each struct's four field indexes under its
+    /// module-qualified path. `None` in tests.
+    pub(crate) fields_q: Option<&'a crate::cache::QualIndexes>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

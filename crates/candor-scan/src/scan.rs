@@ -2546,7 +2546,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         out
     };
-    let elems = ElemIndexes { ambiguous_type_leaves: &ambiguous_type_leaves, field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins, field_borrows: Some(&merged.field_borrows), drop_types: Some(&merged.drop_types), twin_type_leaves: Some(&twin_type_leaves) };
+    let elems = ElemIndexes { ambiguous_type_leaves: &ambiguous_type_leaves, field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, static_types: &merged.static_types, callable_aliases: &merged.callable_aliases, ambiguous_return_leaves: &ambiguous_return_leaves, macro_twins: &merged.macro_twins, field_borrows: Some(&merged.field_borrows), drop_types: Some(&merged.drop_types), twin_type_leaves: Some(&twin_type_leaves), fields_q: Some(&merged.qual) };
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
@@ -3145,12 +3145,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut nonpath_tails: HashSet<String> = HashSet::new();
     // t2 -> the MERGED unit quals that tail names (R1034's shared case; judged post-fixpoint, see below).
     let mut nonpath_shared: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1649 — t2 -> (unit qual, trait leaf) of an `impl Tr for &T` / `&mut T` (module-keyed, R1034) whose tail
+    // `T::m` is ALREADY claimed by another impl, so the fallback below does not file it. Read at the typed call site.
+    let mut r1649_ref: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let r1649_off = std::env::var_os("CANDOR_R1649_OFF").is_some();
     {
         let have: HashSet<&str> = fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias).map(|f| f.qual.as_str()).collect();
         let mut adds: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for e in &merged.nonpath_receivers {
             let mut parts = e.split('\u{1f}');
             let (Some(t2), Some(q), Some(shared)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            if by_tail2.contains_key(t2) && have.contains(q) && shared == "0" && !r1649_off {
+                if let Some(tr) = parts.next().filter(|t| !t.is_empty()) {
+                    let v = r1649_ref.entry(t2.to_string()).or_default();
+                    if !v.iter().any(|(x, _)| x == q) {
+                        v.push((q.to_string(), tr.to_string()));
+                    }
+                }
+            }
             if by_tail2.contains_key(t2) || !have.contains(q) {
                 continue;
             }
@@ -5192,8 +5204,81 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     });
                 if let Some(targets) = targets {
                     resolved_local = true;
+                    // SOUNDNESS R1649 — A TAIL TWO IMPLS CLAIM, ONE OF THEM ON `&T`. `impl Exec for &mut Conn` is keyed at module
+                    // level (R1034) and its `Conn::prep` fallback is not filed when `impl AnyBackend for Conn` already claims
+                    // that tail, so a typed `conn.prep(q)` resolved to `AnyBackend::prep` whatever the call site imported.
+                    // sqlx-postgres `listener`'s `self.connection().await?.prepare_with(..)` (only `Executor` imported) ran
+                    // `<&mut PgConnection as Executor>::prepare_with` and read `AnyConnectionBackend`'s (rustc's MIR;
+                    // EXECUTED one-variable fixture rustagent-r474/fx/r1649: the write ran, the row was ABSENT, and the pure
+                    // twin read the other impl's `Fs`). Rust picks by the trait in scope at the call, so the edge MOVES from the
+                    // claimant to the `&T` impl only where that is determined: the `&T` impl's trait is CERTAINLY in scope (one
+                    // written `use` names its leaf, and it is not a leaf two of this crate's traits share), the claimant is the one
+                    // trait impl of `T::m`, of a DIFFERENT trait, and that trait may NOT be in scope (no glob, no `use` naming it,
+                    // not declared in the file): two in-scope candidates at one probe step would not compile. Residual, stated:
+                    // a claimant trait in scope under a re-exported alias, met by an OWNED receiver at an earlier probe step.
+                    // `CANDOR_R1649_OFF` restores the old reading; `CANDOR_R1649_INSTR` counts both branches.
+                    let mut withdrawn: Option<String> = None;
+                    if c.method && c.dot && c.typed && !c.is_macro && !r1649_ref.is_empty() {
+                        let segs: Vec<&str> = c.path.split("::").collect();
+                        if segs.len() >= 2 {
+                            let (ty_leaf, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
+                            if let Some(refs) = r1649_ref.get(&format!("{ty_leaf}::{m}")) {
+                                let file = f.loc.split(':').next().unwrap_or("");
+                                let fu = file_uses.get(file).copied().unwrap_or(&[]);
+                                // A glob of ANY root may bring either trait; a written `use` naming the leaf brings it.
+                                let any_glob = fu.iter().any(|u| u.ends_with('*'));
+                                let declared_here = file_local_traits.get(file);
+                                let named = |tr: &str| fu.iter().filter(|u| u.rsplit("::").next() == Some(tr)).count();
+                                let maybe = |tr: &str| any_glob || named(tr) > 0 || declared_here.is_some_and(|d| d.contains(tr));
+                                // CERTAIN: one written `use` names the leaf, and it is not a leaf two of this crate's own traits share.
+                                let imported_once = |tr: &str| {
+                                    named(tr) == 1 && merged.trait_quals.get(tr).is_none_or(|v| v.len() == 1)
+                                };
+                                // Only where rustc's choice is DETERMINED by scope does the resolution move: the claimant is the one
+                                // trait impl of `T::m`, its trait may NOT be in scope, and a `&T` impl's (different) trait IS — named by
+                                // exactly one written `use`. Everywhere else the old resolution stands untouched: a first cut that
+                                // EDGED every `&T` impl whose trait merely might be in scope added 400 edges rustc's MIR does not make
+                                // (rustagent-r474/ab1649/mc.tsv: a leaf two types share, `serde_json`'s two `Serializer`s; a generic
+                                // receiver typed by its bound's name; a builder-chain receiver guess, tempfile `self.as_file_mut()`).
+                                if targets.len() == 1 {
+                                    let claim = &targets[0];
+                                    let traits: Vec<&str> = merged
+                                        .impl_members
+                                        .iter()
+                                        .filter_map(|k| {
+                                            let mut p = k.split('\u{1f}');
+                                            let (Some(tr), Some(ty), Some(mm), None) = (p.next(), p.next(), p.next(), p.next()) else {
+                                                return None;
+                                            };
+                                            (ty == ty_leaf && mm == m).then_some(tr)
+                                        })
+                                        .collect();
+                                    let one_unit = fns.iter().filter(|g| &g.qual == claim).count() == 1;
+                                    if let [t] = traits.as_slice() {
+                                        let winners: Vec<&String> = refs
+                                            .iter()
+                                            .filter(|(q, tr)| tr != t && imported_once(tr) && q != &f.qual)
+                                            .map(|(q, _)| q)
+                                            .collect();
+                                        if !winners.is_empty() && !maybe(t) && one_unit {
+                                            if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                                eprintln!("R1649WITHDRAW\t{}\t{}\t{claim}", f.qual, c.path); // §E1 REACH COUNTER
+                                            }
+                                            withdrawn = Some(claim.clone());
+                                            for q in winners {
+                                                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                                    eprintln!("R1649EDGE\t{}\t{}\t{q}", f.qual, c.path); // §E1 REACH COUNTER
+                                                }
+                                                calls.entry(f.qual.clone()).or_default().insert(q.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for t in targets {
-                        if t != &f.qual {
+                        if t != &f.qual && withdrawn.as_ref() != Some(t) {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
                         }
                     }
@@ -5492,6 +5577,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // `U::leaf` that resolves — the user-Deref analog of the Box/Arc/Rc peel (a newtype
                         // `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find). `.clone()`
                         // is guarded at the typed-call emit, so no pointee-clone fabrication recurs.
+                        // SOUNDNESS R1630 (residual) — the receiver's type is a crate-local `impl<T> Deref for W<T> { type
+                        // Target = T }` wrapper and `W` declares no `leaf`: the call auto-derefs to the wrapper's INSTANTIATION,
+                        // which no declaration at this site writes (the collector answers only a FIELD receiver whose written
+                        // arguments say it, `CallCollector::deref_param_recv`). tokio's `if let Some(mut driver) =
+                        // self.shared.driver.try_lock() { driver.shutdown(handle) }` over `LockGuard<'_, T>` formed
+                        // `LockGuard::shutdown` and read PURE over the I/O driver's shutdown. The chase below can only
+                        // follow a CONCRETE target, so this is the generic-payload disclosure, at the site that lost it.
+                        if !resolved_local
+                            && std::env::var_os("CANDOR_R1630_OFF").is_none()
+                            && matches!(merged.rets.get(&crate::model::deref_param_key(&t_type)), Some(Some(p)) if p.parse::<usize>().is_ok())
+                            // …and some crate impl declares a member of that name, so the instantiation CAN be a local type
+                            // whose member runs (tokio's `Driver::shutdown`). A name no crate impl declares is a std or
+                            // dependency member (time's `Spanned<&[u8]>` `.eq_ignore_ascii_case(..)`, 97 rows a crate): the
+                            // pre-existing reading stands for it, as for any untyped foreign receiver.
+                            && merged.rets.contains_key(&crate::model::any_method_key(&c.leaf))
+                            && !matches!(c.leaf.as_str(), "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq"
+                                | "ne" | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default"
+                                | "into" | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")
+                        {
+                            if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+                                eprintln!("R1630HEDGE\t{}\t{t_type}.{}", f.qual, c.leaf); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert(format!("dispatch:generic payload receiver of `{}`", c.leaf));
+                        }
                         if !resolved_local {
                             let mut cur = t_type.clone();
                             let mut hops = 0;
@@ -5652,7 +5763,55 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 } else {
                     Some(format!("{cr_real}#{rel}"))
                 };
-                let hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
+                let mut hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
+                // SOUNDNESS R1637 — A PATH THROUGH A SUBMODULE RE-EXPORT. `rustix::io::write` is defined at
+                // `io::read_write::write` and re-exported by `pub use read_write::*;` in `io`; the producer keys its unit by
+                // leaf, tail2 (`read_write::write`) and qual, so the consumer's `rustix#io::write` matched nothing and a
+                // COVERED owner's miss reads as purity: polling 3.3.1/3.4.0's `poll::Poller::notify` (whose `Notify::notify`
+                // writes the wake-up pipe) read `[Log]` chained, and the minimal `pd::io::w()` over `mod io { mod rw { pub fn
+                // w() { fs::read(..) } } pub use rw::w; }` read PURE chained against `invisible:[pd]` unchained (EXECUTED
+                // fixture `fx/pc`, `deny Fs` 0, published 0.41.3 the same). A crate-root re-export only ever worked because
+                // its tail2 IS the leaf key. On the miss: the producer's units of that LEAF (`DepIndex::members`) — exactly
+                // one, and the path names it (a re-export of anything else would be a name the producer does not define,
+                // which stays as before); several, and which one the path re-exports is not decidable from the report, so
+                // the call discloses rather than picking (`ambiguous:`). A free-fn path call only. `CANDOR_R1637_OFF=1`.
+                // A free fn reached through a MODULE: the segment before the leaf is a module name (lower-case by Rust's
+                // naming rule), never a type — `Pz::eq`, `Dp::bitor_assign` are an operator's or an associated fn's path, whose
+                // pure unit is simply absent from `functions[]` (executed controls `z_pz`, `cc_deppure`).
+                let through_module = rel.rsplit("::").nth(1).and_then(|m| m.chars().next()).is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+                if hit.is_none() && !c.method && !c.is_macro && through_module && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
+                    // Only MODULE owners (every segment lower-case): a `pub use` re-exports a free fn, never an inherent
+                    // method, so a type's same-leaf method (`cargo::Builder::build` beside dylint_internal's pure free fn
+                    // `cargo::build`) is neither a join target nor a reason to disclose — the first cut joined it (a
+                    // fabrication the chained census found; fixture chain/r1637 `c_mk_free_zq`).
+                    let module_owner = |o: &String| {
+                        o.split("::").all(|s| s.chars().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_'))
+                    };
+                    let all: Vec<&String> = deps_idx.members.get(&c.leaf).into_iter().flatten()
+                        .filter(|(k, o)| k == cr_real && module_owner(o)).map(|(_, o)| o).collect();
+                    // `members` is read off `functions[]`, which lists only units that HAVE effects: a pure unit of the same
+                    // leaf is invisible here, so "exactly one owner" is not "the only definition". The join is taken only for
+                    // the one effectful unit BENEATH the written module (`io::read_write` for `io::write`), where a `pub use`
+                    // re-exports from far more often than from elsewhere; any other miss with an effectful unit of that leaf
+                    // in the producer DISCLOSES, never picks (`pd::jo::w()` over a pure `jo::rw::w` beside an effectful
+                    // `io::rw::w` would otherwise be charged the sibling's `Fs`). No effectful unit of the leaf: the miss stays
+                    // as it was, which is the right answer when the re-exported unit is itself pure.
+                    let module = rel.rsplit_once("::").map_or("", |x| x.0);
+                    let under: Vec<&String> = all.iter().copied()
+                        .filter(|o| o.as_str() == module || o.starts_with(&format!("{module}::"))).collect();
+                    if std::env::var_os("CANDOR_R1637_INSTR").is_some() && !all.is_empty() {
+                        eprintln!("R1637REEXP\t{}\t{jpath}\t{}\t{}", f.qual, under.len(), all.len()); // §E1 REACH COUNTER
+                    }
+                    match (under.as_slice(), all.is_empty()) {
+                        ([one], _) => hit = deps_idx.by_key.get(&format!("{cr_real}#{one}::{}", c.leaf)),
+                        (_, true) => {}
+                        _ => {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert(format!("ambiguous:same-name units in {cr_real} under a re-exported path"));
+                        }
+                    }
+                }
                 if let Some(de) = hit {
                     dep_join_hit = covered_owner; // R1349 — a contributor is not a resolution of the call
                     // SOUNDNESS R501 — WHAT THE JOIN ACTUALLY ANSWERED, kept because the disclosure gate
@@ -6739,8 +6898,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R501MARK\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
                     } else if claimants == 0
-                        && merged.macro_hidden_types.contains(&ty)
-                        && merged.macro_hidden_fns.contains(&c.leaf)
+                        && (merged.macro_hidden_fns.contains(&c.leaf)
+                            // An ALIAS declared only in macro text names a hidden target: whatever the member, it is that
+                            // target's (tokio 1.18's `cfg_time! { type TimeDriver = Either<..> }`, `self.inner.park()`).
+                            || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_ALIAS))
+                                && !merged.fields.contains_key(&ty)
+                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
+                        && (merged.macro_hidden_types.contains(&ty)
+                            // SOUNDNESS R1636 — …or the receiver's TYPE is declared only inside unexpanded macro text (tokio
+                            // 1.45's `cfg_io_driver! { enum IoStack { .. } }`, 1.18's `cfg_time! { type TimeDriver = .. }`): no
+                            // declaration of it was read anywhere. The TYPE evidence is the new half; the METHOD-NAME half
+                            // stays R452's (`fn <leaf>` written in unexpanded macro text): measured, the type half alone hedged
+                            // 2,871 rows across the corpus, syn's `ast_struct!` types dominating, where the member is a derive's or
+                            // a readable trait impl's. Not a struct candor read (`fields` holds every one it saw).
+                            || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_TYPE))
+                                && !merged.fields.contains_key(&ty)
+                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
                     {
                         // (b) THE RECEIVER'S TYPE IS ONE THIS CRATE DECLARES INSIDE A MACRO-HIDDEN
                         // MODULE, and no `Type::method` unit exists. `collect_decls` skips an

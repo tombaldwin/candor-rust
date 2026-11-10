@@ -44,6 +44,21 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev161 (rustagent-r474): SOUNDNESS R1649 — Pass A's `nonpath_receivers` referent entries gain the impl's trait leaf
+    // (a fourth field) and Pass B's typed calls read it. A rev160 entry has no trait and replays the wrong-impl edge warm.
+    // rev160 (rustagent-r474): SOUNDNESS R474 — Pass A records a root `#[macro_use] extern crate log` in `macro_twins`
+    // (`model::MACRO_USE_LOG_PREFIX`) and Pass B's cached `calls` gain the bare `log::<leaf>` edge. A rev159 entry has no
+    // record and replays the silence warm. Mandatory.
+    // rev159 (rustagent-r1641): SOUNDNESS R1641/R1643 — Pass A types `self` in a reference-self impl of a local struct
+    // (FnInfo vars and the impl-args key change) and Pass B's cached `calls` change (a std-handle accessor return types its
+    // receiver). A rev158 entry would replay the untyped reading on a warm scan. Mandatory.
+    // rev158 (rustagent-r1630): SOUNDNESS R1630/R1631 — Pass A's cached decls change: `QualIndexes` gained `field_args`,
+    // and `rets` gained `deref_param_key` (a `Deref` whose `Target` is the impl's own type parameter). A rev157 entry
+    // deserializes `field_args` EMPTY and has no deref-parameter fact, which replays the silence warm. Mandatory.
+    // rev157 (rustagent-r1624): SOUNDNESS R1624 — Pass A's cached decls change: `FileDecls` gained `qual` (`QualIndexes`),
+    // each struct's four field indexes under its module-qualified path. A rev156 entry deserializes them EMPTY,
+    // which leaves a same-leaf twin's `self.f` typed by whichever twin merged last — the fabrication/silence this closes,
+    // served warm. Mandatory.
     // rev156 (rustagent-r1623): SOUNDNESS R1623 — Pass B's cached `calls` change: `connect_with` / `connect_lazy` /
     // `connect_lazy_with` are constructor names (`lang::is_ctor`), so `let p = PgPool::connect_lazy(u).unwrap(); p.acquire()`
     // now forms `PgPool::acquire`, and a `parse::<DepType>()` hook edge is asked of the classifier (FromStr); a rev155 entry has no such edge and would replay the silence warm. Mandatory.
@@ -598,7 +613,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev156/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev161/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -621,6 +636,9 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> String {
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileDecls {
     pub(crate) fields: FieldIndex,
+    /// SOUNDNESS R1624 — this file's structs' field indexes keyed by MODULE-QUALIFIED path. See `QualIndexes`.
+    #[serde(default)]
+    pub(crate) qual: QualIndexes,
     /// SOUNDNESS R718 — `fields`' OWNERSHIP twin, keyed IDENTICALLY (struct leaf -> field name, or the
     /// tuple POSITION's string form) and carrying, per declaration, whether the field's written type
     /// BORROWS (`&T`, `&mut T`, `Option<&mut T>`, `*const T`, `&[T]`). `type_path` peels references on
@@ -903,9 +921,12 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     }
     crate::lang::set_file_dyn_aliases(crate::decls::seed_dyn_aliases(items, include_tests));
     let _clear_dyn = ClearDyn;
+    // SOUNDNESS R1624 — record each struct's own entries under its qualified path, for this walk only.
+    crate::decls::QUAL_FIELDS.with(|c| *c.borrow_mut() = Some(QualIndexes::default()));
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut dyn_trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut macro_twins, &mut blanket_methods, &mut callable_statics, &mut callable_aliases, &mut field_borrows);
+    let qual = crate::decls::QUAL_FIELDS.with(|c| c.borrow_mut().take()).unwrap_or_default();
     // SOUNDNESS R529c — the block-local structs' fields, typed by the SAME struct arm against the file's
     // top-level `use` map, into their own maps; every other output of this second walk is discarded.
     let mut block_fields: FieldIndex = HashMap::new();
@@ -948,6 +969,17 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut macro_hidden_fn = std::collections::HashSet::new();
     crate::lang::collect_macro_hidden_decls(
         items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn);
+    // SOUNDNESS R1630 — a generic `Deref` wrapper declared where candor could not read all its items (tokio's `PollEvented`,
+    // whose `poll_write` / `poll_read_ready` live in `cfg_io_driver! { impl<E: Source> PollEvented<E> { .. } }`) may declare
+    // the very method a call names, so auto-derefing to its target would skip the wrapper's own member: Rust picks
+    // `PollEvented::poll_write`, the collector would have formed `mio::..::Sender::poll_write`. Its deref-parameter fact is
+    // withdrawn to `RET_GENERIC_NONE` (a second file's value then conflicts, which also withdraws), leaving R452 (b) to disclose.
+    for t in &macro_hidden_ty {
+        let k = crate::model::deref_param_key(t);
+        if rets.contains_key(&k) {
+            rets.insert(k, Some(crate::model::RET_GENERIC_NONE.to_string()));
+        }
+    }
     // ⟨0.39⟩ obligation 2 — the FOREIGN abstractions this file implements, keyed under the OWNING crate.
     // Walked here (not inside `collect_decls`) for the same reason the re-export walk is: it needs the
     // file's assembled `use` map, which is what `collect_decls` has just finished producing.
@@ -1003,6 +1035,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::lang::collect_local_impl_members(items, include_tests, modpath, &uses, &mut impl_members);
     FileDecls {
         fields,
+        qual,
         field_borrows,
         block_fields,
         block_field_elem,
@@ -1116,6 +1149,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
 #[derive(Default)]
 pub(crate) struct MergedDecls {
     pub(crate) fields: FieldIndex,
+    /// SOUNDNESS R1624 — see `QualIndexes`; merged by `QualIndexes::merge` (a disagreement tombstones the field).
+    pub(crate) qual: QualIndexes,
     /// SOUNDNESS R718 — see `FileDecls::field_borrows`. Merged so OWNED WINS.
     pub(crate) field_borrows: HashMap<String, HashMap<String, crate::model::FieldBorrow>>,
     pub(crate) field_elem: FieldElemIndex,
@@ -1603,6 +1638,8 @@ pub(crate) fn alias_expand_decls(
     };
     if !moves_nested(&fd.fields)
         && !moves_nested(&fd.field_elem)
+        && !moves_nested(&fd.qual.fields)
+        && !moves_nested(&fd.qual.field_elem)
         && !moves_amb(&fd.rets)
         && !moves_amb(&fd.enum_tmp)
     {
@@ -1632,7 +1669,7 @@ pub(crate) fn alias_expand_decls(
         })
         .map(|(k, _)| k.clone())
         .collect();
-    for m in out.fields.values_mut().chain(out.field_elem.values_mut()) {
+    for m in out.fields.values_mut().chain(out.field_elem.values_mut()).chain(out.qual.fields.values_mut()).chain(out.qual.field_elem.values_mut()) {
         for v in m.values_mut() {
             if let Some(e) = re(v) {
                 *v = e;
@@ -1659,6 +1696,117 @@ pub(crate) fn alias_expand_decls(
     Some(out)
 }
 
+/// SOUNDNESS R1624 — the value a qualified field entry holds when two declarations of ONE path disagree on it.
+pub(crate) const QUAL_TOMB: &str = "\u{0}tomb";
+
+/// SOUNDNESS R1624 — `fields` / `field_elem` / `trait_fields` / `field_elem_trait` keyed by each struct's MODULE-QUALIFIED
+/// path (`pg::Executor`; the crate root's bare `Executor`) instead of its leaf, as that one declaration wrote them
+/// (`decls::QUAL_FIELDS`). The leaf-keyed indexes keep the LAST same-leaf declaration merged, so a same-leaf twin's
+/// `self.f` read its sibling's field type; these are read where the owner's path is PROVEN (`CallCollector::owner_qual`).
+/// Every struct the walk saw has a `fields` entry here, possibly empty, so `fields.contains_key(q)` says "declared". Two
+/// declarations of ONE path (`#[cfg]` arms of one struct) that disagree on a field record `QUAL_TOMB` for it.
+/// Not rewritten by scan.rs's post-merge passes (R476's impl-bound join, R1495's alias moves), so a reader checks the
+/// leaf-keyed entry still says the same KIND of thing before trusting one.
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QualIndexes {
+    pub(crate) fields: FieldIndex,
+    pub(crate) field_elem: FieldElemIndex,
+    pub(crate) trait_fields: TraitFieldIndex,
+    pub(crate) field_elem_trait: FieldElemTraitIndex,
+    /// The struct's own TYPE PARAMETERS, by qual. A field typed by one (`delegate: X`) is filed in `fields` as the
+    /// parameter's NAME, which names no type: its dispatch is the bound route's (R476), so it is not a CONCRETE field
+    /// for `CallCollector::qual_trait_field_in` (measured: serde_path_to_error's `de::CaptureKey::deserialize_any` lost its
+    /// `Deserializer` dispatch hedge when `delegate: X` was read as concrete).
+    #[serde(default)]
+    pub(crate) params: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1630/R1631 — each named field's written type ARGUMENTS (`decls::field_type_args`'s encoding, the value
+    /// the leaf-keyed `model::field_args_key` fact holds), by qual. The leaf-keyed fact is WITHDRAWN when same-leaf twins
+    /// disagree, so a proven owner reads its own here (`CallCollector::owner_field_args`). Same tomb rule.
+    #[serde(default)]
+    pub(crate) field_args: HashMap<String, HashMap<String, String>>,
+}
+
+impl QualIndexes {
+    /// Whether `v` (a `fields` / `field_elem` value, layers allowed) is one of `qual`'s own type parameters.
+    pub(crate) fn names_param(&self, qual: &str, v: &str) -> bool {
+        let bare = crate::lang::strip_wrapped(v);
+        self.params.get(qual).is_some_and(|ps| ps.iter().any(|p| p == bare))
+    }
+
+    /// File one declaration's entries under `qual`.
+    pub(crate) fn file(
+        &mut self,
+        qual: &str,
+        f: Option<&HashMap<String, String>>,
+        e: Option<&HashMap<String, String>>,
+        t: Option<&HashMap<String, Vec<String>>>,
+        et: Option<&HashMap<String, Vec<String>>>,
+    ) {
+        let tomb_s = QUAL_TOMB.to_string();
+        let tomb_v = vec![QUAL_TOMB.to_string()];
+        merge_qual_entry(&mut self.fields, qual, f.unwrap_or(&HashMap::new()), &tomb_s, true);
+        merge_qual_entry(&mut self.field_elem, qual, e.unwrap_or(&HashMap::new()), &tomb_s, false);
+        merge_qual_entry(&mut self.trait_fields, qual, t.unwrap_or(&HashMap::new()), &tomb_v, false);
+        merge_qual_entry(&mut self.field_elem_trait, qual, et.unwrap_or(&HashMap::new()), &tomb_v, false);
+    }
+
+    /// SOUNDNESS R1630/R1631 — file one field's written arguments under `qual` (same tomb rule).
+    pub(crate) fn file_args(&mut self, qual: &str, field: &str, args: &str) {
+        let m: HashMap<String, String> = std::iter::once((field.to_string(), args.to_string())).collect();
+        merge_qual_entry(&mut self.field_args, qual, &m, &QUAL_TOMB.to_string(), false);
+    }
+
+    /// Fold another file's `QualIndexes` in (same rule).
+    pub(crate) fn merge(&mut self, o: &QualIndexes) {
+        let tomb_s = QUAL_TOMB.to_string();
+        let tomb_v = vec![QUAL_TOMB.to_string()];
+        for (q, m) in &o.field_args {
+            merge_qual_entry(&mut self.field_args, q, m, &tomb_s, false);
+        }
+        for (q, m) in &o.fields {
+            merge_qual_entry(&mut self.fields, q, m, &tomb_s, true);
+        }
+        for (q, m) in &o.field_elem {
+            merge_qual_entry(&mut self.field_elem, q, m, &tomb_s, false);
+        }
+        for (q, m) in &o.trait_fields {
+            merge_qual_entry(&mut self.trait_fields, q, m, &tomb_v, false);
+        }
+        for (q, m) in &o.field_elem_trait {
+            merge_qual_entry(&mut self.field_elem_trait, q, m, &tomb_v, false);
+        }
+        for (q, ps) in &o.params {
+            let e = self.params.entry(q.clone()).or_default();
+            for p in ps {
+                if !e.contains(p) {
+                    e.push(p.clone());
+                }
+            }
+        }
+    }
+}
+
+/// SOUNDNESS R1624 — fold one declaration's map into a qualified index. A field two declarations of the same qualified path
+/// type differently (`#[cfg]` arms of one struct) is tombstoned, never picked; agreement keeps it. Order-independent. With
+/// `always`, the path gets an entry even when the map is empty (the "declared" fact `QualIndexes` documents).
+fn merge_qual_entry<V: Clone + PartialEq>(ix: &mut HashMap<String, HashMap<String, V>>, qual: &str, m: &HashMap<String, V>, tomb: &V, always: bool) {
+    if m.is_empty() && !always {
+        return;
+    }
+    let e = ix.entry(qual.to_string()).or_default();
+    for (k, v) in m {
+        match e.get(k) {
+            Some(prev) if prev != v => {
+                e.insert(k.clone(), tomb.clone());
+            }
+            Some(_) => {}
+            None => {
+                e.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
 /// `collect_decls` used when it wrote a shared map directly — so calling this over the per-file decls in
 /// WALK ORDER yields a result byte-identical to the old sequential `collect_decls` loop:
@@ -1669,6 +1817,7 @@ pub(crate) fn alias_expand_decls(
 ///   * `trait_impls`: append in walk order (the Vec's order is preserved exactly as the original push).
 ///   * `trait_decls`: sum counts, union method names (commutative).
 pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
+    acc.qual.merge(&fd.qual); // R1624
     for (s, fmap) in &fd.fields {
         let e = acc.fields.entry(s.clone()).or_default();
         for (k, v) in fmap {
@@ -2044,6 +2193,13 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push('\n');
     };
     nested(&mut s, "fields", &m.fields);
+    // R1624 — the qualified indexes (the Vec-valued two rendered joined, which is unambiguous for leaf lists).
+    nested(&mut s, "qual_fields", &m.qual.fields);
+    nested(&mut s, "qual_field_elem", &m.qual.field_elem);
+    nested(&mut s, "qual_field_args", &m.qual.field_args); // R1630/R1631
+    for (tag, ix) in [("qual_trait_fields", &m.qual.trait_fields), ("qual_field_elem_trait", &m.qual.field_elem_trait)] {
+        nested(&mut s, tag, &ix.iter().map(|(k, v)| (k.clone(), v.iter().map(|(f, l)| (f.clone(), l.join(","))).collect())).collect());
+    }
     // SOUNDNESS R718 — `field_borrows` is `fields`' ownership twin and steers whether a construction is
     // charged drop glue, so it belongs in the digest for the same reason `fields` does: a Pass-B FnInfo
     // is only reusable if the index it was derived from has not moved. Rendered through the same

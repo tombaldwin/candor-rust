@@ -170,6 +170,8 @@ pub(crate) struct AssignDrop<'a> {
     pub(crate) macro_idents: std::collections::HashSet<String>,
     /// Type leaves declared at two or more quals (`ElemIndexes::twin_type_leaves`).
     pub(crate) twin_leaves: Option<&'a std::collections::HashSet<String>>,
+    /// SOUNDNESS R1624 — `ElemIndexes::fields_q`, for `CallCollector::owner_qual`.
+    pub(crate) fields_q: Option<&'a crate::cache::QualIndexes>,
 }
 
 pub(crate) struct CallCollector<'a> {
@@ -4311,6 +4313,28 @@ impl<'a> CallCollector<'a> {
                 _ => break,
             }
         }
+        // SOUNDNESS R1641/R1643 — `self.as_file()` in `impl Read for &NamedTempFile<File>`: the receiver is `self`, whose
+        // written arguments are the impl's own (`decls::IMPL_ARGS_KEY`, positions as `impl_retgen_key` counts them). Only a
+        // CONCRETE argument answers — an argument that is one of this scope's own type parameters (`impl<F: Read> Read for
+        // NamedTempFile<F>`) is left to the walk below exactly as before — and only a std I/O handle, which no crate
+        // `impl_fn_key` can name (the gate R452 put on every other corrected receiver is kept for those).
+        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+            if let syn::Expr::Path(p) = r {
+                if p.path.is_ident("self") {
+                    let arg = self.uses.get(crate::decls::IMPL_ARGS_KEY).and_then(|a| a.split(',').nth(pos).map(str::to_string));
+                    if let Some(a) = arg.filter(|a| a != "_" && !self.generic_bounds.contains_key(a.as_str())) {
+                        let full = crate::lang::expand(&a, &self.uses);
+                        if let Some(h) = std_io_handle(&full) {
+                            if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                                eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\tself<{a}>\t{h}"); // §E1 REACH COUNTER
+                            }
+                            return Some(h);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
         let syn::Expr::Field(f) = r else { return None };
         let owner = self.resolve_recv_type(&f.base)?;
         if self.field_ambiguous(&owner, &f.member) || self.is_dependency_type(&owner) {
@@ -4367,6 +4391,22 @@ impl<'a> CallCollector<'a> {
         // here: it would withdraw a concrete charge at the old site and replace it with `Unknown` at the
         // new one, so it can REMOVE rows, which this commit's A/B (REMOVED 0) says nothing about. Price
         // it on its own corpus run before touching this line.
+        // SOUNDNESS R1643 — A DECLARED std I/O HANDLE RETURN (`fn as_file_mut(&mut self) -> &mut File`) IS ANSWERED BY THE
+        // STD HANDLE RULES, NOT BY A CRATE `impl_fn_key`. The second gate below asks whether the crate declares
+        // `File::read`, which it never does, so `self.as_file_mut().read(b)` fell back to the base (`NamedTempFile::read`,
+        // a key nothing answers) and read PURE over a file read (EXECUTED rustagent-r1641/fx/tf: `t1`/`t3`/`t5` ABSENT on
+        // published 0.41.3 and 65889f2 while the field spelling `self.file.read(b)` and `let f: &mut File = ..; f.read(b)`
+        // read `Fs`; tempfile's `impl Read for NamedTempFile`). A std handle is not a crate type, so the ambiguity this
+        // gate guards against (three local `Selector::deregister` claimants) cannot arise for it. `CANDOR_R1643_OFF=1`.
+        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+            let full = crate::lang::expand(ret, &self.uses);
+            if let Some(h) = std_io_handle(&full).or_else(|| std_io_handle(ret)) {
+                if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                    eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\t{h}"); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                return Some(h);
+            }
+        }
         let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
         self.returns
             .contains_key(&crate::model::impl_fn_key(ret_leaf, outer))
@@ -4430,6 +4470,41 @@ impl<'a> CallCollector<'a> {
         self.returns.get(&crate::model::unit_variant_key(leaf, variant)).is_some_and(|v| v == "1")
     }
 
+    /// SOUNDNESS R474 — `log::<leaf>` when a bare invocation `<leaf>!` is bound by the crate root's `#[macro_use]
+    /// extern crate log` (`decls::record_macro_use_log`): `leaf` is a name `log` exports, the import's list names it
+    /// (bare `#[macro_use]` names all), and its own `#[cfg]` is not known-false under the crate's feature picture —
+    /// the rule every other cfg-gated item obeys (`lang::is_cfg_inactive`; an undeclared feature, rand 0.6.5's
+    /// optional `log`, is UNKNOWN and keeps it). A macro this BODY declares under the name shadows the import
+    /// textually and is left to R142's expansion, as does an ungated crate-level one in textual scope. Kill switch `CANDOR_R474_OFF`; reach `CANDOR_R474_INSTR`.
+    fn macro_use_log_path(&self, leaf: &str) -> Option<String> {
+        if !crate::model::LOG_MACRO_NAMES.contains(&leaf) || self.body_macros.contains_key(leaf) {
+            return None;
+        }
+        // An UNGATED crate-local definition of the name in TEXTUAL scope at this item (R1156's record) shadows the
+        // `#[macro_use]` prelude, which is rustc's rule: EXECUTED, `both_debug_zq` (`#[macro_use] extern crate log;`
+        // then `macro_rules! debug { ($($x:tt)*) => () }`) logs nothing. A `#[cfg]`-gated definition is never
+        // recorded there, so the rand / getrandom / handlebars / quickcheck fallbacks keep the edge.
+        if self.uses.contains_key(&format!("{}{leaf}", crate::model::SCOPE_MACRO_PREFIX)) {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R474_OFF").is_some() {
+            return None;
+        }
+        let bound = self.macro_twins.iter().filter_map(|k| k.strip_prefix(crate::model::MACRO_USE_LOG_PREFIX)).any(|rest| {
+            let (names, cfgs) = rest.split_once('\u{3}').unwrap_or((rest, ""));
+            if names != "*" && !names.split(',').any(|n| n == leaf) {
+                return false;
+            }
+            let src: String = cfgs.split('\u{3}').filter(|c| !c.is_empty()).map(|c| format!("#[cfg({c})]")).collect();
+            // An unparseable predicate cannot be proven false, so it keeps the import.
+            let attrs = syn::parse::Parser::parse_str(syn::Attribute::parse_outer, &src).unwrap_or_default();
+            !crate::lang::is_cfg_inactive(&attrs)
+        });
+        if bound && std::env::var_os("CANDOR_R474_INSTR").is_some() {
+            eprintln!("R474MACUSE\t{leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+        bound.then(|| format!("log::{leaf}"))
+    }
     /// SOUNDNESS R862 — is this resolved type path rooted at a MANIFEST dependency (`ratescore::Node`)?
     /// Read from the dependency list Pass B seeds (`lang::DEPS_KEY`); a map without it answers `false`,
     /// which is today's behaviour. A local module spelled like a dependency is anchored to `crate::` by
@@ -4575,13 +4650,13 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Path(_) => self.resolve_recv_type(expr),
             syn::Expr::Field(f) => {
                 let base = self.type_of(&f.base)?;
-                if self.field_ambiguous(&base, &f.member) {
-                    return None;
-                }
                 let key = match &f.member {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                if self.field_ambiguous(&base, &f.member) {
+                    return self.qual_field_in(&f.base, &base, &key, false).flatten(); // R1624 — the owner's own declaration, or nothing
+                }
                 if self.is_dependency_type(&base) {
                     return None; // R862 — a dependency's field is not this crate's leaf-keyed `fields`
                 }
@@ -4874,7 +4949,16 @@ impl<'a> CallCollector<'a> {
                     && self.elem_root_ambiguous(&m.receiver)
             }
             syn::Expr::Index(i) => self.elem_root_ambiguous(&i.expr),
-            syn::Expr::Field(f) => self.resolve_recv_type(&f.base).is_some_and(|t| self.field_ambiguous(&t, &f.member)),
+            // SOUNDNESS R1624 — not ambiguous where the owner's own declaration answers for the field (`qual_field_in`).
+            syn::Expr::Field(f) => self.resolve_recv_type(&f.base).is_some_and(|t| {
+                self.field_ambiguous(&t, &f.member) && {
+                    let key = match &f.member {
+                        syn::Member::Named(n) => n.to_string(),
+                        syn::Member::Unnamed(i) => i.index.to_string(),
+                    };
+                    !matches!(self.qual_field_in(&f.base, &t, &key, true), Some(Some(_)))
+                }
+            }),
             _ => false,
         }
     }
@@ -4897,6 +4981,145 @@ impl<'a> CallCollector<'a> {
         let mut hits = self.ambiguous_type_leaves.iter().filter_map(|e| e.strip_prefix(&prefix));
         let one = hits.next()?;
         hits.next().is_none().then(|| one.to_string())
+    }
+
+    /// SOUNDNESS R1624 — the owner's MODULE-QUALIFIED path, where it is PROVEN rather than inferred from its leaf:
+    ///   * a crate-anchored type (`crate::pg::Executor`, a parameter written `pg::Executor` expands to one), whose path
+    ///     is the qual;
+    ///   * `self`, typed as the enclosing impl's `Self`, written bare in a module that itself declares that name — a
+    ///     declared name cannot also be a non-glob import (E0255) and a glob loses to it (`lang::anchor_declared_type`).
+    ///
+    /// A bare owner reached any other way (a binding typed from another module's return or field, which records the
+    /// bare leaf) has no provable module and gets `None`, so every caller keeps its pre-existing reading. So does a path
+    /// the qualified indexes never saw declared. Kill switch `CANDOR_R1624_OFF`.
+    fn owner_qual(&self, base_expr: &syn::Expr, base: &str) -> Option<(&'a crate::cache::QualIndexes, String)> {
+        if std::env::var_os("CANDOR_R1624_OFF").is_some() {
+            return None;
+        }
+        let qi = self.assign_drop.fields_q?;
+        let qual = if let Some(q) = exact_anchored_ty(base) {
+            q.to_string()
+        } else {
+            let is_self = matches!(base_expr, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self"));
+            if !is_self
+                || base.contains("::")
+                || self.uses.get(crate::lang::SELF_KEY).map(String::as_str) != Some(base)
+                || crate::lang::module_declares(&self.uses, base) != Some(true)
+            {
+                return None;
+            }
+            let modpath = self.uses.get(crate::lang::MODPATH_KEY).map_or(self.modpath.as_str(), String::as_str);
+            crate::decls::qualify(modpath, base)
+        };
+        qi.fields.contains_key(&qual).then_some((qi, qual))
+    }
+
+    /// SOUNDNESS R1624 — what the owner's OWN declaration says `base.key` is in `fields` (or `field_elem`, `elem`), where
+    /// `owner_qual` proves the owner. `Some(Some(t))`: its type. `Some(None)`: the owner declares the field, but not in this
+    /// index (it is a trait object, or has no element) — the leaf-keyed entry is a sibling's and must not answer. `None`: no
+    /// proof; the caller keeps its pre-existing reading. A tombstoned field, a trait-object alias (R1495 moves those out of
+    /// `fields` after the merge) and a field the leaf-keyed index no longer holds (R476 / R1495) are all `None`.
+    fn qual_field_in(&self, base_expr: &syn::Expr, base: &str, key: &str, elem: bool) -> Option<Option<String>> {
+        let (qi, qual) = self.owner_qual(base_expr, base)?;
+        let (own, legacy) = if elem { (&qi.field_elem, self.field_elem) } else { (&qi.fields, self.fields) };
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        let instr = |what: &str, v: &str| {
+            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elem" } else { "field" }); // §E1 REACH
+            }
+        };
+        match own.get(&qual).and_then(|m| m.get(key)) {
+            Some(v) => {
+                if v == crate::cache::QUAL_TOMB || crate::lang::dyn_alias_leaves_str(v).is_some() {
+                    return None;
+                }
+                legacy.get(leaf)?.get(key)?;
+                // SOUNDNESS R1624 (twin element) — the owner's own ELEMENT is one of its type PARAMETERS (`m: RefCell<HashMap<K, C>>` in
+                // `struct ClusterConnection<C>`): that names no type, so it is not a concrete answer — and the leaf entry is a
+                // twin's, so it must not answer either. The bound route answers it (`qual_trait_field_in`). Measured: redis
+                // 1.7.1's sync `ClusterConnection::{is_open, check_connection, set_*_timeout}` formed `C::is_open` and went
+                // ABSENT (EXECUTED twin fixture `fx/ge2`: `a::W::ge_map` `deny Fs` 1 -> 0 under R1624 alone).
+                if elem && qi.names_param(&qual, v) && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                    instr("param", v);
+                    return Some(None);
+                }
+                instr("type", v);
+                Some(Some(v.clone()))
+            }
+            None => {
+                // Declared by the owner as a trait-object field (and not in this index), while the leaf entry answers.
+                let declared_dyn = qi.trait_fields.get(&qual).is_some_and(|m| m.contains_key(key))
+                    || (elem && qi.fields.get(&qual).is_some_and(|m| m.contains_key(key)));
+                if declared_dyn && legacy.get(leaf).is_some_and(|m| m.contains_key(key)) {
+                    instr("none", "-");
+                    return Some(None);
+                }
+                None
+            }
+        }
+    }
+
+    /// SOUNDNESS R1624 — the dispatch-leaf half (`trait_fields`, or `field_elem_trait` with `elem`): the owner's own trait
+    /// leaves for `base.key`. `Some(vec![])` where the owner declares the field CONCRETELY (the leaf entry is a sibling's
+    /// trait object). Same proof and same `None` cases as `qual_field_in`.
+    fn qual_trait_field_in(&self, base_expr: &syn::Expr, base: &str, key: &str, elem: bool) -> Option<Vec<String>> {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(leaf)) {
+            return None;
+        }
+        let (qi, qual) = self.owner_qual(base_expr, base)?;
+        let (own, legacy) = if elem { (&qi.field_elem_trait, self.field_elem_trait) } else { (&qi.trait_fields, self.trait_fields) };
+        let legacy_has = legacy.get(leaf).is_some_and(|m| m.contains_key(key));
+        let instr = |what: &str, v: &str| {
+            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elemtrait" } else { "trait" }); // §E1 REACH
+            }
+        };
+        match own.get(&qual).and_then(|m| m.get(key)) {
+            Some(v) => {
+                if v.iter().any(|l| l == crate::cache::QUAL_TOMB || l.contains('\u{1f}')) || !legacy_has {
+                    return None;
+                }
+                instr("leaves", &v.join(","));
+                Some(v.clone())
+            }
+            None => {
+                // SOUNDNESS R1624 (twin element) — an element typed by the owner's own parameter: its bounds HERE, mapped by position
+                // (`payload_decision`), as the leaf-keyed index's R476 join would have filed them for a non-twin.
+                if elem && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                    if let Some(p) = qi.field_elem.get(&qual).and_then(|m| m.get(key)).filter(|v| qi.names_param(&qual, v)) {
+                        // By the owner's OWN parameter list (`qi.params`): the leaf-keyed `type_params_key` fact
+                        // `payload_decision` reads is withdrawn when a same-leaf twin declares different parameters.
+                        let t = crate::lang::strip_wrapped(p).to_string();
+                        let pos = qi.params.get(&qual).and_then(|ps| ps.iter().position(|x| *x == t));
+                        if let (Some(pos), Some((ev_leaf, args))) = (pos, self.scrut_evidence(base_expr)) {
+                            if ev_leaf == leaf {
+                                if let Some(arg) = args.get(pos) {
+                                    let mut b: Vec<String> = Vec::new();
+                                    for l in self.generic_bounds.get(arg).into_iter().chain(self.impl_generic_bounds.get(arg)).flatten() {
+                                        if !b.contains(l) {
+                                            b.push(l.clone());
+                                        }
+                                    }
+                                    if !b.is_empty() {
+                                        instr("param-bounds", &b.join(","));
+                                        return Some(b);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let concrete = qi.fields.get(&qual).and_then(|m| m.get(key)).is_some_and(|v| {
+                    v != crate::cache::QUAL_TOMB && crate::lang::dyn_alias_leaves_str(v).is_none() && !qi.names_param(&qual, v)
+                });
+                if concrete && legacy_has {
+                    instr("none", "-");
+                    return Some(Vec::new());
+                }
+                None
+            }
+        }
     }
 
     fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
@@ -5495,9 +5718,24 @@ impl<'a> CallCollector<'a> {
                 // type is crate-anchored with one shared leaf, answer with that leaf: the module-blind
                 // reading the twins used to share, settled or disclosed downstream, never a pick. (Twins
                 // that disagree on the leaf, or name a dependency type, keep today's answer.)
-                if self.field_ambiguous(&base, &f.member) {
+                // SOUNDNESS R1624 — …AND WHERE THE OWNER'S OWN PATH IS KNOWN, ITS OWN DECLARATION ANSWERS. The twin-leaf
+                // answer above, and the leaf-keyed pick below it, both read `fields` by LEAF: with sea-schema's three
+                // `executor::real::Executor { pool: .. }` (MySQL, Postgres, SQLite) the SQLite unit's `self.pool.acquire()`
+                // was typed as whichever pool merged last and read the Postgres driver's Db+Ipc+Net+Rand. `qual_field_in`
+                // answers from the qualified index, only for an owner whose path is proven (`self` in its own module, or a
+                // crate-anchored type); every other receiver keeps the reading it had.
+                let r1624 = self.field_ambiguous(&base, &f.member).then(|| self.qual_field_in(&f.base, &base, &key, false)).flatten();
+                if r1624 == Some(None) {
+                    return None;
+                }
+                if r1624.is_none() && self.field_ambiguous(&base, &f.member) {
                     if let Some(l) = self.field_twin_leaf(&base, &f.member) {
                         return Some(l);
+                    }
+                    if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                        let is_self = matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"));
+                        let kind = if is_self { "self" } else if base.starts_with("crate::") { "anchored" } else { "other" };
+                        eprintln!("R1624PICK\t{kind}\t{base}\t{}", self.modpath); // §E1 — the residual leaf pick
                     }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
@@ -5507,6 +5745,9 @@ impl<'a> CallCollector<'a> {
                 // shadow it (the same shadow R476 removes for an impl-level bound).
                 if !self.method_bound_gen_field(&f.base, base_leaf, &key).is_empty() {
                     return None;
+                }
+                if let Some(Some(t)) = r1624 {
+                    return Some(t);
                 }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -5991,6 +6232,12 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                // SOUNDNESS R1624 — the element half of `qual_field_in`: the owner's own declaration, where its path is proven.
+                if self.field_ambiguous(&base, &f.member) {
+                    if let Some(v) = self.qual_field_in(&f.base, &base, &key, true) {
+                        return v;
+                    }
+                }
                 // VEIN A — the element twin of `resolve_recv_type`'s twin-field rule (moka's
                 // `sync::`/`future::base_cache::Inner { invalidator: Option<Invalidator> }`).
                 if let Some(l) = self.field_twin_leaf_sep(&base, &f.member, '\u{1e}') {
@@ -6336,6 +6583,9 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                if let Some(l) = self.qual_trait_field_in(&f.base, &base, &key, true) {
+                    return l; // R1624 — see `qual_trait_field_in`
+                }
                 self.field_elem_trait
                     .get(base_leaf)
                     .and_then(|m| m.get(&key))
@@ -9358,8 +9608,150 @@ impl<'a> CallCollector<'a> {
     fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
         match self.field_payload(expr) {
             PayloadTy::Dispatch(b) => b,
-            _ => Vec::new(),
+            _ => match self.accessor_payload(expr) {
+                PayloadTy::Dispatch(b) => b,
+                _ => Vec::new(),
+            },
         }
+    }
+
+    /// SOUNDNESS R1630/R1631 — `owner.key`'s written type ARGUMENTS (`model::field_args_key`'s encoding): the owner's OWN
+    /// declaration where R1624's `owner_qual` proves its path, else the leaf-keyed fact — which a same-leaf twin with
+    /// different arguments has already withdrawn, and which is refused outright for an ambiguous field. `None`: no
+    /// declaration says.
+    /// `member` is the field expression's own (never re-built from `key`: a raw identifier `r#type` is no `Ident::new`).
+    fn owner_field_args(&self, base_expr: &syn::Expr, owner: &str, key: &str, member: &syn::Member) -> Option<String> {
+        if let Some((qi, qual)) = self.owner_qual(base_expr, owner) {
+            let v = qi.field_args.get(&qual)?.get(key)?;
+            return (v != crate::cache::QUAL_TOMB).then(|| v.clone());
+        }
+        if self.field_ambiguous(owner, member) {
+            return None;
+        }
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
+        self.returns.get(&crate::model::field_args_key(owner_leaf, key)).cloned()
+    }
+
+    /// SOUNDNESS R1631 — `self.inner.get_mut().read(buf)` where `impl<W: Write, D> Writer<W, D> { fn get_mut(&mut self) ->
+    /// &mut W }`, `inner: zio::Writer<W, Decompress>`, and `impl<W: Read + Write> Read for DeflateDecoder<W>` (flate2's
+    /// `write::*Decoder::read`). R979 types the accessor's value as the receiver field's argument at the returned
+    /// parameter's position — here `W`, the OWNER's own type parameter, which names no type, so `W::read` formed nothing and
+    /// the call vanished while `self.obj.read(buf)` over a field typed `W` directly dispatched (`dispatch:Read.read`). This
+    /// is that same payload question (`payload_decision`), asked of the accessor's value instead of the field: the owner's
+    /// parameter is mapped by POSITION through the scrutinee's instantiation to this scope's bounds. A concrete argument is
+    /// R979's and stays `Old`. Kill switch `CANDOR_R1631_OFF`.
+    fn accessor_payload(&self, expr: &syn::Expr) -> PayloadTy {
+        if std::env::var_os("CANDOR_R1631_OFF").is_some() || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
+            return PayloadTy::Old;
+        }
+        let syn::Expr::MethodCall(m) = peel_recv(expr) else { return PayloadTy::Old };
+        let Some(acc_ty) = self.resolve_recv_type(&m.receiver) else { return PayloadTy::Old };
+        let acc_leaf = acc_ty.rsplit("::").next().unwrap_or(&acc_ty);
+        let Some(pos) = self.returns.get(&crate::model::impl_retgen_key(acc_leaf, &m.method.to_string())).and_then(|p| p.parse::<usize>().ok()) else {
+            return PayloadTy::Old;
+        };
+        // The accessor's receiver is not a FIELD — itself a call (`self.inner.get_mut().get_mut()`, flate2's
+        // `gz::write::GzDecoder::read` over `inner: zio::Writer<CrcWriter<W>, _>`), a binding, a parameter: no declaration
+        // here writes the arguments its type was instantiated with (`field_args_key` keeps one level), so the value's type
+        // is a parameter nothing shows. That is `Hedge`'s case exactly (`payload_decision`): disclosed, never read as a
+        // guess and never as nothing. Only in a scope with bounded generics, where the parameter can be one of them.
+        let syn::Expr::Field(fe) = peel_recv(&m.receiver) else {
+            // Only a CHAIN of such accessors (`get_mut().get_mut()`): the inner one returns a parameter of ITS impl, so the
+            // outer receiver's instantiation is a parameter nothing at this site writes. Any other receiver (a binding, an
+            // operator's `self.make_owned()`) keeps today's reading — measured, the unnarrowed rule hedged 72 maybe-owned
+            // operator bodies whose payload the caller fixes.
+            let inner_param = match peel_recv(&m.receiver) {
+                syn::Expr::MethodCall(im) => self.resolve_recv_type(&im.receiver).is_some_and(|t| {
+                    let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
+                    self.returns.get(&crate::model::impl_retgen_key(&tl, &im.method.to_string())).is_some_and(|p| p.parse::<usize>().is_ok())
+                }),
+                _ => false,
+            };
+            if !inner_param {
+                return PayloadTy::Old;
+            }
+            if std::env::var_os("CANDOR_R1631_INSTR").is_some() {
+                eprintln!("R1631ACC\t{acc_leaf}.{}\t-\tHedge(nonfield)", m.method); // §E1 REACH COUNTER
+            }
+            return PayloadTy::Hedge;
+        };
+        let Some(owner) = self.resolve_recv_type(&fe.base) else { return PayloadTy::Old };
+        if self.is_dependency_type(&owner) {
+            return PayloadTy::Old;
+        }
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) else { return PayloadTy::Old };
+        let Some(t) = args.split('\u{1}').nth(pos) else { return PayloadTy::Old };
+        if t.contains("::") || matches!(t, "_" | "'" | "") {
+            return PayloadTy::Old;
+        }
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
+        let ev = self.scrut_evidence(&fe.base);
+        let d = self.payload_decision(Some(&owner_leaf), t, ev.as_ref());
+        if std::env::var_os("CANDOR_R1631_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+            eprintln!("R1631ACC\t{owner_leaf}.{key}.{}\t{t}\t{d:?}", m.method); // §E1 REACH COUNTER
+        }
+        d
+    }
+
+    /// SOUNDNESS R1630 — `self.io.send(buf)` with `io: DontDrop<net::UdpSocket>` and `impl<T> Deref for DontDrop<T> {
+    /// type Target = T }` (mio 0.6's fuchsia sockets). `DontDrop` declares no `send`, so Rust auto-derefs to
+    /// `UdpSocket::send`; the engine's auto-deref chase (`scan.rs`) keys `deref_target` by LEAF and the target here is the
+    /// impl's parameter `T`, which names no type, so the call formed `DontDrop::send` and vanished. The instantiation is the
+    /// receiver FIELD's written argument at `Target`'s position (`model::deref_param_key`, `owner_field_args`). Answered only
+    /// where the wrapper itself declares no member of that name (`impl_fn_key`, inherent or trait impl, which also withdraws
+    /// on a second declaration but stays present) and the name is not one a derive or a std blanket supplies to every type;
+    /// anything else keeps today's reading. Not consulted: a crate-local BLANKET trait method of the same name (which Rust
+    /// would pick on the wrapper first) — Pass B has no blanket index, so that case would over-charge, never silence.
+    /// Kill switch `CANDOR_R1630_OFF`.
+    fn deref_param_recv(&self, recv: &syn::Expr, ty: &str, leaf: &str) -> Option<String> {
+        if std::env::var_os("CANDOR_R1630_OFF").is_some() {
+            return None;
+        }
+        let wl = ty.rsplit("::").next().unwrap_or(ty);
+        let pos: usize = self.returns.get(&crate::model::deref_param_key(wl))?.parse().ok()?;
+        // A crate-local trait PROVIDING `leaf` (a default body the wrapper may inherit by implementing it) would be picked
+        // on the wrapper before any auto-deref; whether the wrapper implements it is not visible here, so any such trait
+        // keeps today's reading.
+        if self.local_traits.values().any(|t| t.methods.contains(leaf)) {
+            return None;
+        }
+        if self.returns.contains_key(&crate::model::impl_fn_key(wl, leaf))
+            || matches!(leaf, "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq" | "ne"
+                | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default" | "into"
+                | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")
+        {
+            return None;
+        }
+        let syn::Expr::Field(fe) = peel_recv(recv) else { return None };
+        let owner = self.resolve_recv_type(&fe.base)?;
+        if self.is_dependency_type(&owner) {
+            return None;
+        }
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let args = self.owner_field_args(&fe.base, &owner, &key, &fe.member)?;
+        let arg = args.split('\u{1}').nth(pos)?;
+        if matches!(arg, "_" | "'" | "") || arg.contains('\u{1f}') || !arg.contains("::") && self.is_scoped_generic_name(arg) {
+            return None;
+        }
+        // An owner's own type parameter (`io: DontDrop<T>`) names no type here either: that is a dispatch question.
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+        if self.returns.get(&crate::model::type_params_key(owner_leaf)).is_some_and(|ps| ps.split(',').any(|p| p == arg)) {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+            // The owner's module-qualified path where R1624 proves it (else its leaf), so an independent checker can find
+            // the declaration the argument was read from.
+            let oq = self.owner_qual(&fe.base, &owner).map_or_else(|| owner_leaf.to_string(), |(_, q)| q);
+            eprintln!("R1630DEREF\t{oq}.{key}\t{wl}->{arg}\t.{leaf}"); // §E1 REACH COUNTER
+        }
+        Some(arg.to_string())
     }
 
     /// SOUNDNESS R1267/R1279/R1281 — WHAT A PAYLOAD TYPED BY A CONTAINER'S GENERIC PARAMETER NAME `t` IS.
@@ -9690,6 +10082,11 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R1624 — the owner's own declaration's trait leaves, where its path is proven (a same-leaf twin's
+                // `self.h: Box<dyn Wr>` dispatched on its SIBLING's `Box<dyn Sk>` and read pure over an executed write).
+                if let Some(l) = self.qual_trait_field_in(&f.base, &base, &key, false) {
+                    return l;
+                }
                 match self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()) {
                     Some(l) => l,
                     None => self.method_bound_gen_field(&f.base, base_leaf, &key),
@@ -10285,6 +10682,53 @@ impl<'a> CallCollector<'a> {
                     eprintln!("R1318UFCS\t{tr}\t{m}"); // §E1 REACH COUNTER
                 }
                 self.mark_unresolved(format!("dispatch:{tr}.{m}"));
+            }
+        }
+    }
+
+    /// SOUNDNESS R1638 — `fmt::Debug::fmt(&self.0, f)` in `impl<S: fmt::Debug> fmt::Debug for TlsStream<S>` over `struct
+    /// TlsStream<S>(ssl::SslStream<S>)` (native-tls's `imp::openssl`). The receiver is a DEPENDENCY type instantiated with
+    /// this scope's own bounded parameter `S`, and the member is one of a std trait that bounds `S` here: the dependency's
+    /// impl of it is generic over `S` (it can only reach `S`'s `fmt` through that bound), so what it does is the CALLER's
+    /// instantiation's — a question no producer report answers, and the chained join read the producer's parametric row as
+    /// pure and dropped the call. Disclosed as the same dispatch the receiver spelling `self.0.fmt(f)` over a field typed
+    /// `S` gets (`dispatch:<Trait>.<member>`). Only a FIELD receiver of a proven owner whose written arguments show the
+    /// parameter (`owner_field_args`), mapped by position through `payload_decision`. Kill switch `CANDOR_R1638_OFF`.
+    /// `tr` is the WRITTEN trait of the UFCS spelling; `None` for the receiver spelling `self.0.fmt(f)`, where the
+    /// member must be one a std bound of the parameter REQUIRES (`std_bounds::std_required_member`).
+    fn hedge_dep_param_wrapper(&mut self, tr: Option<&str>, m: &str, recv: &syn::Expr) {
+        if std::env::var_os("CANDOR_R1638_OFF").is_some() || tr.is_some_and(|t| !crate::std_bounds::is_std_trait_leaf(t)) {
+            return;
+        }
+        let syn::Expr::Field(fe) = peel_recv(recv) else { return };
+        let Some(rt) = self.resolve_recv_type(recv) else { return };
+        if !self.is_dependency_type(&rt) {
+            return;
+        }
+        let Some(owner) = self.resolve_recv_type(&fe.base) else { return };
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) else { return };
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
+        let ev = self.scrut_evidence(&fe.base);
+        for t in args.split('\u{1}') {
+            if t.contains("::") || matches!(t, "_" | "'" | "") {
+                continue;
+            }
+            if let PayloadTy::Dispatch(b) = self.payload_decision(Some(&owner_leaf), t, ev.as_ref()) {
+                let hit = b.iter().find(|l| match tr {
+                    Some(tr) => *l == tr,
+                    None => crate::std_bounds::is_std_trait_leaf(l) && crate::std_bounds::std_required_member(l, m),
+                });
+                if let Some(l) = hit.cloned() {
+                    if std::env::var_os("CANDOR_R1638_INSTR").is_some() {
+                        eprintln!("R1638WRAP\t{owner_leaf}.{key}\t{rt}<{t}>\t{l}.{m}"); // §E1 REACH COUNTER
+                    }
+                    self.mark_unresolved(format!("dispatch:{l}.{m}"));
+                    return;
+                }
             }
         }
     }
@@ -12172,6 +12616,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.route_trait_member_path(p, &path, &leaf, &node.args, str_arg.clone());
                         self.route_handle_args(&path, &node.args);
                         self.hedge_io_ufcs(&path, &node.args);
+                        // SOUNDNESS R1638 — `Trait::m(&self.0, ..)` on a dependency wrapper over this scope's parameter.
+                        if let (Some(first), Some((tr, m))) = (node.args.first(), path.rsplit_once("::").and_then(|(h, m)| {
+                            h.rsplit("::").next().map(|t| (t.to_string(), m.to_string()))
+                        })) {
+                            self.hedge_dep_param_wrapper(Some(&tr), &m, first);
+                        }
                         // SOUNDNESS R330 — the arity travels with the call. See `Call::argc`: this is
                         // the ExprCall spelling, so `node.args` INCLUDES the receiver for a UFCS
                         // `Trait::method(&recv, ..)`, and the `method: false` beside it is what lets the
@@ -12267,6 +12717,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         self.self_io_receiver(&node.receiver, &leaf);
         self.self_param_bound_dispatch(&node.receiver, &leaf);
+        self.hedge_dep_param_wrapper(None, &leaf, &node.receiver); // SOUNDNESS R1638
         // R1095 — what this SITE (not its children, walked last) formed or disclosed, to tell an untyped one.
         let r1095_start = (self.calls.len(), self.unresolved_why.len(), self.unresolved,
             self.dispatch_sites.len(), self.foreign_dispatch_sites.len());
@@ -12601,7 +13052,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let payload = if recv_ty.as_deref().is_some_and(|t| t.starts_with(GENERIC_PAYLOAD_MARK)) {
             PayloadTy::Hedge
         } else {
-            self.field_payload(&node.receiver)
+            match self.field_payload(&node.receiver) {
+                PayloadTy::Old => self.accessor_payload(&node.receiver), // SOUNDNESS R1631
+                d => d,
+            }
+        };
+        // SOUNDNESS R1630 — auto-deref through a local generic `Deref<Target = T>` wrapper, to the field's instantiation.
+        let recv_ty = match recv_ty {
+            Some(t) if matches!(payload, PayloadTy::Old) => Some(self.deref_param_recv(&node.receiver, &t, &leaf).unwrap_or(t)),
+            o => o,
         };
         if matches!(payload, PayloadTy::Hedge) {
             self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));
@@ -15720,6 +16179,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
                             path_lits_partial: false, path_lit2: None,
                         });
+        } else if let Some(lp) = self.macro_use_log_path(&mleaf) {
+            // SOUNDNESS R474 — a BARE `debug!` bound by the crate root's `#[macro_use] extern crate log` is
+            // `log::debug!`: the same edge the `use log::debug;` spelling forms, so the classifier answers it the
+            // same way. Formed BESIDE a crate-local `macro_rules!` of the name (expanded above), not instead of it:
+            // every registry crate that has both writes them as cfg-exclusive arms (rand 0.6.5
+            // `#[cfg(feature = "log")] #[macro_use] extern crate log;` / `#[cfg(not(feature = "log"))] macro_rules!
+            // debug { ($($x:tt)*) => () }`), and the arm the build takes is not known here unless the feature
+            // picture proves the import compiled out.
+            self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: lp, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
+                            path_lits_partial: false, path_lit2: None,
+                        });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
@@ -15732,7 +16202,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // have — a `-1` anywhere in the body reaches syn's `parse_negative_lit`, which JOINS spans, and
         // the join aborts the parser (getrandom's `debug_assert!`). See `respan_call_site`.
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(exprs) = syn::parse::Parser::parse2(parser, respan_call_site(node.tokens.clone())) {
+        let parsed = syn::parse::Parser::parse2(parser, respan_call_site(node.tokens.clone()));
+        // SOUNDNESS R1649 (the silence its resolution exposed) — a STREAM macro (`async_stream`'s `stream!` /
+        // `try_stream!`, and sqlx-core's own `try_stream!`) takes a BLOCK of statements, not a list of expressions, so the
+        // walk below parsed nothing and every call inside read pure: sqlx-postgres `<&mut PgConnection as
+        // Executor>::fetch_many` (`Box::pin(try_stream! { let mut s = pin!(self.run(..).await?); .. })`) read `[]` on
+        // every arm. The body is the code the returned stream runs, which this engine charges to the fn that builds it,
+        // exactly as it does an `async move` block. Named macros only: a code-shaped body such as `quote!`'s is NOT run.
+        if parsed.is_err()
+            && matches!(mleaf.as_str(), "stream" | "try_stream")
+            && std::env::var_os("CANDOR_R1649_OFF").is_none()
+        {
+            let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+                proc_macro2::Delimiter::Brace,
+                respan_call_site(node.tokens.clone()),
+            )));
+            if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                    eprintln!("R1649STREAM\t{mleaf}"); // §E1 REACH COUNTER
+                }
+                self.visit_block(&block);
+            }
+        }
+        if let Ok(exprs) = parsed {
             // IMPLICIT FORMATTING (#2): a formatting macro (`format!`/`println!`/`write!`/…) runs each
             // `{}`/`{:?}` argument through `Display::fmt`/`Debug::fmt`. A LOCAL type with an effectful
             // `impl Display`/`impl Debug` (a custom formatter that touches the fs/net/etc.) is therefore
@@ -17073,7 +17565,7 @@ fn flatten_repetitions(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream
     out.into_iter().collect()
 }
 
-struct CfgIfArms(Vec<syn::Block>);
+pub(crate) struct CfgIfArms(pub(crate) Vec<syn::Block>);
 
 impl syn::parse::Parse for CfgIfArms {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {

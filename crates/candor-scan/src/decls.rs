@@ -186,7 +186,15 @@ pub(crate) fn scan_items(
                 }
                 // SOUNDNESS R897 — the self type's generic arguments IN ORDER, lifetimes included,
                 // because the struct's parameter positions (`TF_GEN_FIELD`) count them too.
-                if let syn::Type::Path(tp) = &*im.self_ty {
+                // SOUNDNESS R1641 — and for `impl Tr for &'a Name<A, ..>` the REFERENT's arguments: R1641 types that impl's
+                // `self` as `Name`, and tempfile's `impl Read for &NamedTempFile<File> { self.as_file().read(b) }` needs
+                // `as_file() -> &F` answered with `File` (`impl_generic_return`), or the call falls back to the by-value
+                // `NamedTempFile::read` and the row reads pure.
+                let args_self_ty: &syn::Type = match &*im.self_ty {
+                    syn::Type::Reference(r) if std::env::var_os("CANDOR_R1641_OFF").is_none() => &r.elem,
+                    t => t,
+                };
+                if let syn::Type::Path(tp) = args_self_ty {
                     if let Some(syn::PathArguments::AngleBracketed(ab)) = tp.path.segments.last().map(|s| &s.arguments) {
                         let args: Vec<String> = ab.args.iter().map(|a| match a {
                             syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => {
@@ -1573,6 +1581,26 @@ fn resolve_use_base(segs: &[String], modpath: &str, mods: &HashMap<String, Vec<S
             (false, false) => format!("{b}::{rest}"),
         })
         .collect()
+}
+
+thread_local! {
+    /// SOUNDNESS R1624 — while `Some`, every struct `collect_decls` walks files its OWN `fields` / `field_elem` /
+    /// `trait_fields` / `field_elem_trait` entries here under its MODULE-QUALIFIED path. Those four indexes are keyed by the
+    /// type LEAF and keep the LAST same-leaf declaration, so two `struct Executor { pool: .. }` in two modules shared one
+    /// answer. `cache::file_decls` turns this on for its one top-level walk and keeps the result as `FileDecls::qual`; every
+    /// other walk (the block-local structs', the tests') leaves it `None` and records nothing.
+    pub(crate) static QUAL_FIELDS: std::cell::RefCell<Option<crate::cache::QualIndexes>> = const { std::cell::RefCell::new(None) };
+}
+
+/// SOUNDNESS R1624 — put a leaf-keyed entry set aside before a struct's own writes back UNDER those writes, so the map
+/// ends exactly as in-place inserts would have left it (the later declaration's fields win).
+fn r1624_restore<V>(ix: &mut HashMap<String, HashMap<String, V>>, leaf: &str, prev: Option<HashMap<String, V>>) {
+    if let Some(mut m) = prev {
+        if let Some(own) = ix.remove(leaf) {
+            m.extend(own);
+        }
+        ix.insert(leaf.to_string(), m);
+    }
 }
 
 /// A name declared at `modpath`, spelled as the path a caller ELSEWHERE writes for it (`facade::Command`;
@@ -3026,6 +3054,47 @@ pub(crate) fn fninfo(
             vars.insert("self".to_string(), w);
         }
     }
+    // SOUNDNESS R1641 — `self` in a NON-operator trait impl on a REFERENCE to a nominal type (`impl<'a, R: Read + Seek>
+    // ReadRef<'a> for &'a ReadCache<R>`, object's `read_cache.rs`) had no type: `impl_type_name` answers only a path
+    // self type, so the impl is keyed at the module level (R1034, deliberately unchanged here) and `self_ty` is `None`.
+    // Every call through `self` in the body then formed no edge and no disclosure — `cache.read.seek(..)` over
+    // `R: Read + Seek` read `[]`, so `StringTable::get`, which CHA does edge to this unit, read pure (EXECUTED,
+    // rustagent-r1641/fx/rr: V1 and the concrete `RefCell<File>` V10 seek and read a real file, both ABSENT; the same
+    // body under a by-value self type (V4) or as an inherent method (V5) reads `dispatch:Seek.seek`). R1131 already types
+    // an OPERATOR impl's `self` as the referent; this does the same for every other trait, by the authority a parameter
+    // `this: &'a ReadCache<R>` is typed by (`type_path`). Only the TYPING moves: the unit's key, `Self`, `self_ty`'s other
+    // readers (drop params, return keys) are untouched. A referent that is the impl's own type parameter (R1208/R1292's
+    // forwarder), a primitive and any referent that is not a crate-local struct are excluded, and so is an impl R1034 keys `&Name` (a free-fn collision): its `self` is typed by
+    // that key, which `self.m()` needs to reach the impl's own sibling units (quick-xml's `&Deserializer`; a first cut that
+    // retyped it REMOVED those rows with their `invisible: [serde]`). `CANDOR_R1641_OFF=1` restores the untyped `self`.
+    if std::env::var_os("CANDOR_R1641_OFF").is_none() && !vars.contains_key("self") {
+        if let Some(syn::Type::Reference(r)) = impl_self {
+            if let syn::Type::Path(p) = crate::lang::peel_ty_refs(&r.elem) {
+                let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let own = p.path.segments.len() == 1
+                    && impl_generics.is_some_and(|g| g.type_params().any(|t| t.ident == leaf));
+                if p.qself.is_none() && !own && !crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str()) && leaf != "str" {
+                    // A CRATE-LOCAL struct only. A std or dependency referent (`impl MigrationSource for &'s Path {
+                    // self.to_owned().resolve() }`, sqlx-core) is the method-probe question this crate's index cannot
+                    // answer — typing `self` as `Path` dropped the `untyped receiver` hedge that named the right local
+                    // candidate (`PathBuf::resolve`, which reads the filesystem) and the row went ABSENT (first-cut A/B).
+                    let w = crate::lang::type_path(&r.elem, sig_uses).filter(|w| {
+                        let root = w.split("::").next().unwrap_or("");
+                        let foreign = w.contains("::")
+                            && (matches!(root, "std" | "core" | "alloc")
+                                || sig_uses.get(crate::lang::DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root)));
+                        fields.contains_key(leaf.as_str()) && !foreign
+                    });
+                    if let Some(w) = w {
+                        if std::env::var_os("CANDOR_R1641_INSTR").is_some() {
+                            eprintln!("R1641REFSELF\t{qual}\t{w}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        vars.insert("self".to_string(), w);
+                    }
+                }
+            }
+        }
+    }
     // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;
     // fn g(t: &Tool) { t.run() }`) was typed by the bare `Tool`, which names no local type, so `t.run()` and `a % b`
     // formed no edge and no disclosure: ABSENT unchained (no `invisible`) and chained alike, while the explicit
@@ -3412,6 +3481,7 @@ pub(crate) fn fninfo(
             field_borrows: elems.field_borrows,
             self_leaf: self_ty.map(|t| t.rsplit("::").next().unwrap_or(t).to_string()),
             twin_leaves: elems.twin_type_leaves,
+            fields_q: elems.fields_q,
             let_inits,
             nested_self,
             macro_idents,
@@ -4725,6 +4795,69 @@ pub(crate) fn block_local_field_index(
     (block_fields, block_field_elem)
 }
 
+/// SOUNDNESS R474 — record a `#[macro_use] extern crate log` (see `model::MACRO_USE_LOG_PREFIX`).
+///
+/// THE DEFECT. `#[macro_use] extern crate log;` binds `trace!`..`error!` as BARE names, and a bare macro has no
+/// `::`, so `visit_macro` formed no edge: tokio-reactor 0.1.12 `registration::Inner::poll_ready` logs through a
+/// bare `debug!` (registration.rs:91) and read Log-silent on every arm, while the `use log::debug;` and
+/// `log::debug!` spellings of the same call charge Log. Rustc accepts the attribute only at the crate root
+/// (E0468), so any file reaching here with one is the root; it is also read inside a root `cfg_if!` arm, where
+/// getrandom 0.1 writes it.
+///
+/// The cfg predicates are recorded, not evaluated: a cached Pass A fact cannot depend on the feature set.
+fn record_macro_use_log(items: &[syn::Item], include_tests: bool, out: &mut std::collections::BTreeSet<String>) {
+    fn one(e: &syn::ItemExternCrate, include_tests: bool, out: &mut std::collections::BTreeSet<String>) {
+        if e.ident != "log" || (!include_tests && is_cfg_test(&e.attrs)) {
+            return;
+        }
+        let Some(mu) = e.attrs.iter().find(|a| a.path().is_ident("macro_use")) else { return };
+        let names = match &mu.meta {
+            syn::Meta::List(l) => l
+                .tokens
+                .to_string()
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => "*".to_string(),
+        };
+        let cfgs: Vec<String> = e
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .filter_map(|a| match &a.meta {
+                syn::Meta::List(l) => Some(l.tokens.to_string()),
+                _ => None,
+            })
+            .collect();
+        out.insert(format!("{}{names}\u{3}{}", crate::model::MACRO_USE_LOG_PREFIX, cfgs.join("\u{3}")));
+    }
+    for it in items {
+        match it {
+            syn::Item::ExternCrate(e) => one(e, include_tests, out),
+            // `cfg_if! { if #[cfg(feature = "log")] { #[macro_use] extern crate log; } else { .. } }` — every arm is
+            // read, and an arm's own cfg is not recorded: an arm this scan cannot place counts as present.
+            syn::Item::Macro(m)
+                if m.ident.is_none() && m.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if") =>
+            {
+                if let Ok(arms) =
+                    syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone()))
+                {
+                    for b in &arms.0 {
+                        for st in &b.stmts {
+                            if let syn::Stmt::Item(syn::Item::ExternCrate(e)) = st {
+                                one(e, include_tests, out);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Pre-pass: index struct field types (`App -> { http: reqwest::Client }`) AND function return types
 /// (`create_pool -> sqlx::Pool`), expanded via each module's `use` map. Recurses into modules like
 /// `scan_items`. Field index keyed by struct leaf; return map keyed by fn leaf (ambiguous names dropped
@@ -4803,6 +4936,7 @@ pub(crate) fn collect_decls(
         m
     });
     let uses_ty: &HashMap<String, String> = uses_ty_owned.as_ref().unwrap_or(&*uses);
+    record_macro_use_log(items, include_tests, macro_twins);
     // SOUNDNESS R1128 — an operator impl a MACRO generates (`forward_all_binop_to_ref_ref!(impl Rem for BigInt,
     // rem)`, num-bigint) has no `impl` item this pass can read its `Rhs` from, so a refusal keyed on the
     // visible impls alone would refuse the edge a macro-made `Rem<BigInt>` justifies. Any item-position macro
@@ -5053,6 +5187,15 @@ pub(crate) fn collect_decls(
         }
         match it {
             syn::Item::Struct(s) => {
+                // SOUNDNESS R1624 — this declaration's OWN field entries, recorded beside the leaf-keyed ones under its
+                // module-qualified path (see `QUAL_FIELDS`). The leaf entries already hold any same-leaf twin this file
+                // declared earlier, so they are set aside, the arm below writes into fresh ones, and `r1624_restore` puts them
+                // back exactly as the in-place inserts would have left them.
+                let r1624_leaf = s.ident.to_string();
+                let r1624_prev = QUAL_FIELDS.with(|c| c.borrow().is_some()).then(|| {
+                    (fields.remove(&r1624_leaf), field_elem.remove(&r1624_leaf),
+                     trait_fields.remove(&r1624_leaf), field_elem_trait.remove(&r1624_leaf))
+                });
                 // SOUNDNESS R1279/R1281 — the struct's type parameters, by position (`model::type_params_key`).
                 file_decl_fact(rets, crate::model::type_params_key(&s.ident.to_string()),
                     s.generics.type_params().map(|t| t.ident.to_string()).collect::<Vec<_>>().join(","));
@@ -5239,6 +5382,16 @@ pub(crate) fn collect_decls(
                                         if let Some(t) = target {
                                             entry.insert(name.to_string(), t);
                                         }
+                                        // SOUNDNESS R1630/R1631 — and under the struct's MODULE-QUALIFIED path, beside R1624's
+                                        // qualified field types: the leaf-keyed fact is withdrawn as soon as a same-leaf twin
+                                        // writes different arguments for the same field name (flate2's three `DeflateDecoder
+                                        // { inner }`), which is exactly where R1624's proven owner has to read its OWN.
+                                        QUAL_FIELDS.with(|c| {
+                                            if let Some(q) = c.borrow_mut().as_mut() {
+                                                let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &s.ident.to_string());
+                                                q.file_args(&qual, &name.to_string(), &args);
+                                            }
+                                        });
                                         file_decl_fact(rets, crate::model::field_args_key(&s.ident.to_string(), &name.to_string()), args);
                                     }
                                 }
@@ -5415,6 +5568,19 @@ pub(crate) fn collect_decls(
                             } else if let Some(ty) = r372_type_path(&f.ty, uses_ty) {
                                 entry.insert(i.to_string(), ty);
                             }
+                            // SOUNDNESS R1638 — the position's written type ARGUMENTS, under the struct's QUALIFIED path
+                            // only (`QualIndexes::field_args`; the leaf-keyed R979 fact stays named-field-only), so a proven
+                            // owner's `self.0` over `struct TlsStream<S>(ssl::SslStream<S>)` can say what it was instantiated with.
+                            if !had_trait_leaves {
+                                if let Some((_, args)) = field_type_args(&f.ty, uses_ty, items) {
+                                    QUAL_FIELDS.with(|c| {
+                                        if let Some(q) = c.borrow_mut().as_mut() {
+                                            let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &s.ident.to_string());
+                                            q.file_args(&qual, &i.to_string(), &args);
+                                        }
+                                    });
+                                }
+                            }
                             // SOUNDNESS R238 — the TUPLE-struct position of the named-field rule above;
                             // `struct Tup(fn(&i32) -> bool)` and `t.0` handed to an invoking adapter is
                             // the same program as `h.cb`. Keyed by POSITION, exactly as `fields` and
@@ -5484,6 +5650,26 @@ pub(crate) fn collect_decls(
                         }
                     }
                     syn::Fields::Unit => {}
+                }
+                if let Some((pf, pe, pt, pet)) = r1624_prev {
+                    let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &r1624_leaf);
+                    QUAL_FIELDS.with(|c| {
+                        if let Some(q) = c.borrow_mut().as_mut() {
+                            q.file(&qual, fields.get(&r1624_leaf), field_elem.get(&r1624_leaf),
+                                   trait_fields.get(&r1624_leaf), field_elem_trait.get(&r1624_leaf));
+                            let e = q.params.entry(qual.clone()).or_default();
+                            for t in s.generics.type_params() {
+                                let n = t.ident.to_string();
+                                if !e.contains(&n) {
+                                    e.push(n);
+                                }
+                            }
+                        }
+                    });
+                    r1624_restore(fields, &r1624_leaf, pf);
+                    r1624_restore(field_elem, &r1624_leaf, pe);
+                    r1624_restore(trait_fields, &r1624_leaf, pt);
+                    r1624_restore(field_elem_trait, &r1624_leaf, pet);
                 }
             }
             syn::Item::Fn(f) => {
@@ -5990,6 +6176,23 @@ pub(crate) fn collect_decls(
                             for it in &im.items {
                                 if let syn::ImplItem::Type(at) = it {
                                     if at.ident == "Target" {
+                                        // SOUNDNESS R1630 — `impl<T> Deref for DontDrop<T> { type Target = T; }`: the target is
+                                        // the impl's own type PARAMETER, so `r372_type_path` below names no type (`T`) and the
+                                        // auto-deref chase stopped there. File the parameter's POSITION in the impl's written
+                                        // self-type arguments; the call site reads the instantiation off the receiver FIELD's
+                                        // written arguments (`model::deref_param_key`). Twins that disagree withdraw it.
+                                        if let (syn::Type::Path(tp), syn::Type::Path(sp)) = (&at.ty, &*im.self_ty) {
+                                            let param = tp.qself.is_none().then(|| tp.path.get_ident()).flatten().map(|i| i.to_string())
+                                                .filter(|n| im.generics.type_params().any(|g| g.ident == n));
+                                            let pos = param.and_then(|n| match sp.path.segments.last().map(|seg| &seg.arguments) {
+                                                Some(syn::PathArguments::AngleBracketed(a)) => a.args.iter().position(|g| matches!(g,
+                                                    syn::GenericArgument::Type(syn::Type::Path(ap)) if ap.qself.is_none() && ap.path.is_ident(&n))),
+                                                _ => None,
+                                            });
+                                            let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
+                                            file_decl_fact(rets, crate::model::deref_param_key(&kl),
+                                                pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()));
+                                        }
                                         if let Some(tp) = r372_type_path(&at.ty, uses_ty) {
                                             let tl = tp.rsplit("::").next().unwrap_or(&tp).to_string();
                                             let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
