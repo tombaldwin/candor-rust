@@ -851,6 +851,11 @@ pub(crate) fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
     ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t))
 }
 
+thread_local! {
+    /// R1608 — set while `r1608_stopped` asks for the root reading the walk would replace.
+    static R1608_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The methods that return a DIFFERENT type from their receiver, so a chain must NOT be walked through
 /// them to the base receiver. Extracted for R380: `resolve_recv_type` and `resolve_recv_traits` ask this
 /// same question about the same expression and only one of them used to, which is R347's shape — two
@@ -1033,6 +1038,217 @@ impl<'a> CallCollector<'a> {
         None
     }
 
+    /// SOUNDNESS R1608 — A METHOD CHAIN OVER A CRATE-LOCAL ROOT IS TYPED BY EACH STEP'S DECLARED RETURN, NOT BY ITS ROOT.
+    ///
+    ///     let mut find = handle_of::<R>(ctx, u).find().for_association().filter(c);   // RepoHandle -> Find -> Find -> Find
+    ///     find.all().await                                                           // a SELECT
+    ///
+    /// `ctor_type`'s builder walk types a chain as its ROOT (`RepoHandle`), an assumption written for a dependency's
+    /// builder (`reqwest::Client::builder().build()`, whose rule keys on the method leaf). For a LOCAL root it is a
+    /// guess the crate's own declarations can contradict — `RepoHandle::find` is declared `-> Find` — and a wrong local
+    /// type is the worst answer available: `find.all()` formed `RepoHandle::all`, which no unit declares, and a typed
+    /// call with no claimant is dropped with no disclosure (R452's population), so the caller read pure over a query
+    /// (cakedome-0.1.1 `association::util::read_in`). Typed through `find`'s declaration it edges `Find::all`.
+    ///
+    /// `None` = not this route's question (no method step, or a root that is not crate-local: a dependency's or std's
+    /// builder keeps `ctor_type`'s reading unchanged). `Some(None)` = the walk reached a step no declaration answers and
+    /// the binding is left UNTYPED on purpose, so later calls disclose rather than resolve against a guessed type.
+    /// `Some(Some(t))` = every step was answered.
+    ///
+    /// A local step is answered by the declaration the receiver's own type carries (`impl_ret_key` / `impl_self_ret_key`).
+    /// Where the type declares NO method of that name (a trait's provided method, `Result`/`Option` plumbing, a `Deref`
+    /// target's method) no declaration speaks and the root reading stands, as it always did: this route replaces the root
+    /// reading only where a declaration contradicts it. The walk STOPS — the binding is left untyped — where a
+    /// declaration exists but cannot be used, each a way it could name a type the value does not have:
+    ///   * the type declares the method but no nominal return was filed (a generic `-> T`, `-> impl Trait`, a `dyn`, a
+    ///     tuple or `()`);
+    ///   * an associated-type PROJECTION return (`-> Self::Item`, `-> E::Model`): the index files the written path, whose
+    ///     leaf is not a type the crate can resolve (`Model` would name a local entity struct);
+    ///   * both a `-> Self` and a `-> Other` fact on one (type, method): two same-leaf types (or an inherent method and a
+    ///     trait impl) disagree;
+    ///   * a type-CHANGING fact on a TWIN type leaf (declared at two or more quals): the facts are leaf-keyed, so one
+    ///     twin's `m -> X` may be filed while the other twin reaches `m` through a trait;
+    ///   * a `#[cfg]`-duplicated type unless EVERY arm answers.
+    ///
+    /// A std type-changing name no declaration answers (`iter`, `into_inner`, ...) defers the whole chain to `ctor_type`'s
+    /// own refusal, so the binder's later routes run as before.
+    ///
+    /// Once a declared return reaches a DEPENDENCY type the remaining steps keep the dependency builder reading (or R1606's
+    /// read step map where one exists) — the same answer a chain rooted at that type gets. `.await` on a crate-local future
+    /// is its `Output` (R1168). Local means crate-anchored (`crate::..`) or a bare name; another crate's path (a bin's
+    /// `clap::Command` inside the clap package) keeps the root reading. `CANDOR_R1608_OFF=1` restores the root reading.
+    fn r1608_chain_type(&self, expr: &syn::Expr) -> Option<Option<String>> {
+        if std::env::var_os("CANDOR_R1608_OFF").is_some() {
+            return None;
+        }
+        // (step, awaited after it) — outermost first; `awaited` on the root is kept separately.
+        let mut steps: Vec<(&syn::ExprMethodCall, bool)> = Vec::new();
+        let mut e = expr;
+        let mut awaited = false;
+        loop {
+            match e {
+                syn::Expr::Reference(r) => e = &r.expr,
+                syn::Expr::Paren(p) => e = &p.expr,
+                syn::Expr::Group(g) => e = &g.expr,
+                syn::Expr::Try(t) => e = &t.expr,
+                syn::Expr::Await(a) => {
+                    awaited = true;
+                    e = &a.base;
+                }
+                syn::Expr::MethodCall(m) => {
+                    steps.push((m, awaited));
+                    awaited = false;
+                    e = &m.receiver;
+                }
+                _ => break,
+            }
+        }
+        if steps.is_empty() || !matches!(e, syn::Expr::Call(_) | syn::Expr::Struct(_) | syn::Expr::Path(_)) {
+            return None;
+        }
+        let root = ctor_type(e, &self.uses, self.returns)?;
+        if root == "Self" || !self.r1608_local(&root) {
+            return None;
+        }
+        let instr = std::env::var_os("CANDOR_R1608_INSTR").is_some();
+        let mut cur = root.clone();
+        if awaited {
+            match self.r1608_await(&cur) {
+                Some(t) => cur = t,
+                None => return Some(None),
+            }
+        }
+        for (m, aw) in steps.iter().rev() {
+            let name = m.method.to_string();
+            // A std type-changing name no declaration of `cur` answers is `ctor_type`'s own refusal: defer to it whole, so
+            // the binder's later routes run exactly as before.
+            if is_recv_type_changing(&name)
+                && cur.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()).all(|a| {
+                    let l = a.rsplit("::").next().unwrap_or(a);
+                    !self.returns.contains_key(&crate::model::impl_ret_key(l, &name))
+                        && !self.returns.contains_key(&crate::model::impl_self_ret_key(l, &name))
+                })
+            {
+                return None;
+            }
+            let next = if cur.contains(crate::decls::ALIAS_ALT_SEP) {
+                let mut arms: Vec<String> = Vec::new();
+                let mut all = true;
+                for a in cur.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                    match self.r1608_step(a, &name) {
+                        Some(r) => {
+                            for x in r.split(crate::decls::ALIAS_ALT_SEP) {
+                                if !arms.iter().any(|y| y == x) {
+                                    arms.push(x.to_string());
+                                }
+                            }
+                        }
+                        None => all = false,
+                    }
+                }
+                arms.sort_unstable();
+                (all && !arms.is_empty()).then(|| arms.join(&crate::decls::ALIAS_ALT_SEP.to_string()))
+            } else {
+                self.r1608_step(&cur, &name)
+            };
+            match next {
+                Some(n) => cur = n,
+                None => {
+                    if instr {
+                        eprintln!("R1608STOP\t{root}\t{cur}\t.{name}"); // §E1 REACH COUNTER — left untyped
+                    }
+                    return Some(None);
+                }
+            }
+            if *aw {
+                match self.r1608_await(&cur) {
+                    Some(t) => cur = t,
+                    None => {
+                        if instr {
+                            eprintln!("R1608STOP\t{root}\t{cur}\t.await");
+                        }
+                        return Some(None);
+                    }
+                }
+            }
+        }
+        if instr {
+            eprintln!("R1608TYPED\t{root}\t{cur}\t{}", if cur == root { "same" } else { "changed" }); // §E1 REACH COUNTER
+        }
+        Some(Some(cur))
+    }
+
+    /// R1608 — a type whose methods this crate's declarations can answer: not a dependency's, not std/core/alloc-rooted, not
+    /// a bare prelude type, not the R1605 untyped sentinel.
+    fn r1608_local(&self, t: &str) -> bool {
+        t.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()).all(|a| {
+            (a.starts_with("crate::") || !a.contains("::"))
+                && !self.is_dependency_type(a)
+                && !matches!(a.split("::").next(), Some("std" | "core" | "alloc"))
+                && !a.starts_with(crate::model::R1605_UNTYPED)
+                && !a.contains('<')
+                && !crate::lang::PRELUDE_SHADOWABLE_TYPES.contains(&a)
+                && !crate::lang::is_primitive_root(a)
+        })
+    }
+
+    /// R1608 — `.await` on a value of type `t`: a crate-local future's declared `Output`; any other value keeps its type
+    /// (an `async fn`'s return is filed as the awaited value already, R1168).
+    fn r1608_await(&self, t: &str) -> Option<String> {
+        match self.local_future_leaf(t) {
+            Some(l) => self.returns.get(&crate::model::future_output_key(&l)).cloned().filter(|o| !o.is_empty()),
+            None => Some(t.to_string()),
+        }
+    }
+
+    /// R1608 — one step `.name()` on a value of the single (non-`#[cfg]`-joined) type `cur`. See `r1608_chain_type`.
+    fn r1608_step(&self, cur: &str, name: &str) -> Option<String> {
+        if self.is_dependency_type(cur) {
+            // The dependency builder reading `ctor_type` gives a chain rooted here, or R1606's read step map.
+            if let Some(map) = self.returns.get(&crate::model::r1606_steps_key(cur)) {
+                return map.split(',').filter_map(|e| e.split_once('=')).find(|(m, _)| *m == name).map(|(_, t)| t.to_string());
+            }
+            return (!is_recv_type_changing(name)).then(|| cur.to_string());
+        }
+        let leaf = cur.rsplit("::").next().unwrap_or(cur);
+        let ret = self.returns.get(&crate::model::impl_ret_key(leaf, name));
+        let same = self.returns.contains_key(&crate::model::impl_self_ret_key(leaf, name));
+        match (ret, same) {
+            (Some(r), false) => {
+                let projection = r.contains(crate::decls::ALIAS_ALT_SEP)
+                    || r.contains('<')
+                    || r.rsplit_once("::").is_some_and(|(q, _)| {
+                        let head = q.rsplit("::").next().unwrap_or(q);
+                        head == "Self" || crate::lang::is_type_ident(head)
+                    })
+                    || r == "Self";
+                // A crate-local `Result` alias (`fn append_label(..) -> ProtoResult<Self>`, hickory-proto) is filed as the
+                // alias's target `Result` (or the alias name), its payload lost: `record_return` unwraps only a WRITTEN
+                // `Result`/`Option`. No usable declaration, so the root reading stands, as it did before this route —
+                // never `Result` as a type (a typed call on it has no claimant and is dropped silently).
+                let r_leaf = r.rsplit("::").next().unwrap_or(r);
+                if matches!(r_leaf, "Result" | "Option") || self.returns.contains_key(&crate::model::result_alias_key(r_leaf)) {
+                    return Some(cur.to_string());
+                }
+                let twin = self.assign_drop.twin_leaves.is_none_or(|t| t.contains(leaf));
+                (!projection && !twin).then(|| r.clone())
+            }
+            (None, true) => Some(cur.to_string()),
+            (Some(_), true) => None,
+            (None, false) => {
+                // The type DECLARES this method but no nominal fact was filed for its return (a generic `-> T`, `-> impl
+                // Trait`, a `dyn`, a tuple, `()`): the root reading would be a guess the declaration contradicts.
+                if self.returns.contains_key(&crate::model::impl_fn_key(leaf, name)) {
+                    return None;
+                }
+                // Not declared on this type at all: a trait's provided method (`fn parse_attributes(self, ..) ->
+                // Result<Self>`), `Result`/`Option` plumbing, a `Deref` target's method. No declaration speaks, so the
+                // reading the root walk always gave stands — this route only ever replaces it where one does.
+                Some(cur.to_string())
+            }
+        }
+    }
+
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
         // R980/R987 — `Pin::new(x)` / `ManuallyDrop::new(x)` / `ptr::read(&x)` is `x`'s type, not the
         // wrapper's: typed as `ManuallyDrop`, allocator-api2's `boxed.1` named no field.
@@ -1115,10 +1331,31 @@ impl<'a> CallCollector<'a> {
         // `Backend::new().go()` charged the inactive arm (executed: `['Env']` over a body that writes,
         // `deny Fs` 0). The parameter route has unioned the arms since R369; this is the same rule.
         let head = ctor_written_head(expr);
-        Some(match head {
+        let res = match head {
             Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
             None => ty,
-        })
+        };
+        // SOUNDNESS R1608 — the root reading above survived every refusal; a local chain replaces it with what its steps
+        // declare. Asked LAST, so every refusal above (a const-shadowed caps leaf, a generic turbofish, …) still answers
+        // first and the walk can only replace an answer, never supply one where there was none.
+        if !res.contains(crate::decls::ALIAS_ALT_SEP) && !R1608_SUPPRESS.with(|c| c.get()) {
+            if let Some(answer) = self.r1608_chain_type(expr) {
+                return answer;
+            }
+        }
+        Some(res)
+    }
+
+    /// R1608 — the walk stopped on a binding the root reading WOULD have typed: the binder must leave it untyped rather
+    /// than let a later route answer from the facts the walk refused.
+    fn r1608_stopped(&self, expr: &syn::Expr) -> bool {
+        if !matches!(self.r1608_chain_type(expr), Some(None)) {
+            return false;
+        }
+        R1608_SUPPRESS.with(|c| c.set(true));
+        let old = self.nominal_ctor_type(expr).is_some();
+        R1608_SUPPRESS.with(|c| c.set(false));
+        old
     }
 
     /// SOUNDNESS R1056 — A SLICE / ARRAY / TUPLE RECEIVER REACHES THE CRATE'S OWN IMPL FOR IT. `type_path` names
@@ -14617,7 +14854,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // older routes' answers (including the `clone` and `&expr` arms above, which still
                         // walk) are unchanged. Inside the self-shadow window (R107) like every RHS read.
                         if !typed_here {
-                            if let Some(t) = self.with_pre_bindings(&pre_bindings, |s| s.type_of(&init.expr)) {
+                            // SOUNDNESS R1608 — a local-rooted chain whose walk STOPPED at a step no declaration answers is
+                            // left untyped here too: `type_of` would answer the same chain from facts the walk refuses (a
+                            // projection return, a twin leaf's type change) and a wrong local type is a silent typed miss.
+                            let r1608_stopped = self.with_pre_bindings(&pre_bindings, |s| s.r1608_stopped(&init.expr));
+                            if let Some(t) = (!r1608_stopped)
+                                .then(|| self.with_pre_bindings(&pre_bindings, |s| s.type_of(&init.expr)))
+                                .flatten()
+                            {
                                 if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
                                     eprintln!("VEINB_LET\t{}\t{t}", id.ident);
                                 }

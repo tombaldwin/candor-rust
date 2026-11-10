@@ -7210,7 +7210,7 @@ pub(crate) fn caps_leaf_shadowed_by_const(
 /// overlooked: such a module shadows a primitive's inherent consts for every reader of the code, and
 /// declining to type it costs a charge no shipped build ever made — whereas reading `u32::MAX` as a
 /// local `MAX` fabricates in code that is everywhere.
-fn is_primitive_root(s: &str) -> bool {
+pub(crate) fn is_primitive_root(s: &str) -> bool {
     matches!(s, "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
                 | "f16" | "f32" | "f64" | "f128" | "bool" | "char" | "str")
