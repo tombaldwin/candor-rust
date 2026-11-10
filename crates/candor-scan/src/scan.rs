@@ -1071,8 +1071,8 @@ fn r1578_type(
 /// `E::find()` under `E: EntityTrait`) as the dependency's `Select`; a `let` over a further step (`let q = E::find().filter(c);
 /// q.all(db)`) records that typed base and the steps (`<cr>::<untyped>::<Type>::filter::all`, or `…::<Type>::<chain>a.b::m`),
 /// because the strict binder does not assume a step returns its receiver. Here each step is checked against the
-/// lock-pinned source (`DepSigs::self_step`: every trait the type implements that declares the step returns `Self`, and
-/// there is no inherent of that name), and only then is the call formed on the type, where the classifier answers.
+/// lock-pinned source (`DepSigs::step_map`: every declaration the step could reach agrees on the type it yields), and
+/// only then is the call formed on the resulting type, where the classifier answers.
 /// `None` for anything else: the published behaviour.
 fn r1605_chain_type(
     c: &Call,
@@ -1102,10 +1102,16 @@ fn r1605_chain_type(
     if base.contains('<') || !crate::lang::is_type_ident(leaf) || steps.iter().any(|s| s.is_empty() || s.contains('<')) {
         return None;
     }
+    let _ = leaf;
     let mut sigs_b = sigs.borrow_mut();
-    if !steps.iter().all(|s| sigs_b.self_step(dir, cr, cr_real, leaf, s)) {
-        return None;
+    let mut cur = base.to_string();
+    for st in &steps {
+        let cur_leaf = cur.rsplit("::").next().unwrap_or(&cur).to_string();
+        let map = sigs_b.step_map(dir, cr, cr_real, &cur_leaf);
+        let (_, next) = map.into_iter().find(|(m, _)| m == st)?;
+        cur = next;
     }
+    let base = cur.as_str();
     sigs_b.note_typed(cr);
     let path = format!("{cr}::{base}::{method}");
     if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
@@ -1996,6 +2002,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
+    for (ty, trs) in &r1605_ty_traits {
+        if let Some((tr, cr)) = trs.first() {
+            returns.insert(crate::model::r1605_type_key(ty), format!("{cr}\u{1}{tr}"));
+        }
+    }
+    for r in &merged.reexports {
+        if r.alias != r.name && r.alias != "*" {
+            if let Some((tr, cr)) = r1605_ty_traits.get(&r.name).and_then(|v| v.first()) {
+                returns.entry(crate::model::r1605_type_key(&r.alias)).or_insert_with(|| format!("{cr}\u{1}{tr}"));
+            }
+        }
+    }
     {
         let renames = cargo_deps(dir).1;
         let mut seeded: Vec<(String, String, String)> = Vec::new();
@@ -2076,6 +2094,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         seeded.push((format!("<{l}>"), m.clone(), format!("{cr}::{q}")));
                     }
                 }
+            }
+        }
+        // SOUNDNESS R1606 — for each dependency type those members return, and each type reachable from it by a step, the
+        // method steps it provably takes and what each yields (`Collector::nominal_ctor_type` walks a binding's chain
+        // through these and nothing else). Bounded: 32 types.
+        {
+            let mut work: Vec<(String, String)> = seeded
+                .iter()
+                .filter_map(|(_, _, v)| v.split_once("::").map(|(cr, q)| (cr.to_string(), q.to_string())))
+                .collect();
+            work.sort();
+            work.dedup();
+            let mut done: HashSet<(String, String)> = HashSet::new();
+            while let Some((cr, q)) = work.pop() {
+                if done.len() >= 32 || !done.insert((cr.clone(), q.clone())) {
+                    continue;
+                }
+                let leaf = q.rsplit("::").next().unwrap_or(&q).to_string();
+                let real = renames.get(&cr).cloned().unwrap_or_else(|| cr.clone());
+                let steps = r1578_sigs.borrow_mut().step_map(dir, &cr, &real, &leaf);
+                let enc: Vec<String> = steps.iter().map(|(m, t)| format!("{m}={cr}::{t}")).collect();
+                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    eprintln!("R1606STEPS\t{cr}::{q}\t{}", enc.len()); // §E1
+                }
+                for (_, t) in &steps {
+                    work.push((cr.clone(), t.clone()));
+                }
+                seeded.push((format!("<steps>{cr}::{q}"), String::new(), enc.join(",")));
+                returns.insert(crate::model::r1606_steps_key(&format!("{cr}::{q}")), enc.join(","));
             }
         }
         // …and under the name a `pub use <module>::Entity as Post;` re-export gives it (sea-orm-cli's `prelude.rs`), which
@@ -3166,6 +3213,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let Some((root, _)) = path.split_once("::") else { continue };
             if crate::lang::is_dependency_crate_root(root) && deps_idx.crates.contains(root) {
                 m.entry(ty.to_string()).or_default().push((tr.to_string(), path.to_string()));
+            }
+        }
+        m
+    };
+    // SOUNDNESS R1607 — VEIN C's map for an UNCHAINED dependency too: a local type's impls of any declared dependency's trait.
+    let r1607_dep_traits_by_ty: HashMap<String, Vec<(String, String)>> = {
+        let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        if std::env::var_os("CANDOR_R1607_OFF").is_none() {
+            for k in &merged.impl_members {
+                let mut it = k.splitn(3, '\u{1f}');
+                let (Some(tr), Some(ty), Some(p)) = (it.next(), it.next(), it.next()) else { continue };
+                let Some(path) = p.strip_prefix('!') else { continue };
+                let Some((root, _)) = path.split_once("::") else { continue };
+                if crate::lang::is_dependency_crate_root(root) && manifest_deps.contains(root) && !deps_idx.crates.contains(root) {
+                    m.entry(ty.to_string()).or_default().push((tr.to_string(), path.to_string()));
+                }
             }
         }
         m
@@ -5255,6 +5318,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                         // Joined below by the SAME chained join the UFCS spelling
                                         // reaches, so the member's `dispatchesOn` is followed too.
                                         dep_default_path = Some(format!("{tpath}::{}", c.leaf));
+                                    }
+                                }
+                            }
+                        }
+                        // SOUNDNESS R1607 — …AND WHEN THAT DEPENDENCY IS NOT CHAINED. `am.insert(db)` on a derive-generated
+                        // `ActiveModel` (or a hand-written `impl sea_orm::ActiveModelTrait for X {}`) formed
+                        // `crate::post::ActiveModel::insert`, which no local unit answers, and VEIN C asks only a chained
+                        // report — so the INSERT the trait's provided body runs read ABSENT (EXECUTED). The call is put to the
+                        // classifier under the trait's own spelling, `<dep>::<Trait>::<m>`, for each dependency trait the type
+                        // implements without declaring `m`. A classifier answer is a rule written for that member, but a
+                        // path-shaped rule can match a name the trait does not have, so the answer is only CHARGED when the
+                        // trait's declaration in the Cargo.lock-pinned source names `m` (the owner's ⟨0.42⟩ rule: lock-pinned,
+                        // adding only, recorded in `dependencySources`); with no such source the caller discloses `Unknown`
+                        // (`dispatch:<Trait>.<m>`) instead. A declaration that provably lacks `m` adds nothing.
+                        if !resolved_local && dep_default_path.is_none() && c.method && c.dot && c.typed && !c.is_macro {
+                            if let Some(dts) = r1607_dep_traits_by_ty.get(&t_type) {
+                                let root = c.path.split("::").next().unwrap_or("");
+                                if !deps.contains(root) {
+                                    for (tr_leaf, tpath) in dts {
+                                        if !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, &t_type, &c.leaf) {
+                                            continue;
+                                        }
+                                        let Some((dcr, _)) = tpath.split_once("::") else { continue };
+                                        let dreal = dep_renames.get(dcr).map(String::as_str).unwrap_or(dcr);
+                                        let tp = format!("{dreal}::{}", tpath.split_once("::").map(|x| x.1).unwrap_or(""));
+                                        let Some(eff) = candor_classify::classify(dreal, &format!("{tp}::{}", c.leaf)) else { continue };
+                                        let declares = r1578_sigs.borrow_mut().trait_declares_locked(dir, dcr, dreal, tr_leaf, &c.leaf);
+                                        if std::env::var_os("CANDOR_R1607_INSTR").is_some() {
+                                            eprintln!("R1607\t{}\t{}\t{tp}::{}\t{eff}\tdeclares={declares:?}", f.qual, c.path, c.leaf); // §E1
+                                        }
+                                        match declares {
+                                            Some(true) => {
+                                                r1578_sigs.borrow_mut().note_typed(dcr);
+                                                direct.entry(f.qual.clone()).or_default().insert(eff);
+                                            }
+                                            Some(false) => {}
+                                            None => {
+                                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr_leaf}.{}", c.leaf));
+                                            }
+                                        }
                                     }
                                 }
                             }

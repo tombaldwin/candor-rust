@@ -2551,139 +2551,324 @@ impl DepSigs {
         }
     }
 
-    /// SOUNDNESS R1605 — does calling `m` on a value of the dependency's type `ty_leaf` (by value, a builder step) PROVABLY
-    /// yield a value of that same type, read from the lock-pinned source? True only when the type has NO inherent `m`, at
-    /// least one trait the source implements for it (`impl Tr for Ty<..>`, or a blanket `impl<T> Tr for T`) declares `m`,
-    /// and EVERY such declaration returns exactly `Self`: then whichever of those traits the consumer's call resolves to,
-    /// the value is still `ty_leaf` (sea_orm's `QueryFilter::filter`, `QuerySelect::limit`, `QueryOrder::order_by_asc` on
-    /// `Select<E>`). Every doubt — no lock-pinned source, a file that does not parse and names `m`, a macro naming `m`, a
-    /// trait declared twice or not at all in this source — is `false`. A trait from a THIRD crate in scope at the consumer
-    /// that is blanket-implemented with a by-value `m` is not visible here (R1200's caveat); it is the stated residual.
-    pub(crate) fn self_step(&mut self, dir: &str, alias: &str, real: &str, ty_leaf: &str, m: &str) -> bool {
-        let key = (alias.to_string(), format!("\u{5}{ty_leaf}::{m}"));
-        if let Some(v) = self.rets.get(&key) {
-            return v.is_some();
+    /// SOUNDNESS R1605/R1606 — the METHOD STEPS a value of the dependency's type `ty_leaf` can take, each with the type it
+    /// provably yields, read from the lock-pinned source: `{method -> placed type qual}`. A step is answered only when every
+    /// declaration that could be the one a consumer's call reaches agrees on the result —
+    ///   * every INHERENT `fn m` on an `impl` of `ty_leaf` (its `Self` is `ty_leaf`), and
+    ///   * every `fn m` declared with a receiver by a trait the source CAN implement for the type (its `Self` is the
+    ///     receiver's type): one implemented for it visibly, a blanket `impl<T> Tr for T`, or a trait an item macro names
+    ///     (sea_orm's `impl_query_trait!(QueryFilter)` makes `Select`'s). The orphan rule leaves this source's trait on this
+    ///     source's type to this source. Which of them the call resolves to depends on the consumer's scope, so all must
+    ///     agree —
+    ///
+    /// and the result is `Self`, or one plain owned nominal path `place` puts in the source (no generic parameter, no
+    /// `Self::Assoc`, no reference, not `async`, not inside `Result`/`Option`: a terminal like `one(db)` is left out, so a
+    /// binding over it stays untyped). `QueryFilter::filter` -> `Select`, `PaginatorTrait::paginate` -> `Paginator`,
+    /// `UpdateMany::col_expr` (inherent) -> `UpdateMany`.
+    ///
+    /// Refused wholesale (empty): no lock-pinned source, the type declared twice, or a std iteration trait visibly
+    /// implemented for it. Refused per step: a file that does not parse and names `m`, an `impl` of the type holding a macro
+    /// item, an item macro naming the type and `m` (or a `macro_rules!` naming the type and writing `fn $x`), a trait body
+    /// macro that can define `m`, a trait declared twice. A trait from a THIRD crate in scope at the consumer is not visible
+    /// here (R1200's caveat); it is the stated residual.
+    pub(crate) fn step_map(&mut self, dir: &str, alias: &str, real: &str, ty_leaf: &str) -> Vec<(String, String)> {
+        let key = (alias.to_string(), format!("\u{5}steps\u{5}{ty_leaf}"));
+        if let Some(Some(v)) = self.rets.get(&key).map(|r| r.as_ref().map(|r| match &r.ty { RetTy::Dep(q) => q.clone(), _ => String::new() })) {
+            return v.split('\u{6}').filter(|x| !x.is_empty()).filter_map(|x| x.split_once('=').map(|(a, b)| (a.to_string(), b.to_string()))).collect();
         }
-        let ok = (|| -> Result<(), String> {
-            let src = self.lock_source(dir, alias, real).ok_or("nolock")?;
-            let idx = self.index(&src.dir).ok_or("unreadable")?;
-            if idx.unparsed.iter().any(|(_, w)| w.contains(m)) {
-                return Err("parse".into());
-            }
-            // A macro could add an inherent `m` (or an impl) to the type only from an impl block of the type that holds a
-            // macro item, or from an item-position invocation whose tokens name both the type and `m`: either refuses.
-            struct V<'a> { ty: &'a str, m: &'a str, inherent: bool, traits: Vec<String>, decls: Vec<&'a syn::ItemTrait>, mac: bool }
-            fn fn_metavar(ts: &proc_macro2::TokenStream) -> bool {
-                let v: Vec<proc_macro2::TokenTree> = ts.clone().into_iter().collect();
-                v.iter().enumerate().any(|(k, t)| match t {
-                    proc_macro2::TokenTree::Ident(i) if i == "fn" => {
-                        matches!(v.get(k + 1), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '$')
-                    }
-                    proc_macro2::TokenTree::Group(g) => fn_metavar(&g.stream()),
-                    _ => false,
+        let out = self.step_map_uncached(dir, alias, real, ty_leaf);
+        let enc: Vec<String> = out.iter().map(|(m, t)| format!("{m}={t}")).collect();
+        self.rets.insert(key, Some(DepRet { is_async: false, wraps: Vec::new(), ty: RetTy::Dep(enc.join("\u{6}")) }));
+        self.say("steps", alias, ty_leaf, 0, &format!("{}", out.len()));
+        out
+    }
+
+    fn step_map_uncached(&mut self, dir: &str, alias: &str, real: &str, ty_leaf: &str) -> Vec<(String, String)> {
+        let Some(src) = self.lock_source(dir, alias, real) else { return Vec::new() };
+        let Some(idx) = self.index(&src.dir) else { return Vec::new() };
+        if idx.type_decls.get(ty_leaf).is_none_or(|d| d.len() != 1) {
+            return Vec::new();
+        }
+        fn names(ts: &proc_macro2::TokenStream, w: &str) -> bool {
+            ts.clone().into_iter().any(|t| match t {
+                proc_macro2::TokenTree::Ident(i) => i == w,
+                proc_macro2::TokenTree::Group(g) => names(&g.stream(), w),
+                _ => false,
+            })
+        }
+        fn fn_metavar(ts: &proc_macro2::TokenStream) -> bool {
+            let v: Vec<proc_macro2::TokenTree> = ts.clone().into_iter().collect();
+            v.iter().enumerate().any(|(k, t)| match t {
+                proc_macro2::TokenTree::Ident(i) if i == "fn" => {
+                    matches!(v.get(k + 1), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '$')
+                }
+                proc_macro2::TokenTree::Group(g) => fn_metavar(&g.stream()),
+                _ => false,
+            })
+        }
+        // one walk: the type's inherent fns (with the module they sit in), the traits it visibly implements, every trait
+        // declaration (with its module), and the macro hazards
+        struct V<'a> {
+            ty: &'a str,
+            base: Option<String>,
+            stack: Vec<String>,
+            inherent: Vec<(&'a syn::Signature, Option<String>)>,
+            impl_traits: Vec<String>,
+            blanket_traits: Vec<String>,
+            decls: Vec<(&'a syn::ItemTrait, Option<String>)>,
+            impl_mac: bool,
+            item_macs: Vec<&'a proc_macro2::TokenStream>,
+            def_macs: Vec<&'a proc_macro2::TokenStream>,
+        }
+        impl V<'_> {
+            fn module(&self) -> Option<String> {
+                self.base.as_ref().map(|b| {
+                    let mut v: Vec<String> = if b.is_empty() { Vec::new() } else { vec![b.clone()] };
+                    v.extend(self.stack.iter().cloned());
+                    v.join("::")
                 })
             }
-            fn names(ts: &proc_macro2::TokenStream, w: &str) -> bool {
-                ts.clone().into_iter().any(|t| match t {
-                    proc_macro2::TokenTree::Ident(i) => i == w,
-                    proc_macro2::TokenTree::Group(g) => names(&g.stream(), w),
-                    _ => false,
-                })
+        }
+        impl<'a> Visit<'a> for V<'a> {
+            fn visit_item_mod(&mut self, m: &'a syn::ItemMod) {
+                self.stack.push(m.ident.to_string());
+                syn::visit::visit_item_mod(self, m);
+                self.stack.pop();
             }
-            impl<'a> Visit<'a> for V<'a> {
-                fn visit_item_impl(&mut self, i: &'a syn::ItemImpl) {
-                    let self_leaf = match &*i.self_ty {
-                        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
-                        _ => None,
-                    };
-                    let generic_self = self_leaf.as_ref().is_some_and(|l| i.generics.type_params().any(|t| t.ident == l));
-                    if self_leaf.as_deref() == Some(self.ty) || generic_self {
-                        if i.items.iter().any(|it| matches!(it, syn::ImplItem::Macro(_) | syn::ImplItem::Verbatim(_))) {
-                            self.mac = true;
+            fn visit_item_impl(&mut self, i: &'a syn::ItemImpl) {
+                let self_leaf = match &*i.self_ty {
+                    syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
+                    _ => None,
+                };
+                let generic_self = self_leaf.as_ref().is_some_and(|l| i.generics.type_params().any(|t| t.ident == l));
+                if generic_self {
+                    if let Some((_, p, _)) = &i.trait_ {
+                        if let Some(l) = p.segments.last() {
+                            self.blanket_traits.push(l.ident.to_string());
                         }
-                        match &i.trait_ {
-                            None => {
-                                if !generic_self && i.items.iter().any(|it| matches!(it, syn::ImplItem::Fn(f) if f.sig.ident == self.m)) {
-                                    self.inherent = true;
+                    }
+                }
+                if self_leaf.as_deref() == Some(self.ty) {
+                    if i.items.iter().any(|it| matches!(it, syn::ImplItem::Macro(_) | syn::ImplItem::Verbatim(_))) {
+                        self.impl_mac = true;
+                    }
+                    match &i.trait_ {
+                        None => {
+                            let m = self.module();
+                            for it in &i.items {
+                                if let syn::ImplItem::Fn(f) = it {
+                                    self.inherent.push((&f.sig, m.clone()));
                                 }
                             }
-                            Some((_, p, _)) => {
-                                if let Some(l) = p.segments.last() {
-                                    self.traits.push(l.ident.to_string());
-                                }
+                        }
+                        Some((_, p, _)) => {
+                            if let Some(l) = p.segments.last() {
+                                self.impl_traits.push(l.ident.to_string());
                             }
                         }
                     }
-                    syn::visit::visit_item_impl(self, i);
                 }
-                fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
-                    self.decls.push(t);
-                    syn::visit::visit_item_trait(self, t);
+                syn::visit::visit_item_impl(self, i);
+            }
+            fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
+                self.decls.push((t, self.module()));
+                syn::visit::visit_item_trait(self, t);
+            }
+            fn visit_item_macro(&mut self, i: &'a syn::ItemMacro) {
+                if i.mac.path.is_ident("macro_rules") {
+                    self.def_macs.push(&i.mac.tokens);
+                } else {
+                    self.item_macs.push(&i.mac.tokens);
                 }
-                fn visit_item_macro(&mut self, i: &'a syn::ItemMacro) {
-                    // an invocation naming the type and `m`, or a definition whose body names the type and writes a fn
-                    // named `m` or by a metavariable (`fn $name`) — either may add an inherent `m`
-                    let def = i.mac.path.is_ident("macro_rules");
-                    if names(&i.mac.tokens, self.ty) && (names(&i.mac.tokens, self.m) || def && fn_metavar(&i.mac.tokens)) {
-                        self.mac = true;
+            }
+        }
+        let mut v = V {
+            ty: ty_leaf, base: None, stack: Vec::new(), inherent: Vec::new(), impl_traits: Vec::new(), blanket_traits: Vec::new(), decls: Vec::new(),
+            impl_mac: false, item_macs: Vec::new(), def_macs: Vec::new(),
+        };
+        for (i, f) in idx.files.iter().enumerate() {
+            v.base = idx.file_mods.get(i).cloned().flatten();
+            v.stack.clear();
+            v.visit_file(f);
+        }
+        if v.impl_mac || v.impl_traits.iter().any(|t| matches!(t.as_str(), "Iterator" | "Stream" | "StreamExt" | "IntoIterator")) {
+            return Vec::new();
+        }
+        let mut trait_count: HashMap<String, usize> = HashMap::new();
+        for (d, _) in &v.decls {
+            *trait_count.entry(d.ident.to_string()).or_insert(0) += 1;
+        }
+        // The traits that can be implemented for the type at all: the orphan rule leaves an impl of THIS source's trait for
+        // THIS source's type to this source, so it is one it writes — visibly, as a blanket `impl<T> Tr for T`, or through
+        // an item macro whose tokens name the trait (`impl_query_trait!(QueryFilter)`). A trait none of these reach cannot
+        // be the one a call on the type resolves to, and is left out of the agreement below.
+        let possible = |tr: &str| -> bool {
+            v.impl_traits.iter().any(|t| t == tr) || v.blanket_traits.iter().any(|t| t == tr) || v.item_macs.iter().any(|t| names(t, tr))
+        };
+        // the result one declaration names: `Some(None)` = `Self`, `Some(Some(segs))` = a nominal path, `None` = refused
+        fn result(sig: &syn::Signature, scope: &[&syn::Generics]) -> Option<Option<Vec<String>>> {
+            if sig.asyncness.is_some() {
+                return None;
+            }
+            let syn::ReturnType::Type(_, t) = &sig.output else { return None };
+            let mut t: &syn::Type = t;
+            while let syn::Type::Paren(p) = t {
+                t = &p.elem;
+            }
+            let syn::Type::Path(p) = t else { return None };
+            if p.qself.is_some() || p.path.leading_colon.is_some() {
+                return None;
+            }
+            if p.path.is_ident("Self") {
+                return Some(None);
+            }
+            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let l = segs.last()?;
+            if segs.iter().any(|s| s == "Self") || matches!(l.as_str(), "Result" | "Option") || generic_params(scope).contains(l) {
+                return None;
+            }
+            Some(Some(segs))
+        }
+        let ty_qual = {
+            let d = idx.type_decls.get(ty_leaf).and_then(|d| d[0].clone()).unwrap_or_default();
+            if d.is_empty() { ty_leaf.to_string() } else { format!("{d}::{ty_leaf}") }
+        };
+        v.inherent.retain(|(s, _)| s.receiver().is_some());
+        let mut cand: std::collections::BTreeSet<String> = v.inherent.iter().map(|(s, _)| s.ident.to_string()).collect();
+        for (d, _) in v.decls.iter().filter(|(d, _)| possible(&d.ident.to_string())) {
+            for it in &d.items {
+                if let syn::TraitItem::Fn(f) = it {
+                    if f.sig.receiver().is_some() {
+                        cand.insert(f.sig.ident.to_string());
                     }
                 }
             }
-            let mut v = V { ty: ty_leaf, m, inherent: false, traits: Vec::new(), decls: Vec::new(), mac: false };
-            for f in &idx.files {
-                v.visit_file(f);
+        }
+        let mut out = Vec::new();
+        'm: for m in cand {
+            if idx.unparsed.iter().any(|(_, w)| w.contains(&m))
+                || v.item_macs.iter().any(|t| names(t, ty_leaf) && names(t, &m))
+                || v.def_macs.iter().any(|t| names(t, ty_leaf) && (names(t, &m) || fn_metavar(t)))
+            {
+                continue;
             }
-            if v.inherent {
-                return Err("inherent".into());
+            let mut got: Option<String> = None;
+            let mut agree = |r: String| -> bool {
+                match &got {
+                    Some(g) if *g != r => false,
+                    _ => {
+                        got = Some(r);
+                        true
+                    }
+                }
+            };
+            for (sig, module) in v.inherent.iter().filter(|(s, _)| s.ident == m.as_str()) {
+                let r = match result(sig, &[&sig.generics]) {
+                    Some(None) => ty_qual.clone(),
+                    Some(Some(segs)) => {
+                        let sv: Vec<&str> = segs.iter().map(String::as_str).collect();
+                        match module.as_deref().and_then(|md| place(idx, md, &sv)) {
+                            Some(RetTy::Dep(q)) => q,
+                            _ => continue 'm,
+                        }
+                    }
+                    None => continue 'm,
+                };
+                if !agree(r) {
+                    continue 'm;
+                }
             }
-            if v.mac {
-                return Err("macro".into());
-            }
-            // Which trait the call resolves to depends on what the consumer has in scope and on impls a macro may write
-            // (sea_orm's `impl_query_trait!(QueryFilter)` makes `Select`'s), so it is not decided here: EVERY trait this
-            // source declares with a member `m` must take `self` by value and return `Self`. A std trait the type visibly
-            // implements that has such a member of its own (`Iterator::filter`) refuses.
-            if v.traits.iter().any(|t| matches!(t.as_str(), "Iterator" | "Stream" | "StreamExt" | "IntoIterator")) {
-                return Err("std-iter".into());
-            }
-            let mut declaring = 0usize;
-            for d in &v.decls {
+            for (d, module) in v.decls.iter().filter(|(d, _)| possible(&d.ident.to_string())) {
                 for it in &d.items {
                     match it {
-                        syn::TraitItem::Fn(f) if f.sig.ident == m => {
-                            declaring += 1;
-                            let by_value = matches!(f.sig.receiver(), Some(r) if r.reference.is_none());
-                            let self_ret = matches!(&f.sig.output, syn::ReturnType::Type(_, t)
-                                if matches!(&**t, syn::Type::Path(p) if p.qself.is_none() && p.path.is_ident("Self")));
-                            if !by_value || !self_ret {
-                                return Err(format!("notself:{}", d.ident));
+                        syn::TraitItem::Fn(f) if f.sig.ident == m.as_str() && f.sig.receiver().is_some() => {
+                            if trait_count.get(&d.ident.to_string()).copied().unwrap_or(0) > 1 {
+                                continue 'm;
+                            }
+                            let r = match result(&f.sig, &[&d.generics, &f.sig.generics]) {
+                                Some(None) => ty_qual.clone(),
+                                Some(Some(segs)) => {
+                                    let sv: Vec<&str> = segs.iter().map(String::as_str).collect();
+                                    match module.as_deref().and_then(|md| place(idx, md, &sv)) {
+                                        Some(RetTy::Dep(q)) => q,
+                                        _ => continue 'm,
+                                    }
+                                }
+                                None => continue 'm,
+                            };
+                            if !agree(r) {
+                                continue 'm;
                             }
                         }
-                        // a macro in the trait body may declare `m` — unless it is a local `macro_rules!` whose body
-                        // provably cannot (no fixed `fn m`, no computed name, and a `fn $x` only where this invocation
-                        // does not carry `m`)
                         syn::TraitItem::Macro(mm) => {
                             let name = mm.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
-                            let carried = names(&mm.mac.tokens, m);
                             match idx.macros.get(&name) {
-                                Some(f) if !f.fixed.contains(m) && !f.computed && !(f.metavar && carried) => {}
-                                _ => return Err(format!("macroitem:{}", d.ident)),
+                                Some(f) if !f.fixed.contains(&m) && !f.computed && !(f.metavar && names(&mm.mac.tokens, &m)) => {}
+                                _ => continue 'm,
                             }
                         }
                         _ => {}
                     }
                 }
             }
-            if declaring == 0 {
-                return Err(format!("nodecl:{:?}", v.traits));
+            if let Some(g) = got {
+                out.push((m, g));
             }
-            Ok(())
-        })();
-        let why = match &ok { Ok(()) => "read:self".to_string(), Err(w) => w.clone() };
-        let v = ok.ok().map(|_| DepRet { is_async: false, wraps: Vec::new(), ty: RetTy::Dep(ty_leaf.to_string()) });
-        self.say("self", alias, &format!("{ty_leaf}::{m}"), 0, &why);
-        self.rets.insert(key, v.clone());
-        v.is_some()
+        }
+        out
+    }
+
+    /// SOUNDNESS R1607 — does trait `leaf`'s declaration in the LOCK-PINNED source of `alias` (`lock_source`; the owner's
+    /// ruling — never the semver union `trait_declares` reads to narrow) name a fn `member`, itself or through a supertrait
+    /// this source declares? `Some(true)` / `Some(false)` read; `None` with no lock-pinned source, no single declaration, a
+    /// macro that may declare the trait, or a macro item in its body.
+    pub(crate) fn trait_declares_locked(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str) -> Option<bool> {
+        let src = self.lock_source(dir, alias, real)?;
+        let idx = self.index(&src.dir)?;
+        if idx.unparsed.iter().any(|(_, w)| w.contains(leaf)) {
+            return None;
+        }
+        struct T<'a>(Vec<&'a syn::ItemTrait>, bool);
+        impl<'a> Visit<'a> for T<'a> {
+            fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
+                self.0.push(t);
+                syn::visit::visit_item_trait(self, t);
+            }
+        }
+        let mut v = T(Vec::new(), false);
+        for f in &idx.files {
+            v.visit_file(f);
+        }
+        let mut work = vec![leaf.to_string()];
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(l) = work.pop() {
+            if !seen.insert(l.clone()) || seen.len() > 16 {
+                continue;
+            }
+            let ds: Vec<&&syn::ItemTrait> = v.0.iter().filter(|t| t.ident == l.as_str()).collect();
+            let [d] = ds.as_slice() else {
+                if l == leaf {
+                    return None;
+                }
+                continue; // a supertrait of another package: not ours to read
+            };
+            for it in &d.items {
+                match it {
+                    syn::TraitItem::Fn(f) if f.sig.ident == member => return Some(true),
+                    syn::TraitItem::Macro(_) => return None,
+                    _ => {}
+                }
+            }
+            for b in &d.supertraits {
+                if let syn::TypeParamBound::Trait(t) = b {
+                    if let Some(s) = t.path.segments.last() {
+                        work.push(s.ident.to_string());
+                    }
+                }
+            }
+        }
+        let _ = v.1;
+        Some(false)
     }
 
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {

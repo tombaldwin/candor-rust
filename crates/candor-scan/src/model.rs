@@ -619,6 +619,20 @@ pub(crate) fn r1605_trait_key(trait_leaf: &str) -> String {
     format!("<r1605tr>{trait_leaf}")
 }
 
+/// SOUNDNESS R1606 — the method steps a value of the dependency type `ty` (its full path, `sea_orm::query::select::Select`)
+/// provably takes, `m=<full type it yields>` comma-joined (`DepSigs::step_map`); present only for a type reachable from an
+/// `R1605_TRAITS` member's return and whose source was read.
+pub(crate) fn r1606_steps_key(ty: &str) -> String {
+    format!("<r1606steps>{ty}")
+}
+
+/// SOUNDNESS R1605 — present (value: the dependency crate, then `\u{1}` and the trait leaf) for every crate-local TYPE leaf
+/// that implements an `R1605_TRAITS` trait (written, or a known derive's skeleton), whether or not its members' returns
+/// could be read.
+pub(crate) fn r1605_type_key(type_leaf: &str) -> String {
+    format!("<r1605ty>{type_leaf}")
+}
+
 /// SOUNDNESS R1605 — the comma-joined receiver-less members the trait's lock-pinned declaration names (absent when it was
 /// not read).
 pub(crate) fn r1605_trait_members_key(trait_leaf: &str) -> String {

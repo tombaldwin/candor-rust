@@ -975,15 +975,43 @@ impl<'a> CallCollector<'a> {
     /// return, which `scan.rs` filed from the lock-pinned source (`model::r1605_trait_ret_key`), so `E::find().filter(c)
     /// .all(db)` forms `sea_orm::query::select::Select::all` as a concrete entity's does. Where it could not be read the
     /// value gets the `R1605_UNTYPED` type and the call loop discloses. `None` for every other shape.
+    /// SOUNDNESS R1605/R1606 — `T::m()` with `T` a crate-local type that implements an `R1605_TRAITS` trait (by leaf, or a
+    /// re-exported name for one): the filed declared return when there is one; else, for a member the trait declares (or,
+    /// with no declaration read, any name but a std associated fn), the untyped sentinel the call loop discloses. Never the
+    /// crate's LEAF record for `m` — a local `fn find(&self) -> Handle` is not `Entity::find` (measured: it typed
+    /// `post::Entity::find()` as `Handle` and the SELECT went silent without a lock). `None` where the type declares `m`
+    /// itself, which the ordinary routes answer.
+    fn r1605_type_member(&self, ty: &str, m: &str) -> Option<String> {
+        let v = self.returns.get(&crate::model::r1605_type_key(ty))?;
+        let (cr, tr) = v.split_once('\u{1}')?;
+        if self.returns.contains_key(&crate::model::impl_fn_key(ty, m)) || self.returns.contains_key(&crate::model::impl_self_ret_key(ty, m)) {
+            return None;
+        }
+        if let Some(t) = self.returns.get(&crate::model::impl_ret_key(ty, m)) {
+            return Some(t.clone());
+        }
+        let named = match self.returns.get(&crate::model::r1605_trait_members_key(tr)) {
+            Some(ms) => ms.split(',').any(|x| x == m),
+            None => !matches!(m, "default" | "from" | "try_from" | "from_str" | "from_iter" | "new"),
+        };
+        named.then(|| format!("{}::{cr}::{tr}::{m}", crate::model::R1605_UNTYPED))
+    }
+
     fn r1605_generic_member(&self, expr: &syn::Expr) -> Option<String> {
         let syn::Expr::Call(c) = peel_recv(expr) else { return None };
         let syn::Expr::Path(p) = &*c.func else { return None };
-        if p.qself.is_some() || p.path.segments.len() != 2 {
+        if p.qself.is_some() || p.path.segments.len() < 2 {
             return None;
         }
-        let g = p.path.segments[0].ident.to_string();
-        let m = p.path.segments[1].ident.to_string();
-        let bounds = self.generic_bounds.get(&g).or_else(|| self.impl_generic_bounds.get(&g))?;
+        let n = p.path.segments.len();
+        let g = p.path.segments[n - 2].ident.to_string();
+        let m = p.path.segments[n - 1].ident.to_string();
+        if n > 2 {
+            return self.r1605_type_member(&g, &m);
+        }
+        let Some(bounds) = self.generic_bounds.get(&g).or_else(|| self.impl_generic_bounds.get(&g)) else {
+            return self.r1605_type_member(&g, &m);
+        };
         for b in bounds {
             if let Some(t) = self.returns.get(&crate::model::r1605_trait_ret_key(b, &m)) {
                 return Some(t.clone());
@@ -1013,6 +1041,50 @@ impl<'a> CallCollector<'a> {
         }
         if let Some(t) = self.r1605_generic_member(expr) {
             return Some(t);
+        }
+        // SOUNDNESS R1606 — …and the ROOT of a builder chain over one (`let mut select = E::find().filter(c).filter(d);`).
+        // `ctor_type` walks the chain to that root and, finding no declared fact for `E::find`, fell back to the crate's
+        // LEAF record for `find` — a local `fn find(&self) -> Find<..>` (cakedome's `RepoHandle::find`) — so `select` was
+        // typed as the crate's own `Find`, `select.all(db)` resolved to the local `Find::all`, and the SELECT reached no
+        // rule. A generic bounded by an `R1605_TRAITS` trait is answered by that trait's member and never by a leaf
+        // record; the chain keeps `ctor_type`'s own reading (the root's type unless a step is type-changing).
+        //
+        // AND THE STEPS MUST KEEP THE TYPE. `ctor_type` assumes every step of a chain returns its receiver, which is false for
+        // a terminal: `let m = E::find().one(db).await?` is a MODEL, and typing it `Select` turned `m.into_active_model()
+        // .update(db)` into `Select::update` (no rule) and withdrew the untyped-receiver hedge over a real UPDATE (measured,
+        // relativelylight `update_prepared`). Where the root is a dependency type whose builder steps were read from its
+        // source (`model::r1606_steps_key`), the binding is typed only when every step is one of them; otherwise it is left
+        // untyped, which is what it was before R1605. Applies to a concrete entity's root (`post::Entity::find()`) too.
+        if let Some((root, steps)) = r1605_chain_root(expr) {
+            let generic = self.r1605_generic_member(root);
+            let rt = generic.clone().or_else(|| ctor_type(root, &self.uses, self.returns));
+            if let Some(rt) = rt {
+                if self.returns.contains_key(&crate::model::r1606_steps_key(&rt)) {
+                    // walk the steps root-outward (`steps` is outermost first)
+                    let mut cur = rt.clone();
+                    for st in steps.iter().rev() {
+                        let next = self.returns.get(&crate::model::r1606_steps_key(&cur)).and_then(|map| {
+                            map.split(',').filter_map(|e| e.split_once('=')).find(|(m, _)| m == st).map(|(_, t)| t.to_string())
+                        });
+                        match next {
+                            Some(n) => cur = n,
+                            None => {
+                                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                                    eprintln!("R1606STOP\t{cur}\t.{st}"); // §E1 — a step not read: left untyped
+                                }
+                                return None;
+                            }
+                        }
+                    }
+                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                        eprintln!("R1606ROOT\t{rt}\t{cur}"); // §E1 REACH COUNTER
+                    }
+                    return Some(cur);
+                }
+                if generic.is_some() {
+                    return generic; // the untyped sentinel (no source read): every call on it discloses
+                }
+            }
         }
         let ty = match ctor_type(expr, &self.uses, self.returns) {
             Some(t) => t,
@@ -16542,6 +16614,35 @@ fn fd_tainted() -> bool {
 
 /// SOUNDNESS R1578 (round 3) — a `dep_bound_vars` value may carry the value's full provenance after `\u{2}`; every reader of
 /// the PATH strips it here, so the provenance never reaches a marker path or any chained consumer.
+/// SOUNDNESS R1606 — the call at the root of a builder chain (`E::find()` in `E::find().filter(c)?.limit(n)`), through
+/// `?`/`.await`/parens, with the method steps above it; `None` for a bare call (the caller asks that directly), for a step
+/// `ctor_type` itself refuses as type-changing, and for any other shape.
+fn r1605_chain_root(expr: &syn::Expr) -> Option<(&syn::Expr, Vec<String>)> {
+    let mut cur = expr;
+    let mut steps: Vec<String> = Vec::new();
+    loop {
+        match cur {
+            syn::Expr::Paren(p) => cur = &p.expr,
+            syn::Expr::Try(t) => cur = &t.expr,
+            syn::Expr::Await(a) => cur = &a.base,
+            syn::Expr::Reference(r) => cur = &r.expr,
+            syn::Expr::MethodCall(m) => {
+                if matches!(
+                    m.method.to_string().as_str(),
+                    "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice" | "as_bytes" | "as_str" | "to_vec"
+                        | "keys" | "values" | "values_mut" | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
+                ) {
+                    return None;
+                }
+                steps.push(m.method.to_string());
+                cur = &m.receiver;
+            }
+            syn::Expr::Call(_) => return (!steps.is_empty()).then_some((cur, steps)),
+            _ => return None,
+        }
+    }
+}
+
 pub(crate) fn r1578_path(v: &str) -> &str {
     v.split_once('\u{2}').map_or(v, |(p, _)| p)
 }

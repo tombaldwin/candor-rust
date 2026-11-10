@@ -54,7 +54,7 @@ fn dep(root: &Path, extra: &str) {
          \x20   fn me() -> Self;\n\
          }\n",
     );
-    write(&d.join("src/entity/prelude.rs"), "pub use crate::{DatabaseConnection, EntityTrait, QueryFilter, Select};\n");
+    write(&d.join("src/entity/prelude.rs"), "pub use crate::{DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Select};\n");
     write(&d.join("src/query/mod.rs"), "pub mod select;\npub mod helper;\npub use select::*;\npub use helper::*;\n");
     write(
         &d.join("src/query/select.rs"),
@@ -64,6 +64,10 @@ fn dep(root: &Path, extra: &str) {
          pub trait QueryFilter: Sized { fn filter(self, _c: u8) -> Self { self } }\n\
          macro_rules! impl_filter { ($t:ident) => { impl<E> $t for Select<E> {} } }\n\
          impl_filter!(QueryFilter);\n\
+         pub struct Paginator;\n\
+         impl Paginator { pub async fn num_items(&self) -> u64 { 0 } }\n\
+         pub trait PaginatorTrait: Sized { fn paginate(self, _db: &crate::DatabaseConnection, _n: u64) -> Paginator { Paginator } }\n\
+         impl<E> PaginatorTrait for Select<E> {}\n\
          pub struct Insert<A>(Option<A>);\n\
          impl<A> Insert<A> { pub fn new() -> Self { Insert(None) } pub async fn exec(self, _db: &crate::DatabaseConnection) {} }\n\
          pub struct DeleteMany<E>(Option<E>);\n\
@@ -99,7 +103,11 @@ fn consumer(root: &Path, name: &str, lock: bool, body: Option<&str>) -> PathBuf 
     );
     let default = "mod entities;\n\
          use entities::post;\n\
-         use sea_orm::{Condition, DatabaseConnection, EntityTrait, QueryFilter};\n\
+         use sea_orm::{Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};\n\
+         pub struct Handle;\n\
+         impl Handle { pub fn find(&self) -> Handle { Handle } }\n\
+         pub async fn t_generic_leaf<E: EntityTrait>(db: &DatabaseConnection) { let mut s = E::find().filter(1); s = s.filter(2); s.all(db).await }\n\
+         pub async fn t_paginate_let(db: &DatabaseConnection) { let p = post::Entity::find().filter(1).paginate(db, 10); p.num_items().await; }\n\
          pub trait Aud: EntityTrait {}\n\
          pub async fn t_generic<E: EntityTrait>(db: &DatabaseConnection) { E::find().all(db).await }\n\
          pub async fn t_generic_let<E: EntityTrait>(db: &DatabaseConnection) { let q = E::find().filter(1).filter(2); q.all(db).await }\n\
@@ -124,7 +132,8 @@ fn consumer(root: &Path, name: &str, lock: bool, body: Option<&str>) -> PathBuf 
 /// R1605 tripwire charges its `Condition::all()` builder `Db` in every arm, so it cannot tell the routes apart.
 const CHARGED: &[&str] = &[
     "t_find_all", "t_by_id_one", "t_chain", "t_bound", "t_insert", "t_delete_many", "t_alias",
-    "entities::post::t_in_mod", "t_generic", "t_generic_let", "t_generic_super", "t_entity_let",
+    "entities::post::t_in_mod", "t_generic", "t_generic_let", "t_generic_super", "t_entity_let", "t_generic_leaf",
+    "t_paginate_let",
 ];
 
 /// `fn -> (inferred, unknownWhy)`; the scan is never chained.
@@ -171,8 +180,11 @@ fn a_derived_entity_query_terminal_is_charged_through_the_trait_declaration_with
         assert!(!has(&on, f, "Unknown"), "`{f}` was typed and must not also be hedged: {:?}", on.get(*f));
     }
     // OFF: the published behaviour — every terminal reads uncharged again, so the fixture reaches the new code
+    // (`t_in_mod` is left out here: with the splice off, the bare `Entity` is read as the dependency prelude glob's, the
+    // crate's leaf record for `find` types it `Handle`, and `.all` is charged through the glob-retyped
+    // `sea_orm::entity::prelude::Handle::all` — a guess that happens to land, the published route, not R1605's.)
     let off = scan(&app, true);
-    for f in CHARGED {
+    for f in CHARGED.iter().filter(|f| **f != "entities::post::t_in_mod") {
         assert!(!has(&off, f, "Db"), "with CANDOR_R1605_OFF `{f}` still charged — the fixture does not reach R1605");
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -243,14 +255,73 @@ fn a_local_inherent_member_wins_and_a_written_impl_is_typed_like_the_derived_one
 
 #[test]
 fn a_builder_step_is_followed_only_when_every_declaring_trait_returns_self() {
-    // A second trait in the source declares `filter` returning a different type: which one the consumer's call reaches is
-    // not decided here, so the let-bound chain stays untyped (and, with the lock, discloses nothing new — the published
+    // A second trait in the source, blanket-implemented for every type, declares `filter` returning a different type: which
+    // one the consumer's call reaches is not decided here, so the let-bound chain stays untyped (and, with the lock, discloses nothing new — the published
     // behaviour). The direct chain, typed by the collector's own builder walk, still charges.
     let root = tmpdir("twin");
-    dep(&root, "pub struct Other;\npub trait Narrow { fn filter(self, _c: u8) -> Other where Self: Sized { Other } }\n");
+    dep(&root, "pub struct Other;\npub trait Narrow { fn filter(self, _c: u8) -> Other where Self: Sized { Other } }\nimpl<T> Narrow for T {}\n");
     let app = consumer(&root, "app_twin", true, None);
     let rows = scan(&app, false);
     assert!(!has(&rows, "t_generic_let", "Db"), "a step two traits declare differently was followed: {:?}", rows.get("t_generic_let"));
     assert!(has(&rows, "t_generic", "Db"), "the direct terminal must still charge: {:?}", rows.get("t_generic"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SOUNDNESS R1607 — a dot-call on a local value whose type implements a dependency trait without declaring the method:
+/// `am.insert(db)` on the derive's `ActiveModel`, `model.delete(db)` on `Model`, and the same on a HAND-WRITTEN
+/// `impl sea_orm::ActiveModelTrait for Hand {}`. The call is put to the classifier as `sea_orm::ActiveModelTrait::insert`
+/// (`ModelTrait::delete`) and charged only when the lock-pinned trait declaration names the member; without a lock the
+/// caller discloses `Unknown`. The pure members (`is_changed`, `get`) never charge — the derive's overrides are spliced as
+/// empty local members, and the classifier names only the query members.
+fn r1607_dep(root: &Path) {
+    dep(
+        root,
+        "pub trait ActiveModelTrait: Sized { fn get(&self) {} fn is_changed(&self) -> bool { false } \
+         async fn insert(self, _db: &DatabaseConnection) {} async fn save(self, _db: &DatabaseConnection) {} }\n\
+         pub trait ModelTrait: Sized { async fn delete(self, _db: &DatabaseConnection) {} }\n",
+    );
+}
+
+const R1607_BODY: &str = "mod entities;\n\
+     use entities::post;\n\
+     use sea_orm::{ActiveModelTrait, DatabaseConnection, ModelTrait};\n\
+     pub struct Hand;\n\
+     impl sea_orm::ActiveModelTrait for Hand {}\n\
+     pub async fn u_am_insert(db: &DatabaseConnection) { post::ActiveModel.insert(db).await }\n\
+     pub async fn u_am_save(db: &DatabaseConnection) { let am = post::ActiveModel; am.save(db).await }\n\
+     pub async fn u_model_delete(m: post::Model, db: &DatabaseConnection) { m.delete(db).await }\n\
+     pub async fn u_hand_insert(db: &DatabaseConnection) { Hand.insert(db).await }\n\
+     pub fn c_am_changed() -> bool { post::ActiveModel.is_changed() }\n\
+     pub fn c_hand_changed() -> bool { Hand.is_changed() }\n\
+     pub fn c_am_get() { post::ActiveModel.get() }\n";
+
+const R1607_CHARGED: &[&str] = &["u_am_insert", "u_am_save", "u_model_delete", "u_hand_insert"];
+
+#[test]
+fn a_dependency_trait_member_called_on_a_local_value_is_classified_under_the_trait() {
+    let root = tmpdir("r1607");
+    r1607_dep(&root);
+    let lock = scan(&consumer(&root, "app_r1607", true, Some(R1607_BODY)), false);
+    for f in R1607_CHARGED {
+        assert!(has(&lock, f, "Db"), "`{f}` must be charged Db under the trait's spelling; row {:?}", lock.get(*f));
+    }
+    for f in ["c_am_changed", "c_hand_changed", "c_am_get"] {
+        assert!(!has(&lock, f, "Db") && !has(&lock, f, "Unknown"), "`{f}` is a pure member: {:?}", lock.get(f));
+    }
+    let nolock = scan(&consumer(&root, "app_r1607_nl", false, Some(R1607_BODY)), false);
+    for f in R1607_CHARGED {
+        assert!(!has(&nolock, f, "Db"), "`{f}` charged without a lock-pinned source: {:?}", nolock.get(*f));
+        assert!(has(&nolock, f, "Unknown"), "`{f}` must disclose without a lock-pinned source: {:?}", nolock.get(*f));
+    }
+    let app = consumer(&root, "app_r1607_off", true, Some(R1607_BODY));
+    let mut cmd = Command::new(bin());
+    cmd.arg(app.to_string_lossy().as_ref()).arg("--json").env("CANDOR_R1607_OFF", "1").env_remove("CANDOR_DEPS");
+    let out = cmd.output().expect("run candor-scan");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("report json");
+    for f in R1607_CHARGED {
+        let row = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == *f);
+        let db = row.is_some_and(|r| r["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Db")));
+        assert!(!db, "with CANDOR_R1607_OFF `{f}` still charged — the fixture does not reach R1607");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

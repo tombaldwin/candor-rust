@@ -1060,6 +1060,8 @@ pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
         })
     };
     let has_entity = declares(items, "Entity");
+    let has_active_model = declares(items, "ActiveModel");
+    let mut active_added = false;
     let mut adds: Vec<syn::Item> = Vec::new();
     let mut entity_added = false;
     for it in items.iter_mut() {
@@ -1099,6 +1101,20 @@ pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
             srcs.push("pub struct Entity;".to_string());
             srcs.push("impl sea_orm::entity::EntityTrait for Entity {}".to_string());
             entity_added = true;
+        }
+        // SOUNDNESS R1607 — `DeriveEntityModel` also expands `DeriveModel` on the struct and `DeriveActiveModel` beside it
+        // (sea-orm-macros `lib.rs` `derive_entity_model`): `impl sea_orm::ModelTrait for Model` and `struct ActiveModel` with
+        // `impl sea_orm::ActiveModelTrait for ActiveModel` (`derives/model.rs`, `derives/active_model.rs`). The derive's
+        // overrides are field accessors with no effect and are NOT spliced (a member stub would publish an interface-union
+        // row per member for every entity): a call to one goes to the classifier under the trait's spelling (R1607), which
+        // names only the members that run a statement.
+        if kinds.contains(&"model") && st.ident == "Model" && st.generics.params.is_empty() && std::env::var_os("CANDOR_R1607_OFF").is_none() {
+            srcs.push("impl sea_orm::ModelTrait for Model {}".to_string());
+            if !has_active_model && !active_added {
+                srcs.push("pub struct ActiveModel;".to_string());
+                srcs.push("impl sea_orm::ActiveModelTrait for ActiveModel {}".to_string());
+                active_added = true;
+            }
         }
         if kinds.contains(&"entity") && st.generics.params.is_empty() {
             srcs.push(format!("impl sea_orm::entity::EntityTrait for {} {{}}", st.ident));

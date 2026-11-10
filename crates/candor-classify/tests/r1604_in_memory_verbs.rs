@@ -108,3 +108,21 @@ fn r1605_sea_orm_root_builders_keep_db_until_the_terminal_is_typed() {
     // the typed terminal
     assert_eq!(classify("sea_orm", "sea_orm::Select::all"), Some("Db"));
 }
+
+/// R1607 — `ActiveModelTrait` / `ModelTrait` charge only the members that run a statement (EXECUTED: `insert` 2 statements,
+/// `ModelTrait::delete` 1). The pure accessors and constructors (`get`, `set`, `try_set`, `default`, `is_changed`,
+/// `find_related` — a builder) were charged `Db` by the old `contains("ActiveModelTrait::")` rule.
+#[test]
+fn r1607_active_model_trait_charges_only_query_members() {
+    for m in ["insert", "update", "update_without_returning", "save", "delete", "establish_links", "delete_links"] {
+        assert_eq!(classify("sea_orm", &format!("sea_orm::ActiveModelTrait::{m}")), Some("Db"), "{m}");
+        assert_eq!(classify("sea_orm", &format!("sea_orm::entity::active_model::ActiveModelTrait::{m}")), Some("Db"), "{m}");
+    }
+    assert_eq!(classify("sea_orm", "sea_orm::ModelTrait::delete"), Some("Db"));
+    for m in ["get", "set", "try_set", "take", "default", "default_values", "is_changed", "reset_all", "from_json", "find_related"] {
+        assert_eq!(classify("sea_orm", &format!("sea_orm::ActiveModelTrait::{m}")), None, "{m}");
+    }
+    for m in ["get", "set", "find_related", "find_linked"] {
+        assert_eq!(classify("sea_orm", &format!("sea_orm::ModelTrait::{m}")), None, "{m}");
+    }
+}

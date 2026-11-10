@@ -2688,11 +2688,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // charged `Db` for pure work (EXECUTED: 0 statements). They are NOT excluded yet: with an entity declared in the
             // consumer crate, `Entity::find().filter(Condition::all()..).all(db)` reached no other rule (the derive-generated
             // `Entity` left `.all(db)` untyped), so that charge was the only `Db` on code that runs a SELECT (EXECUTED).
-            // `candor-scan` now types that terminal (R1605: the derive's `Entity`, a generic `E: EntityTrait`, and a let-bound
-            // builder chain, from the lock-pinned `EntityTrait` declaration). The exclusion is STILL held: measured over 76
-            // sea_orm consumer crates, removing it drops `Db` on 518 rows, and among them are real queries the typing does not
-            // reach (a local `-> Self` builder method shadowing a let-bound `Select`, an untyped-receiver hedge whose only
-            // concrete candidate was this charge). See SOUNDNESS R1606 before excluding.
+            // `candor-scan` now types that terminal (R1605: the derive's `Entity`, a generic `E: EntityTrait`, a let-bound
+            // builder chain from the lock-pinned `EntityTrait` declaration; R1606: a chain rooted at a generic or a local
+            // implementor is never typed through a local leaf record, and its steps are walked by what the source says each
+            // returns). The exclusion is STILL held. Re-measured over 76 sea_orm consumer crates x {lock, lockless} on top of
+            // R1606/R1607: it drops `Db` on 487 rows; an independent token checker over each row's call closure leaves 47
+            // whose closure runs a query no typed terminal or on-site hedge covers, and it is BLIND to a dropped local edge
+            // (cakedome `association::util::read_in`, whose `find.all()` binds to the chain root `RepoHandle` instead of the
+            // declared `Find` — SOUNDNESS R1608), so its 312 "pure" rows are not a proof. See SOUNDNESS R1606.
             if path.ends_with("::all")
                 || path.ends_with("::one")
                 || path.ends_with("::count")
@@ -2712,7 +2715,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::query_all")
                 || path.ends_with("::fetch_page")
                 || path.ends_with("::num_items")
-                || path.contains("ActiveModelTrait::")
+                || r1607_active_model_query(path)
             {
                 return Some("Db");
             }
@@ -4441,6 +4444,25 @@ pub const LIBC_EXEC: &[&str] = &[
 /// (the crate-root re-export when `mods` holds `""`). Used by the coverage-gate rules below that name a
 /// method on ONE type: comparing the type SEGMENT, not a suffix, so `MultiplexedConnection::recv_response`
 /// can never satisfy a rule written for `Connection::recv_response`.
+/// SOUNDNESS R1607 — the sea_orm `ActiveModelTrait` / `ModelTrait` members that run a statement: the provided `insert`,
+/// `update`, `update_without_returning`, `save`, `delete` and the link-table writers (`entity/active_model.rs`, async, each
+/// through a connection; `ModelTrait::delete`, `entity/model.rs`). Read from sea-orm 2.0.4 and EXECUTED for `insert`
+/// (2 statements, INSERT and the read-back) and `ModelTrait::delete` (1). The rule was `path.contains("ActiveModelTrait::")`,
+/// which also charged the pure accessors (`get`, `set`, `take`, `is_changed`, `from_json`, `find_related` — a builder);
+/// those are named only now that a dot-call on a derive-generated `ActiveModel` reaches the trait's spelling (`scan.rs`
+/// R1607), so the rule names the member.
+fn r1607_active_model_query(path: &str) -> bool {
+    let Some((head, m)) = path.rsplit_once("::") else { return false };
+    if head.ends_with("::ActiveModelTrait") || head == "ActiveModelTrait" {
+        return matches!(
+            m,
+            "insert" | "update" | "update_without_returning" | "save" | "delete" | "establish_links" | "establish_links_self"
+                | "establish_links_self_rev" | "delete_links" | "delete_links_self"
+        );
+    }
+    (head.ends_with("::ModelTrait") || head == "ModelTrait") && m == "delete"
+}
+
 fn type_method<'a>(path: &'a str, krate: &str, mods: &[&str]) -> Option<(&'a str, &'a str)> {
     let rest = path.strip_prefix(krate)?.strip_prefix("::")?;
     let (head, method) = rest.rsplit_once("::")?;
