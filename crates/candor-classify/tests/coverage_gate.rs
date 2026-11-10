@@ -56,7 +56,7 @@
 //! doubles as the escape hatch here for a `covered.tsv` row whose classify() rule a human later removed
 //! in favor of a `REVIEWED_PURE_ENTRIES` verdict, without regenerating the (now-stale) manifest row.
 
-use candor_classify::{classify, REVIEWED_PURE_ENTRIES};
+use candor_classify::{classify, classify_rendered, ALSO_EFFECTS, REVIEWED_PURE_ENTRIES};
 
 #[test]
 fn calibrated_crates_completeness_gate() {
@@ -75,13 +75,15 @@ fn calibrated_crates_completeness_gate() {
             panic!("malformed covered.tsv row (expected 4 tab-separated columns): {line:?}");
         };
         checked += 1;
-        let actual = classify(krate, path);
-        let still_agrees = actual == Some(classified_as) || REVIEWED_PURE_ENTRIES.contains(&(krate, path));
+        // SOUNDNESS R1612 — the FULL charge (`classify_rendered`: primary, then `ALSO_EFFECTS`), so a dropped second
+        // effect is a regression here exactly as a retargeted primary is.
+        let actual = classify_rendered(krate, path);
+        let still_agrees = actual.as_deref() == Some(classified_as) || REVIEWED_PURE_ENTRIES.contains(&(krate, path));
         if !still_agrees {
             let now = match actual {
                 Some(eff) => format!(
-                    "now classify() -> Some({eff:?}), not the recorded {classified_as:?} — a rule was \
-                     NARROWED to a different effect, not just removed"
+                    "now classify_rendered() -> Some({eff:?}), not the recorded {classified_as:?} — a rule was \
+                     NARROWED to a different effect, or a second effect was added or dropped"
                 ),
                 None => format!(
                     "now classify() -> None (recorded as {classified_as:?} at generation time), and not \
@@ -299,4 +301,74 @@ fn ceiling_comparator_treats_trailing_zeros_as_padding_and_open_rusqlite_stays_e
         "a rusqlite row is back in open.tsv while rusqlite 0.39.0 holds the calibration exemption: the \
          consumer is told nothing about it (SOUNDNESS R1528). Give it a rule or a verdict."
     );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// SOUNDNESS R1612 — EVERY `ALSO_EFFECTS` ROW IS LIVE, AND THE SELF-SCAN ORACLE DOES NOT CONTRADICT IT.
+//
+// A second effect is a charge, so it needs what any charge needs; this is the part the manifest can check. (1) LIVE: the
+// row names at least one `covered.tsv` consumer path, and that row's recorded charge carries the second effect — a row
+// matching nothing is a rule nobody's call reaches. (2) NOT CONTRADICTED: the self-scan oracle walked the entry point's
+// own body; a second effect it neither found NOR hedged (`Unknown`, an unresolved reach it could not see through) is
+// evidence AGAINST the row. The oracle cannot PROVE a row — its extras are a union over every branch, which is why it
+// is not the source of these rows (R1613) — but it can refute one. The executed evidence lives on the row itself.
+// ---------------------------------------------------------------------------------------------------
+#[test]
+fn also_effects_rows_are_live_and_not_contradicted_by_the_oracle() {
+    let manifest = include_str!("../../../eval/coverage-gate/covered.tsv");
+    let rows: Vec<Vec<&str>> = manifest
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| l.split('\t').collect())
+        .collect();
+    assert!(rows.len() > 500, "covered.tsv failed to load");
+    let mut failures = Vec::new();
+    for (i, row) in ALSO_EFFECTS.iter().enumerate() {
+        let mut live = 0usize;
+        for r in &rows {
+            let (krate, path, oracle, recorded) = (r[0], r[1], r[2], r[3]);
+            if !row.krate.contains(&krate) || candor_classify::also_effects(krate, path).is_empty() {
+                continue;
+            }
+            let hits: Vec<&str> = candor_classify::also_effects(krate, path)
+                .into_iter()
+                .filter(|e| row.effects.contains(e))
+                .collect();
+            if hits.is_empty() {
+                continue;
+            }
+            live += 1;
+            let seen: Vec<&str> = oracle.split(',').collect();
+            for e in hits {
+                if !recorded.split('+').any(|x| x == e) {
+                    failures.push(format!("{} {krate} {path}: recorded {recorded:?} lacks second effect {e}", row.row));
+                }
+                if !seen.contains(&e) && !seen.contains(&"Unknown") {
+                    failures.push(format!(
+                        "{} {krate} {path}: the self-scan oracle found {oracle:?} — neither {e} nor an Unknown reach",
+                        row.row
+                    ));
+                }
+            }
+        }
+        if live == 0 {
+            failures.push(format!("ALSO_EFFECTS[{i}] ({}, {:?}) matches no covered.tsv consumer path", row.row, row.krate));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The check above must be able to fail: a second effect the oracle neither found nor hedged is refused, and a row
+/// matching nothing is refused. Asked of the same predicate shape over a synthetic manifest line.
+#[test]
+fn also_effects_oracle_check_can_fail() {
+    let contradicted = |oracle: &str, e: &str| {
+        let seen: Vec<&str> = oracle.split(',').collect();
+        !seen.contains(&e) && !seen.contains(&"Unknown")
+    };
+    assert!(contradicted("Rand", "Clock"), "an oracle set lacking the effect and any Unknown must refute");
+    assert!(!contradicted("Clock,Rand", "Clock"));
+    assert!(!contradicted("Clock,Unknown", "Fs"), "an Unknown reach is not a refutation");
+    assert_eq!(classify("backoff", "backoff::ExponentialBackoff::next_backoff"), Some("Rand"));
+    assert_eq!(classify_rendered("backoff", "backoff::ExponentialBackoff::next_backoff").as_deref(), Some("Rand+Clock"));
 }

@@ -4701,11 +4701,11 @@ fn tungstenite_r1528(path: &str) -> Option<&'static str> {
 /// 0.23.43): that needs the whole crate table re-verified at the new version.
 ///
 /// Returns `Some(Some(effect))` for a rule, `Some(None)` for a proven-pure carve-out of a rule that fires later in
-/// `classify`, and `None` to fall through. ONE effect is all `classify` can carry, so where a row does two things the one
-/// charged is named and the other is a stated residual (R1599): `next_backoff` draws entropy AND reads the clock (Rand
-/// charged), `try_associate` reads `PATH` AND stats each directory (Env charged), `UtcOffset::current_local_offset` reads
-/// the clock AND the zone database (Clock charged), and the elasticsearch transport reads the proxy variables (Env) AND, on
-/// the openssl backend, the system trust store (Fs, carried by `reads_trust_store` as the second effect).
+/// `classify`, and `None` to fall through. `classify` carries the PRIMARY effect; where a row does two things the second is
+/// an `ALSO_EFFECTS` row (R1612, closing R1599's four): `next_backoff` draws entropy (Rand) AND reads the clock (Clock),
+/// `try_associate` reads `PATH` (Env) AND stats each directory (Fs), `UtcOffset::current_local_offset` reads the clock
+/// (Clock) AND the zone database (Fs), and the elasticsearch transport reads the proxy variables (Env) AND, on
+/// the openssl backend, the system trust store (Fs, carried by `ALSO_EFFECTS` as the second effect).
 ///
 /// CHARGED `Clock`: `env_logger` `Formatter::timestamp{,_seconds,_millis,_micros,_nanos}` (each reads `SystemTime::now`) and
 /// `ConfigurableFormat::format` (EXECUTED: 1 read by default, 0 after `.timestamp(None)` — accepted over-charge);
@@ -5903,55 +5903,199 @@ pub fn is_entropy_source_ident(seg: &str) -> bool {
     matches!(seg, "OsRng" | "SysRng")
 }
 
-/// SOUNDNESS R338 — DOES THIS CALL ALSO READ THE SYSTEM TRUST STORE? A SECOND effect, not a
-/// replacement for the one `classify` returns.
+/// SOUNDNESS R1612 — THE EFFECTS A CALL PERFORMS BESIDE THE ONE `classify` RETURNS.
 ///
-/// **THE DEFECT.** candor charges `native_tls::TlsConnector::new` `Fs` because on the openssl backend
-/// it loads the probed cert file/dir from disk. Several calibrated crates construct that connector
-/// INSIDE a public entry point, so the consumer's call discloses the transport effect and drops the
-/// `Fs` — `tungstenite::client_tls` reports `['Net']`, and `deny Fs` passes over a real trust-store
-/// read. `wrap_stream` does `tls_connector.map_or_else(TlsConnector::new, Ok)`
-/// (`tungstenite-0.30.0/src/tls.rs:54`), so a caller supplying no connector gets `TlsConnector::new()`.
-/// (The row the coverage gate nominated — `tungstenite::tls::encryption::native_tls::wrap_stream` — is
-/// unreachable from outside: `mod tls;` is private at `lib.rs:32`. The reachable form is one level up.)
+/// `classify` answers ONE effect per path, and that one is the call's PRIMARY: the effect whose locator (path, host,
+/// program, SQL) is the call's own argument or receiver, which is why every surface rule (`str_arg` capture, the masking
+/// guard, `fs_kind`) is keyed on it. Some library entry points do a second thing whose locator the caller never sees —
+/// `next_backoff` draws entropy AND reads the clock, `try_associate` reads `PATH` AND stats the directories on it. Those
+/// are declared HERE, one row per rule, and charged beside the primary by [`also_effects`], never instead of it.
 ///
-/// **WHY THIS IS SO SHORT: the sweep found four more crates and every one was PRICED AND REJECTED,
-/// which is the deliverable rather than a gap.** Callers of `native_tls::TlsConnector::new` in the
-/// local registry are redis, tungstenite, ureq, minreq and tokio-websockets.
-///   - `minreq`, `tokio_websockets` — NOT calibrated, so their calls already disclose rather than
-///     claim purity. No rule can improve them.
-///   - `redis` — `ActualConnection::new` (`redis-1.6.0/src/connection.rs:932`) constructs it only for a
-///     `rediss://` address, and the consumer-visible verb is `Client::get_connection`. Charging that
-///     `Fs` would fabricate on every PLAIN redis user, which is the majority. Rejected on the trade.
-///   - `ureq` — `agent.rs:265` takes `crate::default_tls_config()`, and ureq's default features are
-///     `["tls", "gzip"]`: `native-certs` is OFF, so the default build resolves to
-///     `rtls::root_certs()`'s `#[cfg(not(feature = "native-certs"))]` arm, which is
-///     `webpki_roots::TLS_SERVER_ROOTS` — COMPILED IN, no disk read (`ureq-2.12.1/src/rtls.rs:82`).
-///     Charging it would fabricate on the default build. Rejected on the evidence.
+/// **Why a table and not a set-valued `classify`.** The set is not uniform: the primary carries the call's locator and the
+/// rest do not. A flat set would invite a charging site to publish the call's literal as the locator of every effect in it
+/// (a fabricated surface), and the one thing every site must do for a secondary is the OPPOSITE — a secondary `Fs`/`Net`/
+/// `Exec`/`Db` has a locator nobody can see, so it is marked `incomplete` ([`also_hides_locator`]) and a benign sibling
+/// literal cannot certify it. And the second-effect hook this replaces (`reads_trust_store`, R338) was asked by ONE of the
+/// four sites that charge a `classify` answer: `candor-scan`'s main path. The `use`-alias arm, the R1607 trait-dispatch
+/// arm and the deep engine (`src/lib.rs`) never asked it, so the trust-store `Fs` was charged or silent by spelling and by
+/// engine. One table, one function, every site — the shape `masks_locator` already has for the same reason (R806/R808).
 ///
-/// What is left is tungstenite's two explicitly-TLS-named entry points, where no caller is
-/// over-charged: `client_tls` passes `None` for the connector unconditionally, and
-/// `client_tls_with_config`'s callers are by definition doing TLS. **`tungstenite::connect` is a stated
-/// residual, not an oversight** — it serves `ws://` and `wss://` alike, so charging it would hit real
-/// plain-WebSocket users; the scheme is often a string literal candor already captures in `str_arg`,
-/// which is the shape a future fix should use rather than a blanket charge.
-pub fn reads_trust_store(crate_name: &str, path: &str) -> bool {
-    // SOUNDNESS R1528 (b11) — elasticsearch builds a reqwest client with the DEFAULT `native-tls` feature, so on the
-    // openssl backend every transport constructor reads the system trust store: EXECUTED under `strace` in
-    // `rust:1-bookworm`, `Transport::single_node` opens `openssl.cnf`, `cert.pem`, `certs/` and `ca-certificates.crt` (0
-    // opens on macOS, where the Security framework answers). The primary effect charged by `b11_r1528` is the proxy-variable
-    // read (`Env`, every platform); this is the second. Charged although macOS and a `rustls-tls` build read no file: the
-    // default feature set on the platform ES clients run on does.
-    if crate_name == "elasticsearch" {
-        return path.ends_with("::Transport::single_node")
-            || path.ends_with("::Transport::static_node_list")
-            || path.ends_with("::Transport::sniffing_node_list")
-            || path.ends_with("::Transport::cloud")
-            || path.ends_with("::TransportBuilder::build");
-    }
-    crate_name == "tungstenite"
-        && (path.ends_with("::client_tls") || path.ends_with("::client_tls_with_config"))
+/// **The bar for a row** is the family's for any charge: an EXECUTED observation of the second effect inside the call, a
+/// pure neighbour of the same type that is not charged, and `deny <E2>` flipping 0→1 on a consumer. A row whose second
+/// effect is platform- or configuration-conditional says so in `evidence`; it is charged on the configuration where it was
+/// observed (the R338 trade: the default build on the platform the crate's users run), and the condition is the row's
+/// stated over-charge. Do NOT seed this table from `covered.tsv`'s `self_scan_effects`: that oracle's extra effects are a
+/// union over every branch (1,306 of 2,020 covered rows carry one, 792 of them `Clock` and 468 `Log`, mostly timeouts and
+/// debug events inside a request), and adopting them is a priced decision, not a transcription (R1613).
+pub struct AlsoEffect {
+    /// Crate names (post `-`→`_`) this row applies to.
+    pub krate: &'static [&'static str],
+    /// Which paths in those crates.
+    pub on: AlsoOn,
+    /// The effects charged beside the primary. An entry equal to the primary is dropped by [`also_effects`].
+    pub effects: &'static [&'static str],
+    /// The SOUNDNESS row that carries the evidence.
+    pub row: &'static str,
+    /// What was executed, where, and under which condition.
+    pub evidence: &'static str,
 }
+
+/// How an [`AlsoEffect`] row names its paths — the two shapes the rule tables already use.
+pub enum AlsoOn {
+    /// `(type, methods)`: the path's second-to-last segment is `type` and its last is one of `methods` — the key
+    /// `b11_r1528` matches on, so a row here names exactly the spellings the primary rule beside it names.
+    Method(&'static str, &'static [&'static str]),
+    /// A free function: the path ends in `::<leaf>` for one of these leaves.
+    Leaf(&'static [&'static str]),
+}
+
+impl AlsoOn {
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            AlsoOn::Method(ty, methods) => path.rsplit_once("::").is_some_and(|(head, m)| {
+                methods.contains(&m) && head.rsplit("::").next() == Some(*ty)
+            }),
+            AlsoOn::Leaf(leaves) => leaves.iter().any(|l| path.strip_suffix(l).is_some_and(|h| h.ends_with("::"))),
+        }
+    }
+}
+
+pub const ALSO_EFFECTS: &[AlsoEffect] = &[
+    // SOUNDNESS R338 — the system trust store, read by a native-tls connector the crate builds INSIDE its own entry point.
+    // **THE DEFECT.** candor charges `native_tls::TlsConnector::new` `Fs` because on the openssl backend
+    // it loads the probed cert file/dir from disk. Several calibrated crates construct that connector
+    // INSIDE a public entry point, so the consumer's call discloses the transport effect and drops the
+    // `Fs` — `tungstenite::client_tls` reports `['Net']`, and `deny Fs` passes over a real trust-store
+    // read. `wrap_stream` does `tls_connector.map_or_else(TlsConnector::new, Ok)`
+    // (`tungstenite-0.30.0/src/tls.rs:54`), so a caller supplying no connector gets `TlsConnector::new()`.
+    // (The row the coverage gate nominated — `tungstenite::tls::encryption::native_tls::wrap_stream` — is
+    // unreachable from outside: `mod tls;` is private at `lib.rs:32`. The reachable form is one level up.)
+    //
+    // **WHY THIS IS SO SHORT: the sweep found four more crates and every one was PRICED AND REJECTED,
+    // which is the deliverable rather than a gap.** Callers of `native_tls::TlsConnector::new` in the
+    // local registry are redis, tungstenite, ureq, minreq and tokio-websockets.
+    //   - `minreq`, `tokio_websockets` — NOT calibrated, so their calls already disclose rather than
+    //     claim purity. No rule can improve them.
+    //   - `redis` — `ActualConnection::new` (`redis-1.6.0/src/connection.rs:932`) constructs it only for a
+    //     `rediss://` address, and the consumer-visible verb is `Client::get_connection`. Charging that
+    //     `Fs` would fabricate on every PLAIN redis user, which is the majority. Rejected on the trade.
+    //   - `ureq` — `agent.rs:265` takes `crate::default_tls_config()`, and ureq's default features are
+    //     `["tls", "gzip"]`: `native-certs` is OFF, so the default build resolves to
+    //     `rtls::root_certs()`'s `#[cfg(not(feature = "native-certs"))]` arm, which is
+    //     `webpki_roots::TLS_SERVER_ROOTS` — COMPILED IN, no disk read (`ureq-2.12.1/src/rtls.rs:82`).
+    //     Charging it would fabricate on the default build. Rejected on the evidence.
+    //
+    // What is left is tungstenite's two explicitly-TLS-named entry points, where no caller is
+    // over-charged: `client_tls` passes `None` for the connector unconditionally, and
+    // `client_tls_with_config`'s callers are by definition doing TLS. **`tungstenite::connect` is a stated
+    // residual, not an oversight** — it serves `ws://` and `wss://` alike, so charging it would hit real
+    // plain-WebSocket users; the scheme is often a string literal candor already captures in `str_arg`,
+    // which is the shape a future fix should use rather than a blanket charge.
+    AlsoEffect {
+        krate: &["tungstenite"],
+        on: AlsoOn::Leaf(&["client_tls", "client_tls_with_config"]),
+        effects: &["Fs"],
+        row: "R338",
+        evidence: "openssl backend: TlsConnector::new loads the probed cert file/dir; client_tls passes no connector \
+                   (tungstenite-0.30.0 src/tls.rs:54). macOS (Security framework) reads no file.",
+    },
+    // SOUNDNESS R1528 (b11) — elasticsearch builds a reqwest client with the DEFAULT `native-tls` feature.
+    AlsoEffect {
+        krate: &["elasticsearch"],
+        on: AlsoOn::Method("Transport", &["single_node", "static_node_list", "sniffing_node_list", "cloud"]),
+        effects: &["Fs"],
+        row: "R1598",
+        evidence: "EXECUTED under strace in rust:1-bookworm: Transport::single_node opens openssl.cnf, cert.pem, certs/, \
+                   ca-certificates.crt; 0 opens on macOS. Primary Env is the proxy-variable read.",
+    },
+    AlsoEffect {
+        krate: &["elasticsearch"],
+        on: AlsoOn::Method("TransportBuilder", &["build"]),
+        effects: &["Fs"],
+        row: "R1598",
+        evidence: "as Transport::single_node (EXECUTED under strace, Linux/openssl).",
+    },
+    // SOUNDNESS R1612 — R1599's four rule rows.
+    AlsoEffect {
+        krate: &["backoff"],
+        on: AlsoOn::Method("ExponentialBackoff", &["next_backoff"]),
+        effects: &["Clock"],
+        row: "R1612",
+        evidence: "EXECUTED (macOS, DYLD interposer): next_backoff on a default ExponentialBackoff = 1 getentropy (the \
+                   Rand primary) + 1 clock_gettime (the max_elapsed_time check reads clock.now()). Pure neighbour \
+                   ExponentialBackoffBuilder::new: 0 events.",
+    },
+    AlsoEffect {
+        krate: &["grep_cli"],
+        on: AlsoOn::Method("DecompressionMatcherBuilder", &["associate", "try_associate"]),
+        effects: &["Fs"],
+        row: "R1612",
+        evidence: "EXECUTED (macOS, DYLD interposer): a relative program (`gzip`) = getenv(PATH) (the Env primary) + \
+                   stat(<PATH dir>/gzip) per directory until found; an absolute program = 0 events, the same accepted \
+                   over-charge as the Env primary. Pure neighbour DecompressionMatcherBuilder::new: 0 events.",
+    },
+    AlsoEffect {
+        krate: &["time"],
+        on: AlsoOn::Method("UtcOffset", &["current_local_offset"]),
+        effects: &["Fs"],
+        row: "R1612",
+        evidence: "EXECUTED (macOS, DYLD interposer), TZ unset: 1 clock_gettime (the Clock primary) + localtime_r + \
+                   access(/etc/localtime). With TZ set the interposer saw no file call (libc's own zone-file open is \
+                   not interposable), so the TZ-set arm is not claimed either way. libc caches the zone: first call per \
+                   process. Pure neighbour UtcOffset::from_hms: 0 events.",
+    },
+    AlsoEffect {
+        krate: &["portable_pty"],
+        on: AlsoOn::Method("CommandBuilder", &["new", "from_argv", "new_default_prog"]),
+        effects: &["Fs"],
+        row: "R1612",
+        evidence: "EXECUTED (macOS, DYLD interposer), SHELL unset: each of the three ctors = access(<passwd shell>, X_OK) \
+                   (get_base_env -> get_shell, cmdbuilder.rs:43-71); SHELL set: 0 events. Charged on the unset arm, \
+                   which is the default in containers and service managers; SHELL-set callers are the stated \
+                   over-charge. Pure neighbour CommandBuilder::arg: 0 events.",
+    },
+];
+
+/// The effects `(crate_name, path)` performs BESIDE its primary `classify` answer — see [`ALSO_EFFECTS`]. Empty unless
+/// `classify` charges the path (a second effect never stands alone: the κ ledger's "was this call classified" question
+/// stays the primary's), and never contains the primary itself.
+pub fn also_effects(crate_name: &str, path: &str) -> Vec<&'static str> {
+    let Some(primary) = classify(crate_name, path) else { return Vec::new() };
+    let mut out: Vec<&'static str> = Vec::new();
+    for row in ALSO_EFFECTS {
+        if row.krate.contains(&crate_name) && row.on.matches(path) {
+            for e in row.effects {
+                if *e != primary && !out.contains(e) {
+                    out.push(e);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every effect a `classify`-charged call performs: the primary first, then [`also_effects`]. `None` when `classify` is.
+pub fn classify_all(crate_name: &str, path: &str) -> Option<Vec<&'static str>> {
+    let primary = classify(crate_name, path)?;
+    let mut v = vec![primary];
+    v.extend(also_effects(crate_name, path));
+    Some(v)
+}
+
+/// The coverage-gate rendering of [`classify_all`]: `Rand` for a one-effect rule (the pre-R1612 column, unchanged), and
+/// `Rand+Clock` — primary, then the second effects in table order — for a rule with more.
+pub fn classify_rendered(crate_name: &str, path: &str) -> Option<String> {
+    classify_all(crate_name, path).map(|v| v.join("+"))
+}
+
+/// Does a SECOND effect of this name have a locator surface (§2 `hosts`/`fs`/`cmds`/`tables`) that the call does not
+/// show? Then the charging site marks it `incomplete`: the call's argument is the PRIMARY's locator, never the second
+/// effect's, so without the mark a benign sibling literal would certify it (`allow Fs /etc/hosts` over a function that
+/// also stats `PATH`). Effects with no surface (`Env`/`Clock`/`Rand`/`Log`/`Ipc`/`Clipboard`) need nothing.
+pub fn also_hides_locator(eff: &str) -> bool {
+    matches!(eff, "Fs" | "Net" | "Llm" | "Exec" | "Db")
+}
+
 
 /// SOUNDNESS R330 — IS THIS `hash_password` CALL PROVABLY THE EXPLICIT-SALT ONE (password-hash 0.5.x)?
 ///
@@ -8116,15 +8260,15 @@ mod masks_locator_tests {
         for m in ["single_node", "static_node_list", "sniffing_node_list", "cloud"] {
             let p = format!("elasticsearch::http::transport::Transport::{m}");
             assert_eq!(eff("elasticsearch", &p), Some("Env"), "{p}");
-            assert!(reads_trust_store("elasticsearch", &p), "{p} must carry the trust-store read");
+            assert_eq!(also_effects("elasticsearch", &p), vec!["Fs"], "{p} must carry the trust-store read");
         }
         assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::TransportBuilder::build"), Some("Env"));
-        assert!(reads_trust_store("elasticsearch", "elasticsearch::http::transport::TransportBuilder::build"));
+        assert_eq!(also_effects("elasticsearch", "elasticsearch::http::transport::TransportBuilder::build"), vec!["Fs"]);
         assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::MultiNodeConnectionPool::reseed"), Some("Clock"));
         assert_eq!(eff("elasticsearch", "elasticsearch::http::transport::TransportBuilder::auth"), None);
-        assert!(!reads_trust_store("elasticsearch", "elasticsearch::http::transport::TransportBuilder::auth"));
-        assert!(!reads_trust_store("elasticsearch", "elasticsearch::http::transport::Transport::send"));
-        assert!(!reads_trust_store("reqwest", "reqwest::ClientBuilder::build"), "reqwest is not claimed here");
+        assert!(also_effects("elasticsearch", "elasticsearch::http::transport::TransportBuilder::auth").is_empty());
+        assert!(also_effects("elasticsearch", "elasticsearch::http::transport::Transport::send").is_empty());
+        assert!(also_effects("reqwest", "reqwest::ClientBuilder::build").is_empty(), "reqwest is not claimed here");
         // tokio_postgres / deadpool_postgres: the verbs `PG_DB_VERBS` never matched
         for m in ["execute_raw", "execute_typed", "query_typed_raw", "query_typed_one", "query_typed_opt", "query_scalar",
                   "query_one_scalar", "query_opt_scalar", "bind", "bind_raw", "query_portal", "query_portal_raw",

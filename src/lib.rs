@@ -3213,6 +3213,27 @@ impl Candor {
         }
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
+            // SOUNDNESS R1612 — the effects the call performs BESIDE its primary (`candor_classify::ALSO_EFFECTS`).
+            // This engine never asked R338's trust-store hook, so `tungstenite::client_tls` was `Fs` under
+            // `candor-scan` and not here; the table is now the one authority both engines ask. Gated to a BUILT-IN
+            // primary (a user `extra` rule has no second effects), charged beside it, and an effect with a locator
+            // surface is marked `incomplete`: the call's literal is the primary's locator, not the second effect's.
+            if builtin.is_some() {
+                for e2 in candor_classify::also_effects(crate_name.as_str(), &path) {
+                    self.direct.entry(caller).or_default().insert(e2);
+                    if candor_classify::also_hides_locator(e2) {
+                        self.incomplete_direct.entry(caller).or_default().insert(e2);
+                    }
+                    // The table records no verb, so a second `Fs` makes no read/write claim (the cross-crate sentinel).
+                    if e2 == "Fs" {
+                        self.fs_direct.entry(caller).or_default().insert(FS_UNKNOWN);
+                    }
+                    if self.explain.is_some() {
+                        let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                        self.sites.entry(caller).or_default().push(EffectSite { eff: e2, via: path.clone(), loc });
+                    }
+                }
+            }
             // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
             // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
             // Gated to built-in Fs classification — see `fs_detail_for`.

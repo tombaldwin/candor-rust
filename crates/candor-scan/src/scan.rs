@@ -3912,6 +3912,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if agree { format!("AGREE {first:?}") } else { "DISAGREE".to_string() }
                     );
                 }
+                // SOUNDNESS R1612 — each arm's SECOND effects (`ALSO_EFFECTS`) are charged with it, and marked like
+                // the primary: this branch withholds every surface, so every charged effect is `incomplete`.
+                let alsos: Vec<&'static str> = c.path.split(crate::decls::ALIAS_ALT_SEP).flat_map(|alt| {
+                    let written = alt.split("::").next().unwrap_or("");
+                    let acr: &str = dep_renames.get(written).map(String::as_str).unwrap_or(written);
+                    candor_classify::also_effects(acr, alt)
+                }).collect();
+                for e2 in &alsos {
+                    direct.entry(f.qual.clone()).or_default().insert(e2);
+                    incomplete.entry(f.qual.clone()).or_default().insert(e2);
+                }
                 match (agree, first) {
                     (true, Some(eff)) => {
                         direct.entry(f.qual.clone()).or_default().insert(eff);
@@ -5352,6 +5363,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                             Some(true) => {
                                                 r1578_sigs.borrow_mut().note_typed(dcr);
                                                 direct.entry(f.qual.clone()).or_default().insert(eff);
+                                                // SOUNDNESS R1612 — and the rule's second effects, as on the main path.
+                                                for e2 in candor_classify::also_effects(dreal, &format!("{tp}::{}", c.leaf)) {
+                                                    direct.entry(f.qual.clone()).or_default().insert(e2);
+                                                    if candor_classify::also_hides_locator(e2) {
+                                                        incomplete.entry(f.qual.clone()).or_default().insert(e2);
+                                                    }
+                                                }
                                             }
                                             Some(false) => {}
                                             None => {
@@ -6111,16 +6129,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     d.insert("Llm");
                     d.insert("Net");
                 }
-                // SOUNDNESS R338 — the same SECOND-EFFECT shape, for the trust-store read a calibrated
-                // crate performs inside its own public entry point. `classify` returns ONE effect, so
-                // `tungstenite::client_tls` resolving to `Net` would DROP the `Fs` it also does — the
-                // identical drop the Llm block above exists to prevent, which is why this sits beside
-                // it and carries the same guards rather than becoming a second mechanism.
-                if !suppress_bare_leaf
-                    && !local_is_authoritative
-                    && candor_classify::reads_trust_store(cr_real, &path_real)
-                {
-                    direct.entry(f.qual.clone()).or_default().insert("Fs");
+                // SOUNDNESS R1612 (was R338's trust-store hook) — the effects the call performs BESIDE its
+                // primary, from the one table every charging site asks (`candor_classify::ALSO_EFFECTS`). Charged,
+                // never substituted; a second effect with a locator surface is marked `incomplete`, because the
+                // call's literal is the PRIMARY's locator, and an Fs one poisons the direction (`?`) because the
+                // table records no verb. The Llm block above is the same shape for the model-SDK surface.
+                if !suppress_bare_leaf && !local_is_authoritative && !explicit_salt {
+                    for e2 in candor_classify::also_effects(cr_real, &path_real) {
+                        direct.entry(f.qual.clone()).or_default().insert(e2);
+                        if candor_classify::also_hides_locator(e2) {
+                            incomplete.entry(f.qual.clone()).or_default().insert(e2);
+                        }
+                        if e2 == "Fs" {
+                            fskinds.entry(f.qual.clone()).or_default().insert("?".to_string());
+                        }
+                        if std::env::var_os("CANDOR_ALSO_DEBUG").is_some() {
+                            eprintln!("R1612ALSO {e2} {} :: {path_real}", f.qual);
+                        }
+                    }
                 }
                 // A host-ESTABLISHING Net / program-NAMING Exec call with NO captured literal → the endpoint
                 // is invisible to the gate (a runtime value). Mark the surface incomplete so a benign captured

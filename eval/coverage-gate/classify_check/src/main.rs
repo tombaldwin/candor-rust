@@ -128,7 +128,7 @@ fn is_reviewed_pure(krate: &str, guesses: &[String]) -> bool {
 
 /// covered.tsv's data lines, one per candidate identity, sorted. Split out of `main` so the
 /// no-row-may-be-lost property has a test that does not need a 74-crate corpus to exercise it.
-fn render_covered(covered: HashMap<(String, String), (String, Vec<String>, &'static str)>) -> Vec<String> {
+fn render_covered(covered: HashMap<(String, String), (String, Vec<String>, String)>) -> Vec<String> {
     let mut lines: Vec<String> = covered
         .into_iter()
         .map(|((krate, sk), (g, eff, classified_as))| {
@@ -196,7 +196,7 @@ fn main() {
     // 1057 + 445 != 1553 — and nothing ever subtracted. Both halves are fixed here: `entry` (the
     // crate-qualified self_scan_key) is written as a fifth COLUMN so every row carries its own
     // identity, and the accounting is asserted rather than printed (see the end of main).
-    let mut covered: HashMap<(String, String), (String, Vec<String>, &'static str)> = HashMap::new();
+    let mut covered: HashMap<(String, String), (String, Vec<String>, String)> = HashMap::new();
     let mut open: HashMap<(String, String), (String, Vec<String>, String)> = HashMap::new();
     // SOUNDNESS R1528 step 2. An unresolved candidate no consumer can name is not a consumer silence:
     // it goes HERE, not to open.tsv. Two source sites of one identity (`#[cfg]` arms) are one unit, so
@@ -245,7 +245,9 @@ fn main() {
             // thing that made the asymmetry dangerous was the refresh workflow DIFFING on this column.
             // It now diffs on `entry`, which is the same key in both files, so the display rule is a
             // display rule again.
-            let matched = e.guesses.iter().find_map(|g| candor_classify::classify(krate, g).map(|eff| (g, eff)));
+            // SOUNDNESS R1612 — the FULL charge, primary then `ALSO_EFFECTS` (`Rand+Clock`): a one-effect rule renders
+            // exactly as before, and dropping a second effect is now a regression this column catches.
+            let matched = e.guesses.iter().find_map(|g| candor_classify::classify_rendered(krate, g).map(|eff| (g, eff)));
             if let Some((g, classified_as)) = matched {
                 covered.insert(dedup_key, (g.clone(), inf.clone(), classified_as));
             } else {
@@ -277,7 +279,8 @@ fn main() {
          # local call-graph reachability over the crate's OWN source) — documentation, never a value to\n\
          # check classify() against: the two oracles legitimately disagree (self-scan's set for\n\
          # `async_nats::Consumer::request_batch` is `Log` alone; classify() correctly returns `Net`).\n\
-         # classified_as is the actual `classify(crate, consumer_path)` return value THIS gate asserts:\n\
+         # classified_as is the actual `classify_rendered(crate, consumer_path)` value THIS gate asserts —\n\
+         # the primary effect, then any `ALSO_EFFECTS` second effects, `+`-joined (SOUNDNESS R1612):\n\
          # crates/candor-classify/tests/coverage_gate.rs requires it hold EXACTLY (not just Some(_)) —\n\
          # a rule narrowed to a different-but-still-Some effect (Net -> Log) is a regression this equality\n\
          # check catches; `is_some()` alone would not, since the narrowed value can already be a member\n\
@@ -393,7 +396,7 @@ mod tests {
         for module in ["async_impl::multipart", "blocking::multipart"] {
             covered.insert(
                 ("reqwest".to_string(), format!("{module}::Part::file")),
-                ("reqwest::Part::file".to_string(), vec!["Fs".to_string()], "Fs"),
+                ("reqwest::Part::file".to_string(), vec!["Fs".to_string()], "Fs".to_string()),
             );
         }
         let lines = render_covered(covered);
@@ -437,7 +440,7 @@ mod tests {
             let key = ("k".to_string(), format!("m{i}::Ty::f"));
             identities.insert(key.clone());
             if i % 2 == 0 {
-                covered.insert(key, ("k::Ty::f".to_string(), vec!["Fs".to_string()], "Fs"));
+                covered.insert(key, ("k::Ty::f".to_string(), vec!["Fs".to_string()], "Fs".to_string()));
             } else {
                 open.insert(key, ("k::Ty::f".to_string(), vec!["Fs".to_string()], "src/l.rs".to_string()));
             }

@@ -13664,7 +13664,7 @@ pub fn seed_os_verb() { let _r = StdRng::from_os_rng(); }\n";
         //
         // The plain entry points are the fabrication control and they matter more than usual, because
         // the reason `connect` is NOT charged is a deliberate pricing decision recorded in
-        // `reads_trust_store`: it serves ws:// and wss:// alike, so charging it would hit real
+        // `ALSO_EFFECTS` (candor-classify): it serves ws:// and wss:// alike, so charging it would hit real
         // plain-WebSocket users.
         let src = "\
 pub fn tls_client(u: tungstenite::handshake::client::Request, s: std::net::TcpStream) { let _ = tungstenite::client_tls(u, s); }\n\
@@ -13683,7 +13683,7 @@ pub fn ws_client(u: tungstenite::handshake::client::Request, s: std::net::TcpStr
         for f in ["ws_connect", "ws_client"] {
             assert_eq!(fixture_effects(&v, f), vec!["Net".to_string()],
                        "{f} serves plain WebSocket too and is deliberately NOT charged Fs — see the \
-                        pricing recorded in reads_trust_store:\n{v:#}");
+                        pricing recorded in ALSO_EFFECTS:\n{v:#}");
         }
     }
 
