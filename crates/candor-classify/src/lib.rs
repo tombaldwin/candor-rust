@@ -2254,6 +2254,33 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             if crate_name == "postgres" && path.ends_with("::Client::is_valid") {
                 return Some("Db");
             }
+            // SOUNDNESS R1618 — `deadpool_postgres::Pool::{get, timeout_get}` is the pool's connection-opening verb. EXECUTED
+            // (macOS, DYLD interposer, postgres:16): a COLD pool's `get()` = connect(127.0.0.1:port) + 1 getentropy (the SCRAM
+            // nonce) + the startup/auth exchange; a WARM pool's `get()` (an idle object, default `RecyclingMethod::Fast`) = 0
+            // connects and 0 entropy. `Db` is the primary because the cold arm opens a database session, and a `Verified`/`Clean`
+            // recycling method sends a query on the warm arm too. The path is `deadpool_postgres::Pool::get`: `Pool` is a
+            // `deadpool::managed::Pool<Manager>` alias, which the scan keeps under the consumer's own spelling. Keyed on the exact
+            // head so another crate's `Pool::get` (and `deadpool::managed::Pool::get` over a caller's own manager) is not claimed.
+            if crate_name == "deadpool_postgres"
+                && matches!(path, "deadpool_postgres::Pool::get" | "deadpool_postgres::Pool::timeout_get")
+            {
+                return Some("Db");
+            }
+            // SOUNDNESS R1618 — `build_transaction().start()` is `BEGIN`. EXECUTED: 1 simple_query record and a BEGIN on the wire
+            // (tokio_postgres, postgres, deadpool). The scan types the builder chain `c.build_transaction().start()` as the
+            // RECEIVER's type, so the consumer's path is `tokio_postgres::Client::start` (neither `Client` nor `Object` has a
+            // `start` of its own, so the name can only come from the builder), and a held builder is `TransactionBuilder::start`.
+            // `isolation_level` / `read_only` / `deferrable` / `build_transaction` itself send nothing (EXECUTED, 0 events).
+            if let Some((head, "start")) = path.rsplit_once("::") {
+                if matches!(
+                    head,
+                    "tokio_postgres::Client" | "tokio_postgres::TransactionBuilder"
+                        | "postgres::Client" | "postgres::TransactionBuilder"
+                        | "deadpool_postgres::Client" | "deadpool_postgres::Object" | "deadpool_postgres::TransactionBuilder"
+                ) {
+                    return Some("Db");
+                }
+            }
             // rusqlite only: opening the database IS the connection establishment (`Connection::
             // open`/`open_in_memory`/`open_with_flags` — the embedded analog of `::connect`).
             //
@@ -5117,6 +5144,19 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
     if pool && matches!(module, "" | "pool") && method == "begin_with" {
         return Some("Db");
     }
+    // SOUNDNESS R1618 — `connect_with` is the sqlx facade's OTHER connection-opening verb. The facade's `VERBS` list names
+    // `::connect` only, so `MySqlConnection::connect_with(&opts)`, `MySqlPool::connect_with(opts)` and
+    // `MySqlPoolOptions::connect_with(opts)` read PURE (absent from `functions[]`, no `invisible`; the lane that filed
+    // R1618 found them while executing the `::connect` rows). EXECUTED against mysql:8 (macOS, DYLD interposer): each opens a
+    // TCP connection and draws TLS entropy, exactly as the `::connect` spelling. Keyed on module + type + method: the
+    // facade's root re-export or a driver module, a `*Connection` / `*Pool` / `*PoolOptions` type.
+    if krate == "sqlx"
+        && method == "connect_with"
+        && matches!(module, "" | "pool" | "mysql" | "postgres" | "sqlite" | "any")
+        && (ty.ends_with("Connection") || ty.ends_with("Pool") || ty.ends_with("PoolOptions"))
+    {
+        return Some("Db");
+    }
     match (module, ty, method) {
         ("" | "pool" | "pool::connection", "PoolConnection", "close") => Some("Net"),
         ("" | "pool" | "pool::connection", "PoolConnection", "return_to_pool") => Some("Db"),
@@ -6194,8 +6234,8 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
     // Net: connect(127.0.0.1:55432). Ipc: connect(AF_UNIX path) for a unix-socket host. Rand: 1 getentropy for the SCRAM nonce,
     // ONLY when the server asks SCRAM (a `trust` server: 0 getentropy, same runtime). A single call performs ONE of Net/Ipc
     // (by the host string) and Rand only against SCRAM, so each is a configuration arm charged where observed; the Db primary
-    // already charges the call without a host. deadpool-postgres gets no row of its own (see R1617): its consumer-callable
-    // `Pool::get` is not a classified path, and its `Manager::create` reaches these rows through `Config::connect`.
+    // already charges the call without a host. deadpool-postgres's consumer-callable `Pool::{get, timeout_get}` is a primary `Db`
+    // since R1618 (it was an unclassified path, so the call read pure), and carries the same three extras below.
     AlsoEffect {
         krate: &["tokio_postgres", "postgres"],
         on: AlsoOn::Method("Config", &["connect"]),
@@ -6223,6 +6263,91 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         row: "R1617",
         evidence: "EXECUTED as Config::connect (postgres::Client::connect parses and calls it): TCP Net, SCRAM Rand. (The unix-host arm \
                    was EXECUTED through postgres::Config::connect.)",
+    },
+    // SOUNDNESS R1618 — deadpool_postgres `Pool::{get, timeout_get}` (primary Db, see `classify`). EXECUTED (postgres:16, macOS,
+    // DYLD interposer, rows in handoff `rust-r1617/`): a COLD pool's get = connect(127.0.0.1:55432) [Net] + 1 getentropy [Rand] (the
+    // SCRAM nonce; 0 against a trust server, as for `Config::connect`); a WARM pool's get = 0 connects, 0 entropy. The unix-host arm
+    // is the same `Config::connect` the manager calls. OVER-CHARGE, stated: a call that finds an idle object (the steady state of a
+    // long-lived pool) performs none of these; the cold arm is the only one a static scan cannot rule out. `Log`: 0 records.
+    AlsoEffect {
+        krate: &["deadpool_postgres"],
+        on: AlsoOn::Method("Pool", &["get", "timeout_get"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED cold pool: connect(127.0.0.1:55432) + 1 getentropy; warm pool (idle object): 0 of both. get and timeout_get \
+                   identical. Pure neighbours status/is_closed/manager/resize/close: 0 events.",
+    },
+    // SOUNDNESS R1618 — `build_transaction().start()` = BEGIN, and one `log` record like `transaction()` (simple_query.rs:47). EXECUTED
+    // through the tokio_postgres, postgres (sync; 2 records: BEGIN and the drop's ROLLBACK) and deadpool spellings. The consumer path of
+    // a chained call is the receiver's type (`Client::start`, `Object::start`); a held builder is `TransactionBuilder::start`.
+    AlsoEffect {
+        krate: &["tokio_postgres", "postgres", "deadpool_postgres"],
+        on: AlsoOn::Method("Client", &["start"]),
+        effects: &["Log"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED, logger at DEBUG: build_transaction().start() = 1 record, simple_query.rs:47 (also with isolation_level/read_only \
+                   in the chain). 0 at INFO. build_transaction / isolation_level / read_only alone: 0.",
+    },
+    AlsoEffect {
+        krate: &["tokio_postgres", "postgres", "deadpool_postgres"],
+        on: AlsoOn::Method("TransactionBuilder", &["start"]),
+        effects: &["Log"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED, logger at DEBUG: a held TransactionBuilder's start = 1 record, simple_query.rs:47 (sync postgres: 2, BEGIN and the \
+                   drop's ROLLBACK).",
+    },
+    AlsoEffect {
+        krate: &["deadpool_postgres"],
+        on: AlsoOn::Method("Object", &["start"]),
+        effects: &["Log"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED, logger at DEBUG: pooled Object .build_transaction().start() = 1 record, simple_query.rs:47.",
+    },
+    // SOUNDNESS R1618 — sqlx MySQL connect: the facade's primary is Db (`VERBS` for `::connect`, `sqlx_r1528` for `::connect_with`),
+    // and every connecting spelling EXECUTED against mysql:8 (macOS, sqlx 0.9.0, tls-rustls, DYLD interposer) = connect(127.0.0.1:53306)
+    // [Net] + 5 getentropy [Rand] on the default `ssl-mode=preferred` (also `required`; `ssl-mode=disabled`: connect only, 0 entropy);
+    // `?socket=<path>` = connect(AF_UNIX path) [Ipc] with the same entropy. Spellings executed: MySqlConnection::{connect,
+    // connect_with}, MySqlPool::{connect, connect_with}, MySqlPoolOptions::{connect, connect_with}, MySqlConnectOptions::connect
+    // (the `ConnectOptions` trait method). `connect_lazy` opens nothing (R1589). OVER-CHARGE, stated: a `disabled` URL draws no
+    // entropy, and Net / Ipc are the two arms of one call (the host string picks). `ssl-ca=<file>` opens that file (Fs, EXECUTED) and
+    // is NOT charged here: see R1618, a URL-conditional Fs needs a literal-keyed charge, not a table row. Postgres and sqlite via
+    // sqlx are not executed and not claimed.
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlConnection", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED (mysql:8, interposer): connect(127.0.0.1) + 5 getentropy on the default/required TLS arms; ssl-mode=disabled: connect \
+                   only; ?socket= : connect(AF_UNIX). Neighbour connect_lazy and MySqlConnectOptions parse/new: 0 events.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlPool", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED (mysql:8): Pool::connect / connect_with open one connection eagerly = connect + 5 getentropy; connect_lazy: 0.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlPoolOptions", &["connect", "connect_with"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED (mysql:8): PoolOptions::connect / connect_with = connect + 5 getentropy. max_connections / new: 0.",
+    },
+    AlsoEffect {
+        krate: &["sqlx"],
+        on: AlsoOn::Method("MySqlConnectOptions", &["connect"]),
+        effects: &["Net", "Ipc", "Rand"],
+        fs_kind: &[],
+        row: "R1618",
+        evidence: "EXECUTED (mysql:8): ConnectOptions::connect on MySqlConnectOptions = connect + 5 getentropy.",
     },
     // fastrand 2.5.0 seeds its THREAD-LOCAL generator from `Instant::now()` on a thread's first use (global_rng.rs:203-212), so
     // the first fastrand call per thread reads the clock. EXECUTED (macOS, fresh thread, interposer): fastrand::{u32, seed,

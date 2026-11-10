@@ -38,8 +38,7 @@ fn deadpool_rows_cover_its_own_spellings_only() {
               "deadpool_postgres::Transaction::commit", "deadpool_postgres::Transaction::prepare_typed_cached"] {
         assert_eq!(classify_all("deadpool_postgres", p), Some(vec!["Db", "Log"]), "{p}");
     }
-    // The pool is lazy and `Pool::get` is not a classified path: no primary, so no second effect (the table never stands alone).
-    assert!(classify_all("deadpool_postgres", "deadpool_postgres::Pool::get").is_none());
+    // `Pool::get` is a classified path since R1618 (a cold pool connects); see `tests/r1618_pool_builder_connect.rs`.
     assert!(also_effects("deadpool_postgres", "deadpool_postgres::Config::create_pool").is_empty());
 }
 

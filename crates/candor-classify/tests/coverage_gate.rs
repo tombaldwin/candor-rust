@@ -313,6 +313,27 @@ fn ceiling_comparator_treats_trailing_zeros_as_padding_and_open_rusqlite_stays_e
 // evidence AGAINST the row. The oracle cannot PROVE a row — its extras are a union over every branch, which is why it
 // is not the source of these rows (R1613) — but it can refute one. The executed evidence lives on the row itself.
 // ---------------------------------------------------------------------------------------------------
+/// The consumer paths `ALSO_EFFECTS` rows are written for that `generate.py` cannot list (see the liveness check below).
+const NOT_ENUMERATED: &[(&str, &str)] = &[
+    ("postgres", "postgres::Client::connect"),
+    ("deadpool_postgres", "deadpool_postgres::Pool::get"),
+    ("deadpool_postgres", "deadpool_postgres::Pool::timeout_get"),
+    ("tokio_postgres", "tokio_postgres::Client::start"),
+    ("postgres", "postgres::Client::start"),
+    ("deadpool_postgres", "deadpool_postgres::Client::start"),
+    ("tokio_postgres", "tokio_postgres::TransactionBuilder::start"),
+    ("postgres", "postgres::TransactionBuilder::start"),
+    ("deadpool_postgres", "deadpool_postgres::TransactionBuilder::start"),
+    ("deadpool_postgres", "deadpool_postgres::Object::start"),
+    ("sqlx", "sqlx::MySqlConnection::connect"),
+    ("sqlx", "sqlx::MySqlConnection::connect_with"),
+    ("sqlx", "sqlx::MySqlPool::connect"),
+    ("sqlx", "sqlx::MySqlPool::connect_with"),
+    ("sqlx", "sqlx::mysql::MySqlPoolOptions::connect"),
+    ("sqlx", "sqlx::mysql::MySqlPoolOptions::connect_with"),
+    ("sqlx", "sqlx::mysql::MySqlConnectOptions::connect"),
+];
+
 #[test]
 fn also_effects_rows_are_live_and_not_contradicted_by_the_oracle() {
     let manifest = include_str!("../../../eval/coverage-gate/covered.tsv");
@@ -327,7 +348,7 @@ fn also_effects_rows_are_live_and_not_contradicted_by_the_oracle() {
         let mut live = 0usize;
         for r in &rows {
             let (krate, path, oracle, recorded) = (r[0], r[1], r[2], r[3]);
-            if !row.krate.contains(&krate) || candor_classify::also_effects(krate, path).is_empty() {
+            if !row.krate.contains(&krate) || !row.on.matches(path) || candor_classify::also_effects(krate, path).is_empty() {
                 continue;
             }
             let hits: Vec<&str> = candor_classify::also_effects(krate, path)
@@ -352,7 +373,21 @@ fn also_effects_rows_are_live_and_not_contradicted_by_the_oracle() {
             }
         }
         if live == 0 {
-            failures.push(format!("ALSO_EFFECTS[{i}] ({}, {:?}) matches no covered.tsv consumer path", row.row, row.krate));
+            // SOUNDNESS R1618 — LIVENESS IS PER ROW. This check used to ask `also_effects(krate, path)` for the effect, which any
+            // SIBLING row of the same effect answers (65 covered paths made a `Client::start` Log row "live" before the row
+            // matched anything), so a row nobody's call reaches passed. The row must match the path itself (`row.on`). A row
+            // whose consumer spelling the generator CANNOT enumerate (a type alias or re-export from outside the crate's own
+            // source: `deadpool_postgres::Pool`, the `sqlx` facade; a builder reached only through a chain) is named in
+            // `NOT_ENUMERATED` with the path a consumer writes, and must fire on it. The oracle cannot refute those rows;
+            // the executed evidence on the row is all they have.
+            let named = NOT_ENUMERATED.iter().any(|(k, p)| {
+                row.krate.contains(k)
+                    && row.on.matches(p)
+                    && candor_classify::also_effects(k, p).iter().any(|e| row.effects.contains(e))
+            });
+            if !named {
+                failures.push(format!("ALSO_EFFECTS[{i}] ({}, {:?}) matches no covered.tsv consumer path", row.row, row.krate));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
