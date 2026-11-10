@@ -94,6 +94,8 @@ impl Solo {\n\
     pub fn solo_send_zq(&self, b: &[u8]) -> std::io::Result<usize> { self.io.send(b) }\n\
     pub fn solo_own_zq(&self) -> bool { self.io.own() }\n\
 }\n\
+pub struct Raw { r#type: DontDrop<net::UdpSocket> }\n\
+pub fn raw_send_zq(r: &Raw, b: &[u8]) -> std::io::Result<usize> { r.r#type.send(b) }\n\
 pub struct Lock<T>(std::cell::RefCell<T>);\n\
 pub struct Guard<'a, T>(std::cell::RefMut<'a, T>);\n\
 impl<'a, T> Deref for Guard<'a, T> { type Target = T; fn deref(&self) -> &T { &self.0 } }\n\
@@ -109,6 +111,8 @@ fn r1630_generic_deref_field_reaches_its_instantiation() {
     let on = scan(&d, None, &[]);
     assert_eq!(inferred(&on, "Solo::solo_send_zq"), vec!["Net"], "auto-deref to UdpSocket::send");
     assert!(inferred(&on, "Solo::solo_own_zq").is_empty(), "the wrapper's own member stays the wrapper's (pure twin)");
+    // A raw-identifier field: the file must be analysed at all (a re-built `Ident::new("r#type")` aborted the whole file).
+    assert_eq!(inferred(&on, "raw_send_zq"), vec!["Net"], "raw identifier field, owner not proven (leaf route)");
     assert_eq!(inferred(&on, "Park::park_shut_zq"), vec!["Unknown"], "a non-field receiver of a generic Deref discloses");
     assert!(why(&on, "Park::park_shut_zq").iter().any(|w| w.starts_with("dispatch:generic payload receiver")));
     let off = scan(&d, None, &["CANDOR_R1630_OFF"]);

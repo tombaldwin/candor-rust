@@ -9546,16 +9546,13 @@ impl<'a> CallCollector<'a> {
     /// declaration where R1624's `owner_qual` proves its path, else the leaf-keyed fact — which a same-leaf twin with
     /// different arguments has already withdrawn, and which is refused outright for an ambiguous field. `None`: no
     /// declaration says.
-    fn owner_field_args(&self, base_expr: &syn::Expr, owner: &str, key: &str) -> Option<String> {
+    /// `member` is the field expression's own (never re-built from `key`: a raw identifier `r#type` is no `Ident::new`).
+    fn owner_field_args(&self, base_expr: &syn::Expr, owner: &str, key: &str, member: &syn::Member) -> Option<String> {
         if let Some((qi, qual)) = self.owner_qual(base_expr, owner) {
             let v = qi.field_args.get(&qual)?.get(key)?;
             return (v != crate::cache::QUAL_TOMB).then(|| v.clone());
         }
-        let member = match key.parse::<u32>() {
-            Ok(i) => syn::Member::Unnamed(syn::Index { index: i, span: proc_macro2::Span::call_site() }),
-            Err(_) => syn::Member::Named(syn::Ident::new(key, proc_macro2::Span::call_site())),
-        };
-        if self.field_ambiguous(owner, &member) {
+        if self.field_ambiguous(owner, member) {
             return None;
         }
         let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
@@ -9599,7 +9596,7 @@ impl<'a> CallCollector<'a> {
             syn::Member::Named(n) => n.to_string(),
             syn::Member::Unnamed(i) => i.index.to_string(),
         };
-        let Some(args) = self.owner_field_args(&fe.base, &owner, &key) else { return PayloadTy::Old };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) else { return PayloadTy::Old };
         let Some(t) = args.split('\u{1}').nth(pos) else { return PayloadTy::Old };
         if t.contains("::") || matches!(t, "_" | "'" | "") {
             return PayloadTy::Old;
@@ -9651,7 +9648,7 @@ impl<'a> CallCollector<'a> {
             syn::Member::Named(n) => n.to_string(),
             syn::Member::Unnamed(i) => i.index.to_string(),
         };
-        let args = self.owner_field_args(&fe.base, &owner, &key)?;
+        let args = self.owner_field_args(&fe.base, &owner, &key, &fe.member)?;
         let arg = args.split('\u{1}').nth(pos)?;
         if matches!(arg, "_" | "'" | "") || arg.contains('\u{1f}') || !arg.contains("::") && self.is_scoped_generic_name(arg) {
             return None;
@@ -10623,7 +10620,7 @@ impl<'a> CallCollector<'a> {
             syn::Member::Named(n) => n.to_string(),
             syn::Member::Unnamed(i) => i.index.to_string(),
         };
-        let Some(args) = self.owner_field_args(&fe.base, &owner, &key) else { return };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) else { return };
         let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
         let ev = self.scrut_evidence(&fe.base);
         for t in args.split('\u{1}') {
