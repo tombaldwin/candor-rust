@@ -16202,7 +16202,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // have — a `-1` anywhere in the body reaches syn's `parse_negative_lit`, which JOINS spans, and
         // the join aborts the parser (getrandom's `debug_assert!`). See `respan_call_site`.
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(exprs) = syn::parse::Parser::parse2(parser, respan_call_site(node.tokens.clone())) {
+        let parsed = syn::parse::Parser::parse2(parser, respan_call_site(node.tokens.clone()));
+        // SOUNDNESS R1649 (the silence its resolution exposed) — a STREAM macro (`async_stream`'s `stream!` /
+        // `try_stream!`, and sqlx-core's own `try_stream!`) takes a BLOCK of statements, not a list of expressions, so the
+        // walk below parsed nothing and every call inside read pure: sqlx-postgres `<&mut PgConnection as
+        // Executor>::fetch_many` (`Box::pin(try_stream! { let mut s = pin!(self.run(..).await?); .. })`) read `[]` on
+        // every arm. The body is the code the returned stream runs, which this engine charges to the fn that builds it,
+        // exactly as it does an `async move` block. Named macros only: a code-shaped body such as `quote!`'s is NOT run.
+        if parsed.is_err()
+            && matches!(mleaf.as_str(), "stream" | "try_stream")
+            && std::env::var_os("CANDOR_R1649_OFF").is_none()
+        {
+            let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+                proc_macro2::Delimiter::Brace,
+                respan_call_site(node.tokens.clone()),
+            )));
+            if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                    eprintln!("R1649STREAM\t{mleaf}"); // §E1 REACH COUNTER
+                }
+                self.visit_block(&block);
+            }
+        }
+        if let Ok(exprs) = parsed {
             // IMPLICIT FORMATTING (#2): a formatting macro (`format!`/`println!`/`write!`/…) runs each
             // `{}`/`{:?}` argument through `Display::fmt`/`Debug::fmt`. A LOCAL type with an effectful
             // `impl Display`/`impl Debug` (a custom formatter that touches the fs/net/etc.) is therefore

@@ -3145,12 +3145,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut nonpath_tails: HashSet<String> = HashSet::new();
     // t2 -> the MERGED unit quals that tail names (R1034's shared case; judged post-fixpoint, see below).
     let mut nonpath_shared: HashMap<String, Vec<String>> = HashMap::new();
+    // SOUNDNESS R1649 — t2 -> (unit qual, trait leaf) of an `impl Tr for &T` / `&mut T` (module-keyed, R1034) whose tail
+    // `T::m` is ALREADY claimed by another impl, so the fallback below does not file it. Read at the typed call site.
+    let mut r1649_ref: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let r1649_off = std::env::var_os("CANDOR_R1649_OFF").is_some();
     {
         let have: HashSet<&str> = fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias).map(|f| f.qual.as_str()).collect();
         let mut adds: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for e in &merged.nonpath_receivers {
             let mut parts = e.split('\u{1f}');
             let (Some(t2), Some(q), Some(shared)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            if by_tail2.contains_key(t2) && have.contains(q) && shared == "0" && !r1649_off {
+                if let Some(tr) = parts.next().filter(|t| !t.is_empty()) {
+                    let v = r1649_ref.entry(t2.to_string()).or_default();
+                    if !v.iter().any(|(x, _)| x == q) {
+                        v.push((q.to_string(), tr.to_string()));
+                    }
+                }
+            }
             if by_tail2.contains_key(t2) || !have.contains(q) {
                 continue;
             }
@@ -5192,8 +5204,81 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     });
                 if let Some(targets) = targets {
                     resolved_local = true;
+                    // SOUNDNESS R1649 — A TAIL TWO IMPLS CLAIM, ONE OF THEM ON `&T`. `impl Exec for &mut Conn` is keyed at module
+                    // level (R1034) and its `Conn::prep` fallback is not filed when `impl AnyBackend for Conn` already claims
+                    // that tail, so a typed `conn.prep(q)` resolved to `AnyBackend::prep` whatever the call site imported.
+                    // sqlx-postgres `listener`'s `self.connection().await?.prepare_with(..)` (only `Executor` imported) ran
+                    // `<&mut PgConnection as Executor>::prepare_with` and read `AnyConnectionBackend`'s (rustc's MIR;
+                    // EXECUTED one-variable fixture rustagent-r474/fx/r1649: the write ran, the row was ABSENT, and the pure
+                    // twin read the other impl's `Fs`). Rust picks by the trait in scope at the call, so the edge MOVES from the
+                    // claimant to the `&T` impl only where that is determined: the `&T` impl's trait is CERTAINLY in scope (one
+                    // written `use` names its leaf, and it is not a leaf two of this crate's traits share), the claimant is the one
+                    // trait impl of `T::m`, of a DIFFERENT trait, and that trait may NOT be in scope (no glob, no `use` naming it,
+                    // not declared in the file): two in-scope candidates at one probe step would not compile. Residual, stated:
+                    // a claimant trait in scope under a re-exported alias, met by an OWNED receiver at an earlier probe step.
+                    // `CANDOR_R1649_OFF` restores the old reading; `CANDOR_R1649_INSTR` counts both branches.
+                    let mut withdrawn: Option<String> = None;
+                    if c.method && c.dot && c.typed && !c.is_macro && !r1649_ref.is_empty() {
+                        let segs: Vec<&str> = c.path.split("::").collect();
+                        if segs.len() >= 2 {
+                            let (ty_leaf, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
+                            if let Some(refs) = r1649_ref.get(&format!("{ty_leaf}::{m}")) {
+                                let file = f.loc.split(':').next().unwrap_or("");
+                                let fu = file_uses.get(file).copied().unwrap_or(&[]);
+                                // A glob of ANY root may bring either trait; a written `use` naming the leaf brings it.
+                                let any_glob = fu.iter().any(|u| u.ends_with('*'));
+                                let declared_here = file_local_traits.get(file);
+                                let named = |tr: &str| fu.iter().filter(|u| u.rsplit("::").next() == Some(tr)).count();
+                                let maybe = |tr: &str| any_glob || named(tr) > 0 || declared_here.is_some_and(|d| d.contains(tr));
+                                // CERTAIN: one written `use` names the leaf, and it is not a leaf two of this crate's own traits share.
+                                let imported_once = |tr: &str| {
+                                    named(tr) == 1 && merged.trait_quals.get(tr).is_none_or(|v| v.len() == 1)
+                                };
+                                // Only where rustc's choice is DETERMINED by scope does the resolution move: the claimant is the one
+                                // trait impl of `T::m`, its trait may NOT be in scope, and a `&T` impl's (different) trait IS — named by
+                                // exactly one written `use`. Everywhere else the old resolution stands untouched: a first cut that
+                                // EDGED every `&T` impl whose trait merely might be in scope added 400 edges rustc's MIR does not make
+                                // (rustagent-r474/ab1649/mc.tsv: a leaf two types share, `serde_json`'s two `Serializer`s; a generic
+                                // receiver typed by its bound's name; a builder-chain receiver guess, tempfile `self.as_file_mut()`).
+                                if targets.len() == 1 {
+                                    let claim = &targets[0];
+                                    let traits: Vec<&str> = merged
+                                        .impl_members
+                                        .iter()
+                                        .filter_map(|k| {
+                                            let mut p = k.split('\u{1f}');
+                                            let (Some(tr), Some(ty), Some(mm), None) = (p.next(), p.next(), p.next(), p.next()) else {
+                                                return None;
+                                            };
+                                            (ty == ty_leaf && mm == m).then_some(tr)
+                                        })
+                                        .collect();
+                                    let one_unit = fns.iter().filter(|g| &g.qual == claim).count() == 1;
+                                    if let [t] = traits.as_slice() {
+                                        let winners: Vec<&String> = refs
+                                            .iter()
+                                            .filter(|(q, tr)| tr != t && imported_once(tr) && q != &f.qual)
+                                            .map(|(q, _)| q)
+                                            .collect();
+                                        if !winners.is_empty() && !maybe(t) && one_unit {
+                                            if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                                eprintln!("R1649WITHDRAW\t{}\t{}\t{claim}", f.qual, c.path); // §E1 REACH COUNTER
+                                            }
+                                            withdrawn = Some(claim.clone());
+                                            for q in winners {
+                                                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                                    eprintln!("R1649EDGE\t{}\t{}\t{q}", f.qual, c.path); // §E1 REACH COUNTER
+                                                }
+                                                calls.entry(f.qual.clone()).or_default().insert(q.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for t in targets {
-                        if t != &f.qual {
+                        if t != &f.qual && withdrawn.as_ref() != Some(t) {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
                         }
                     }

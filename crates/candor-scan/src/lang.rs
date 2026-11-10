@@ -12984,6 +12984,14 @@ pub(crate) fn collect_nonpath_receivers(
                 if im.generics.type_params().any(|p| p.ident == seg.ident) {
                     continue; // `impl<T> Tr for &T` — a forwarder, not a receiver
                 }
+                // SOUNDNESS R1649 — the impl's TRAIT leaf, a fourth field: where the referent's own tail is already claimed
+                // by another impl (`impl AnyBackend for Conn` beside `impl Exec for &mut Conn`), which one a method call
+                // runs is decided by which trait is in scope at the call, and Pass B needs the trait to ask.
+                let tr_leaf = im
+                    .trait_
+                    .as_ref()
+                    .and_then(|(_, tr, _)| impl_trait_leaf(tr, uses).or_else(|| tr.segments.last().map(|s| s.ident.to_string())))
+                    .unwrap_or_default();
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(f) = ii {
                         if !include_tests && is_cfg_test(&f.attrs) {
@@ -12991,7 +12999,10 @@ pub(crate) fn collect_nonpath_receivers(
                         }
                         let m = f.sig.ident.to_string();
                         let shared = if shared_count(&m) > 1 { "1" } else { "0" };
-                        out.insert(format!("{referent}::{m}\u{1f}{}\u{1f}{shared}", crate::decls::qualify(modpath, &m)));
+                        out.insert(format!(
+                            "{referent}::{m}\u{1f}{}\u{1f}{shared}\u{1f}{tr_leaf}",
+                            crate::decls::qualify(modpath, &m)
+                        ));
                     }
                 }
             }
