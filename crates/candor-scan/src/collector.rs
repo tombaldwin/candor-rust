@@ -4876,7 +4876,16 @@ impl<'a> CallCollector<'a> {
                     && self.elem_root_ambiguous(&m.receiver)
             }
             syn::Expr::Index(i) => self.elem_root_ambiguous(&i.expr),
-            syn::Expr::Field(f) => self.resolve_recv_type(&f.base).is_some_and(|t| self.field_ambiguous(&t, &f.member)),
+            // SOUNDNESS R1624 — not ambiguous where the owner's own declaration answers for the field (`qual_field_in`).
+            syn::Expr::Field(f) => self.resolve_recv_type(&f.base).is_some_and(|t| {
+                self.field_ambiguous(&t, &f.member) && {
+                    let key = match &f.member {
+                        syn::Member::Named(n) => n.to_string(),
+                        syn::Member::Unnamed(i) => i.index.to_string(),
+                    };
+                    !matches!(self.qual_field_in(&f.base, &t, &key, true), Some(Some(_)))
+                }
+            }),
             _ => false,
         }
     }
@@ -4993,8 +5002,9 @@ impl<'a> CallCollector<'a> {
                 Some(v.clone())
             }
             None => {
-                let concrete = qi.fields.get(&qual).and_then(|m| m.get(key))
-                    .is_some_and(|v| v != crate::cache::QUAL_TOMB && crate::lang::dyn_alias_leaves_str(v).is_none());
+                let concrete = qi.fields.get(&qual).and_then(|m| m.get(key)).is_some_and(|v| {
+                    v != crate::cache::QUAL_TOMB && crate::lang::dyn_alias_leaves_str(v).is_none() && !qi.names_param(&qual, v)
+                });
                 if concrete && legacy_has {
                     instr("none", "-");
                     return Some(Vec::new());

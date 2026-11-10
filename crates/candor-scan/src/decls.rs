@@ -5521,6 +5521,13 @@ pub(crate) fn collect_decls(
                         if let Some(q) = c.borrow_mut().as_mut() {
                             q.file(&qual, fields.get(&r1624_leaf), field_elem.get(&r1624_leaf),
                                    trait_fields.get(&r1624_leaf), field_elem_trait.get(&r1624_leaf));
+                            let e = q.params.entry(qual.clone()).or_default();
+                            for t in s.generics.type_params() {
+                                let n = t.ident.to_string();
+                                if !e.contains(&n) {
+                                    e.push(n);
+                                }
+                            }
                         }
                     });
                     r1624_restore(fields, &r1624_leaf, pf);

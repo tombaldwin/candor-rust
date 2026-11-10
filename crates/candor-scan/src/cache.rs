@@ -1691,9 +1691,21 @@ pub(crate) struct QualIndexes {
     pub(crate) field_elem: FieldElemIndex,
     pub(crate) trait_fields: TraitFieldIndex,
     pub(crate) field_elem_trait: FieldElemTraitIndex,
+    /// The struct's own TYPE PARAMETERS, by qual. A field typed by one (`delegate: X`) is filed in `fields` as the
+    /// parameter's NAME, which names no type: its dispatch is the bound route's (R476), so it is not a CONCRETE field
+    /// for `CallCollector::qual_trait_field_in` (measured: serde_path_to_error's `de::CaptureKey::deserialize_any` lost its
+    /// `Deserializer` dispatch hedge when `delegate: X` was read as concrete).
+    #[serde(default)]
+    pub(crate) params: HashMap<String, Vec<String>>,
 }
 
 impl QualIndexes {
+    /// Whether `v` (a `fields` / `field_elem` value, layers allowed) is one of `qual`'s own type parameters.
+    pub(crate) fn names_param(&self, qual: &str, v: &str) -> bool {
+        let bare = crate::lang::strip_wrapped(v);
+        self.params.get(qual).is_some_and(|ps| ps.iter().any(|p| p == bare))
+    }
+
     /// File one declaration's entries under `qual`.
     pub(crate) fn file(
         &mut self,
@@ -1726,6 +1738,14 @@ impl QualIndexes {
         }
         for (q, m) in &o.field_elem_trait {
             merge_qual_entry(&mut self.field_elem_trait, q, m, &tomb_v, false);
+        }
+        for (q, ps) in &o.params {
+            let e = self.params.entry(q.clone()).or_default();
+            for p in ps {
+                if !e.contains(p) {
+                    e.push(p.clone());
+                }
+            }
         }
     }
 }

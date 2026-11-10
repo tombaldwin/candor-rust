@@ -117,7 +117,8 @@ pub struct G { pub g: Mem }\n\
 impl G { pub fn fb_self_zq(&self) { self.g.put() } }\n";
 
 // The ELEMENT (`field_elem`) and DISPATCH (`trait_fields`) halves, effectful twin first. Executed: `g_loop`, `g_idx` and
-// `t1_self` write a temp file; `h_*` and `t2_self` do nothing. On 544ed9f all three were silent (`t1_self` dispatched on
+// `t1_self` write a temp file; `h_*` and `t2_self` do nothing. `w_flush_zq` (a wrapper accessor over an `Option` twin field,
+// snap's `write::FrameEncoder::flush` shape) writes one too, and was silent on 544ed9f. On 544ed9f all three were silent (`t1_self` dispatched on
 // `t2::Sk::w`, its sibling's trait).
 const EXT: &str = "\
 pub mod g {\n\
@@ -145,6 +146,28 @@ pub mod t2 {\n\
     impl Sk for P { fn w(&self) {} }\n\
     pub struct Tt { pub h: Box<dyn Sk> }\n\
     impl Tt { pub fn t2_self_zq(&self) { self.h.w() } }\n\
+}\n\
+pub mod w {\n\
+    pub struct Inner;\n\
+    impl Inner { pub fn put(&mut self) { std::fs::write(std::env::temp_dir().join(\"r1624-w\"), b\"x\").unwrap(); } }\n\
+    pub struct Fe { pub inner: Option<Inner> }\n\
+    impl Fe { pub fn w_flush_zq(&mut self) { self.inner.as_mut().unwrap().put() } }\n\
+}\n\
+pub mod r {\n\
+    pub struct Calm3;\n\
+    impl Calm3 { pub fn put(&mut self) {} }\n\
+    pub struct Fe { pub inner: Calm3 }\n\
+    impl Fe { pub fn r_flush_zq(&mut self) { self.inner.put() } }\n\
+}\n\
+pub mod q1 {\n\
+    pub trait De { fn d(&self); }\n\
+    pub struct Ck<X> { pub delegate: X }\n\
+    impl<X: De> Ck<X> { pub fn q1_go_zq(&self) { self.delegate.d() } }\n\
+}\n\
+pub mod q2 {\n\
+    pub trait Se { fn d(&self); }\n\
+    pub struct Ck<T> { pub delegate: T }\n\
+    impl<T: Se> Ck<T> { pub fn q2_go_zq(&self) { self.delegate.d() } }\n\
 }\n";
 
 // One directory per test: the tests of this file run in parallel in one process and share the pid.
@@ -167,13 +190,14 @@ fn r1624_each_twin_reads_its_own_field_type() {
         ("ext::g::V::g_loop_zq", vec!["Env", "Fs"]),
         ("ext::g::V::g_idx_zq", vec!["Env", "Fs"]),
         ("ext::t1::Tt::t1_self_zq", vec!["Env", "Fs"]),
+        ("ext::w::Fe::w_flush_zq", vec!["Env", "Fs"]),
     ] {
         assert_eq!(inferred(&v, f), want, "{f}");
     }
     // The pure twins (executed: no effect) carry none of their sibling's.
     for f in [
         "b::H::b_self_zq", "b::H::b_bind_zq", "d::S::d_self_zq", "e::K::e_self_zq", "fb::G::fb_self_zq",
-        "ext::h::V::h_loop_zq", "ext::h::V::h_idx_zq", "ext::t2::Tt::t2_self_zq",
+        "ext::h::V::h_loop_zq", "ext::h::V::h_idx_zq", "ext::t2::Tt::t2_self_zq", "ext::r::Fe::r_flush_zq",
     ] {
         assert!(inferred(&v, f).is_empty(), "{f} charged {:?}", inferred(&v, f));
     }
@@ -183,7 +207,7 @@ fn r1624_each_twin_reads_its_own_field_type() {
 #[test]
 fn r1624_gate_flips_on_the_executed_write_and_the_kill_switch_restores_the_silence() {
     let d = local("gate");
-    for f in ["a::H::a_self_zq", "a::H::a_bind_zq", "c::S::c_self_zq", "ext::g::V::g_loop_zq", "ext::g::V::g_idx_zq", "ext::t1::Tt::t1_self_zq"] {
+    for f in ["a::H::a_self_zq", "a::H::a_bind_zq", "c::S::c_self_zq", "ext::g::V::g_loop_zq", "ext::g::V::g_idx_zq", "ext::t1::Tt::t1_self_zq", "ext::w::Fe::w_flush_zq"] {
         let (on, _) = scan(&d, Some(&format!("deny Fs {f}\n")), false);
         let (off, _) = scan(&d, Some(&format!("deny Fs {f}\n")), true);
         assert_eq!((on, off), (1, 0), "{f}: deny Fs with the fix / under CANDOR_R1624_OFF");
@@ -233,4 +257,21 @@ fn r1624_three_driver_executors_each_read_their_own_pool() {
         assert!(rows[0] == rows[1] && rows[1] == rows[2], "kill switch no longer reproduces the shared entry: {rows:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+/// A twin field typed by the owner's own TYPE PARAMETER (`delegate: X`, serde_path_to_error's two `CaptureKey`s) is not a
+/// concrete field: its dispatch stays the bound route's hedge. A first cut read the parameter name as a concrete type, cleared
+/// the dispatch and left both rows ABSENT (measured on the corpus by the dropped-edge detector).
+#[test]
+fn r1624_a_generic_twin_field_keeps_its_bound_dispatch() {
+    let d = local("generic");
+    let (_, v) = scan(&d, None, false);
+    for (f, key) in [("ext::q1::Ck::q1_go_zq", "fx#ext::q1::De::d"), ("ext::q2::Ck::q2_go_zq", "fx#ext::q2::Se::d")] {
+        let row = v["functions"].as_array().unwrap().iter().find(|r| r["fn"].as_str() == Some(f));
+        let row = row.unwrap_or_else(|| panic!("{f} absent: its bound dispatch was dropped"));
+        assert_eq!(inferred(&v, f), vec!["Unknown"], "{f}");
+        let keys: Vec<&str> = row["dispatchesOn"].as_array().map(|a| a.iter().filter_map(|k| k.as_str()).collect()).unwrap_or_default();
+        assert!(keys.contains(&key), "{f} dispatchesOn {keys:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
 }
