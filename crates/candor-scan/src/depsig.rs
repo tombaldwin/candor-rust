@@ -34,6 +34,9 @@
 //!     coarse rules cost 59 newly-`Unknown` rows over the 981 chained consumers (rustagent-v070).
 use crate::*;
 
+#[path = "depsig_strict.rs"]
+mod strict;
+
 /// The std-witness traits (`model::STD_WITNESS_TRAITS` leaves) a body bounded by `bound` can reach on the value.
 /// `Some(empty)` for a MARKER bound that runs nothing; `None` for a bound this table does not know.
 fn implied(bound: &str) -> Option<&'static [&'static str]> {
@@ -365,7 +368,17 @@ fn cfg_if_items(ts: &proc_macro2::TokenStream) -> Option<Vec<syn::Item>> {
 
 /// Replace every invocation of a pass-through macro (and `cfg_if!`) by the items it re-emits, to a fixpoint, in this item
 /// list and every inline module's.
-fn expand_items(items: &mut Vec<syn::Item>, pass: &HashSet<String>, local: &HashSet<String>, depth: usize) {
+/// SOUNDNESS R1619 — every name a re-emitted item binds is recorded in `expanded`, as `(module, name)` (`module` the item list's
+/// module path; `None` when the file's is not derivable): such an item lost the `#[cfg]` its macro (`cfg_if!`, a `cfg_rt!`-style
+/// pass-through) put on it, so the per-item typing proof (`strict`) reads it as conditional.
+fn expand_items(
+    items: &mut Vec<syn::Item>,
+    pass: &HashSet<String>,
+    local: &HashSet<String>,
+    depth: usize,
+    module: Option<&str>,
+    expanded: &mut HashSet<(Option<String>, String)>,
+) {
     let mut i = 0;
     while i < items.len() {
         let rep = match &items[i] {
@@ -383,15 +396,19 @@ fn expand_items(items: &mut Vec<syn::Item>, pass: &HashSet<String>, local: &Hash
         };
         match rep {
             Some(mut v) => {
-                expand_items(&mut v, pass, local, depth + 1);
+                expand_items(&mut v, pass, local, depth + 1, module, expanded);
+                for it in &v {
+                    strict::item_names(it, module, expanded);
+                }
                 let n = v.len();
                 items.splice(i..=i, v);
                 i += n;
             }
             None => {
                 if let syn::Item::Mod(m) = &mut items[i] {
+                    let child = module.map(|b| if b.is_empty() { m.ident.to_string() } else { format!("{b}::{}", m.ident) });
                     if let Some((_, c)) = &mut m.content {
-                        expand_items(c, pass, local, depth);
+                        expand_items(c, pass, local, depth, child.as_deref(), expanded);
                     }
                 }
                 i += 1;
@@ -444,6 +461,11 @@ struct SrcIndex {
     /// `use` glob fills: a written return `Client` there may be ANOTHER crate's `Client`
     ext_use: HashMap<Option<String>, HashMap<String, String>>,
     ext_glob: HashSet<Option<String>>,
+    /// SOUNDNESS R1619 — `(module, name)` for every name an item a pass-through macro or `cfg_if!` re-emitted binds
+    /// (`expand_items`)
+    expanded: HashSet<(Option<String>, String)>,
+    /// SOUNDNESS R1619 — the module table the per-item typing proof reads, built on first use
+    strict: std::cell::OnceCell<strict::ModTable>,
 }
 
 /// SOUNDNESS R1200 — is a `root::name!` invocation one this reading can account for? A local `macro_rules!` (judged at its
@@ -999,8 +1021,9 @@ impl SrcIndex {
         // a name with any NON-pass-through definition is not expanded
         let pass: HashSet<String> = defs.1.difference(&defs.2).cloned().collect();
         let local: HashSet<String> = defs.0.keys().cloned().collect();
-        for f in &mut files {
-            expand_items(&mut f.items, &pass, &local, 0);
+        let mut expanded: HashSet<(Option<String>, String)> = HashSet::new();
+        for (f, m) in files.iter_mut().zip(file_mods.iter()) {
+            expand_items(&mut f.items, &pass, &local, 0, m.as_deref(), &mut expanded);
         }
         // Pass 2: names, aliases, extern crates, macro words.
         #[derive(Default)]
@@ -1217,6 +1240,8 @@ impl SrcIndex {
             aliases,
             tainted,
             unseen: std::cell::OnceCell::new(),
+            expanded,
+            strict: std::cell::OnceCell::new(),
         })
     }
 
@@ -2373,6 +2398,24 @@ impl DepSigs {
         self.typing = false;
         self.typing_dirs = None;
         let Some(set) = v else {
+            // SOUNDNESS R1619 — `judged` refused for a reason about definitions OUT OF SIGHT somewhere in the crate (a foreign
+            // item macro, a macro naming the item, an external glob): the per-item proof (`strict`) can still type it.
+            let hidden = ["fmac:", "mac:", "macdef:", "use:leaf", "use:type"].iter().any(|p| why.starts_with(p));
+            if hidden && std::env::var_os("CANDOR_R1619_OFF").is_none() {
+                match self.strict_ret(&src.dir, &path, need) {
+                    Ok(r) => {
+                        if std::env::var_os("CANDOR_R1619_INSTR").is_some() {
+                            eprintln!("R1619STRICT\t{alias}\t{path}\t{why}\t{r:?}"); // §E1 REACH COUNTER
+                        }
+                        self.say("ret", alias, &path, 0, &format!("{why}|strict:read:{r:?}"));
+                        return Some(r);
+                    }
+                    Err(e) => {
+                        self.say("ret", alias, &path, 0, &format!("{why}|strict:{e}"));
+                        return None;
+                    }
+                }
+            }
             self.say("ret", alias, &path, 0, &why);
             return None;
         };
