@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev155 (rustagent-recv): SOUNDNESS R1617(4) — Pass B's cached `calls` change: a `<chain>` guessed-owner marker carries
+    // the chain's provenance in `Call::prov`; R1609 types a method turbofish's generic return; R1616 adds the typed call for
+    // `<dep::T as Trait>::m`. A rev154 entry has none of these, so a warm scan would replay the silences. Mandatory.
     // rev154 (rustagent-seaent): SOUNDNESS R1607 — Pass A's cached decls change again: the `DeriveEntityModel` skeleton now also
     // declares `struct ActiveModel` with `impl ActiveModelTrait` and `impl ModelTrait for Model`. Mandatory.
     // rev153 (rustagent-seaent): SOUNDNESS R1605 — Pass A's cached decls change: a known sea_orm derive now splices its declared
@@ -592,7 +595,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev154/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev155/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

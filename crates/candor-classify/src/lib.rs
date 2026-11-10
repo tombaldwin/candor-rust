@@ -3469,6 +3469,21 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             {
                 return Some("Clock");
             }
+            // SOUNDNESS R1616 (provided-member half) — `TimeZone`'s PROVIDED members on `Local`. Their default bodies
+            // (offset/mod.rs) call `self.offset_from_*` (directly, or through `from_utc_datetime`/`from_local_datetime`/
+            // `from_local_date`), which `Local` implements with the lookups charged above; `Local` overrides none of them.
+            // The consumer's typed call is `chrono::Local::from_utc_datetime`, and with no row the calibrated crate read it
+            // PURE: `chrono::Local.from_utc_datetime(n)` was ABSENT. EXECUTED (rustagent-recv `fx/c`, DYLD interposer), every
+            // name below on a valid input: 2 clock reads + getenv TZ + open /etc/localtime. Same single-effect convention
+            // (and the same Env/Fs gap) as the four lookups.
+            if ty == "Local"
+                && matches!(m, "from_utc_datetime" | "from_utc_date" | "from_local_datetime" | "from_local_date"
+                    | "with_ymd_and_hms" | "ymd" | "ymd_opt" | "yo" | "yo_opt" | "isoywd" | "isoywd_opt" | "timestamp"
+                    | "timestamp_opt" | "timestamp_millis" | "timestamp_millis_opt" | "timestamp_nanos" | "timestamp_micros"
+                    | "datetime_from_str")
+            {
+                return Some("Clock");
+            }
         }
     }
     if crate_name == "time"
@@ -6085,6 +6100,25 @@ pub fn also_effects(crate_name: &str, path: &str) -> Vec<&'static str> {
     out
 }
 
+/// SOUNDNESS R1617(4) — the second effects of EVERY `AlsoOn::Method` row of `crate_name` that names `method`, whatever its
+/// type. For a call whose receiver type is a GUESS — a dependency builder chain the scan types as its ROOT (`c.get(u).send()`
+/// reaches here as `Client::send`, the step's real type `RequestBuilder` being unknown) — and whose primary the rule tables
+/// already charge on that guessed path: the step's type is one of the crate's, so the union over the crate's rows for the
+/// method over-approximates the row that applies. Empty when no row names the method.
+pub fn also_effects_by_method(crate_name: &str, method: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for row in ALSO_EFFECTS {
+        if row.krate.contains(&crate_name) && matches!(row.on, AlsoOn::Method(_, ms) if ms.contains(&method)) {
+            for e in row.effects {
+                if !out.contains(e) {
+                    out.push(e);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The §2 `fs` direction of the second `Fs` [`also_effects`] charges for this path: the union of the matching rows'
 /// `fs_kind`, or empty (direction unknown — record the poison marker) if any matching `Fs` row declares none.
 pub fn also_fs_kind(crate_name: &str, path: &str) -> Vec<&'static str> {
@@ -8549,6 +8583,13 @@ mod masks_locator_tests {
             assert_eq!(classify("chrono", &format!("chrono::{p}")), None, "{p}");
         }
         assert_eq!(classify("mycrate", "mycrate::Local::offset_from_utc_datetime"), None);
+        // SOUNDNESS R1616 — TimeZone's provided members on Local reach the same lookups; on Utc/FixedOffset they do not.
+        for m in ["from_utc_datetime", "from_local_datetime", "timestamp_opt", "with_ymd_and_hms", "ymd_opt", "datetime_from_str"] {
+            assert_eq!(classify("chrono", &format!("chrono::Local::{m}")), Some("Clock"), "{m}");
+            assert_eq!(classify("chrono", &format!("chrono::offset::local::Local::{m}")), Some("Clock"), "{m}");
+            assert_eq!(classify("chrono", &format!("chrono::Utc::{m}")), None, "{m}");
+            assert_eq!(classify("chrono", &format!("chrono::FixedOffset::{m}")), None, "{m}");
+        }
 
         for p in ["SystemTime::format_time", "fmt::time::SystemTime::format_time", "UtcTime::format_time",
                   "fmt::time::time_crate::LocalTime::format_time", "OffsetTime::format_time",

@@ -975,6 +975,110 @@ impl<'a> CallCollector<'a> {
         Some(head != "Self" && !self.generic_bounds.contains_key(&head) && !self.impl_generic_bounds.contains_key(&head))
     }
 
+    /// SOUNDNESS R1609 — the METHOD-call twin of VEIN B's turbofish (R197 covered only the path `Call` arm): `h.gen::<F>()`
+    /// over `fn gen<T: Default>(&self) -> T` is an `F`. The return index files `gen`'s value as the `<dyn>` sentinel of its
+    /// BOUND, so `let f = h.gen::<F>(); f.all()` dispatched over `Default` (which declares no `all`) and the caller read
+    /// ABSENT over a body that writes (EXECUTED `rust-r1608/fx` `s_generic`). The turbofish's type, placed like the path
+    /// arm's (`type_path`), when: the leaf's every same-leaf contributor names the same generic position
+    /// (`ret_generic_key`); the argument there is a nominal path that is not `Self` and not this scope's own generic (a
+    /// bound, not a type — bitflags' `from_str::<B>` keeps its bound's dispatch and disclosure, R197's measurement); and the
+    /// RECEIVER is this crate's — a local type that declares the method, or a dispatch over local traits only — so the
+    /// leaf-keyed fact names the method that runs. `None` everywhere else: the published reading.
+    fn r1609_method_turbofish(&self, m: &syn::ExprMethodCall) -> Option<String> {
+        let tf = m.turbofish.as_ref()?;
+        if std::env::var_os("CANDOR_R1609_OFF").is_some() {
+            return None;
+        }
+        let name = m.method.to_string();
+        let pos: usize = self.returns.get(&crate::model::ret_generic_key(&name))?.parse().ok()?;
+        let t = tf
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .nth(pos)?;
+        let syn::Type::Path(tp) = t else { return None };
+        if tp.qself.is_some() {
+            return None;
+        }
+        let head = tp.path.segments.first()?.ident.to_string();
+        if head == "Self" || self.generic_bounds.contains_key(&head) || self.impl_generic_bounds.contains_key(&head) {
+            return None;
+        }
+        let ty = crate::lang::type_path(t, &self.uses).filter(|t| t != "_")?;
+        if !self.r1609_local_recv(m) {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R1609_INSTR").is_some() {
+            eprintln!("R1609TYPED\t{name}\t{ty}"); // §E1 REACH COUNTER
+        }
+        Some(ty)
+    }
+
+    /// SOUNDNESS R1609 — the method call's receiver is this crate's: a local type that declares the method, or a dispatch
+    /// over local traits only — so the leaf-keyed return facts name the method that runs.
+    fn r1609_local_recv(&self, m: &syn::ExprMethodCall) -> bool {
+        let name = m.method.to_string();
+        match self.resolve_recv_type(&m.receiver) {
+            Some(r) => self.r1609_declares(&r, &name),
+            None => {
+                let tr = self.resolve_recv_traits(&m.receiver);
+                !tr.is_empty() && tr.iter().all(|t| self.local_traits.contains_key(t))
+            }
+        }
+    }
+
+    /// SOUNDNESS R1609 — the turbofish names THIS scope's generic `B` at the generic return's position (`h.gen::<B>()`,
+    /// `from_str::<B>(..)`): the value is a `B`, so `B`'s own bounds dispatch it — beside the callee's bound sentinel, which
+    /// was the only answer before and dispatches over the CALLEE's bound (`Default`) where the caller's (`Flags`) declares
+    /// the method (EXECUTED `rustagent-recv/fx/t9` `t_caller_generic`: `b.bits()` over `B: Flags` writes; ABSENT). Empty
+    /// for any other turbofish.
+    fn r1609_caller_generic_bounds(&self, args: &syn::AngleBracketedGenericArguments, leaf: &str) -> Vec<String> {
+        if std::env::var_os("CANDOR_R1609_OFF").is_some() {
+            return Vec::new();
+        }
+        let Some(pos) = self.returns.get(&crate::model::ret_generic_key(leaf)).and_then(|p| p.parse::<usize>().ok()) else {
+            return Vec::new();
+        };
+        let t = args
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .nth(pos);
+        let Some(syn::Type::Path(tp)) = t else { return Vec::new() };
+        let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()).map(|i| i.to_string()) else { return Vec::new() };
+        let mut out: Vec<String> = Vec::new();
+        for l in self.generic_bounds.get(&id).into_iter().chain(self.impl_generic_bounds.get(&id)).flatten() {
+            if !out.contains(l) {
+                out.push(l.clone());
+            }
+        }
+        out
+    }
+
+    /// SOUNDNESS R1609 — `r` (a receiver's single, non-`#[cfg]`-joined type) is this crate's and declares `name`.
+    fn r1609_declares(&self, r: &str, name: &str) -> bool {
+        let l = r.rsplit("::").next().unwrap_or(r);
+        !r.contains(crate::decls::ALIAS_ALT_SEP)
+            && !self.is_dependency_type(r)
+            && !matches!(r.split("::").next(), Some("std" | "core" | "alloc"))
+            && self.returns.contains_key(&crate::model::impl_fn_key(l, name))
+    }
+
+    /// SOUNDNESS R1609 — `r1609_method_turbofish` for a chain step whose receiver type `cur` is already known (R1608's walk).
+    fn r1609_step_turbofish(&self, m: &syn::ExprMethodCall, cur: &str) -> Option<String> {
+        m.turbofish.as_ref()?;
+        if !self.r1609_declares(cur, &m.method.to_string()) {
+            return None;
+        }
+        self.r1609_method_turbofish(m)
+    }
+
     /// SOUNDNESS R1605 — `E::find()` with `E` a generic of this signature (or impl) bounded by a trait that reaches an
     /// `R1605_TRAITS` trait (`E: EntityTrait`, or `E: Auditable` with `trait Auditable: EntityTrait`): the member's DECLARED
     /// return, which `scan.rs` filed from the lock-pinned source (`model::r1605_trait_ret_key`), so `E::find().filter(c)
@@ -1131,7 +1235,9 @@ impl<'a> CallCollector<'a> {
             {
                 return None;
             }
-            let next = if cur.contains(crate::decls::ALIAS_ALT_SEP) {
+            let next = if let Some(t) = self.r1609_step_turbofish(m, &cur) {
+                Some(t)
+            } else if cur.contains(crate::decls::ALIAS_ALT_SEP) {
                 let mut arms: Vec<String> = Vec::new();
                 let mut all = true;
                 for a in cur.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
@@ -1250,6 +1356,25 @@ impl<'a> CallCollector<'a> {
     }
 
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
+        // SOUNDNESS R1609 — `let f = h.gen::<F>()` (through the `?`/`.await`/`&` `ctor_type` reads through too).
+        {
+            let mut e = expr;
+            loop {
+                match e {
+                    syn::Expr::Reference(r) => e = &r.expr,
+                    syn::Expr::Paren(p) => e = &p.expr,
+                    syn::Expr::Group(g) => e = &g.expr,
+                    syn::Expr::Try(t) => e = &t.expr,
+                    syn::Expr::Await(a) => e = &a.base,
+                    _ => break,
+                }
+            }
+            if let syn::Expr::MethodCall(m) = e {
+                if let Some(t) = self.r1609_method_turbofish(m) {
+                    return Some(t);
+                }
+            }
+        }
         // R980/R987 — `Pin::new(x)` / `ManuallyDrop::new(x)` / `ptr::read(&x)` is `x`'s type, not the
         // wrapper's: typed as `ManuallyDrop`, allocator-api2's `boxed.1` named no field.
         if let Some(a) = pinned_arg(expr) {
@@ -4933,6 +5058,13 @@ impl<'a> CallCollector<'a> {
     /// that walk's plain "returns its receiver" assumption. A step any other arm answers (a `dyn` return,
     /// a type-changing read-back, an element accessor) is not this guess, so the chain is not reported.
     fn chain_steps(&self, expr: &syn::Expr) -> Option<(Vec<String>, String)> {
+        self.chain_steps_ex(expr, false)
+    }
+
+    /// `chain_steps`, and with `through_accessors` (SOUNDNESS R1617(4)) an element-yielding accessor name (`get`) is a step
+    /// wherever `resolve_recv_type`'s own walk went THROUGH it — no element dispatch, no container element — which is
+    /// exactly when the typed call beside the marker was formed on the chain's root (`c.get(u).send()` as `Client::send`).
+    fn chain_steps_ex(&self, expr: &syn::Expr, through_accessors: bool) -> Option<(Vec<String>, String)> {
         let mut steps = Vec::new();
         let mut e = expr;
         loop {
@@ -4944,9 +5076,13 @@ impl<'a> CallCollector<'a> {
                 syn::Expr::Await(a) => e = &a.base,
                 syn::Expr::MethodCall(m) => {
                     let name = m.method.to_string();
+                    let accessor = crate::lang::is_element_yielding_accessor(&name);
                     if self.returns.get(&name).and_then(|t| ret_dyn_leaves(t)).is_some()
                         || is_recv_type_changing(&name)
-                        || crate::lang::is_element_yielding_accessor(&name)
+                        || (accessor
+                            && (!through_accessors
+                                || !self.resolve_elem_trait_leaves(&m.receiver).is_empty()
+                                || self.elem_after_accessor(&m.receiver, &name).is_some()))
                     {
                         return None;
                     }
@@ -4993,6 +5129,10 @@ impl<'a> CallCollector<'a> {
                 }
             }
             syn::Expr::MethodCall(m) => {
+                // SOUNDNESS R1609 — `h.gen::<F>().all()`: the turbofish's type, before the bound's `<dyn>` decline below.
+                if let Some(t) = self.r1609_method_turbofish(m) {
+                    return Some(t);
+                }
                 // A method whose return is a DISPATCH trait object (`self.handler() -> &dyn Doer` /
                 // `-> Box<dyn Doer>`) has NO concrete type — return None so the dispatch path
                 // (`resolve_recv_traits`, which decodes the `<dyn>` sentinel by method leaf) resolves
@@ -6376,6 +6516,35 @@ impl<'a> CallCollector<'a> {
     /// where `foreign_impls` records that THIS impl block DECLARES the member for THAT type — R53's
     /// fabrication (an inherent `m` shadowing a trait DEFAULT, both keyed `T::m`) needs a default, and a
     /// declared member is not one. Additive: the written path is still pushed by the arm below.
+    /// SOUNDNESS R1616 — `<dep::Type as Trait>::m(b)`: the qself NAMES the receiver's type, and that type is a dependency's,
+    /// so the call is `dep::Type::m` exactly as the method spelling `b.m()` over a `b: &mut dep::Type` forms it. The written
+    /// path keeps only the trait (`backoff::backoff::Backoff::next_backoff`), which no rule claims, and the caller read
+    /// ABSENT over an executed clock read + entropy draw while `b.next_backoff()` charged `[Clock, Rand]` (EXECUTED
+    /// `rust-deep/ev/fxc` `f_bo_next_ufcs`). Additive — the written path is still pushed — and only for a qself `as Trait`
+    /// over a nominal dependency type: a local type has `edge_ufcs_foreign_trait`, a std type the std routes, and the
+    /// inherent form `<T>::m` is already restored to `T::m` by the call visitor. `CANDOR_R1616U_OFF=1` disables it.
+    fn r1616_ufcs_dep_type(&mut self, p: &syn::ExprPath) {
+        let Some(q) = &p.qself else { return };
+        if q.position == 0 || std::env::var_os("CANDOR_R1616U_OFF").is_some() {
+            return;
+        }
+        let Some(method) = p.path.segments.last().map(|s| s.ident.to_string()) else { return };
+        let Some(ty) = crate::lang::type_path(&q.ty, &self.uses) else { return };
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) || ty.contains('<') || !self.is_dependency_type(&ty) {
+            return;
+        }
+        let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        if !crate::lang::is_type_ident(leaf) {
+            return;
+        }
+        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1616_INSTR").is_some() {
+            eprintln!("R1616UFCS\t{ty}::{method}"); // §E1 REACH COUNTER
+        }
+        self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+            path: format!("{ty}::{method}"), leaf: method, str_arg: None, typed: true, method: true, is_macro: false,
+            path_lits_partial: false, path_lit2: None });
+    }
+
     fn edge_ufcs_foreign_trait(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
         let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
         if segs.len() < 2 {
@@ -9254,17 +9423,42 @@ impl<'a> CallCollector<'a> {
                 if self.turbofish_is_concrete(p) == Some(true) {
                     return Vec::new();
                 }
-                self.returns.get(leaf).and_then(|t| ret_dyn_leaves(t)).unwrap_or_default()
+                let mut out = self.returns.get(leaf).and_then(|t| ret_dyn_leaves(t)).unwrap_or_default();
+                if let Some(syn::PathArguments::AngleBracketed(a)) = p.path.segments.last().map(|s| &s.arguments) {
+                    for b in self.r1609_caller_generic_bounds(a, leaf) {
+                        if !out.contains(&b) {
+                            out.push(b);
+                        }
+                    }
+                }
+                out
             }
             // A METHOD factory returning a dispatch trait object (`self.handler().go()` where
             // `handler(&self) -> &dyn Doer`): decode the recorded `<dyn>` sentinel by the method leaf,
             // exactly like the free/static-fn Call arm above (an ambiguous leaf was dropped upstream).
             syn::Expr::MethodCall(m) => {
+                // SOUNDNESS R1609 — a turbofish naming the generic return's concrete type is that type's value, never the
+                // bound's dispatch (the method twin of the `Call` arm's R197 check above).
+                if self.r1609_method_turbofish(m).is_some() {
+                    return Vec::new();
+                }
+                let caller: Vec<String> = match &m.turbofish {
+                    Some(tf) if self.r1609_local_recv(m) => self.r1609_caller_generic_bounds(tf, &m.method.to_string()),
+                    _ => Vec::new(),
+                };
                 // The factory case first: a method whose recorded return IS a `<dyn>` sentinel.
-                if let Some(leaves) =
+                if let Some(mut leaves) =
                     self.returns.get(&m.method.to_string()).and_then(|t| ret_dyn_leaves(t))
                 {
+                    for b in caller {
+                        if !leaves.contains(&b) {
+                            leaves.push(b);
+                        }
+                    }
                     return leaves;
+                }
+                if !caller.is_empty() {
+                    return caller;
                 }
                 // SOUNDNESS R380 — OTHERWISE WALK THE CHAIN, exactly as `resolve_recv_type` has always
                 // done for the concrete-type question about this same expression. This arm used to stop
@@ -11553,6 +11747,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.note_chain_witness(&callee, &args, 0);
             }
             self.edge_ufcs_foreign_trait(p, &node.args);
+            self.r1616_ufcs_dep_type(p);
             self.edge_std_type_dep_trait_member(p, &node.args);
             self.edge_ufcs_operator(p, &node.args);
             // `std::cmp::max(a, b)` / `min` (R1111's spelling list) is the std bound table's `fn:core::cmp max/min` row now
@@ -12357,7 +12552,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }),
                     _ => false,
                 };
-                let guess = self.chain_steps(&node.receiver)
+                // SOUNDNESS R1617(4) — a chain through an element-yielding accessor (`get`) the walk went through files its
+                // marker too, but ONLY for the unchained re-typing: R861's chained consumer never saw these and must not
+                // start hedging them, so the marker is tagged (`R1617_ACCESSOR_STEP` on its steps) and R861 skips it.
+                let strict = self.chain_steps(&node.receiver);
+                let guess = strict.clone()
+                    .or_else(|| {
+                        (std::env::var_os("CANDOR_R1617H_OFF").is_none())
+                            .then(|| self.chain_steps_ex(&node.receiver, true))
+                            .flatten()
+                            .map(|(st, b)| {
+                                let mut st = st;
+                                st.insert(0, crate::lazy::R1617_ACCESSOR_STEP.to_string());
+                                (st, b)
+                            })
+                    })
                     .or_else(|| unit_guess.then(|| (Vec::new(), ty.clone())));
                 if let Some((steps, base)) = guess {
                     let root = base.split("::").next().unwrap_or("");
@@ -12365,7 +12574,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
                     {
                         let rest = base.split_once("::").map_or("", |(_, r)| r);
-                        self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
+                        // SOUNDNESS R1617(4) — the chain's provenance (`r1578_prov`'s format) rides on the marker, so an
+                        // UNCHAINED dependency's chain can be re-typed from its lock-pinned source the way R861 re-types a
+                        // chained one from its report (`scan::r1617_chain_type`). `None` for the unit-struct guess (no steps).
+                        let prov = (!steps.is_empty() && std::env::var_os("CANDOR_R1617H_OFF").is_none())
+                            .then(|| self.r1578_prov(&node.receiver))
+                            .flatten();
+                        self.calls.push(Call { prov, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{root}::{CHAIN_GUESS_MARKER}::{}::{rest}::{leaf}", steps.join(".")),
                             leaf: leaf.clone(), str_arg: None, typed: false, method: false,
                             is_macro: false, path_lits_partial: false, path_lit2: None });

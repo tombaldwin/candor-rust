@@ -1120,6 +1120,36 @@ fn r1605_chain_type(
     Some((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, false))
 }
 
+/// SOUNDNESS R1617(4) — A DEPENDENCY BUILDER CHAIN RE-TYPED FROM THE LOCK-PINNED SOURCE. `c.get(u).send()` over `c:
+/// &reqwest::Client` is typed by the chain walk as its ROOT (`Client::send`), on the assumption every step returns its
+/// receiver; the collector files a `<chain>` guessed-owner marker beside that call (R861), which only a CHAINED dependency's
+/// report could answer, and an unchained one read nothing — so a rule keyed on the step's real type (`RequestBuilder::send`,
+/// `ExponentialBackoff::next_backoff`) never matched. Here the marker's provenance is walked through the dependency's
+/// signatures exactly as an `<untyped>` marker's is (`r1578_resolve`), and where every step is answered the marker becomes
+/// the typed call on the type the chain really reaches. ADDED beside the guessed call, which stays. `None` otherwise.
+fn r1617_chain_type(
+    c: &Call,
+    deps: &std::collections::HashSet<String>,
+    renames: &HashMap<String, String>,
+    deps_idx: &DepIndex,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+) -> Option<(Call, bool)> {
+    if std::env::var_os("CANDOR_R1617H_OFF").is_some() {
+        return None;
+    }
+    c.prov.as_ref()?;
+    let (cr, _) = c.path.split_once(&format!("::{CHAIN_GUESS_MARKER}::"))?;
+    let pseudo = Call { path: format!("{cr}::{UNTYPED_RECV_MARKER}::{CHAIN_GUESS_MARKER}::{}", c.leaf), ..c.clone() };
+    let R1578::Typed { cr, method, ty } = r1578_resolve(&pseudo, deps, renames, deps_idx, dir, sigs)? else { return None };
+    sigs.borrow_mut().note_typed(&cr);
+    let path = format!("{cr}::{ty}::{method}");
+    if std::env::var_os("CANDOR_R1617_INSTR").is_some() {
+        eprintln!("R1617CHAIN\t{}\t{path}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
+    }
+    Some((Call { path, leaf: method, typed: true, method: true, dot: true, prov: None, ..c.clone() }, false))
+}
+
 /// SOUNDNESS R1578 — where an `<untyped>` marker's receiver provably lands.
 pub(crate) enum R1578 {
     /// a type the dependency declares (crate-relative qual)
@@ -3754,7 +3784,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // dependency's own source signature, and the call then goes down the ordinary typed-external path below
             // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
             let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns)
-                .or_else(|| r1605_chain_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs));
+                .or_else(|| r1605_chain_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs))
+                .or_else(|| r1617_chain_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs));
             let r1578_twin = r1578_owned.as_ref().is_some_and(|(_, t)| *t);
             let c = r1578_owned.as_ref().map(|(c, _)| c).unwrap_or(c);
             // SOUNDNESS R1605 — …AND WHERE THE MEMBER'S RETURN WAS NOT FILED (no lock-pinned source to read, a member whose
@@ -4357,7 +4388,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // ADDS `Unknown`", which names this walk). `clone` is the one step whose type is the
             // receiver's by contract (`Clone::clone(&self) -> Self`).
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{CHAIN_GUESS_MARKER}::")) {
-                if deps_idx.crates.contains(cr_real) {
+                // SOUNDNESS R1617(4) — a marker through an accessor step is the unchained re-typing's alone (see
+                // `R1617_ACCESSOR_STEP`): R861's chained walk never saw one and does not start now.
+                let accessor_marker = rest.starts_with(crate::lazy::R1617_ACCESSOR_STEP);
+                if deps_idx.crates.contains(cr_real) && !accessor_marker {
                     let parsed = rest.rsplit_once("::").and_then(|(head, method)| {
                         head.split_once("::").map(|(steps, base)| (steps, base, method))
                     });
@@ -4449,6 +4483,38 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default()
                                 .insert("dispatch:untyped cross-package receiver".to_string());
+                        }
+                    }
+                } else if !deps_idx.crates.contains(cr_real) && deps.contains(cr) && std::env::var_os("CANDOR_R1617H_OFF").is_none() {
+                    // SOUNDNESS R1617(4) — an UNCHAINED dependency's chain `r1617_chain_type` could not re-type (its source
+                    // refuses — reqwest's `pin_project!` makes the whole crate unreadable — or a step it cannot place). The
+                    // guessed call beside this marker is charged by a rule keyed on the step's LEAF (`reqwest::*::send`), but
+                    // its second effects are keyed on the step's TYPE (`RequestBuilder::send` + Log), which the guess does not
+                    // name: `deny Log` passed over `c.get(u).send()`. Where the guessed path's primary charges, every second
+                    // effect the crate's rows give that method on ANY of its types is charged too — the step's type is one of
+                    // them. Never where the primary misses: that would be a charge with no rule behind the call at all.
+                    let parsed = rest.rsplit_once("::").and_then(|(head, method)| {
+                        head.split_once("::").map(|(steps, base)| (steps, base, method))
+                    });
+                    if let Some((steps, base, method)) = parsed.filter(|(st, _, _)| !st.is_empty()) {
+                        let tp = format!("{cr_real}::{base}::{method}");
+                        if let Some(primary) = candor_classify::classify(cr_real, &tp) {
+                            let have = candor_classify::also_effects(cr_real, &tp);
+                            for e2 in candor_classify::also_effects_by_method(cr_real, method) {
+                                if e2 == primary || have.contains(&e2) {
+                                    continue;
+                                }
+                                direct.entry(f.qual.clone()).or_default().insert(e2);
+                                if candor_classify::also_hides_locator(e2) {
+                                    incomplete.entry(f.qual.clone()).or_default().insert(e2);
+                                }
+                                if e2 == "Fs" {
+                                    fskinds.entry(f.qual.clone()).or_default().insert("?".to_string());
+                                }
+                                if std::env::var_os("CANDOR_R1617_INSTR").is_some() {
+                                    eprintln!("R1617UNION\t{}\t{e2}\t{tp}\t{steps}", f.qual); // §E1 REACH COUNTER
+                                }
+                            }
                         }
                     }
                 }

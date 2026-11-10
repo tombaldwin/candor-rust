@@ -121,6 +121,9 @@ pub(crate) const FIELD_HOP_SEG: &str = "<field>";
 /// chain from the dependency's published `returns`/`returnsProtocol` or, where a step is unanswered,
 /// discloses. Same containment as the other markers: the angle-bracket segment reaches no classifier.
 pub(crate) const CHAIN_GUESS_MARKER: &str = "<chain>";
+/// SOUNDNESS R1617(4) — the FIRST step of a `<chain>` marker whose steps pass through an element-yielding accessor the chain
+/// walk went through (`c.get(u).send()`): read only by the unchained re-typing; R861's chained consumer skips such a marker.
+pub(crate) const R1617_ACCESSOR_STEP: &str = "<acc>";
 
 /// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
 /// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
