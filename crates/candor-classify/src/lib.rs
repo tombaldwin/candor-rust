@@ -5934,6 +5934,10 @@ pub struct AlsoEffect {
     pub on: AlsoOn,
     /// The effects charged beside the primary. An entry equal to the primary is dropped by [`also_effects`].
     pub effects: &'static [&'static str],
+    /// The §2 `fs` direction of an `Fs` in `effects` — `&["read"]` only where the executed window showed no write
+    /// (no `O_WRONLY`/`O_RDWR`/`O_CREAT`, only `stat`/`access`/read-only opens). Empty means the direction is unknown and
+    /// the charging site records the poison marker, never a guess.
+    pub fs_kind: &'static [&'static str],
     /// The SOUNDNESS row that carries the evidence.
     pub row: &'static str,
     /// What was executed, where, and under which condition.
@@ -5995,6 +5999,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["tungstenite"],
         on: AlsoOn::Leaf(&["client_tls", "client_tls_with_config"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R338",
         evidence: "openssl backend: TlsConnector::new loads the probed cert file/dir; client_tls passes no connector \
                    (tungstenite-0.30.0 src/tls.rs:54). macOS (Security framework) reads no file.",
@@ -6004,6 +6009,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["elasticsearch"],
         on: AlsoOn::Method("Transport", &["single_node", "static_node_list", "sniffing_node_list", "cloud"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R1598",
         evidence: "EXECUTED under strace in rust:1-bookworm: Transport::single_node opens openssl.cnf, cert.pem, certs/, \
                    ca-certificates.crt; 0 opens on macOS. Primary Env is the proxy-variable read.",
@@ -6012,6 +6018,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["elasticsearch"],
         on: AlsoOn::Method("TransportBuilder", &["build"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R1598",
         evidence: "as Transport::single_node (EXECUTED under strace, Linux/openssl).",
     },
@@ -6020,6 +6027,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["backoff"],
         on: AlsoOn::Method("ExponentialBackoff", &["next_backoff"]),
         effects: &["Clock"],
+        fs_kind: &[],
         row: "R1612",
         evidence: "EXECUTED (macOS, DYLD interposer): next_backoff on a default ExponentialBackoff = 1 getentropy (the \
                    Rand primary) + 1 clock_gettime (the max_elapsed_time check reads clock.now()). Pure neighbour \
@@ -6029,6 +6037,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["grep_cli"],
         on: AlsoOn::Method("DecompressionMatcherBuilder", &["associate", "try_associate"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R1612",
         evidence: "EXECUTED (macOS, DYLD interposer): a relative program (`gzip`) = getenv(PATH) (the Env primary) + \
                    stat(<PATH dir>/gzip) per directory until found; an absolute program = 0 events, the same accepted \
@@ -6038,6 +6047,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["time"],
         on: AlsoOn::Method("UtcOffset", &["current_local_offset"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R1612",
         evidence: "EXECUTED (macOS, DYLD interposer), TZ unset: 1 clock_gettime (the Clock primary) + localtime_r + \
                    access(/etc/localtime). With TZ set the interposer saw no file call (libc's own zone-file open is \
@@ -6048,6 +6058,7 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         krate: &["portable_pty"],
         on: AlsoOn::Method("CommandBuilder", &["new", "from_argv", "new_default_prog"]),
         effects: &["Fs"],
+        fs_kind: &["read"],
         row: "R1612",
         evidence: "EXECUTED (macOS, DYLD interposer), SHELL unset: each of the three ctors = access(<passwd shell>, X_OK) \
                    (get_base_env -> get_shell, cmdbuilder.rs:43-71); SHELL set: 0 events. Charged on the unset arm, \
@@ -6067,6 +6078,25 @@ pub fn also_effects(crate_name: &str, path: &str) -> Vec<&'static str> {
             for e in row.effects {
                 if *e != primary && !out.contains(e) {
                     out.push(e);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The §2 `fs` direction of the second `Fs` [`also_effects`] charges for this path: the union of the matching rows'
+/// `fs_kind`, or empty (direction unknown — record the poison marker) if any matching `Fs` row declares none.
+pub fn also_fs_kind(crate_name: &str, path: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for row in ALSO_EFFECTS {
+        if row.krate.contains(&crate_name) && row.on.matches(path) && row.effects.contains(&"Fs") {
+            if row.fs_kind.is_empty() {
+                return Vec::new();
+            }
+            for k in row.fs_kind {
+                if !out.contains(k) {
+                    out.push(k);
                 }
             }
         }

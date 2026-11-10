@@ -6132,8 +6132,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // SOUNDNESS R1612 (was R338's trust-store hook) — the effects the call performs BESIDE its
                 // primary, from the one table every charging site asks (`candor_classify::ALSO_EFFECTS`). Charged,
                 // never substituted; a second effect with a locator surface is marked `incomplete`, because the
-                // call's literal is the PRIMARY's locator, and an Fs one poisons the direction (`?`) because the
-                // table records no verb. The Llm block above is the same shape for the model-SDK surface.
+                // call's literal is the PRIMARY's locator, and an Fs one records the direction its row declares (the
+                // executed window's), or the poison marker `?` when the row declares none. The Llm block above is the same shape for the model-SDK surface.
                 if !suppress_bare_leaf && !local_is_authoritative && !explicit_salt {
                     for e2 in candor_classify::also_effects(cr_real, &path_real) {
                         direct.entry(f.qual.clone()).or_default().insert(e2);
@@ -6141,7 +6141,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             incomplete.entry(f.qual.clone()).or_default().insert(e2);
                         }
                         if e2 == "Fs" {
-                            fskinds.entry(f.qual.clone()).or_default().insert("?".to_string());
+                            let e = fskinds.entry(f.qual.clone()).or_default();
+                            let kinds = candor_classify::also_fs_kind(cr_real, &path_real);
+                            if kinds.is_empty() { e.insert("?".to_string()); }
+                            else { for k in kinds { e.insert(k.to_string()); } }
                         }
                         if std::env::var_os("CANDOR_ALSO_DEBUG").is_some() {
                             eprintln!("R1612ALSO {e2} {} :: {path_real}", f.qual);

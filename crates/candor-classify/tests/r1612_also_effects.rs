@@ -4,7 +4,7 @@
 //! pure neighbour is the same type's idle window (0 events). The pure neighbours matter more than usual: a row keyed on
 //! the type alone would pass the positives.
 
-use candor_classify::{also_effects, also_hides_locator, classify, classify_all, classify_rendered, ALSO_EFFECTS};
+use candor_classify::{also_effects, also_fs_kind, also_hides_locator, classify, classify_all, classify_rendered, ALSO_EFFECTS};
 
 #[test]
 fn r1599_four_rule_rows_carry_their_second_effect() {
@@ -71,4 +71,19 @@ fn locator_bearing_second_effects_are_marked_incomplete() {
     for e in ["Env", "Clock", "Rand", "Log", "Ipc", "Clipboard"] {
         assert!(!also_hides_locator(e), "{e} has no surface");
     }
+}
+
+#[test]
+fn a_second_fs_declares_its_direction_from_the_executed_window() {
+    // Every Fs row's window showed only stat/access/read-only opens, so each declares `read`; none may claim more.
+    for (c, p) in [
+        ("grep_cli", "grep_cli::DecompressionMatcherBuilder::associate"),
+        ("time", "time::UtcOffset::current_local_offset"),
+        ("portable_pty", "portable_pty::CommandBuilder::new"),
+        ("tungstenite", "tungstenite::client_tls"),
+        ("elasticsearch", "elasticsearch::Transport::single_node"),
+    ] {
+        assert_eq!(also_fs_kind(c, p), vec!["read"], "{p}");
+    }
+    assert!(also_fs_kind("backoff", "backoff::ExponentialBackoff::next_backoff").is_empty(), "no Fs, no direction");
 }

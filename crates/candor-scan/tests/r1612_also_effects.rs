@@ -102,6 +102,9 @@ pub fn ok_only(_x: u8) -> usize { std::fs::read(\"/etc/hosts\").map(|v| v.len())
         let (code, _) = scan(&d, Some(&format!("allow Fs in {f} /etc/hosts\n")));
         assert_eq!(code, 1, "{f}: a second Fs whose path the call does not name must not be certified by /etc/hosts");
     }
+    // The second Fs declares `read` (its executed window wrote nothing), so the sibling's `read` claim survives.
+    let (_, v) = scan(&d, None);
+    assert_eq!(field(&v, "m_gc", "fs"), vec!["read".to_string()], "{v:#}");
     // The control: the same literal, alone, IS certified — the mark is what changed, not the allowlist.
     let (code, _) = scan(&d, Some("allow Fs in ok_only /etc/hosts\n"));
     assert_eq!(code, 0, "a function whose only Fs is the visible literal stays certifiable");

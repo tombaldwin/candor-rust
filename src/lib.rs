@@ -3224,9 +3224,11 @@ impl Candor {
                     if candor_classify::also_hides_locator(e2) {
                         self.incomplete_direct.entry(caller).or_default().insert(e2);
                     }
-                    // The table records no verb, so a second `Fs` makes no read/write claim (the cross-crate sentinel).
+                    // A second `Fs` records the direction its row declares, or no claim (the cross-crate sentinel).
                     if e2 == "Fs" {
-                        self.fs_direct.entry(caller).or_default().insert(FS_UNKNOWN);
+                        let kinds = candor_classify::also_fs_kind(crate_name.as_str(), &path);
+                        let d = self.fs_direct.entry(caller).or_default();
+                        if kinds.is_empty() { d.insert(FS_UNKNOWN); } else { d.extend(kinds); }
                     }
                     if self.explain.is_some() {
                         let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
