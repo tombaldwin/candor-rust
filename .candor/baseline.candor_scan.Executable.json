@@ -3141,6 +3141,33 @@
       ]
     },
     {
+      "fn": "collector::CallCollector::<'a>::accessor_payload",
+      "loc": "crates/candor-scan/src/collector.rs:9573:5: 9573:62",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "5a2e203694859fe7a6ffd43a88d77258",
+      "calls": [
+        "collector::CallCollector::<'a>::owner_field_args",
+        "collector::CallCollector::<'a>::resolve_recv_type"
+      ],
+      "invisible": [
+        "candor_classify",
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
       "fn": "collector::CallCollector::<'a>::alias_targets_of_path",
       "loc": "crates/candor-scan/src/collector.rs:11184:5: 11184:115",
       "inferred": [
@@ -4488,6 +4515,33 @@
       ]
     },
     {
+      "fn": "collector::CallCollector::<'a>::deref_param_recv",
+      "loc": "crates/candor-scan/src/collector.rs:9626:5: 9626:89",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "5a2e203694859fe76b6a7c6ce5b6d52f",
+      "calls": [
+        "collector::CallCollector::<'a>::owner_field_args",
+        "collector::CallCollector::<'a>::resolve_recv_type"
+      ],
+      "invisible": [
+        "candor_classify",
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
       "fn": "collector::CallCollector::<'a>::dispatch_calls_for_trait_method",
       "loc": "crates/candor-scan/src/collector.rs:9876:5: 9876:105",
       "inferred": [
@@ -5046,6 +5100,34 @@
         "collector::CallCollector::<'a>::recv_trait_full",
         "collector::CallCollector::<'a>::resolve_recv_traits",
         "lang::expand"
+      ],
+      "invisible": [
+        "candor_classify",
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::<'a>::hedge_dep_param_wrapper",
+      "loc": "crates/candor-scan/src/collector.rs:10606:5: 10606:87",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "5a2e203694859fe799f6d19965b65262",
+      "calls": [
+        "collector::CallCollector::<'a>::mark_unresolved",
+        "collector::CallCollector::<'a>::owner_field_args",
+        "collector::CallCollector::<'a>::resolve_recv_type"
       ],
       "invisible": [
         "candor_classify",
@@ -5828,6 +5910,46 @@
       ]
     },
     {
+      "fn": "collector::CallCollector::<'a>::owner_field_args",
+      "loc": "crates/candor-scan/src/collector.rs:9549:5: 9549:96",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "5a2e203694859fe7ffb84701869b6f59",
+      "calls": [
+        "collector::CallCollector::<'a>::field_ambiguous",
+        "collector::CallCollector::<'a>::owner_qual"
+      ],
+      "invisible": [
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::<'a>::owner_qual",
+      "loc": "crates/candor-scan/src/collector.rs:4922:5: 4922:111",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "5a2e203694859fe73e0c0a003aec210b",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
       "fn": "collector::CallCollector::<'a>::payload_bound",
       "loc": "crates/candor-scan/src/collector.rs:5808:5: 5808:72",
       "inferred": [
@@ -5915,6 +6037,53 @@
       ],
       "invisible": [
         "candor_classify",
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::<'a>::qual_field_in",
+      "loc": "crates/candor-scan/src/collector.rs:4949:5: 4949:112",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "5a2e203694859fe7d8557e96a77f91e5",
+      "calls": [
+        "collector::CallCollector::<'a>::owner_qual",
+        "lang::dyn_alias_leaves_str"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::<'a>::qual_trait_field_in",
+      "loc": "crates/candor-scan/src/collector.rs:4992:5: 4992:115",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "5a2e203694859fe736f6367ed050b93c",
+      "calls": [
+        "collector::CallCollector::<'a>::owner_qual",
+        "lang::dyn_alias_leaves_str"
+      ],
+      "invisible": [
         "proc_macro2",
         "syn"
       ]
@@ -13088,15 +13257,21 @@
     },
     {
       "fn": "lang::collect_macro_hidden_decls",
-      "loc": "crates/candor-scan/src/lang.rs:6323:1: 6330:2",
+      "loc": "crates/candor-scan/src/lang.rs:6327:1: 6334:2",
       "inferred": [
+        "Env",
         "Unknown"
       ],
+      "direct": [
+        "Env"
+      ],
       "declared": [],
-      "undeclared": [],
+      "undeclared": [
+        "Env"
+      ],
       "overdeclared": [],
       "unresolved": true,
-      "hash": "7f07d505992c79d6f62d5fc5ac0e4d47",
+      "hash": "5a2e203694859fe7bc922c5e21f18bf4",
       "calls": [
         "lang::collect_macro_hidden_decls",
         "lang::is_cfg_test"
