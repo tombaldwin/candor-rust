@@ -9629,6 +9629,12 @@ impl<'a> CallCollector<'a> {
         }
         let wl = ty.rsplit("::").next().unwrap_or(ty);
         let pos: usize = self.returns.get(&crate::model::deref_param_key(wl))?.parse().ok()?;
+        // A crate-local trait PROVIDING `leaf` (a default body the wrapper may inherit by implementing it) would be picked
+        // on the wrapper before any auto-deref; whether the wrapper implements it is not visible here, so any such trait
+        // keeps today's reading.
+        if self.local_traits.values().any(|t| t.methods.contains(leaf)) {
+            return None;
+        }
         if self.returns.contains_key(&crate::model::impl_fn_key(wl, leaf))
             || matches!(leaf, "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq" | "ne"
                 | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default" | "into"
