@@ -9500,8 +9500,130 @@ impl<'a> CallCollector<'a> {
     fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
         match self.field_payload(expr) {
             PayloadTy::Dispatch(b) => b,
-            _ => Vec::new(),
+            _ => match self.accessor_payload(expr) {
+                PayloadTy::Dispatch(b) => b,
+                _ => Vec::new(),
+            },
         }
+    }
+
+    /// SOUNDNESS R1630/R1631 — `owner.key`'s written type ARGUMENTS (`model::field_args_key`'s encoding): the owner's OWN
+    /// declaration where R1624's `owner_qual` proves its path, else the leaf-keyed fact — which a same-leaf twin with
+    /// different arguments has already withdrawn, and which is refused outright for an ambiguous field. `None`: no
+    /// declaration says.
+    fn owner_field_args(&self, base_expr: &syn::Expr, owner: &str, key: &str) -> Option<String> {
+        if let Some((qi, qual)) = self.owner_qual(base_expr, owner) {
+            let v = qi.field_args.get(&qual)?.get(key)?;
+            return (v != crate::cache::QUAL_TOMB).then(|| v.clone());
+        }
+        let member = match key.parse::<u32>() {
+            Ok(i) => syn::Member::Unnamed(syn::Index { index: i, span: proc_macro2::Span::call_site() }),
+            Err(_) => syn::Member::Named(syn::Ident::new(key, proc_macro2::Span::call_site())),
+        };
+        if self.field_ambiguous(owner, &member) {
+            return None;
+        }
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
+        self.returns.get(&crate::model::field_args_key(owner_leaf, key)).cloned()
+    }
+
+    /// SOUNDNESS R1631 — `self.inner.get_mut().read(buf)` where `impl<W: Write, D> Writer<W, D> { fn get_mut(&mut self) ->
+    /// &mut W }`, `inner: zio::Writer<W, Decompress>`, and `impl<W: Read + Write> Read for DeflateDecoder<W>` (flate2's
+    /// `write::*Decoder::read`). R979 types the accessor's value as the receiver field's argument at the returned
+    /// parameter's position — here `W`, the OWNER's own type parameter, which names no type, so `W::read` formed nothing and
+    /// the call vanished while `self.obj.read(buf)` over a field typed `W` directly dispatched (`dispatch:Read.read`). This
+    /// is that same payload question (`payload_decision`), asked of the accessor's value instead of the field: the owner's
+    /// parameter is mapped by POSITION through the scrutinee's instantiation to this scope's bounds. A concrete argument is
+    /// R979's and stays `Old`. Kill switch `CANDOR_R1631_OFF`.
+    fn accessor_payload(&self, expr: &syn::Expr) -> PayloadTy {
+        if std::env::var_os("CANDOR_R1631_OFF").is_some() || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
+            return PayloadTy::Old;
+        }
+        let syn::Expr::MethodCall(m) = peel_recv(expr) else { return PayloadTy::Old };
+        let Some(acc_ty) = self.resolve_recv_type(&m.receiver) else { return PayloadTy::Old };
+        let acc_leaf = acc_ty.rsplit("::").next().unwrap_or(&acc_ty);
+        let Some(pos) = self.returns.get(&crate::model::impl_retgen_key(acc_leaf, &m.method.to_string())).and_then(|p| p.parse::<usize>().ok()) else {
+            return PayloadTy::Old;
+        };
+        // The accessor's receiver is not a FIELD — itself a call (`self.inner.get_mut().get_mut()`, flate2's
+        // `gz::write::GzDecoder::read` over `inner: zio::Writer<CrcWriter<W>, _>`), a binding, a parameter: no declaration
+        // here writes the arguments its type was instantiated with (`field_args_key` keeps one level), so the value's type
+        // is a parameter nothing shows. That is `Hedge`'s case exactly (`payload_decision`): disclosed, never read as a
+        // guess and never as nothing. Only in a scope with bounded generics, where the parameter can be one of them.
+        let syn::Expr::Field(fe) = peel_recv(&m.receiver) else {
+            if std::env::var_os("CANDOR_R1631_INSTR").is_some() {
+                eprintln!("R1631ACC\t{acc_leaf}.{}\t-\tHedge(nonfield)", m.method); // §E1 REACH COUNTER
+            }
+            return PayloadTy::Hedge;
+        };
+        let Some(owner) = self.resolve_recv_type(&fe.base) else { return PayloadTy::Old };
+        if self.is_dependency_type(&owner) {
+            return PayloadTy::Old;
+        }
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let Some(args) = self.owner_field_args(&fe.base, &owner, &key) else { return PayloadTy::Old };
+        let Some(t) = args.split('\u{1}').nth(pos) else { return PayloadTy::Old };
+        if t.contains("::") || matches!(t, "_" | "'" | "") {
+            return PayloadTy::Old;
+        }
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
+        let ev = self.scrut_evidence(&fe.base);
+        let d = self.payload_decision(Some(&owner_leaf), t, ev.as_ref());
+        if std::env::var_os("CANDOR_R1631_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+            eprintln!("R1631ACC\t{owner_leaf}.{key}.{}\t{t}\t{d:?}", m.method); // §E1 REACH COUNTER
+        }
+        d
+    }
+
+    /// SOUNDNESS R1630 — `self.io.send(buf)` with `io: DontDrop<net::UdpSocket>` and `impl<T> Deref for DontDrop<T> {
+    /// type Target = T }` (mio 0.6's fuchsia sockets). `DontDrop` declares no `send`, so Rust auto-derefs to
+    /// `UdpSocket::send`; the engine's auto-deref chase (`scan.rs`) keys `deref_target` by LEAF and the target here is the
+    /// impl's parameter `T`, which names no type, so the call formed `DontDrop::send` and vanished. The instantiation is the
+    /// receiver FIELD's written argument at `Target`'s position (`model::deref_param_key`, `owner_field_args`). Answered only
+    /// where the wrapper itself declares no member of that name (`impl_fn_key`, inherent or trait impl, which also withdraws
+    /// on a second declaration but stays present) and the name is not one a derive or a std blanket supplies to every type;
+    /// anything else keeps today's reading. Not consulted: a crate-local BLANKET trait method of the same name (which Rust
+    /// would pick on the wrapper first) — Pass B has no blanket index, so that case would over-charge, never silence.
+    /// Kill switch `CANDOR_R1630_OFF`.
+    fn deref_param_recv(&self, recv: &syn::Expr, ty: &str, leaf: &str) -> Option<String> {
+        if std::env::var_os("CANDOR_R1630_OFF").is_some() {
+            return None;
+        }
+        let wl = ty.rsplit("::").next().unwrap_or(ty);
+        let pos: usize = self.returns.get(&crate::model::deref_param_key(wl))?.parse().ok()?;
+        if self.returns.contains_key(&crate::model::impl_fn_key(wl, leaf))
+            || matches!(leaf, "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq" | "ne"
+                | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default" | "into"
+                | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")
+        {
+            return None;
+        }
+        let syn::Expr::Field(fe) = peel_recv(recv) else { return None };
+        let owner = self.resolve_recv_type(&fe.base)?;
+        if self.is_dependency_type(&owner) {
+            return None;
+        }
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        let args = self.owner_field_args(&fe.base, &owner, &key)?;
+        let arg = args.split('\u{1}').nth(pos)?;
+        if matches!(arg, "_" | "'" | "") || arg.contains('\u{1f}') || !arg.contains("::") && self.is_scoped_generic_name(arg) {
+            return None;
+        }
+        // An owner's own type parameter (`io: DontDrop<T>`) names no type here either: that is a dispatch question.
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+        if self.returns.get(&crate::model::type_params_key(owner_leaf)).is_some_and(|ps| ps.split(',').any(|p| p == arg)) {
+            return None;
+        }
+        if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+            eprintln!("R1630DEREF\t{owner_leaf}.{key}\t{wl}->{arg}\t.{leaf}"); // §E1 REACH COUNTER
+        }
+        Some(arg.to_string())
     }
 
     /// SOUNDNESS R1267/R1279/R1281 — WHAT A PAYLOAD TYPED BY A CONTAINER'S GENERIC PARAMETER NAME `t` IS.
@@ -12748,7 +12870,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let payload = if recv_ty.as_deref().is_some_and(|t| t.starts_with(GENERIC_PAYLOAD_MARK)) {
             PayloadTy::Hedge
         } else {
-            self.field_payload(&node.receiver)
+            match self.field_payload(&node.receiver) {
+                PayloadTy::Old => self.accessor_payload(&node.receiver), // SOUNDNESS R1631
+                d => d,
+            }
+        };
+        // SOUNDNESS R1630 — auto-deref through a local generic `Deref<Target = T>` wrapper, to the field's instantiation.
+        let recv_ty = match recv_ty {
+            Some(t) if matches!(payload, PayloadTy::Old) => Some(self.deref_param_recv(&node.receiver, &t, &leaf).unwrap_or(t)),
+            o => o,
         };
         if matches!(payload, PayloadTy::Hedge) {
             self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));

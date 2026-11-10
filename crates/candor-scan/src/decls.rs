@@ -5269,6 +5269,16 @@ pub(crate) fn collect_decls(
                                         if let Some(t) = target {
                                             entry.insert(name.to_string(), t);
                                         }
+                                        // SOUNDNESS R1630/R1631 — and under the struct's MODULE-QUALIFIED path, beside R1624's
+                                        // qualified field types: the leaf-keyed fact is withdrawn as soon as a same-leaf twin
+                                        // writes different arguments for the same field name (flate2's three `DeflateDecoder
+                                        // { inner }`), which is exactly where R1624's proven owner has to read its OWN.
+                                        QUAL_FIELDS.with(|c| {
+                                            if let Some(q) = c.borrow_mut().as_mut() {
+                                                let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &s.ident.to_string());
+                                                q.file_args(&qual, &name.to_string(), &args);
+                                            }
+                                        });
                                         file_decl_fact(rets, crate::model::field_args_key(&s.ident.to_string(), &name.to_string()), args);
                                     }
                                 }
@@ -6040,6 +6050,23 @@ pub(crate) fn collect_decls(
                             for it in &im.items {
                                 if let syn::ImplItem::Type(at) = it {
                                     if at.ident == "Target" {
+                                        // SOUNDNESS R1630 — `impl<T> Deref for DontDrop<T> { type Target = T; }`: the target is
+                                        // the impl's own type PARAMETER, so `r372_type_path` below names no type (`T`) and the
+                                        // auto-deref chase stopped there. File the parameter's POSITION in the impl's written
+                                        // self-type arguments; the call site reads the instantiation off the receiver FIELD's
+                                        // written arguments (`model::deref_param_key`). Twins that disagree withdraw it.
+                                        if let (syn::Type::Path(tp), syn::Type::Path(sp)) = (&at.ty, &*im.self_ty) {
+                                            let param = tp.qself.is_none().then(|| tp.path.get_ident()).flatten().map(|i| i.to_string())
+                                                .filter(|n| im.generics.type_params().any(|g| g.ident == n));
+                                            let pos = param.and_then(|n| match sp.path.segments.last().map(|seg| &seg.arguments) {
+                                                Some(syn::PathArguments::AngleBracketed(a)) => a.args.iter().position(|g| matches!(g,
+                                                    syn::GenericArgument::Type(syn::Type::Path(ap)) if ap.qself.is_none() && ap.path.is_ident(&n))),
+                                                _ => None,
+                                            });
+                                            let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
+                                            file_decl_fact(rets, crate::model::deref_param_key(&kl),
+                                                pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()));
+                                        }
                                         if let Some(tp) = r372_type_path(&at.ty, uses_ty) {
                                             let tl = tp.rsplit("::").next().unwrap_or(&tp).to_string();
                                             let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();

@@ -674,6 +674,13 @@ pub(crate) fn field_trait_qual_key(struct_leaf: &str, field: &str, leaf: &str) -
     format!("<fieldtq>{struct_leaf}\u{1f}{field}\u{1f}{leaf}")
 }
 
+/// SOUNDNESS R1630 — `impl<T> Deref for W<T> { type Target = T }`: the POSITION of `Target`'s parameter in the impl's
+/// written self-type arguments (`RET_GENERIC_NONE` for any other target), so `w.m()` on a field `w: W<X>` can auto-deref
+/// to `X::m`. Angle-bracketed: no identifier reaches it.
+pub(crate) fn deref_param_key(type_leaf: &str) -> String {
+    format!("<derefparam>{type_leaf}")
+}
+
 pub(crate) fn field_args_key(struct_leaf: &str, field: &str) -> String {
     format!("<fieldargs>{struct_leaf}\u{1f}{field}")
 }

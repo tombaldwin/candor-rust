@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev158 (rustagent-r1630): SOUNDNESS R1630/R1631 — Pass A's cached decls change: `QualIndexes` gained `field_args`,
+    // and `rets` gained `deref_param_key` (a `Deref` whose `Target` is the impl's own type parameter). A rev157 entry
+    // deserializes `field_args` EMPTY and has no deref-parameter fact, which replays the silence warm. Mandatory.
     // rev157 (rustagent-r1624): SOUNDNESS R1624 — Pass A's cached decls change: `FileDecls` gained `qual` (`QualIndexes`),
     // each struct's four field indexes under its module-qualified path. A rev156 entry deserializes them EMPTY,
     // which leaves a same-leaf twin's `self.f` typed by whichever twin merged last — the fabrication/silence this closes,
@@ -602,7 +605,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev157/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev158/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1697,6 +1700,11 @@ pub(crate) struct QualIndexes {
     /// `Deserializer` dispatch hedge when `delegate: X` was read as concrete).
     #[serde(default)]
     pub(crate) params: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1630/R1631 — each named field's written type ARGUMENTS (`decls::field_type_args`'s encoding, the value
+    /// the leaf-keyed `model::field_args_key` fact holds), by qual. The leaf-keyed fact is WITHDRAWN when same-leaf twins
+    /// disagree, so a proven owner reads its own here (`CallCollector::owner_field_args`). Same tomb rule.
+    #[serde(default)]
+    pub(crate) field_args: HashMap<String, HashMap<String, String>>,
 }
 
 impl QualIndexes {
@@ -1723,10 +1731,19 @@ impl QualIndexes {
         merge_qual_entry(&mut self.field_elem_trait, qual, et.unwrap_or(&HashMap::new()), &tomb_v, false);
     }
 
+    /// SOUNDNESS R1630/R1631 — file one field's written arguments under `qual` (same tomb rule).
+    pub(crate) fn file_args(&mut self, qual: &str, field: &str, args: &str) {
+        let m: HashMap<String, String> = std::iter::once((field.to_string(), args.to_string())).collect();
+        merge_qual_entry(&mut self.field_args, qual, &m, &QUAL_TOMB.to_string(), false);
+    }
+
     /// Fold another file's `QualIndexes` in (same rule).
     pub(crate) fn merge(&mut self, o: &QualIndexes) {
         let tomb_s = QUAL_TOMB.to_string();
         let tomb_v = vec![QUAL_TOMB.to_string()];
+        for (q, m) in &o.field_args {
+            merge_qual_entry(&mut self.field_args, q, m, &tomb_s, false);
+        }
         for (q, m) in &o.fields {
             merge_qual_entry(&mut self.fields, q, m, &tomb_s, true);
         }
@@ -2160,6 +2177,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // R1624 — the qualified indexes (the Vec-valued two rendered joined, which is unambiguous for leaf lists).
     nested(&mut s, "qual_fields", &m.qual.fields);
     nested(&mut s, "qual_field_elem", &m.qual.field_elem);
+    nested(&mut s, "qual_field_args", &m.qual.field_args); // R1630/R1631
     for (tag, ix) in [("qual_trait_fields", &m.qual.trait_fields), ("qual_field_elem_trait", &m.qual.field_elem_trait)] {
         nested(&mut s, tag, &ix.iter().map(|(k, v)| (k.clone(), v.iter().map(|(f, l)| (f.clone(), l.join(","))).collect())).collect());
     }

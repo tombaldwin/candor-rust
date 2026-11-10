@@ -5492,6 +5492,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // `U::leaf` that resolves — the user-Deref analog of the Box/Arc/Rc peel (a newtype
                         // `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find). `.clone()`
                         // is guarded at the typed-call emit, so no pointee-clone fabrication recurs.
+                        // SOUNDNESS R1630 (residual) — the receiver's type is a crate-local `impl<T> Deref for W<T> { type
+                        // Target = T }` wrapper and `W` declares no `leaf`: the call auto-derefs to the wrapper's INSTANTIATION,
+                        // which no declaration at this site writes (the collector answers only a FIELD receiver whose written
+                        // arguments say it, `CallCollector::deref_param_recv`). tokio's `if let Some(mut driver) =
+                        // self.shared.driver.try_lock() { driver.shutdown(handle) }` over `LockGuard<'_, T>` formed
+                        // `LockGuard::shutdown` and read PURE over the I/O driver's shutdown. The chase below can only
+                        // follow a CONCRETE target, so this is the generic-payload disclosure, at the site that lost it.
+                        if !resolved_local
+                            && std::env::var_os("CANDOR_R1630_OFF").is_none()
+                            && matches!(merged.rets.get(&crate::model::deref_param_key(&t_type)), Some(Some(p)) if p.parse::<usize>().is_ok())
+                            && !matches!(c.leaf.as_str(), "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq"
+                                | "ne" | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default"
+                                | "into" | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")
+                        {
+                            if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+                                eprintln!("R1630HEDGE\t{}\t{t_type}.{}", f.qual, c.leaf); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default()
+                                .insert(format!("dispatch:generic payload receiver of `{}`", c.leaf));
+                        }
                         if !resolved_local {
                             let mut cur = t_type.clone();
                             let mut hops = 0;
@@ -6739,8 +6760,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R501MARK\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
                     } else if claimants == 0
-                        && merged.macro_hidden_types.contains(&ty)
-                        && merged.macro_hidden_fns.contains(&c.leaf)
+                        && ((merged.macro_hidden_types.contains(&ty) && merged.macro_hidden_fns.contains(&c.leaf))
+                            // SOUNDNESS R1636 — the receiver's TYPE is declared only inside unexpanded macro text (tokio 1.18's
+                            // `cfg_time! { type TimeDriver = .. }`, 1.45's `cfg_io_driver! { enum IoStack { .. } }`): no
+                            // declaration of it was read anywhere, so the absence of `Type::method` says nothing about the program
+                            // whatever the macro text names. Not a struct candor read (`fields` holds every one it saw).
+                            || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_TYPE))
+                                && !merged.fields.contains_key(&ty)
+                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
                     {
                         // (b) THE RECEIVER'S TYPE IS ONE THIS CRATE DECLARES INSIDE A MACRO-HIDDEN
                         // MODULE, and no `Type::method` unit exists. `collect_decls` skips an
