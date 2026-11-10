@@ -5502,6 +5502,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if !resolved_local
                             && std::env::var_os("CANDOR_R1630_OFF").is_none()
                             && matches!(merged.rets.get(&crate::model::deref_param_key(&t_type)), Some(Some(p)) if p.parse::<usize>().is_ok())
+                            // …and some crate impl declares a member of that name, so the instantiation CAN be a local type
+                            // whose member runs (tokio's `Driver::shutdown`). A name no crate impl declares is a std or
+                            // dependency member (time's `Spanned<&[u8]>` `.eq_ignore_ascii_case(..)`, 97 rows a crate): the
+                            // pre-existing reading stands for it, as for any untyped foreign receiver.
+                            && merged.rets.contains_key(&crate::model::any_method_key(&c.leaf))
                             && !matches!(c.leaf.as_str(), "deref" | "deref_mut" | "drop" | "clone" | "clone_from" | "clone_into" | "fmt" | "eq"
                                 | "ne" | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default"
                                 | "into" | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")

@@ -9583,6 +9583,20 @@ impl<'a> CallCollector<'a> {
         // is a parameter nothing shows. That is `Hedge`'s case exactly (`payload_decision`): disclosed, never read as a
         // guess and never as nothing. Only in a scope with bounded generics, where the parameter can be one of them.
         let syn::Expr::Field(fe) = peel_recv(&m.receiver) else {
+            // Only a CHAIN of such accessors (`get_mut().get_mut()`): the inner one returns a parameter of ITS impl, so the
+            // outer receiver's instantiation is a parameter nothing at this site writes. Any other receiver (a binding, an
+            // operator's `self.make_owned()`) keeps today's reading — measured, the unnarrowed rule hedged 72 maybe-owned
+            // operator bodies whose payload the caller fixes.
+            let inner_param = match peel_recv(&m.receiver) {
+                syn::Expr::MethodCall(im) => self.resolve_recv_type(&im.receiver).is_some_and(|t| {
+                    let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
+                    self.returns.get(&crate::model::impl_retgen_key(&tl, &im.method.to_string())).is_some_and(|p| p.parse::<usize>().is_ok())
+                }),
+                _ => false,
+            };
+            if !inner_param {
+                return PayloadTy::Old;
+            }
             if std::env::var_os("CANDOR_R1631_INSTR").is_some() {
                 eprintln!("R1631ACC\t{acc_leaf}.{}\t-\tHedge(nonfield)", m.method); // §E1 REACH COUNTER
             }
