@@ -8,6 +8,7 @@
 //!   * SILENT before this row: `PgPool::connect_lazy(u)` then `.acquire()` (receiver untyped: `connect_lazy` / `connect_with` were not
 //!     constructor names), `PgListener::connect_with(&pool)`, `Pool::try_begin` (a warm pool sent BEGIN), and the option constructors
 //!     / `parse::<PgConnectOptions>()` (Env + Fs).
+//!
 //! Fixture fns carry a unique `_zq` terminator because `deny <E> <fn>` matches by PREFIX. Both the lock arm (a `Cargo.lock` pins the
 //! calibrated sqlx) and the lockless arm are asserted.
 
