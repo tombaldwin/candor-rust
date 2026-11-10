@@ -7,6 +7,22 @@
   "package": "candor_classify",
   "functions": [
     {
+      "fn": "also_effects",
+      "loc": "crates/candor-classify/src/lib.rs:6073:1: 6073:71",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "92ef748e9b079cba6f403187fefe98e9",
+      "calls": [
+        "classify"
+      ]
+    },
+    {
       "fn": "classify",
       "loc": "crates/candor-classify/src/lib.rs:484:1: 484:70",
       "inferred": [
@@ -21,6 +37,39 @@
       ],
       "overdeclared": [],
       "hash": "b980b641c851786896279481bf615e7b"
+    },
+    {
+      "fn": "classify_all",
+      "loc": "crates/candor-classify/src/lib.rs:6108:1: 6108:79",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "92ef748e9b079cbab00391566a09f875",
+      "calls": [
+        "also_effects",
+        "classify"
+      ]
+    },
+    {
+      "fn": "classify_rendered",
+      "loc": "crates/candor-classify/src/lib.rs:6117:1: 6117:73",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "92ef748e9b079cba150034dee832dce8",
+      "calls": [
+        "classify_all"
+      ]
     },
     {
       "fn": "password_hash_explicit_salt",
