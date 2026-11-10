@@ -3717,6 +3717,7 @@ pub(crate) fn fninfo(
     }
     let alias_prev = c.bind_block_aliases(&block.stmts); // R1143 — the body's own `type` aliases
     c.walk_stmts(&block.stmts);
+    c.charge_body_expected(&sig.output, block); // SOUNDNESS R1625
     c.unbind_block_aliases(alias_prev);
     let ret_idents = match &sig.output {
         syn::ReturnType::Type(_, ty) => {

@@ -6956,6 +6956,191 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1625 — whether one CONSUMER of the expected-type rule is on. `CANDOR_R1625_OFF` (set) turns every consumer
+    /// off (empty, `1` or `all`), `CANDOR_R1625_OFF=parse,collect,try_into,default` only the ones named: the same-binary attribution control.
+    fn r1625_on(kind: &str) -> bool {
+        match std::env::var("CANDOR_R1625_OFF") {
+            Err(_) => true,
+            Ok(v) => !(matches!(v.as_str(), "" | "1" | "all") || v.split(',').any(|k| k.trim() == kind)),
+        }
+    }
+
+    /// The first generic argument of `ty` when its last segment is `name` (`Result<T, E>` -> `T`).
+    fn r1625_first_arg<'t>(ty: &'t syn::Type, name: &str) -> Option<&'t syn::Type> {
+        let syn::Type::Path(p) = ty else { return None };
+        let seg = p.path.segments.last()?;
+        if p.qself.is_some() || seg.ident != name {
+            return None;
+        }
+        match &seg.arguments {
+            syn::PathArguments::AngleBracketed(a) => a.args.iter().find_map(|g| match g {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// SOUNDNESS R1625 — THE EXPECTED-TYPE RULE. A call whose return type is a generic parameter of the callee
+    /// (`str::parse::<F>`, `Iterator::collect::<B>`, `TryInto::try_into`, `Default::default`) is typed by
+    /// where its value goes, not only by a turbofish: `let o: T = s.parse()?`, `let o: Result<T, _> = s.parse()`, the
+    /// tail / `return` of a `-> Result<T, _>` fn. Only the turbofish reached `T`'s impl; every other spelling formed no
+    /// edge and the caller read ABSENT over `T::from_str`'s effects (EXECUTED).
+    ///
+    /// `ty` is the type of `e`'s VALUE as declared (`wrapped` false), or of what a `?`/`unwrap` has already peeled off
+    /// a `Result`/`Option` (`wrapped` true: `e` is `Result<ty, _>`). Walks only the value-forwarding spine: `?`,
+    /// `unwrap`/`expect`/`unwrap_or*`, `map_err`, `.ok()`, parentheses, and a block/`if`/`match` tail. It stops at
+    /// anything else, so an argument or a nested call's own return is never read as this binding's type.
+    pub(crate) fn charge_expected_value(&mut self, e: &syn::Expr, ty: &syn::Type, wrapped: bool) {
+        match e {
+            syn::Expr::Paren(p) => self.charge_expected_value(&p.expr, ty, wrapped),
+            syn::Expr::Group(g) => self.charge_expected_value(&g.expr, ty, wrapped),
+            syn::Expr::Try(t) if !wrapped => self.charge_expected_value(&t.expr, ty, true),
+            syn::Expr::Block(b) if b.label.is_none() => {
+                if let Some(syn::Stmt::Expr(t, None)) = b.block.stmts.last() {
+                    self.charge_expected_value(t, ty, wrapped);
+                }
+            }
+            syn::Expr::Unsafe(b) => {
+                if let Some(syn::Stmt::Expr(t, None)) = b.block.stmts.last() {
+                    self.charge_expected_value(t, ty, wrapped);
+                }
+            }
+            syn::Expr::If(i) => {
+                if let Some(syn::Stmt::Expr(t, None)) = i.then_branch.stmts.last() {
+                    self.charge_expected_value(t, ty, wrapped);
+                }
+                if let Some((_, el)) = &i.else_branch {
+                    self.charge_expected_value(el, ty, wrapped);
+                }
+            }
+            syn::Expr::Match(m) => {
+                for arm in &m.arms {
+                    self.charge_expected_value(&arm.body, ty, wrapped);
+                }
+            }
+            syn::Expr::MethodCall(m) => {
+                let name = m.method.to_string();
+                match name.as_str() {
+                    "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" if !wrapped => {
+                        self.charge_expected_value(&m.receiver, ty, true)
+                    }
+                    "map_err" | "or" | "or_else" | "inspect_err" | "inspect" => {
+                        // these keep the `Ok` type: the receiver is `Result<T, _>` where this value is (`Result<T, E2>`)
+                        if wrapped {
+                            self.charge_expected_value(&m.receiver, ty, true)
+                        } else if let Some(t) = Self::r1625_first_arg(ty, "Result") {
+                            self.charge_expected_value(&m.receiver, t, true)
+                        }
+                    }
+                    "ok" if !wrapped && m.args.is_empty() => {
+                        if let Some(t) = Self::r1625_first_arg(ty, "Option") {
+                            self.charge_expected_value(&m.receiver, t, true);
+                        }
+                    }
+                    "parse" | "try_into" | "collect" => self.r1625_consume(m, &name, ty, wrapped),
+                    _ => {}
+                }
+            }
+            syn::Expr::Call(c) if !wrapped && c.args.is_empty() => {
+                let syn::Expr::Path(p) = &*c.func else { return };
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                let is_default = p.qself.is_none()
+                    && (segs.as_slice() == ["Default", "default"] || segs.as_slice() == ["std", "default", "Default", "default"]);
+                if is_default && Self::r1625_on("default") && !self.local_traits.contains_key("Default") {
+                    self.r1625_charge_target(ty, "default", "Default", "default");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The consumer half of `charge_expected_value`: `m` is a `parse`/`try_into`/`collect` call whose value is
+    /// `ty` (peeled to the call's own `Result<T, _>` when `wrapped` is false).
+    fn r1625_consume(&mut self, m: &syn::ExprMethodCall, name: &str, ty: &syn::Type, wrapped: bool) {
+        if m.turbofish.is_some() || !Self::r1625_on(name) {
+            return;
+        }
+        // a hand-written method of that name on the receiver's own type is the call, not std's
+        if let Some(rt) = self.resolve_recv_type(&m.receiver) {
+            let tl = rt.rsplit("::").next().unwrap_or(&rt).to_string();
+            if self.local_fn_on(&tl, name) {
+                return;
+            }
+        }
+        match name {
+            "parse" | "try_into" if m.args.is_empty() => {
+                let target = if wrapped { Some(ty) } else { Self::r1625_first_arg(ty, "Result") };
+                let Some(target) = target else { return };
+                if name == "parse" {
+                    let Some(t) = self.r1625_target_path(target) else { return };
+                    if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+                        eprintln!("R1625REACH\tparse\t{t}"); // §E1 REACH COUNTER
+                    }
+                    self.charge_std_method_site_ret(m, "parse", Some(t));
+                } else {
+                    self.r1625_charge_target(target, "try_into", "TryFrom", "try_from");
+                }
+            }
+            "collect" if m.args.is_empty() && !wrapped => {
+                let Some(t) = self.r1625_target_path(ty) else { return };
+                if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+                    eprintln!("R1625REACH\tcollect\t{t}"); // §E1 REACH COUNTER
+                }
+                self.charge_std_method_site_ret(m, "collect", Some(t));
+            }
+            _ => {}
+        }
+    }
+
+    /// The path a context-declared type names, or `None` when it names no concrete type: an inference hole, one of the
+    /// scope's own generics (the caller's instantiation answers it), `Self`, `impl Trait`, a reference or tuple.
+    fn r1625_target_path(&self, t: &syn::Type) -> Option<String> {
+        if matches!(t, syn::Type::Infer(_)) {
+            return None;
+        }
+        let p = crate::lang::type_path(t, &self.uses)?;
+        let head = p.split("::").next().unwrap_or(&p);
+        if head == "Self" || head == "_" || self.scope_generic_names().contains(head) {
+            return None;
+        }
+        Some(p)
+    }
+
+    fn r1625_charge_target(&mut self, t: &syn::Type, kind: &str, trait_leaf: &str, member: &str) {
+        let Some(p) = self.r1625_target_path(t) else { return };
+        if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+            eprintln!("R1625REACH\t{kind}\t{p}"); // §E1 REACH COUNTER
+        }
+        self.charge_licensed(&p, trait_leaf, member);
+    }
+
+    /// SOUNDNESS R1625 — the fn's own declared return type is the expected type of its tail and of every `return`.
+    /// Called once after the body walk. Closures, nested items and async blocks are their own bodies and are not entered.
+    pub(crate) fn charge_body_expected(&mut self, ret: &syn::ReturnType, block: &syn::Block) {
+        let syn::ReturnType::Type(_, ty) = ret else { return };
+        if let Some(syn::Stmt::Expr(t, None)) = block.stmts.last() {
+            self.charge_expected_value(t, ty, false);
+        }
+        struct Rets<'a>(Vec<&'a syn::Expr>);
+        impl<'a> syn::visit::Visit<'a> for Rets<'a> {
+            fn visit_expr_return(&mut self, r: &'a syn::ExprReturn) {
+                if let Some(e) = &r.expr {
+                    self.0.push(e);
+                }
+                syn::visit::visit_expr_return(self, r);
+            }
+            fn visit_expr_closure(&mut self, _: &'a syn::ExprClosure) {}
+            fn visit_expr_async(&mut self, _: &'a syn::ExprAsync) {}
+            fn visit_item(&mut self, _: &'a syn::Item) {}
+        }
+        let mut rets = Rets(Vec::new());
+        syn::visit::Visit::visit_block(&mut rets, block);
+        for e in rets.0 {
+            self.charge_expected_value(e, ty, false);
+        }
+    }
+
     /// SOUNDNESS R1130 — collecting into a KEYED std collection inserts every element: a `HashSet`/`HashMap` hashes
     /// and compares each key (`K::hash`, `K::eq`), a `BTreeSet`/`BTreeMap` orders it (EXECUTED: `Guard::hash` runs
     /// per element; ABSENT before). `target` is the collected-into type as WRITTEN (turbofish or `let`
@@ -7993,13 +8178,20 @@ impl<'a> CallCollector<'a> {
     /// `v.sort()`), and as a std TRAIT member the receiver's type gets from std (`x.to_string()`, `it.count()`,
     /// `a.max(b)`, `w.write_all(..)`) when the type does not define the method itself.
     fn charge_std_method_site(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
+        self.charge_std_method_site_ret(node, leaf, None);
+    }
+
+    /// `charge_std_method_site` with the call's RETURN type given by its CONTEXT instead of a turbofish (SOUNDNESS R1625):
+    /// `let o: T = s.parse()?` / `fn f(..) -> Result<T, _> { s.parse() }` call `T::from_str` exactly as `s.parse::<T>()` does.
+    /// A turbofish, when written, wins.
+    fn charge_std_method_site_ret(&mut self, node: &syn::ExprMethodCall, leaf: &str, ret_override: Option<String>) {
         if std::env::var_os("CANDOR_CT2_OFF").is_some() {
             return;
         }
         let args: Vec<&syn::Expr> = node.args.iter().collect();
         let ret = match node.turbofish.as_ref().and_then(|tf| tf.args.first()) {
             Some(syn::GenericArgument::Type(t)) => crate::lang::type_path(t, &self.uses),
-            _ => None,
+            _ => ret_override,
         };
         let mut hooks: Vec<crate::std_bounds::Hook> = Vec::new();
         let shape = self.std_shape_of(&node.receiver).map(|(s, _)| s);
@@ -14446,6 +14638,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.with_pre_bindings(&pre_bindings, |s| s.charge_collect_into(mc, &ty));
                 }
             }
+        }
+        // SOUNDNESS R1625 — `let o: T = s.parse()?;`: the annotation is the call's expected type (parse / try_into / collect /
+        // `Default::default()`). Read under the PRE-statement bindings, like the `collect` arm above.
+        if let (syn::Pat::Type(pt), Some(init)) = (&node.pat, &node.init) {
+            self.with_pre_bindings(&pre_bindings, |s| s.charge_expected_value(&init.expr, &pt.ty, false));
         }
         // SOUNDNESS R571 — CLEAR the per-name monomorphization denylist for every name this statement
         // binds, BEFORE any of the ~10 `trait_vars` binders below runs. Enumerating the STATE rather than
