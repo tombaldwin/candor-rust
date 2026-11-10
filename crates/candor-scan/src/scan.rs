@@ -1058,6 +1058,7 @@ fn r1578_type(
         R1578::Std => return None,
     };
     sigs.borrow_mut().note_typed(&cr);
+    let ty = r1619_public(&cr, renames, dir, sigs, ty, &method);
     let leaf = ty.rsplit("::").next().unwrap_or(&ty);
     let twin = returns.contains_key(&crate::model::nominal_key(leaf));
     let path = format!("{cr}::{ty}::{method}");
@@ -1143,11 +1144,44 @@ fn r1617_chain_type(
     let pseudo = Call { path: format!("{cr}::{UNTYPED_RECV_MARKER}::{CHAIN_GUESS_MARKER}::{}", c.leaf), ..c.clone() };
     let R1578::Typed { cr, method, ty } = r1578_resolve(&pseudo, deps, renames, deps_idx, dir, sigs)? else { return None };
     sigs.borrow_mut().note_typed(&cr);
+    let ty = r1619_public(&cr, renames, dir, sigs, ty, &method);
     let path = format!("{cr}::{ty}::{method}");
     if std::env::var_os("CANDOR_R1617_INSTR").is_some() {
         eprintln!("R1617CHAIN\t{}\t{path}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
     }
     Some((Call { path, leaf: method, typed: true, method: true, dot: true, prov: None, ..c.clone() }, false))
+}
+
+/// SOUNDNESS R1619 — THE TYPED CALL IS SPELLED THE WAY A CONSUMER CAN SPELL IT. R1578 places a value on the type's
+/// DECLARING qual (`tokio_postgres::transaction_builder::TransactionBuilder`), a path in a private module no consumer can
+/// write, while a classifier rule keyed on the consumer's spelling names the public re-export
+/// (`tokio_postgres::TransactionBuilder::start`): the typed call then met no rule and `let b = c.build_transaction();
+/// b.start()` read ABSENT over an executed BEGIN. Where the declaring spelling classifies nothing and the type's public path
+/// (`DepSigs::public_qual`, through `pub use`s from the root) does, that path is used. Either spelling names the same type,
+/// so the switch can only find a rule the other missed. `ty` unchanged otherwise.
+fn r1619_public(
+    cr: &str,
+    renames: &HashMap<String, String>,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+    ty: String,
+    method: &str,
+) -> String {
+    if std::env::var_os("CANDOR_R1619_OFF").is_some() {
+        return ty;
+    }
+    let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
+    if candor_classify::classify(cr_real, &format!("{cr_real}::{ty}::{method}")).is_some() {
+        return ty;
+    }
+    let Some(p) = sigs.borrow_mut().public_qual(dir, cr, cr_real, &ty) else { return ty };
+    if candor_classify::classify(cr_real, &format!("{cr_real}::{p}::{method}")).is_some() {
+        if std::env::var_os("CANDOR_R1619_INSTR").is_some() {
+            eprintln!("R1619PUB\t{cr}::{ty}::{method}\t{cr}::{p}::{method}"); // §E1 REACH COUNTER
+        }
+        return p;
+    }
+    ty
 }
 
 /// SOUNDNESS R1578 — where an `<untyped>` marker's receiver provably lands.
@@ -1199,6 +1233,11 @@ pub(crate) fn r1578_resolve(
             "a" if is_async => is_async = false,
             "?" | "u" if !is_async && !wraps.is_empty() => {
                 wraps.remove(0);
+            }
+            // SOUNDNESS R1619 — `Result::ok` (std's inherent `fn ok(self) -> Option<T>`, the first probe step on an owned
+            // `Result`): the value is unchanged, its wrapper becomes `Option` (`cfg.create_pool(..).ok()?`)
+            "m:ok" if !is_async && wraps.first() == Some(&'R') && std::env::var_os("CANDOR_R1619_OFF").is_none() => {
+                wraps[0] = 'O';
             }
             m if m.starts_with("m:") && !is_async && wraps.is_empty() => {
                 let RetTy::Dep(q) = &ty else { return None };
