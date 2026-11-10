@@ -925,6 +925,74 @@ want   "CANDOR_DROP_DEBUG names the instantiated callee edge"  "$rout" 'CANDOR_D
 absent "the R1117 reach probe is SILENT without CANDOR_DROP_DEBUG" "$(dl "$GI")" 'CANDOR_DROP_INST_EDGE'
 rm -rf "$(dirname "$GI")"
 
+# ── 9c-vii. SOUNDNESS R1615 — a TRAIT call that resolves into a DEPENDENCY's body is classified by that body ──
+# `b.next_backoff()` on a concrete `backoff::ExponentialBackoff` reached κ as the trait DECLARATION's path
+# (`backoff::backoff::Backoff::next_backoff`), while κ's row is keyed on the implementing type — so it matched
+# nothing, and the floor disclosure skipped it for being a trait call: ABSENT, no `invisible`, `deny Rand`
+# exit 0, EXECUTED 1 entropy + 1 clock read against the real backoff 0.4.0. An inherent method of a GENERIC type
+# missed the same table another way: `ExponentialBackoff::<C>::get_elapsed_time` split as type `<C>`. The
+# dependency here is a hermetic `path` crate with the real crate's NAME and SHAPE (κ keys on both), so the test
+# pins the SPELLING that reaches κ; the executed ground truth is the real crate's, recorded in the row.
+echo "== trait call into a dependency body (R1615) =="
+TI=$(mktemp -d)/ti; mkdir -p "$TI/backoff/src" "$TI/app/src"
+printf '[package]\nname="backoff"\nversion="0.4.0"\nedition="2021"\n' > "$TI/backoff/Cargo.toml"
+{
+  printf 'pub mod backoff {\n'
+  printf '    pub trait Backoff { fn next_backoff(&mut self) -> Option<u32>; fn reset(&mut self) {} }\n'
+  printf '    #[derive(Clone)] pub struct Zero;\n'
+  printf '    impl Backoff for Zero { fn next_backoff(&mut self) -> Option<u32> { Some(0) } }\n'
+  printf '}\n'
+  printf 'pub mod exponential {\n'
+  printf '    pub struct ExponentialBackoff<C> { pub c: C }\n'
+  printf '    impl<C> ExponentialBackoff<C> { pub fn get_elapsed_time(&self) -> u32 { 0 } }\n'
+  printf '    impl<C> crate::backoff::Backoff for ExponentialBackoff<C> {\n'
+  printf '        fn next_backoff(&mut self) -> Option<u32> { Some(1) }\n'
+  printf '        fn reset(&mut self) {}\n'
+  printf '    }\n'
+  printf '}\n'
+  printf 'pub use exponential::ExponentialBackoff as Exp;\n'
+} > "$TI/backoff/src/lib.rs"
+printf '[package]\nname="ti"\nversion="0.1.0"\nedition="2021"\n\n[dependencies]\nbackoff = { path = "../backoff" }\n\n[workspace]\n' > "$TI/app/Cargo.toml"
+{
+  printf 'use backoff::backoff::Backoff;\n'
+  printf 'type E = backoff::Exp<u8>;\n'
+  printf 'pub fn b_next(b: &mut E) -> Option<u32> { b.next_backoff() }\n'
+  printf 'pub fn b_ufcs(b: &mut E) -> Option<u32> { <E as Backoff>::next_backoff(b) }\n'
+  printf 'pub fn b_reset(b: &mut E) { b.reset() }\n'
+  printf 'pub fn b_elapsed(b: &E) -> u32 { b.get_elapsed_time() }\n'
+  printf 'pub fn b_gen<B: Backoff>(b: &mut B) -> Option<u32> { b.next_backoff() }\n'
+  printf 'pub fn b_gcaller(b: &mut E) -> Option<u32> { b_gen(b) }\n'
+  printf 'pub fn k_zero(z: &mut backoff::backoff::Zero) -> Option<u32> { z.next_backoff() }\n'
+  printf 'pub fn k_zgcaller(z: &mut backoff::backoff::Zero) -> Option<u32> { b_gen(z) }\n'
+  printf 'pub fn k_clone(z: &backoff::backoff::Zero) -> backoff::backoff::Zero { z.clone() }\n'
+} > "$TI/app/src/lib.rs"
+for eff in Rand Clock; do
+  echo "deny $eff" > "$TI/policy"
+  : > "$TI/vio"; dl "$TI/app" env CANDOR_POLICY="$TI/policy" CANDOR_VIOLATIONS="$TI/vio" >/dev/null
+  printf -v "tiv_$eff" '%s' "|$(sort "$TI/vio" | tr '\n' '|')"
+done
+# The report run is separate: CANDOR_JSON makes a run report-only, with no enforcement.
+dl "$TI/app" env CANDOR_JSON="$TI/r" >/dev/null
+for f in b_next b_ufcs b_gcaller; do
+  want   "R1615 GATE: deny Rand fires on $f (the impl's own row, ExponentialBackoff::next_backoff)" "$tiv_Rand" "|AS-EFF-006 $f|"
+done
+for f in b_reset b_elapsed; do
+  want   "R1615 GATE: deny Clock fires on $f" "$tiv_Clock" "|AS-EFF-006 $f|"
+done
+for f in k_zero k_zgcaller k_clone; do
+  absent "R1615 control: $f reaches no charged row — NOT charged Rand" "$tiv_Rand" "|AS-EFF-006 $f|"
+done
+tij=$(python3 -c '
+import json,glob,sys
+r=json.load(open([p for p in glob.glob(sys.argv[1]+".ti.*.json") if "callgraph" not in p][0]))
+for f in r["functions"]:
+    print(f["fn"]+":"+",".join(f.get("invisible") or []))
+' "$TI/r")
+want   "R1615 floor: an UNCLASSIFIED dependency trait impl is disclosed (k_zero invisible:[backoff])"   "$tij" 'k_zero:backoff'
+want   "R1615 floor: the same through a generic callee the site instantiates (k_zgcaller)"            "$tij" 'k_zgcaller:backoff'
+absent "R1615 control: a calibrated-pure std trait impl (Clone) is not floored"                        "$tij" 'k_clone:'
+rm -rf "$(dirname "$TI")"
+
 # ── 9c-v. SOUNDNESS R761: the deep engine's ⟨0.21⟩/⟨0.22⟩ COMPLETENESS MANIFEST ──
 # `write_report_files` called `to_packaged_report_json`, which has no `analyzed` parameter, so every
 # deep-engine report was a §2 ROW-3 document — one that makes no completeness claim at all. Two

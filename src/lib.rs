@@ -1061,6 +1061,81 @@ enum Devirt {
     StillVirtual,
 }
 
+/// SOUNDNESS R1615 — `def_path_str` prints a method of a GENERIC type with its arguments
+/// (`backoff::exponential::ExponentialBackoff::<C>::get_elapsed_time`); κ's rows split `(type, method)` on
+/// `::` and read the type as `<C>`. Drop each `::<..>` ARGUMENT list. An `::<impl ..>` segment is a path
+/// component, not arguments, and is kept: removing it would hand κ `std::fs::read` for an impl in `std::fs`.
+fn strip_generic_args(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(i) = rest.find("::<") {
+        let after = &rest[i + 3..];
+        if after.starts_with("impl ") {
+            out.push_str(&rest[..i + 3]);
+            rest = after;
+            continue;
+        }
+        let mut depth = 1usize;
+        let mut end = None;
+        for (j, c) in after.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(j) = end else { break };
+        out.push_str(&rest[..i]);
+        rest = &after[j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// SOUNDNESS R1615 — the spellings candor-scan hands κ for a trait call on a concrete receiver: the
+/// IMPLEMENTING type's path plus the method, never the trait's. `body` is the devirtualized dependency target.
+/// Three forms, all ending `::<Type>::<method>`: the impl's own module (`backoff::exponential::ExponentialBackoff::
+/// next_backoff`, the key candor-scan's coverage manifest uses), the type's visible path, and the crate-root
+/// alias (`backoff::ExponentialBackoff::next_backoff`, a consumer's usual spelling). The type is the call's
+/// `Self` argument, so a PROVIDED method the impl does not override (`body` is then the trait's own item) is
+/// still spelled on the type it ran for. A `Self` that is not a nominal type yields nothing.
+fn trait_impl_spellings<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId, body: DefId) -> Vec<String> {
+    let Some(typeck) = cx.maybe_typeck_results() else { return Vec::new() };
+    let args = match expr.kind {
+        ExprKind::Call(callee, _) => match typeck.expr_ty(callee).kind() {
+            rustc_middle::ty::TyKind::FnDef(_, substs) => *substs,
+            _ => return Vec::new(),
+        },
+        ExprKind::MethodCall(..) => typeck.node_args(expr.hir_id),
+        _ => return Vec::new(),
+    };
+    let Some(self_ty) = args.types().next() else { return Vec::new() };
+    impl_spellings_for(cx, self_ty, method_did, body)
+}
+
+/// `trait_impl_spellings` for a known `Self` type (the generic-callee walk has the monomorphized one).
+fn impl_spellings_for<'tcx>(cx: &LateContext<'tcx>, self_ty: rustc_middle::ty::Ty<'tcx>, method_did: DefId,
+                            body: DefId) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let rustc_middle::ty::TyKind::Adt(adt, _) = self_ty.peel_refs().kind() else { return out };
+    let ty_name = cx.tcx.item_name(adt.did());
+    let method = cx.tcx.item_name(method_did);
+    if let Some(impl_did) = cx.tcx.impl_of_assoc(body) {
+        out.push(format!("{}::{ty_name}::{method}", cx.tcx.def_path_str(cx.tcx.parent(impl_did))));
+    }
+    out.push(format!("{}::{method}", cx.tcx.def_path_str(adt.did())));
+    out.push(format!("{}::{ty_name}::{method}", cx.tcx.crate_name(body.krate)));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
+}
+
 /// Resolve a trait-method dispatch to the single concrete impl it lands on, when the receiver/operand
 /// type is known — so candor can use the ONE real target instead of CHA-expanding to every impl (the
 /// over-approximation that yields confident false positives, CRITIQUE §9). Returns None for
@@ -2035,6 +2110,7 @@ fn generic_callee_local_edges<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &Expr<'tcx>,
     callee_did: DefId,
+    ext: &mut Vec<DepBody<'tcx>>,
 ) -> Vec<DefId> {
     let mut out: Vec<DefId> = Vec::new();
     let Some(callee_local) = callee_did.as_local() else { return out };
@@ -2056,9 +2132,17 @@ fn generic_callee_local_edges<'tcx>(
         _ => return out,
     };
     let mut visited = std::collections::HashSet::new();
-    collect_generic_callee_edges(cx, callee_local, site_args, 0, &mut visited, &mut out);
+    collect_generic_callee_edges(cx, callee_local, site_args, 0, &mut visited, &mut out, ext);
     out.dedup();
     out
+}
+
+/// SOUNDNESS R1615 — a trait dispatch inside a LOCAL generic callee that the call site's substs resolve to a
+/// DEPENDENCY's body: the trait method, the body that runs, and the concrete `Self` it runs for.
+struct DepBody<'tcx> {
+    method: DefId,
+    body: DefId,
+    self_ty: rustc_middle::ty::Ty<'tcx>,
 }
 
 /// True if any type in `args` is (or contains) a still-generic `Param` — the substitution didn't fully
@@ -2084,6 +2168,7 @@ fn collect_generic_callee_edges<'tcx>(
     depth: u32,
     visited: &mut std::collections::HashSet<(rustc_span::def_id::LocalDefId, String)>,
     out: &mut Vec<DefId>,
+    ext: &mut Vec<DepBody<'tcx>>,
 ) {
     use rustc_hir::intravisit::Visitor;
     if depth > 6 {
@@ -2144,6 +2229,17 @@ fn collect_generic_callee_edges<'tcx>(
             if did.is_local() && did != method_did {
                 out.push(did);
                 return;
+            }
+            // SOUNDNESS R1615 — a dispatch over one of the callee's OWN params that the site's substs pin to a
+            // DEPENDENCY body (`fn g<B: Backoff>(b: &mut B) { b.next_backoff() }` called with
+            // `ExponentialBackoff`): hand it back for the caller to classify as if it had made the call
+            // itself. Only a dispatch whose args were generic before substitution — a concrete call in the
+            // callee's body is already charged to the callee, which the caller reaches by its own edge.
+            if !did.is_local()
+                && args_still_generic(inner_args)
+                && let Some(self_ty) = mono_args.types().next()
+            {
+                ext.push(DepBody { method: method_did, body: did, self_ty });
             }
         }
         // Non-local resolution: only an iter-driver default hides a LOCAL `next` behind it. Peel the
@@ -2225,7 +2321,7 @@ fn collect_generic_callee_edges<'tcx>(
     }
     // Recurse into the generic forwarders found, under their monomorphized substs.
     for (next_fn, next_args) in forward_targets {
-        collect_generic_callee_edges(cx, next_fn, next_args, depth + 1, visited, out);
+        collect_generic_callee_edges(cx, next_fn, next_args, depth + 1, visited, out, ext);
     }
 }
 
@@ -3167,11 +3263,58 @@ impl Candor {
         }
     }
 
+    /// SOUNDNESS R1615 — charge `caller` for a dependency body a LOCAL generic callee reaches under this site's
+    /// substs (see `DepBody`). The same spellings and the same floor as `record_resolved_call`'s trait arm, without
+    /// its literal detail: the arguments live in the callee, so a locator-bearing effect is marked `incomplete`.
+    fn charge_dep_body<'tcx>(&mut self, cx: &LateContext<'tcx>, caller: LocalDefId, d: &DepBody<'tcx>) {
+        let bk = cx.tcx.crate_name(d.body.krate);
+        if matches!(bk.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+            && is_real_sysroot_frontier(cx, d.body.krate)
+        {
+            return;
+        }
+        let bc = bk.to_string();
+        let tk = cx.tcx.crate_name(d.method.krate).to_string();
+        let raw = cx.tcx.def_path_str(d.method);
+        let mut spellings: Vec<(String, String)> = vec![(tk.clone(), strip_generic_args(&raw)), (tk, raw)];
+        spellings.extend(impl_spellings_for(cx, d.self_ty, d.method, d.body).into_iter().map(|p| (bc.clone(), p)));
+        self.encountered.insert(bc.clone());
+        let mut hit = false;
+        for (c, p) in &spellings {
+            if let Some(e) = classify(c, p) {
+                hit = true;
+                let mut effs = vec![e];
+                effs.extend(candor_classify::also_effects(c, p).iter().copied());
+                for e in effs {
+                    self.direct.entry(caller).or_default().insert(e);
+                    if candor_classify::also_hides_locator(e) || matches!(e, "Net" | "Fs" | "Exec" | "Db") {
+                        self.incomplete_direct.entry(caller).or_default().insert(e);
+                    }
+                    if e == "Fs" {
+                        self.fs_direct.entry(caller).or_default().insert(FS_UNKNOWN);
+                    }
+                }
+            }
+        }
+        if !hit
+            && let Some(td) = cx.tcx.trait_of_assoc(d.method)
+        {
+            let tk = cx.tcx.crate_name(td.krate);
+            let ti = cx.tcx.item_name(td);
+            let pure_std = (is_pure_std_trait(tk.as_str(), ti.as_str()) || is_pure_fmt_write(tk.as_str(), ti.as_str()))
+                && is_real_sysroot_frontier(cx, td.krate);
+            if !pure_std {
+                self.invisible_direct.entry(caller).or_default().insert(bc);
+            }
+        }
+    }
+
     /// check_expr concern: record the RESOLVED call — classify a direct effect (+ fs/host/cmd/
     /// path/table literal detail and the κ floor disclosure), or inherit a cross-crate callee's
     /// effects + literals. The tail of check_expr, so its early `return` is behavior-identical.
     fn record_resolved_call<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>,
-                                  caller: LocalDefId, def_id: DefId, trait_did: Option<DefId>) {
+                                  caller: LocalDefId, def_id: DefId, trait_did: Option<DefId>,
+                                  body: Option<DefId>) {
         // Record a directly-performed effect (built-in classifier, then project rules).
         let crate_name = cx.tcx.crate_name(def_id.krate);
         // ⟨core/alloc-impostor⟩: a name match alone is not enough to trust a call as the sysroot
@@ -3184,8 +3327,84 @@ impl Candor {
         if !def_id.is_local() && !std_frontier {
             self.encountered.insert(crate_name.to_string());
         }
-        let path = cx.tcx.def_path_str(def_id);
-        let builtin = classify(crate_name.as_str(), &path);
+        // SOUNDNESS R1615 — A TRAIT CALL THAT RESOLVED INTO A DEPENDENCY'S BODY IS CLASSIFIED BY THE BODY.
+        // `def_id` is the trait's DECLARATION, so `def_path_str` is `backoff::backoff::Backoff::next_backoff`,
+        // and κ's rows are keyed on the IMPLEMENTING type (`("backoff", "ExponentialBackoff", "next_backoff")`),
+        // the spelling candor-scan hands it from the receiver. `b.next_backoff()` on a concrete
+        // `ExponentialBackoff` therefore matched nothing — EXECUTED 1 entropy read + 1 clock read — and, being a
+        // trait call, skipped the floor disclosure too: ABSENT, no `invisible`, every `deny` exit 0. `body` is
+        // the devirtualized non-local target (check_expr's `Devirt::Static`); its crate is where the code runs.
+        // The sysroot is left out: a std impl is the frontier, and its type-keyed prefix rules are not built to
+        // be asked about every `Clone`/`Iterator` impl in std.
+        let body = body.filter(|t| {
+            let k = cx.tcx.crate_name(t.krate);
+            !(matches!(k.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+                && is_real_sysroot_frontier(cx, t.krate))
+        });
+        let body_crate = body.map(|t| cx.tcx.crate_name(t.krate).to_string());
+        if let Some(bc) = &body_crate {
+            self.encountered.insert(bc.clone());
+        }
+        let impl_spellings: Vec<String> = match (trait_did, body) {
+            (Some(_), Some(t)) => trait_impl_spellings(cx, expr, def_id, t),
+            _ => Vec::new(),
+        };
+        // An INHERENT method of a dependency type is spelled by `def_path_str` through the shortest visible
+        // path, which can be a renamed re-export (`pub use exponential::ExponentialBackoff as Exp` prints
+        // `backoff::Exp::<C>::get_elapsed_time`). Ask the type's own name too, from its impl block.
+        let inherent_spellings: Vec<String> = if trait_did.is_none()
+            && !def_id.is_local()
+            && !std_frontier
+            && let Some(impl_did) = cx.tcx.impl_of_assoc(def_id)
+        {
+            impl_spellings_for(cx, cx.tcx.type_of(impl_did).instantiate_identity().skip_normalization(), def_id, def_id)
+        } else {
+            Vec::new()
+        };
+        // The spellings κ is asked, in order; the FIRST that classifies is the call's primary. The trait's own
+        // spelling stays first, so every charge it already gave is kept (this only adds). The generic-stripped
+        // form is the same fix for an INHERENT method of a generic type: `def_path_str` prints
+        // `backoff::exponential::ExponentialBackoff::<C>::get_elapsed_time`, and κ's `(type, method)` split read
+        // the type as `<C>` (EXECUTED 1 clock read; was `invisible:[backoff]` only).
+        let raw_path = cx.tcx.def_path_str(def_id);
+        let mut spellings: Vec<(String, String)> = vec![(crate_name.to_string(), raw_path.clone())];
+        let stripped = strip_generic_args(&raw_path);
+        if stripped != raw_path {
+            spellings.push((crate_name.to_string(), stripped));
+        }
+        if let Some(bc) = &body_crate {
+            spellings.extend(impl_spellings.iter().map(|p| (bc.clone(), p.clone())));
+        }
+        spellings.extend(inherent_spellings.into_iter().map(|p| (crate_name.to_string(), p)));
+        let (class_crate, path, builtin) = spellings
+            .iter()
+            .find_map(|(c, p)| classify(c, p).map(|e| (c.clone(), p.clone(), Some(e))))
+            .unwrap_or_else(|| (crate_name.to_string(), raw_path.clone(), None));
+        // A trait spelling that classified names the TRAIT's row, which can be another implementor's effect
+        // (`lettre::Transport::send` is Net; `FileTransport`'s `send` writes a file). The body's own row is
+        // charged beside it, its locator unseen. Additive: nothing the trait spelling charged is withdrawn.
+        let mut body_extra: Vec<&'static str> = Vec::new();
+        // Asked only when the primary came from the TRAIT's spelling: when it came from the body's own, the
+        // primary arm below already charges that row and its second effects.
+        if let (Some(primary), Some(bc)) = (builtin, &body_crate)
+            && !impl_spellings.contains(&path)
+            && let Some((p, e)) = impl_spellings.iter().find_map(|p| classify(bc, p).map(|e| (p, e)))
+        {
+            if e != primary {
+                body_extra.push(e);
+            }
+            body_extra.extend(candor_classify::also_effects(bc, p).iter().copied().filter(|x| *x != primary));
+        }
+        for e in &body_extra {
+            self.direct.entry(caller).or_default().insert(e);
+            if candor_classify::also_hides_locator(e) || matches!(*e, "Net" | "Fs" | "Exec" | "Db") {
+                self.incomplete_direct.entry(caller).or_default().insert(e);
+            }
+            if *e == "Fs" {
+                self.fs_direct.entry(caller).or_default().insert(FS_UNKNOWN);
+            }
+        }
+        let crate_name = class_crate;
         // Method form (`recv.m(..)`) vs call form — the `method` argument `masks_locator` takes, so the
         // receiver-locator arms can fire and a path-stat is not mistaken for an argument-form call.
         let is_method = matches!(expr.kind, ExprKind::MethodCall(..));
@@ -3210,6 +3429,23 @@ impl Candor {
         // like crates are known-pure-frontier, excluded — matching the `encountered` coverage filter.
         if effect.is_none() && trait_did.is_none() && !def_id.is_local() && !std_frontier {
             self.invisible_direct.entry(caller).or_default().insert(crate_name.to_string());
+        }
+        // SOUNDNESS R1615 — …and a trait call that devirtualized into a DEPENDENCY's body is exactly such a reach:
+        // the comment above assumed every trait dispatch CHA-resolves locally or is disclosed `Unknown`, but a
+        // concrete receiver resolves statically to the dependency's impl, which is neither. Name the crate whose
+        // body runs. The calibrated pure std traits (`Clone`/`Debug`/`Default`/…) keep their exemption: it is the
+        // same one the `dyn` disclosure applies, so this floors nothing that one does not.
+        if effect.is_none()
+            && body_extra.is_empty()
+            && let (Some(td), Some(bc)) = (trait_did, &body_crate)
+        {
+            let tk = cx.tcx.crate_name(td.krate);
+            let ti = cx.tcx.item_name(td);
+            let pure_std = (is_pure_std_trait(tk.as_str(), ti.as_str()) || is_pure_fmt_write(tk.as_str(), ti.as_str()))
+                && is_real_sysroot_frontier(cx, td.krate);
+            if !pure_std {
+                self.invisible_direct.entry(caller).or_default().insert(bc.clone());
+            }
         }
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
@@ -4241,8 +4477,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // UNDER those substs (`<Rows as Iterator>::next` → the LOCAL `Rows::next`) and edge `caller` to
         // each pinned LOCAL impl — precise, never fabricated (a std/pure iterator resolves non-local → no
         // edge), no flood (`<u32 as Clone>::clone` resolves non-local → no edge). Adds soundness only.
-        for e in generic_callee_local_edges(cx, expr, def_id) {
+        let mut dep_bodies: Vec<DepBody<'tcx>> = Vec::new();
+        for e in generic_callee_local_edges(cx, expr, def_id, &mut dep_bodies) {
             add_edge(self, e);
+        }
+        for d in dep_bodies {
+            self.charge_dep_body(cx, caller, &d);
         }
 
         // Closure-flow bookkeeping (sending side) — see record_callback_flow.
@@ -4291,8 +4531,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // Honest `Unknown` for genuinely-unresolvable dispatch — see note_unresolved_dispatch.
         self.note_unresolved_dispatch(cx, expr, caller, trait_did, dynamic, cha_resolved);
 
-        // Record the resolved call: direct effect + literal surface, or cross-crate inheritance.
-        self.record_resolved_call(cx, expr, caller, def_id, trait_did);
+        // Record the resolved call: direct effect + literal surface, or cross-crate inheritance. A trait call
+        // that devirtualized to a NON-local body hands that body along (SOUNDNESS R1615).
+        let body = match devirt {
+            Some(Devirt::Static(t)) if trait_did.is_some() && !t.is_local() => Some(t),
+            _ => None,
+        };
+        self.record_resolved_call(cx, expr, caller, def_id, trait_did, body);
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
@@ -5524,6 +5769,24 @@ mod tests {
         assert!(fs_kind("std::fs::OpenOptions::open").is_empty());
         assert!(fs_kind("memmap2::MmapOptions::map").is_empty());
         assert!(fs_kind("cap_std::fs::Dir::entries").is_empty());
+    }
+
+    // SOUNDNESS R1615: the argument lists go, an `<impl ..>` path component stays (dropping it would hand κ a
+    // shorter path than the item has, e.g. `std::fs::read` for an impl method in `std::fs`).
+    #[test]
+    fn strip_generic_args_keeps_impl_segments() {
+        assert_eq!(
+            super::strip_generic_args("backoff::exponential::ExponentialBackoff::<C>::get_elapsed_time"),
+            "backoff::exponential::ExponentialBackoff::get_elapsed_time"
+        );
+        assert_eq!(super::strip_generic_args("std::vec::Vec::<T, A>::len"), "std::vec::Vec::len");
+        assert_eq!(super::strip_generic_args("a::B::<Vec<u8>, C<D<E>>>::m"), "a::B::m");
+        assert_eq!(
+            super::strip_generic_args("std::fs::<impl std::io::Read for &std::fs::File>::read"),
+            "std::fs::<impl std::io::Read for &std::fs::File>::read"
+        );
+        assert_eq!(super::strip_generic_args("plain::path::f"), "plain::path::f");
+        assert_eq!(super::strip_generic_args("unbalanced::<T::m"), "unbalanced::<T::m");
     }
 
     #[test]
