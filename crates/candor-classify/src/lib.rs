@@ -2686,8 +2686,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // SOUNDNESS R1605 — the crate-root spellings of the same builders (`sea_orm::Condition::all`,
             // `sea_orm::entity::prelude::Expr::{all,count}`, `sea_orm::ExprTrait::count`) still match the verbs below and are
             // charged `Db` for pure work (EXECUTED: 0 statements). They are NOT excluded yet: with an entity declared in the
-            // consumer crate, `Entity::find().filter(Condition::all()..).all(db)` reaches no other rule (the derive-generated
-            // `Entity` leaves `.all(db)` untyped), so that charge is the only `Db` on code that runs a SELECT (EXECUTED).
+            // consumer crate, `Entity::find().filter(Condition::all()..).all(db)` reached no other rule (the derive-generated
+            // `Entity` left `.all(db)` untyped), so that charge was the only `Db` on code that runs a SELECT (EXECUTED).
+            // `candor-scan` now types that terminal (R1605: the derive's `Entity`, a generic `E: EntityTrait`, and a let-bound
+            // builder chain, from the lock-pinned `EntityTrait` declaration). The exclusion is STILL held: measured over 76
+            // sea_orm consumer crates, removing it drops `Db` on 518 rows, and among them are real queries the typing does not
+            // reach (a local `-> Self` builder method shadowing a let-bound `Select`, an untyped-receiver hedge whose only
+            // concrete candidate was this charge). See SOUNDNESS R1606 before excluding.
             if path.ends_with("::all")
                 || path.ends_with("::one")
                 || path.ends_with("::count")

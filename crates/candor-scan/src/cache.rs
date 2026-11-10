@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev153 (rustagent-seaent): SOUNDNESS R1605 — Pass A's cached decls change: a known sea_orm derive now splices its declared
+    // skeleton (`struct Entity;` + an empty `impl EntityTrait`), so a rev152 entry lacks the type and its impl. Mandatory.
     // rev152 (rustagent-vein): SOUNDNESS R1587 — Pass B's cached `calls` change: a factory value peeled by `unwrap`/`expect`
     // now carries `<peeled>` provenance and forms a marker; a rev151 entry has none. Mandatory.
     // rev151 (rustagent-vein): SOUNDNESS R1578 round 3 — Pass B's cached `calls` change: an `<untyped>` marker carries the value's
@@ -588,7 +590,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev152/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev153/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

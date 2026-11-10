@@ -1020,6 +1020,12 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) peek_excluded: bool,
 }
 
+/// SOUNDNESS R1605 — the dependency traits whose RECEIVER-LESS members a crate-local implementor (written, or a known
+/// derive's skeleton, `mbe::splice_sea_orm_entities`) is typed through, as `(crate, trait leaf)`. A table rather than every
+/// dependency trait because reading a trait's members means parsing that dependency's source, and a crate that implements
+/// `serde::Serialize` must not pay for it; a row is added with its own executed fixture.
+const R1605_TRAITS: &[(&str, &str)] = &[("sea_orm", "EntityTrait")];
+
 /// SOUNDNESS R1591 — the calibration-list identifiers that are an EXTERN ALIAS, not a package name, with the package
 /// each stands for. The κ exemption is asked of the real package; an alias entry exempts only a rename to its package.
 const R1591_CALIBRATED_ALIASES: &[(&str, &str)] = &[("native_tls_crate", "native_tls")];
@@ -1059,6 +1065,53 @@ fn r1578_type(
         eprintln!("R1578TYPED\t{}\t{path}\ttwin={twin}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
     }
     Some((Call { path, leaf: method, typed: true, method: true, dot: true, ..c.clone() }, twin))
+}
+
+/// SOUNDNESS R1605 — a BUILDER STEP on a typed `R1605_TRAITS`-crate value. The collector types `post::Entity::find()` (and
+/// `E::find()` under `E: EntityTrait`) as the dependency's `Select`; a `let` over a further step (`let q = E::find().filter(c);
+/// q.all(db)`) records that typed base and the steps (`<cr>::<untyped>::<Type>::filter::all`, or `…::<Type>::<chain>a.b::m`),
+/// because the strict binder does not assume a step returns its receiver. Here each step is checked against the
+/// lock-pinned source (`DepSigs::self_step`: every trait the type implements that declares the step returns `Self`, and
+/// there is no inherent of that name), and only then is the call formed on the type, where the classifier answers.
+/// `None` for anything else: the published behaviour.
+fn r1605_chain_type(
+    c: &Call,
+    deps: &std::collections::HashSet<String>,
+    renames: &HashMap<String, String>,
+    deps_idx: &DepIndex,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+) -> Option<(Call, bool)> {
+    if std::env::var_os("CANDOR_R1605_OFF").is_some() {
+        return None;
+    }
+    let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
+    let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
+    if !R1605_TRAITS.iter().any(|(k, _)| *k == cr_real) || !deps.contains(cr) || deps_idx.crates.contains(cr_real) {
+        return None;
+    }
+    let (callee, method) = rest.rsplit_once("::")?;
+    let (base, steps): (&str, Vec<&str>) = match callee.split_once("::<chain>") {
+        Some((b, s)) => (b, s.split('.').collect()),
+        None => {
+            let (b, s) = callee.rsplit_once("::")?;
+            (b, vec![s])
+        }
+    };
+    let leaf = base.rsplit("::").next()?;
+    if base.contains('<') || !crate::lang::is_type_ident(leaf) || steps.iter().any(|s| s.is_empty() || s.contains('<')) {
+        return None;
+    }
+    let mut sigs_b = sigs.borrow_mut();
+    if !steps.iter().all(|s| sigs_b.self_step(dir, cr, cr_real, leaf, s)) {
+        return None;
+    }
+    sigs_b.note_typed(cr);
+    let path = format!("{cr}::{base}::{method}");
+    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+        eprintln!("R1605STEP\t{}\t{path}", c.path); // §E1 REACH COUNTER
+    }
+    Some((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, false))
 }
 
 /// SOUNDNESS R1578 — where an `<untyped>` marker's receiver provably lands.
@@ -1516,6 +1569,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
             }
             crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
+            if text.contains("DeriveEntity") {
+                crate::mbe::splice_sea_orm_entities(&mut file.items); // R1605
+            }
             let mut locs = Vec::new();
             fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
@@ -1859,7 +1915,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // VEIN A — Pass B now reads the manifest's dependency names (`lang::glob_origin`), so a cached
     // FnInfo set is reusable only under the same dependency list: it is folded into the reuse key.
     let manifest_deps = cargo_deps(dir).0;
-    let decl_index_hash = {
+    let mut decl_index_hash = {
         let mut d: Vec<&str> = manifest_deps.iter().map(String::as_str).collect();
         d.sort_unstable();
         format!("{}#deps:{}", decl_index_digest(&merged), d.join(","))
@@ -1911,6 +1967,147 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 slot.insert(v);
             }
+        }
+    }
+    // SOUNDNESS R1605 — a crate-local type that implements one of `R1605_TRAITS` (a dependency trait whose receiver-less
+    // members build a value the next call runs: sea_orm's `EntityTrait::find`/`insert`/`delete_many`/…) — whether the impl
+    // is written or is the skeleton `mbe::splice_sea_orm_entities` adds for a known derive — gets, for each such member it
+    // does NOT declare itself, the RETURN the trait's own declaration names in the lock-pinned source (`DepSigs::
+    // trait_assoc_rets`). Filed as the declared fact `impl Type { fn m() -> R }` files (`impl_ret_key`), so every typed route
+    // the crate's own declarations already feed — the path call, a `let` binding, a builder chain — reads it unchanged and
+    // the next call is formed against the dependency's type (`sea_orm::query::select::Select::all`), where the classifier
+    // answers. A supply, never an override: a key the crate's declarations already hold (or withdrew as ambiguous) is left
+    // alone, as is any member the local type declares. No lock-pinned source: nothing is filed, the value stays untyped, and
+    // the `<untyped>` marker the call leaves is disclosed in the call loop instead (`r1605_ty_traits`).
+    let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    let r1605_ty_traits: HashMap<String, Vec<(String, String)>> = {
+        let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for k in &merged.impl_members {
+            let mut it = k.splitn(3, '\u{1f}');
+            let (Some(tr), Some(ty), Some(p)) = (it.next(), it.next(), it.next()) else { continue };
+            let Some(path) = p.strip_prefix('!') else { continue };
+            let Some((root, _)) = path.split_once("::") else { continue };
+            if std::env::var_os("CANDOR_R1605_OFF").is_none()
+                && manifest_deps.contains(root)
+                && R1605_TRAITS.iter().any(|(c, t)| *c == root && *t == tr)
+            {
+                m.entry(ty.to_string()).or_default().push((tr.to_string(), root.to_string()));
+            }
+        }
+        m
+    };
+    {
+        let renames = cargo_deps(dir).1;
+        let mut seeded: Vec<(String, String, String)> = Vec::new();
+        let mut seeded_alias: Vec<(String, String, String)> = Vec::new();
+        let mut tys: Vec<(&String, &Vec<(String, String)>)> = r1605_ty_traits.iter().collect();
+        tys.sort();
+        for (ty, trs) in tys {
+            for (tr, alias) in trs {
+                let real = renames.get(alias).cloned().unwrap_or_else(|| alias.clone());
+                let Some((_, rets)) = r1578_sigs.borrow_mut().trait_assoc_rets(dir, alias, &real, tr) else {
+                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                        eprintln!("R1605NOSRC\t{ty}\t{alias}::{tr}"); // §E1 — no lock-pinned source: the marker discloses
+                    }
+                    continue;
+                };
+                for (m, r) in rets {
+                    let crate::depsig::RetTy::Dep(q) = &r.ty else { continue };
+                    if r.is_async || !r.wraps.is_empty() {
+                        continue;
+                    }
+                    let k = crate::model::impl_ret_key(ty, &m);
+                    if returns.contains_key(&k)
+                        || merged.rets.contains_key(&k)
+                        || returns.contains_key(&crate::model::impl_self_ret_key(ty, &m))
+                        || merged.rets.contains_key(&crate::model::impl_fn_key(ty, &m))
+                        || !crate::model::impl_does_not_declare(&merged.impl_members, tr, ty, &m)
+                    {
+                        continue;
+                    }
+                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                        eprintln!("R1605SEED\t{ty}::{m}\t{alias}::{q}"); // §E1 REACH COUNTER
+                    }
+                    r1578_sigs.borrow_mut().note_typed(alias);
+                    returns.insert(k, format!("{alias}::{q}"));
+                    seeded.push((ty.clone(), m, format!("{alias}::{q}")));
+                }
+            }
+        }
+        // …and for a GENERIC bounded by the trait (`E::find()` under `E: EntityTrait`, `Collector::r1605_generic_member`), or
+        // by a local trait whose supertraits reach it (`trait Auditable: EntityTrait`), keyed by the bound's leaf. Filed
+        // whenever the crate declares the dependency; the members' returns only where the lock-pinned source was read. A
+        // crate that declares a trait of the same leaf itself is left alone (its bound names that one).
+        if std::env::var_os("CANDOR_R1605_OFF").is_none() {
+            for (cr, tl) in R1605_TRAITS {
+                if !manifest_deps.contains(*cr) || merged.trait_decls.contains_key(*tl) {
+                    continue;
+                }
+                let mut leaves: Vec<String> = vec![tl.to_string()];
+                let mut changed = true;
+                while changed {
+                    changed = false;
+                    for (l, t) in merged.trait_decls.iter() {
+                        if !leaves.contains(l) && t.count == 1 && t.supertraits.iter().any(|s| leaves.contains(s)) {
+                            leaves.push(l.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                let real = renames.get(*cr).cloned().unwrap_or_else(|| cr.to_string());
+                let read = r1578_sigs.borrow_mut().trait_assoc_rets(dir, cr, &real, tl);
+                let rets = read.as_ref().map(|r| r.1.clone()).unwrap_or_default();
+                for l in &leaves {
+                    returns.insert(crate::model::r1605_trait_key(l), cr.to_string());
+                    // the members the declaration names, when it was read: a path call to any other name through the bound
+                    // (`E::default()`, a supertrait's or a local trait's own member) is not this trait's value
+                    if let Some((names, _)) = &read {
+                        returns.insert(crate::model::r1605_trait_members_key(l), names.join(","));
+                    }
+                    for (m, r) in &rets {
+                        let crate::depsig::RetTy::Dep(q) = &r.ty else { continue };
+                        if r.is_async || !r.wraps.is_empty() || merged.trait_decls.get(l).is_some_and(|t| t.assoc.contains(m) || t.methods.contains(m)) {
+                            continue;
+                        }
+                        if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                            eprintln!("R1605SEED\t<{l}>::{m}\t{cr}::{q}"); // §E1 REACH COUNTER
+                        }
+                        returns.insert(crate::model::r1605_trait_ret_key(l, m), format!("{cr}::{q}"));
+                        seeded.push((format!("<{l}>"), m.clone(), format!("{cr}::{q}")));
+                    }
+                }
+            }
+        }
+        // …and under the name a `pub use <module>::Entity as Post;` re-export gives it (sea-orm-cli's `prelude.rs`), which
+        // is the leaf a `Post::find()` call is typed by. Not where the crate declares a type of that name itself.
+        let declared: HashSet<String> = decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.ts.types.iter())
+            .map(|(q, _, _)| q.rsplit("::").next().unwrap_or(q).to_string())
+            .collect();
+        for r in &merged.reexports {
+            if r.alias == r.name || r.alias == "*" || declared.contains(&r.alias) {
+                continue;
+            }
+            for (ty, m, v) in seeded.iter().filter(|(ty, _, _)| *ty == r.name) {
+                let k = crate::model::impl_ret_key(&r.alias, m);
+                if returns.contains_key(&k) || returns.contains_key(&crate::model::impl_self_ret_key(&r.alias, m)) {
+                    continue;
+                }
+                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    eprintln!("R1605SEED\t{}::{m}\t{v}\talias-of={ty}", r.alias); // §E1 REACH COUNTER
+                }
+                returns.insert(k, v.clone());
+                seeded_alias.push((r.alias.clone(), m.clone(), v.clone()));
+            }
+        }
+        // The filed facts come from a DEPENDENCY's source, not from this crate's declarations, so they are not in
+        // `decl_index_digest(&merged)`: fold them into the Pass B reuse key, or a warm scan would replay FnInfos typed under a
+        // different lock (or none) — a cached silence where a cold scan charges.
+        if !seeded.is_empty() {
+            let mut all: Vec<String> = seeded.iter().chain(seeded_alias.iter()).map(|(t, m, v)| format!("{t}::{m}={v}")).collect();
+            all.sort();
+            decl_index_hash.push_str(&format!("#r1605:{}", all.join(",")));
         }
     }
     let mut enum_variants: EnumVariantIndex =
@@ -2272,6 +2469,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
+                    if t.contains("DeriveEntity") {
+                        crate::mbe::splice_sea_orm_entities(&mut f.items); // R1605 — the round-2 twin
+                    }
                     Some(f)
                 })
                 .map(|file| {
@@ -2509,6 +2709,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // the genuinely-blind crates (not calibrated, no sibling report) + propagated transitively → the
     // per-fn `invisible` honesty disclosure (the κ ledger, but attributed per function).
     let mut blind_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
+    // SOUNDNESS R1605 — the units whose `Unknown` is the R1605 floor (a dependency value an `R1605_TRAITS` member produced,
+    // left untyped); read by R1095's untyped-receiver floor below.
+    let mut r1605_floored: HashMap<String, BTreeSet<String>> = HashMap::new();
     // Blind crates inherited from a dep fn's `invisible` (sweep [8]): genuinely blind (the dep confirmed
     // it), but a TRANSITIVE crate the consumer never saw directly, so it is absent from `dep_seen` and
     // would be dropped by the `global_blind` filter. Collected here and unioned into global_blind below.
@@ -3410,7 +3613,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // pure verdict is about the real crate too.
             && !(candor_classify::REVIEWED_PURE_CRATES.contains(&real) && !impostor)
     };
-    let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    // SOUNDNESS R1605 — a re-exported name for an `R1605_TRAITS` implementor (`pub use post::Entity as Post`) -> its leaf.
+    let r1605_aliases: HashMap<String, String> = merged
+        .reexports
+        .iter()
+        .filter(|r| r.alias != r.name && r.alias != "*" && r1605_ty_traits.contains_key(&r.name))
+        .map(|r| (r.alias.clone(), r.name.clone()))
+        .collect();
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -3481,9 +3690,46 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that
             // dependency's own source signature, and the call then goes down the ordinary typed-external path below
             // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
-            let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns);
+            let r1578_owned = r1578_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns)
+                .or_else(|| r1605_chain_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs));
             let r1578_twin = r1578_owned.as_ref().is_some_and(|(_, t)| *t);
             let c = r1578_owned.as_ref().map(|(c, _)| c).unwrap_or(c);
+            // SOUNDNESS R1605 — …AND WHERE THE MEMBER'S RETURN WAS NOT FILED (no lock-pinned source to read, a member whose
+            // declared return cannot be placed, a spelling the typed routes do not reach), the value is untyped and the method
+            // on it formed only this crate-rooted `<untyped>` marker, which reached nothing: the caller ABSENT over a query
+            // that runs. A receiver an `R1605_TRAITS` implementor's member produced is a dependency's value, so the caller
+            // discloses `Unknown` with the untyped-receiver reason the chained arm uses. Never a charge.
+            if c.path.starts_with(&format!("{}::", crate::model::R1605_UNTYPED)) {
+                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    eprintln!("R1605FLOOR\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER (generic bound)
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("dispatch:untyped cross-package receiver".to_string());
+                r1605_floored.entry(f.qual.clone()).or_default().insert("r1605".to_string());
+                continue;
+            }
+            if let Some((root, rest)) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::")) {
+                if !deps.contains(root) && !rest.contains('<') {
+                    if let Some((callee, _)) = rest.rsplit_once("::") {
+                        // the marker's root is the callee's first segment (`crate`, a module, or — through a glob that
+                        // `expand` leaves bare — the type itself: `SysUser::<untyped>::find::all`)
+                        let full = format!("{root}::{callee}");
+                        let segs: Vec<&str> = full.split("::").collect();
+                        if let [.., ty, _m] = segs.as_slice() {
+                            let real = r1605_aliases.get(*ty).map(String::as_str).unwrap_or(ty);
+                            if r1605_ty_traits.contains_key(real) {
+                                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                                    eprintln!("R1605FLOOR\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                                }
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default()
+                                    .insert("dispatch:untyped cross-package receiver".to_string());
+                                r1605_floored.entry(f.qual.clone()).or_default().insert("r1605".to_string());
+                            }
+                        }
+                    }
+                }
+            }
             // SOUNDNESS R334 — THE OS ENTROPY SOURCE PASSED AS AN ARGUMENT, decided at the TOP of this
             // loop and deliberately BEFORE every `continue` below.
             //
@@ -7121,6 +7367,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     } else {
         propagate_str(&unresolved_ext, &calls, &all)
     };
+    let r1605_reach = if r1605_floored.is_empty() || untyped_contested.is_empty() {
+        HashMap::new()
+    } else {
+        propagate_str(&r1605_floored, &calls, &all)
+    };
     for _round in 0..8 {
         let mut hedged = false;
         for (caller, units) in &nonpath_contested {
@@ -7180,9 +7431,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     && inferred.get(u).is_some_and(|e| e.contains("Unknown"))
                     && u.rsplit("::").nth(1).is_some_and(|tr| merged.blanket_methods.contains_key(&crate::model::blanket_trait_key(tr)))
             };
+            // SOUNDNESS R1605 — …and a candidate whose `Unknown` is (transitively) the R1605 floor: an untyped query on a
+            // dependency's entity value, which before the builder fabrication was removed read as a concrete `Db` and
+            // kept this caller hedged. Without this, the removal turned a hedged caller into an absent one (EXECUTED shape:
+            // a generic `E::delete_by_id(id).exec(db)` with no lock-pinned source, reached through an untyped field).
+            let r1605_unknown = |u: &String| r1605_reach.get(u).is_some_and(|b| !b.is_empty());
             let impure: Vec<&String> = cands
                 .iter()
-                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")) || blanket_unknown(u))
+                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")) || blanket_unknown(u) || r1605_unknown(u))
                 .collect();
             if impure.is_empty() {
                 continue;

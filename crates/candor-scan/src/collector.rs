@@ -970,11 +970,49 @@ impl<'a> CallCollector<'a> {
         Some(head != "Self" && !self.generic_bounds.contains_key(&head) && !self.impl_generic_bounds.contains_key(&head))
     }
 
+    /// SOUNDNESS R1605 — `E::find()` with `E` a generic of this signature (or impl) bounded by a trait that reaches an
+    /// `R1605_TRAITS` trait (`E: EntityTrait`, or `E: Auditable` with `trait Auditable: EntityTrait`): the member's DECLARED
+    /// return, which `scan.rs` filed from the lock-pinned source (`model::r1605_trait_ret_key`), so `E::find().filter(c)
+    /// .all(db)` forms `sea_orm::query::select::Select::all` as a concrete entity's does. Where it could not be read the
+    /// value gets the `R1605_UNTYPED` type and the call loop discloses. `None` for every other shape.
+    fn r1605_generic_member(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Call(c) = peel_recv(expr) else { return None };
+        let syn::Expr::Path(p) = &*c.func else { return None };
+        if p.qself.is_some() || p.path.segments.len() != 2 {
+            return None;
+        }
+        let g = p.path.segments[0].ident.to_string();
+        let m = p.path.segments[1].ident.to_string();
+        let bounds = self.generic_bounds.get(&g).or_else(|| self.impl_generic_bounds.get(&g))?;
+        for b in bounds {
+            if let Some(t) = self.returns.get(&crate::model::r1605_trait_ret_key(b, &m)) {
+                return Some(t.clone());
+            }
+        }
+        // Untyped: only for a member the declaration names, or — with no declaration read — any name but a std trait's
+        // associated fn (`E::default()` reaches `Default` through `EntityName`'s supertraits, never the trait's value).
+        for b in bounds {
+            if let Some(cr) = self.returns.get(&crate::model::r1605_trait_key(b)) {
+                let named = match self.returns.get(&crate::model::r1605_trait_members_key(b)) {
+                    Some(ms) => ms.split(',').any(|x| x == m),
+                    None => !matches!(m.as_str(), "default" | "from" | "try_from" | "from_str" | "from_iter" | "new"),
+                };
+                if named {
+                    return Some(format!("{}::{cr}::{b}::{m}", crate::model::R1605_UNTYPED));
+                }
+            }
+        }
+        None
+    }
+
     fn nominal_ctor_type(&self, expr: &syn::Expr) -> Option<String> {
         // R980/R987 — `Pin::new(x)` / `ManuallyDrop::new(x)` / `ptr::read(&x)` is `x`'s type, not the
         // wrapper's: typed as `ManuallyDrop`, allocator-api2's `boxed.1` named no field.
         if let Some(a) = pinned_arg(expr) {
             return self.type_of(a).or_else(|| self.resolve_recv_type(a));
+        }
+        if let Some(t) = self.r1605_generic_member(expr) {
+            return Some(t);
         }
         let ty = match ctor_type(expr, &self.uses, self.returns) {
             Some(t) => t,

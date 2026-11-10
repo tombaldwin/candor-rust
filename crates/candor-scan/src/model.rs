@@ -604,6 +604,32 @@ pub(crate) const RET_GENERIC_NONE: &str = "-";
 pub(crate) const RET_ELEM: &str = "<retelem>";
 pub(crate) const RET_IMPL_ELEM: &str = "<implelem>";
 
+/// SOUNDNESS R1605 — the `rets` key under which the return an `R1605_TRAITS` trait's DECLARATION gives its receiver-less
+/// member `m` is filed (read from the lock-pinned dependency source), for a PATH call through a generic bounded by that trait
+/// (`E::find()` under `E: EntityTrait`), or by a local trait whose supertraits reach it. Angle-bracketed: no identifier
+/// lookup can reach it.
+pub(crate) fn r1605_trait_ret_key(trait_leaf: &str, m: &str) -> String {
+    format!("<r1605ret>{trait_leaf}\u{1f}{m}")
+}
+
+/// SOUNDNESS R1605 — present (value: the dependency crate) for every trait leaf a generic bound may name to reach an
+/// `R1605_TRAITS` trait, whether or not its members' returns could be read. Where one could not, the value the member
+/// produces is typed as `R1605_UNTYPED` (`Collector::nominal_ctor_type`), which the call loop discloses.
+pub(crate) fn r1605_trait_key(trait_leaf: &str) -> String {
+    format!("<r1605tr>{trait_leaf}")
+}
+
+/// SOUNDNESS R1605 — the comma-joined receiver-less members the trait's lock-pinned declaration names (absent when it was
+/// not read).
+pub(crate) fn r1605_trait_members_key(trait_leaf: &str) -> String {
+    format!("<r1605mem>{trait_leaf}")
+}
+
+/// SOUNDNESS R1605 — the root of the type given to a value an `R1605_TRAITS` member produced through a generic bound when its
+/// declared return could not be read: `__candor_r1605::<crate>::<Trait>::<member>`. Not a crate any rule or report names, so a
+/// call on it reaches no classifier and no join; the call loop discloses it instead (`scan.rs`).
+pub(crate) const R1605_UNTYPED: &str = "__candor_r1605";
+
 pub(crate) fn impl_self_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("{RET_IMPL_SELF}{type_leaf}\u{1f}{fn_leaf}")
 }

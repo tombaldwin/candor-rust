@@ -1019,6 +1019,102 @@ fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
     op && nominal
 }
 
+/// SOUNDNESS R1605 — THE DECLARED OUTPUT OF A KNOWN DEPENDENCY DERIVE. A derive's expansion is opaque to this engine, so a
+/// type it generates was never declared here: with `#[derive(DeriveEntityModel)] #[sea_orm(table_name = "..")] struct Model`
+/// in a module, `Entity::find().all(db)` named a type no item declares, the value `find()` returns stayed untyped, and the
+/// `SELECT` it runs reached no rule — the caller ABSENT from `functions[]` with no `invisible` (EXECUTED, rust-fab `fxso`).
+///
+/// This splices only what the derive DECLARES, read off its generator in `sea-orm-macros` (`derives/entity_model.rs`
+/// emits `#vis struct Entity;` with `#[derive(DeriveEntity)]` when `table_name` is set; `derives/entity.rs` emits
+/// `impl sea_orm::entity::EntityTrait for #ident` with associated TYPES only — no method is overridden). The splice is
+/// that skeleton and nothing else: a unit struct and an EMPTY trait impl. Every signature a call on it needs comes from
+/// the trait's own declaration in the lock-pinned dependency source (`scan.rs`, `r1605_seed`), never from this table, and
+/// effects still come only from the classifier. If the derive's real output differs (a later version that declares more,
+/// or an inherent method shadowing a trait member), the skeleton under-declares: a member it does not know is untyped
+/// exactly as before, and the disclosure at the `<untyped>` marker speaks for it.
+///
+/// Gated on the derive being sea_orm's: written `sea_orm::…::DeriveEntityModel`, or bare in a module whose `use` items bring
+/// `sea_orm` names in (a glob of a `sea_orm` path, or the derive by name). Not spliced where the module already declares
+/// an item named `Entity` (the derive would not compile), or for a generic `DeriveEntity` type.
+pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
+    if std::env::var_os("CANDOR_R1605_OFF").is_some() {
+        return;
+    }
+    fn use_brings_sea_orm(t: &syn::UseTree, under: bool) -> bool {
+        match t {
+            syn::UseTree::Path(p) => use_brings_sea_orm(&p.tree, under || p.ident == "sea_orm"),
+            syn::UseTree::Glob(_) => under,
+            syn::UseTree::Name(n) => under && (n.ident == "DeriveEntityModel" || n.ident == "DeriveEntity"),
+            syn::UseTree::Rename(r) => under && (r.ident == "DeriveEntityModel" || r.ident == "DeriveEntity"),
+            syn::UseTree::Group(g) => g.items.iter().any(|i| use_brings_sea_orm(i, under)),
+        }
+    }
+    let scoped = items.iter().any(|it| matches!(it, syn::Item::Use(u) if use_brings_sea_orm(&u.tree, false)));
+    let declares = |items: &[syn::Item], name: &str| {
+        items.iter().any(|it| match it {
+            syn::Item::Struct(s) => s.ident == name,
+            syn::Item::Enum(e) => e.ident == name,
+            syn::Item::Type(t) => t.ident == name,
+            syn::Item::Union(u) => u.ident == name,
+            _ => false,
+        })
+    };
+    let has_entity = declares(items, "Entity");
+    let mut adds: Vec<syn::Item> = Vec::new();
+    let mut entity_added = false;
+    for it in items.iter_mut() {
+        let st = match it {
+            syn::Item::Mod(md) => {
+                if let Some((_, inner)) = &mut md.content {
+                    splice_sea_orm_entities(inner);
+                }
+                continue;
+            }
+            syn::Item::Struct(st) => st,
+            _ => continue,
+        };
+        let mut kinds: Vec<&'static str> = Vec::new();
+        for a in st.attrs.iter().filter(|a| a.path().is_ident("derive")) {
+            let Ok(paths) = a.parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+            else { continue };
+            for p in paths {
+                let Some(leaf) = p.segments.last().map(|s| s.ident.to_string()) else { continue };
+                let ours = if p.segments.len() > 1 {
+                    p.segments.first().is_some_and(|s| s.ident == "sea_orm")
+                } else {
+                    scoped
+                };
+                match leaf.as_str() {
+                    "DeriveEntityModel" if ours => kinds.push("model"),
+                    "DeriveEntity" if ours => kinds.push("entity"),
+                    _ => {}
+                }
+            }
+        }
+        let table_name = st.attrs.iter().any(|a| {
+            a.path().is_ident("sea_orm") && a.meta.require_list().is_ok_and(|l| l.tokens.to_string().contains("table_name"))
+        });
+        let mut srcs: Vec<String> = Vec::new();
+        if kinds.contains(&"model") && table_name && !entity_added && !has_entity {
+            srcs.push("pub struct Entity;".to_string());
+            srcs.push("impl sea_orm::entity::EntityTrait for Entity {}".to_string());
+            entity_added = true;
+        }
+        if kinds.contains(&"entity") && st.generics.params.is_empty() {
+            srcs.push(format!("impl sea_orm::entity::EntityTrait for {} {{}}", st.ident));
+        }
+        for src in srcs {
+            let Ok(ts) = src.parse::<TokenStream>() else { continue };
+            let Ok(item) = syn::parse2::<syn::Item>(respan_to(ts, st.ident.span())) else { continue };
+            if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                eprintln!("R1605SPLICE\t{}\t{src}", st.ident); // §E1 REACH COUNTER
+            }
+            adds.push(item);
+        }
+    }
+    items.extend(adds);
+}
+
 /// SOUNDNESS R1146 — a `#[derive(PartialEq)]` / `#[derive(PartialOrd)]` has no body in the source, so the crate's
 /// report published no `Type::eq` / `Type::partial_cmp`: inside the crate the comparison reaches the fields through
 /// the derive route (`CallCollector::charge_coercion_ty_at`, R1111), but a CHAINED consumer joins the dependency's
