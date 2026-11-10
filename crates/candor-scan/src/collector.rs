@@ -170,6 +170,8 @@ pub(crate) struct AssignDrop<'a> {
     pub(crate) macro_idents: std::collections::HashSet<String>,
     /// Type leaves declared at two or more quals (`ElemIndexes::twin_type_leaves`).
     pub(crate) twin_leaves: Option<&'a std::collections::HashSet<String>>,
+    /// SOUNDNESS R1624 — `ElemIndexes::fields_q`, for `CallCollector::owner_qual`.
+    pub(crate) fields_q: Option<&'a crate::cache::QualIndexes>,
 }
 
 pub(crate) struct CallCollector<'a> {
@@ -4575,13 +4577,13 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Path(_) => self.resolve_recv_type(expr),
             syn::Expr::Field(f) => {
                 let base = self.type_of(&f.base)?;
-                if self.field_ambiguous(&base, &f.member) {
-                    return None;
-                }
                 let key = match &f.member {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                if self.field_ambiguous(&base, &f.member) {
+                    return self.qual_field_in(&f.base, &base, &key, false).flatten(); // R1624 — the owner's own declaration, or nothing
+                }
                 if self.is_dependency_type(&base) {
                     return None; // R862 — a dependency's field is not this crate's leaf-keyed `fields`
                 }
@@ -4897,6 +4899,109 @@ impl<'a> CallCollector<'a> {
         let mut hits = self.ambiguous_type_leaves.iter().filter_map(|e| e.strip_prefix(&prefix));
         let one = hits.next()?;
         hits.next().is_none().then(|| one.to_string())
+    }
+
+    /// SOUNDNESS R1624 — the owner's MODULE-QUALIFIED path, where it is PROVEN rather than inferred from its leaf:
+    ///   * a crate-anchored type (`crate::pg::Executor`, a parameter written `pg::Executor` expands to one), whose path
+    ///     is the qual;
+    ///   * `self`, typed as the enclosing impl's `Self`, written bare in a module that itself declares that name — a
+    ///     declared name cannot also be a non-glob import (E0255) and a glob loses to it (`lang::anchor_declared_type`).
+    ///
+    /// A bare owner reached any other way (a binding typed from another module's return or field, which records the
+    /// bare leaf) has no provable module and gets `None`, so every caller keeps its pre-existing reading. So does a path
+    /// the qualified indexes never saw declared. Kill switch `CANDOR_R1624_OFF`.
+    fn owner_qual(&self, base_expr: &syn::Expr, base: &str) -> Option<(&'a crate::cache::QualIndexes, String)> {
+        if std::env::var_os("CANDOR_R1624_OFF").is_some() {
+            return None;
+        }
+        let qi = self.assign_drop.fields_q?;
+        let qual = if let Some(q) = exact_anchored_ty(base) {
+            q.to_string()
+        } else {
+            let is_self = matches!(base_expr, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self"));
+            if !is_self
+                || base.contains("::")
+                || self.uses.get(crate::lang::SELF_KEY).map(String::as_str) != Some(base)
+                || crate::lang::module_declares(&self.uses, base) != Some(true)
+            {
+                return None;
+            }
+            let modpath = self.uses.get(crate::lang::MODPATH_KEY).map_or(self.modpath.as_str(), String::as_str);
+            crate::decls::qualify(modpath, base)
+        };
+        qi.fields.contains_key(&qual).then_some((qi, qual))
+    }
+
+    /// SOUNDNESS R1624 — what the owner's OWN declaration says `base.key` is in `fields` (or `field_elem`, `elem`), where
+    /// `owner_qual` proves the owner. `Some(Some(t))`: its type. `Some(None)`: the owner declares the field, but not in this
+    /// index (it is a trait object, or has no element) — the leaf-keyed entry is a sibling's and must not answer. `None`: no
+    /// proof; the caller keeps its pre-existing reading. A tombstoned field, a trait-object alias (R1495 moves those out of
+    /// `fields` after the merge) and a field the leaf-keyed index no longer holds (R476 / R1495) are all `None`.
+    fn qual_field_in(&self, base_expr: &syn::Expr, base: &str, key: &str, elem: bool) -> Option<Option<String>> {
+        let (qi, qual) = self.owner_qual(base_expr, base)?;
+        let (own, legacy) = if elem { (&qi.field_elem, self.field_elem) } else { (&qi.fields, self.fields) };
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        let instr = |what: &str, v: &str| {
+            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elem" } else { "field" }); // §E1 REACH
+            }
+        };
+        match own.get(&qual).and_then(|m| m.get(key)) {
+            Some(v) => {
+                if v == crate::cache::QUAL_TOMB || crate::lang::dyn_alias_leaves_str(v).is_some() {
+                    return None;
+                }
+                legacy.get(leaf)?.get(key)?;
+                instr("type", v);
+                Some(Some(v.clone()))
+            }
+            None => {
+                // Declared by the owner as a trait-object field (and not in this index), while the leaf entry answers.
+                let declared_dyn = qi.trait_fields.get(&qual).is_some_and(|m| m.contains_key(key))
+                    || (elem && qi.fields.get(&qual).is_some_and(|m| m.contains_key(key)));
+                if declared_dyn && legacy.get(leaf).is_some_and(|m| m.contains_key(key)) {
+                    instr("none", "-");
+                    return Some(None);
+                }
+                None
+            }
+        }
+    }
+
+    /// SOUNDNESS R1624 — the dispatch-leaf half (`trait_fields`, or `field_elem_trait` with `elem`): the owner's own trait
+    /// leaves for `base.key`. `Some(vec![])` where the owner declares the field CONCRETELY (the leaf entry is a sibling's
+    /// trait object). Same proof and same `None` cases as `qual_field_in`.
+    fn qual_trait_field_in(&self, base_expr: &syn::Expr, base: &str, key: &str, elem: bool) -> Option<Vec<String>> {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(leaf)) {
+            return None;
+        }
+        let (qi, qual) = self.owner_qual(base_expr, base)?;
+        let (own, legacy) = if elem { (&qi.field_elem_trait, self.field_elem_trait) } else { (&qi.trait_fields, self.trait_fields) };
+        let legacy_has = legacy.get(leaf).is_some_and(|m| m.contains_key(key));
+        let instr = |what: &str, v: &str| {
+            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elemtrait" } else { "trait" }); // §E1 REACH
+            }
+        };
+        match own.get(&qual).and_then(|m| m.get(key)) {
+            Some(v) => {
+                if v.iter().any(|l| l == crate::cache::QUAL_TOMB || l.contains('\u{1f}')) || !legacy_has {
+                    return None;
+                }
+                instr("leaves", &v.join(","));
+                Some(v.clone())
+            }
+            None => {
+                let concrete = qi.fields.get(&qual).and_then(|m| m.get(key))
+                    .is_some_and(|v| v != crate::cache::QUAL_TOMB && crate::lang::dyn_alias_leaves_str(v).is_none());
+                if concrete && legacy_has {
+                    instr("none", "-");
+                    return Some(Vec::new());
+                }
+                None
+            }
+        }
     }
 
     fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
@@ -5495,9 +5600,24 @@ impl<'a> CallCollector<'a> {
                 // type is crate-anchored with one shared leaf, answer with that leaf: the module-blind
                 // reading the twins used to share, settled or disclosed downstream, never a pick. (Twins
                 // that disagree on the leaf, or name a dependency type, keep today's answer.)
-                if self.field_ambiguous(&base, &f.member) {
+                // SOUNDNESS R1624 — …AND WHERE THE OWNER'S OWN PATH IS KNOWN, ITS OWN DECLARATION ANSWERS. The twin-leaf
+                // answer above, and the leaf-keyed pick below it, both read `fields` by LEAF: with sea-schema's three
+                // `executor::real::Executor { pool: .. }` (MySQL, Postgres, SQLite) the SQLite unit's `self.pool.acquire()`
+                // was typed as whichever pool merged last and read the Postgres driver's Db+Ipc+Net+Rand. `qual_field_in`
+                // answers from the qualified index, only for an owner whose path is proven (`self` in its own module, or a
+                // crate-anchored type); every other receiver keeps the reading it had.
+                let r1624 = self.field_ambiguous(&base, &f.member).then(|| self.qual_field_in(&f.base, &base, &key, false)).flatten();
+                if r1624 == Some(None) {
+                    return None;
+                }
+                if r1624.is_none() && self.field_ambiguous(&base, &f.member) {
                     if let Some(l) = self.field_twin_leaf(&base, &f.member) {
                         return Some(l);
+                    }
+                    if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                        let is_self = matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"));
+                        let kind = if is_self { "self" } else if base.starts_with("crate::") { "anchored" } else { "other" };
+                        eprintln!("R1624PICK\t{kind}\t{base}\t{}", self.modpath); // §E1 — the residual leaf pick
                     }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
@@ -5507,6 +5627,9 @@ impl<'a> CallCollector<'a> {
                 // shadow it (the same shadow R476 removes for an impl-level bound).
                 if !self.method_bound_gen_field(&f.base, base_leaf, &key).is_empty() {
                     return None;
+                }
+                if let Some(Some(t)) = r1624 {
+                    return Some(t);
                 }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -5991,6 +6114,12 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Named(field) => field.to_string(),
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
+                // SOUNDNESS R1624 — the element half of `qual_field_in`: the owner's own declaration, where its path is proven.
+                if self.field_ambiguous(&base, &f.member) {
+                    if let Some(v) = self.qual_field_in(&f.base, &base, &key, true) {
+                        return v;
+                    }
+                }
                 // VEIN A — the element twin of `resolve_recv_type`'s twin-field rule (moka's
                 // `sync::`/`future::base_cache::Inner { invalidator: Option<Invalidator> }`).
                 if let Some(l) = self.field_twin_leaf_sep(&base, &f.member, '\u{1e}') {
@@ -6336,6 +6465,9 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                if let Some(l) = self.qual_trait_field_in(&f.base, &base, &key, true) {
+                    return l; // R1624 — see `qual_trait_field_in`
+                }
                 self.field_elem_trait
                     .get(base_leaf)
                     .and_then(|m| m.get(&key))
@@ -9690,6 +9822,11 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R1624 — the owner's own declaration's trait leaves, where its path is proven (a same-leaf twin's
+                // `self.h: Box<dyn Wr>` dispatched on its SIBLING's `Box<dyn Sk>` and read pure over an executed write).
+                if let Some(l) = self.qual_trait_field_in(&f.base, &base, &key, false) {
+                    return l;
+                }
                 match self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()) {
                     Some(l) => l,
                     None => self.method_bound_gen_field(&f.base, base_leaf, &key),

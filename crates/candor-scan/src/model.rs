@@ -1644,6 +1644,9 @@ pub(crate) struct ElemIndexes<'a> {
     pub(crate) drop_types: Option<&'a HashSet<String>>,
     /// SOUNDNESS R1116 — type leaves declared at two or more quals (any fields). `None` in tests.
     pub(crate) twin_type_leaves: Option<&'a HashSet<String>>,
+    /// SOUNDNESS R1624 — `merged.qual` (`cache::QualIndexes`): each struct's four field indexes under its
+    /// module-qualified path. `None` in tests.
+    pub(crate) fields_q: Option<&'a crate::cache::QualIndexes>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

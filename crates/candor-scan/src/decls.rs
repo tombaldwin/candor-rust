@@ -1575,6 +1575,26 @@ fn resolve_use_base(segs: &[String], modpath: &str, mods: &HashMap<String, Vec<S
         .collect()
 }
 
+thread_local! {
+    /// SOUNDNESS R1624 — while `Some`, every struct `collect_decls` walks files its OWN `fields` / `field_elem` /
+    /// `trait_fields` / `field_elem_trait` entries here under its MODULE-QUALIFIED path. Those four indexes are keyed by the
+    /// type LEAF and keep the LAST same-leaf declaration, so two `struct Executor { pool: .. }` in two modules shared one
+    /// answer. `cache::file_decls` turns this on for its one top-level walk and keeps the result as `FileDecls::qual`; every
+    /// other walk (the block-local structs', the tests') leaves it `None` and records nothing.
+    pub(crate) static QUAL_FIELDS: std::cell::RefCell<Option<crate::cache::QualIndexes>> = const { std::cell::RefCell::new(None) };
+}
+
+/// SOUNDNESS R1624 — put a leaf-keyed entry set aside before a struct's own writes back UNDER those writes, so the map
+/// ends exactly as in-place inserts would have left it (the later declaration's fields win).
+fn r1624_restore<V>(ix: &mut HashMap<String, HashMap<String, V>>, leaf: &str, prev: Option<HashMap<String, V>>) {
+    if let Some(mut m) = prev {
+        if let Some(own) = ix.remove(leaf) {
+            m.extend(own);
+        }
+        ix.insert(leaf.to_string(), m);
+    }
+}
+
 /// A name declared at `modpath`, spelled as the path a caller ELSEWHERE writes for it (`facade::Command`;
 /// just `Command` at the crate root). The key shape `seed_mod_aliases` and `expand`'s multi-segment lookup
 /// both agree on.
@@ -3412,6 +3432,7 @@ pub(crate) fn fninfo(
             field_borrows: elems.field_borrows,
             self_leaf: self_ty.map(|t| t.rsplit("::").next().unwrap_or(t).to_string()),
             twin_leaves: elems.twin_type_leaves,
+            fields_q: elems.fields_q,
             let_inits,
             nested_self,
             macro_idents,
@@ -5053,6 +5074,15 @@ pub(crate) fn collect_decls(
         }
         match it {
             syn::Item::Struct(s) => {
+                // SOUNDNESS R1624 — this declaration's OWN field entries, recorded beside the leaf-keyed ones under its
+                // module-qualified path (see `QUAL_FIELDS`). The leaf entries already hold any same-leaf twin this file
+                // declared earlier, so they are set aside, the arm below writes into fresh ones, and `r1624_restore` puts them
+                // back exactly as the in-place inserts would have left them.
+                let r1624_leaf = s.ident.to_string();
+                let r1624_prev = QUAL_FIELDS.with(|c| c.borrow().is_some()).then(|| {
+                    (fields.remove(&r1624_leaf), field_elem.remove(&r1624_leaf),
+                     trait_fields.remove(&r1624_leaf), field_elem_trait.remove(&r1624_leaf))
+                });
                 // SOUNDNESS R1279/R1281 — the struct's type parameters, by position (`model::type_params_key`).
                 file_decl_fact(rets, crate::model::type_params_key(&s.ident.to_string()),
                     s.generics.type_params().map(|t| t.ident.to_string()).collect::<Vec<_>>().join(","));
@@ -5484,6 +5514,19 @@ pub(crate) fn collect_decls(
                         }
                     }
                     syn::Fields::Unit => {}
+                }
+                if let Some((pf, pe, pt, pet)) = r1624_prev {
+                    let qual = qualify(uses.get(crate::lang::MODPATH_KEY).map_or("", String::as_str), &r1624_leaf);
+                    QUAL_FIELDS.with(|c| {
+                        if let Some(q) = c.borrow_mut().as_mut() {
+                            q.file(&qual, fields.get(&r1624_leaf), field_elem.get(&r1624_leaf),
+                                   trait_fields.get(&r1624_leaf), field_elem_trait.get(&r1624_leaf));
+                        }
+                    });
+                    r1624_restore(fields, &r1624_leaf, pf);
+                    r1624_restore(field_elem, &r1624_leaf, pe);
+                    r1624_restore(trait_fields, &r1624_leaf, pt);
+                    r1624_restore(field_elem_trait, &r1624_leaf, pet);
                 }
             }
             syn::Item::Fn(f) => {
