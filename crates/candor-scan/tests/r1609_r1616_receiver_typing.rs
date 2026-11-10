@@ -44,6 +44,15 @@ pub fn t_try(h: &H) -> Result<(), String> { let f = h.mk::<F>()?; f.all(); Ok(()
 pub fn t_mid_chain() { let f = H::new().me().gen::<F>().me2(); f.all() }
 pub fn t_dyn_trait(g: &impl Gen) { let f = g.make::<F>(); f.all() }
 pub fn t_caller_generic<B: Flags + Default>(h: &H) -> u8 { let b = h.gen::<B>(); b.bits() }
+// a const parameter before the type one: the generic return's position counts it (bitstream-io's
+// `read_unsigned_counted::<MAX, S::Unsigned>`; counting type params only read the const `MAX` as the type)
+pub trait Un: Default { fn neg(self) -> i8; }
+#[derive(Default)] pub struct Lo;
+impl Un for Lo { fn neg(self) -> i8 { hit("Lo.neg"); 0 } }
+impl H { pub fn rd<const N: u32, U: Un>(&self) -> U { U::default() } }
+pub const MAX: u32 = 3;
+pub fn t_const_ident<S: Un>(h: &H) -> i8 { let u = h.rd::<MAX, S>(); u.neg() }
+pub fn t_const_concrete(h: &H) -> i8 { let u = h.rd::<MAX, Lo>(); u.neg() }
 pub fn c_q(h: &H) { let q = h.gen::<Q>(); q.all() }
 pub fn c_q_inline() { H::new().gen::<Q>().all() }
 pub fn c_std_parse() -> u32 { "5".parse::<u32>().unwrap_or(0) }
@@ -121,6 +130,9 @@ fn r1609_a_method_turbofish_types_the_generic_return() {
     }
     // the turbofish names the CALLER's generic: `B`'s bounds dispatch (bounded CHA over the local `Flags` implementors)
     assert_eq!(inf(&on, "t_caller_generic"), v(&["Fs"]), "t_caller_generic: `B: Flags` reaches `F::bits`");
+    for f in ["t_const_ident", "t_const_concrete"] {
+        assert_eq!(inf(&on, f), v(&["Fs"]), "{f}: the const turbofish argument is not the return's type");
+    }
     for f in ["c_q", "c_q_inline", "c_std_parse"] {
         assert!(inf(&on, f).is_empty(), "{f}: a pure turbofish target must not gain a charge: {:?}", inf(&on, f));
     }

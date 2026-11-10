@@ -2068,13 +2068,16 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
 pub(crate) fn turbofish_return_ty<'e>(p: &'e syn::ExprPath, leaf: &str, returns: &ReturnIndex) -> Option<&'e syn::Type> {
     let pos: usize = returns.get(&crate::model::ret_generic_key(leaf))?.parse().ok()?;
     let syn::PathArguments::AngleBracketed(args) = &p.path.segments.last()?.arguments else { return None };
-    args.args
-        .iter()
-        .filter_map(|a| match a {
-            syn::GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .nth(pos)
+    turbofish_nth_param(args, pos)
+}
+
+/// SOUNDNESS R1609 — the turbofish argument at `pos` among the TYPE and CONST arguments (`ret_generic_key`'s counting): a
+/// type, or `None` when that position holds a const (`{3}`, a literal) or nothing.
+pub(crate) fn turbofish_nth_param(args: &syn::AngleBracketedGenericArguments, pos: usize) -> Option<&syn::Type> {
+    match args.args.iter().filter(|a| matches!(a, syn::GenericArgument::Type(_) | syn::GenericArgument::Const(_))).nth(pos)? {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    }
 }
 
 /// `turbofish_return_ty` as a nominal type path (`type_path`, so `&`/`Box`/`Arc`/`Rc` peel as every

@@ -4603,14 +4603,19 @@ fn ret_generic_position(sig: &syn::Signature, ty: &syn::Type) -> Option<usize> {
         return None;
     }
     let id = p.path.get_ident()?;
+    // SOUNDNESS R1609 — the position among the params a TURBOFISH supplies, i.e. type AND const (a lifetime is never
+    // written there). Counting type params only mis-aligned `r.read_unsigned_counted::<MAX, S::Unsigned>(..)` over
+    // `fn read_unsigned_counted<const BITS: u32, U>(..) -> Result<U>`: position 0 read the const `MAX` as the type
+    // (measured in the corpus A/B: bitstream-io's `read_signed_counted` lost its `dispatch:` disclosure).
     sig.generics
         .params
         .iter()
         .filter_map(|g| match g {
-            syn::GenericParam::Type(t) => Some(&t.ident),
-            _ => None,
+            syn::GenericParam::Type(t) => Some(Some(&t.ident)),
+            syn::GenericParam::Const(_) => Some(None),
+            syn::GenericParam::Lifetime(_) => None,
         })
-        .position(|t| t == id)
+        .position(|t| t == Some(id))
 }
 
 /// SOUNDNESS R182 — file one WITHDRAWN candidate return type under `amb_ret_key`. Only a LOCAL nominal

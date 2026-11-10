@@ -991,14 +991,7 @@ impl<'a> CallCollector<'a> {
         }
         let name = m.method.to_string();
         let pos: usize = self.returns.get(&crate::model::ret_generic_key(&name))?.parse().ok()?;
-        let t = tf
-            .args
-            .iter()
-            .filter_map(|a| match a {
-                syn::GenericArgument::Type(t) => Some(t),
-                _ => None,
-            })
-            .nth(pos)?;
+        let t = crate::lang::turbofish_nth_param(tf, pos)?;
         let syn::Type::Path(tp) = t else { return None };
         if tp.qself.is_some() {
             return None;
@@ -1042,14 +1035,7 @@ impl<'a> CallCollector<'a> {
         let Some(pos) = self.returns.get(&crate::model::ret_generic_key(leaf)).and_then(|p| p.parse::<usize>().ok()) else {
             return Vec::new();
         };
-        let t = args
-            .args
-            .iter()
-            .filter_map(|a| match a {
-                syn::GenericArgument::Type(t) => Some(t),
-                _ => None,
-            })
-            .nth(pos);
+        let t = crate::lang::turbofish_nth_param(args, pos);
         let Some(syn::Type::Path(tp)) = t else { return Vec::new() };
         let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()).map(|i| i.to_string()) else { return Vec::new() };
         let mut out: Vec<String> = Vec::new();
