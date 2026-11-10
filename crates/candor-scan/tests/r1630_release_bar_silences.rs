@@ -215,13 +215,15 @@ const PD: &str = "\
 mod inner;\n\
 pub use inner::eff;\n\
 pub mod io { mod rw { pub fn w() -> usize { std::fs::read(\"/etc/hosts\").map(|v| v.len()).unwrap_or(0) } pub fn calm() -> usize { 0 } } pub use rw::{w, calm}; }\n\
-pub mod jo { mod rw { pub fn w() -> usize { 0 } } pub use rw::*; }\n";
+pub mod jo { mod rw { pub fn w() -> usize { 0 } } pub use rw::*; }\n\
+pub mod io2 { pub struct Bx(pub u8); pub fn mk(n: u8) -> Bx { Bx(n) } impl Bx { pub fn mk(&self) -> usize { std::fs::read(\"/etc/hosts\").map(|v| v.len()).unwrap_or(0) } } }\n";
 const PD_INNER: &str = "pub fn eff() -> usize { std::fs::read(\"/etc/hosts\").map(|v| v.len()).unwrap_or(0) }\n";
 const PC: &str = "\
 pub fn c_root_zq() -> usize { pd::eff() }\n\
 pub fn c_io_zq() -> usize { pd::io::w() }\n\
 pub fn c_calm_zq() -> usize { pd::io::calm() }\n\
-pub fn c_jo_zq() -> usize { pd::jo::w() }\n";
+pub fn c_jo_zq() -> usize { pd::jo::w() }\n\
+pub fn c_mk_free_zq() -> u8 { pd::io2::mk(3).0 }\n";
 
 #[test]
 fn r1637_a_submodule_reexport_path_joins_the_chained_producer() {
@@ -244,6 +246,10 @@ fn r1637_a_submodule_reexport_path_joins_the_chained_producer() {
     // `jo::rw::w` is pure and so absent from the producer's `functions[]`; the only `w` the report shows is `io::rw::w`,
     // which is not beneath `jo`. Picking it would charge `Fs` over a pure body: the call discloses instead.
     assert_eq!(inferred(&on, "c_jo_zq"), vec!["Unknown"], "a re-export the report cannot place discloses, never picks");
+    // SOUNDNESS R1637 (rustagent-r1641) — a PURE free fn beside an effectful inherent METHOD of the same leaf on a type in
+    // that module (dylint_internal's `cargo::build` / `cargo::Builder::build`): a `pub use` never re-exports a method, so
+    // the method is neither a join target nor a reason to disclose. The first cut charged the free fn the method's `Fs`.
+    assert!(inferred(&on, "c_mk_free_zq").is_empty(), "{:?}", inferred(&on, "c_mk_free_zq"));
     let off = scan(&c, Some(&rep), &["CANDOR_R1637_OFF"]);
     assert!(inferred(&off, "c_io_zq").is_empty(), "the switch restores the silence");
     let _ = std::fs::remove_dir_all(&p);

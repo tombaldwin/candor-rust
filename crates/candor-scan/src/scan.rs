@@ -5695,8 +5695,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // pure unit is simply absent from `functions[]` (executed controls `z_pz`, `cc_deppure`).
                 let through_module = rel.rsplit("::").nth(1).and_then(|m| m.chars().next()).is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
                 if hit.is_none() && !c.method && !c.is_macro && through_module && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
+                    // Only MODULE owners (every segment lower-case): a `pub use` re-exports a free fn, never an inherent
+                    // method, so a type's same-leaf method (`cargo::Builder::build` beside dylint_internal's pure free fn
+                    // `cargo::build`) is neither a join target nor a reason to disclose — the first cut joined it (a
+                    // fabrication the chained census found; fixture chain/r1637 `c_mk_free_zq`).
+                    let module_owner = |o: &String| {
+                        o.split("::").all(|s| s.chars().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_'))
+                    };
                     let all: Vec<&String> = deps_idx.members.get(&c.leaf).into_iter().flatten()
-                        .filter(|(k, _)| k == cr_real).map(|(_, o)| o).collect();
+                        .filter(|(k, o)| k == cr_real && module_owner(o)).map(|(_, o)| o).collect();
                     // `members` is read off `functions[]`, which lists only units that HAVE effects: a pure unit of the same
                     // leaf is invisible here, so "exactly one owner" is not "the only definition". The join is taken only for
                     // the one effectful unit BENEATH the written module (`io::read_write` for `io::write`), where a `pub use`
