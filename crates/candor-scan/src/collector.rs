@@ -7309,8 +7309,24 @@ impl<'a> CallCollector<'a> {
                             self.charge_expected_value(&m.receiver, t, true);
                         }
                     }
-                    "parse" | "try_into" | "collect" => self.r1625_consume(m, &name, ty, wrapped),
+                    "parse" | "try_into" | "collect" | "into" => self.r1625_consume(m, &name, ty, wrapped),
                     _ => {}
+                }
+            }
+            // SOUNDNESS R1626 — `Ok(x.into())` / `Some(x.into())` under `-> Result<T, _>` / `Option<T>`: the constructor's
+            // argument is the declared payload type (a wrapper variant is the one value-forwarding position that is exact).
+            syn::Expr::Call(c) if !wrapped && c.args.len() == 1 => {
+                let syn::Expr::Path(p) = &*c.func else { return };
+                if p.qself.is_some() || p.path.segments.len() != 1 {
+                    return;
+                }
+                let inner = match p.path.segments[0].ident.to_string().as_str() {
+                    "Ok" => Self::r1625_first_arg(ty, "Result"),
+                    "Some" => Self::r1625_first_arg(ty, "Option"),
+                    _ => None,
+                };
+                if let Some(inner) = inner {
+                    self.charge_expected_value(&c.args[0], inner, false);
                 }
             }
             syn::Expr::Call(c) if !wrapped && c.args.is_empty() => {
@@ -7351,6 +7367,33 @@ impl<'a> CallCollector<'a> {
                     self.charge_std_method_site_ret(m, "parse", Some(t));
                 } else {
                     self.r1625_charge_target(target, "try_into", "TryFrom", "try_from");
+                }
+            }
+            // SOUNDNESS R1626 — `x.into()` whose target is the context type: the same edge the annotated `let` formed
+            // (`charge_from` on a LOCAL `impl From<_> for Target`), now also from a tail / `return` / `Ok(..)`.
+            "into" if m.args.is_empty() && !wrapped => {
+                let Some(t) = self.r1625_target_path(ty) else { return };
+                let leaf = t.rsplit("::").next().unwrap_or(&t).to_string();
+                // `x.into()` where x is already the target is the reflexive `From<T> for T`: no local impl runs
+                if self.resolve_recv_type(&m.receiver).is_some_and(|r| r.rsplit("::").next() == Some(leaf.as_str())) {
+                    return;
+                }
+                // A target with SEVERAL local `From` impls shares one `T::from` key across them, so the edge would charge the
+                // union (a pure source charged for a sibling impl's read) and, across modules, an `ambiguous:` hedge — measured
+                // 2026-11-11 (R1626 A/B): 3,276 hedge rows for ONE real gain, the by-name consumer already DROPPED. Choosing the
+                // impl needs the SOURCE type matched to an impl, which the per-leaf impl index cannot answer. So only a target
+                // with exactly one local impl is resolved; the rest is the named residual.
+                // A primitive target, or an alias of one (`type WideWord = u128`), is dominated by std's own `From` impls: a local
+                // `impl From<Limb> for WideWord` is one of several and the source decides (measured: crypto-bigint
+                // `limb.0.into()` charged its own enclosing `from`, hedging `ambiguous:type alias and nominal type`).
+                let prim_target = crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
+                    || crate::model::PRIMITIVE_LEAVES.iter().any(|p| self.returns.contains_key(&crate::model::prim_alias_key(&leaf, p)));
+                let impls = if prim_target { 0 } else { self.trait_impls.get("From").map_or(0, |v| v.iter().filter(|x| **x == leaf).count()) };
+                if candor_report::env::trace("CANDOR_R1625_INSTR") {
+                    eprintln!("R1625REACH\tinto{}\t{t}", if impls == 1 { "" } else { "-multi" }); // §E1 REACH COUNTER
+                }
+                if impls == 1 {
+                    self.charge_from(&leaf);
                 }
             }
             "collect" if m.args.is_empty() && !wrapped => {
