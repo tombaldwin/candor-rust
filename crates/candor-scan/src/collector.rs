@@ -12733,7 +12733,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.vars.insert("self".to_string(), crate::lang::expand(&n, &self.uses));
             }
         }
+        if f4 {
+            NESTED_IMPL_DEPTH.with(|d| d.set(d.get() + 1));
+        }
         syn::visit::visit_item_impl(self, node);
+        if f4 {
+            NESTED_IMPL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
         if let Some((v, tv)) = saved_self {
             self.vars.remove("self");
             self.trait_vars.remove("self");
@@ -13706,6 +13712,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         };
         if matches!(payload, PayloadTy::Hedge) {
             self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));
+        }
+        // SOUNDNESS R1657 stage 1b (F4, the (c'') leg) — a FORMATTER call on a caller-chosen generic value inside a BODY-LOCAL
+        // impl. tokio's `TaskLocalFuture::fmt` declares `struct TransparentOption<'a, T> { value: &'a Option<T> }` and formats
+        // `value` (a `T: Debug`) in a nested `impl Debug`; once F4 typed that impl's `self`, the call became a std-trait
+        // dispatch on a caller-chosen `T` and the row read pure, where the published engine carried a (wrong-reason) hedge.
+        // A LIVE chained consumer (real tokio 1.36 report, pub beside tip, join proven by a control probe) whose `T` writes a
+        // file in `Debug::fmt` was charged `Unknown` through pub's hedge and read ABSENT on the tip, over an EXECUTED write: no
+        // consumer-side route answers a dependency wrapper formatting the consumer's `T` (the R1165 forwarded-`T` residual).
+        // The true reason is the dispatch itself: `dispatch:Debug.fmt` (or `Display`), disclosed on exactly these units.
+        if NESTED_IMPL_DEPTH.with(|d| d.get()) > 0 && leaf == "fmt" && !candor_report::env::switch("CANDOR_R1657F4_OFF") {
+            // The value is typed by the nested impl's own type-parameter NAME (`T`, read off `value: &'a Option<T>`), which
+            // names no type: its bounds in this scope are the dispatch.
+            let generic = match &payload {
+                PayloadTy::Dispatch(l) => Some(l.clone()),
+                _ => match recv_ty.as_deref() {
+                    None => Some(self.resolve_recv_traits(&node.receiver)),
+                    Some(t) if !t.contains("::") => {
+                        self.generic_bounds.get(t).or_else(|| self.impl_generic_bounds.get(t)).cloned()
+                    }
+                    Some(_) => None,
+                },
+            };
+            if let Some(tr) = generic.and_then(|l| {
+                l.into_iter().find(|t| matches!(t.as_str(), "Debug" | "Display" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "LowerExp" | "UpperExp" | "Pointer"))
+            }) {
+                if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                    eprintln!("R1657F4FMT\t{tr}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{tr}.fmt"));
+            }
         }
         if let Some(ty) = recv_ty.filter(|_| matches!(payload, PayloadTy::Old)) {
             // SOUNDNESS R1160 — a receiver std CONSTRUCTED as a `String` is std's, whatever a glob in scope exports. Only
@@ -18587,3 +18623,10 @@ pub(crate) fn r1578_join(path: &str, prov: Option<&str>) -> String {
         None => path.to_string(),
     }
 }
+
+thread_local! {
+    /// SOUNDNESS R1657 stage 1b (F4) — how many body-local `impl` blocks enclose the code being walked (`visit_item_impl`
+    /// with F4 active). Read only by the formatter-dispatch disclosure in `visit_expr_method_call`.
+    static NESTED_IMPL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+

@@ -234,3 +234,31 @@ fn f4_a_body_local_impl_types_self_as_its_own_self_type() {
         assert!(!field(&off, f, "inferred").contains(&"Fs".to_string()), "the switch must restore the hedge on `{f}`");
     }
 }
+
+/// F4's (c'') leg. tokio 1.25–1.4x `TaskLocalFuture::fmt` formats a caller-chosen `T: Debug` inside a body-local
+/// `impl Debug for TransparentOption<'_, T>`. Once F4 typed that impl's `self`, the row read pure where 0.41.3 carried a
+/// (wrong-reason) hedge — and a LIVE chained consumer (real tokio 1.36 report; join proven by a control probe) whose `T`
+/// writes a file in `Debug::fmt` (EXECUTED) went from `Unknown` on 0.41.3 to ABSENT: no consumer-side route answers a
+/// dependency wrapper that formats the consumer's `T`. The true reason is disclosed on exactly such a unit:
+/// `dispatch:Debug.fmt`. A module-level impl of the same shape is unchanged (it was not this change's).
+#[test]
+fn f4_a_body_local_formatter_over_a_caller_chosen_type_discloses_its_dispatch() {
+    let src = "use std::fmt;\n\
+        pub struct Outer<T> { slot: Option<T> }\n\
+        impl<T: fmt::Debug> fmt::Debug for Outer<T> {\n\
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n\
+                struct Inner<'a, T> { value: &'a Option<T> }\n\
+                impl<'a, T: fmt::Debug> fmt::Debug for Inner<'a, T> {\n\
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n\
+                        match self.value.as_ref() { Some(value) => value.fmt(f), None => f.pad(\"<missing>\") }\n\
+                    }\n\
+                }\n\
+                f.debug_struct(\"Outer\").field(\"value\", &Inner { value: &self.slot }).finish()\n\
+            }\n\
+        }\n";
+    let d = fixture("f4fmt", &[("lib.rs", src)]);
+    let (_, v) = scan(&d, None, &[]);
+    assert_eq!(field(&v, "Outer::fmt", "unknownWhy"), vec!["dispatch:Debug.fmt".to_string()], "{v:#}");
+    let (_, off) = scan(&d, None, &["CANDOR_R1657F4_OFF"]);
+    assert!(!field(&off, "Outer::fmt", "unknownWhy").iter().any(|w| w == "dispatch:Debug.fmt"));
+}
