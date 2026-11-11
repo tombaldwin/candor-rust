@@ -128,6 +128,8 @@ pub mod srv {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builde
   pub mod conn {{ pub fn twin_below_zq() {{ super::builder::builder().build() }} pub fn twin_value_zq() {{ crate::srv::builder().build() }} }} }}\n\
 pub mod pv {{ use crate::tu as sys; pub mod child {{ use super::sys; pub fn priv_super_zq() {{ sys::fx() }} pub fn priv_path_zq() {{ super::sys::fx() }} }}\n\
   pub mod child2 {{ pub fn priv_crate_zq() {{ crate::pv::sys::fx() }} }} }}\n\
+pub mod gl {{ pub mod inner {{ pub fn spl() {{ {W} }} }} pub use inner::spl; }}\n\
+pub mod m_shadow {{ use crate::gl::*; fn spl() {{}} pub fn shadow_zq() {{ spl() }} }}\n\
 pub mod cli {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builder {{ Builder }} impl Builder {{ pub fn build(&self) {{}} }} }}\n\
   pub use builder::builder; }}\n\
 fn main() {{}}\n"
@@ -172,6 +174,9 @@ fn r1657s2_reexported_names_resolve_on_every_reader() {
     // BELOW the module (`super::builder::builder()`), which aacd3880 resolved and a first cut of the table broke.
     assert!(inferred(&off, "srv::conn::twin_below_zq").contains(&"Fs".to_string()), "the module path resolves without the table {off:#}");
     // Pure twins with unique names: charged on NO arm.
+    // rayon's shape: a module's own `fn spl` shadows the glob's re-exported `spl` (a one-segment name is any namespace's):
+    // never the glob's `Fs` (the bare leaf's own `ambiguous:` hedge may stand, as on aacd3880).
+    assert!(!inferred(&on, "m_shadow::shadow_zq").contains(&"Fs".to_string()), "{on:#}");
     for f in ["m_path::pure_ctl_zq", "m_ty::ty_pure_twin_zq", "m_owner::owner_other_zq"] {
         assert!(!inferred(&on, f).contains(&"Fs".to_string()), "{f} is pure {on:#}");
         assert!(!inferred(&on, f).contains(&"Unknown".to_string()), "{f} resolves to a pure definition {on:#}");
